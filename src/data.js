@@ -17,7 +17,7 @@ const pick = (arr) => arr[Math.floor(rand() * arr.length)]
 export const PSYCHOLOGISTS = [
   {
     id: 'p1',
-    name: 'Julia Kamińska',
+    name: 'Julia Wolanin',
     title: 'dr',
     spec: 'Założycielka · Terapia poznawczo-behawioralna',
     color: '#a4596b',
@@ -206,7 +206,7 @@ export const SESSIONS = sessions
 export const POSTS = [
   {
     id: 'b1',
-    author: 'Julia Kamińska',
+    author: 'Julia Wolanin',
     text: 'Superwizja zespołowa w piątek o 14:00 — sala konferencyjna. Przynieście opisy trudniejszych przypadków.',
     date: toISODate(daysAgo(1)),
     time: '09:12',
@@ -221,10 +221,10 @@ export const POSTS = [
 ]
 
 export const INITIAL_STATE = {
-  user: { name: 'Julia Kamińska', role: 'Założycielka', email: 'julia@aurelia.pl', psychId: 'p1' },
+  user: { name: 'Julia Wolanin', role: 'Założycielka', email: 'julia@aurelia.pl', psychId: 'p1' },
   center: {
     name: 'Aurelia — Centrum Psychoterapii',
-    address: 'ul. Złota 12/3, 00-019 Warszawa',
+    address: 'ul. Złota 12/3, 58-500 Jelenia Góra',
     phone: '+48 22 412 80 90',
     email: 'kontakt@aurelia.pl',
   },

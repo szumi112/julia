@@ -117,7 +117,7 @@ export function Login({ onLogin }) {
           </button>
         </div>
       </form>
-      <div className="login__footer">Aurelia — Centrum Psychoterapii · Warszawa</div>
+      <div className="login__footer">Aurelia — Centrum Psychoterapii · Jelenia Góra</div>
     </div>
   )
 }
