@@ -12,6 +12,7 @@ import {
 } from '../format.js'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
+const STRIP_DOW = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
 
 function monthGrid(ym) {
   const [y, m] = ym.split('-').map(Number)
@@ -34,17 +35,71 @@ function monthGrid(ym) {
   return cells
 }
 
+// Phone agenda mode: horizontally scrollable month strip — day pills with
+// psychologist-colored dots; the selected day auto-centers in the strip.
+function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
+  const ref = useRef(null)
+  const first = useRef(true)
+
+  useEffect(() => {
+    const strip = ref.current
+    const el = strip?.querySelector('.day-strip__day.is-on')
+    if (!strip || !el) return
+    const left = el.offsetLeft - (strip.clientWidth - el.offsetWidth) / 2
+    strip.scrollTo({ left, behavior: first.current || !motionOK() ? 'auto' : 'smooth' })
+    first.current = false
+  }, [selected, days])
+
+  return (
+    <div className="day-strip" ref={ref} data-reveal>
+      {days.map((iso) => {
+        const items = byDate[iso] || []
+        const dowIdx = (parseISO(iso).getDay() + 6) % 7
+        return (
+          <button
+            key={iso}
+            className={[
+              'day-strip__day',
+              iso === selected ? 'is-on' : '',
+              iso === today ? 'is-today' : '',
+              dowIdx >= 5 ? 'is-weekend' : '',
+            ].join(' ')}
+            onClick={() => onSelect(iso)}
+            aria-pressed={iso === selected}
+            aria-label={`${fmtDayMonth(iso)} — ${items.length} ${sessionsWord(items.length)}`}
+          >
+            <span className="day-strip__dow">{STRIP_DOW[dowIdx]}</span>
+            <span className="day-strip__num">{Number(iso.slice(8))}</span>
+            <span className="day-strip__dots">
+              {items.slice(0, 3).map((s) => (
+                <span key={s.id} className="dot" style={{ background: psychOf(s.psychId)?.color }} />
+              ))}
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 export function CalendarView() {
   const { state, dispatch, toast } = useApp()
   const { openSessionForm } = useShell()
   const today = toISODate(new Date())
   const curYm = monthKey(new Date())
   const [ym, setYm] = useState(curYm)
-  // phones start in the agenda list — the 7-column grid is a tap target maze there
-  const [mode, setMode] = useState(() => (window.matchMedia(phoneMQ).matches ? 'list' : 'cal'))
+  // phones start in the day agenda — the 7-column grid is a tap target maze there
+  const [mode, setMode] = useState(() => (window.matchMedia(phoneMQ).matches ? 'agenda' : 'cal'))
   const [selected, setSelected] = useState(today)
   const isPhone = useIsPhone()
   const isCompact = useIsCompact()
+
+  // crossing the phone breakpoint swaps the available modes
+  useEffect(() => {
+    if (isPhone && mode === 'list') setMode('agenda')
+    if (!isPhone && mode === 'agenda') setMode('cal')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPhone])
   // dragging an agenda row would trap touch scrolling, so it stays a desktop affordance
   const agendaDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
   const gridRef = useRef(null)
@@ -207,7 +262,8 @@ export function CalendarView() {
   const changeMonth = (d) => {
     const next = addMonths(ym, d)
     setYm(next)
-    setSelected(null)
+    // the agenda always needs a selected day; the grid can wait for a click
+    setSelected(mode === 'agenda' ? (next === curYm ? today : `${next}-01`) : null)
   }
 
   // stacked layouts put the day panel below the grid — bring it into view
@@ -227,6 +283,68 @@ export function CalendarView() {
     return days.map((iso) => ({ iso, items: byDate[iso].sort((a, b) => (a.time < b.time ? -1 : 1)) }))
   }, [byDate])
 
+  // --- phone agenda mode ---
+  const stripDays = useMemo(() => {
+    const [y, m] = ym.split('-').map(Number)
+    const n = new Date(y, m, 0).getDate()
+    return Array.from({ length: n }, (_, i) => `${y}-${pad2(m)}-${pad2(i + 1)}`)
+  }, [ym])
+
+  const agendaSel = selected || (ym === curYm ? today : `${ym}-01`)
+  const agendaSessions = useMemo(
+    () => (byDate[agendaSel] || []).slice().sort((a, b) => (a.time < b.time ? -1 : 1)),
+    [byDate, agendaSel]
+  )
+
+  // gentle row cascade when another day is picked from the strip
+  const agendaRef = useRef(null)
+  const firstAgendaSwap = useRef(true)
+  useEffect(() => {
+    if (mode !== 'agenda') {
+      firstAgendaSwap.current = true
+      return
+    }
+    if (firstAgendaSwap.current) {
+      firstAgendaSwap.current = false
+      return
+    }
+    if (!motionOK() || !agendaRef.current) return
+    window.gsap.fromTo(
+      agendaRef.current.querySelectorAll('.agenda__row, .empty'),
+      { autoAlpha: 0, y: 12 },
+      { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power3.out', stagger: 0.05, clearProps: 'all' }
+    )
+  }, [agendaSel, mode])
+
+  // one session row — shared by the desktop day panel and the phone agenda
+  const dayRow = (s, dragOk) => {
+    const c = clientOf(s.clientId)
+    const p = psychOf(s.psychId)
+    const draggable = dragOk && s.status === 'scheduled'
+    return (
+      <div
+        className="agenda__row"
+        key={s.id}
+        onPointerDown={draggable ? (e) => onChipDown(e, s) : undefined}
+        style={draggable ? { touchAction: 'none' } : undefined}
+      >
+        <span className="agenda__time">{s.time}</span>
+        <span className="agenda__main">
+          <span className="agenda__client">{c?.name}</span>
+          <span className="agenda__meta">
+            <Avatar name={p?.name || '?'} color={p?.color} size={16} />
+            {p?.name} · {fmtMoney(s.amount)}
+          </span>
+          <span className="agenda__pills">
+            <StatusPicker session={s} />
+            <PaymentPicker session={s} />
+          </span>
+        </span>
+        <IconBtn name="edit" label="Edytuj sesję" size={16} onClick={() => openSessionForm({ session: s })} />
+      </div>
+    )
+  }
+
   return (
     <div ref={ref}>
       <div className="view-head" data-reveal>
@@ -239,10 +357,15 @@ export function CalendarView() {
             ariaLabel="Widok"
             value={mode}
             onChange={setMode}
-            options={[
-              { value: 'cal', label: 'Kalendarz', icon: 'calendar' },
-              { value: 'list', label: 'Lista', icon: 'reports' },
-            ]}
+            options={isPhone
+              ? [
+                  { value: 'agenda', label: 'Plan dnia', icon: 'clock' },
+                  { value: 'cal', label: 'Miesiąc', icon: 'calendar' },
+                ]
+              : [
+                  { value: 'cal', label: 'Kalendarz', icon: 'calendar' },
+                  { value: 'list', label: 'Lista', icon: 'reports' },
+                ]}
           />
           <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today })}>
             Nowa sesja
@@ -271,7 +394,44 @@ export function CalendarView() {
         </span>
       </div>
 
-      {mode === 'cal' ? (
+      {mode === 'agenda' ? (
+        <>
+          <DayStrip
+            days={stripDays}
+            selected={agendaSel}
+            today={today}
+            byDate={byDate}
+            psychOf={psychOf}
+            onSelect={setSelected}
+          />
+          <div className="card card--pad agenda-day" ref={agendaRef} data-reveal>
+            <h2 className="card-title">
+              <span className="row" style={{ gap: 9 }}>
+                {cap(fmtWeekday(agendaSel))}, {fmtDayMonth(agendaSel)}
+                {agendaSel === today && <span className="pill pill--gold">dziś</span>}
+              </span>
+              <span className="faint" style={{ fontFamily: 'var(--font-ui)', fontSize: 12.5, fontWeight: 550 }}>
+                {agendaSessions.length} {sessionsWord(agendaSessions.length)}
+              </span>
+            </h2>
+            <div className="agenda" style={{ marginTop: 6 }}>
+              {agendaSessions.length === 0 && (
+                <EmptyState
+                  compact
+                  icon="calendar"
+                  title="Brak sesji tego dnia"
+                  hint="Dodaj sesję przyciskiem poniżej."
+                />
+              )}
+              {agendaSessions.map((s) => dayRow(s, false))}
+            </div>
+            <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
+              onClick={() => openSessionForm({ date: agendaSel })}>
+              Dodaj sesję tego dnia
+            </Button>
+          </div>
+        </>
+      ) : mode === 'cal' ? (
         <div className="grid-31" data-reveal>
           <div>
             <div className="cal" style={{ gridTemplateColumns: `repeat(${showWeekends ? 7 : 5}, 1fr)`, marginBottom: 7 }}>
@@ -348,33 +508,9 @@ export function CalendarView() {
                 />
               )}
               {daySessions
+                .slice()
                 .sort((a, b) => (a.time < b.time ? -1 : 1))
-                .map((s) => {
-                  const c = clientOf(s.clientId)
-                  const p = psychOf(s.psychId)
-                  return (
-                    <div
-                      className="agenda__row"
-                      key={s.id}
-                      onPointerDown={agendaDrag && s.status === 'scheduled' ? (e) => onChipDown(e, s) : undefined}
-                      style={agendaDrag && s.status === 'scheduled' ? { touchAction: 'none' } : undefined}
-                    >
-                      <span className="agenda__time">{s.time}</span>
-                      <span className="agenda__main">
-                        <span className="agenda__client">{c?.name}</span>
-                        <span className="agenda__meta">
-                          <Avatar name={p?.name || '?'} color={p?.color} size={16} />
-                          {p?.name} · {fmtMoney(s.amount)}
-                        </span>
-                        <span className="agenda__pills">
-                          <StatusPicker session={s} />
-                          <PaymentPicker session={s} />
-                        </span>
-                      </span>
-                      <IconBtn name="edit" label="Edytuj sesję" size={16} onClick={() => openSessionForm({ session: s })} />
-                    </div>
-                  )
-                })}
+                .map((s) => dayRow(s, agendaDrag))}
             </div>
             {selected && (
               <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}

@@ -3,7 +3,8 @@ import { Icon, Bloom } from './icons.jsx'
 import { Avatar, IconBtn } from './ui.jsx'
 import { useApp } from './store.jsx'
 import { ShellCtx } from './shell-ctx.js'
-import { useIsCompact } from './responsive.js'
+import { useIsCompact, useIsPhone } from './responsive.js'
+import { TodayCockpit } from './cockpit.jsx'
 import { animateOut, motionOK, goldBurst } from './anim.js'
 import { fmtMonthYear, monthKey, toISODate, fmtWeekday, cap, sessionsWord, outstandingOf } from './format.js'
 import { Dashboard } from './views/Dashboard.jsx'
@@ -207,6 +208,66 @@ function MobileNavDrawer({ route, navigate, onClose }) {
   )
 }
 
+// Phone-first bottom navigation: the four daily destinations plus a raised
+// "new session" action in the centre. Secondary pages (Zespół, Raporty,
+// Ustawienia) stay in the hamburger drawer.
+const TABBAR = NAV.filter((n) => ['dashboard', 'calendar', 'clients', 'payments'].includes(n.id))
+
+function MobileTabbar({ route, navigate, onAdd }) {
+  const barRef = useRef(null)
+  const [pill, setPill] = useState(null)
+  const activeId = ACTIVE_OF[route.name] || route.name
+
+  // the gliding blob behind the active icon — measured, then moved via CSS
+  // transition (same pattern as Segmented, survives orientation changes)
+  useLayoutEffect(() => {
+    const bar = barRef.current
+    if (!bar) return
+    const measure = () => {
+      const btn = bar.querySelector(`.tabbar__item[data-id="${activeId}"]`)
+      if (!btn) return setPill(null)
+      setPill({ left: btn.offsetLeft + (btn.offsetWidth - 46) / 2 })
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(bar)
+    return () => ro.disconnect()
+  }, [activeId])
+
+  useEffect(() => {
+    if (!motionOK() || !barRef.current) return
+    window.gsap.fromTo(
+      barRef.current,
+      { y: 84 },
+      { y: 0, duration: 0.7, ease: 'power4.out', delay: 0.15, clearProps: 'transform' }
+    )
+  }, [])
+
+  const tab = (n) => (
+    <button
+      key={n.id}
+      data-id={n.id}
+      className={`tabbar__item ${activeId === n.id ? 'is-active' : ''}`}
+      onClick={() => navigate(n.id)}
+      aria-current={activeId === n.id ? 'page' : undefined}
+    >
+      <Icon name={n.icon} size={21} />
+      <span>{n.label}</span>
+    </button>
+  )
+
+  return (
+    <nav className="tabbar" ref={barRef} aria-label="Nawigacja dolna">
+      {pill && <span className="tabbar__pill" style={{ left: pill.left }} />}
+      {TABBAR.slice(0, 2).map(tab)}
+      <button className="tabbar__fab" onClick={onAdd} aria-label="Nowa sesja">
+        <Icon name="plus" size={22} />
+      </button>
+      {TABBAR.slice(2).map(tab)}
+    </nav>
+  )
+}
+
 function Topbar({ route, onLogout, onSearch, onMenu }) {
   const { state } = useApp()
   const titleRef = useRef(null)
@@ -235,6 +296,7 @@ function Topbar({ route, onLogout, onSearch, onMenu }) {
           <span>Szukaj…</span>
           <kbd>Ctrl K</kbd>
         </button>
+        <TodayCockpit />
         <span className="month-chip">
           <Icon name="sparkle" size={14} />
           {fmtMonthYear(monthKey(new Date()))}
@@ -266,7 +328,13 @@ function useMonthSettled() {
     if (prev.current) {
       for (const ym of Object.keys(prev.current)) {
         if (prev.current[ym] > 0 && (byMonth[ym] || 0) === 0) {
-          goldBurst(document.querySelector('.stat--gold') || document.querySelector('.month-chip'))
+          // order matters: the month chip exists but is display:none below
+          // desktop, and goldBurst skips zero-size anchors
+          goldBurst(
+            document.querySelector('.stat--gold') ||
+            document.querySelector('.today-chip') ||
+            document.querySelector('.month-chip')
+          )
           toast(`${cap(fmtMonthYear(ym))} rozliczony w całości ✨`)
           break
         }
@@ -282,6 +350,7 @@ export function Shell({ onLogout }) {
   const [cmdOpen, setCmdOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false)
   const isCompact = useIsCompact()
+  const isPhone = useIsPhone()
   const viewRef = useRef(null)
   const contentRef = useRef(null)
   const shellRef = useRef(null)
@@ -353,6 +422,7 @@ export function Shell({ onLogout }) {
           </main>
         </div>
       </div>
+      {isPhone && <MobileTabbar route={route} navigate={navigate} onAdd={() => openSessionForm()} />}
       {isCompact && navOpen && (
         <MobileNavDrawer route={route} navigate={navigate} onClose={() => setNavOpen(false)} />
       )}
