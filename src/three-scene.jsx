@@ -3,6 +3,7 @@
 // when the tab is hidden, static single frame under reduced motion.
 import { useEffect, useRef } from 'react'
 import { motionOK } from './anim.js'
+import { phoneMQ } from './responsive.js'
 
 const NOISE_GLSL = /* glsl */ `
 vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
@@ -101,8 +102,13 @@ export function createAmbient(container, opts = {}) {
     colors = ['#f2d6cf', '#d28d80', '#e8cfa0'],
   } = opts
 
+  // phones and low-core machines get fewer pixels and a lighter mesh —
+  // the blob is ambient decoration, never worth jank
+  const lowPower =
+    window.matchMedia(phoneMQ).matches || (navigator.hardwareConcurrency || 8) <= 4
+
   const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75))
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, lowPower ? 1.3 : 1.75))
   renderer.setClearColor(0x000000, 0)
   container.appendChild(renderer.domElement)
   renderer.domElement.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;'
@@ -111,7 +117,7 @@ export function createAmbient(container, opts = {}) {
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 50)
   camera.position.z = 5.2
 
-  const geo = new THREE.IcosahedronGeometry(1.7 * scale, 48)
+  const geo = new THREE.IcosahedronGeometry(1.7 * scale, lowPower ? 28 : 48)
   const mat = new THREE.ShaderMaterial({
     vertexShader: VERT,
     fragmentShader: FRAG,

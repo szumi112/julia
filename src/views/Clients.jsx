@@ -46,7 +46,7 @@ export function Clients() {
         </div>
       </div>
 
-      <div className="row" style={{ flexWrap: 'wrap', marginBottom: 20 }} data-reveal>
+      <div className="row chips-row" data-reveal>
         <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Wszyscy</Chip>
         {state.psychologists.map((p) => (
           <Chip key={p.id} on={psychFilter === p.id} swatch={p.color} onClick={() => setPsychFilter(psychFilter === p.id ? null : p.id)}>
@@ -59,8 +59,9 @@ export function Clients() {
         </Chip>
       </div>
 
-      <div className="card" data-reveal style={{ overflow: 'hidden' }}>
-        <table className="table">
+      <div className="card card--table" data-reveal>
+        <div className="table-scroll table-scroll--until-tablet">
+        <table className="table table--cards">
           <thead>
             <tr>
               <th>Klient</th>
@@ -123,19 +124,19 @@ export function Clients() {
                       </span>
                     </span>
                   </td>
-                  <td>
+                  <td data-th="Specjalistka">
                     <span className="row" style={{ gap: 8 }}>
                       <span style={{ width: 8, height: 8, borderRadius: 99, background: p?.color, display: 'inline-block' }} />
                       <span className="muted">{p?.name}</span>
                     </span>
                   </td>
-                  <td className="muted">{c.phone}</td>
-                  <td className="muted">{last ? fmtShortDate(last.date) : '—'}</td>
-                  <td className="right num-cell">{count}</td>
-                  <td className="right">
+                  <td className="muted" data-th="Telefon">{c.phone}</td>
+                  <td className="muted" data-th="Ostatnia sesja">{last ? fmtShortDate(last.date) : '—'}</td>
+                  <td className="right num-cell" data-th="Sesje">{count}</td>
+                  <td className="right" data-th="Zaległość">
                     {debt > 0 ? <Pill tone="gold">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
                   </td>
-                  <td>
+                  <td data-th="Status">
                     <Pill tone={c.status === 'active' ? 'sage' : 'mauve'} dot>
                       {c.status === 'active' ? 'Aktywny' : 'Wstrzymany'}
                     </Pill>
@@ -145,6 +146,7 @@ export function Clients() {
             })}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   )
@@ -304,7 +306,7 @@ export function ClientDetail({ params }) {
               {history.length} {sessionsWord(history.length)}
             </span>
           </h2>
-          <table className="table" style={{ marginTop: 10 }}>
+          <table className="table table--cards" style={{ marginTop: 10 }}>
             <thead>
               <tr>
                 <th>Data</th>
@@ -318,12 +320,12 @@ export function ClientDetail({ params }) {
             <tbody>
               {history.map((s) => (
                 <tr key={s.id}>
-                  <td style={{ fontWeight: 600 }}>{fmtShortDate(s.date)}</td>
-                  <td className="num-cell muted">{s.time}</td>
-                  <td><StatusPicker session={s} /></td>
-                  <td className="right num-cell">{fmtMoney(s.amount)}</td>
-                  <td><PaymentPicker session={s} /></td>
-                  <td className="right" style={{ width: 44 }}>
+                  <td style={{ fontWeight: 600 }} data-th="Data">{fmtShortDate(s.date)}</td>
+                  <td className="num-cell muted" data-th="Godzina">{s.time}</td>
+                  <td data-th="Status"><StatusPicker session={s} /></td>
+                  <td className="right num-cell" data-th="Kwota">{fmtMoney(s.amount)}</td>
+                  <td data-th="Płatność"><PaymentPicker session={s} /></td>
+                  <td className="right td--actions" style={{ width: 44 }}>
                     <IconBtn name="edit" label="Edytuj sesję" size={15} onClick={() => openSessionForm({ session: s })} />
                   </td>
                 </tr>

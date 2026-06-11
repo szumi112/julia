@@ -266,7 +266,7 @@ export function SessionDrawer({ opts, onClose }) {
         </form>
 
         <div className="drawer__foot">
-          <Button variant="primary" onClick={submit} style={{ flex: 1 }}>
+          <Button variant="primary" onClick={submit}>
             {editing ? 'Zapisz zmiany' : 'Dodaj sesję'}
           </Button>
           {editing && (

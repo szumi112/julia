@@ -173,14 +173,14 @@ export function ClientDrawer({ opts, onClose }) {
         <div className="drawer__foot">
           {confirmDel ? (
             <>
-              <Button variant="danger" style={{ flex: 1 }} onClick={remove}>
+              <Button variant="danger" onClick={remove}>
                 Tak, usuń klienta
               </Button>
               <Button variant="ghost" onClick={() => setConfirmDel(false)}>Wróć</Button>
             </>
           ) : (
             <>
-              <Button variant="primary" onClick={submit} style={{ flex: 1 }}>
+              <Button variant="primary" onClick={submit}>
                 {editing ? 'Zapisz zmiany' : 'Dodaj klienta'}
               </Button>
               {editing && (

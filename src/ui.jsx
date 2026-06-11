@@ -59,14 +59,21 @@ export function Segmented({ options, value, onChange, ariaLabel }) {
   useLayoutEffect(() => {
     const wrap = wrapRef.current
     if (!wrap) return
-    const idx = options.findIndex((o) => o.value === value)
-    const btn = wrap.querySelectorAll('.seg__opt')[idx]
-    if (btn) setThumb({ left: btn.offsetLeft, width: btn.offsetWidth })
+    const measure = () => {
+      const idx = options.findIndex((o) => o.value === value)
+      const btn = wrap.querySelectorAll('.seg__opt')[idx]
+      // track top/height too — on phones the options can wrap to a second row
+      if (btn) setThumb({ left: btn.offsetLeft, width: btn.offsetWidth, top: btn.offsetTop, height: btn.offsetHeight })
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(wrap)
+    return () => ro.disconnect()
   }, [value, options])
 
   return (
     <div className="seg" role="group" aria-label={ariaLabel} ref={wrapRef}>
-      {thumb && <span className="seg__thumb" style={{ left: thumb.left, width: thumb.width }} />}
+      {thumb && <span className="seg__thumb" style={{ left: thumb.left, width: thumb.width, top: thumb.top, height: thumb.height }} />}
       {options.map((o) => (
         <button
           key={o.value}
@@ -151,30 +158,64 @@ export function Avatar({ name, color = '#a4596b', size = 38 }) {
 }
 
 // Lightweight popover (status pickers, menus). Closes on outside click / Esc.
+// Positioned with fixed viewport coordinates so it escapes scroll containers
+// (.table-scroll) and flips/clamps instead of clipping at viewport edges.
 export function Popover({ trigger, children, align = 'left', open, setOpen }) {
   const ref = useRef(null)
+  const popRef = useRef(null)
+  const [pos, setPos] = useState(null)
+
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return }
+    const wrap = ref.current
+    const pop = popRef.current
+    if (!wrap || !pop) return
+    const r = wrap.getBoundingClientRect()
+    const margin = 8
+    let left = align === 'right' ? r.right - pop.offsetWidth : r.left
+    left = Math.max(margin, Math.min(left, window.innerWidth - pop.offsetWidth - margin))
+    let top = r.bottom + 7
+    if (top + pop.offsetHeight > window.innerHeight - margin) top = r.top - pop.offsetHeight - 7
+    top = Math.max(margin, top)
+    setPos({ left, top })
+  }, [open, align])
+
   useEffect(() => {
     if (!open) return
     const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
     const onKey = (e) => { if (e.key === 'Escape') setOpen(false) }
+    // fixed coordinates go stale the moment anything scrolls or resizes
+    const onMove = () => setOpen(false)
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onMove, true)
+    window.addEventListener('resize', onMove)
     return () => {
       document.removeEventListener('mousedown', onDoc)
       document.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onMove, true)
+      window.removeEventListener('resize', onMove)
     }
   }, [open, setOpen])
 
   useEffect(() => {
     if (!open || !motionOK()) return
-    const el = ref.current?.querySelector('.popover')
+    const el = popRef.current
     if (el) window.gsap.fromTo(el, { autoAlpha: 0, y: -6, scale: 0.97 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.28, ease: 'power3.out' })
   }, [open])
 
   return (
     <span className="pop-wrap" ref={ref}>
       {trigger}
-      {open && <div className={`popover ${align === 'right' ? 'popover--right' : ''}`}>{children}</div>}
+      {open && (
+        <div
+          className="popover"
+          ref={popRef}
+          style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: 0, visibility: 'hidden' }}
+        >
+          {children}
+        </div>
+      )}
     </span>
   )
 }
@@ -202,19 +243,41 @@ export function EmptyState({ icon = 'sparkle', title, hint, action, compact }) {
 }
 
 // Tiny "?" tooltip for less obvious controls. Keyboard- and touch-accessible
-// (shows on hover and focus, Escape dismisses by blurring).
+// (shows on hover and focus, Escape dismisses by blurring). The bubble is
+// centered but nudged back inside the viewport when the trigger sits near
+// an edge (stat cards in the phone's 2-up grid).
 export function InfoTip({ text }) {
   const id = useId()
+  const ref = useRef(null)
+  const [shift, setShift] = useState(0)
+  const reposition = () => {
+    const el = ref.current
+    const bubble = el?.querySelector('.tip__bubble')
+    if (!el || !bubble) return
+    const r = el.getBoundingClientRect()
+    const center = r.left + r.width / 2
+    const half = bubble.offsetWidth / 2
+    const margin = 10
+    let dx = 0
+    if (center - half < margin) dx = margin - (center - half)
+    else if (center + half > window.innerWidth - margin) dx = window.innerWidth - margin - (center + half)
+    setShift(Math.round(dx))
+  }
   return (
     <button
       type="button"
       className="tip"
+      ref={ref}
       aria-label="Wyjaśnienie"
       aria-describedby={id}
+      onMouseEnter={reposition}
+      onFocus={reposition}
       onKeyDown={(e) => { if (e.key === 'Escape') e.currentTarget.blur() }}
     >
       <Icon name="help" size={14} />
-      <span className="tip__bubble" role="tooltip" id={id}>{text}</span>
+      <span className="tip__bubble" role="tooltip" id={id} style={shift ? { marginLeft: shift } : undefined}>
+        {text}
+      </span>
     </button>
   )
 }

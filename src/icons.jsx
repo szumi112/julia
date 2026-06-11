@@ -151,6 +151,7 @@ const PATHS = {
       <path d="M12 13.6v6.6" />
     </>
   ),
+  menu: <path d="M4 7h16M4 12h12.5M4 17h16" />,
 }
 
 export function Icon({ name, size = 20, strokeWidth = 1.7, className, style }) {

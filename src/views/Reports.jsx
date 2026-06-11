@@ -89,7 +89,8 @@ export function Reports() {
       <div className="grid-31" style={{ marginTop: 20 }}>
         <div className="card card--pad" data-reveal>
           <h2 className="card-title">Zespół — {fmtMonthYear(ym)}</h2>
-          <table className="table" style={{ marginTop: 12 }}>
+          <div className="table-scroll" style={{ marginTop: 12 }}>
+          <table className="table">
             <thead>
               <tr>
                 <th>Specjalistka</th>
@@ -124,7 +125,7 @@ export function Reports() {
                   </td>
                 </tr>
               ))}
-              <tr style={{ background: 'var(--surface-warm)' }}>
+              <tr className="table__total">
                 <td style={{ fontWeight: 700, fontFamily: 'var(--font-display)' }}>Całe centrum</td>
                 <td className="right num-cell" style={{ fontWeight: 700 }}>{stats.completed}</td>
                 <td className="right num-cell" style={{ fontWeight: 700 }}>{Math.round(stats.hours * 10) / 10} h</td>
@@ -137,6 +138,7 @@ export function Reports() {
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
 
         <div className="card card--pad" data-reveal style={{ alignSelf: 'start', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, motionOK } from '../anim.js'
+import { useIsPhone, useIsCompact, useMediaQuery, desktopMQ, phoneMQ } from '../responsive.js'
 import { Button, IconBtn, Segmented, Avatar, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
@@ -39,9 +40,15 @@ export function CalendarView() {
   const today = toISODate(new Date())
   const curYm = monthKey(new Date())
   const [ym, setYm] = useState(curYm)
-  const [mode, setMode] = useState('cal')
+  // phones start in the agenda list — the 7-column grid is a tap target maze there
+  const [mode, setMode] = useState(() => (window.matchMedia(phoneMQ).matches ? 'list' : 'cal'))
   const [selected, setSelected] = useState(today)
+  const isPhone = useIsPhone()
+  const isCompact = useIsCompact()
+  // dragging an agenda row would trap touch scrolling, so it stays a desktop affordance
+  const agendaDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
   const gridRef = useRef(null)
+  const dayPanelRef = useRef(null)
   const ref = useReveal()
   const suppressClick = useRef(false)
 
@@ -203,6 +210,16 @@ export function CalendarView() {
     setSelected(null)
   }
 
+  // stacked layouts put the day panel below the grid — bring it into view
+  const selectDay = (iso) => {
+    setSelected(iso)
+    if (isCompact) {
+      requestAnimationFrame(() =>
+        dayPanelRef.current?.scrollIntoView({ behavior: motionOK() ? 'smooth' : 'auto', block: 'start' })
+      )
+    }
+  }
+
   const daySessions = selected ? (byDate[selected] || []) : []
 
   const listDays = useMemo(() => {
@@ -233,7 +250,7 @@ export function CalendarView() {
         </div>
       </div>
 
-      <div className="row row--between" style={{ marginBottom: 18 }} data-reveal>
+      <div className="row row--between cal-toolbar" data-reveal>
         <div className="row" style={{ gap: 14 }}>
           <div className="month-nav">
             <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={ym <= monthsRange[0]} onClick={() => changeMonth(-1)} />
@@ -275,25 +292,34 @@ export function CalendarView() {
                       cell.iso === today ? 'is-today' : '',
                       cell.iso === selected ? 'is-sel' : '',
                     ].join(' ')}
-                    onClick={() => { if (!suppressClick.current) setSelected(cell.iso) }}
+                    onClick={() => { if (!suppressClick.current) selectDay(cell.iso) }}
                     aria-label={`${fmtDayMonth(cell.iso)} — ${items.length} ${sessionsWord(items.length)}`}
                   >
                     <span className="cal__num">{Number(cell.iso.slice(8))}</span>
-                    <span className="cal__items">
-                      {items.slice(0, 3).map((s) => (
-                        <span
-                          key={s.id}
-                          className={`cal__item ${s.status === 'scheduled' ? 'is-draggable' : ''}`}
-                          style={{ background: psychOf(s.psychId)?.soft }}
-                          onPointerDown={(e) => onChipDown(e, s)}
-                          title={s.status === 'scheduled' ? 'Przeciągnij, aby przełożyć sesję' : undefined}
-                        >
-                          <span className="dot" style={{ background: psychOf(s.psychId)?.color }} />
-                          {s.time} {clientOf(s.clientId)?.name.split(' ')[0]}
-                        </span>
-                      ))}
-                      {items.length > 3 && <span className="cal__more">+{items.length - 3} więcej</span>}
-                    </span>
+                    {isPhone ? (
+                      <span className="cal__dots">
+                        {items.slice(0, 4).map((s) => (
+                          <span key={s.id} className="dot" style={{ background: psychOf(s.psychId)?.color }} />
+                        ))}
+                        {items.length > 4 && <span className="cal__more">+{items.length - 4}</span>}
+                      </span>
+                    ) : (
+                      <span className="cal__items">
+                        {items.slice(0, 3).map((s) => (
+                          <span
+                            key={s.id}
+                            className={`cal__item ${s.status === 'scheduled' ? 'is-draggable' : ''}`}
+                            style={{ background: psychOf(s.psychId)?.soft }}
+                            onPointerDown={(e) => onChipDown(e, s)}
+                            title={s.status === 'scheduled' ? 'Przeciągnij, aby przełożyć sesję' : undefined}
+                          >
+                            <span className="dot" style={{ background: psychOf(s.psychId)?.color }} />
+                            {s.time} {clientOf(s.clientId)?.name.split(' ')[0]}
+                          </span>
+                        ))}
+                        {items.length > 3 && <span className="cal__more">+{items.length - 3} więcej</span>}
+                      </span>
+                    )}
                   </button>
                 )
               })}
@@ -308,7 +334,7 @@ export function CalendarView() {
             </div>
           </div>
 
-          <div className="card card--pad" style={{ alignSelf: 'start', position: 'sticky', top: 0 }}>
+          <div className="card card--pad cal-day-panel" ref={dayPanelRef}>
             <h2 className="card-title">
               {selected ? cap(fmtWeekday(selected)) + ', ' + fmtDayMonth(selected) : 'Wybierz dzień'}
             </h2>
@@ -330,8 +356,8 @@ export function CalendarView() {
                     <div
                       className="agenda__row"
                       key={s.id}
-                      onPointerDown={s.status === 'scheduled' ? (e) => onChipDown(e, s) : undefined}
-                      style={s.status === 'scheduled' ? { touchAction: 'none' } : undefined}
+                      onPointerDown={agendaDrag && s.status === 'scheduled' ? (e) => onChipDown(e, s) : undefined}
+                      style={agendaDrag && s.status === 'scheduled' ? { touchAction: 'none' } : undefined}
                     >
                       <span className="agenda__time">{s.time}</span>
                       <span className="agenda__main">
@@ -340,7 +366,7 @@ export function CalendarView() {
                           <Avatar name={p?.name || '?'} color={p?.color} size={16} />
                           {p?.name} · {fmtMoney(s.amount)}
                         </span>
-                        <span className="row" style={{ gap: 6, marginTop: 7 }}>
+                        <span className="agenda__pills">
                           <StatusPicker session={s} />
                           <PaymentPicker session={s} />
                         </span>
@@ -379,25 +405,26 @@ export function CalendarView() {
                 </h3>
                 <span className="faint" style={{ fontSize: 12.5 }}>{items.length} {sessionsWord(items.length)}</span>
               </div>
-              <table className="table">
+              <div className="table-scroll table-scroll--until-tablet">
+              <table className="table table--cards">
                 <tbody>
                   {items.map((s) => {
                     const c = clientOf(s.clientId)
                     const p = psychOf(s.psychId)
                     return (
                       <tr key={s.id}>
-                        <td style={{ width: 64 }} className="num-cell">{s.time}</td>
+                        <td className="num-cell td--time" data-th="Godzina">{s.time}</td>
                         <td style={{ fontWeight: 600 }}>{c?.name}</td>
-                        <td>
+                        <td data-th="Specjalistka">
                           <span className="row" style={{ gap: 8 }}>
                             <span className="dot" style={{ width: 8, height: 8, borderRadius: 99, background: p?.color, display: 'inline-block' }} />
                             <span className="muted">{p?.name}</span>
                           </span>
                         </td>
-                        <td className="num-cell">{fmtMoney(s.amount)}</td>
-                        <td><StatusPicker session={s} /></td>
-                        <td><PaymentPicker session={s} /></td>
-                        <td className="right" style={{ width: 50 }}>
+                        <td className="num-cell" data-th="Kwota">{fmtMoney(s.amount)}</td>
+                        <td data-th="Status"><StatusPicker session={s} /></td>
+                        <td data-th="Płatność"><PaymentPicker session={s} /></td>
+                        <td className="right td--actions" style={{ width: 50 }}>
                           <IconBtn name="edit" label="Edytuj" size={16} onClick={() => openSessionForm({ session: s })} />
                         </td>
                       </tr>
@@ -405,6 +432,7 @@ export function CalendarView() {
                   })}
                 </tbody>
               </table>
+              </div>
             </div>
           ))}
         </div>

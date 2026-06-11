@@ -263,6 +263,8 @@ export function useFlip(depKey) {
 export function goldBurst(el) {
   if (!el || !motionOK()) return
   const r = el.getBoundingClientRect()
+  // the anchor may be display:none on small screens (e.g. the month chip)
+  if (!r.width && !r.height) return
   const cx = r.left + r.width / 2
   const cy = r.top + r.height / 2
   const colors = ['#ac8a4e', '#c2808d', '#dcc488', '#a4596b', '#e8cfa0', '#7d8c6c']

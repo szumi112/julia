@@ -83,7 +83,7 @@ export function Payments() {
         </div>
       </div>
 
-      <div className="row" style={{ flexWrap: 'wrap', marginBottom: 20 }} data-reveal>
+      <div className="row chips-row" data-reveal>
         <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
         {state.psychologists.map((p) => (
           <Chip key={p.id} on={psychFilter === p.id} swatch={p.color}
@@ -113,7 +113,7 @@ export function Payments() {
           <h2 className="card-title">Zespół · {fmtMonthYear(ym)}</h2>
           <div className="hbar" style={{ marginTop: 20 }}>
             {perPsych.map(({ p, collected: col, outstanding: out }) => (
-              <div className="hbar__row" key={p.id} style={{ gridTemplateColumns: '120px 1fr' }}>
+              <div className="hbar__row hbar__row--labeled" key={p.id}>
                 <span className="hbar__name">
                   <Avatar name={p.name} color={p.color} size={26} />
                   <span>{p.name.split(' ')[0]}</span>
@@ -149,7 +149,8 @@ export function Payments() {
               {filtered.length} {sessionsWord(filtered.length)}
             </span>
           </div>
-          <table className="table" style={{ marginTop: 8 }}>
+          <div className="table-scroll" style={{ marginTop: 8 }}>
+          <table className="table">
             <thead>
               <tr>
                 <th>Data</th>
@@ -201,6 +202,7 @@ export function Payments() {
               })}
             </tbody>
           </table>
+          </div>
         </div>
       </div>
     </div>

@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Icon, Bloom } from './icons.jsx'
 import { Avatar, IconBtn } from './ui.jsx'
 import { useApp } from './store.jsx'
 import { ShellCtx } from './shell-ctx.js'
+import { useIsCompact } from './responsive.js'
 import { animateOut, motionOK, goldBurst } from './anim.js'
 import { fmtMonthYear, monthKey, toISODate, fmtWeekday, cap, sessionsWord, outstandingOf } from './format.js'
 import { Dashboard } from './views/Dashboard.jsx'
@@ -64,7 +65,7 @@ export function Logotype({ light }) {
   )
 }
 
-function Sidebar({ route, navigate }) {
+function Sidebar({ route, navigate, className = '', innerRef }) {
   const { state } = useApp()
   const navRef = useRef(null)
   const pillRef = useRef(null)
@@ -93,7 +94,7 @@ function Sidebar({ route, navigate }) {
   ).length
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${className}`} ref={innerRef}>
       <div className="sidebar__brand" data-shell-reveal>
         <Logotype />
       </div>
@@ -135,7 +136,78 @@ function Sidebar({ route, navigate }) {
   )
 }
 
-function Topbar({ route, onLogout, onSearch }) {
+// Compact-shell navigation: the sidebar slides in from the left as a drawer,
+// with the same GSAP choreography as the form drawers (mirrored).
+function MobileNavDrawer({ route, navigate, onClose }) {
+  const asideRef = useRef(null)
+  const backRef = useRef(null)
+  const closing = useRef(false)
+
+  useEffect(() => {
+    if (!motionOK() || !asideRef.current) return
+    window.gsap.fromTo(backRef.current, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.3 })
+    window.gsap.fromTo(asideRef.current, { x: '-104%' }, { x: '0%', duration: 0.5, ease: 'power4.out' })
+  }, [])
+
+  const close = useCallback(() => {
+    if (closing.current) return
+    if (!motionOK() || !asideRef.current) return onClose()
+    closing.current = true
+    window.gsap.to(backRef.current, { autoAlpha: 0, duration: 0.25 })
+    window.gsap.to(asideRef.current, { x: '-104%', duration: 0.38, ease: 'power3.in', onComplete: onClose })
+  }, [onClose])
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) close()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [close])
+
+  // aria-modal promises a focus trap: focus the active item on open, keep Tab
+  // inside the drawer, hand focus back to the hamburger on close
+  useEffect(() => {
+    const opener = document.activeElement
+    const aside = asideRef.current
+    aside?.querySelector('.nav__item.is-active, .nav__item')?.focus()
+    const onTab = (e) => {
+      if (e.key !== 'Tab' || !aside) return
+      const els = [...aside.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
+        .filter((el) => !el.disabled && el.offsetParent !== null)
+      if (!els.length) return
+      const first = els[0]
+      const last = els[els.length - 1]
+      const inside = aside.contains(document.activeElement)
+      if (e.shiftKey && (document.activeElement === first || !inside)) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && (document.activeElement === last || !inside)) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', onTab)
+    return () => {
+      document.removeEventListener('keydown', onTab)
+      if (opener && typeof opener.focus === 'function') opener.focus()
+    }
+  }, [])
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Nawigacja">
+      <div className="drawer-backdrop" ref={backRef} onClick={close} />
+      <Sidebar
+        route={route}
+        navigate={(name, params) => { navigate(name, params); close() }}
+        className="sidebar--drawer"
+        innerRef={asideRef}
+      />
+    </div>
+  )
+}
+
+function Topbar({ route, onLogout, onSearch, onMenu }) {
   const { state } = useApp()
   const titleRef = useRef(null)
   const title = TITLES[route.name] || ''
@@ -151,8 +223,11 @@ function Topbar({ route, onLogout, onSearch }) {
 
   return (
     <header className="topbar">
+      {onMenu && (
+        <IconBtn name="menu" label="Otwórz menu" className="topbar__menu" onClick={onMenu} data-shell-reveal />
+      )}
       <div className="topbar__title" ref={titleRef} data-shell-reveal>
-        Aurelia <span style={{ opacity: 0.35, margin: '0 7px' }}>/</span> <b>{title}</b>
+        <span className="topbar__crumb">Aurelia <span style={{ opacity: 0.35, margin: '0 7px' }}>/</span> </span><b>{title}</b>
       </div>
       <div className="topbar__right" data-shell-reveal>
         <button className="cmd-trigger" onClick={onSearch} title="Szukaj w Aurelii (Ctrl+K)">
@@ -205,12 +280,19 @@ export function Shell({ onLogout }) {
   const [route, setRoute] = useState({ name: 'dashboard' })
   const [drawer, setDrawer] = useState(null)
   const [cmdOpen, setCmdOpen] = useState(false)
+  const [navOpen, setNavOpen] = useState(false)
+  const isCompact = useIsCompact()
   const viewRef = useRef(null)
   const contentRef = useRef(null)
   const shellRef = useRef(null)
   const busy = useRef(false)
 
   useMonthSettled()
+
+  // widening past the breakpoint restores the static sidebar
+  useEffect(() => {
+    if (!isCompact) setNavOpen(false)
+  }, [isCompact])
 
   // entrance choreography
   useEffect(() => {
@@ -256,9 +338,14 @@ export function Shell({ onLogout }) {
   return (
     <ShellCtx.Provider value={{ route, navigate, openSessionForm, openClientForm, openPsychForm }}>
       <div className="shell" ref={shellRef}>
-        <Sidebar route={route} navigate={navigate} />
+        {!isCompact && <Sidebar route={route} navigate={navigate} />}
         <div className="main">
-          <Topbar route={route} onLogout={onLogout} onSearch={() => setCmdOpen(true)} />
+          <Topbar
+            route={route}
+            onLogout={onLogout}
+            onSearch={() => setCmdOpen(true)}
+            onMenu={isCompact ? () => setNavOpen(true) : undefined}
+          />
           <main className="content" ref={contentRef}>
             <div className="view" ref={viewRef} key={route.name + JSON.stringify(route.params || {})}>
               <View params={route.params || {}} />
@@ -266,6 +353,9 @@ export function Shell({ onLogout }) {
           </main>
         </div>
       </div>
+      {isCompact && navOpen && (
+        <MobileNavDrawer route={route} navigate={navigate} onClose={() => setNavOpen(false)} />
+      )}
       {drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}

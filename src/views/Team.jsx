@@ -166,7 +166,7 @@ export function PsychDetail({ params }) {
         <div className="stack">
           <div className="card card--pad" data-reveal>
             <h2 className="card-title">Klienci pod opieką</h2>
-            <table className="table" style={{ marginTop: 10 }}>
+            <table className="table table--cards" style={{ marginTop: 10 }}>
               <thead>
                 <tr>
                   <th>Klient</th>
@@ -207,9 +207,9 @@ export function PsychDetail({ params }) {
                           <span style={{ fontWeight: 600 }}>{c.name}</span>
                         </span>
                       </td>
-                      <td className="muted">{last ? fmtShortDate(last.date) : '—'}</td>
-                      <td className="right num-cell">{count}</td>
-                      <td className="right">
+                      <td className="muted" data-th="Ostatnia sesja">{last ? fmtShortDate(last.date) : '—'}</td>
+                      <td className="right num-cell" data-th="Sesje">{count}</td>
+                      <td className="right" data-th="Zaległość">
                         {debt > 0 ? <Pill tone="gold">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
                       </td>
                     </tr>
