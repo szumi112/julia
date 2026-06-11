@@ -87,7 +87,7 @@ export function SessionDrawer({ opts, onClose }) {
       window.gsap.fromTo(
         warnRef.current,
         { autoAlpha: 0, y: -6 },
-        { autoAlpha: 1, y: 0, duration: 0.35, ease: 'power2.out', clearProps: 'all' }
+        { autoAlpha: 1, y: 0, duration: 0.35, ease: 'power2.out', clearProps: 'transform,opacity,visibility' }
       )
     }
   }, [conflict?.id])

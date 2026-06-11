@@ -129,10 +129,6 @@ export function CalendarView() {
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
 
   // --- drag & drop: reschedule by dragging a session chip onto another day ---
-  const clearDropHints = () => {
-    document.querySelectorAll('.cal__day.is-dropover').forEach((el) => el.classList.remove('is-dropover'))
-  }
-
   const onChipDown = (e, s) => {
     if (s.status !== 'scheduled') return
     if (e.pointerType === 'mouse' && e.button !== 0) return
@@ -173,10 +169,14 @@ export function CalendarView() {
       const day = under ? under.closest('.cal__day[data-iso]') : null
       const iso = day && !day.classList.contains('is-out') ? day.dataset.iso : null
       const valid = iso && iso !== s.date
-      clearDropHints()
-      if (valid) day.classList.add('is-dropover')
+      const dropEl = valid ? day : null
+      // only touch the DOM when the hovered day actually changes
+      if (d.dropEl !== dropEl) {
+        d.dropEl?.classList.remove('is-dropover')
+        dropEl?.classList.add('is-dropover')
+      }
       d.dropIso = valid ? iso : null
-      d.dropEl = valid ? day : null
+      d.dropEl = dropEl
     }
 
     const finish = (ev) => {
@@ -185,7 +185,7 @@ export function CalendarView() {
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', cancel)
       if (!d.active) return
-      clearDropHints()
+      d.dropEl?.classList.remove('is-dropover')
       document.body.classList.remove('is-grabbing')
       chip.classList.remove('is-dragging')
       setTimeout(() => { suppressClick.current = false }, 0)
@@ -255,7 +255,7 @@ export function CalendarView() {
     window.gsap.fromTo(
       gridRef.current.children,
       { autoAlpha: 0, y: 10 },
-      { autoAlpha: 1, y: 0, duration: 0.4, ease: 'power2.out', stagger: 0.006, clearProps: 'all' }
+      { autoAlpha: 1, y: 0, duration: 0.4, ease: 'power2.out', stagger: 0.006, clearProps: 'transform,opacity,visibility' }
     )
   }, [ym, mode, showWeekends])
 
@@ -312,7 +312,7 @@ export function CalendarView() {
     window.gsap.fromTo(
       agendaRef.current.querySelectorAll('.agenda__row, .empty'),
       { autoAlpha: 0, y: 12 },
-      { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power3.out', stagger: 0.05, clearProps: 'all' }
+      { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power3.out', stagger: 0.05, clearProps: 'transform,opacity,visibility' }
     )
   }, [agendaSel, mode])
 

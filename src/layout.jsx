@@ -370,7 +370,7 @@ export function Shell({ onLogout }) {
     window.gsap.fromTo(
       items,
       { autoAlpha: 0, x: -14 },
-      { autoAlpha: 1, x: 0, duration: 0.7, ease: 'power3.out', stagger: 0.05, clearProps: 'all' }
+      { autoAlpha: 1, x: 0, duration: 0.7, ease: 'power3.out', stagger: 0.05, clearProps: 'transform,opacity,visibility' }
     )
   }, [])
 

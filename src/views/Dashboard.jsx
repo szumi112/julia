@@ -160,7 +160,7 @@ function TeamBoard() {
       window.gsap.fromTo(
         listRef.current.firstElementChild,
         { autoAlpha: 0, y: -10 },
-        { autoAlpha: 1, y: 0, duration: 0.5, ease: 'power3.out', clearProps: 'all' }
+        { autoAlpha: 1, y: 0, duration: 0.5, ease: 'power3.out', clearProps: 'transform,opacity,visibility' }
       )
     }
     prevCount.current = state.posts.length

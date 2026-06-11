@@ -2,7 +2,7 @@
 // shaded in the warm palette. Lightweight: one mesh, capped DPR, paused
 // when the tab is hidden, static single frame under reduced motion.
 import { useEffect, useRef } from 'react'
-import { motionOK } from './anim.js'
+import { motionOK, onMotionChange } from './anim.js'
 import { phoneMQ } from './responsive.js'
 
 const NOISE_GLSL = /* glsl */ `
@@ -176,17 +176,32 @@ export function createAmbient(container, opts = {}) {
     raf = requestAnimationFrame(loop)
   }
 
+  const start = () => {
+    if (running) return
+    running = true
+    clock.getDelta()
+    loop()
+  }
+  const stop = () => {
+    running = false
+    cancelAnimationFrame(raf)
+  }
+
   const onVis = () => {
-    if (document.hidden) {
-      running = false
-      cancelAnimationFrame(raf)
-    } else if (motionOK()) {
-      running = true
-      clock.getDelta()
-      loop()
-    }
+    if (document.hidden) stop()
+    else if (motionOK()) start()
   }
   document.addEventListener('visibilitychange', onVis)
+
+  // react live when the in-app reduced-motion preference (or the OS one) flips
+  const offMotion = onMotionChange((ok) => {
+    if (ok && !document.hidden) {
+      start()
+    } else {
+      stop()
+      render() // settle on a calm static frame
+    }
+  })
 
   if (motionOK()) {
     loop()
@@ -199,8 +214,8 @@ export function createAmbient(container, opts = {}) {
 
   return {
     destroy() {
-      running = false
-      cancelAnimationFrame(raf)
+      stop()
+      offMotion()
       document.removeEventListener('visibilitychange', onVis)
       window.removeEventListener('pointermove', onMouse)
       ro.disconnect()

@@ -4,6 +4,9 @@ import { INITIAL_STATE } from './data.js'
 import { monthKey, isBillable, collectedOf, outstandingOf } from './format.js'
 
 const AppCtx = createContext(null)
+// toasts live in their own context: every add/expire would otherwise
+// recreate the app context value and re-render all of its consumers
+const ToastCtx = createContext([])
 
 let nextId = 10000
 
@@ -78,13 +81,18 @@ export function AppProvider({ children }) {
   }, [])
 
   const value = useMemo(
-    () => ({ state, dispatch, toast, toasts }),
-    [state, toast, toasts]
+    () => ({ state, dispatch, toast }),
+    [state, toast]
   )
-  return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>
+  return (
+    <AppCtx.Provider value={value}>
+      <ToastCtx.Provider value={toasts}>{children}</ToastCtx.Provider>
+    </AppCtx.Provider>
+  )
 }
 
 export const useApp = () => useContext(AppCtx)
+export const useToasts = () => useContext(ToastCtx)
 
 // ---------- selectors ----------
 

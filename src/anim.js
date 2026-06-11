@@ -3,13 +3,34 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { fmtNumber } from './format.js'
 
+// Entrance tweens only touch transform + autoAlpha — clearing exactly those
+// keeps inline layout styles on animated elements intact ('all' would wipe them).
+const CLEAR = 'transform,opacity,visibility'
+
 let reduceOverride = false
-export const setReduceMotion = (v) => { reduceOverride = !!v }
+
+// Long-lived animation loops (Three.js scenes) subscribe here so flipping the
+// in-app reduced-motion setting stops them live, not on next mount.
+const motionSubs = new Set()
+const notifyMotion = () => motionSubs.forEach((fn) => fn(motionOK()))
+export const onMotionChange = (fn) => {
+  motionSubs.add(fn)
+  return () => motionSubs.delete(fn)
+}
+
+export const setReduceMotion = (v) => {
+  if (reduceOverride === !!v) return
+  reduceOverride = !!v
+  notifyMotion()
+}
+
+const osReduceMQ = window.matchMedia('(prefers-reduced-motion: reduce)')
+osReduceMQ.addEventListener?.('change', notifyMotion)
 
 export const motionOK = () =>
   !!window.gsap &&
   !reduceOverride &&
-  !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  !osReduceMQ.matches
 
 const g = () => window.gsap
 
@@ -34,7 +55,7 @@ export function useReveal(deps = []) {
           duration: 0.85,
           ease: 'power3.out',
           stagger: 0.07,
-          clearProps: 'all',
+          clearProps: CLEAR,
           overwrite: 'auto',
         }
       )
@@ -52,7 +73,7 @@ export function useReveal(deps = []) {
                 y: 0,
                 duration: 0.9,
                 ease: 'power3.out',
-                clearProps: 'all',
+                clearProps: CLEAR,
               })
               io.unobserve(e.target)
             }
@@ -96,25 +117,37 @@ export function useCountUp(value, fmt = fmtNumber, duration = 1.4) {
   return ref
 }
 
-// Magnetic hover for primary CTAs.
+// Magnetic hover for primary CTAs. quickTo retargets one tween pair per
+// hover instead of allocating a new tween on every mousemove. The setters are
+// recreated on each enter because the elastic release overwrites (kills) them.
 export function useMagnetic(strength = 0.32) {
   const ref = useRef(null)
   useEffect(() => {
     const el = ref.current
     if (!el || !motionOK()) return
-    const move = (e) => {
-      const r = el.getBoundingClientRect()
-      const dx = e.clientX - (r.left + r.width / 2)
-      const dy = e.clientY - (r.top + r.height / 2)
-      g().to(el, { x: dx * strength, y: dy * strength, duration: 0.5, ease: 'power3.out' })
+    let toX, toY
+    const enter = () => {
+      toX = g().quickTo(el, 'x', { duration: 0.5, ease: 'power3.out' })
+      toY = g().quickTo(el, 'y', { duration: 0.5, ease: 'power3.out' })
     }
-    const leave = () =>
-      g().to(el, { x: 0, y: 0, duration: 0.8, ease: 'elastic.out(1, 0.45)' })
+    const move = (e) => {
+      if (!toX) enter()
+      const r = el.getBoundingClientRect()
+      toX((e.clientX - (r.left + r.width / 2)) * strength)
+      toY((e.clientY - (r.top + r.height / 2)) * strength)
+    }
+    const leave = () => {
+      toX = toY = null
+      g().to(el, { x: 0, y: 0, duration: 0.8, ease: 'elastic.out(1, 0.45)', overwrite: 'auto' })
+    }
+    el.addEventListener('mouseenter', enter)
     el.addEventListener('mousemove', move)
     el.addEventListener('mouseleave', leave)
     return () => {
+      el.removeEventListener('mouseenter', enter)
       el.removeEventListener('mousemove', move)
       el.removeEventListener('mouseleave', leave)
+      g().killTweensOf(el, 'x,y')
     }
   }, [strength])
   return ref
@@ -139,7 +172,7 @@ export function animateIn(el) {
   g().fromTo(
     el,
     { autoAlpha: 0, y: 10 },
-    { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power3.out', clearProps: 'all' }
+    { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power3.out', clearProps: CLEAR }
   )
 }
 
@@ -159,7 +192,7 @@ export function useDrawerFX(drawerRef, backRef, onClose) {
       g().fromTo(
         items,
         { autoAlpha: 0, x: 26 },
-        { autoAlpha: 1, x: 0, duration: 0.55, ease: 'power3.out', stagger: 0.035, delay: 0.1, clearProps: 'all' }
+        { autoAlpha: 1, x: 0, duration: 0.55, ease: 'power3.out', stagger: 0.035, delay: 0.1, clearProps: CLEAR }
       )
     }
     // the entrance stagger starts fields at visibility:hidden, so focus the
@@ -249,7 +282,7 @@ export function useFlip(depKey) {
             g().fromTo(el, { y: dy }, { y: 0, duration: 0.55, ease: 'power3.out', clearProps: 'transform', overwrite: true })
           }
         } else {
-          g().fromTo(el, { autoAlpha: 0, y: 10 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power2.out', clearProps: 'all', overwrite: true })
+          g().fromTo(el, { autoAlpha: 0, y: 10 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power2.out', clearProps: CLEAR, overwrite: true })
         }
       })
     }

@@ -27,7 +27,7 @@ export function Login({ onLogin }) {
     tl.fromTo(
       cardRef.current.querySelectorAll('[data-stagger]'),
       { autoAlpha: 0, y: 14 },
-      { autoAlpha: 1, y: 0, duration: 0.7, ease: 'power3.out', stagger: 0.08, clearProps: 'all' },
+      { autoAlpha: 1, y: 0, duration: 0.7, ease: 'power3.out', stagger: 0.08, clearProps: 'transform,opacity,visibility' },
       '-=0.6'
     )
   }, [])

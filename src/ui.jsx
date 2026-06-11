@@ -1,7 +1,7 @@
 import { cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Icon } from './icons.jsx'
 import { initials } from './format.js'
-import { useApp } from './store.jsx'
+import { useToasts } from './store.jsx'
 import { useMagnetic, motionOK } from './anim.js'
 
 export function Button({ children, icon, variant = 'primary', size, magnetic, className = '', ...rest }) {
@@ -316,7 +316,7 @@ function ToastItem({ toast }) {
 }
 
 export function ToastHost() {
-  const { toasts } = useApp()
+  const toasts = useToasts()
   return (
     <div className="toasts" aria-live="polite">
       {toasts.map((t) => (
