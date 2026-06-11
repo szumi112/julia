@@ -14,10 +14,13 @@
       href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..700;1,9..144,300..700&family=Hanken+Grotesk:ital,wght@0,300..700;1,300..700&display=swap"
       rel="stylesheet"
     />
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
-    <script type="module" crossorigin src="/julia/assets/index-C_aW6J84.js"></script>
-    <link rel="stylesheet" crossorigin href="/julia/assets/index-DWCKqIrW.css">
+    <!-- defer: parse the document without blocking; both still execute in
+         document order before the module script below, so window.gsap /
+         window.THREE are ready when the app boots -->
+    <script defer src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
+    <script type="module" crossorigin src="/julia/assets/index-CVdqgirT.js"></script>
+    <link rel="stylesheet" crossorigin href="/julia/assets/index-C1bZLckj.css">
   </head>
   <body>
     <div id="root"></div>
