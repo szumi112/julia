@@ -53,7 +53,7 @@ export function Clients() {
             {p.name.split(' ')[0]}
           </Chip>
         ))}
-        <span style={{ width: 1, height: 22, background: 'var(--line)', margin: '0 6px' }} />
+        <span className="chips-row__divider" />
         <Chip on={debtOnly} onClick={() => setDebtOnly(!debtOnly)}>
           <Icon name="payments" size={14} /> Z zaległościami
         </Chip>

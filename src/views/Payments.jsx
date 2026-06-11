@@ -27,6 +27,7 @@ export function Payments() {
   const ref = useReveal()
   const [ym, setYm] = useState(monthKey(new Date()))
   const [psychFilter, setPsychFilter] = useState(null)
+  const [unpaidOnly, setUnpaidOnly] = useState(false)
 
   const months = useMemo(() => availableMonths(state.sessions), [state.sessions])
   const maxYm = monthKey(new Date()) // billing always stops at the current month
@@ -34,7 +35,9 @@ export function Payments() {
     () => sessionsInMonth(state.sessions, ym).filter(isBillable).reverse(),
     [state.sessions, ym]
   )
-  const filtered = psychFilter ? monthBillable.filter((s) => s.psychId === psychFilter) : monthBillable
+  const filtered = monthBillable.filter(
+    (s) => (!psychFilter || s.psychId === psychFilter) && (!unpaidOnly || outstandingOf(s) > 0)
+  )
 
   const collected = filtered.reduce((a, s) => a + collectedOf(s), 0)
   const outstanding = filtered.reduce((a, s) => a + outstandingOf(s), 0)
@@ -91,6 +94,10 @@ export function Payments() {
             {p.name.split(' ')[0]}
           </Chip>
         ))}
+        <span className="chips-row__divider" />
+        <Chip on={unpaidOnly} onClick={() => setUnpaidOnly(!unpaidOnly)}>
+          <Icon name="payments" size={14} /> Tylko zaległe
+        </Chip>
       </div>
 
       <div className="stats-row stats-row--3">

@@ -308,6 +308,7 @@ input, select, textarea { font-family: inherit; color: inherit; }
   box-shadow: var(--shadow-3);
   padding-bottom: max(22px, env(safe-area-inset-bottom));
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .sidebar__brand { padding: 0 10px 30px; }
@@ -684,6 +685,7 @@ input, select, textarea { font-family: inherit; color: inherit; }
 /* filter chip rows — class, not inline style: the reveal tween's
    clearProps wipes inline styles when it finishes */
 .chips-row { flex-wrap: wrap; margin-bottom: 20px; }
+.chips-row__divider { width: 1px; height: 22px; background: var(--line); margin: 0 6px; }
 
 /* filter chips */
 .chip {
@@ -778,6 +780,7 @@ input, select, textarea { font-family: inherit; color: inherit; }
   line-height: 1.5;
 }
 .form-warn svg { flex-shrink: 0; margin-top: 2px; }
+.form-warn span { min-width: 0; overflow-wrap: anywhere; }
 .form-warn b { font-weight: 700; }
 .form-warn--error {
   background: var(--error-ghost);
@@ -1118,9 +1121,14 @@ input, select, textarea { font-family: inherit; color: inherit; }
   padding: 28px 28px 20px;
   border-bottom: 1px solid var(--line-soft);
 }
+/* long user-entered names must wrap, not push the close button off-screen */
+.drawer__head > div:first-child { min-width: 0; }
+.drawer__head .icon-btn { flex-shrink: 0; }
 .drawer__title { font-family: var(--font-display); font-size: 24px; font-weight: 460; }
-.drawer__sub { color: var(--ink-soft); font-size: 13.5px; margin-top: 4px; }
-.drawer__body { flex: 1; overflow-y: auto; padding: 24px 28px; display: flex; flex-direction: column; gap: 20px; }
+.drawer__sub { color: var(--ink-soft); font-size: 13.5px; margin-top: 4px; overflow-wrap: anywhere; }
+/* overflow-x hidden: the entrance stagger animates fields from x:26px, which
+   would otherwise make the body horizontally swipeable while it plays */
+.drawer__body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 24px 28px; display: flex; flex-direction: column; gap: 20px; }
 .drawer__foot {
   display: flex;
   gap: 12px;
@@ -1212,7 +1220,7 @@ kbd {
   min-width: 0;
 }
 .cmd__head input::placeholder { color: var(--ink-faint); }
-.cmd__list { max-height: min(380px, 55dvh); overflow-y: auto; padding: 8px; }
+.cmd__list { max-height: min(380px, 55dvh); overflow-y: auto; overflow-x: hidden; padding: 8px; }
 .cmd__group {
   font-size: 10.5px;
   font-weight: 700;
@@ -1731,7 +1739,7 @@ body.is-grabbing, body.is-grabbing * { cursor: grabbing !important; }
   position: relative;
 }
 .bpost:last-child { border-bottom: none; padding-bottom: 4px; }
-.bpost__meta { font-size: 12px; color: var(--ink-faint); }
+.bpost__meta { font-size: 12px; color: var(--ink-faint); overflow-wrap: break-word; }
 .bpost__meta b { color: var(--ink-soft); font-weight: 650; }
 .bpost__text { margin-top: 3px; font-size: 13.5px; line-height: 1.55; color: var(--ink-soft); overflow-wrap: break-word; }
 .bpost__del { width: 28px; height: 28px; opacity: 0; transition: opacity 0.18s; flex-shrink: 0; }
@@ -2021,6 +2029,7 @@ body.is-grabbing, body.is-grabbing * { cursor: grabbing !important; }
   width: min(400px, calc(100vw - 24px));
   max-height: min(76vh, 660px);
   overflow-y: auto;
+  overflow-x: hidden;
   border-radius: var(--r-lg);
 }
 .cockpit--sheet {
@@ -2029,6 +2038,7 @@ body.is-grabbing, body.is-grabbing * { cursor: grabbing !important; }
   bottom: 0;
   max-height: 86dvh;
   overflow-y: auto;
+  overflow-x: hidden;
   border-radius: 26px 26px 0 0;
   border-bottom: none;
   padding: 12px 20px calc(20px + env(safe-area-inset-bottom));
@@ -2084,6 +2094,12 @@ body.is-grabbing, body.is-grabbing * { cursor: grabbing !important; }
   margin-top: 3px;
   font-size: 12.5px;
   color: var(--ink-soft);
+}
+.cockpit__next-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .cockpit__next .pill { flex-shrink: 0; }
 
@@ -2184,6 +2200,8 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
   .userchip { display: none; }
   .cmd-trigger { width: 40px; height: 40px; padding: 0; justify-content: center; }
   .cmd-trigger > span, .cmd-trigger kbd { display: none; }
+  /* keyboard hints are meaningless on touch and overflow at 360px */
+  .cmd__foot { display: none; }
 }
 
 /* inputs at 16px on phones so iOS Safari doesn't zoom on focus */

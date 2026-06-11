@@ -87,7 +87,7 @@ function CockpitBody({ m, onClose }) {
             <b>{clientOf(focus.clientId)?.name}</b>
             <span>
               <Avatar name={focusPsych?.name || '?'} color={focusPsych?.color} size={16} />
-              {focusPsych?.name} · {focusPsych?.room}
+              <span className="cockpit__next-sub">{focusPsych?.name} · {focusPsych?.room}</span>
             </span>
           </span>
           <span className={`pill ${m.running ? 'pill--rose' : 'pill--gold'}`}>
@@ -101,7 +101,7 @@ function CockpitBody({ m, onClose }) {
           <span className="cockpit__next-time">{m.future.time}</span>
           <span className="cockpit__next-main">
             <b>{clientOf(m.future.clientId)?.name}</b>
-            <span>najbliższa sesja · {fmtDayMonth(m.future.date)}</span>
+            <span><span className="cockpit__next-sub">najbliższa sesja · {fmtDayMonth(m.future.date)}</span></span>
           </span>
           <Icon name="chevR" size={15} className="faint" />
         </button>

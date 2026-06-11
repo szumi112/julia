@@ -2,7 +2,7 @@
 import { useMemo, useState } from 'react'
 import { useApp, sessionsInMonth, monthStats, availableMonths } from '../store.jsx'
 import { useReveal, useCountUp } from '../anim.js'
-import { Avatar, Button, IconBtn } from '../ui.jsx'
+import { Avatar, Button, Chip, IconBtn } from '../ui.jsx'
 import { Donut, BarFill } from '../charts.jsx'
 import {
   fmtMoney, fmtNumber, monthKey, addMonths, fmtMonthYear, fmtMonthName, cap,
@@ -22,11 +22,19 @@ function BigNum({ label, value, fmt }) {
 export function Reports() {
   const { state, toast } = useApp()
   const [ym, setYm] = useState(monthKey(new Date()))
+  const [psychFilter, setPsychFilter] = useState(null)
   const ref = useReveal([ym])
 
   const months = useMemo(() => availableMonths(state.sessions), [state.sessions])
   const maxYm = monthKey(new Date()) // no reports for future months
-  const stats = useMemo(() => monthStats(state.sessions, ym), [state.sessions, ym])
+  // the hero numbers scope to one specialist when a chip is active;
+  // the breakdown table and donut keep the whole-clinic context
+  const scopedSessions = useMemo(
+    () => (psychFilter ? state.sessions.filter((s) => s.psychId === psychFilter) : state.sessions),
+    [state.sessions, psychFilter]
+  )
+  const stats = useMemo(() => monthStats(scopedSessions, ym), [scopedSessions, ym])
+  const clinicStats = useMemo(() => monthStats(state.sessions, ym), [state.sessions, ym])
   const monthList = useMemo(() => sessionsInMonth(state.sessions, ym), [state.sessions, ym])
 
   const perPsych = state.psychologists.map((p) => {
@@ -75,10 +83,26 @@ export function Reports() {
         </div>
       </div>
 
+      <div className="row chips-row no-print" data-reveal>
+        <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
+        {state.psychologists.map((p) => (
+          <Chip key={p.id} on={psychFilter === p.id} swatch={p.color}
+            onClick={() => setPsychFilter(psychFilter === p.id ? null : p.id)}>
+            {p.name.split(' ')[0]}
+          </Chip>
+        ))}
+      </div>
+
       <section className="report-hero" data-reveal>
         <div className="report-hero__month" aria-hidden="true">{fmtMonthName(ym)}</div>
         <div className="report-bignum">
-          <BigNum label="Przychód centrum" value={stats.revenue} fmt={fmtMoney} />
+          <BigNum
+            label={psychFilter
+              ? state.psychologists.find((p) => p.id === psychFilter)?.name.split(' ')[0] + ' — przychód'
+              : 'Przychód centrum'}
+            value={stats.revenue}
+            fmt={fmtMoney}
+          />
           <BigNum label="Zebrane" value={stats.collected} fmt={fmtMoney} />
           <BigNum label="Godziny terapii" value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
           <BigNum label="Sesje odbyte" value={stats.completed} fmt={(v) => fmtNumber(Math.round(v))} />
@@ -104,7 +128,7 @@ export function Reports() {
             </thead>
             <tbody>
               {perPsych.map(({ p, sessions, hours, revenue, collected, outstanding }) => (
-                <tr key={p.id}>
+                <tr key={p.id} style={psychFilter && psychFilter !== p.id ? { opacity: 0.38 } : undefined}>
                   <td>
                     <span className="row" style={{ gap: 10 }}>
                       <Avatar name={p.name} color={p.color} size={30} />
@@ -127,12 +151,12 @@ export function Reports() {
               ))}
               <tr className="table__total">
                 <td style={{ fontWeight: 700, fontFamily: 'var(--font-display)' }}>Całe centrum</td>
-                <td className="right num-cell" style={{ fontWeight: 700 }}>{stats.completed}</td>
-                <td className="right num-cell" style={{ fontWeight: 700 }}>{Math.round(stats.hours * 10) / 10} h</td>
-                <td className="right num-cell" style={{ fontWeight: 700 }}>{fmtMoney(stats.revenue)}</td>
-                <td className="right num-cell" style={{ fontWeight: 700, color: 'var(--sage-deep)' }}>{fmtMoney(stats.collected)}</td>
+                <td className="right num-cell" style={{ fontWeight: 700 }}>{clinicStats.completed}</td>
+                <td className="right num-cell" style={{ fontWeight: 700 }}>{Math.round(clinicStats.hours * 10) / 10} h</td>
+                <td className="right num-cell" style={{ fontWeight: 700 }}>{fmtMoney(clinicStats.revenue)}</td>
+                <td className="right num-cell" style={{ fontWeight: 700, color: 'var(--sage-deep)' }}>{fmtMoney(clinicStats.collected)}</td>
                 <td className="right num-cell" style={{ fontWeight: 700, color: 'var(--gold-deep)' }}>
-                  {stats.outstanding > 0 ? fmtMoney(stats.outstanding) : '—'}
+                  {clinicStats.outstanding > 0 ? fmtMoney(clinicStats.outstanding) : '—'}
                 </td>
                 <td></td>
               </tr>
@@ -146,7 +170,7 @@ export function Reports() {
           <div style={{ marginTop: 18 }}>
             <Donut
               parts={perPsych.map(({ p, revenue }) => ({ value: revenue, color: p.color, label: p.name }))}
-              centerTop={fmtMoney(stats.revenue)}
+              centerTop={fmtMoney(clinicStats.revenue)}
               centerBottom={cap(fmtMonthName(ym))}
             />
           </div>
@@ -158,14 +182,14 @@ export function Reports() {
                   {p.name.split(' ')[0]}
                 </span>
                 <span style={{ fontWeight: 650 }}>
-                  {stats.revenue > 0 ? Math.round((revenue / stats.revenue) * 100) : 0}%
+                  {clinicStats.revenue > 0 ? Math.round((revenue / clinicStats.revenue) * 100) : 0}%
                 </span>
               </div>
             ))}
           </div>
           <p className="faint" style={{ fontSize: 12.5, marginTop: 20, alignSelf: 'stretch' }}>
-            {cap(fmtMonthYear(ym))}: {stats.completed}{' '}
-            {plural(stats.completed, 'sesja terapeutyczna odbyta', 'sesje terapeutyczne odbyte', 'sesji terapeutycznych odbytych')} w centrum.
+            {cap(fmtMonthYear(ym))}: {clinicStats.completed}{' '}
+            {plural(clinicStats.completed, 'sesja terapeutyczna odbyta', 'sesje terapeutyczne odbyte', 'sesji terapeutycznych odbytych')} w centrum.
           </p>
         </div>
       </div>

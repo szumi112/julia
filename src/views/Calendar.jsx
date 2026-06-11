@@ -3,12 +3,12 @@ import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, motionOK } from '../anim.js'
 import { useIsPhone, useIsCompact, useMediaQuery, desktopMQ, phoneMQ } from '../responsive.js'
-import { Button, IconBtn, Segmented, Avatar, EmptyState } from '../ui.jsx'
+import { Button, IconBtn, Segmented, Avatar, Chip, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
 import {
   monthKey, addMonths, fmtMonthYear, toISODate, parseISO, pad2, cap,
-  fmtWeekday, fmtDayMonth, fmtMoney, sessionsWord, timeToMin,
+  fmtWeekday, fmtDayMonth, fmtMoney, sessionsWord, timeToMin, outstandingOf,
 } from '../format.js'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
@@ -91,6 +91,9 @@ export function CalendarView() {
   // phones start in the day agenda — the 7-column grid is a tap target maze there
   const [mode, setMode] = useState(() => (window.matchMedia(phoneMQ).matches ? 'agenda' : 'cal'))
   const [selected, setSelected] = useState(today)
+  const [psychFilter, setPsychFilter] = useState(null)
+  const [statusFilter, setStatusFilter] = useState(null)
+  const [unpaidOnly, setUnpaidOnly] = useState(false)
   const isPhone = useIsPhone()
   const isCompact = useIsCompact()
 
@@ -116,8 +119,14 @@ export function CalendarView() {
 
   // cancelled sessions are not shown on the grid (they stay in client history)
   const monthSessions = useMemo(
-    () => sessionsInMonth(state.sessions, ym).filter((s) => s.status !== 'cancelled'),
-    [state.sessions, ym]
+    () => sessionsInMonth(state.sessions, ym).filter(
+      (s) =>
+        s.status !== 'cancelled' &&
+        (!psychFilter || s.psychId === psychFilter) &&
+        (!statusFilter || s.status === statusFilter) &&
+        (!unpaidOnly || outstandingOf(s) > 0)
+    ),
+    [state.sessions, ym, psychFilter, statusFilter, unpaidOnly]
   )
   const byDate = useMemo(() => {
     const map = {}
@@ -257,7 +266,7 @@ export function CalendarView() {
       { autoAlpha: 0, y: 10 },
       { autoAlpha: 1, y: 0, duration: 0.4, ease: 'power2.out', stagger: 0.006, clearProps: 'transform,opacity,visibility' }
     )
-  }, [ym, mode, showWeekends])
+  }, [ym, mode, showWeekends, psychFilter, statusFilter, unpaidOnly])
 
   const changeMonth = (d) => {
     const next = addMonths(ym, d)
@@ -367,10 +376,35 @@ export function CalendarView() {
                   { value: 'list', label: 'Lista', icon: 'reports' },
                 ]}
           />
-          <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today })}>
+          <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: psychFilter || undefined })}>
             Nowa sesja
           </Button>
         </div>
+      </div>
+
+      <div className="row chips-row" data-reveal>
+        <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
+        {state.psychologists.map((p) => (
+          <Chip key={p.id} on={psychFilter === p.id} swatch={p.color}
+            onClick={() => setPsychFilter(psychFilter === p.id ? null : p.id)}>
+            {p.name.split(' ')[0]}
+          </Chip>
+        ))}
+        <span className="chips-row__divider" />
+        {[
+          { value: 'scheduled', label: 'Zaplanowane' },
+          { value: 'completed', label: 'Odbyte' },
+          { value: 'noshow', label: 'Nieobecności' },
+        ].map((o) => (
+          <Chip key={o.value} on={statusFilter === o.value}
+            onClick={() => setStatusFilter(statusFilter === o.value ? null : o.value)}>
+            {o.label}
+          </Chip>
+        ))}
+        <span className="chips-row__divider" />
+        <Chip on={unpaidOnly} onClick={() => setUnpaidOnly(!unpaidOnly)}>
+          <Icon name="payments" size={14} /> Nieopłacone
+        </Chip>
       </div>
 
       <div className="row row--between cal-toolbar" data-reveal>
@@ -426,7 +460,7 @@ export function CalendarView() {
               {agendaSessions.map((s) => dayRow(s, false))}
             </div>
             <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
-              onClick={() => openSessionForm({ date: agendaSel })}>
+              onClick={() => openSessionForm({ date: agendaSel, psychId: psychFilter || undefined })}>
               Dodaj sesję tego dnia
             </Button>
           </div>
@@ -486,7 +520,7 @@ export function CalendarView() {
             </div>
             <div className="legend" style={{ marginTop: 16 }}>
               {state.psychologists.map((p) => (
-                <span key={p.id} className="legend__item">
+                <span key={p.id} className="legend__item" style={psychFilter && psychFilter !== p.id ? { opacity: 0.35 } : undefined}>
                   <span className="legend__swatch" style={{ background: p.color }} />
                   {p.name}
                 </span>
@@ -514,7 +548,7 @@ export function CalendarView() {
             </div>
             {selected && (
               <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
-                onClick={() => openSessionForm({ date: selected })}>
+                onClick={() => openSessionForm({ date: selected, psychId: psychFilter || undefined })}>
                 Dodaj sesję tego dnia
               </Button>
             )}

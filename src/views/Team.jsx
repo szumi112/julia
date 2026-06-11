@@ -1,8 +1,8 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useApp, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useCountUp } from '../anim.js'
-import { Avatar, Pill, Button, IconBtn, EmptyState } from '../ui.jsx'
+import { Avatar, Pill, Button, Chip, IconBtn, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { AreaChart } from '../charts.jsx'
 import { fmtMoney, fmtNumber, fmtShortDate, monthKey, addMonths, fmtMonthYear, sessionsWord, fmtDayMonth, clientsWord } from '../format.js'
@@ -105,6 +105,7 @@ export function PsychDetail({ params }) {
   const { state } = useApp()
   const { navigate, openSessionForm, openPsychForm } = useShell()
   const ref = useReveal([params.id])
+  const [debtOnly, setDebtOnly] = useState(false)
   const psych = state.psychologists.find((p) => p.id === params.id)
   if (!psych) {
     return (
@@ -123,6 +124,9 @@ export function PsychDetail({ params }) {
   const series = revenueSeries(own, months)
   const stats = monthStats(own, ym)
   const clients = state.clients.filter((c) => c.psychId === psych.id)
+  const visibleClients = debtOnly
+    ? clients.filter((c) => clientOutstanding(state.sessions, c.id) > 0)
+    : clients
   const upcoming = upcomingSessions(own, 5)
   const clientOf = (id) => state.clients.find((c) => c.id === id)
 
@@ -166,6 +170,14 @@ export function PsychDetail({ params }) {
         <div className="stack">
           <div className="card card--pad" data-reveal>
             <h2 className="card-title">Klienci pod opieką</h2>
+            {clients.length > 0 && (
+              <div className="row chips-row" style={{ marginTop: 12, marginBottom: 0 }}>
+                <Chip on={!debtOnly} onClick={() => setDebtOnly(false)}>Wszyscy</Chip>
+                <Chip on={debtOnly} onClick={() => setDebtOnly(true)}>
+                  <Icon name="payments" size={14} /> Z zaległościami
+                </Chip>
+              </div>
+            )}
             <table className="table table--cards" style={{ marginTop: 10 }}>
               <thead>
                 <tr>
@@ -183,7 +195,14 @@ export function PsychDetail({ params }) {
                     </td>
                   </tr>
                 )}
-                {clients.map((c) => {
+                {clients.length > 0 && visibleClients.length === 0 && (
+                  <tr>
+                    <td colSpan={4}>
+                      <EmptyState compact icon="check" title="Brak zaległości" hint="Wszyscy klienci tej specjalistki są rozliczeni." />
+                    </td>
+                  </tr>
+                )}
+                {visibleClients.map((c) => {
                   const last = lastSessionOf(state.sessions, c.id)
                   const count = state.sessions.filter((s) => s.clientId === c.id && s.status === 'completed').length
                   const debt = clientOutstanding(state.sessions, c.id)
