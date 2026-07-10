@@ -4,7 +4,7 @@ import { useApp } from '../store.jsx'
 import { Button, Field, Segmented, IconBtn } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX, motionOK } from '../anim.js'
-import { toISODate, timeToMin, STATUS_LABELS, PAY_LABELS } from '../format.js'
+import { toISODate, timeToMin, fmtDayMonth, isBillable, STATUS_LABELS, PAY_LABELS } from '../format.js'
 
 export function SessionDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
@@ -33,6 +33,7 @@ export function SessionDrawer({ opts, onClose }) {
     note: editing?.note || '',
   })
   const [errors, setErrors] = useState({})
+  const [confirmDel, setConfirmDel] = useState(false)
   const amountTouched = useRef(!!editing)
 
   const set = (k, v) => {
@@ -273,18 +274,41 @@ export function SessionDrawer({ opts, onClose }) {
               onChange={(e) => set('note', e.target.value)}
             />
           </Field>
+
+          {editing && confirmDel && (
+            <div className="form-warn form-warn--error" role="alert">
+              <Icon name="alert" size={15} />
+              <span>
+                Sesja z <b>{fmtDayMonth(editing.date)} o {editing.time}</b>
+                {client && <> ({client.name})</>} zostanie trwale usunięta
+                {isBillable(editing) && <> — zniknie też z rozliczeń i raportu miesiąca</>}
+                .
+              </span>
+            </div>
+          )}
         </form>
 
         <div className="drawer__foot">
-          <Button variant="primary" onClick={submit}>
-            {editing ? 'Zapisz zmiany' : 'Dodaj sesję'}
-          </Button>
-          {editing && (
-            <Button variant="danger" onClick={remove}>
-              Usuń
-            </Button>
+          {editing && confirmDel ? (
+            <>
+              <Button variant="danger" onClick={remove}>
+                Tak, usuń sesję
+              </Button>
+              <Button variant="ghost" onClick={() => setConfirmDel(false)}>Wróć</Button>
+            </>
+          ) : (
+            <>
+              <Button variant="primary" onClick={submit}>
+                {editing ? 'Zapisz zmiany' : 'Dodaj sesję'}
+              </Button>
+              {editing && (
+                <Button variant="danger" onClick={() => setConfirmDel(true)}>
+                  Usuń
+                </Button>
+              )}
+              <Button variant="ghost" onClick={close}>Anuluj</Button>
+            </>
           )}
-          <Button variant="ghost" onClick={close}>Anuluj</Button>
         </div>
       </aside>
     </>
