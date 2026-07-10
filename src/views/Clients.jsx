@@ -58,7 +58,7 @@ export function Clients() {
       </div>
 
       <div className="row chips-row" data-reveal>
-        <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Wszyscy</Chip>
+        <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
         {state.psychologists.map((p) => (
           <Chip key={p.id} on={psychFilter === p.id} swatch={p.color} onClick={() => setPsychFilter(psychFilter === p.id ? null : p.id)}>
             {p.name.split(' ')[0]}
@@ -243,8 +243,8 @@ export function ClientDetail({ params }) {
               {client.status === 'active' ? 'Aktywny' : 'Wstrzymany'}
             </Pill>
             {debt > 0
-              ? <Pill tone="gold">zaległość {fmtMoney(debt)}</Pill>
-              : <Pill tone="sage">rozliczony</Pill>}
+              ? <Pill tone="gold">Zaległość {fmtMoney(debt)}</Pill>
+              : <Pill tone="sage">Rozliczony</Pill>}
           </div>
         </div>
         <div className="id-band__actions">

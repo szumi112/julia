@@ -119,6 +119,7 @@ export function PsychDrawer({ opts, onClose }) {
                 type="number"
                 min="0"
                 step="10"
+                inputMode="numeric"
                 className="input"
                 value={form.rate}
                 placeholder="np. 220"

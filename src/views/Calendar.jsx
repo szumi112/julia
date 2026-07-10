@@ -594,12 +594,21 @@ export function CalendarView() {
         <div className="stack" ref={flipRef} data-reveal>
           {listDays.length === 0 && (
             <div className="card card--pad">
-              <EmptyState
-                icon="calendar"
-                title="Brak sesji w tym miesiącu"
-                hint="Zaplanuj pierwsze spotkanie, aby pojawiło się w grafiku."
-                action={<Button size="sm" icon="plus" onClick={() => openSessionForm({ date: today })}>Nowa sesja</Button>}
-              />
+              {sessionsInMonth(state.sessions, ym).some((s) => s.status !== 'cancelled') ? (
+                <EmptyState
+                  icon="search"
+                  title="Nic nie pasuje do filtrów"
+                  hint="Zmień lub wyłącz filtry, aby zobaczyć sesje miesiąca."
+                  action={<Button size="sm" icon="plus" onClick={() => openSessionForm({ date: today })}>Nowa sesja</Button>}
+                />
+              ) : (
+                <EmptyState
+                  icon="calendar"
+                  title="Brak sesji w tym miesiącu"
+                  hint="Zaplanuj pierwsze spotkanie, aby pojawiło się w grafiku."
+                  action={<Button size="sm" icon="plus" onClick={() => openSessionForm({ date: today })}>Nowa sesja</Button>}
+                />
+              )}
             </div>
           )}
           {listDays.map(({ iso, items }) => (
@@ -631,7 +640,7 @@ export function CalendarView() {
                         <td data-th="Status"><StatusPicker session={s} /></td>
                         <td data-th="Płatność"><PaymentPicker session={s} /></td>
                         <td className="right td--actions" style={{ width: 50 }}>
-                          <IconBtn name="edit" label="Edytuj" size={16} onClick={() => openSessionForm({ session: s })} />
+                          <IconBtn name="edit" label="Edytuj sesję" size={16} onClick={() => openSessionForm({ session: s })} />
                         </td>
                       </tr>
                     )

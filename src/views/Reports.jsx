@@ -139,7 +139,7 @@ export function Reports() {
 
       <div className="grid-31" style={{ marginTop: 20 }}>
         <div className="card card--pad" data-reveal>
-          <h2 className="card-title">Zespół — {fmtMonthYear(ym)}</h2>
+          <h2 className="card-title">Zespół · {fmtMonthYear(ym)}</h2>
           <div className="table-scroll" style={{ marginTop: 12 }}>
           <table className="table">
             <thead>

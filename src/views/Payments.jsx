@@ -202,11 +202,19 @@ export function Payments() {
               {filtered.length === 0 && (
                 <tr>
                   <td colSpan={7}>
-                    <EmptyState
-                      icon="payments"
-                      title="Brak rozliczeń w tym miesiącu"
-                      hint="Rozliczane są sesje odbyte i nieobecności — pojawią się tu po zakończeniu."
-                    />
+                    {monthBillable.length === 0 ? (
+                      <EmptyState
+                        icon="payments"
+                        title="Brak rozliczeń w tym miesiącu"
+                        hint="Rozliczane są sesje odbyte i nieobecności — pojawią się tu po zakończeniu."
+                      />
+                    ) : (
+                      <EmptyState
+                        icon="search"
+                        title="Nic nie pasuje do filtrów"
+                        hint="Zmień lub wyłącz filtry, aby zobaczyć rozliczenia miesiąca."
+                      />
+                    )}
                   </td>
                 </tr>
               )}

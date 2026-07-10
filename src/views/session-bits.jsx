@@ -16,7 +16,7 @@ export function StatusPicker({ session }) {
       open={open}
       setOpen={setOpen}
       trigger={
-        <Pill tone={STATUS_TONE[session.status]} dot onClick={() => setOpen(!open)}>
+        <Pill tone={STATUS_TONE[session.status]} dot onClick={() => setOpen(!open)} title="Zmień status sesji">
           {STATUS_LABELS[session.status]}
           <Icon name="chevD" size={11} />
         </Pill>
@@ -29,7 +29,10 @@ export function StatusPicker({ session }) {
           onClick={() => {
             dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: { status: st } })
             setOpen(false)
-            toast(`Status zmieniony: ${STATUS_LABELS[st].toLowerCase()}`)
+            // cancelling has a billing consequence worth naming
+            toast(st === 'cancelled'
+              ? 'Status zmieniony: odwołana — sesja nie jest fakturowana'
+              : `Status zmieniony: ${STATUS_LABELS[st].toLowerCase()}`)
           }}
         >
           <span className="dot" style={{ width: 7, height: 7, borderRadius: 99, background: `var(--${STATUS_TONE[st] === 'error' ? 'error' : STATUS_TONE[st]})` }} />
@@ -52,7 +55,7 @@ export function PaymentPicker({ session }) {
       open={open}
       setOpen={setOpen}
       trigger={
-        <Pill tone={PAY_TONE[session.payment]} dot onClick={() => setOpen(!open)}>
+        <Pill tone={PAY_TONE[session.payment]} dot onClick={() => setOpen(!open)} title="Zmień płatność">
           {label}
           <Icon name="chevD" size={11} />
         </Pill>
@@ -67,7 +70,7 @@ export function PaymentPicker({ session }) {
             if (p === 'partial' && !session.paidAmount) patch.paidAmount = Math.round(session.amount / 2 / 10) * 10
             dispatch({ type: 'UPDATE_SESSION', id: session.id, patch })
             setOpen(false)
-            toast(`Płatność: ${PAY_LABELS[p].toLowerCase()}`)
+            toast(`Płatność zmieniona: ${PAY_LABELS[p].toLowerCase()}`)
           }}
         >
           <span className="dot" style={{ width: 7, height: 7, borderRadius: 99, background: `var(--${PAY_TONE[p] === 'error' ? 'error' : PAY_TONE[p]})` }} />

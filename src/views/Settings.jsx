@@ -32,6 +32,7 @@ function RateInput({ psych }) {
       type="number"
       min="0"
       step="10"
+      inputMode="numeric"
       value={val}
       aria-label={`Stawka — ${psych.name}`}
       onChange={(e) => setVal(e.target.value)}
@@ -58,7 +59,7 @@ export function Settings() {
     setErrors((e) => ({ ...e, profileName: errs.profileName, profileEmail: errs.profileEmail }))
     if (errs.profileName || errs.profileEmail) return
     dispatch({ type: 'UPDATE_USER', patch: { name: profile.name.trim(), email: profile.email.trim() } })
-    toast('Profil zaktualizowany')
+    toast('Profil zapisany')
   }
   const saveCenter = () => {
     const errs = {}
@@ -75,6 +76,9 @@ export function Settings() {
         <div>
           <div className="eyebrow">Konfiguracja</div>
           <h1 className="display view-head__title">Ustawienia <em>centrum</em></h1>
+          <p className="view-head__sub">
+            Profil, dane centrum, stawki zespołu i preferencje — wszystko w jednym miejscu.
+          </p>
         </div>
       </div>
 
@@ -82,7 +86,9 @@ export function Settings() {
         <div className="stack">
           <div className="card card--pad" data-reveal>
             <h2 className="card-title">Twój profil</h2>
-            <div className="stack" style={{ marginTop: 18 }}>
+            {/* real form so Enter saves, like every other form in the app */}
+            <form className="stack" style={{ marginTop: 18 }} noValidate
+              onSubmit={(e) => { e.preventDefault(); saveProfile() }}>
               <Field label="Imię i nazwisko" error={errors.profileName}>
                 <input className="input" value={profile.name}
                   onChange={(e) => { setProfile({ ...profile, name: e.target.value }); setErrors((x) => ({ ...x, profileName: null })) }} />
@@ -91,13 +97,16 @@ export function Settings() {
                 <input className="input" type="email" value={profile.email}
                   onChange={(e) => { setProfile({ ...profile, email: e.target.value }); setErrors((x) => ({ ...x, profileEmail: null })) }} />
               </Field>
-              <div><Button size="sm" onClick={saveProfile}>Zapisz profil</Button></div>
-            </div>
+              {/* real submit button: Chrome skips implicit (Enter) submission
+                  in multi-input forms that have none */}
+              <div><Button size="sm" type="submit">Zapisz profil</Button></div>
+            </form>
           </div>
 
           <div className="card card--pad" data-reveal>
             <h2 className="card-title">Dane centrum</h2>
-            <div className="stack" style={{ marginTop: 18 }}>
+            <form className="stack" style={{ marginTop: 18 }} noValidate
+              onSubmit={(e) => { e.preventDefault(); saveCenter() }}>
               <Field label="Nazwa" error={errors.centerName}>
                 <input className="input" value={center.name}
                   onChange={(e) => { setCenter({ ...center, name: e.target.value }); setErrors((x) => ({ ...x, centerName: null })) }} />
@@ -108,16 +117,16 @@ export function Settings() {
               </Field>
               <div className="form-grid">
                 <Field label="Telefon">
-                  <input className="input" value={center.phone}
+                  <input className="input" type="tel" value={center.phone}
                     onChange={(e) => setCenter({ ...center, phone: e.target.value })} />
                 </Field>
                 <Field label="E-mail">
-                  <input className="input" value={center.email}
+                  <input className="input" type="email" value={center.email}
                     onChange={(e) => setCenter({ ...center, email: e.target.value })} />
                 </Field>
               </div>
-              <div><Button size="sm" onClick={saveCenter}>Zapisz dane</Button></div>
-            </div>
+              <div><Button size="sm" type="submit">Zapisz dane</Button></div>
+            </form>
           </div>
 
           <div className="card card--pad" data-reveal>

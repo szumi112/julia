@@ -159,7 +159,7 @@ export function SessionDrawer({ opts, onClose }) {
             <h2 className="drawer__title">{editing ? 'Edycja sesji' : 'Nowa sesja'}</h2>
             <p className="drawer__sub">
               {editing
-                ? `${client?.name || ''} · ${editing.date}`
+                ? `${client?.name || ''} · ${fmtDayMonth(editing.date)}`
                 : 'Uzupełnij szczegóły spotkania.'}
             </p>
           </div>
@@ -207,6 +207,7 @@ export function SessionDrawer({ opts, onClose }) {
                 type="number"
                 min="0"
                 step="10"
+                inputMode="numeric"
                 className="input"
                 value={form.amount}
                 placeholder="np. 220"
@@ -258,6 +259,7 @@ export function SessionDrawer({ opts, onClose }) {
                 type="number"
                 min="0"
                 step="10"
+                inputMode="numeric"
                 className="input"
                 value={form.paidAmount}
                 placeholder="np. 110"

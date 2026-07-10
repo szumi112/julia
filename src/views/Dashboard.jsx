@@ -36,7 +36,7 @@ function TodayThread({ sessions, nowMin, onOpen, onCalendar }) {
         )}
       </div>
       {sessions.length === 0 ? (
-        <EmptyState compact icon="sparkle" title="Wolny dzień" hint="Kalendarz jest dziś pusty — czas na oddech." />
+        <EmptyState compact icon="sparkle" title="Wolny dzień" hint="Kalendarz jest dziś wolny — czas na oddech." />
       ) : (
         <div className="spine">
           <span className="spine__rule" data-spine aria-hidden="true" />
@@ -253,7 +253,7 @@ function TeamBoard() {
 // show last month's value as context instead.
 const prevContext = (prevYm, formatted) => (
   <span>
-    {fmtMonthName(prevYm).slice(0, 3)}: <b>{formatted}</b>
+    {cap(fmtMonthName(prevYm)).slice(0, 3)}: <b>{formatted}</b>
   </span>
 )
 

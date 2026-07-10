@@ -54,6 +54,9 @@ const VIEWS = {
 
 const ACTIVE_OF = { client: 'clients', psych: 'team' }
 
+// the handler accepts Ctrl and Cmd alike — advertise the native chord
+const META_K = /Mac|iP/.test(navigator.platform) ? '⌘ K' : 'Ctrl K'
+
 export function Logotype({ light }) {
   return (
     <div className="logotype">
@@ -293,10 +296,10 @@ function Topbar({ route, onLogout, onSearch, onMenu, overlayKey }) {
         <span className="topbar__crumb">Aurelia <span style={{ opacity: 0.35, margin: '0 7px' }}>/</span> </span><b>{title}</b>
       </div>
       <div className="topbar__right" data-shell-reveal>
-        <button className="cmd-trigger" onClick={onSearch} title="Szukaj w Aurelii (Ctrl+K)">
+        <button className="cmd-trigger" onClick={onSearch} title={`Szukaj w Aurelii (${META_K})`}>
           <Icon name="search" size={15} />
           <span>Szukaj…</span>
-          <kbd>Ctrl K</kbd>
+          <kbd>{META_K}</kbd>
         </button>
         <TodayCockpit closeKey={overlayKey} />
         <div className="userchip">

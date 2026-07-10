@@ -1,11 +1,11 @@
 // Add/Edit client — slide-over drawer with validation and delete-with-confirm.
 import { useRef, useState } from 'react'
-import { useApp } from '../store.jsx'
+import { useApp, clientOutstanding } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { Button, Field, Segmented, IconBtn } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
-import { toISODate, plural } from '../format.js'
+import { toISODate, plural, fmtMoney } from '../format.js'
 
 export function ClientDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
@@ -70,6 +70,7 @@ export function ClientDrawer({ opts, onClose }) {
   }
 
   const sessionCount = editing ? state.sessions.filter((s) => s.clientId === editing.id).length : 0
+  const debt = editing ? clientOutstanding(state.sessions, editing.id) : 0
 
   const remove = () => {
     dispatch({ type: 'DELETE_CLIENT', id: editing.id })
@@ -164,7 +165,8 @@ export function ClientDrawer({ opts, onClose }) {
               <span>
                 Usunięcie klienta <b>{editing.name}</b> jest nieodwracalne
                 {sessionCount > 0 && (
-                  <> i usunie też <b>{sessionCount} {plural(sessionCount, 'sesję', 'sesje', 'sesji')}</b> z historii i rozliczeń</>
+                  <> i usunie też <b>{sessionCount} {plural(sessionCount, 'sesję', 'sesje', 'sesji')}</b> z historii i rozliczeń
+                  {debt > 0 && <>, w tym nierozliczoną zaległość <b>{fmtMoney(debt)}</b></>}</>
                 )}
                 .
               </span>
