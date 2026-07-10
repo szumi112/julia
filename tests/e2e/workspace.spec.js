@@ -167,6 +167,53 @@ test('Today prioritises the next action above monthly metrics', async ({ page })
   await expect(page.getByRole('region', { name: /Plan dnia/ })).toBeVisible()
 })
 
+test('team board is a Shell overlay that yields to global overlays', async ({ page }) => {
+  await login(page)
+  const composer = page.getByLabel('Nowy wpis na tablicy')
+  await composer.fill('Pierwszy wpis testowy')
+  await page.getByRole('button', { name: 'Opublikuj' }).click()
+  await composer.fill('Drugi wpis testowy')
+  await page.getByRole('button', { name: 'Opublikuj' }).click()
+  await page.getByRole('button', { name: /Cała tablica/ }).click()
+  const board = page.getByRole('dialog', { name: 'Tablica zespołu' })
+  await expect(board).toBeVisible()
+  await expect(page.getByRole('main')).toHaveAttribute('inert', '')
+
+  await page.keyboard.press('Control+K')
+  await expect(board).toHaveCount(0)
+  const palette = page.getByRole('dialog', { name: 'Szukaj w Aurelii' })
+  await expect(palette).toBeVisible()
+
+  await page.keyboard.press('Escape')
+  await expect(palette).toHaveCount(0)
+  await page.getByRole('button', { name: /Panel dnia/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Panel dnia' })).toBeVisible()
+  await expect(board).toHaveCount(0)
+})
+
+test('toasts dismiss with the keyboard', async ({ page }) => {
+  await login(page)
+  const composer = page.getByLabel('Nowy wpis na tablicy')
+  await composer.fill('Wpis do testu powiadomienia')
+  await page.getByRole('button', { name: 'Opublikuj' }).click()
+  const toast = page.getByRole('button', { name: /Zamknij: Wpis dodany na tablicę/ })
+  await expect(toast).toBeVisible()
+  await toast.focus()
+  await page.keyboard.press('Enter')
+  await expect(toast).toHaveCount(0)
+})
+
+test('enabling reduced motion clears active GSAP tweens', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Ustawienia' }).click()
+  await page.evaluate(() => {
+    window.__motionProbe = { value: 0 }
+    window.gsap.to(window.__motionProbe, { value: 100, duration: 5 })
+  })
+  await page.getByRole('switch', { name: 'Ogranicz animacje' }).click()
+  await expect.poll(() => page.evaluate(() => window.gsap.globalTimeline.getChildren().length)).toBe(0)
+})
+
 test('Today limits the day plan to the therapist and keeps practice status owner-only', async ({ page }) => {
   await login(page)
   await expect(page.getByRole('region', { name: 'Stan praktyki' })).toBeVisible()

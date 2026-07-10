@@ -8,7 +8,7 @@ import { useIsCompact, useIsPhone } from './responsive.js'
 import { TodayCockpit } from './cockpit.jsx'
 import { animateOut, motionOK, goldBurst } from './anim.js'
 import { fmtMonthYear, monthKey, toISODate, fmtWeekday, cap, sessionsWord, outstandingOf } from './format.js'
-import { Dashboard } from './views/Dashboard.jsx'
+import { BoardDrawer, Dashboard } from './views/Dashboard.jsx'
 import { CalendarView } from './views/Calendar.jsx'
 import { Clients, ClientDetail } from './views/Clients.jsx'
 import { Team, PsychDetail } from './views/Team.jsx'
@@ -514,6 +514,7 @@ export function Shell({ onLogout }) {
   const openSessionForm = (opts = {}) => { setDrawer({ kind: 'session', opts }); openOverlay('drawer') }
   const openClientForm = (opts = {}) => { setDrawer({ kind: 'client', opts }); openOverlay('drawer') }
   const openPsychForm = (opts = {}) => { setDrawer({ kind: 'psych', opts }); openOverlay('drawer') }
+  const openTeamBoard = () => { setDrawer({ kind: 'board' }); openOverlay('drawer') }
   const closeDrawer = () => {
     closeOverlay('drawer')
     setDrawer(null)
@@ -530,7 +531,7 @@ export function Shell({ onLogout }) {
   const hasOverlay = overlay !== null
 
   return (
-    <ShellCtx.Provider value={{ role, setDemoRole, canAccess, route, navigate, openSessionForm, openClientForm, openPsychForm }}>
+    <ShellCtx.Provider value={{ role, setDemoRole, canAccess, route, navigate, openSessionForm, openClientForm, openPsychForm, openTeamBoard }}>
       <div className="shell" ref={shellRef}>
         {!isCompact && <Sidebar route={route} navigate={navigate} role={role} inert={hasOverlay ? '' : undefined} />}
         <div className="main">
@@ -569,6 +570,7 @@ export function Shell({ onLogout }) {
       {overlay === 'drawer' && drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {overlay === 'drawer' && drawer?.kind === 'board' && <BoardDrawer onClose={closeDrawer} />}
       {overlay === 'palette' && <CommandPalette onClose={() => closeOverlay('palette')} />}
     </ShellCtx.Provider>
   )

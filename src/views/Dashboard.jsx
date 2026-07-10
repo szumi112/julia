@@ -149,7 +149,7 @@ function BoardComposer() {
 }
 
 // Full board — slide-over with the composer and complete history.
-function BoardDrawer({ onClose }) {
+export function BoardDrawer({ onClose }) {
   const { state } = useApp()
   const drawerRef = useRef(null)
   const backRef = useRef(null)
@@ -189,7 +189,7 @@ function BoardDrawer({ onClose }) {
 
 function TeamBoard() {
   const { state } = useApp()
-  const [boardOpen, setBoardOpen] = useState(false)
+  const { openTeamBoard } = useShell()
   const listRef = useRef(null)
   const prevCount = useRef(state.posts.length)
 
@@ -217,7 +217,7 @@ function TeamBoard() {
             Tablica zespołu
           </span>
           {state.posts.length > BOARD_PREVIEW && (
-            <button className="link" onClick={() => setBoardOpen(true)}>
+            <button className="link" onClick={openTeamBoard}>
               Cała tablica ({state.posts.length}) →
             </button>
           )}
@@ -234,12 +234,11 @@ function TeamBoard() {
           ))}
         </div>
         {hidden > 0 && (
-          <button className="bpost-more" onClick={() => setBoardOpen(true)}>
+          <button className="bpost-more" onClick={openTeamBoard}>
             Pokaż {hidden} {plural(hidden, 'starszy wpis', 'starsze wpisy', 'starszych wpisów')} →
           </button>
         )}
       </div>
-      {boardOpen && <BoardDrawer onClose={() => setBoardOpen(false)} />}
     </>
   )
 }
