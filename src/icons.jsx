@@ -152,6 +152,16 @@ const PATHS = {
     </>
   ),
   menu: <path d="M4 7h16M4 12h12.5M4 17h16" />,
+  group: (
+    <>
+      <circle cx="12" cy="7.4" r="2.9" />
+      <circle cx="5.9" cy="9.8" r="2.3" />
+      <circle cx="18.1" cy="9.8" r="2.3" />
+      <path d="M8.3 19.8c.5-2.9 1.9-4.4 3.7-4.4s3.2 1.5 3.7 4.4" />
+      <path d="M2.8 18.6c.4-2.4 1.6-3.7 3.4-3.7" />
+      <path d="M21.2 18.6c-.4-2.4-1.6-3.7-3.4-3.7" />
+    </>
+  ),
 }
 
 export function Icon({ name, size = 20, strokeWidth = 1.7, className, style }) {

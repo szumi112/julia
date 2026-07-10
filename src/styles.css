@@ -2661,6 +2661,40 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
   .figures__value { color: #000; }
 }
 
+/* --- Grupa TUS ------------------------------------------------------- */
+
+.gcard { padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; cursor: pointer; }
+.gcard__name { font-family: var(--font-display); font-size: 21px; font-weight: 490; }
+.gcard__meta { color: var(--ink-soft); font-size: 13.5px; margin-top: 3px; }
+.gcard__leaders { display: flex; gap: 18px; align-items: center; }
+.gcard__stats {
+  display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+  font-size: 13.5px; color: var(--ink-soft);
+  border-top: 1px solid var(--line-soft); padding-top: 12px;
+}
+.gcard__stats b { color: var(--ink); font-weight: 650; }
+
+/* attendance toggle — one mark per kid per class */
+.att {
+  width: 27px; height: 27px; border-radius: 50%;
+  border: 1.5px solid var(--line-strong); background: transparent;
+  color: var(--ink-faint); display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; font-size: 13px; line-height: 1;
+  transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast);
+}
+.att[aria-pressed='true'] {
+  background: var(--sage-ghost); border-color: var(--sage-deep); color: var(--sage-deep);
+}
+.att:not(:disabled):hover { border-color: var(--ink-soft); }
+.att:disabled { opacity: 0.35; cursor: default; }
+.att-table th.att-col { text-align: center; }
+.att-table td.att-cell { text-align: center; }
+.att-table .att-col span { display: inline-flex; flex-direction: column; align-items: center; gap: 4px; font-size: 12px; }
+.att-table tfoot td { color: var(--ink-soft); font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 10px; }
+
+/* method choice separator inside the payment popover */
+.popover__sep { height: 1px; background: var(--line-soft); margin: 6px 4px; }
+
 /* reduced motion — the OS preference and the in-app toggle (html.rm, set by
    anim.js setReduceMotion) both silence CSS animation immediately */
 @media (prefers-reduced-motion: reduce) {

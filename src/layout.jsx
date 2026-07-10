@@ -13,6 +13,7 @@ import { BoardDrawer, Dashboard } from './views/Dashboard.jsx'
 import { CalendarView } from './views/Calendar.jsx'
 import { Clients, ClientDetail } from './views/Clients.jsx'
 import { Team, PsychDetail } from './views/Team.jsx'
+import { TusGroups } from './views/Tus.jsx'
 import { Payments } from './views/Payments.jsx'
 import { Reports } from './views/Reports.jsx'
 import { Settings } from './views/Settings.jsx'
@@ -25,15 +26,16 @@ const NAV = [
   { id: 'dashboard', label: 'Dziś', icon: 'dashboard' },
   { id: 'calendar', label: 'Kalendarz', icon: 'calendar' },
   { id: 'clients', label: 'Klienci', icon: 'clients' },
+  { id: 'tus', label: 'Zajęcia TUS', icon: 'group' },
   { id: 'team', label: 'Zespół', icon: 'team' },
   { id: 'payments', label: 'Finanse', icon: 'payments' },
   { id: 'reports', label: 'Raporty', icon: 'reports' },
 ]
 
 const ROLE_NAV = {
-  owner: ['dashboard', 'calendar', 'clients', 'team', 'payments', 'reports', 'settings'],
-  coordinator: ['dashboard', 'calendar', 'clients', 'payments', 'settings'],
-  therapist: ['dashboard', 'calendar', 'clients', 'settings'],
+  owner: ['dashboard', 'calendar', 'clients', 'tus', 'team', 'payments', 'reports', 'settings'],
+  coordinator: ['dashboard', 'calendar', 'clients', 'tus', 'payments', 'settings'],
+  therapist: ['dashboard', 'calendar', 'clients', 'tus', 'settings'],
 }
 const canAccess = (routeName, role) => ROLE_NAV[role.id].includes(routeName)
 
@@ -56,6 +58,7 @@ const TITLES = {
   calendar: 'Kalendarz sesji',
   clients: 'Klienci',
   client: 'Karta klienta',
+  tus: 'Zajęcia grupowe TUS',
   team: 'Zespół',
   psych: 'Profil specjalistki',
   payments: 'Finanse',
@@ -68,6 +71,7 @@ const VIEWS = {
   calendar: CalendarView,
   clients: Clients,
   client: ClientDetail,
+  tus: TusGroups,
   team: Team,
   psych: PsychDetail,
   payments: Payments,

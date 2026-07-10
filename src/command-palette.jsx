@@ -13,6 +13,7 @@ const VIEW_ITEMS = [
   { view: 'dashboard', label: 'Pulpit', icon: 'dashboard' },
   { view: 'calendar', label: 'Kalendarz sesji', icon: 'calendar' },
   { view: 'clients', label: 'Klienci', icon: 'clients' },
+  { view: 'tus', label: 'Zajęcia TUS', icon: 'group' },
   { view: 'team', label: 'Zespół', icon: 'team' },
   { view: 'payments', label: 'Finanse i płatności', icon: 'payments' },
   { view: 'reports', label: 'Raport miesięczny', icon: 'reports' },
