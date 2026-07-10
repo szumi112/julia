@@ -104,6 +104,9 @@ export function Payments() {
           </Chip>
         ))}
         <span className="chips-row__divider" />
+        <Chip on={!unpaidOnly} onClick={() => setUnpaidOnly(false)}>
+          Wszystkie płatności
+        </Chip>
         <Chip on={unpaidOnly} onClick={() => setUnpaidOnly(!unpaidOnly)}>
           <Icon name="payments" size={14} /> Tylko zaległe
         </Chip>

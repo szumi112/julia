@@ -352,7 +352,9 @@ export function Dashboard() {
                   <button
                     key={item.sessionId}
                     className="today-attention__row"
-                    onClick={() => canOpenPayments ? navigate('payments') : openSessionForm({ session })}
+                    onClick={() => canOpenPayments
+                      ? navigate('payments', { allPeriods: true, unpaidOnly: true })
+                      : openSessionForm({ session })}
                   >
                     <Icon name="payments" size={16} />
                     <span>

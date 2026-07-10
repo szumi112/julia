@@ -234,6 +234,71 @@ test('therapist Today omits all-team board posts and controls', async ({ page })
   await expect(page.getByText(/Superwizja zespołowa/)).toHaveCount(0)
 })
 
+test('therapist cockpit excludes centre day and finance context', async ({ page }) => {
+  await login(page)
+  await switchToTherapist(page)
+  await page.getByRole('button', { name: /Panel dnia/ }).click()
+  const cockpit = page.getByRole('dialog', { name: 'Panel dnia' })
+  await expect(cockpit).toBeVisible()
+  await expect(cockpit).not.toContainText('Julia Wolanin')
+  await expect(cockpit).not.toContainText('Zofia Mazur')
+  await expect(cockpit).not.toContainText('Zaległe płatności')
+  await expect(cockpit.locator('.cockpit__due')).toHaveCount(0)
+})
+
+test('therapist sidebar count is scoped to their daily sessions', async ({ page }) => {
+  await login(page)
+  const count = page.locator('.sidebar .today-card__line')
+  await expect(count).toHaveText(/sesj[ei] w grafiku|Spokojny dzień/)
+  const ownerCount = await count.textContent()
+  expect(ownerCount).toMatch(/sesj[ei] w grafiku|Spokojny dzień/)
+  await switchToTherapist(page)
+  await expect(count).toHaveText(/sesj[ei] w grafiku|Spokojny dzień/)
+  await expect(count).not.toHaveText(ownerCount)
+})
+
+test('older attention debt opens all-period unpaid payments', async ({ page }) => {
+  await login(page)
+  await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('button').first().click()
+  await expect(page.getByText(/Wszystkie okresy.*tylko zaległe/i)).toBeVisible()
+  await expect(page.locator('tr.is-due')).not.toHaveCount(0)
+})
+
+test('calendar exposes explicit payment and attendance reset choices', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  const payment = page.getByRole('group', { name: 'Płatność' })
+  const attendance = page.getByRole('group', { name: 'Obecność klienta' })
+  const allPayments = payment.getByRole('button', { name: 'Wszystkie' })
+  const allAttendance = attendance.getByRole('button', { name: 'Wszyscy' })
+
+  await expect(allPayments).toHaveAttribute('aria-pressed', 'true')
+  await payment.getByRole('button', { name: 'Nieopłacone' }).click()
+  await expect(allPayments).toHaveAttribute('aria-pressed', 'false')
+  await allPayments.click()
+  await expect(allPayments).toHaveAttribute('aria-pressed', 'true')
+
+  await expect(allAttendance).toHaveAttribute('aria-pressed', 'true')
+  await attendance.getByRole('button', { name: 'Nieobecny' }).click()
+  await expect(allAttendance).toHaveAttribute('aria-pressed', 'false')
+  await allAttendance.click()
+  await expect(allAttendance).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('Payments exposes an all-status control to reverse unpaid filtering', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Finanse' }).click()
+  const allStatuses = page.getByRole('button', { name: 'Wszystkie płatności' })
+  const unpaid = page.getByRole('button', { name: 'Tylko zaległe' })
+
+  await expect(allStatuses).toHaveAttribute('aria-pressed', 'true')
+  await unpaid.click()
+  await expect(unpaid).toHaveAttribute('aria-pressed', 'true')
+  await allStatuses.click()
+  await expect(allStatuses).toHaveAttribute('aria-pressed', 'true')
+  await expect(unpaid).toHaveAttribute('aria-pressed', 'false')
+})
+
 test('calendar opens the therapist agenda and exposes exact partial payment editing', async ({ page }) => {
   await login(page)
   await page.getByRole('button', { name: /Tryb demonstracyjny.*Julia Wolanin/ }).click()

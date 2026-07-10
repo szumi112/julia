@@ -9,6 +9,7 @@ import { useIsPhone } from './responsive.js'
 import { motionOK } from './anim.js'
 import { Icon } from './icons.jsx'
 import { Avatar, Button, IconBtn, EmptyState } from './ui.jsx'
+import { sessionsForRole } from './workspace.js'
 import {
   toISODate, timeToMin, pad2, fmtMoney, fmtDayMonth, fmtWeekday, cap,
   sessionsWord, outstandingOf, isBillable,
@@ -36,11 +37,13 @@ function useClock() {
 
 function useTodayModel() {
   const { state } = useApp()
+  const { role } = useShell()
   const now = useClock()
   const today = toISODate(now)
   const nowMin = now.getHours() * 60 + now.getMinutes()
   return useMemo(() => {
-    const todays = state.sessions
+    const scopedSessions = sessionsForRole(state, role)
+    const todays = scopedSessions
       .filter((s) => s.date === today && s.status !== 'cancelled')
       .sort((a, b) => (a.time < b.time ? -1 : 1))
     const done = todays.filter((s) => s.status === 'completed').length
@@ -50,12 +53,15 @@ function useTodayModel() {
     const next = todays.find((s) => s.status === 'scheduled' && timeToMin(s.time) > nowMin)
     // sessions are kept sorted by date+time, so the first future match wins
     const future = !running && !next
-      ? state.sessions.find((s) => s.status === 'scheduled' && s.date > today)
+      ? scopedSessions.find((s) => s.status === 'scheduled' && s.date > today)
       : null
-    const outstanding = totalOutstanding(state.sessions)
-    const unpaidCount = state.sessions.filter((s) => isBillable(s) && outstandingOf(s) > 0).length
-    return { today, nowMin, todays, done, running, next, future, outstanding, unpaidCount }
-  }, [state.sessions, today, nowMin])
+    const showFinance = role.scope !== 'own'
+    const outstanding = showFinance ? totalOutstanding(state.sessions) : 0
+    const unpaidCount = showFinance
+      ? state.sessions.filter((s) => isBillable(s) && outstandingOf(s) > 0).length
+      : 0
+    return { today, nowMin, todays, done, running, next, future, outstanding, unpaidCount, showFinance }
+  }, [state, role, today, nowMin])
 }
 
 function CockpitBody({ m, onClose }) {
@@ -144,7 +150,7 @@ function CockpitBody({ m, onClose }) {
         </div>
       )}
 
-      {m.outstanding > 0 ? (
+      {m.showFinance && (m.outstanding > 0 ? (
         <button className="cockpit__due" onClick={() => go(() => navigate('payments'))}>
           <Icon name="payments" size={19} />
           <span style={{ flex: 1 }}>
@@ -158,7 +164,7 @@ function CockpitBody({ m, onClose }) {
           <Icon name="check" size={19} />
           <span style={{ flex: 1 }}>Wszystkie sesje rozliczone</span>
         </div>
-      )}
+      ))}
 
       <div className="cockpit__actions">
         <Button size="sm" icon="plus" onClick={() => go(() => openSessionForm({ date: m.today }))}>

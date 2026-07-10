@@ -8,6 +8,7 @@ import { useIsCompact, useIsPhone } from './responsive.js'
 import { TodayCockpit } from './cockpit.jsx'
 import { animateOut, motionOK, goldBurst } from './anim.js'
 import { fmtMonthYear, monthKey, toISODate, fmtWeekday, cap, sessionsWord, outstandingOf } from './format.js'
+import { sessionsForRole } from './workspace.js'
 import { BoardDrawer, Dashboard } from './views/Dashboard.jsx'
 import { CalendarView } from './views/Calendar.jsx'
 import { Clients, ClientDetail } from './views/Clients.jsx'
@@ -117,7 +118,7 @@ function Sidebar({ route, navigate, role, className = '', innerRef, inert }) {
   }, [activeId, role.id, showSettings])
 
   const today = toISODate(new Date())
-  const todayCount = state.sessions.filter(
+  const todayCount = sessionsForRole(state, role).filter(
     (s) => s.date === today && (s.status === 'scheduled' || s.status === 'completed')
   ).length
 

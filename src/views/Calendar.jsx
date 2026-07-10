@@ -20,11 +20,13 @@ const DATE_PRESETS = [
   { value: 'month', label: 'Ten miesiąc' },
 ]
 const PAYMENT_FILTERS = [
+  { value: 'all', label: 'Wszystkie' },
   { value: 'paid', label: 'Opłacone' },
   { value: 'partial', label: 'Częściowe' },
   { value: 'unpaid', label: 'Nieopłacone' },
 ]
 const ATTENDANCE_FILTERS = [
+  { value: 'all', label: 'Wszyscy' },
   { value: 'completed', label: 'Obecny' },
   { value: 'noshow', label: 'Nieobecny' },
   { value: 'cancelled', label: 'Odwołana' },
