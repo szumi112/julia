@@ -69,3 +69,13 @@ test('Today limits the day plan to the therapist and keeps practice status owner
   await expect(plan).not.toContainText('Julia Wolanin')
   await expect(page.getByRole('region', { name: 'Stan praktyki' })).toHaveCount(0)
 })
+
+test('therapist Today omits all-team board posts and controls', async ({ page }) => {
+  await login(page)
+  await switchToTherapist(page)
+
+  await expect(page.getByText('Tablica zespołu', { exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('Nowy wpis na tablicy')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Usuń wpis' })).toHaveCount(0)
+  await expect(page.getByText(/Superwizja zespołowa/)).toHaveCount(0)
+})

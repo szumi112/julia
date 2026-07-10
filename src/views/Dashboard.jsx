@@ -496,7 +496,7 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="grid-31 today-secondary" style={{ marginTop: 20 }}>
+      <div className={`grid-31 today-secondary ${role.scope === 'own' ? 'grid-31--single' : ''}`} style={{ marginTop: 20 }}>
         <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
           <h2 className="card-title">
             Zespół dziś
@@ -521,7 +521,7 @@ export function Dashboard() {
           </div>
         </div>
 
-        <TeamBoard />
+        {role.scope !== 'own' && <TeamBoard />}
       </div>
     </div>
   )
