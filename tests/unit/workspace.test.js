@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { roleById, sessionsForRole, dayAttention } from '../../src/workspace.js'
+import { roleById, sessionsForRole, dayAttention, todayWorkspace } from '../../src/workspace.js'
 
 const state = {
   sessions: [
@@ -26,4 +26,12 @@ test('day attention ignores a scheduled partial payment', () => {
     ...state,
     sessions: [{ ...state.sessions[1], status: 'scheduled' }],
   }, roleById('owner'), '2026-07-10'), [])
+})
+
+test('today workspace selects the next scheduled session for the active role', () => {
+  const workspace = todayWorkspace({
+    ...state,
+    sessions: [{ ...state.sessions[1], status: 'scheduled' }],
+  }, roleById('therapist'), new Date('2026-07-10T09:30:00'))
+  assert.equal(workspace.next.id, 's-therapist')
 })

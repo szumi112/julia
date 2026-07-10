@@ -2,19 +2,14 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useApp, monthStats, upcomingSessions, totalOutstanding, clientOutstanding, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useDrawerFX, motionOK } from '../anim.js'
-import { Ambient } from '../three-scene.jsx'
 import { AreaChart, BarFill } from '../charts.jsx'
 import { Button, Avatar, Pill, IconBtn, EmptyState, Figure } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
+import { sessionsForRole, todayWorkspace } from '../workspace.js'
 import {
-  fmtMoney, fmtNumber, monthKey, addMonths, fmtWeekday, fmtDayMonth, fmtShortDate, toISODate, pad2,
-  sessionsWord, outstandingOf, isBillable, cap, greeting, fmtMonthName, plural, timeToMin,
+  fmtMoney, monthKey, addMonths, fmtWeekday, fmtDayMonth, fmtShortDate, toISODate, pad2,
+  sessionsWord, outstandingOf, isBillable, cap, fmtMonthName, plural, timeToMin,
 } from '../format.js'
-
-const vocative = (name) => {
-  const first = name.split(' ')[0]
-  return first.endsWith('a') ? first.slice(0, -1) + 'o' : first
-}
 
 // today's sessions on the day thread — the hero's working half
 function TodayThread({ sessions, nowMin, onOpen, onCalendar }) {
@@ -249,127 +244,175 @@ function TeamBoard() {
   )
 }
 
-// The current month is in progress, so percent deltas would mislead —
-// show last month's value as context instead.
-const prevContext = (prevYm, formatted) => (
-  <span>
-    {cap(fmtMonthName(prevYm)).slice(0, 3)}: <b>{formatted}</b>
-  </span>
-)
-
 export function Dashboard() {
   const { state } = useApp()
-  const { navigate, openSessionForm, openClientForm } = useShell()
+  const { navigate, openSessionForm, openClientForm, role } = useShell()
   const ref = useReveal()
 
-  const ym = monthKey(new Date())
-  const months = useMemo(() => Array.from({ length: 6 }, (_, i) => addMonths(ym, i - 5)), [ym])
-  const series = useMemo(() => revenueSeries(state.sessions, months), [state.sessions, months])
-  const cur = series[series.length - 1]
-  const prev = series[series.length - 2]
-  const monthName = fmtMonthName(ym)
-
-  const activeClients = state.clients.filter((c) => c.status === 'active').length
-  const outstanding = totalOutstanding(state.sessions)
-  const unpaidCount = state.sessions.filter((s) => isBillable(s) && outstandingOf(s) > 0).length
-  const upcoming = upcomingSessions(state.sessions, 5)
   const now = new Date()
   const today = toISODate(now)
   const nowMin = now.getHours() * 60 + now.getMinutes()
+  const workspace = todayWorkspace(state, role, now)
+  const roleSessions = sessionsForRole(state, role)
+  const selectedSession = workspace.current || workspace.next
+  const ym = monthKey(now)
+  const months = useMemo(() => Array.from({ length: 6 }, (_, i) => addMonths(ym, i - 5)), [ym])
+  const series = useMemo(() => revenueSeries(roleSessions, months), [roleSessions, months])
+  const monthName = fmtMonthName(ym)
+
+  const outstanding = totalOutstanding(roleSessions)
+  const unpaidCount = roleSessions.filter((s) => isBillable(s) && outstandingOf(s) > 0).length
+  const upcoming = upcomingSessions(roleSessions, 5)
 
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
   const clientOf = (id) => state.clients.find((c) => c.id === id)
 
-  const todays = state.sessions
-    .filter((s) => s.date === today && s.status !== 'cancelled')
+  const todays = workspace.schedule
     .map((s) => ({ ...s, psych: psychOf(s.psychId), client: clientOf(s.clientId) }))
 
-  // who owes the most — the dashboard's actionable financial context
+  // The secondary billing card stays useful in each role, without exposing
+  // another specialist's client balance in therapist mode.
   const debtors = state.clients
-    .map((c) => ({ c, due: clientOutstanding(state.sessions, c.id) }))
+    .map((c) => ({ c, due: clientOutstanding(roleSessions, c.id) }))
     .filter((d) => d.due > 0)
     .sort((a, b) => b.due - a.due)
     .slice(0, 3)
 
   const psychMonth = state.psychologists.map((p) => {
-    const sess = state.sessions.filter((s) => s.psychId === p.id)
+    const sess = roleSessions.filter((s) => s.psychId === p.id)
     const todayCount = todays.filter((s) => s.psychId === p.id).length
     return { p, todayCount, ...monthStats(sess, ym) }
   })
-  const maxRev = Math.max(...psychMonth.map((x) => x.revenue), 1)
+  const visiblePsychMonth = role.scope === 'own'
+    ? psychMonth.filter(({ p }) => p.id === role.psychId)
+    : psychMonth
+  const maxRev = Math.max(...visiblePsychMonth.map((x) => x.revenue), 1)
+  const focusPsych = selectedSession ? psychOf(selectedSession.psychId) : null
+  const focusClient = selectedSession ? clientOf(selectedSession.clientId) : null
 
   return (
     <div ref={ref}>
-      <section className="dash-hero" data-reveal>
-        <Ambient className="dash-hero__scene" amp={0.34} speed={0.5} scale={3.4} />
-        <div className="dash-hero__inner">
-          <div className="dash-hero__intro">
-            <div className="eyebrow">{cap(fmtWeekday(today))}, {fmtDayMonth(today)}</div>
-            <h1 className="display dash-hero__title">
-              {greeting()}, <em>{vocative(state.user.name)}</em>
-            </h1>
-            <p className="dash-hero__sub">
-              {todays.length > 0
-                ? <>Dziś w grafiku {plural(todays.length, 'jest', 'są', 'jest')} <b>{todays.length} {sessionsWord(todays.length)}</b>. Powodzenia!</>
-                : 'Dziś kalendarz jest wolny — czas na oddech.'}
-            </p>
-            <div className="row dash-hero__actions">
-              <Button icon="plus" magnetic onClick={() => openSessionForm()}>
-                Nowa sesja
-              </Button>
-              <Button variant="ghost" icon="user" onClick={() => openClientForm()}>
-                Nowy klient
-              </Button>
+      <header className="today-head" data-reveal>
+        <div>
+          <div className="eyebrow">{cap(fmtWeekday(today))}, {fmtDayMonth(today)}</div>
+          <h1 className="display today-head__title">
+            {role.id === 'therapist' ? 'Mój dzień' : 'Dziś'}
+          </h1>
+          <p className="today-head__sub">
+            {todays.length > 0
+              ? <>W planie {todays.length} {sessionsWord(todays.length)}. Zacznij od tego, co najbliżej.</>
+              : 'Dziś kalendarz jest wolny — czas na oddech.'}
+          </p>
+        </div>
+        <div className="today-head__actions">
+          <Button icon="plus" magnetic onClick={() => openSessionForm()}>Nowa sesja</Button>
+          <Button variant="ghost" icon="user" onClick={() => openClientForm()}>Nowy klient</Button>
+        </div>
+      </header>
+
+      <div className="today-workspace">
+        <section className="today-region today-region--focus card card--pad" aria-labelledby="today-focus-title" data-reveal>
+          <div className="today-region__head">
+            <div>
+              <span className="eyebrow">Najbliższe działanie</span>
+              <h2 id="today-focus-title" className="card-title">Teraz lub następna sesja</h2>
             </div>
+            {workspace.current && <Pill tone="rose" dot>Trwa teraz</Pill>}
           </div>
+          {selectedSession ? (
+            <div className="today-focus">
+              <div className="today-focus__time">{selectedSession.time}</div>
+              <div className="today-focus__main">
+                <b>{focusClient?.name}</b>
+                <span>{focusPsych?.room || 'Gabinet do potwierdzenia'} · {focusPsych?.name}</span>
+              </div>
+              <Button onClick={() => openSessionForm({ session: selectedSession })}>Otwórz sesję</Button>
+            </div>
+          ) : (
+            <EmptyState compact icon="calendar" title="Brak kolejnej sesji" hint="Zaplanuj spotkanie, gdy pojawi się nowa potrzeba." />
+          )}
+        </section>
+
+        <section className="today-region today-region--attention card card--pad" aria-labelledby="today-attention-title" data-reveal>
+          <div className="today-region__head">
+            <div>
+              <span className="eyebrow">Do działania</span>
+              <h2 id="today-attention-title" className="card-title">Wymaga uwagi</h2>
+            </div>
+            {workspace.attention.length > 0 && <Pill tone="gold">{workspace.attention.length}</Pill>}
+          </div>
+          {workspace.attention.length === 0 ? (
+            <EmptyState compact icon="check" title="Wszystko pod kontrolą" hint="Nie ma dziś spraw wymagających działania." />
+          ) : (
+            <div className="today-attention">
+              {workspace.attention.map((item) => {
+                const session = state.sessions.find((entry) => entry.id === item.sessionId)
+                const client = session && clientOf(session.clientId)
+                const canOpenPayments = role.id !== 'therapist'
+                return (
+                  <button
+                    key={item.sessionId}
+                    className="today-attention__row"
+                    onClick={() => canOpenPayments ? navigate('payments') : openSessionForm({ session })}
+                  >
+                    <Icon name="payments" size={16} />
+                    <span>
+                      <b>{client?.name || 'Klient'}</b>
+                      <small>Zaległa płatność · {fmtMoney(item.amount)}</small>
+                    </span>
+                    <Icon name="chevR" size={15} className="faint" />
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </section>
+
+        <section className="today-region today-region--plan" aria-label="Plan dnia">
           <TodayThread
             sessions={todays}
             nowMin={nowMin}
             onOpen={(s) => openSessionForm({ session: state.sessions.find((x) => x.id === s.id) })}
             onCalendar={() => navigate('calendar')}
           />
-        </div>
-      </section>
+        </section>
 
-      <div className="figures" role="group" aria-label={`Podsumowanie — ${monthName}`}>
-        <Figure
-          label="Aktywni klienci"
-          value={activeClients}
-          sub={`spośród ${state.clients.length} w kartotece`}
-          onClick={() => navigate('clients')}
-        />
-        <Figure
-          label={`Sesje · ${monthName}`}
-          value={cur.count}
-          sub={prevContext(prev.ym, fmtNumber(prev.count))}
-          onClick={() => navigate('calendar')}
-        />
-        <Figure
-          label={`Godziny · ${monthName}`}
-          value={cur.hours}
-          fmt={(v) => fmtNumber(Math.round(v))}
-          suffix=" h"
-          sub={prevContext(prev.ym, `${Math.round(prev.hours)} h`)}
-          onClick={() => navigate('reports')}
-        />
-        <Figure
-          label={`Przychód · ${monthName}`}
-          value={cur.revenue}
-          fmt={fmtMoney}
-          sub={prevContext(prev.ym, fmtMoney(prev.revenue))}
-          onClick={() => navigate('reports')}
-        />
-        <Figure
-          label="Zaległe · łącznie"
-          value={outstanding}
-          fmt={fmtMoney}
-          gold
-          sub={<span>{unpaidCount} {sessionsWord(unpaidCount)} · <span className="link">zobacz</span></span>}
-          onClick={() => navigate('payments')}
-        />
+        {workspace.summary && (
+          <section className="today-region today-region--summary" aria-label="Stan praktyki" data-reveal>
+            <div className="today-region__head">
+              <div>
+                <span className="eyebrow">Właścicielka</span>
+                <h2 className="card-title">Stan praktyki</h2>
+              </div>
+            </div>
+            <div className="figures" role="group" aria-label="Stan praktyki">
+              <Figure
+                label="Sesje zakończone"
+                value={workspace.summary.completedToday.value}
+                sub="dzisiaj"
+                onClick={() => navigate('calendar')}
+              />
+              <Figure
+                label={`Przychód · ${monthName}`}
+                value={workspace.summary.revenueMonth.value}
+                fmt={fmtMoney}
+                sub="bieżący miesiąc"
+                onClick={() => navigate('reports')}
+              />
+              <Figure
+                label="Zaległe · łącznie"
+                value={workspace.summary.outstandingAllTime.value}
+                fmt={fmtMoney}
+                gold
+                sub="wszystkie okresy"
+                onClick={() => navigate('payments')}
+              />
+            </div>
+          </section>
+        )}
       </div>
 
-      <div className="grid-31">
+      <div className="grid-31 today-secondary">
         <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
           <h2 className="card-title">
             Przychód miesięczny
@@ -453,14 +496,14 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="grid-31" style={{ marginTop: 20 }}>
+      <div className="grid-31 today-secondary" style={{ marginTop: 20 }}>
         <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
           <h2 className="card-title">
             Zespół dziś
             <button className="link" onClick={() => navigate('team')}>Zespół →</button>
           </h2>
           <div className="hbar" style={{ marginTop: 20 }}>
-            {psychMonth.map(({ p, todayCount, count, revenue }) => (
+            {visiblePsychMonth.map(({ p, todayCount, count, revenue }) => (
               <div className="hbar__row" key={p.id}>
                 <button className="hbar__name link" style={{ color: 'var(--ink)', display: 'flex' }} aria-label={`Otwórz profil specjalistki: ${p.name}`} onClick={() => navigate('psych', { id: p.id })}>
                   <Avatar name={p.name} color={p.color} size={30} />

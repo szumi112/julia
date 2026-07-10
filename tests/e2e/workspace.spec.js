@@ -52,3 +52,20 @@ test('therapist mode guards dashboard destinations and filters command palette',
   await search.fill('julia')
   await expect(palette).not.toContainText('dr Julia Wolanin')
 })
+
+test('Today prioritises the next action above monthly metrics', async ({ page }) => {
+  await login(page)
+  await expect(page.getByRole('region', { name: /Teraz lub następna sesja/ })).toBeVisible()
+  await expect(page.getByRole('region', { name: /Wymaga uwagi/ })).toBeVisible()
+  await expect(page.getByRole('region', { name: /Plan dnia/ })).toBeVisible()
+})
+
+test('Today limits the day plan to the therapist and keeps practice status owner-only', async ({ page }) => {
+  await login(page)
+  await expect(page.getByRole('region', { name: 'Stan praktyki' })).toBeVisible()
+
+  await switchToTherapist(page)
+  const plan = page.getByRole('region', { name: 'Plan dnia' })
+  await expect(plan).not.toContainText('Julia Wolanin')
+  await expect(page.getByRole('region', { name: 'Stan praktyki' })).toHaveCount(0)
+})
