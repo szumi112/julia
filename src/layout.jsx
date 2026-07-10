@@ -91,7 +91,7 @@ export function Logotype({ light }) {
   )
 }
 
-function Sidebar({ route, navigate, role, className = '', innerRef }) {
+function Sidebar({ route, navigate, role, className = '', innerRef, inert }) {
   const { state } = useApp()
   const navRef = useRef(null)
   const pillRef = useRef(null)
@@ -122,7 +122,7 @@ function Sidebar({ route, navigate, role, className = '', innerRef }) {
   ).length
 
   return (
-    <aside className={`sidebar ${className}`} ref={innerRef}>
+    <aside className={`sidebar ${className}`} ref={innerRef} inert={inert}>
       <div className="sidebar__brand" data-shell-reveal>
         <Logotype />
       </div>
@@ -303,9 +303,10 @@ function MobileTabbar({ route, navigate, role, onAdd }) {
   )
 }
 
-function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, onCockpitOpen, onLogout, onSearch, onMenu, overlayKey }) {
+function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, onCockpitChange, onLogout, onSearch, onMenu, overlayKey }) {
   const titleRef = useRef(null)
   const title = routeTitle(route.name, role)
+  const controlsInert = overlayKey ? '' : undefined
 
   useEffect(() => {
     if (!motionOK() || !titleRef.current) return
@@ -319,56 +320,70 @@ function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, onCoc
   return (
     <header className="topbar">
       {onMenu && (
-        <IconBtn name="menu" label="Otwórz menu" className="topbar__menu" onClick={onMenu} data-shell-reveal />
+        <IconBtn
+          name="menu"
+          label="Otwórz menu"
+          className="topbar__menu"
+          onClick={onMenu}
+          disabled={!!overlayKey}
+          inert={controlsInert}
+          data-shell-reveal
+        />
       )}
       <div className="topbar__title" ref={titleRef} data-shell-reveal>
         <span className="topbar__crumb">Aurelia <span style={{ opacity: 0.35, margin: '0 7px' }}>/</span> </span><b>{title}</b>
       </div>
       <div className="topbar__right" data-shell-reveal>
-        <button className="cmd-trigger" onClick={onSearch} title={`Szukaj w Aurelii (${META_K})`}>
-          <Icon name="search" size={15} />
-          <span>Szukaj…</span>
-          <kbd>{META_K}</kbd>
-        </button>
-        <TodayCockpit closeKey={overlayKey} forceClosed={roleMenuOpen} onOpen={onCockpitOpen} />
-        <Popover
-          align="right"
-          ariaLabel="Tryb demonstracyjny"
-          contentRole="group"
-          open={roleMenuOpen}
-          setOpen={setRoleMenuOpen}
-          trigger={
-            <button
-              type="button"
-              className="userchip userchip--button"
-              onClick={() => setRoleMenuOpen(!roleMenuOpen)}
-            >
-              <Avatar name={role.name} size={37} />
-              <span>
-                <span className="userchip__mode">Tryb demonstracyjny</span>
-                <span className="userchip__name">{role.name}</span>
-                <span className="userchip__role">{role.label}</span>
-              </span>
-            </button>
-          }
-        >
-          <div className="popover__label">Tryb demonstracyjny</div>
-          {DEMO_ROLES.map((demoRole) => (
-            <PopItem
-              key={demoRole.id}
-              role="button"
-              on={demoRole.id === role.id}
-              pressed
-              onClick={() => {
-                setDemoRole(demoRole.id)
-                setRoleMenuOpen(false)
-              }}
-            >
-              {demoRole.label} · {demoRole.name}
-            </PopItem>
-          ))}
-        </Popover>
-        <IconBtn name="logout" label="Wyloguj się" onClick={onLogout} />
+        <div className="topbar__controls" inert={controlsInert}>
+          <button className="cmd-trigger" onClick={onSearch} title={`Szukaj w Aurelii (${META_K})`}>
+            <Icon name="search" size={15} />
+            <span>Szukaj…</span>
+            <kbd>{META_K}</kbd>
+          </button>
+          <Popover
+            align="right"
+            ariaLabel="Tryb demonstracyjny"
+            contentRole="group"
+            open={roleMenuOpen}
+            setOpen={setRoleMenuOpen}
+            trigger={
+              <button
+                type="button"
+                className="userchip userchip--button"
+                onClick={() => setRoleMenuOpen(!roleMenuOpen)}
+              >
+                <Avatar name={role.name} size={37} />
+                <span>
+                  <span className="userchip__mode">Tryb demonstracyjny</span>
+                  <span className="userchip__name">{role.name}</span>
+                  <span className="userchip__role">{role.label}</span>
+                </span>
+              </button>
+            }
+          >
+            <div className="popover__label">Tryb demonstracyjny</div>
+            {DEMO_ROLES.map((demoRole) => (
+              <PopItem
+                key={demoRole.id}
+                role="button"
+                on={demoRole.id === role.id}
+                pressed
+                onClick={() => {
+                  setDemoRole(demoRole.id)
+                  setRoleMenuOpen(false)
+                }}
+              >
+                {demoRole.label} · {demoRole.name}
+              </PopItem>
+            ))}
+          </Popover>
+          <IconBtn name="logout" label="Wyloguj się" onClick={onLogout} />
+        </div>
+        <TodayCockpit
+          open={overlayKey === 'cockpit'}
+          onOpenChange={onCockpitChange}
+          disabled={!!overlayKey}
+        />
       </div>
     </header>
   )
@@ -411,8 +426,7 @@ export function Shell({ onLogout }) {
   const { state, dispatch } = useApp()
   const [route, setRoute] = useState({ name: 'dashboard' })
   const [drawer, setDrawer] = useState(null)
-  const [cmdOpen, setCmdOpen] = useState(false)
-  const [navOpen, setNavOpen] = useState(false)
+  const [overlay, setOverlay] = useState(null)
   const [roleMenuOpen, setRoleMenuOpen] = useState(false)
   const isCompact = useIsCompact()
   const isPhone = useIsPhone()
@@ -426,7 +440,7 @@ export function Shell({ onLogout }) {
 
   // widening past the breakpoint restores the static sidebar
   useEffect(() => {
-    if (!isCompact) setNavOpen(false)
+    if (!isCompact) setOverlay((active) => active === 'navigation' ? null : active)
   }, [isCompact])
 
   // entrance choreography
@@ -440,29 +454,26 @@ export function Shell({ onLogout }) {
     )
   }, [])
 
-  // one modal layer at a time: opening any overlay closes its siblings, and
-  // the background view is marked inert while one is up (the cockpit gets the
-  // same signal via overlayKey)
-  const anyModal = !!drawer || cmdOpen || navOpen
-  useEffect(() => {
-    contentRef.current?.toggleAttribute('inert', anyModal)
-  }, [anyModal])
+  // Shell owns the one active overlay. Opening a new one unmounts every
+  // sibling first, so no dialog can sit behind another dialog.
+  const openOverlay = useCallback((key) => {
+    setRoleMenuOpen(false)
+    setOverlay(key)
+  }, [])
+  const closeOverlay = useCallback((key) => {
+    setOverlay((active) => !key || active === key ? null : active)
+  }, [])
 
-  // global search shortcut — registered once, so it reads overlay state
-  // through a ref. A form drawer keeps priority (Ctrl+K must not stack a
-  // second modal over unsaved input); toggling closed drops inert first so
-  // the palette's focus restore can land in the content area.
-  const overlayRef = useRef({ drawer: null, cmd: false })
-  overlayRef.current = { drawer, cmd: cmdOpen }
+  // global search shortcut — registered once, so it reads the active overlay
+  // through a ref and toggles the palette without stacking it over a sibling.
+  const overlayRef = useRef(overlay)
+  overlayRef.current = overlay
   useEffect(() => {
     const onKey = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
-        if (overlayRef.current.drawer) return
         setRoleMenuOpen(false)
-        setNavOpen(false)
-        if (overlayRef.current.cmd) contentRef.current?.removeAttribute('inert')
-        setCmdOpen(!overlayRef.current.cmd)
+        setOverlay((active) => active === 'palette' ? null : 'palette')
       }
     }
     window.addEventListener('keydown', onKey)
@@ -472,6 +483,8 @@ export function Shell({ onLogout }) {
   const navigate = (name, params) => {
     if (!canAccess(ACTIVE_OF[name] || name, role)) return
     if (busy.current) return
+    setRoleMenuOpen(false)
+    setOverlay(null)
     if (route.name === name && JSON.stringify(route.params) === JSON.stringify(params)) return
     busy.current = true
     const dir = (DEPTH[name] || 0) - (DEPTH[route.name] || 0)
@@ -494,26 +507,32 @@ export function Shell({ onLogout }) {
 
   const setRoleMenu = (open) => {
     if (open) {
-      setDrawer(null)
-      setCmdOpen(false)
-      setNavOpen(false)
+      setOverlay(null)
     }
     setRoleMenuOpen(open)
   }
-  const openSessionForm = (opts = {}) => { setRoleMenuOpen(false); setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'session', opts }) }
-  const openClientForm = (opts = {}) => { setRoleMenuOpen(false); setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'client', opts }) }
-  const openPsychForm = (opts = {}) => { setRoleMenuOpen(false); setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'psych', opts }) }
-  // inert must drop before the closing overlay's cleanup restores focus into
-  // the content area, or the focus() call lands on an inert subtree and dies
-  const unInert = () => contentRef.current?.removeAttribute('inert')
-  const closeDrawer = () => { unInert(); setDrawer(null) }
+  const openSessionForm = (opts = {}) => { setDrawer({ kind: 'session', opts }); openOverlay('drawer') }
+  const openClientForm = (opts = {}) => { setDrawer({ kind: 'client', opts }); openOverlay('drawer') }
+  const openPsychForm = (opts = {}) => { setDrawer({ kind: 'psych', opts }); openOverlay('drawer') }
+  const closeDrawer = () => {
+    closeOverlay('drawer')
+    setDrawer(null)
+  }
+
+  // The new .view exists only after animateOut has committed a route swap.
+  // Moving focus here gives screen-reader and keyboard users the destination
+  // context without interrupting the existing live-region announcement.
+  useEffect(() => {
+    viewRef.current?.focus({ preventScroll: true })
+  }, [route])
 
   const View = VIEWS[route.name] || Dashboard
+  const hasOverlay = overlay !== null
 
   return (
     <ShellCtx.Provider value={{ role, setDemoRole, canAccess, route, navigate, openSessionForm, openClientForm, openPsychForm }}>
       <div className="shell" ref={shellRef}>
-        {!isCompact && <Sidebar route={route} navigate={navigate} role={role} />}
+        {!isCompact && <Sidebar route={route} navigate={navigate} role={role} inert={hasOverlay ? '' : undefined} />}
         <div className="main">
           <Topbar
             route={route}
@@ -521,14 +540,17 @@ export function Shell({ onLogout }) {
             setDemoRole={setDemoRole}
             roleMenuOpen={roleMenuOpen}
             setRoleMenuOpen={setRoleMenu}
-            onCockpitOpen={() => setRoleMenuOpen(false)}
+            onCockpitChange={(open) => open ? openOverlay('cockpit') : closeOverlay('cockpit')}
             onLogout={onLogout}
-            onSearch={() => { setRoleMenuOpen(false); setNavOpen(false); setCmdOpen(true) }}
-            onMenu={isCompact ? () => { setRoleMenuOpen(false); setCmdOpen(false); setNavOpen(true) } : undefined}
-            overlayKey={`${drawer?.kind || ''}-${cmdOpen}-${navOpen}`}
+            onSearch={() => {
+              setRoleMenuOpen(false)
+              setOverlay((active) => active === 'palette' ? null : 'palette')
+            }}
+            onMenu={isCompact ? () => openOverlay('navigation') : undefined}
+            overlayKey={overlay}
           />
-          <main className="content" ref={contentRef}>
-            <div className="view" ref={viewRef} key={route.name + JSON.stringify(route.params || {})}>
+          <main className="content" ref={contentRef} inert={hasOverlay ? '' : undefined}>
+            <div className="view" ref={viewRef} tabIndex={-1} key={route.name + JSON.stringify(route.params || {})}>
               <View params={route.params || {}} />
             </div>
           </main>
@@ -536,14 +558,18 @@ export function Shell({ onLogout }) {
       </div>
       {/* view changes are announced — the router moves no focus by itself */}
       <div className="sr-only" aria-live="polite">{routeTitle(route.name, role)}</div>
-      {isPhone && <MobileTabbar route={route} navigate={navigate} role={role} onAdd={() => openSessionForm()} />}
-      {isCompact && navOpen && (
-        <MobileNavDrawer route={route} navigate={navigate} role={role} onClose={() => { unInert(); setNavOpen(false) }} />
+      {isPhone && (
+        <div inert={hasOverlay ? '' : undefined}>
+          <MobileTabbar route={route} navigate={navigate} role={role} onAdd={() => openSessionForm()} />
+        </div>
       )}
-      {drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {cmdOpen && <CommandPalette onClose={() => { unInert(); setCmdOpen(false) }} />}
+      {isCompact && overlay === 'navigation' && (
+        <MobileNavDrawer route={route} navigate={navigate} role={role} onClose={() => closeOverlay('navigation')} />
+      )}
+      {overlay === 'drawer' && drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {overlay === 'drawer' && drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {overlay === 'drawer' && drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {overlay === 'palette' && <CommandPalette onClose={() => closeOverlay('palette')} />}
     </ShellCtx.Provider>
   )
 }

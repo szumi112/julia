@@ -21,6 +21,9 @@ export const onMotionChange = (fn) => {
 export const setReduceMotion = (v) => {
   if (reduceOverride === !!v) return
   reduceOverride = !!v
+  // Clear running tweens before listeners update their loops; otherwise a
+  // long-lived scene can continue moving for a frame after the preference flips.
+  window.gsap?.globalTimeline.clear()
   // CSS animations (breathing dots, transitions) obey the in-app pref too
   document.documentElement.classList.toggle('rm', reduceOverride)
   notifyMotion()

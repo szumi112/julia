@@ -445,11 +445,11 @@ input, select, textarea { font-family: inherit; color: inherit; }
 }
 .topbar__title b { color: var(--ink); font-weight: 520; }
 
-.topbar__right { display: flex; align-items: center; gap: 18px; flex-shrink: 0; }
+.topbar__right, .topbar__controls { display: flex; align-items: center; gap: 18px; flex-shrink: 0; }
 
 @media (max-width: 1024px) {
   .topbar { padding: 12px 20px; gap: 12px; }
-  .topbar__right { gap: 12px; }
+  .topbar__right, .topbar__controls { gap: 12px; }
 }
 /* phone topbar rules live in the responsive section at the end of the file,
    after .month-chip / .cmd-trigger base rules, so the cascade favors them */
@@ -2249,6 +2249,26 @@ button.today-attention__row:hover b { color: var(--rose-deep); }
   .today-focus .btn { grid-column: 1 / -1; width: 100%; justify-content: center; }
   .today-focus__time { font-size: 25px; }
   .today-focus__main span { line-height: 1.35; }
+}
+
+/* The smallest supported phone keeps decisions legible without horizontal
+   scroll: the primary action gets a full row, attention can wrap, and agenda
+   controls retain a usable inline size. */
+@media (max-width: 360px) {
+  .today-head__actions { grid-template-columns: 1fr; gap: 8px; }
+  .today-head__actions .btn { width: 100%; min-height: 42px; }
+  .today-focus { grid-template-columns: 52px minmax(0, 1fr); gap: 8px; }
+  .today-focus .btn { font-size: 13px; }
+  .today-attention__row { grid-template-columns: 16px minmax(0, 1fr); gap: 8px; padding: 10px 0; }
+  .today-attention__row > svg:last-child { display: none; }
+  .today-attention__row b, .today-attention__row small { white-space: normal; overflow-wrap: anywhere; line-height: 1.3; }
+  .agenda__row { align-items: flex-start; gap: 10px; padding: 12px 0; }
+  .agenda__time { width: 44px; font-size: 15px; }
+  .agenda__client { overflow-wrap: anywhere; }
+  .agenda__meta { font-size: 11.5px; line-height: 1.3; overflow-wrap: anywhere; }
+  .agenda__pills { gap: 4px; }
+  .agenda__pills .pill { padding: 0 8px; font-size: 10.5px; }
+  .agenda__row .icon-btn { flex-shrink: 0; }
 }
 
 /* dashboard's reusable day-thread panel */

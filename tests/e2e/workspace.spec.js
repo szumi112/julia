@@ -22,6 +22,15 @@ test('the mock-data workspace opens after login', async ({ page }) => {
   await expect(page.getByRole('heading', { name: /Dziś|Dobry/ })).toBeVisible()
 })
 
+test('navigation focuses the destination and a day cockpit excludes background controls', async ({ page }) => {
+  await login(page)
+  await page.getByRole('button', { name: /Kalendarz/ }).click()
+  await expect(page.locator('.view')).toBeFocused()
+  await page.getByRole('button', { name: /Panel dnia/ }).click()
+  await expect(page.getByRole('dialog', { name: /Panel dnia/ })).toBeVisible()
+  await expect(page.getByRole('main')).toHaveAttribute('inert', '')
+})
+
 test('therapist demo mode narrows navigation to daily care work', async ({ page }) => {
   await login(page)
   await switchToTherapist(page)

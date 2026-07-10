@@ -387,10 +387,10 @@ function ToastItem({ toast, onDismiss }) {
     window.gsap.to(ref.current, { autoAlpha: 0, y: 12, scale: 0.95, duration: 0.28, ease: 'power2.in' })
   }, [toast.leaving])
   return (
-    <div className="toast" ref={ref} onClick={onDismiss} title="Zamknij">
+    <button type="button" className="toast" ref={ref} onClick={onDismiss} title="Zamknij" aria-label={`Zamknij: ${toast.msg}`}>
       <Icon name={toast.icon} size={16} />
       {toast.msg}
-    </div>
+    </button>
   )
 }
 
