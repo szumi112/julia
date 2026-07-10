@@ -12,6 +12,11 @@ async function switchToTherapist(page) {
   await page.getByRole('button', { name: /Specjalistka.*Marta Zielińska/ }).click()
 }
 
+async function switchToCoordinator(page) {
+  await page.getByRole('button', { name: /Tryb demonstracyjny/ }).click()
+  await page.getByRole('button', { name: /Koordynatorka.*Maja Nowak/ }).click()
+}
+
 test('the mock-data workspace opens after login', async ({ page }) => {
   await login(page)
   await expect(page.getByRole('heading', { name: /Dziś|Dobry/ })).toBeVisible()
@@ -70,6 +75,56 @@ test('centre roles receive a neutral clinical-notes state', async ({ page }) => 
   await page.getByRole('row', { name: /Zofia Mazur/ }).click()
   await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
   await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
+})
+
+test('coordinator receives the neutral clinical-notes state', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await switchToCoordinator(page)
+  await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
+  await expect(page.locator('.note__text')).toHaveCount(0)
+  await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
+})
+
+test('non-owning therapist receives the neutral clinical-notes state', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await switchToTherapist(page)
+  await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
+  await expect(page.locator('.note__text')).toHaveCount(0)
+  await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
+})
+
+test('client detail adapts its primary CTA to the active role', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await expect(page.getByRole('button', { name: 'Umów spotkanie' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Przygotuj sesję' })).toHaveCount(0)
+
+  await switchToTherapist(page)
+  await page.getByRole('button', { name: /Wróć do listy klientów/ }).click()
+  await page.getByRole('row', { name: /Joanna Madej/ }).click()
+  await expect(page.getByRole('button', { name: 'Przygotuj sesję' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Umów spotkanie' })).toHaveCount(0)
+})
+
+test('client detail presents care headings in record order', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await expect(page.getByRole('heading', { name: 'Przegląd opieki' })).toBeVisible()
+  const headings = await page.locator('main h2').evaluateAll((elements) =>
+    elements.map((element) => element.firstChild.textContent.trim())
+  )
+  expect(headings).toEqual([
+    'Przegląd opieki',
+    'Najbliższe spotkania',
+    'Historia frekwencji',
+    'Notatki kliniczne',
+  ])
 })
 
 test('client form validates a supplied email and keeps email optional', async ({ page }) => {
