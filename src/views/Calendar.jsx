@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { useReveal, motionOK } from '../anim.js'
+import { useReveal, useFlip, motionOK } from '../anim.js'
 import { useIsPhone, useIsCompact, useMediaQuery, desktopMQ, phoneMQ } from '../responsive.js'
 import { Button, IconBtn, Segmented, Avatar, Chip, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
@@ -226,10 +226,11 @@ export function CalendarView() {
             x: cr.left + 10, y: cr.top + 36, scale: 0.4, autoAlpha: 0,
             duration: 0.32, ease: 'power3.in', onComplete: () => ghost.remove(),
           })
+          // compositor-friendly landing pulse on the receiving day
           window.gsap.fromTo(
             target,
-            { boxShadow: '0 0 0 5px rgba(164, 89, 107, 0.32)' },
-            { boxShadow: '0 0 0 0px rgba(164, 89, 107, 0)', duration: 0.8, ease: 'power2.out', clearProps: 'boxShadow' }
+            { scale: 1.045 },
+            { scale: 1, duration: 0.45, ease: 'power2.out', clearProps: 'transform' }
           )
         } else ghost.remove()
       } else {
@@ -253,26 +254,31 @@ export function CalendarView() {
     window.addEventListener('pointercancel', cancel)
   }
 
-  // animate month swap (skip mount — useReveal already animates the view in)
+  // animate the month-grid swap only for real context changes (month, mode,
+  // weekend pref) — filter changes keep the grid still so persisting sessions
+  // stay visibly in place (state-driven continuity, not a blanket replay)
   const firstSwap = useRef(true)
   useEffect(() => {
     if (firstSwap.current) {
       firstSwap.current = false
       return
     }
-    if (!motionOK() || !gridRef.current) return
+    if (mode === 'list' || !motionOK() || !gridRef.current) return
     window.gsap.fromTo(
       gridRef.current.children,
       { autoAlpha: 0, y: 10 },
       { autoAlpha: 1, y: 0, duration: 0.4, ease: 'power2.out', stagger: 0.006, clearProps: 'transform,opacity,visibility' }
     )
-  }, [ym, mode, showWeekends, psychFilter, statusFilter, unpaidOnly])
+  }, [ym, mode, showWeekends])
+
+  // list mode: day cards glide (FLIP) when filters add/remove/move them
+  const flipRef = useFlip(`${mode}|${ym}|${psychFilter}|${statusFilter}|${unpaidOnly}`)
 
   const changeMonth = (d) => {
     const next = addMonths(ym, d)
     setYm(next)
-    // the agenda always needs a selected day; the grid can wait for a click
-    setSelected(mode === 'agenda' ? (next === curYm ? today : `${next}-01`) : null)
+    // keep a day selected so the panel never collapses to an empty prompt
+    setSelected(next === curYm ? today : `${next}-01`)
   }
 
   // stacked layouts put the day panel below the grid — bring it into view
@@ -335,7 +341,7 @@ export function CalendarView() {
         className="agenda__row"
         key={s.id}
         onPointerDown={draggable ? (e) => onChipDown(e, s) : undefined}
-        style={draggable ? { touchAction: 'none' } : undefined}
+        style={{ '--node-color': p?.color, ...(draggable ? { touchAction: 'none' } : null) }}
       >
         <span className="agenda__time">{s.time}</span>
         <span className="agenda__main">
@@ -350,6 +356,29 @@ export function CalendarView() {
           </span>
         </span>
         <IconBtn name="edit" label="Edytuj sesję" size={16} onClick={() => openSessionForm({ session: s })} />
+      </div>
+    )
+  }
+
+  // a day's rows on the day thread, with the "teraz" marker when it is today
+  const dayThread = (sessions, dragOk, iso) => {
+    const now = new Date()
+    const nowMin = now.getHours() * 60 + now.getMinutes()
+    const isToday = iso === today
+    return (
+      <div className="agenda agenda--spine" style={{ marginTop: 6 }}>
+        {sessions.length > 0 && <span className="spine__rule" aria-hidden="true" />}
+        {sessions.map((s, i) => {
+          const nowHere = isToday &&
+            timeToMin(s.time) > nowMin &&
+            (i === 0 || timeToMin(sessions[i - 1].time) <= nowMin)
+          return (
+            <Fragment key={s.id}>
+              {nowHere && <div className="spine__now" aria-hidden="true">teraz</div>}
+              {dayRow(s, dragOk)}
+            </Fragment>
+          )
+        })}
       </div>
     )
   }
@@ -376,9 +405,12 @@ export function CalendarView() {
                   { value: 'list', label: 'Lista', icon: 'reports' },
                 ]}
           />
-          <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: psychFilter || undefined })}>
-            Nowa sesja
-          </Button>
+          {/* the phone's raised tabbar action already covers "new session" */}
+          {!isPhone && (
+            <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: psychFilter || undefined })}>
+              Nowa sesja
+            </Button>
+          )}
         </div>
       </div>
 
@@ -448,17 +480,16 @@ export function CalendarView() {
                 {agendaSessions.length} {sessionsWord(agendaSessions.length)}
               </span>
             </h2>
-            <div className="agenda" style={{ marginTop: 6 }}>
-              {agendaSessions.length === 0 && (
-                <EmptyState
-                  compact
-                  icon="calendar"
-                  title="Brak sesji tego dnia"
-                  hint="Dodaj sesję przyciskiem poniżej."
-                />
-              )}
-              {agendaSessions.map((s) => dayRow(s, false))}
-            </div>
+            {agendaSessions.length === 0 ? (
+              <EmptyState
+                compact
+                icon="calendar"
+                title="Brak sesji tego dnia"
+                hint="Dodaj sesję przyciskiem poniżej."
+              />
+            ) : (
+              dayThread(agendaSessions, false, agendaSel)
+            )}
             <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
               onClick={() => openSessionForm({ date: agendaSel, psychId: psychFilter || undefined })}>
               Dodaj sesję tego dnia
@@ -485,6 +516,7 @@ export function CalendarView() {
                       cell.inMonth ? '' : 'is-out',
                       cell.iso === today ? 'is-today' : '',
                       cell.iso === selected ? 'is-sel' : '',
+                      cell.dow >= 5 ? 'is-weekend' : '',
                     ].join(' ')}
                     onClick={() => { if (!suppressClick.current) selectDay(cell.iso) }}
                     aria-label={`${fmtDayMonth(cell.iso)} — ${items.length} ${sessionsWord(items.length)}`}
@@ -530,22 +562,26 @@ export function CalendarView() {
 
           <div className="card card--pad cal-day-panel" ref={dayPanelRef}>
             <h2 className="card-title">
-              {selected ? cap(fmtWeekday(selected)) + ', ' + fmtDayMonth(selected) : 'Wybierz dzień'}
-            </h2>
-            <div className="agenda" style={{ marginTop: 6 }}>
-              {selected && daySessions.length === 0 && (
-                <EmptyState
-                  compact
-                  icon="calendar"
-                  title="Brak sesji tego dnia"
-                  hint="Dodaj sesję przyciskiem poniżej."
-                />
+              <span className="row" style={{ gap: 9 }}>
+                {selected ? cap(fmtWeekday(selected)) + ', ' + fmtDayMonth(selected) : 'Wybierz dzień'}
+                {selected === today && <span className="pill pill--gold">dziś</span>}
+              </span>
+              {selected && (
+                <span className="faint" style={{ fontFamily: 'var(--font-ui)', fontSize: 12.5, fontWeight: 550 }}>
+                  {daySessions.length} {sessionsWord(daySessions.length)}
+                </span>
               )}
-              {daySessions
-                .slice()
-                .sort((a, b) => (a.time < b.time ? -1 : 1))
-                .map((s) => dayRow(s, agendaDrag))}
-            </div>
+            </h2>
+            {selected && daySessions.length === 0 && (
+              <EmptyState
+                compact
+                icon="calendar"
+                title="Brak sesji tego dnia"
+                hint="Dodaj sesję przyciskiem poniżej."
+              />
+            )}
+            {daySessions.length > 0 &&
+              dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), agendaDrag, selected)}
             {selected && (
               <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
                 onClick={() => openSessionForm({ date: selected, psychId: psychFilter || undefined })}>
@@ -555,7 +591,7 @@ export function CalendarView() {
           </div>
         </div>
       ) : (
-        <div className="stack" ref={gridRef} data-reveal>
+        <div className="stack" ref={flipRef} data-reveal>
           {listDays.length === 0 && (
             <div className="card card--pad">
               <EmptyState
@@ -567,7 +603,7 @@ export function CalendarView() {
             </div>
           )}
           {listDays.map(({ iso, items }) => (
-            <div className="card card--pad" key={iso} style={{ padding: '18px 24px' }}>
+            <div className="card card--pad" key={iso} data-flip-id={iso} style={{ padding: '18px 24px' }}>
               <div className="row row--between" style={{ marginBottom: 4 }}>
                 <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 17, fontWeight: 500 }}>
                   {cap(fmtWeekday(iso))}, {fmtDayMonth(iso)}

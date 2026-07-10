@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, monthStats, upcomingSessions, totalOutstanding, revenueSeries } from '../store.jsx'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { useApp, monthStats, upcomingSessions, totalOutstanding, clientOutstanding, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useCountUp, useDrawerFX, motionOK } from '../anim.js'
 import { Ambient } from '../three-scene.jsx'
-import { AreaChart, Sparkline, BarFill } from '../charts.jsx'
+import { AreaChart, BarFill } from '../charts.jsx'
 import { Button, Avatar, Pill, IconBtn, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import {
   fmtMoney, fmtNumber, monthKey, addMonths, fmtWeekday, fmtDayMonth, fmtShortDate, toISODate, pad2,
-  sessionsWord, outstandingOf, isBillable, cap, greeting, fmtMonthName, plural,
+  sessionsWord, outstandingOf, isBillable, cap, greeting, fmtMonthName, plural, timeToMin,
 } from '../format.js'
 
 const vocative = (name) => {
@@ -16,17 +16,82 @@ const vocative = (name) => {
   return first.endsWith('a') ? first.slice(0, -1) + 'o' : first
 }
 
-function StatCard({ label, value, fmt, suffix, delta, spark, sparkColor = '#a4596b', gold, onClick }) {
+// one entry in the figures line — a quiet, linked number instead of a card
+function Figure({ label, value, fmt = fmtNumber, suffix, sub, gold, onClick }) {
   const ref = useCountUp(value, fmt)
+  const Tag = onClick ? 'button' : 'div'
   return (
-    <div className={`card stat card--lift ${gold ? 'stat--gold' : ''}`} data-reveal onClick={onClick} style={onClick ? { cursor: 'pointer' } : undefined}>
-      <div className="stat__label">{label}</div>
-      <div className="stat__value">
+    <Tag
+      type={onClick ? 'button' : undefined}
+      className={`figures__item ${gold ? 'figures__item--gold' : ''}`}
+      onClick={onClick}
+      data-reveal
+    >
+      <span className="figures__label">{label}</span>
+      <span className="figures__value">
         <span ref={ref}>0</span>
         {suffix && <small>{suffix}</small>}
+      </span>
+      {sub && <span className="figures__sub">{sub}</span>}
+    </Tag>
+  )
+}
+
+// today's sessions on the day thread — the hero's working half
+function TodayThread({ sessions, nowMin, onOpen, onCalendar }) {
+  const MAX = 6
+  const shown = sessions.slice(0, MAX)
+  const hidden = sessions.length - shown.length
+  const done = sessions.filter((s) => s.status === 'completed').length
+  const running = sessions.find(
+    (s) => s.status === 'scheduled' && timeToMin(s.time) <= nowMin && nowMin < timeToMin(s.time) + s.duration
+  )
+  const nextId = sessions.find((s) => s.status === 'scheduled' && timeToMin(s.time) > nowMin)?.id
+
+  return (
+    <div className="dash-hero__day" data-reveal>
+      <div className="dash-hero__day-head">
+        <span className="eyebrow">Plan dnia</span>
+        {sessions.length > 0 && (
+          <span className="figures__sub">{done} z {sessions.length} za Tobą</span>
+        )}
       </div>
-      {delta && <div className="stat__delta">{delta}</div>}
-      {spark && <Sparkline values={spark} color={sparkColor} />}
+      {sessions.length === 0 ? (
+        <EmptyState compact icon="sparkle" title="Wolny dzień" hint="Kalendarz jest dziś pusty — czas na oddech." />
+      ) : (
+        <div className="spine">
+          <span className="spine__rule" data-spine aria-hidden="true" />
+          {shown.map((s, i) => {
+            const nowHere = !running &&
+              timeToMin(s.time) > nowMin &&
+              (i === 0 || timeToMin(shown[i - 1].time) <= nowMin)
+            return (
+              <Fragment key={s.id}>
+                {nowHere && <div className="spine__now" aria-hidden="true">teraz</div>}
+                <button
+                  className={`spine__row ${s.status === 'completed' ? 'is-done' : ''} ${s.id === nextId ? 'is-next' : ''}`}
+                  style={{ '--node-color': s.psych?.color }}
+                  onClick={() => onOpen(s)}
+                >
+                  <span className="spine__time">{s.time}</span>
+                  <span className="spine__name">{s.client?.name}</span>
+                  <span className="spine__meta">{s.psych?.name.split(' ')[0]}</span>
+                  <Icon
+                    name={s.status === 'completed' ? 'check' : running?.id === s.id ? 'wave' : 'clock'}
+                    size={14}
+                    className="faint"
+                  />
+                </button>
+              </Fragment>
+            )
+          })}
+          {hidden > 0 && (
+            <button className="bpost-more" onClick={onCalendar}>
+              Jeszcze {hidden} {sessionsWord(hidden)} — otwórz kalendarz →
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -223,20 +288,34 @@ export function Dashboard() {
   const series = useMemo(() => revenueSeries(state.sessions, months), [state.sessions, months])
   const cur = series[series.length - 1]
   const prev = series[series.length - 2]
+  const monthName = fmtMonthName(ym)
 
   const activeClients = state.clients.filter((c) => c.status === 'active').length
   const outstanding = totalOutstanding(state.sessions)
   const unpaidCount = state.sessions.filter((s) => isBillable(s) && outstandingOf(s) > 0).length
-  const upcoming = upcomingSessions(state.sessions, 6)
-  const today = toISODate(new Date())
-  const todayCount = state.sessions.filter((s) => s.date === today && s.status !== 'cancelled').length
+  const upcoming = upcomingSessions(state.sessions, 5)
+  const now = new Date()
+  const today = toISODate(now)
+  const nowMin = now.getHours() * 60 + now.getMinutes()
 
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
   const clientOf = (id) => state.clients.find((c) => c.id === id)
 
+  const todays = state.sessions
+    .filter((s) => s.date === today && s.status !== 'cancelled')
+    .map((s) => ({ ...s, psych: psychOf(s.psychId), client: clientOf(s.clientId) }))
+
+  // who owes the most — the dashboard's actionable financial context
+  const debtors = state.clients
+    .map((c) => ({ c, due: clientOutstanding(state.sessions, c.id) }))
+    .filter((d) => d.due > 0)
+    .sort((a, b) => b.due - a.due)
+    .slice(0, 3)
+
   const psychMonth = state.psychologists.map((p) => {
     const sess = state.sessions.filter((s) => s.psychId === p.id)
-    return { p, ...monthStats(sess, ym) }
+    const todayCount = todays.filter((s) => s.psychId === p.id).length
+    return { p, todayCount, ...monthStats(sess, ym) }
   })
   const maxRev = Math.max(...psychMonth.map((x) => x.revenue), 1)
 
@@ -245,72 +324,74 @@ export function Dashboard() {
       <section className="dash-hero" data-reveal>
         <Ambient className="dash-hero__scene" amp={0.34} speed={0.5} scale={3.4} />
         <div className="dash-hero__inner">
-          <div>
+          <div className="dash-hero__intro">
             <div className="eyebrow">{cap(fmtWeekday(today))}, {fmtDayMonth(today)}</div>
             <h1 className="display dash-hero__title">
               {greeting()}, <em>{vocative(state.user.name)}</em>
             </h1>
             <p className="dash-hero__sub">
-              {todayCount > 0
-                ? <>Dziś w grafiku {plural(todayCount, 'jest', 'są', 'jest')} <b>{todayCount} {sessionsWord(todayCount)}</b>. Powodzenia!</>
+              {todays.length > 0
+                ? <>Dziś w grafiku {plural(todays.length, 'jest', 'są', 'jest')} <b>{todays.length} {sessionsWord(todays.length)}</b>. Powodzenia!</>
                 : 'Dziś kalendarz jest wolny — czas na oddech.'}
             </p>
+            <div className="row dash-hero__actions">
+              <Button icon="plus" magnetic onClick={() => openSessionForm()}>
+                Nowa sesja
+              </Button>
+              <Button variant="ghost" icon="user" onClick={() => openClientForm()}>
+                Nowy klient
+              </Button>
+            </div>
           </div>
-          <div className="row" style={{ gap: 10 }}>
-            <Button icon="plus" magnetic onClick={() => openSessionForm()}>
-              Nowa sesja
-            </Button>
-            <Button variant="ghost" icon="user" onClick={() => openClientForm()}>
-              Nowy klient
-            </Button>
-          </div>
+          <TodayThread
+            sessions={todays}
+            nowMin={nowMin}
+            onOpen={(s) => openSessionForm({ session: state.sessions.find((x) => x.id === s.id) })}
+            onCalendar={() => navigate('calendar')}
+          />
         </div>
       </section>
 
-      <div className="stats-row">
-        <StatCard
+      <div className="figures" role="group" aria-label={`Podsumowanie — ${monthName}`}>
+        <Figure
           label="Aktywni klienci"
           value={activeClients}
-          fmt={fmtNumber}
-          delta={<span>spośród {state.clients.length} w kartotece</span>}
-          spark={series.map((s) => s.count)}
-          sparkColor="#9d8190"
+          sub={`spośród ${state.clients.length} w kartotece`}
+          onClick={() => navigate('clients')}
         />
-        <StatCard
-          label="Sesje w tym mies."
+        <Figure
+          label={`Sesje · ${monthName}`}
           value={cur.count}
-          fmt={fmtNumber}
-          delta={prevContext(prev.ym, fmtNumber(prev.count))}
-          spark={series.map((s) => s.count)}
+          sub={prevContext(prev.ym, fmtNumber(prev.count))}
+          onClick={() => navigate('calendar')}
         />
-        <StatCard
-          label="Godziny pracy"
+        <Figure
+          label={`Godziny · ${monthName}`}
           value={cur.hours}
           fmt={(v) => fmtNumber(Math.round(v))}
           suffix=" h"
-          delta={prevContext(prev.ym, `${Math.round(prev.hours)} h`)}
-          spark={series.map((s) => s.hours)}
-          sparkColor="#c26b4b"
+          sub={prevContext(prev.ym, `${Math.round(prev.hours)} h`)}
+          onClick={() => navigate('reports')}
         />
-        <StatCard
-          label="Przychód (mies.)"
+        <Figure
+          label={`Przychód · ${monthName}`}
           value={cur.revenue}
           fmt={fmtMoney}
-          delta={prevContext(prev.ym, fmtMoney(prev.revenue))}
-          spark={series.map((s) => s.revenue)}
+          sub={prevContext(prev.ym, fmtMoney(prev.revenue))}
+          onClick={() => navigate('reports')}
         />
-        <StatCard
-          label="Zaległe płatności"
+        <Figure
+          label="Zaległe · łącznie"
           value={outstanding}
           fmt={fmtMoney}
           gold
-          delta={<span>{unpaidCount} {sessionsWord(unpaidCount)} · <span className="link">zobacz</span></span>}
+          sub={<span>{unpaidCount} {sessionsWord(unpaidCount)} · <span className="link">zobacz</span></span>}
           onClick={() => navigate('payments')}
         />
       </div>
 
       <div className="grid-31">
-        <div className="card card--pad" data-reveal>
+        <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
           <h2 className="card-title">
             Przychód miesięczny
             <button className="link" onClick={() => navigate('reports')}>Pełny raport →</button>
@@ -320,43 +401,75 @@ export function Dashboard() {
           </div>
         </div>
 
-        <div className="card card--pad" data-reveal>
-          <h2 className="card-title">
-            Najbliższe sesje
-            <button className="link" onClick={() => navigate('calendar')}>Kalendarz →</button>
-          </h2>
-          <div className="agenda" style={{ marginTop: 8 }}>
-            {upcoming.length === 0 && (
-              <EmptyState
-                compact
-                icon="calendar"
-                title="Brak zaplanowanych sesji"
-                hint="Zaplanuj spotkanie, a pojawi się tutaj."
-                action={<Button size="sm" variant="soft" icon="plus" onClick={() => openSessionForm()}>Nowa sesja</Button>}
-              />
-            )}
-            {upcoming.map((s) => {
-              const p = psychOf(s.psychId)
-              const c = clientOf(s.clientId)
-              return (
-                <button
-                  key={s.id}
-                  className="agenda__row hover-row"
-                  style={{ width: '100%', textAlign: 'left' }}
-                  onClick={() => openSessionForm({ session: s })}
-                >
-                  <span className="agenda__time">{s.time}</span>
-                  <span className="agenda__main">
-                    <span className="agenda__client">{c?.name}</span>
-                    <span className="agenda__meta">
-                      <span className="dot" style={{ width: 7, height: 7, borderRadius: 99, background: p?.color, display: 'inline-block' }} />
-                      {p?.name} · {s.date === today ? 'dziś' : fmtDayMonth(s.date)}
+        <div className="stack">
+          <div className="card card--pad" data-reveal>
+            <h2 className="card-title">
+              Najbliższe sesje
+              <button className="link" onClick={() => navigate('calendar')}>Kalendarz →</button>
+            </h2>
+            <div className="agenda" style={{ marginTop: 8 }}>
+              {upcoming.length === 0 && (
+                <EmptyState
+                  compact
+                  icon="calendar"
+                  title="Brak zaplanowanych sesji"
+                  hint="Zaplanuj spotkanie, a pojawi się tutaj."
+                  action={<Button size="sm" variant="soft" icon="plus" onClick={() => openSessionForm()}>Nowa sesja</Button>}
+                />
+              )}
+              {upcoming.map((s) => {
+                const p = psychOf(s.psychId)
+                const c = clientOf(s.clientId)
+                return (
+                  <button
+                    key={s.id}
+                    className="agenda__row hover-row"
+                    style={{ width: '100%', textAlign: 'left' }}
+                    onClick={() => openSessionForm({ session: s })}
+                  >
+                    <span className="agenda__time">{s.time}</span>
+                    <span className="agenda__main">
+                      <span className="agenda__client">{c?.name}</span>
+                      <span className="agenda__meta">
+                        <span className="dot" style={{ width: 7, height: 7, borderRadius: 99, background: p?.color, display: 'inline-block' }} />
+                        {p?.name} · {s.date === today ? 'dziś' : fmtDayMonth(s.date)}
+                      </span>
                     </span>
-                  </span>
-                  <Icon name="chevR" size={15} className="faint" />
-                </button>
-              )
-            })}
+                    <Icon name="chevR" size={15} className="faint" />
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <div className="card card--pad" data-reveal>
+            <h2 className="card-title">
+              Do rozliczenia
+              <button className="link" onClick={() => navigate('payments')}>Finanse →</button>
+            </h2>
+            {debtors.length === 0 ? (
+              <EmptyState compact icon="check" title="Wszystko rozliczone" hint="Żaden klient nie ma zaległości." />
+            ) : (
+              <div style={{ marginTop: 8 }}>
+                {debtors.map(({ c, due }) => (
+                  <button
+                    key={c.id}
+                    className="hover-row row row--between"
+                    style={{ width: '100%', textAlign: 'left' }}
+                    onClick={() => navigate('client', { id: c.id })}
+                  >
+                    <span className="row" style={{ gap: 10, minWidth: 0 }}>
+                      <Avatar name={c.name} size={28} />
+                      <span style={{ fontWeight: 600, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
+                    </span>
+                    <Pill tone="gold">{fmtMoney(due)}</Pill>
+                  </button>
+                ))}
+                <div className="figures__sub" style={{ marginTop: 10 }}>
+                  Łącznie {fmtMoney(outstanding)} · {unpaidCount} {sessionsWord(unpaidCount)}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -364,11 +477,11 @@ export function Dashboard() {
       <div className="grid-31" style={{ marginTop: 20 }}>
         <div className="card card--pad" data-reveal-scroll style={{ alignSelf: 'start' }}>
           <h2 className="card-title">
-            Zespół w tym miesiącu
+            Zespół dziś
             <button className="link" onClick={() => navigate('team')}>Zespół →</button>
           </h2>
           <div className="hbar" style={{ marginTop: 20 }}>
-            {psychMonth.map(({ p, count, hours, revenue }) => (
+            {psychMonth.map(({ p, todayCount, count, revenue }) => (
               <div className="hbar__row" key={p.id}>
                 <button className="hbar__name link" style={{ color: 'var(--ink)', display: 'flex' }} onClick={() => navigate('psych', { id: p.id })}>
                   <Avatar name={p.name} color={p.color} size={30} />
@@ -378,7 +491,8 @@ export function Dashboard() {
                   <BarFill segments={[{ value: revenue, color: p.color, label: p.name }]} totalMax={maxRev} />
                 </div>
                 <div className="hbar__val">
-                  {fmtMoney(revenue)} <span className="faint" style={{ fontWeight: 500 }}>· {count} {sessionsWord(count)} · {Math.round(hours)} h</span>
+                  {todayCount > 0 ? `dziś ${todayCount} ${sessionsWord(todayCount)}` : 'dziś wolne'}
+                  <span className="faint" style={{ fontWeight: 500 }}> · {fmtMoney(revenue)} / {monthName.slice(0, 3)} · {count} {sessionsWord(count)}</span>
                 </div>
               </div>
             ))}

@@ -18,17 +18,18 @@ export function Login({ onLogin }) {
 
   useEffect(() => {
     if (!motionOK() || !cardRef.current) return
+    // cinematic but brief — the form must be workable well under a second
     const tl = window.gsap.timeline()
     tl.fromTo(
       cardRef.current,
-      { autoAlpha: 0, y: 34, scale: 0.97 },
-      { autoAlpha: 1, y: 0, scale: 1, duration: 1.1, ease: 'power3.out', delay: 0.25 }
+      { autoAlpha: 0, y: 30, scale: 0.975 },
+      { autoAlpha: 1, y: 0, scale: 1, duration: 0.7, ease: 'power3.out', delay: 0.1 }
     )
     tl.fromTo(
       cardRef.current.querySelectorAll('[data-stagger]'),
-      { autoAlpha: 0, y: 14 },
-      { autoAlpha: 1, y: 0, duration: 0.7, ease: 'power3.out', stagger: 0.08, clearProps: 'transform,opacity,visibility' },
-      '-=0.6'
+      { autoAlpha: 0, y: 12 },
+      { autoAlpha: 1, y: 0, duration: 0.5, ease: 'power3.out', stagger: 0.055, clearProps: 'transform,opacity,visibility' },
+      '-=0.45'
     )
   }, [])
 
@@ -39,6 +40,8 @@ export function Login({ onLogin }) {
     if (!password.trim()) errs.password = 'Wpisz hasło'
     setErrors(errs)
     if (Object.keys(errs).length) {
+      // announce and land on the first invalid field, not just the shake
+      cardRef.current?.querySelector(errs.email ? '#email' : '#password')?.focus()
       if (motionOK()) {
         window.gsap.fromTo(
           cardRef.current,
@@ -78,10 +81,14 @@ export function Login({ onLogin }) {
             value={email}
             onChange={(e) => { setEmail(e.target.value); setErrors((x) => ({ ...x, email: null })) }}
             autoComplete="email"
+            aria-invalid={errors.email ? true : undefined}
+            aria-describedby={errors.email ? 'email-error' : undefined}
             style={errors.email ? { borderColor: 'var(--error)' } : undefined}
           />
           <label htmlFor="email">Adres e-mail</label>
-          {errors.email && <span className="field__error" style={{ marginTop: 6, display: 'block' }}>{errors.email}</span>}
+          {errors.email && (
+            <span className="field__error" id="email-error" role="alert" style={{ marginTop: 6, display: 'block' }}>{errors.email}</span>
+          )}
         </div>
 
         <div className="float-field" data-stagger>
@@ -92,10 +99,14 @@ export function Login({ onLogin }) {
             value={password}
             onChange={(e) => { setPassword(e.target.value); setErrors((x) => ({ ...x, password: null })) }}
             autoComplete="current-password"
+            aria-invalid={errors.password ? true : undefined}
+            aria-describedby={errors.password ? 'password-error' : undefined}
             style={errors.password ? { borderColor: 'var(--error)' } : undefined}
           />
           <label htmlFor="password">Hasło</label>
-          {errors.password && <span className="field__error" style={{ marginTop: 6, display: 'block' }}>{errors.password}</span>}
+          {errors.password && (
+            <span className="field__error" id="password-error" role="alert" style={{ marginTop: 6, display: 'block' }}>{errors.password}</span>
+          )}
         </div>
 
         <div className="login__row" data-stagger>
@@ -115,6 +126,7 @@ export function Login({ onLogin }) {
           <button type="submit" className="btn btn--primary btn--lg btn--full" ref={btnRef} disabled={loading}>
             <span>{loading ? 'Logowanie…' : 'Zaloguj się'}</span>
           </button>
+          <p className="login__demo">Wersja demonstracyjna — wystarczy dowolny e-mail i hasło.</p>
         </div>
       </form>
       <div className="login__footer">Aurelia — Centrum Psychoterapii · Jelenia Góra</div>
