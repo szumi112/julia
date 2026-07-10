@@ -107,9 +107,12 @@ export function CommandPalette({ onClose }) {
   closeRef.current = close
 
   // capture-phase Escape (works whatever has focus, and never reaches the
-  // drawer's document listener underneath) + Tab trap + focus restore
+  // drawer's document listener underneath) + Tab trap + focus restore.
+  // The opener is recorded BEFORE focus moves into the panel — an autoFocus
+  // attribute would fire during commit and make the input its own "opener".
   useEffect(() => {
     const opener = document.activeElement
+    inputRef.current?.focus()
     const onDocKey = (e) => {
       if (e.key === 'Escape') {
         e.preventDefault()
@@ -190,7 +193,6 @@ export function CommandPalette({ onClose }) {
             aria-controls="cmd-list"
             aria-activedescendant={results.length ? `cmd-opt-${sel}` : undefined}
             aria-autocomplete="list"
-            autoFocus
             onChange={(e) => setQuery(e.target.value)}
           />
           <kbd>Esc</kbd>

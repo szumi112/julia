@@ -243,8 +243,11 @@ export function useDrawerFX(drawerRef, backRef, onClose) {
     const drawer = drawerRef.current
     const onTab = (e) => {
       if (e.key !== 'Tab' || !drawer) return
+      // visibility check matters during the entrance stagger: autoAlpha keeps
+      // fields visibility:hidden (offsetParent non-null), and the browser
+      // skips those in real Tab order — the trap must reason over the same set
       const els = [...drawer.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')]
-        .filter((el) => !el.disabled && el.offsetParent !== null)
+        .filter((el) => !el.disabled && el.offsetParent !== null && getComputedStyle(el).visibility !== 'hidden')
       if (!els.length) return
       const first = els[0]
       const last = els[els.length - 1]

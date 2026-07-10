@@ -215,7 +215,7 @@ function TeamBoard() {
 
   return (
     <>
-      <div className="card card--pad" data-reveal-scroll style={{ alignSelf: 'start' }}>
+      <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
         <h2 className="card-title">
           <span className="row" style={{ gap: 8 }}>
             <Icon name="pin" size={17} style={{ color: 'var(--gold-deep)' }} />
@@ -454,7 +454,7 @@ export function Dashboard() {
       </div>
 
       <div className="grid-31" style={{ marginTop: 20 }}>
-        <div className="card card--pad" data-reveal-scroll style={{ alignSelf: 'start' }}>
+        <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
           <h2 className="card-title">
             Zespół dziś
             <button className="link" onClick={() => navigate('team')}>Zespół →</button>

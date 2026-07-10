@@ -32,6 +32,13 @@ export function Payments() {
   const collected = filtered.reduce((a, s) => a + collectedOf(s), 0)
   const outstanding = filtered.reduce((a, s) => a + outstandingOf(s), 0)
 
+  // the collection meter always shows the month's true progress for the
+  // visible specialist scope — "Tylko zaległe" narrows the list and the
+  // figures (existing behavior), but must not fake a 0% collection rate
+  const scopeBillable = monthBillable.filter((s) => !psychFilter || s.psychId === psychFilter)
+  const scopeCollected = scopeBillable.reduce((a, s) => a + collectedOf(s), 0)
+  const scopeOutstanding = scopeBillable.reduce((a, s) => a + outstandingOf(s), 0)
+
   const flipRef = useFlip(filtered.map((s) => s.id).join(','))
 
   const perPsych = state.psychologists.map((p) => {
@@ -114,24 +121,24 @@ export function Payments() {
         />
       </div>
 
-      {/* the month's collection at a glance */}
-      {collected + outstanding > 0 && (
+      {/* the month's collection at a glance (specialist scope, full month) */}
+      {scopeCollected + scopeOutstanding > 0 && (
         <div className="collect" data-reveal>
           <div className="hbar__track" style={{ height: 16 }}>
             <BarFill
               segments={[
-                { value: collected, color: 'var(--sage)', label: 'zebrane' },
-                { value: outstanding, color: 'var(--gold-mid)', label: 'zaległe' },
+                { value: scopeCollected, color: 'var(--sage)', label: 'zebrane' },
+                { value: scopeOutstanding, color: 'var(--gold-mid)', label: 'zaległe' },
               ]}
-              totalMax={collected + outstanding}
+              totalMax={scopeCollected + scopeOutstanding}
             />
           </div>
           <div className="row row--between collect__labels">
             <span className="muted">
-              zebrane {fmtMoney(collected)} · {Math.round((collected / (collected + outstanding)) * 100)}%
+              zebrane {fmtMoney(scopeCollected)} · {Math.round((scopeCollected / (scopeCollected + scopeOutstanding)) * 100)}%
             </span>
-            {outstanding > 0
-              ? <span className="collect__due">do zebrania {fmtMoney(outstanding)}</span>
+            {scopeOutstanding > 0
+              ? <span className="collect__due">do zebrania {fmtMoney(scopeOutstanding)}</span>
               : <span className="collect__ok">wszystko rozliczone</span>}
           </div>
         </div>

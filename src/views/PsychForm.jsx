@@ -132,7 +132,6 @@ export function PsychDrawer({ opts, onClose }) {
               className="input"
               value={form.name}
               placeholder="np. Maria Nowak"
-              autoFocus={!editing}
               onChange={(e) => set('name', e.target.value)}
             />
           </Field>

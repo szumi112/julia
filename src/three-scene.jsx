@@ -107,7 +107,14 @@ export function createAmbient(container, opts = {}) {
   const lowPower =
     window.matchMedia(phoneMQ).matches || (navigator.hardwareConcurrency || 8) <= 4
 
-  const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
+  // WebGL may be unavailable (blocked, headless, exhausted contexts) — the
+  // ambient blob is decoration and must never take login down with it
+  let renderer
+  try {
+    renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true })
+  } catch {
+    return null
+  }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, lowPower ? 1.3 : 1.75))
   renderer.setClearColor(0x000000, 0)
   container.appendChild(renderer.domElement)
@@ -150,11 +157,14 @@ export function createAmbient(container, opts = {}) {
   ro.observe(container)
   resize()
 
+  // pointer parallax is a fine-pointer, motion-allowed enhancement only
+  const finePointer = window.matchMedia('(pointer: fine)').matches
   const onMouse = (e) => {
+    if (!motionOK()) return
     mouse.tx = (e.clientX / window.innerWidth - 0.5) * 2
     mouse.ty = (e.clientY / window.innerHeight - 0.5) * 2
   }
-  window.addEventListener('pointermove', onMouse, { passive: true })
+  if (finePointer) window.addEventListener('pointermove', onMouse, { passive: true })
 
   const render = () => {
     const dt = clock.getDelta()
@@ -217,7 +227,7 @@ export function createAmbient(container, opts = {}) {
       stop()
       offMotion()
       document.removeEventListener('visibilitychange', onVis)
-      window.removeEventListener('pointermove', onMouse)
+      if (finePointer) window.removeEventListener('pointermove', onMouse)
       ro.disconnect()
       geo.dispose()
       mat.dispose()

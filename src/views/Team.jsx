@@ -6,7 +6,7 @@ import { Avatar, Pill, Button, Chip, IconBtn, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { AreaChart } from '../charts.jsx'
 import {
-  fmtMoney, fmtNumber, fmtShortDate, monthKey, addMonths, fmtMonthYear, fmtMonthName,
+  fmtMoney, fmtNumber, fmtShortDate, monthKey, addMonths, fmtMonthName,
   sessionsWord, fmtDayMonth, clientsWord, toISODate,
 } from '../format.js'
 
@@ -248,7 +248,7 @@ export function PsychDetail({ params }) {
             </table>
           </div>
 
-          <div className="card card--pad" data-reveal-scroll>
+          <div className="card card--pad" data-reveal>
             <h2 className="card-title">Przychód · ostatnie 6 miesięcy</h2>
             <div style={{ marginTop: 12 }}>
               <AreaChart data={series} height={200} />

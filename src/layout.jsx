@@ -171,7 +171,9 @@ function MobileNavDrawer({ route, navigate, onClose }) {
   useEffect(() => {
     const opener = document.activeElement
     const aside = asideRef.current
-    aside?.querySelector('.nav__item.is-active, .nav__item')?.focus()
+    // querySelector('a, b') returns first in DOM order — the active item
+    // must be looked up explicitly or "Pulpit" always wins
+    ;(aside?.querySelector('.nav__item.is-active') || aside?.querySelector('.nav__item'))?.focus()
     const onTab = (e) => {
       if (e.key !== 'Tab' || !aside) return
       const els = [...aside.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
@@ -381,13 +383,20 @@ export function Shell({ onLogout }) {
     contentRef.current?.toggleAttribute('inert', anyModal)
   }, [anyModal])
 
-  // global search shortcut
+  // global search shortcut — registered once, so it reads overlay state
+  // through a ref. A form drawer keeps priority (Ctrl+K must not stack a
+  // second modal over unsaved input); toggling closed drops inert first so
+  // the palette's focus restore can land in the content area.
+  const overlayRef = useRef({ drawer: null, cmd: false })
+  overlayRef.current = { drawer, cmd: cmdOpen }
   useEffect(() => {
     const onKey = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
+        if (overlayRef.current.drawer) return
         setNavOpen(false)
-        setCmdOpen((v) => !v)
+        if (overlayRef.current.cmd) contentRef.current?.removeAttribute('inert')
+        setCmdOpen(!overlayRef.current.cmd)
       }
     }
     window.addEventListener('keydown', onKey)

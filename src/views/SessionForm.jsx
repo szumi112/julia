@@ -167,7 +167,9 @@ export function SessionDrawer({ opts, onClose }) {
 
         <form className="drawer__body" onSubmit={submit} noValidate>
           <Field label="Klient" error={errors.clientId}>
-            <select className="select" value={form.clientId} onChange={(e) => onClientChange(e.target.value)} autoFocus>
+            {/* no autoFocus: it would hijack activeElement before useDrawerFX
+                records the opener, breaking focus restore on close */}
+            <select className="select" value={form.clientId} onChange={(e) => onClientChange(e.target.value)}>
               <option value="">— wybierz klienta —</option>
               {state.clients.map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>

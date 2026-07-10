@@ -7,7 +7,7 @@ import { Avatar, Button, Chip, IconBtn, Figure } from '../ui.jsx'
 import { Donut, BarFill } from '../charts.jsx'
 import {
   fmtMoney, fmtNumber, monthKey, addMonths, fmtMonthYear, fmtMonthLocative, fmtMonthName, cap,
-  isBillable, collectedOf, plural, sessionsWord,
+  isBillable, collectedOf, plural,
 } from '../format.js'
 
 const hoursWord = (h) => plural(h, 'godzina', 'godziny', 'godzin')
@@ -27,7 +27,8 @@ function ReportLead({ ym, stats, scopeName, avg }) {
   return (
     <p className="report-lead__text">
       {inMonth} {scopeName ? <em>{scopeName}</em> : 'zespół'} {scopeName ? 'przeprowadziła' : 'przeprowadził'}{' '}
-      <em>{stats.completed} {sessionsWord(stats.completed)}</em> — <em>{h} {hoursWord(h)}</em> rozmów.
+      {/* accusative after "przeprowadzić": 1 sesję / 2 sesje / 5 sesji */}
+      <em>{stats.completed} {plural(stats.completed, 'sesję', 'sesje', 'sesji')}</em> — <em>{h} {hoursWord(h)}</em> rozmów.
       Wystawiono <em>{fmtMoney(stats.revenue)}</em>{stats.revenue > 0 && stats.outstanding === 0
         ? <> i wszystko zostało już rozliczone.</>
         : <>; zebrano dotąd <em>{fmtMoney(stats.collected)}</em>, a <em>{fmtMoney(stats.outstanding)}</em> czeka na wpłaty.</>}

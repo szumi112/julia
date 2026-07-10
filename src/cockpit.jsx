@@ -113,7 +113,8 @@ function CockpitBody({ m, onClose }) {
         <div>
           <div className="cockpit__progress"><span style={{ width: `${pct}%` }} /></div>
           <div className="cockpit__meta">
-            <span>{m.done} z {total} {sessionsWord(total)} za Tobą</span>
+            {/* genitive after "z" — always "sesji" */}
+            <span>{m.done} z {total} sesji za Tobą</span>
             <span className="faint">{cap(fmtWeekday(m.today))}</span>
           </div>
           <div className="cockpit__list spine">
@@ -218,7 +219,9 @@ function CockpitPop({ anchorRef, onClose, children }) {
   useEffect(() => {
     const opener = document.activeElement
     const pop = ref.current
-    pop?.querySelector('button')?.focus()
+    // the entrance tween starts at autoAlpha 0 (visibility:hidden) in this
+    // same commit — focus only sticks once the panel is visible again
+    const t = setTimeout(() => pop?.querySelector('button')?.focus(), motionOK() ? 80 : 0)
     const onTab = (e) => {
       if (e.key !== 'Tab' || !pop) return
       const els = [...pop.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
@@ -237,6 +240,7 @@ function CockpitPop({ anchorRef, onClose, children }) {
     }
     document.addEventListener('keydown', onTab)
     return () => {
+      clearTimeout(t)
       document.removeEventListener('keydown', onTab)
       if (opener && typeof opener.focus === 'function') opener.focus()
     }

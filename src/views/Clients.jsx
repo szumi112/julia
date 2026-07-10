@@ -236,7 +236,7 @@ export function ClientDetail({ params }) {
               </button>
             )}
             <span>klient od {fmtFullDate(client.since)}</span>
-            <span>{completed.length} {sessionsWord(completed.length)} odbytych</span>
+            <span>{completed.length} {plural(completed.length, 'sesja odbyta', 'sesje odbyte', 'sesji odbytych')}</span>
           </div>
           <div className="id-band__pills">
             <Pill tone={client.status === 'active' ? 'sage' : 'mauve'} dot>
