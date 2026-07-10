@@ -117,6 +117,15 @@ export const PAY_PILL = {
   partial: 'pill--gold',
 }
 
+export const METHOD_LABELS = {
+  cash: 'Gotówka',
+  card: 'Karta',
+  transfer: 'Przelew',
+}
+
+// index = Date.getDay()
+export const WEEKDAY_SHORT = ['nd', 'pn', 'wt', 'śr', 'cz', 'pt', 'sb']
+
 export const paymentPatchFor = (payment, amount, paidAmount = 0) => {
   const total = Number(amount)
   if (payment === 'paid') return { payment, paidAmount: total }

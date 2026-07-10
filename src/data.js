@@ -13,6 +13,9 @@ const mulberry32 = (seed) => () => {
 
 const rand = mulberry32(20260611)
 const pick = (arr) => arr[Math.floor(rand() * arr.length)]
+// separate streams so new fields never shift the original generation
+const methodRand = mulberry32(20260712)
+const tusRand = mulberry32(20260713)
 
 export const PSYCHOLOGISTS = [
   {
@@ -131,6 +134,8 @@ export const CLIENTS = CLIENT_DEFS.map(([name, psychId], i) => {
     since: toISODate(daysAgo(sinceDays)),
     status: rand() < 0.85 ? 'active' : 'paused',
     notes,
+    familyId: null,
+    familyRole: null,
   }
 })
 
@@ -199,20 +204,52 @@ CLIENTS.forEach((client, ci) => {
       status,
       payment,
       paidAmount: paidAmount || 0,
+      method:
+        payment === 'paid' || payment === 'partial'
+          ? methodRand() < 0.45 ? 'card' : methodRand() < 0.55 ? 'cash' : 'transfer'
+          : null,
       note: status === 'completed' && rand() < 0.35 ? pick(NOTE_POOL) : '',
     })
   }
 })
 
+// Family demo — a parent and a child enrolled as separate clients (different
+// surnames), linked as one family. Hand-written after the generator so the
+// seeded stream stays stable.
+const FAMILY_CLIENTS = [
+  {
+    id: 'c20', name: 'Renata Gawrys', psychId: 'p3',
+    email: 'renata.gawrys@gmail.com', phone: '+48 512 384 664',
+    since: toISODate(daysAgo(45)), status: 'active',
+    notes: [{ date: toISODate(daysAgo(38)), text: 'Konsultacja rodzicielska przed rozpoczęciem terapii syna. Omówiony wywiad rozwojowy.' }],
+    familyId: 'f1', familyRole: 'rodzic',
+  },
+  {
+    id: 'c21', name: 'Ignacy Borkowski', psychId: 'p3',
+    email: 'ignacy.borkowski@gmail.com', phone: '+48 512 384 664',
+    since: toISODate(daysAgo(31)), status: 'active',
+    notes: [{ date: toISODate(daysAgo(10)), text: 'Praca nad regulacją emocji przez zabawę. Dobra współpraca, kontynuujemy.' }],
+    familyId: 'f1', familyRole: 'dziecko',
+  },
+]
+CLIENTS.push(...FAMILY_CLIENTS)
+
+const FAMILY_SESSIONS = [
+  { id: 'demo-family-parent', clientId: 'c20', psychId: 'p3', date: toISODate(daysAgo(38)), time: '11:00', duration: 50, amount: 190, status: 'completed', payment: 'paid', paidAmount: 190, method: 'transfer', note: '' },
+  { id: 'demo-family-child-past', clientId: 'c21', psychId: 'p3', date: toISODate(daysAgo(10)), time: '15:00', duration: 50, amount: 190, status: 'completed', payment: 'paid', paidAmount: 190, method: 'cash', note: '' },
+  { id: 'demo-family-child-next', clientId: 'c21', psychId: 'p3', date: toISODate(daysAgo(-4)), time: '15:00', duration: 50, amount: 190, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+]
+sessions.push(...FAMILY_SESSIONS)
+
 const scenarioDate = toISODate(TODAY)
 const DEMO_SCENARIOS = [
-  { id: 'demo-owner-completed', clientId: 'c1', psychId: 'p1', date: scenarioDate, time: '08:00', duration: 50, amount: 220, status: 'completed', payment: 'paid', paidAmount: 220, note: '' },
-  { id: 'demo-therapist-next', clientId: 'c6', psychId: 'p2', date: scenarioDate, time: '10:00', duration: 80, amount: 260, status: 'scheduled', payment: 'unpaid', paidAmount: 0, note: '' },
-  { id: 'demo-cancelled', clientId: 'c10', psychId: 'p3', date: scenarioDate, time: '12:00', duration: 50, amount: 190, status: 'cancelled', payment: 'unpaid', paidAmount: 0, note: '' },
-  { id: 'demo-noshow', clientId: 'c15', psychId: 'p4', date: scenarioDate, time: '13:00', duration: 50, amount: 240, status: 'noshow', payment: 'unpaid', paidAmount: 0, note: '' },
-  { id: 'demo-unpaid', clientId: 'c2', psychId: 'p1', date: scenarioDate, time: '14:00', duration: 50, amount: 220, status: 'completed', payment: 'unpaid', paidAmount: 0, note: '' },
-  { id: 'demo-partial', clientId: 'c7', psychId: 'p2', date: scenarioDate, time: '15:00', duration: 80, amount: 260, status: 'completed', payment: 'partial', paidAmount: 130, note: '' },
-  { id: 'demo-overlap', clientId: 'c3', psychId: 'p1', date: scenarioDate, time: '14:00', duration: 50, amount: 220, status: 'scheduled', payment: 'unpaid', paidAmount: 0, note: '' },
+  { id: 'demo-owner-completed', clientId: 'c1', psychId: 'p1', date: scenarioDate, time: '08:00', duration: 50, amount: 220, status: 'completed', payment: 'paid', paidAmount: 220, method: 'card', note: '' },
+  { id: 'demo-therapist-next', clientId: 'c6', psychId: 'p2', date: scenarioDate, time: '10:00', duration: 80, amount: 260, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-cancelled', clientId: 'c10', psychId: 'p3', date: scenarioDate, time: '12:00', duration: 50, amount: 190, status: 'cancelled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-noshow', clientId: 'c15', psychId: 'p4', date: scenarioDate, time: '13:00', duration: 50, amount: 240, status: 'noshow', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-unpaid', clientId: 'c2', psychId: 'p1', date: scenarioDate, time: '14:00', duration: 50, amount: 220, status: 'completed', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-partial', clientId: 'c7', psychId: 'p2', date: scenarioDate, time: '15:00', duration: 80, amount: 260, status: 'completed', payment: 'partial', paidAmount: 130, method: 'cash', note: '' },
+  { id: 'demo-overlap', clientId: 'c3', psychId: 'p1', date: scenarioDate, time: '14:00', duration: 50, amount: 220, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
 ]
 sessions.push(...DEMO_SCENARIOS)
 
@@ -238,6 +275,99 @@ export const POSTS = [
   },
 ]
 
+// --- Grupa TUS ----------------------------------------------------------
+// Group social-skills classes for kids — a category separate from the 1:1
+// sessions. Kids belong to age groups; classes are weekly with per-kid
+// attendance; parents pay a monthly fee (mirrors the practice's Excel tab).
+
+export const TUS_GROUPS = [
+  { id: 'g1', name: 'Grupa TUS 5–6 lat', age: '5–6 lat', leaderIds: ['p2', 'p3'], weekday: 3, time: '16:00', fee: 300 },
+  { id: 'g2', name: 'Grupa TUS 4 lata', age: '4 lata', leaderIds: ['p3', 'p4'], weekday: 4, time: '17:00', fee: 300 },
+]
+
+const TUS_KID_DEFS = [
+  ['Hania Malik', 5, 'g1', 'Ewa Malik', true],
+  ['Staś Urban', 6, 'g1', 'Karol Urban', true],
+  ['Pola Dec', 5, 'g1', 'Sylwia Nowicka', true],
+  ['Ignacy Lis', 6, 'g1', 'Beata Lis', false],
+  ['Maja Cichoń', 5, 'g1', 'Tomasz Cichoń', true],
+  ['Antek Duda', 4, 'g2', 'Marta Duda', true],
+  ['Zosia Kral', 4, 'g2', 'Piotr Kral', true],
+  ['Franek Bąk', 4, 'g2', 'Aneta Wilk', false],
+  ['Lena Szulc', 4, 'g2', 'Igor Szulc', true],
+  ['Borys Cygan', 5, null, 'Alina Cygan', false],
+  ['Tosia Wrona', 6, null, 'Jan Wrona', false],
+]
+
+export const TUS_KIDS = TUS_KID_DEFS.map(([name, age, groupId, parentName, regulationsSigned], i) => ({
+  id: `k${i + 1}`,
+  name,
+  age,
+  groupId,
+  parentName,
+  parentPhone: `+48 ${601 + i} ${230 + i * 11} ${402 + i * 7}`,
+  regulationsSigned,
+  note: '',
+}))
+
+const TUS_TOPICS = [
+  'Rozpoznawanie emocji',
+  'Czekanie na swoją kolej',
+  'Współpraca w parze',
+  'Proszenie o pomoc',
+  'Przegrywanie bez złości',
+  'Uważne słuchanie',
+  'Rozwiązywanie konfliktów',
+  'Mowa ciała',
+  'Komplementy i podziękowania',
+  'Wspólna zabawa — zasady',
+]
+
+export const TUS_CLASSES = []
+let tcId = 1
+for (const group of TUS_GROUPS) {
+  const kids = TUS_KIDS.filter((k) => k.groupId === group.id)
+  for (let weekOffset = -10; weekOffset <= 3; weekOffset++) {
+    const d = new Date(TODAY)
+    d.setDate(d.getDate() - d.getDay() + group.weekday + weekOffset * 7)
+    const iso = toISODate(d)
+    const past = iso <= toISODate(TODAY)
+    const attendance = {}
+    if (past) for (const kid of kids) attendance[kid.id] = tusRand() < 0.85
+    TUS_CLASSES.push({
+      id: `tc${tcId++}`,
+      groupId: group.id,
+      date: iso,
+      time: group.time,
+      topic: past ? TUS_TOPICS[(weekOffset + 10) % TUS_TOPICS.length] : '',
+      attendance,
+    })
+  }
+}
+TUS_CLASSES.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
+
+export const TUS_PAYMENTS = []
+let tpId = 1
+const tusPaidMonths = [...new Set(TUS_CLASSES.filter((c) => c.date <= toISODate(TODAY)).map((c) => monthKey(c.date)))].sort()
+for (const ym of tusPaidMonths) {
+  for (const kid of TUS_KIDS.filter((k) => k.groupId)) {
+    const group = TUS_GROUPS.find((g) => g.id === kid.groupId)
+    const current = ym === CURRENT_MONTH
+    const paid = current ? tusRand() < 0.55 : true
+    TUS_PAYMENTS.push({
+      id: `tp${tpId++}`,
+      kidId: kid.id,
+      ym,
+      amount: group.fee,
+      status: paid ? 'paid' : 'unpaid',
+      method: paid ? (tusRand() < 0.7 ? 'transfer' : tusRand() < 0.5 ? 'cash' : 'card') : null,
+      invoice: paid && tusRand() < 0.6,
+      paidDate: paid ? `${ym}-05` : null,
+      note: kid.id === 'k3' ? 'przelew od przedszkola (faktura na placówkę)' : '',
+    })
+  }
+}
+
 export const INITIAL_STATE = {
   user: { name: 'Julia Wolanin', role: 'Założycielka', email: 'julia@aurelia.pl', psychId: 'p1' },
   demoRoleId: 'owner',
@@ -251,5 +381,9 @@ export const INITIAL_STATE = {
   clients: CLIENTS,
   sessions: SESSIONS,
   posts: POSTS,
-  prefs: { reduceMotion: false, weekendsInCalendar: true },
+  tusGroups: TUS_GROUPS,
+  tusKids: TUS_KIDS,
+  tusClasses: TUS_CLASSES,
+  tusPayments: TUS_PAYMENTS,
+  prefs: { reduceMotion: false, weekendsInCalendar: true, gcalConnected: false },
 }
