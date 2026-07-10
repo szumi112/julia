@@ -3,6 +3,7 @@ import { createContext, useContext, useMemo, useReducer, useState, useCallback }
 import { DEMO_ROLES, INITIAL_STATE } from './data.js'
 import { monthKey, billableSummary, outstandingOf, paymentPatchFor } from './format.js'
 import { stripKid } from './tus.js'
+import { dissolveLoneFamilies } from './workspace.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -64,9 +65,10 @@ function reducer(state, action) {
       }
     case 'DELETE_CLIENT':
       // removing a client also removes their session history (in-memory demo)
+      // and dissolves a family the removal leaves with a single member
       return {
         ...state,
-        clients: state.clients.filter((c) => c.id !== action.id),
+        clients: dissolveLoneFamilies(state.clients.filter((c) => c.id !== action.id)),
         sessions: state.sessions.filter((s) => s.clientId !== action.id),
       }
     case 'ADD_POST': {
@@ -86,23 +88,28 @@ function reducer(state, action) {
     case 'SET_PREF':
       return { ...state, prefs: { ...state.prefs, [action.key]: action.value } }
     case 'LINK_FAMILY': {
+      const acting = state.clients.find((c) => c.id === action.clientId)
       const other = state.clients.find((c) => c.id === action.otherId)
-      const familyId = other?.familyId || `f${nextId++}`
+      // the acting client's family wins, so linking from an existing member
+      // grows that family instead of stranding it
+      const familyId = acting?.familyId || other?.familyId || `f${nextId++}`
       return {
         ...state,
-        clients: state.clients.map((c) =>
+        clients: dissolveLoneFamilies(state.clients.map((c) =>
           c.id === action.clientId
             ? { ...c, familyId, familyRole: action.role || null }
             : c.id === action.otherId
               ? { ...c, familyId }
               : c
-        ),
+        )),
       }
     }
     case 'UNLINK_FAMILY':
       return {
         ...state,
-        clients: state.clients.map((c) => (c.id === action.clientId ? { ...c, familyId: null, familyRole: null } : c)),
+        clients: dissolveLoneFamilies(
+          state.clients.map((c) => (c.id === action.clientId ? { ...c, familyId: null, familyRole: null } : c))
+        ),
       }
     case 'ADD_TUS_GROUP':
       return { ...state, tusGroups: [...state.tusGroups, { ...action.group, id: `g${nextId++}` }] }

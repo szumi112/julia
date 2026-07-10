@@ -288,15 +288,22 @@ export function ClientDetail({ params }) {
               <span>Rodzina</span>
               {family.length > 0 ? (
                 <span className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
-                  {family.map((member) => (
-                    <button
-                      key={member.id}
-                      className="link care-overview__value"
-                      onClick={() => navigate('client', { id: member.id })}
-                    >
-                      {member.name}{member.familyRole ? ` (${member.familyRole})` : ''}
-                    </button>
-                  ))}
+                  {family.map((member) => {
+                    const label = `${member.name}${member.familyRole ? ` (${member.familyRole})` : ''}`
+                    // a therapist sees the family fact, but only their own
+                    // clients' cards open from here
+                    return role.scope === 'own' && member.psychId !== role.psychId ? (
+                      <b key={member.id}>{label}</b>
+                    ) : (
+                      <button
+                        key={member.id}
+                        className="link care-overview__value"
+                        onClick={() => navigate('client', { id: member.id })}
+                      >
+                        {label}
+                      </button>
+                    )
+                  })}
                 </span>
               ) : <b>—</b>}
             </div>

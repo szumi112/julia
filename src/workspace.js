@@ -9,6 +9,18 @@ export const sessionsForRole = (state, role) =>
 export const clientsForRole = (state, role) =>
   role.scope === 'own' ? state.clients.filter((client) => client.psychId === role.psychId) : state.clients
 
+// A family needs at least two members — after an unlink, delete, or move,
+// clear the link fields on anyone left alone so no dangling familyId survives.
+export const dissolveLoneFamilies = (clients) => {
+  const sizes = {}
+  for (const client of clients) {
+    if (client.familyId) sizes[client.familyId] = (sizes[client.familyId] || 0) + 1
+  }
+  return clients.map((client) =>
+    client.familyId && sizes[client.familyId] < 2 ? { ...client, familyId: null, familyRole: null } : client
+  )
+}
+
 export const sessionMatchesFilters = (session, filters) => {
   const afterStart = !filters.dateFrom || session.date >= filters.dateFrom
   const beforeEnd = !filters.dateTo || session.date <= filters.dateTo

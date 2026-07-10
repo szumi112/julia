@@ -2,6 +2,7 @@
 import { useRef, useState } from 'react'
 import { useApp, clientOutstanding } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
+import { clientsForRole } from '../workspace.js'
 import { Button, Field, Segmented, IconBtn } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
@@ -11,7 +12,7 @@ const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export function ClientDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
-  const { route, navigate } = useShell()
+  const { route, navigate, role } = useShell()
   const editing = opts.client || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
@@ -35,7 +36,8 @@ export function ClientDrawer({ opts, onClose }) {
   const familyMembers = current?.familyId
     ? state.clients.filter((c) => c.familyId === current.familyId && c.id !== current.id)
     : []
-  const linkables = state.clients.filter(
+  // therapists may link only within their own client list
+  const linkables = clientsForRole(state, role).filter(
     (c) => c.id !== editing?.id && !familyMembers.some((m) => m.id === c.id)
   )
 

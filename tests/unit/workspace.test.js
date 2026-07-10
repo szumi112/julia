@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters } from '../../src/workspace.js'
+import { roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters, dissolveLoneFamilies } from '../../src/workspace.js'
 import { billableSummary, paymentPatchFor } from '../../src/format.js'
 
 const state = {
@@ -77,6 +77,18 @@ test('session filters combine inclusive date, payment, and attendance constraint
   assert.equal(sessionMatchesFilters(state.sessions[1], filters), true)
   assert.equal(sessionMatchesFilters({ ...state.sessions[1], payment: 'unpaid' }, filters), false)
   assert.equal(sessionMatchesFilters({ ...state.sessions[1], date: '2026-07-11' }, filters), false)
+})
+
+test('families with fewer than two members dissolve completely', () => {
+  const clients = [
+    { id: 'c1', familyId: 'f1', familyRole: 'rodzic' },
+    { id: 'c2', familyId: null, familyRole: null },
+    { id: 'c3', familyId: 'f2', familyRole: null },
+    { id: 'c4', familyId: 'f2', familyRole: 'dziecko' },
+  ]
+  const out = dissolveLoneFamilies(clients)
+  assert.deepEqual(out.map((c) => c.familyId), [null, null, 'f2', 'f2'])
+  assert.equal(out[0].familyRole, null)
 })
 
 test('billable summary includes billable no-shows in its average population', () => {
