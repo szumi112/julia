@@ -255,4 +255,8 @@ test('owner outstanding figure opens matching all-period unpaid payments', async
   await page.locator('.figures__item--gold').click()
   await expect(page.getByText(/wszystkie okresy.*tylko zaległe/i)).toBeVisible()
   await expect(page.locator('.figures__item--gold .figures__value')).toHaveText(amount)
+  const issuedTip = page.locator('.figures__item').filter({ hasText: 'Wystawione' }).getByRole('button', { name: 'Wyjaśnienie' })
+  await issuedTip.focus()
+  const issuedTipId = await issuedTip.getAttribute('aria-describedby')
+  await expect(page.locator(`[id="${issuedTipId}"]`)).toHaveText('Suma kwot za sesje rozliczane we wszystkich okresach — odbyte i nieobecności. Sesje odwołane nie są fakturowane.')
 })

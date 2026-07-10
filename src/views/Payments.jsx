@@ -115,7 +115,10 @@ export function Payments() {
       </div>
       <div className="figures" role="group" aria-label={`Rozliczenia — ${allPeriods ? 'wszystkie okresy' : fmtMonthYear(ym)}`}>
         <Figure
-          label={<>Wystawione <InfoTip text="Suma kwot za sesje rozliczane w tym miesiącu — odbyte i nieobecności. Sesje odwołane nie są fakturowane." /></>}
+          label={<>Wystawione <InfoTip text={allPeriods
+            ? 'Suma kwot za sesje rozliczane we wszystkich okresach — odbyte i nieobecności. Sesje odwołane nie są fakturowane.'
+            : 'Suma kwot za sesje rozliczane w tym miesiącu — odbyte i nieobecności. Sesje odwołane nie są fakturowane.'
+          } /></>}
           value={collected + outstanding}
           fmt={fmtMoney}
         />
