@@ -117,6 +117,16 @@ export const PAY_PILL = {
   partial: 'pill--gold',
 }
 
+export const paymentPatchFor = (payment, amount, paidAmount = 0) => {
+  const total = Number(amount)
+  if (payment === 'paid') return { payment, paidAmount: total }
+  if (payment === 'unpaid') return { payment, paidAmount: 0 }
+  const current = Number(paidAmount)
+  const roundedFallback = Math.round(total / 2 / 10) * 10
+  const fallback = roundedFallback > 0 && roundedFallback < total ? roundedFallback : total / 2
+  return { payment: 'partial', paidAmount: current > 0 && current < total ? current : fallback }
+}
+
 // Billing rules: completed + no-show sessions are billed; cancelled are not.
 export const isBillable = (s) => s.status === 'completed' || s.status === 'noshow'
 

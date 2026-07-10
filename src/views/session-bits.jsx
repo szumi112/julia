@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Pill, Popover, PopItem } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useApp } from '../store.jsx'
+import { useShell } from '../shell-ctx.js'
 import { STATUS_LABELS, STATUS_PILL, PAY_LABELS, PAY_PILL, fmtMoney } from '../format.js'
 
 const STATUS_TONE = { scheduled: 'rose', completed: 'sage', cancelled: 'mauve', noshow: 'error' }
@@ -45,6 +46,7 @@ export function StatusPicker({ session }) {
 
 export function PaymentPicker({ session }) {
   const { dispatch, toast } = useApp()
+  const { openSessionForm } = useShell()
   const [open, setOpen] = useState(false)
   const label =
     session.payment === 'partial'
@@ -66,10 +68,8 @@ export function PaymentPicker({ session }) {
           key={p}
           on={p === session.payment}
           onClick={() => {
-            const patch = { payment: p }
-            if (p === 'partial' && !session.paidAmount) patch.paidAmount = Math.round(session.amount / 2 / 10) * 10
-            dispatch({ type: 'UPDATE_SESSION', id: session.id, patch })
-            setOpen(false)
+            dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: { payment: p } })
+            setOpen(p === 'partial')
             toast(`Płatność zmieniona: ${PAY_LABELS[p].toLowerCase()}`)
           }}
         >
@@ -77,6 +77,18 @@ export function PaymentPicker({ session }) {
           {PAY_LABELS[p]}
         </PopItem>
       ))}
+      {session.payment === 'partial' && (
+        <PopItem
+          role="menuitem"
+          onClick={() => {
+            setOpen(false)
+            openSessionForm({ session, focus: 'paidAmount' })
+          }}
+        >
+          <Icon name="edit" size={14} />
+          Edytuj kwotę
+        </PopItem>
+      )}
     </Popover>
   )
 }

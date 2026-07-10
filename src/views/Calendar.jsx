@@ -2,10 +2,11 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip, motionOK } from '../anim.js'
-import { useIsPhone, useIsCompact, useMediaQuery, desktopMQ, phoneMQ } from '../responsive.js'
+import { useIsPhone, useMediaQuery, desktopMQ } from '../responsive.js'
 import { Button, IconBtn, Segmented, Avatar, Chip, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
+import { sessionsForRole } from '../workspace.js'
 import {
   monthKey, addMonths, fmtMonthYear, toISODate, parseISO, pad2, cap,
   fmtWeekday, fmtDayMonth, fmtMoney, sessionsWord, timeToMin, outstandingOf,
@@ -84,33 +85,34 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
 
 export function CalendarView() {
   const { state, dispatch, toast } = useApp()
-  const { openSessionForm } = useShell()
+  const { openSessionForm, role } = useShell()
   const today = toISODate(new Date())
   const curYm = monthKey(new Date())
   const [ym, setYm] = useState(curYm)
-  // phones start in the day agenda — the 7-column grid is a tap target maze there
-  const [mode, setMode] = useState(() => (window.matchMedia(phoneMQ).matches ? 'agenda' : 'cal'))
+  const [mode, setMode] = useState('agenda')
   const [selected, setSelected] = useState(today)
   const [psychFilter, setPsychFilter] = useState(null)
   const [statusFilter, setStatusFilter] = useState(null)
   const [unpaidOnly, setUnpaidOnly] = useState(false)
+  const [agendaExpanded, setAgendaExpanded] = useState(false)
   const isPhone = useIsPhone()
-  const isCompact = useIsCompact()
-
-  // crossing the phone breakpoint swaps the available modes
-  useEffect(() => {
-    if (isPhone && mode === 'list') setMode('agenda')
-    if (!isPhone && mode === 'agenda') setMode('cal')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPhone])
   // dragging an agenda row would trap touch scrolling, so it stays a desktop affordance
   const agendaDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
   const gridRef = useRef(null)
   const dayPanelRef = useRef(null)
+  const agendaPanelRef = useRef(null)
   const ref = useReveal()
   const suppressClick = useRef(false)
 
-  const monthsRange = useMemo(() => availableMonths(state.sessions), [state.sessions])
+  const roleSessions = useMemo(() => sessionsForRole(state, role), [state, role])
+  const rolePsychologists = useMemo(
+    () => role.scope === 'own'
+      ? state.psychologists.filter((psychologist) => psychologist.id === role.psychId)
+      : state.psychologists,
+    [role, state.psychologists]
+  )
+  useEffect(() => setPsychFilter(null), [role.id])
+  const monthsRange = useMemo(() => availableMonths(roleSessions), [roleSessions])
   const showWeekends = state.prefs.weekendsInCalendar
   const cells = useMemo(() => {
     const all = monthGrid(ym)
@@ -119,14 +121,14 @@ export function CalendarView() {
 
   // cancelled sessions are not shown on the grid (they stay in client history)
   const monthSessions = useMemo(
-    () => sessionsInMonth(state.sessions, ym).filter(
+    () => sessionsInMonth(roleSessions, ym).filter(
       (s) =>
         s.status !== 'cancelled' &&
         (!psychFilter || s.psychId === psychFilter) &&
         (!statusFilter || s.status === statusFilter) &&
         (!unpaidOnly || outstandingOf(s) > 0)
     ),
-    [state.sessions, ym, psychFilter, statusFilter, unpaidOnly]
+    [roleSessions, ym, psychFilter, statusFilter, unpaidOnly]
   )
   const byDate = useMemo(() => {
     const map = {}
@@ -219,7 +221,7 @@ export function CalendarView() {
         } else {
           toast(`Sesja przeniesiona na ${fmtDayMonth(d.dropIso)}`)
         }
-        setSelected(d.dropIso)
+        selectDay(d.dropIso)
         if (motionOK() && target) {
           const cr = target.getBoundingClientRect()
           window.gsap.to(ghost, {
@@ -263,7 +265,7 @@ export function CalendarView() {
       firstSwap.current = false
       return
     }
-    if (mode === 'list' || !motionOK() || !gridRef.current) return
+    if (mode !== 'cal' || !motionOK() || !gridRef.current) return
     window.gsap.fromTo(
       gridRef.current.children,
       { autoAlpha: 0, y: 10 },
@@ -271,8 +273,11 @@ export function CalendarView() {
     )
   }, [ym, mode, showWeekends])
 
-  // list mode: day cards glide (FLIP) when filters add/remove/move them
-  const flipRef = useFlip(`${mode}|${ym}|${psychFilter}|${statusFilter}|${unpaidOnly}`)
+  const filterKey = `${ym}|${psychFilter}|${statusFilter}|${unpaidOnly}`
+  // Filtered events retain spatial continuity in every operational view.
+  const agendaFlipRef = useFlip(`agenda|${filterKey}`)
+  const gridFlipRef = useFlip(`cal|${filterKey}`)
+  const listFlipRef = useFlip(`list|${filterKey}`)
 
   const changeMonth = (d) => {
     const next = addMonths(ym, d)
@@ -281,14 +286,14 @@ export function CalendarView() {
     setSelected(next === curYm ? today : `${next}-01`)
   }
 
-  // stacked layouts put the day panel below the grid — bring it into view
+  // A selected day always returns the operator to its actionable session list.
   const selectDay = (iso) => {
     setSelected(iso)
-    if (isCompact) {
-      requestAnimationFrame(() =>
-        dayPanelRef.current?.scrollIntoView({ behavior: motionOK() ? 'smooth' : 'auto', block: 'start' })
-      )
-    }
+    const panel = mode === 'agenda' ? agendaPanelRef.current : dayPanelRef.current
+    if (!panel) return
+    requestAnimationFrame(() =>
+      panel.scrollIntoView({ behavior: motionOK() ? 'smooth' : 'auto', block: 'start' })
+    )
   }
 
   const daySessions = selected ? (byDate[selected] || []) : []
@@ -310,9 +315,12 @@ export function CalendarView() {
     () => (byDate[agendaSel] || []).slice().sort((a, b) => (a.time < b.time ? -1 : 1)),
     [byDate, agendaSel]
   )
+  const shownAgendaSessions = agendaExpanded ? agendaSessions : agendaSessions.slice(0, 4)
+  const hiddenAgendaSessions = agendaSessions.length - shownAgendaSessions.length
+
+  useEffect(() => setAgendaExpanded(false), [agendaSel, filterKey])
 
   // gentle row cascade when another day is picked from the strip
-  const agendaRef = useRef(null)
   const firstAgendaSwap = useRef(true)
   useEffect(() => {
     if (mode !== 'agenda') {
@@ -323,9 +331,9 @@ export function CalendarView() {
       firstAgendaSwap.current = false
       return
     }
-    if (!motionOK() || !agendaRef.current) return
+    if (!motionOK() || !agendaPanelRef.current) return
     window.gsap.fromTo(
-      agendaRef.current.querySelectorAll('.agenda__row, .empty'),
+      agendaPanelRef.current.querySelectorAll('.agenda__row, .empty'),
       { autoAlpha: 0, y: 12 },
       { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power3.out', stagger: 0.05, clearProps: 'transform,opacity,visibility' }
     )
@@ -340,6 +348,7 @@ export function CalendarView() {
       <div
         className="agenda__row"
         key={s.id}
+        data-flip-id={s.id}
         onPointerDown={draggable ? (e) => onChipDown(e, s) : undefined}
         style={{ '--node-color': p?.color, ...(draggable ? { touchAction: 'none' } : null) }}
       >
@@ -361,12 +370,12 @@ export function CalendarView() {
   }
 
   // a day's rows on the day thread, with the "teraz" marker when it is today
-  const dayThread = (sessions, dragOk, iso) => {
+  const dayThread = (sessions, dragOk, iso, flipRef) => {
     const now = new Date()
     const nowMin = now.getHours() * 60 + now.getMinutes()
     const isToday = iso === today
     return (
-      <div className="agenda agenda--spine" style={{ marginTop: 6 }}>
+      <div className="agenda agenda--spine" ref={flipRef} style={{ marginTop: 6 }}>
         {sessions.length > 0 && <span className="spine__rule" aria-hidden="true" />}
         {sessions.map((s, i) => {
           const nowHere = isToday &&
@@ -395,15 +404,10 @@ export function CalendarView() {
             ariaLabel="Widok"
             value={mode}
             onChange={setMode}
-            options={isPhone
-              ? [
-                  { value: 'agenda', label: 'Plan dnia', icon: 'clock' },
-                  { value: 'cal', label: 'Miesiąc', icon: 'calendar' },
-                ]
-              : [
-                  { value: 'cal', label: 'Kalendarz', icon: 'calendar' },
-                  { value: 'list', label: 'Lista', icon: 'reports' },
-                ]}
+            options={[
+              { value: 'agenda', label: 'Plan dnia', icon: 'clock' },
+              { value: 'cal', label: 'Miesiąc', icon: 'calendar' },
+            ]}
           />
           {/* the phone's raised tabbar action already covers "new session" */}
           {!isPhone && (
@@ -415,8 +419,10 @@ export function CalendarView() {
       </div>
 
       <div className="row chips-row" data-reveal>
-        <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
-        {state.psychologists.map((p) => (
+        <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>
+          {role.scope === 'own' ? 'Mój grafik' : 'Cały zespół'}
+        </Chip>
+        {rolePsychologists.map((p) => (
           <Chip key={p.id} on={psychFilter === p.id} swatch={p.color}
             onClick={() => setPsychFilter(psychFilter === p.id ? null : p.id)}>
             {p.name.split(' ')[0]}
@@ -468,9 +474,9 @@ export function CalendarView() {
             today={today}
             byDate={byDate}
             psychOf={psychOf}
-            onSelect={setSelected}
+            onSelect={selectDay}
           />
-          <div className="card card--pad agenda-day" ref={agendaRef} data-reveal>
+          <section className="card card--pad agenda-day" ref={agendaPanelRef} data-reveal aria-label="Plan dnia">
             <h2 className="card-title">
               <span className="row" style={{ gap: 9 }}>
                 {cap(fmtWeekday(agendaSel))}, {fmtDayMonth(agendaSel)}
@@ -488,13 +494,18 @@ export function CalendarView() {
                 hint="Dodaj sesję przyciskiem poniżej."
               />
             ) : (
-              dayThread(agendaSessions, false, agendaSel)
+              dayThread(shownAgendaSessions, false, agendaSel, agendaFlipRef)
+            )}
+            {hiddenAgendaSessions > 0 && (
+              <button type="button" className="bpost-more" onClick={() => setAgendaExpanded(true)}>
+                +{hiddenAgendaSessions} więcej
+              </button>
             )}
             <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
               onClick={() => openSessionForm({ date: agendaSel, psychId: psychFilter || undefined })}>
               Dodaj sesję tego dnia
             </Button>
-          </div>
+          </section>
         </>
       ) : mode === 'cal' ? (
         <div className="grid-31" data-reveal>
@@ -504,13 +515,18 @@ export function CalendarView() {
                 <div key={d} className="cal__dow">{d}</div>
               ))}
             </div>
-            <div className="cal" ref={gridRef} style={{ gridTemplateColumns: `repeat(${showWeekends ? 7 : 5}, 1fr)` }}>
+            <div
+              className="cal"
+              ref={(node) => { gridRef.current = node; gridFlipRef.current = node }}
+              style={{ gridTemplateColumns: `repeat(${showWeekends ? 7 : 5}, 1fr)` }}
+            >
               {cells.map((cell) => {
                 const items = (byDate[cell.iso] || []).sort((a, b) => (a.time < b.time ? -1 : 1))
                 return (
                   <button
                     key={cell.iso}
                     data-iso={cell.iso}
+                    data-flip-id={`day-${cell.iso}`}
                     className={[
                       'cal__day',
                       cell.inMonth ? '' : 'is-out',
@@ -535,6 +551,7 @@ export function CalendarView() {
                           <span
                             key={s.id}
                             className={`cal__item ${s.status === 'scheduled' ? 'is-draggable' : ''}`}
+                            data-flip-id={s.id}
                             style={{ background: psychOf(s.psychId)?.soft }}
                             onPointerDown={(e) => onChipDown(e, s)}
                             title={s.status === 'scheduled' ? 'Przeciągnij, aby przełożyć sesję' : undefined}
@@ -551,7 +568,7 @@ export function CalendarView() {
               })}
             </div>
             <div className="legend" style={{ marginTop: 16 }}>
-              {state.psychologists.map((p) => (
+              {rolePsychologists.map((p) => (
                 <span key={p.id} className="legend__item" style={psychFilter && psychFilter !== p.id ? { opacity: 0.35 } : undefined}>
                   <span className="legend__swatch" style={{ background: p.color }} />
                   {p.name}
@@ -591,10 +608,10 @@ export function CalendarView() {
           </div>
         </div>
       ) : (
-        <div className="stack" ref={flipRef} data-reveal>
+        <div className="stack" ref={listFlipRef} data-reveal>
           {listDays.length === 0 && (
             <div className="card card--pad">
-              {sessionsInMonth(state.sessions, ym).some((s) => s.status !== 'cancelled') ? (
+              {sessionsInMonth(roleSessions, ym).some((s) => s.status !== 'cancelled') ? (
                 <EmptyState
                   icon="search"
                   title="Nic nie pasuje do filtrów"

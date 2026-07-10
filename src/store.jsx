@@ -1,7 +1,7 @@
 // In-memory app state — no persistence by design (demo).
 import { createContext, useContext, useMemo, useReducer, useState, useCallback } from 'react'
 import { DEMO_ROLES, INITIAL_STATE } from './data.js'
-import { monthKey, isBillable, collectedOf, outstandingOf } from './format.js'
+import { monthKey, isBillable, collectedOf, outstandingOf, paymentPatchFor } from './format.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -20,7 +20,11 @@ function reducer(state, action) {
       return {
         ...state,
         sessions: state.sessions
-          .map((s) => (s.id === action.id ? { ...s, ...action.patch } : s))
+          .map((s) => {
+            if (s.id !== action.id) return s
+            const session = { ...s, ...action.patch }
+            return { ...session, ...paymentPatchFor(session.payment, session.amount, session.paidAmount) }
+          })
           .sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : 1)),
       }
     case 'DELETE_SESSION':

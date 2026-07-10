@@ -11,6 +11,7 @@ export function SessionDrawer({ opts, onClose }) {
   const editing = opts.session || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
+  const paidAmountRef = useRef(null)
   const { close, shake } = useDrawerFX(drawerRef, backRef, onClose)
 
   const defaultClient = editing?.clientId || opts.clientId || ''
@@ -35,6 +36,23 @@ export function SessionDrawer({ opts, onClose }) {
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
   const amountTouched = useRef(!!editing)
+
+  useEffect(() => {
+    if (opts.focus !== 'paidAmount' || form.payment !== 'partial') return
+    // useDrawerFX keeps later fields hidden during its entrance stagger. Wait
+    // for this field's actual visibility instead of racing that animation.
+    let frame
+    const focusWhenVisible = () => {
+      const input = paidAmountRef.current
+      if (!input || getComputedStyle(input).visibility === 'hidden') {
+        frame = requestAnimationFrame(focusWhenVisible)
+        return
+      }
+      input.focus()
+    }
+    frame = requestAnimationFrame(focusWhenVisible)
+    return () => cancelAnimationFrame(frame)
+  }, [opts.focus, form.payment])
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -108,10 +126,14 @@ export function SessionDrawer({ opts, onClose }) {
     if (!form.date) errs.date = 'Podaj datę'
     if (!form.time) errs.time = 'Podaj godzinę'
     const amount = Number(form.amount)
-    if (!amount || amount <= 0) errs.amount = 'Podaj kwotę większą od zera'
+    if (!Number.isFinite(amount) || amount <= 0) errs.amount = 'Podaj kwotę większą od zera'
+    const selectedClient = state.clients.find((c) => c.id === form.clientId)
+    if (selectedClient && form.psychId && selectedClient.psychId !== form.psychId) {
+      errs.psychId = 'Wybrana specjalistka nie prowadzi tego klienta'
+    }
     if (form.payment === 'partial') {
       const pa = Number(form.paidAmount)
-      if (!pa || pa <= 0) errs.paidAmount = 'Podaj wpłaconą kwotę'
+      if (!Number.isFinite(pa) || pa <= 0) errs.paidAmount = 'Podaj wpłaconą kwotę'
       else if (pa >= amount) errs.paidAmount = 'Wpłata częściowa musi być niższa niż kwota'
     }
     setErrors(errs)
@@ -263,6 +285,7 @@ export function SessionDrawer({ opts, onClose }) {
                 className="input"
                 value={form.paidAmount}
                 placeholder="np. 110"
+                ref={paidAmountRef}
                 onChange={(e) => set('paidAmount', e.target.value)}
               />
             </Field>

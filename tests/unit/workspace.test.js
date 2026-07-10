@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { roleById, sessionsForRole, dayAttention, todayWorkspace } from '../../src/workspace.js'
+import { paymentPatchFor } from '../../src/format.js'
 
 const state = {
   sessions: [
@@ -34,4 +35,12 @@ test('today workspace selects the next scheduled session for the active role', (
     sessions: [{ ...state.sessions[1], status: 'scheduled' }],
   }, roleById('therapist'), new Date('2026-07-10T09:30:00'))
   assert.equal(workspace.next.id, 's-therapist')
+})
+
+test('partial payment replaces an invalid full paid amount with a valid partial amount', () => {
+  assert.deepEqual(paymentPatchFor('partial', 220, 220), { payment: 'partial', paidAmount: 110 })
+})
+
+test('partial payment keeps a strict partial amount for low positive totals', () => {
+  assert.deepEqual(paymentPatchFor('partial', 1, 1), { payment: 'partial', paidAmount: 0.5 })
 })

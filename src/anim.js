@@ -287,7 +287,7 @@ export function useFlip(depKey) {
   useLayoutEffect(() => {
     const root = ref.current
     if (!root) return
-    const children = [...root.children].filter((el) => el.dataset && el.dataset.flipId)
+    const children = [...root.querySelectorAll('[data-flip-id]')]
     const next = new Map()
     children.forEach((el) => next.set(el.dataset.flipId, el.offsetTop))
     if (motionOK() && tops.current.size) {
