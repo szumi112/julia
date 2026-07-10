@@ -4,7 +4,7 @@ import { Pill, Popover, PopItem } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { STATUS_LABELS, STATUS_PILL, PAY_LABELS, PAY_PILL, fmtMoney } from '../format.js'
+import { STATUS_LABELS, STATUS_PILL, PAY_LABELS, PAY_PILL, METHOD_LABELS, fmtMoney } from '../format.js'
 
 const STATUS_TONE = { scheduled: 'rose', completed: 'sage', cancelled: 'mauve', noshow: 'error' }
 const PAY_TONE = { paid: 'sage', unpaid: 'error', partial: 'gold' }
@@ -92,6 +92,26 @@ export function PaymentPicker({ session }) {
           <Icon name="edit" size={14} />
           Edytuj kwotę
         </PopItem>
+      )}
+      {session.payment !== 'unpaid' && (
+        <>
+          <div className="popover__sep" role="separator" />
+          <div className="popover__label">Forma płatności</div>
+          {Object.entries(METHOD_LABELS).map(([value, label]) => (
+            <PopItem
+              key={value}
+              on={session.method === value}
+              onClick={() => {
+                setOpen(false)
+                if (session.method === value) return
+                dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: { method: value } })
+                toast(`Forma płatności: ${label.toLowerCase()}`)
+              }}
+            >
+              {label}
+            </PopItem>
+          ))}
+        </>
       )}
     </Popover>
   )

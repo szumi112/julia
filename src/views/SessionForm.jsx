@@ -4,7 +4,7 @@ import { useApp } from '../store.jsx'
 import { Button, Field, Segmented, IconBtn } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX, motionOK } from '../anim.js'
-import { toISODate, timeToMin, fmtDayMonth, isBillable, STATUS_LABELS, PAY_LABELS } from '../format.js'
+import { toISODate, timeToMin, fmtDayMonth, isBillable, STATUS_LABELS, PAY_LABELS, METHOD_LABELS } from '../format.js'
 
 export function SessionDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
@@ -31,6 +31,7 @@ export function SessionDrawer({ opts, onClose }) {
     status: editing?.status || 'scheduled',
     payment: editing?.payment || 'unpaid',
     paidAmount: editing?.paidAmount || '',
+    method: editing?.method || '',
     note: editing?.note || '',
   })
   const [errors, setErrors] = useState({})
@@ -152,6 +153,7 @@ export function SessionDrawer({ opts, onClose }) {
       status: form.status,
       payment: form.payment,
       paidAmount: form.payment === 'partial' ? Number(form.paidAmount) : form.payment === 'paid' ? amount : 0,
+      method: form.payment === 'unpaid' ? null : form.method || null,
       note: form.note,
     }
     if (editing) {
@@ -274,6 +276,20 @@ export function SessionDrawer({ opts, onClose }) {
               options={Object.entries(PAY_LABELS).map(([value, label]) => ({ value, label }))}
             />
           </Field>
+
+          {form.payment !== 'unpaid' && (
+            <Field label="Forma płatności" hint="Jak klient zapłacił — gotówką, kartą czy przelewem.">
+              <Segmented
+                ariaLabel="Forma płatności"
+                value={form.method}
+                onChange={(v) => set('method', v)}
+                options={[
+                  { value: '', label: '—' },
+                  ...Object.entries(METHOD_LABELS).map(([value, label]) => ({ value, label })),
+                ]}
+              />
+            </Field>
+          )}
 
           {form.payment === 'partial' && (
             <Field label="Wpłacono (zł)" error={errors.paidAmount}>

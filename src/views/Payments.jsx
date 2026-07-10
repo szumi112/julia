@@ -8,7 +8,7 @@ import { BarFill } from '../charts.jsx'
 import { PaymentPicker } from './session-bits.jsx'
 import {
   fmtMoney, monthKey, addMonths, fmtMonthYear, fmtShortDate,
-  isBillable, collectedOf, outstandingOf, sessionsWord, cap,
+  isBillable, collectedOf, outstandingOf, sessionsWord, cap, METHOD_LABELS,
 } from '../format.js'
 
 export function Payments() {
@@ -211,6 +211,7 @@ export function Payments() {
                 <th>Specjalistka</th>
                 <th className="right">Kwota</th>
                 <th className="right">Zapłacono</th>
+                <th>Forma</th>
                 <th>Płatność</th>
                 <th></th>
               </tr>
@@ -218,7 +219,7 @@ export function Payments() {
             <tbody ref={flipRef}>
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={7}>
+                  <td colSpan={8}>
                     {scopeBillable.length === 0 ? (
                       <EmptyState
                         icon="payments"
@@ -250,6 +251,7 @@ export function Payments() {
                     </td>
                     <td className="right num-cell">{fmtMoney(s.amount)}</td>
                     <td className="right num-cell muted">{fmtMoney(collectedOf(s))}</td>
+                    <td className="muted">{METHOD_LABELS[s.method] || '—'}</td>
                     <td><PaymentPicker session={s} /></td>
                     <td className="right">
                       {out > 0 ? (
