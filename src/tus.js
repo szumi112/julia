@@ -21,12 +21,16 @@ export const nextClassOf = (classes, groupId, nowIso) =>
   classes.find((c) => c.groupId === groupId && c.date >= nowIso) || null
 
 // Rate over marked cells only — unmarked (future) classes don't dilute it.
-export const attendanceRate = (classes, kidId) => {
+// kidFilter: a kid id, an array of kid ids, or nothing (every mark). Callers
+// aggregating a group should pass the roster ids, so marks left behind by a
+// kid who moved groups don't skew the rate.
+export const attendanceRate = (classes, kidFilter) => {
+  const wanted = Array.isArray(kidFilter) ? new Set(kidFilter) : kidFilter ? new Set([kidFilter]) : null
   let present = 0
   let marked = 0
   for (const c of classes) {
-    const values = kidId ? (kidId in c.attendance ? [c.attendance[kidId]] : []) : Object.values(c.attendance)
-    for (const value of values) {
+    for (const [kidId, value] of Object.entries(c.attendance)) {
+      if (wanted && !wanted.has(kidId)) continue
       marked++
       if (value) present++
     }
@@ -47,7 +51,7 @@ export const tusMonthSummary = (group, classes, kids, payments, ym, nowIso) => {
   return {
     classCount: monthClasses.length,
     heldCount: monthClasses.filter((c) => c.date <= nowIso).length,
-    attendanceRate: attendanceRate(monthClasses),
+    attendanceRate: attendanceRate(monthClasses, roster.map((k) => k.id)),
     paidCount,
     dueCount,
     dueAmount: dueCount * group.fee,

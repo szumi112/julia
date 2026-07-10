@@ -20,9 +20,14 @@ function MethodPick({ payment, onPick }) {
     <Popover
       open={open}
       setOpen={setOpen}
-      ariaLabel="Sposób płatności"
+      ariaLabel="Forma płatności"
       trigger={
-        <Pill tone="ink" onClick={() => setOpen(!open)} title="Zmień sposób płatności">
+        <Pill
+          tone="ink"
+          onClick={() => setOpen(!open)}
+          title="Zmień formę płatności"
+          aria-label={`Forma płatności: ${payment.method ? METHOD_LABELS[payment.method] : 'nieoznaczona'}`}
+        >
           {payment.method ? METHOD_LABELS[payment.method] : '—'}
           <Icon name="chevD" size={11} />
         </Pill>
@@ -106,7 +111,9 @@ export function TusGroupDetail({ params }) {
         <Avatar name={group.name.replace('Grupa ', '')} color={leaders[0]?.color} size={64} />
         <div className="id-band__main">
           <h1 className="display id-band__name">{group.name}</h1>
-          <div className="id-band__sub">prowadzą {leaders.map((p) => p.name).join(' i ')}</div>
+          <div className="id-band__sub">
+            {leaders.length === 1 ? 'prowadzi' : 'prowadzą'} {leaders.map((p) => p.name).join(' i ')}
+          </div>
           <div className="id-band__meta">
             <span><Icon name="calendar" size={14} /> co tydzień · {WEEKDAY_SHORT[group.weekday]} {group.time}</span>
             <span><Icon name="clients" size={14} /> {roster.length} {kidsWord(roster.length)}</span>
@@ -256,7 +263,7 @@ export function TusGroupDetail({ params }) {
                     <th>Dziecko</th>
                     <th>Rodzic (płatnik)</th>
                     <th className="right">Kwota</th>
-                    <th>Sposób</th>
+                    <th>Forma</th>
                     <th>Faktura</th>
                     <th>Status</th>
                     <th></th>
@@ -320,7 +327,7 @@ export function TusGroupDetail({ params }) {
                   const rate = attendanceRate(groupClasses, k.id)
                   return (
                     <tr key={k.id}>
-                      <td data-th="Dziecko">
+                      <td>
                         <span className="row" style={{ gap: 10 }}>
                           <Avatar name={k.name} size={32} />
                           <span style={{ fontWeight: 600 }}>

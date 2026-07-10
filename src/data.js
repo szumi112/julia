@@ -325,13 +325,15 @@ const TUS_TOPICS = [
 
 export const TUS_CLASSES = []
 let tcId = 1
+const todayIso = toISODate(TODAY)
 for (const group of TUS_GROUPS) {
   const kids = TUS_KIDS.filter((k) => k.groupId === group.id)
   for (let weekOffset = -10; weekOffset <= 3; weekOffset++) {
     const d = new Date(TODAY)
     d.setDate(d.getDate() - d.getDay() + group.weekday + weekOffset * 7)
     const iso = toISODate(d)
-    const past = iso <= toISODate(TODAY)
+    // hour-aware like the session generator: a class later today is not held yet
+    const past = iso < todayIso || (iso === todayIso && Number(group.time.slice(0, 2)) < new Date().getHours())
     const attendance = {}
     if (past) for (const kid of kids) attendance[kid.id] = tusRand() < 0.85
     TUS_CLASSES.push({
@@ -348,22 +350,25 @@ TUS_CLASSES.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
 
 export const TUS_PAYMENTS = []
 let tpId = 1
-const tusPaidMonths = [...new Set(TUS_CLASSES.filter((c) => c.date <= toISODate(TODAY)).map((c) => monthKey(c.date)))].sort()
+const tusPaidMonths = [...new Set(TUS_CLASSES.filter((c) => c.date <= todayIso).map((c) => monthKey(c.date)))].sort()
 for (const ym of tusPaidMonths) {
   for (const kid of TUS_KIDS.filter((k) => k.groupId)) {
     const group = TUS_GROUPS.find((g) => g.id === kid.groupId)
     const current = ym === CURRENT_MONTH
     const paid = current ? tusRand() < 0.55 : true
+    // k3's note documents a preschool bank transfer — keep her rows consistent
+    const preschoolPayer = kid.id === 'k3'
     TUS_PAYMENTS.push({
       id: `tp${tpId++}`,
       kidId: kid.id,
       ym,
       amount: group.fee,
       status: paid ? 'paid' : 'unpaid',
-      method: paid ? (tusRand() < 0.7 ? 'transfer' : tusRand() < 0.5 ? 'cash' : 'card') : null,
-      invoice: paid && tusRand() < 0.6,
-      paidDate: paid ? `${ym}-05` : null,
-      note: kid.id === 'k3' ? 'przelew od przedszkola (faktura na placówkę)' : '',
+      method: paid ? (preschoolPayer ? 'transfer' : tusRand() < 0.7 ? 'transfer' : tusRand() < 0.5 ? 'cash' : 'card') : null,
+      invoice: paid && (preschoolPayer || tusRand() < 0.6),
+      // never a future date: the current month books as paid today
+      paidDate: paid ? (current ? todayIso : `${ym}-05`) : null,
+      note: preschoolPayer ? 'przelew od przedszkola (faktura na placówkę)' : '',
     })
   }
 }

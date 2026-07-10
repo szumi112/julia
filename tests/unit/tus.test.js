@@ -71,6 +71,14 @@ test('month summary aggregates classes, attendance, and dues', () => {
   })
 })
 
+test('group aggregates ignore marks left by kids who moved groups', () => {
+  const withGhost = [
+    { id: 'tc9', groupId: 'g1', date: '2026-07-01', time: '16:00', topic: '', attendance: { k1: true, ghost: false } },
+  ]
+  assert.equal(attendanceRate(withGhost, ['k1']), 100)
+  assert.equal(tusMonthSummary(groups[0], withGhost, kids, [], '2026-07', '2026-07-10').attendanceRate, 100)
+})
+
 test('stripKid removes attendance marks and payment rows', () => {
   const out = stripKid(classes, payments, 'k1')
   assert.equal('k1' in out.classes[0].attendance, false)
