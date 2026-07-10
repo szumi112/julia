@@ -1457,7 +1457,7 @@ kbd {
   background: #fdf6f3;
   box-shadow: 0 0 0 3px rgba(150, 77, 95, 0.16), var(--shadow-1);
 }
-.cal__day.is-filtered-out:not(.is-sel) { opacity: 0.48; }
+.cal__day.is-filtered-out { opacity: 0.48; }
 .cal__num {
   font-family: var(--font-display);
   font-size: 14.5px;

@@ -88,7 +88,9 @@ test('calendar opens the therapist agenda and exposes exact partial payment edit
   await expect(page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' })).toHaveAttribute('aria-current', 'page')
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
   await expect(agenda).toBeVisible()
-  await agenda.getByRole('button', { name: /Częściowo/ }).click()
+  const partialPayment = agenda.getByRole('button', { name: /Częściowo/ })
+  await partialPayment.scrollIntoViewIfNeeded()
+  await partialPayment.click()
   await page.getByRole('menuitemradio', { name: 'Częściowo' }).click()
   await page.getByRole('menuitem', { name: 'Edytuj kwotę' }).click()
   await expect(page.getByRole('dialog', { name: 'Edycja sesji' }).getByLabel('Wpłacono (zł)')).toBeFocused()
@@ -117,4 +119,33 @@ test('therapist agenda excludes other therapists and payment updates stay cohere
   await page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' }).click()
   await expect(page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' })).toHaveAttribute('aria-current', 'page')
   await expect(page.getByRole('region', { name: /Plan dnia/ }).locator('[data-psych-id="p1"]')).toHaveCount(0)
+})
+
+test('custom month range dims the selected out-of-range day and filters its sessions', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('radio', { name: 'Miesiąc' }).click()
+
+  const { dateFrom, dateTo, selectedDate } = await page.evaluate(() => {
+    const format = (date) => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-')
+    const selected = new Date()
+    const start = new Date(selected)
+    const end = new Date(selected)
+    if (selected.getDate() <= 2) {
+      start.setDate(3)
+      end.setDate(4)
+    } else {
+      start.setDate(1)
+      end.setDate(2)
+    }
+    return { dateFrom: format(start), dateTo: format(end), selectedDate: format(selected) }
+  })
+
+  await page.getByRole('textbox', { name: 'Od', exact: true }).fill(dateFrom)
+  await page.getByRole('textbox', { name: 'Do', exact: true }).fill(dateTo)
+  const selectedDay = page.locator(`.cal__day[data-iso="${selectedDate}"]`)
+  await expect(selectedDay).toHaveClass(/is-filtered-out/)
+  await expect(selectedDay).toHaveCSS('opacity', '0.48')
+  await expect(selectedDay.locator('.cal__item')).toHaveCount(0)
 })
