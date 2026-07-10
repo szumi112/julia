@@ -2,6 +2,7 @@
 import { createContext, useContext, useMemo, useReducer, useState, useCallback } from 'react'
 import { DEMO_ROLES, INITIAL_STATE } from './data.js'
 import { monthKey, billableSummary, outstandingOf, paymentPatchFor } from './format.js'
+import { stripKid } from './tus.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -9,6 +10,8 @@ const AppCtx = createContext(null)
 const ToastCtx = createContext([])
 
 let nextId = 10000
+
+const sortClasses = (list) => [...list].sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
 
 function reducer(state, action) {
   switch (action.type) {
@@ -23,6 +26,7 @@ function reducer(state, action) {
           .map((s) => {
             if (s.id !== action.id) return s
             const session = { ...s, ...action.patch }
+            if (session.payment === 'unpaid') session.method = null
             return { ...session, ...paymentPatchFor(session.payment, session.amount, session.paidAmount) }
           })
           .sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : 1)),
@@ -42,8 +46,16 @@ function reducer(state, action) {
       // guarded in the UI: only allowed when no assigned clients / upcoming sessions
       return { ...state, psychologists: state.psychologists.filter((p) => p.id !== action.id) }
     case 'ADD_CLIENT': {
-      const client = { ...action.client, id: `c${nextId++}` }
-      return { ...state, clients: [...state.clients, client] }
+      const client = { familyId: null, familyRole: null, ...action.client, id: `c${nextId++}` }
+      if (!action.familyLink) return { ...state, clients: [...state.clients, client] }
+      const other = state.clients.find((c) => c.id === action.familyLink.otherId)
+      const familyId = other?.familyId || `f${nextId++}`
+      client.familyId = familyId
+      client.familyRole = action.familyLink.role || null
+      return {
+        ...state,
+        clients: [...state.clients.map((c) => (c.id === other?.id ? { ...c, familyId } : c)), client],
+      }
     }
     case 'UPDATE_CLIENT':
       return {
@@ -73,6 +85,75 @@ function reducer(state, action) {
         : state
     case 'SET_PREF':
       return { ...state, prefs: { ...state.prefs, [action.key]: action.value } }
+    case 'LINK_FAMILY': {
+      const other = state.clients.find((c) => c.id === action.otherId)
+      const familyId = other?.familyId || `f${nextId++}`
+      return {
+        ...state,
+        clients: state.clients.map((c) =>
+          c.id === action.clientId
+            ? { ...c, familyId, familyRole: action.role || null }
+            : c.id === action.otherId
+              ? { ...c, familyId }
+              : c
+        ),
+      }
+    }
+    case 'UNLINK_FAMILY':
+      return {
+        ...state,
+        clients: state.clients.map((c) => (c.id === action.clientId ? { ...c, familyId: null, familyRole: null } : c)),
+      }
+    case 'ADD_TUS_GROUP':
+      return { ...state, tusGroups: [...state.tusGroups, { ...action.group, id: `g${nextId++}` }] }
+    case 'UPDATE_TUS_GROUP':
+      return { ...state, tusGroups: state.tusGroups.map((g) => (g.id === action.id ? { ...g, ...action.patch } : g)) }
+    case 'ADD_TUS_KID':
+      return { ...state, tusKids: [...state.tusKids, { ...action.kid, id: `k${nextId++}` }] }
+    case 'UPDATE_TUS_KID':
+      return { ...state, tusKids: state.tusKids.map((k) => (k.id === action.id ? { ...k, ...action.patch } : k)) }
+    case 'DELETE_TUS_KID': {
+      // removing a kid also clears their attendance marks and fee history
+      const { classes, payments } = stripKid(state.tusClasses, state.tusPayments, action.id)
+      return {
+        ...state,
+        tusKids: state.tusKids.filter((k) => k.id !== action.id),
+        tusClasses: classes,
+        tusPayments: payments,
+      }
+    }
+    case 'ADD_TUS_CLASS':
+      return { ...state, tusClasses: sortClasses([...state.tusClasses, { ...action.cls, id: `tc${nextId++}` }]) }
+    case 'UPDATE_TUS_CLASS':
+      return { ...state, tusClasses: sortClasses(state.tusClasses.map((c) => (c.id === action.id ? { ...c, ...action.patch } : c))) }
+    case 'DELETE_TUS_CLASS':
+      return { ...state, tusClasses: state.tusClasses.filter((c) => c.id !== action.id) }
+    case 'SET_TUS_ATTENDANCE':
+      return {
+        ...state,
+        tusClasses: state.tusClasses.map((c) =>
+          c.id === action.classId ? { ...c, attendance: { ...c.attendance, [action.kidId]: action.present } } : c
+        ),
+      }
+    case 'UPSERT_TUS_PAYMENT': {
+      const existing = state.tusPayments.find((p) => p.kidId === action.kidId && p.ym === action.ym)
+      if (existing) {
+        return { ...state, tusPayments: state.tusPayments.map((p) => (p === existing ? { ...p, ...action.patch } : p)) }
+      }
+      const kid = state.tusKids.find((k) => k.id === action.kidId)
+      const group = state.tusGroups.find((g) => g.id === kid?.groupId)
+      return {
+        ...state,
+        tusPayments: [
+          ...state.tusPayments,
+          {
+            id: `tp${nextId++}`, kidId: action.kidId, ym: action.ym, amount: group?.fee ?? 0,
+            status: 'unpaid', method: null, invoice: false, paidDate: null, note: '',
+            ...action.patch,
+          },
+        ],
+      }
+    }
     default:
       return state
   }
