@@ -21,6 +21,7 @@ import { Settings } from './views/Settings.jsx'
 import { SessionDrawer } from './views/SessionForm.jsx'
 import { ClientDrawer } from './views/ClientForm.jsx'
 import { PsychDrawer } from './views/PsychForm.jsx'
+import { TusGroupDrawer, TusKidDrawer, TusClassDrawer } from './views/TusForms.jsx'
 import { CommandPalette } from './command-palette.jsx'
 
 const NAV = [
@@ -522,6 +523,9 @@ export function Shell({ onLogout }) {
   const openSessionForm = (opts = {}) => { setDrawer({ kind: 'session', opts }); openOverlay('drawer') }
   const openClientForm = (opts = {}) => { setDrawer({ kind: 'client', opts }); openOverlay('drawer') }
   const openPsychForm = (opts = {}) => { setDrawer({ kind: 'psych', opts }); openOverlay('drawer') }
+  const openTusGroupForm = (opts = {}) => { setDrawer({ kind: 'tusGroup', opts }); openOverlay('drawer') }
+  const openTusKidForm = (opts = {}) => { setDrawer({ kind: 'tusKid', opts }); openOverlay('drawer') }
+  const openTusClassForm = (opts = {}) => { setDrawer({ kind: 'tusClass', opts }); openOverlay('drawer') }
   const openTeamBoard = () => { setDrawer({ kind: 'board' }); openOverlay('drawer') }
   const closeDrawer = () => {
     closeOverlay('drawer')
@@ -539,7 +543,7 @@ export function Shell({ onLogout }) {
   const hasOverlay = overlay !== null
 
   return (
-    <ShellCtx.Provider value={{ role, setDemoRole, canAccess, route, navigate, openSessionForm, openClientForm, openPsychForm, openTeamBoard }}>
+    <ShellCtx.Provider value={{ role, setDemoRole, canAccess, route, navigate, openSessionForm, openClientForm, openPsychForm, openTusGroupForm, openTusKidForm, openTusClassForm, openTeamBoard }}>
       <div className="shell" ref={shellRef}>
         {!isCompact && <Sidebar route={route} navigate={navigate} role={role} inert={hasOverlay ? '' : undefined} />}
         <div className="main">
@@ -578,6 +582,9 @@ export function Shell({ onLogout }) {
       {overlay === 'drawer' && drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {overlay === 'drawer' && drawer?.kind === 'tusGroup' && <TusGroupDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {overlay === 'drawer' && drawer?.kind === 'tusKid' && <TusKidDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {overlay === 'drawer' && drawer?.kind === 'tusClass' && <TusClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'board' && <BoardDrawer onClose={closeDrawer} />}
       {overlay === 'palette' && <CommandPalette onClose={() => closeOverlay('palette')} />}
     </ShellCtx.Provider>
