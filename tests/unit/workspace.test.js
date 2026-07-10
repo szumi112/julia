@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters } from '../../src/workspace.js'
-import { paymentPatchFor } from '../../src/format.js'
+import { billableSummary, paymentPatchFor } from '../../src/format.js'
 
 const state = {
   sessions: [
@@ -77,4 +77,11 @@ test('session filters combine inclusive date, payment, and attendance constraint
   assert.equal(sessionMatchesFilters(state.sessions[1], filters), true)
   assert.equal(sessionMatchesFilters({ ...state.sessions[1], payment: 'unpaid' }, filters), false)
   assert.equal(sessionMatchesFilters({ ...state.sessions[1], date: '2026-07-11' }, filters), false)
+})
+
+test('billable summary includes billable no-shows in its average population', () => {
+  assert.deepEqual(billableSummary([
+    { status: 'completed', amount: 200, payment: 'paid', paidAmount: 200 },
+    { status: 'noshow', amount: 100, payment: 'unpaid', paidAmount: 0 },
+  ]), { billable: 2, revenue: 300, collected: 200, outstanding: 100 })
 })

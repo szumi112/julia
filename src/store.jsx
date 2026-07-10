@@ -1,7 +1,7 @@
 // In-memory app state — no persistence by design (demo).
 import { createContext, useContext, useMemo, useReducer, useState, useCallback } from 'react'
 import { DEMO_ROLES, INITIAL_STATE } from './data.js'
-import { monthKey, isBillable, collectedOf, outstandingOf, paymentPatchFor } from './format.js'
+import { monthKey, billableSummary, outstandingOf, paymentPatchFor } from './format.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -118,17 +118,12 @@ export const sessionsInMonth = (sessions, ym) => sessions.filter((s) => monthKey
 
 export const monthStats = (sessions, ym) => {
   const list = sessionsInMonth(sessions, ym)
-  const billed = list.filter(isBillable)
   const completed = list.filter((s) => s.status === 'completed')
-  const revenue = billed.reduce((a, s) => a + s.amount, 0)
-  const collected = billed.reduce((a, s) => a + collectedOf(s), 0)
   return {
     count: list.length,
     completed: completed.length,
     hours: completed.reduce((a, s) => a + s.duration, 0) / 60,
-    revenue,
-    collected,
-    outstanding: revenue - collected,
+    ...billableSummary(list),
   }
 }
 

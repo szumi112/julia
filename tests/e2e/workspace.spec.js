@@ -247,3 +247,12 @@ test('custom month range dims the selected out-of-range day and filters its sess
   await expect(selectedDay).toHaveCSS('opacity', '0.48')
   await expect(selectedDay.locator('.cal__item')).toHaveCount(0)
 })
+
+test('owner outstanding figure opens matching all-period unpaid payments', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await login(page)
+  const amount = await page.locator('.figures__item--gold .figures__value').innerText()
+  await page.locator('.figures__item--gold').click()
+  await expect(page.getByText(/wszystkie okresy.*tylko zaległe/i)).toBeVisible()
+  await expect(page.locator('.figures__item--gold .figures__value')).toHaveText(amount)
+})

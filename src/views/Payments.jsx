@@ -13,36 +13,41 @@ import {
 
 export function Payments() {
   const { state, dispatch, toast } = useApp()
-  const { openSessionForm } = useShell()
+  const { openSessionForm, route } = useShell()
   const ref = useReveal()
   const [ym, setYm] = useState(monthKey(new Date()))
   const [psychFilter, setPsychFilter] = useState(null)
-  const [unpaidOnly, setUnpaidOnly] = useState(false)
+  const allPeriods = route.params?.allPeriods === true
+  const [unpaidOnly, setUnpaidOnly] = useState(() => route.params?.unpaidOnly === true)
 
   const months = useMemo(() => availableMonths(state.sessions), [state.sessions])
   const maxYm = monthKey(new Date()) // billing always stops at the current month
-  const monthBillable = useMemo(
-    () => sessionsInMonth(state.sessions, ym).filter(isBillable).reverse(),
-    [state.sessions, ym]
+  const scopeSessions = useMemo(
+    () => allPeriods ? state.sessions : sessionsInMonth(state.sessions, ym),
+    [allPeriods, state.sessions, ym]
   )
-  const filtered = monthBillable.filter(
+  const scopeBillable = useMemo(
+    () => scopeSessions.filter(isBillable).reverse(),
+    [scopeSessions]
+  )
+  const filtered = scopeBillable.filter(
     (s) => (!psychFilter || s.psychId === psychFilter) && (!unpaidOnly || outstandingOf(s) > 0)
   )
 
   const collected = filtered.reduce((a, s) => a + collectedOf(s), 0)
   const outstanding = filtered.reduce((a, s) => a + outstandingOf(s), 0)
 
-  // the collection meter always shows the month's true progress for the
+  // the collection meter always shows the scope's true progress for the
   // visible specialist scope — "Tylko zaległe" narrows the list and the
   // figures (existing behavior), but must not fake a 0% collection rate
-  const scopeBillable = monthBillable.filter((s) => !psychFilter || s.psychId === psychFilter)
-  const scopeCollected = scopeBillable.reduce((a, s) => a + collectedOf(s), 0)
-  const scopeOutstanding = scopeBillable.reduce((a, s) => a + outstandingOf(s), 0)
+  const scopeFilteredBillable = scopeBillable.filter((s) => !psychFilter || s.psychId === psychFilter)
+  const scopeCollected = scopeFilteredBillable.reduce((a, s) => a + collectedOf(s), 0)
+  const scopeOutstanding = scopeFilteredBillable.reduce((a, s) => a + outstandingOf(s), 0)
 
   const flipRef = useFlip(filtered.map((s) => s.id).join(','))
 
   const perPsych = state.psychologists.map((p) => {
-    const own = monthBillable.filter((s) => s.psychId === p.id)
+    const own = scopeBillable.filter((s) => s.psychId === p.id)
     return {
       p,
       collected: own.reduce((a, s) => a + collectedOf(s), 0),
@@ -53,6 +58,11 @@ export function Payments() {
 
   const clientOf = (id) => state.clients.find((c) => c.id === id)
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
+  const scopeLabel = [
+    allPeriods ? 'Wszystkie okresy' : fmtMonthYear(ym),
+    unpaidOnly ? 'tylko zaległe' : null,
+    psychFilter ? psychOf(psychFilter)?.name : 'Cały zespół',
+  ].filter(Boolean).join(' · ')
 
   const markPaid = (s) => {
     dispatch({ type: 'UPDATE_SESSION', id: s.id, patch: { payment: 'paid', paidAmount: s.amount } })
@@ -70,16 +80,18 @@ export function Payments() {
           </p>
         </div>
         <div className="view-head__actions">
-          {ym !== maxYm && (
-            <Button variant="ghost" size="sm" onClick={() => setYm(maxYm)}>
-              Bieżący miesiąc
-            </Button>
-          )}
-          <div className="month-nav">
-            <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={ym <= months[0]} onClick={() => setYm(addMonths(ym, -1))} />
-            <span className="month-nav__label">{fmtMonthYear(ym)}</span>
-            <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= maxYm} onClick={() => setYm(addMonths(ym, 1))} />
-          </div>
+          {!allPeriods && <>
+            {ym !== maxYm && (
+              <Button variant="ghost" size="sm" onClick={() => setYm(maxYm)}>
+                Bieżący miesiąc
+              </Button>
+            )}
+            <div className="month-nav">
+              <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={ym <= months[0]} onClick={() => setYm(addMonths(ym, -1))} />
+              <span className="month-nav__label">{fmtMonthYear(ym)}</span>
+              <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= maxYm} onClick={() => setYm(addMonths(ym, 1))} />
+            </div>
+          </>}
         </div>
       </div>
 
@@ -99,10 +111,9 @@ export function Payments() {
 
       {/* every number below carries its scope explicitly */}
       <div className="eyebrow" data-reveal style={{ marginBottom: 2 }}>
-        {psychFilter ? psychOf(psychFilter)?.name : 'Cały zespół'}
-        {unpaidOnly ? ' · tylko zaległe' : ''} · {fmtMonthYear(ym)}
+        {scopeLabel}
       </div>
-      <div className="figures" role="group" aria-label={`Rozliczenia — ${fmtMonthYear(ym)}`}>
+      <div className="figures" role="group" aria-label={`Rozliczenia — ${allPeriods ? 'wszystkie okresy' : fmtMonthYear(ym)}`}>
         <Figure
           label={<>Wystawione <InfoTip text="Suma kwot za sesje rozliczane w tym miesiącu — odbyte i nieobecności. Sesje odwołane nie są fakturowane." /></>}
           value={collected + outstanding}
@@ -146,7 +157,7 @@ export function Payments() {
 
       <div className="grid-13" style={{ marginTop: 4 }}>
         <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
-          <h2 className="card-title">Zespół · {fmtMonthYear(ym)}</h2>
+          <h2 className="card-title">Zespół · {allPeriods ? 'wszystkie okresy' : fmtMonthYear(ym)}</h2>
           <div className="hbar" style={{ marginTop: 20 }}>
             {perPsych.map(({ p, collected: col, outstanding: out }) => (
               <div className="hbar__row hbar__row--labeled" key={p.id}>
@@ -202,10 +213,10 @@ export function Payments() {
               {filtered.length === 0 && (
                 <tr>
                   <td colSpan={7}>
-                    {monthBillable.length === 0 ? (
+                    {scopeBillable.length === 0 ? (
                       <EmptyState
                         icon="payments"
-                        title="Brak rozliczeń w tym miesiącu"
+                        title={allPeriods ? 'Brak rozliczeń we wszystkich okresach' : 'Brak rozliczeń w tym miesiącu'}
                         hint="Rozliczane są sesje odbyte i nieobecności — pojawią się tu po zakończeniu."
                       />
                     ) : (

@@ -405,7 +405,7 @@ export function Dashboard() {
                 fmt={fmtMoney}
                 gold
                 sub="wszystkie okresy"
-                onClick={() => navigate('payments')}
+                onClick={() => navigate('payments', { allPeriods: true, unpaidOnly: true })}
               />
             </div>
           </section>

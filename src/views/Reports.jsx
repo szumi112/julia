@@ -7,7 +7,7 @@ import { Avatar, Button, Chip, IconBtn, Figure } from '../ui.jsx'
 import { Donut, BarFill } from '../charts.jsx'
 import {
   fmtMoney, fmtNumber, monthKey, addMonths, fmtMonthYear, fmtMonthLocative, fmtMonthName, cap,
-  isBillable, collectedOf, plural,
+  billableSummary, plural,
 } from '../format.js'
 
 const hoursWord = (h) => plural(h, 'godzina', 'godziny', 'godzin')
@@ -32,7 +32,7 @@ function ReportLead({ ym, stats, scopeName, avg }) {
       Wystawiono <em>{fmtMoney(stats.revenue)}</em>{stats.revenue > 0 && stats.outstanding === 0
         ? <> i wszystko zostało już rozliczone.</>
         : <>; zebrano dotąd <em>{fmtMoney(stats.collected)}</em>, a <em>{fmtMoney(stats.outstanding)}</em> czeka na wpłaty.</>}
-      {stats.completed > 0 && <> Średnia sesja to <em>{fmtMoney(avg)}</em>.</>}
+      {stats.billable > 0 && <> Średnia wartość rozliczonej sesji to <em>{fmtMoney(avg)}</em>.</>}
     </p>
   )
 }
@@ -57,21 +57,16 @@ export function Reports() {
 
   const perPsych = state.psychologists.map((p) => {
     const own = monthList.filter((s) => s.psychId === p.id)
-    const billed = own.filter(isBillable)
     const completed = own.filter((s) => s.status === 'completed')
-    const revenue = billed.reduce((a, s) => a + s.amount, 0)
-    const collected = billed.reduce((a, s) => a + collectedOf(s), 0)
     return {
       p,
       sessions: completed.length,
       hours: completed.reduce((a, s) => a + s.duration, 0) / 60,
-      revenue,
-      collected,
-      outstanding: revenue - collected,
+      ...billableSummary(own),
     }
   })
   const maxRev = Math.max(...perPsych.map((x) => x.revenue), 1)
-  const avg = stats.completed > 0 ? stats.revenue / Math.max(stats.completed, 1) : 0
+  const avg = stats.billable > 0 ? stats.revenue / stats.billable : 0
 
   return (
     <div ref={ref}>
@@ -134,7 +129,7 @@ export function Reports() {
         <Figure label="Zebrane" value={stats.collected} fmt={fmtMoney} />
         <Figure label="Godziny terapii" value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
         <Figure label="Sesje odbyte" value={stats.completed} fmt={(v) => fmtNumber(Math.round(v))} />
-        <Figure label="Średnio / sesję" value={avg} fmt={fmtMoney} />
+        <Figure label="Średnia wartość rozliczonej sesji" value={avg} fmt={fmtMoney} />
       </div>
 
       <div className="grid-31" style={{ marginTop: 20 }}>

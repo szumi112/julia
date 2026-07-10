@@ -139,5 +139,17 @@ export const collectedOf = (s) => {
 
 export const outstandingOf = (s) => (isBillable(s) ? s.amount - collectedOf(s) : 0)
 
+export const billableSummary = (sessions) => {
+  const billableSessions = sessions.filter(isBillable)
+  const revenue = billableSessions.reduce((total, session) => total + session.amount, 0)
+  const collected = billableSessions.reduce((total, session) => total + collectedOf(session), 0)
+  return {
+    billable: billableSessions.length,
+    revenue,
+    collected,
+    outstanding: revenue - collected,
+  }
+}
+
 export const greeting = (h = new Date().getHours()) =>
   h < 5 ? 'Dobry wieczór' : h < 18 ? 'Dzień dobry' : 'Dobry wieczór'
