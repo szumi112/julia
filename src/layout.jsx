@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Icon, Bloom } from './icons.jsx'
-import { Avatar, IconBtn } from './ui.jsx'
+import { Avatar, IconBtn, PopItem, Popover } from './ui.jsx'
 import { useApp } from './store.jsx'
 import { ShellCtx } from './shell-ctx.js'
+import { DEMO_ROLES } from './data.js'
 import { useIsCompact, useIsPhone } from './responsive.js'
 import { TodayCockpit } from './cockpit.jsx'
 import { animateOut, motionOK, goldBurst } from './anim.js'
@@ -20,13 +21,34 @@ import { PsychDrawer } from './views/PsychForm.jsx'
 import { CommandPalette } from './command-palette.jsx'
 
 const NAV = [
-  { id: 'dashboard', label: 'Pulpit', icon: 'dashboard' },
+  { id: 'dashboard', label: 'Dziś', icon: 'dashboard' },
   { id: 'calendar', label: 'Kalendarz', icon: 'calendar' },
   { id: 'clients', label: 'Klienci', icon: 'clients' },
   { id: 'team', label: 'Zespół', icon: 'team' },
   { id: 'payments', label: 'Finanse', icon: 'payments' },
   { id: 'reports', label: 'Raporty', icon: 'reports' },
 ]
+
+const ROLE_NAV = {
+  owner: ['dashboard', 'calendar', 'clients', 'team', 'payments', 'reports', 'settings'],
+  coordinator: ['dashboard', 'calendar', 'clients', 'payments', 'settings'],
+  therapist: ['dashboard', 'calendar', 'clients', 'settings'],
+}
+const canAccess = (routeName, role) => ROLE_NAV[role.id].includes(routeName)
+
+const navLabel = (item, role) => {
+  if (role.id !== 'therapist') return item.label
+  return {
+    dashboard: 'Mój dzień',
+    calendar: 'Mój kalendarz',
+    clients: 'Moi klienci',
+  }[item.id] || item.label
+}
+
+const routeTitle = (routeName, role) => {
+  const navItem = NAV.find((item) => item.id === routeName)
+  return navItem ? navLabel(navItem, role) : TITLES[routeName] || ''
+}
 
 const TITLES = {
   dashboard: 'Pulpit',
@@ -69,20 +91,22 @@ export function Logotype({ light }) {
   )
 }
 
-function Sidebar({ route, navigate, className = '', innerRef }) {
+function Sidebar({ route, navigate, role, className = '', innerRef }) {
   const { state } = useApp()
   const navRef = useRef(null)
   const pillRef = useRef(null)
   const activeId = ACTIVE_OF[route.name] || route.name
+  const items = NAV.filter((item) => canAccess(item.id, role))
+  const showSettings = canAccess('settings', role)
 
   useLayoutEffect(() => {
     const nav = navRef.current
     const pill = pillRef.current
     if (!nav || !pill) return
-    const items = nav.querySelectorAll('.nav__item')
-    const ids = [...NAV.map((n) => n.id), 'settings']
+    const navItems = nav.querySelectorAll('.nav__item')
+    const ids = [...items.map((item) => item.id), ...(showSettings ? ['settings'] : [])]
     const idx = ids.indexOf(activeId)
-    const el = items[idx]
+    const el = navItems[idx]
     if (!el) { pill.style.opacity = 0; return }
     const target = { top: el.offsetTop, height: el.offsetHeight, opacity: 1 }
     if (motionOK()) {
@@ -90,7 +114,7 @@ function Sidebar({ route, navigate, className = '', innerRef }) {
     } else {
       Object.assign(pill.style, { top: target.top + 'px', height: target.height + 'px', opacity: 1 })
     }
-  }, [activeId])
+  }, [activeId, role.id, showSettings])
 
   const today = toISODate(new Date())
   const todayCount = state.sessions.filter(
@@ -104,7 +128,7 @@ function Sidebar({ route, navigate, className = '', innerRef }) {
       </div>
       <nav className="nav" ref={navRef} aria-label="Nawigacja główna">
         <span className="nav__pill" ref={pillRef} />
-        {NAV.map((n) => (
+        {items.map((n) => (
           <button
             key={n.id}
             className={`nav__item ${activeId === n.id ? 'is-active' : ''}`}
@@ -113,19 +137,23 @@ function Sidebar({ route, navigate, className = '', innerRef }) {
             data-shell-reveal
           >
             <Icon name={n.icon} size={19} />
-            {n.label}
+            {navLabel(n, role)}
           </button>
         ))}
-        <div className="nav__divider" data-shell-reveal />
-        <button
-          className={`nav__item ${activeId === 'settings' ? 'is-active' : ''}`}
-          onClick={() => navigate('settings')}
-          aria-current={activeId === 'settings' ? 'page' : undefined}
-          data-shell-reveal
-        >
-          <Icon name="settings" size={19} />
-          Ustawienia
-        </button>
+        {showSettings && (
+          <>
+            <div className="nav__divider" data-shell-reveal />
+            <button
+              className={`nav__item ${activeId === 'settings' ? 'is-active' : ''}`}
+              onClick={() => navigate('settings')}
+              aria-current={activeId === 'settings' ? 'page' : undefined}
+              data-shell-reveal
+            >
+              <Icon name="settings" size={19} />
+              Ustawienia
+            </button>
+          </>
+        )}
       </nav>
       <div className="sidebar__foot" data-shell-reveal>
         <div className="today-card">
@@ -142,7 +170,7 @@ function Sidebar({ route, navigate, className = '', innerRef }) {
 
 // Compact-shell navigation: the sidebar slides in from the left as a drawer,
 // with the same GSAP choreography as the form drawers (mirrored).
-function MobileNavDrawer({ route, navigate, onClose }) {
+function MobileNavDrawer({ route, navigate, role, onClose }) {
   const asideRef = useRef(null)
   const backRef = useRef(null)
   const closing = useRef(false)
@@ -206,6 +234,7 @@ function MobileNavDrawer({ route, navigate, onClose }) {
       <Sidebar
         route={route}
         navigate={(name, params) => { navigate(name, params); close() }}
+        role={role}
         className="sidebar--drawer"
         innerRef={asideRef}
       />
@@ -218,10 +247,11 @@ function MobileNavDrawer({ route, navigate, onClose }) {
 // Ustawienia) stay in the hamburger drawer.
 const TABBAR = NAV.filter((n) => ['dashboard', 'calendar', 'clients', 'payments'].includes(n.id))
 
-function MobileTabbar({ route, navigate, onAdd }) {
+function MobileTabbar({ route, navigate, role, onAdd }) {
   const barRef = useRef(null)
   const [pill, setPill] = useState(null)
   const activeId = ACTIVE_OF[route.name] || route.name
+  const tabs = TABBAR.filter((item) => canAccess(item.id, role))
 
   // the gliding blob behind the active icon — measured, then moved via CSS
   // transition (same pattern as Segmented, survives orientation changes)
@@ -257,26 +287,26 @@ function MobileTabbar({ route, navigate, onAdd }) {
       aria-current={activeId === n.id ? 'page' : undefined}
     >
       <Icon name={n.icon} size={21} />
-      <span>{n.label}</span>
+      <span>{navLabel(n, role)}</span>
     </button>
   )
 
   return (
     <nav className="tabbar" ref={barRef} aria-label="Nawigacja dolna">
       {pill && <span className="tabbar__pill" style={{ left: pill.left }} />}
-      {TABBAR.slice(0, 2).map(tab)}
+      {tabs.slice(0, 2).map(tab)}
       <button className="tabbar__fab" onClick={onAdd} aria-label="Nowa sesja">
         <Icon name="plus" size={22} />
       </button>
-      {TABBAR.slice(2).map(tab)}
+      {tabs.slice(2).map(tab)}
     </nav>
   )
 }
 
-function Topbar({ route, onLogout, onSearch, onMenu, overlayKey }) {
-  const { state } = useApp()
+function Topbar({ route, role, setDemoRole, onLogout, onSearch, onMenu, overlayKey }) {
   const titleRef = useRef(null)
-  const title = TITLES[route.name] || ''
+  const [roleMenuOpen, setRoleMenuOpen] = useState(false)
+  const title = routeTitle(route.name, role)
 
   useEffect(() => {
     if (!motionOK() || !titleRef.current) return
@@ -302,13 +332,40 @@ function Topbar({ route, onLogout, onSearch, onMenu, overlayKey }) {
           <kbd>{META_K}</kbd>
         </button>
         <TodayCockpit closeKey={overlayKey} />
-        <div className="userchip">
-          <Avatar name={state.user.name} size={37} />
-          <div>
-            <div className="userchip__name">{state.user.name}</div>
-            <div className="userchip__role">{state.user.role}</div>
-          </div>
-        </div>
+        <Popover
+          align="right"
+          ariaLabel="Tryb demonstracyjny"
+          open={roleMenuOpen}
+          setOpen={setRoleMenuOpen}
+          trigger={
+            <button
+              type="button"
+              className="userchip userchip--button"
+              onClick={() => setRoleMenuOpen((open) => !open)}
+            >
+              <Avatar name={role.name} size={37} />
+              <span>
+                <span className="userchip__name">{role.name}</span>
+                <span className="userchip__role">{role.label}</span>
+              </span>
+            </button>
+          }
+        >
+          {DEMO_ROLES.map((demoRole) => (
+            <PopItem
+              key={demoRole.id}
+              role="button"
+              on={demoRole.id === role.id}
+              pressed
+              onClick={() => {
+                setDemoRole(demoRole.id)
+                setRoleMenuOpen(false)
+              }}
+            >
+              {demoRole.label} · {demoRole.name}
+            </PopItem>
+          ))}
+        </Popover>
         <IconBtn name="logout" label="Wyloguj się" onClick={onLogout} />
       </div>
     </header>
@@ -349,6 +406,7 @@ function useMonthSettled() {
 const DEPTH = { client: 1, psych: 1 }
 
 export function Shell({ onLogout }) {
+  const { state, dispatch } = useApp()
   const [route, setRoute] = useState({ name: 'dashboard' })
   const [drawer, setDrawer] = useState(null)
   const [cmdOpen, setCmdOpen] = useState(false)
@@ -359,6 +417,7 @@ export function Shell({ onLogout }) {
   const contentRef = useRef(null)
   const shellRef = useRef(null)
   const busy = useRef(false)
+  const role = DEMO_ROLES.find((demoRole) => demoRole.id === state.demoRoleId) || DEMO_ROLES[0]
 
   useMonthSettled()
 
@@ -418,6 +477,16 @@ export function Shell({ onLogout }) {
     })
   }
 
+  const setDemoRole = (roleId) => {
+    const nextRole = DEMO_ROLES.find((demoRole) => demoRole.id === roleId)
+    if (!nextRole) return
+    if (!canAccess(ACTIVE_OF[route.name] || route.name, nextRole)) {
+      setRoute({ name: 'dashboard' })
+      if (contentRef.current) contentRef.current.scrollTop = 0
+    }
+    dispatch({ type: 'SET_DEMO_ROLE', roleId })
+  }
+
   const openSessionForm = (opts = {}) => { setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'session', opts }) }
   const openClientForm = (opts = {}) => { setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'client', opts }) }
   const openPsychForm = (opts = {}) => { setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'psych', opts }) }
@@ -429,12 +498,14 @@ export function Shell({ onLogout }) {
   const View = VIEWS[route.name] || Dashboard
 
   return (
-    <ShellCtx.Provider value={{ route, navigate, openSessionForm, openClientForm, openPsychForm }}>
+    <ShellCtx.Provider value={{ role, setDemoRole, canAccess, route, navigate, openSessionForm, openClientForm, openPsychForm }}>
       <div className="shell" ref={shellRef}>
-        {!isCompact && <Sidebar route={route} navigate={navigate} />}
+        {!isCompact && <Sidebar route={route} navigate={navigate} role={role} />}
         <div className="main">
           <Topbar
             route={route}
+            role={role}
+            setDemoRole={setDemoRole}
             onLogout={onLogout}
             onSearch={() => setCmdOpen(true)}
             onMenu={isCompact ? () => setNavOpen(true) : undefined}
@@ -448,10 +519,10 @@ export function Shell({ onLogout }) {
         </div>
       </div>
       {/* view changes are announced — the router moves no focus by itself */}
-      <div className="sr-only" aria-live="polite">{TITLES[route.name] || ''}</div>
-      {isPhone && <MobileTabbar route={route} navigate={navigate} onAdd={() => openSessionForm()} />}
+      <div className="sr-only" aria-live="polite">{routeTitle(route.name, role)}</div>
+      {isPhone && <MobileTabbar route={route} navigate={navigate} role={role} onAdd={() => openSessionForm()} />}
       {isCompact && navOpen && (
-        <MobileNavDrawer route={route} navigate={navigate} onClose={() => { unInert(); setNavOpen(false) }} />
+        <MobileNavDrawer route={route} navigate={navigate} role={role} onClose={() => { unInert(); setNavOpen(false) }} />
       )}
       {drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}

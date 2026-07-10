@@ -462,7 +462,7 @@ export function Dashboard() {
           <div className="hbar" style={{ marginTop: 20 }}>
             {psychMonth.map(({ p, todayCount, count, revenue }) => (
               <div className="hbar__row" key={p.id}>
-                <button className="hbar__name link" style={{ color: 'var(--ink)', display: 'flex' }} onClick={() => navigate('psych', { id: p.id })}>
+                <button className="hbar__name link" style={{ color: 'var(--ink)', display: 'flex' }} aria-label="Otwórz profil specjalistki" onClick={() => navigate('psych', { id: p.id })}>
                   <Avatar name={p.name} color={p.color} size={30} />
                   <span>{p.name}</span>
                 </button>

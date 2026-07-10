@@ -202,7 +202,7 @@ export function Avatar({ name, color = '#964d5f', size = 38 }) {
 // Lightweight popover (status pickers, menus). Closes on outside click / Esc.
 // Positioned with fixed viewport coordinates so it escapes scroll containers
 // (.table-scroll) and flips/clamps instead of clipping at viewport edges.
-export function Popover({ trigger, children, align = 'left', open, setOpen }) {
+export function Popover({ trigger, children, align = 'left', ariaLabel, open, setOpen }) {
   const ref = useRef(null)
   const popRef = useRef(null)
   const [pos, setPos] = useState(null)
@@ -274,6 +274,7 @@ export function Popover({ trigger, children, align = 'left', open, setOpen }) {
         <div
           className="popover"
           role="menu"
+          aria-label={ariaLabel}
           ref={popRef}
           style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: 0, visibility: 'hidden' }}
         >
@@ -284,9 +285,16 @@ export function Popover({ trigger, children, align = 'left', open, setOpen }) {
   )
 }
 
-export function PopItem({ on, children, ...rest }) {
+export function PopItem({ on, role = 'menuitemradio', pressed, children, ...rest }) {
   return (
-    <button type="button" role="menuitemradio" aria-checked={!!on} className={`popover__item ${on ? 'is-on' : ''}`} {...rest}>
+    <button
+      type="button"
+      role={role}
+      aria-checked={role === 'menuitemradio' ? !!on : undefined}
+      aria-pressed={pressed ? !!on : undefined}
+      className={`popover__item ${on ? 'is-on' : ''}`}
+      {...rest}
+    >
       {children}
     </button>
   )
