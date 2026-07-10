@@ -6,14 +6,55 @@ import { useIsPhone, useMediaQuery, desktopMQ } from '../responsive.js'
 import { Button, IconBtn, Segmented, Avatar, Chip, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
-import { sessionsForRole } from '../workspace.js'
+import { sessionMatchesFilters, sessionsForRole } from '../workspace.js'
 import {
   monthKey, addMonths, fmtMonthYear, toISODate, parseISO, pad2, cap,
-  fmtWeekday, fmtDayMonth, fmtMoney, sessionsWord, timeToMin, outstandingOf,
+  fmtWeekday, fmtDayMonth, fmtMoney, sessionsWord, timeToMin,
 } from '../format.js'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
 const STRIP_DOW = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
+const DATE_PRESETS = [
+  { value: 'today', label: 'Dzisiaj' },
+  { value: 'week', label: 'Ten tydzień' },
+  { value: 'month', label: 'Ten miesiąc' },
+]
+const PAYMENT_FILTERS = [
+  { value: 'paid', label: 'Opłacone' },
+  { value: 'partial', label: 'Częściowe' },
+  { value: 'unpaid', label: 'Nieopłacone' },
+]
+const ATTENDANCE_FILTERS = [
+  { value: 'completed', label: 'Obecny' },
+  { value: 'noshow', label: 'Nieobecny' },
+  { value: 'cancelled', label: 'Odwołana' },
+  { value: 'scheduled', label: 'Zaplanowana' },
+]
+
+const dateBoundsFor = (preset, now = new Date()) => {
+  const start = new Date(now)
+  start.setHours(0, 0, 0, 0)
+  if (preset === 'week') {
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7))
+    const end = new Date(start)
+    end.setDate(end.getDate() + 6)
+    return { dateFrom: toISODate(start), dateTo: toISODate(end) }
+  }
+  if (preset === 'month') {
+    start.setDate(1)
+    const end = new Date(start.getFullYear(), start.getMonth() + 1, 0)
+    return { dateFrom: toISODate(start), dateTo: toISODate(end) }
+  }
+  const date = toISODate(start)
+  return { dateFrom: date, dateTo: date }
+}
+
+const defaultCalendarFilters = () => ({
+  datePreset: 'today',
+  ...dateBoundsFor('today'),
+  payment: 'all',
+  attendance: 'all',
+})
 
 function monthGrid(ym) {
   const [y, m] = ym.split('-').map(Number)
@@ -91,9 +132,7 @@ export function CalendarView() {
   const [ym, setYm] = useState(curYm)
   const [mode, setMode] = useState('agenda')
   const [selected, setSelected] = useState(today)
-  const [psychFilter, setPsychFilter] = useState(null)
-  const [statusFilter, setStatusFilter] = useState(null)
-  const [unpaidOnly, setUnpaidOnly] = useState(false)
+  const [filters, setFilters] = useState(defaultCalendarFilters)
   const [agendaExpanded, setAgendaExpanded] = useState(false)
   const isPhone = useIsPhone()
   // dragging an agenda row would trap touch scrolling, so it stays a desktop affordance
@@ -104,14 +143,16 @@ export function CalendarView() {
   const ref = useReveal()
   const suppressClick = useRef(false)
 
-  const roleSessions = useMemo(() => sessionsForRole(state, role), [state, role])
+  const roleSessions = useMemo(
+    () => sessionsForRole(state, role),
+    [state.sessions, role.psychId, role.scope]
+  )
   const rolePsychologists = useMemo(
     () => role.scope === 'own'
       ? state.psychologists.filter((psychologist) => psychologist.id === role.psychId)
       : state.psychologists,
     [role, state.psychologists]
   )
-  useEffect(() => setPsychFilter(null), [role.id])
   const monthsRange = useMemo(() => availableMonths(roleSessions), [roleSessions])
   const showWeekends = state.prefs.weekendsInCalendar
   const cells = useMemo(() => {
@@ -119,16 +160,14 @@ export function CalendarView() {
     return showWeekends ? all : all.filter((c) => c.dow < 5)
   }, [ym, showWeekends])
 
-  // cancelled sessions are not shown on the grid (they stay in client history)
+  // Role scope always precedes the local operational filters.
+  const filteredSessions = useMemo(
+    () => roleSessions.filter((session) => sessionMatchesFilters(session, filters)),
+    [filters, roleSessions]
+  )
   const monthSessions = useMemo(
-    () => sessionsInMonth(roleSessions, ym).filter(
-      (s) =>
-        s.status !== 'cancelled' &&
-        (!psychFilter || s.psychId === psychFilter) &&
-        (!statusFilter || s.status === statusFilter) &&
-        (!unpaidOnly || outstandingOf(s) > 0)
-    ),
-    [roleSessions, ym, psychFilter, statusFilter, unpaidOnly]
+    () => sessionsInMonth(filteredSessions, ym),
+    [filteredSessions, ym]
   )
   const byDate = useMemo(() => {
     const map = {}
@@ -273,7 +312,7 @@ export function CalendarView() {
     )
   }, [ym, mode, showWeekends])
 
-  const filterKey = `${ym}|${psychFilter}|${statusFilter}|${unpaidOnly}`
+  const filterKey = `${ym}|${filters.dateFrom}|${filters.dateTo}|${filters.payment}|${filters.attendance}`
   // Filtered events retain spatial continuity in every operational view.
   const agendaFlipRef = useFlip(`agenda|${filterKey}`)
   const gridFlipRef = useFlip(`cal|${filterKey}`)
@@ -285,6 +324,21 @@ export function CalendarView() {
     // keep a day selected so the panel never collapses to an empty prompt
     setSelected(next === curYm ? today : `${next}-01`)
   }
+
+  const selectDatePreset = (datePreset) => {
+    setFilters((current) => ({ ...current, datePreset, ...dateBoundsFor(datePreset) }))
+  }
+  const setCustomDate = (key, value) => {
+    setFilters((current) => ({ ...current, datePreset: 'custom', [key]: value }))
+  }
+  const toggleFilter = (key, value) => {
+    setFilters((current) => ({ ...current, [key]: current[key] === value ? 'all' : value }))
+  }
+  const isOutsideDateRange = (iso) =>
+    (filters.dateFrom && iso < filters.dateFrom) || (filters.dateTo && iso > filters.dateTo)
+  const hasActiveFilters =
+    filters.datePreset !== 'today' || filters.payment !== 'all' || filters.attendance !== 'all'
+  const rolePsychId = role.scope === 'own' ? role.psychId : undefined
 
   // A selected day always returns the operator to its actionable session list.
   const selectDay = (iso) => {
@@ -349,6 +403,9 @@ export function CalendarView() {
         className="agenda__row"
         key={s.id}
         data-flip-id={s.id}
+        data-payment={s.payment}
+        data-attendance={s.status}
+        data-psych-id={s.psychId}
         onPointerDown={draggable ? (e) => onChipDown(e, s) : undefined}
         style={{ '--node-color': p?.color, ...(draggable ? { touchAction: 'none' } : null) }}
       >
@@ -411,39 +468,57 @@ export function CalendarView() {
           />
           {/* the phone's raised tabbar action already covers "new session" */}
           {!isPhone && (
-            <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: psychFilter || undefined })}>
+            <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: rolePsychId })}>
               Nowa sesja
             </Button>
           )}
         </div>
       </div>
 
-      <div className="row chips-row" data-reveal>
-        <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>
-          {role.scope === 'own' ? 'Mój grafik' : 'Cały zespół'}
-        </Chip>
-        {rolePsychologists.map((p) => (
-          <Chip key={p.id} on={psychFilter === p.id} swatch={p.color}
-            onClick={() => setPsychFilter(psychFilter === p.id ? null : p.id)}>
-            {p.name.split(' ')[0]}
-          </Chip>
-        ))}
-        <span className="chips-row__divider" />
-        {[
-          { value: 'scheduled', label: 'Zaplanowane' },
-          { value: 'completed', label: 'Odbyte' },
-          { value: 'noshow', label: 'Nieobecności' },
-        ].map((o) => (
-          <Chip key={o.value} on={statusFilter === o.value}
-            onClick={() => setStatusFilter(statusFilter === o.value ? null : o.value)}>
-            {o.label}
-          </Chip>
-        ))}
-        <span className="chips-row__divider" />
-        <Chip on={unpaidOnly} onClick={() => setUnpaidOnly(!unpaidOnly)}>
-          <Icon name="payments" size={14} /> Nieopłacone
-        </Chip>
-      </div>
+      <section className="cal-filter-rail" aria-label="Filtry kalendarza" data-reveal>
+        <div className="cal-filter-rail__groups">
+          <div className="cal-filter-rail__group" role="group" aria-label="Zakres dat">
+            <span className="cal-filter-rail__label">Termin</span>
+            {DATE_PRESETS.map((preset) => (
+              <Chip key={preset.value} on={filters.datePreset === preset.value} onClick={() => selectDatePreset(preset.value)}>
+                {preset.label}
+              </Chip>
+            ))}
+            <label className="cal-filter-rail__date">
+              Od
+              <input type="date" className="input" value={filters.dateFrom} onChange={(event) => setCustomDate('dateFrom', event.target.value)} />
+            </label>
+            <label className="cal-filter-rail__date">
+              Do
+              <input type="date" className="input" value={filters.dateTo} onChange={(event) => setCustomDate('dateTo', event.target.value)} />
+            </label>
+          </div>
+          <div className="cal-filter-rail__group" role="group" aria-label="Płatność">
+            <span className="cal-filter-rail__label">Płatność</span>
+            {PAYMENT_FILTERS.map((payment) => (
+              <Chip key={payment.value} on={filters.payment === payment.value} onClick={() => toggleFilter('payment', payment.value)}>
+                {payment.label}
+              </Chip>
+            ))}
+          </div>
+          <div className="cal-filter-rail__group" role="group" aria-label="Obecność klienta">
+            <span className="cal-filter-rail__label">Obecność</span>
+            {ATTENDANCE_FILTERS.map((attendance) => (
+              <Chip key={attendance.value} on={filters.attendance === attendance.value} onClick={() => toggleFilter('attendance', attendance.value)}>
+                {attendance.label}
+              </Chip>
+            ))}
+          </div>
+          {hasActiveFilters && (
+            <Button variant="ghost" size="sm" onClick={() => setFilters(defaultCalendarFilters)}>
+              Wyczyść filtry
+            </Button>
+          )}
+        </div>
+        <p className="cal-filter-rail__result" aria-live="polite">
+          Wyświetlono {filteredSessions.length} {sessionsWord(filteredSessions.length)} po zastosowaniu filtrów.
+        </p>
+      </section>
 
       <div className="row row--between cal-toolbar" data-reveal>
         <div className="row" style={{ gap: 14 }}>
@@ -497,12 +572,17 @@ export function CalendarView() {
               dayThread(shownAgendaSessions, false, agendaSel, agendaFlipRef)
             )}
             {hiddenAgendaSessions > 0 && (
-              <button type="button" className="bpost-more" onClick={() => setAgendaExpanded(true)}>
+              <button
+                type="button"
+                className="bpost-more"
+                aria-label={`Jeszcze ${hiddenAgendaSessions} ${sessionsWord(hiddenAgendaSessions)}`}
+                onClick={() => setAgendaExpanded(true)}
+              >
                 +{hiddenAgendaSessions} więcej
               </button>
             )}
             <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
-              onClick={() => openSessionForm({ date: agendaSel, psychId: psychFilter || undefined })}>
+              onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId })}>
               Dodaj sesję tego dnia
             </Button>
           </section>
@@ -532,6 +612,7 @@ export function CalendarView() {
                       cell.inMonth ? '' : 'is-out',
                       cell.iso === today ? 'is-today' : '',
                       cell.iso === selected ? 'is-sel' : '',
+                      isOutsideDateRange(cell.iso) ? 'is-filtered-out' : '',
                       cell.dow >= 5 ? 'is-weekend' : '',
                     ].join(' ')}
                     onClick={() => { if (!suppressClick.current) selectDay(cell.iso) }}
@@ -569,7 +650,7 @@ export function CalendarView() {
             </div>
             <div className="legend" style={{ marginTop: 16 }}>
               {rolePsychologists.map((p) => (
-                <span key={p.id} className="legend__item" style={psychFilter && psychFilter !== p.id ? { opacity: 0.35 } : undefined}>
+                <span key={p.id} className="legend__item">
                   <span className="legend__swatch" style={{ background: p.color }} />
                   {p.name}
                 </span>
@@ -601,7 +682,7 @@ export function CalendarView() {
               dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), agendaDrag, selected)}
             {selected && (
               <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
-                onClick={() => openSessionForm({ date: selected, psychId: psychFilter || undefined })}>
+                onClick={() => openSessionForm({ date: selected, psychId: rolePsychId })}>
                 Dodaj sesję tego dnia
               </Button>
             )}

@@ -6,6 +6,14 @@ export const roleById = (id) => DEMO_ROLES.find((role) => role.id === id) || DEM
 export const sessionsForRole = (state, role) =>
   role.scope === 'own' ? state.sessions.filter((session) => session.psychId === role.psychId) : state.sessions
 
+export const sessionMatchesFilters = (session, filters) => {
+  const afterStart = !filters.dateFrom || session.date >= filters.dateFrom
+  const beforeEnd = !filters.dateTo || session.date <= filters.dateTo
+  const paymentMatches = filters.payment === 'all' || session.payment === filters.payment
+  const attendanceMatches = filters.attendance === 'all' || session.status === filters.attendance
+  return afterStart && beforeEnd && paymentMatches && attendanceMatches
+}
+
 export const dayAttention = (state, role, date) => {
   const scoped = sessionsForRole(state, role)
   return scoped

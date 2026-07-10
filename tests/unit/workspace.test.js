@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { roleById, sessionsForRole, dayAttention, todayWorkspace } from '../../src/workspace.js'
+import { roleById, sessionsForRole, dayAttention, todayWorkspace, sessionMatchesFilters } from '../../src/workspace.js'
 import { paymentPatchFor } from '../../src/format.js'
 
 const state = {
@@ -43,4 +43,16 @@ test('partial payment replaces an invalid full paid amount with a valid partial 
 
 test('partial payment keeps a strict partial amount for low positive totals', () => {
   assert.deepEqual(paymentPatchFor('partial', 1, 1), { payment: 'partial', paidAmount: 0.5 })
+})
+
+test('session filters combine inclusive date, payment, and attendance constraints', () => {
+  const filters = {
+    dateFrom: '2026-07-10',
+    dateTo: '2026-07-10',
+    payment: 'partial',
+    attendance: 'completed',
+  }
+  assert.equal(sessionMatchesFilters(state.sessions[1], filters), true)
+  assert.equal(sessionMatchesFilters({ ...state.sessions[1], payment: 'unpaid' }, filters), false)
+  assert.equal(sessionMatchesFilters({ ...state.sessions[1], date: '2026-07-11' }, filters), false)
 })

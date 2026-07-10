@@ -68,6 +68,10 @@ export function PaymentPicker({ session }) {
           key={p}
           on={p === session.payment}
           onClick={() => {
+            if (p === session.payment) {
+              setOpen(p === 'partial')
+              return
+            }
             dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: { payment: p } })
             setOpen(p === 'partial')
             toast(`Płatność zmieniona: ${PAY_LABELS[p].toLowerCase()}`)

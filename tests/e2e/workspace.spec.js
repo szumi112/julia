@@ -93,3 +93,28 @@ test('calendar opens the therapist agenda and exposes exact partial payment edit
   await page.getByRole('menuitem', { name: 'Edytuj kwotę' }).click()
   await expect(page.getByRole('dialog', { name: 'Edycja sesji' }).getByLabel('Wpłacono (zł)')).toBeFocused()
 })
+
+test('calendar combines date, payment, and attendance filters after role scope', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('button', { name: 'Nieopłacone' }).click()
+  await page.getByRole('button', { name: 'Nieobecny' }).click()
+  const agenda = page.getByRole('region', { name: /Plan dnia/ })
+  await expect(agenda.locator('[data-payment="unpaid"][data-attendance="noshow"]')).toHaveCount(1)
+  await page.getByRole('button', { name: 'Wyczyść filtry' }).click()
+  const more = agenda.getByRole('button', { name: /Jeszcze/ })
+  await expect(more).toBeVisible()
+  await more.click()
+  await expect(more).toHaveCount(0)
+  expect(await agenda.locator('.agenda__row').count()).toBeGreaterThan(4)
+})
+
+test('therapist agenda excludes other therapists and payment updates stay coherent', async ({ page }) => {
+  await login(page)
+  await page.getByRole('button', { name: /Tryb demonstracyjny/ }).click()
+  await page.getByRole('button', { name: /Specjalistka.*Marta Zielińska/ }).click()
+  await page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' }).click()
+  await expect(page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('region', { name: /Plan dnia/ }).locator('[data-psych-id="p1"]')).toHaveCount(0)
+})
