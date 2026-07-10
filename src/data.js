@@ -20,7 +20,7 @@ export const PSYCHOLOGISTS = [
     name: 'Julia Wolanin',
     title: 'dr',
     spec: 'Założycielka · Terapia poznawczo-behawioralna',
-    color: '#a4596b',
+    color: '#964d5f',
     soft: '#f0dcda',
     email: 'julia@aurelia.pl',
     phone: '+48 601 224 187',

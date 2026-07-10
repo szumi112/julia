@@ -74,19 +74,29 @@ export function AppProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE)
   const [toasts, setToasts] = useState([])
 
+  // toasts auto-expire but stay interruptible: a tap marks them leaving so the
+  // exit tween can play before removal; rapid actions cap the stack at 3
+  const leave = useCallback((id, delay) => {
+    setTimeout(() => setToasts((t) => t.map((x) => (x.id === id ? { ...x, leaving: true } : x))), delay)
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), delay + 350)
+  }, [])
+
   const toast = useCallback((msg, icon = 'check') => {
     const id = ++nextId
-    setToasts((t) => [...t, { id, msg, icon }])
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200)
-  }, [])
+    setToasts((t) => [...t.slice(-2), { id, msg, icon }])
+    leave(id, 3000)
+  }, [leave])
+
+  const dismissToast = useCallback((id) => leave(id, 0), [leave])
 
   const value = useMemo(
     () => ({ state, dispatch, toast }),
     [state, toast]
   )
+  const toastValue = useMemo(() => ({ toasts, dismissToast }), [toasts, dismissToast])
   return (
     <AppCtx.Provider value={value}>
-      <ToastCtx.Provider value={toasts}>{children}</ToastCtx.Provider>
+      <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
     </AppCtx.Provider>
   )
 }

@@ -71,16 +71,30 @@ export function Segmented({ options, value, onChange, ariaLabel }) {
     return () => ro.disconnect()
   }, [value, options])
 
+  // radio-style keyboard model: one tab stop, arrows move the selection
+  const move = (dir) => {
+    const idx = options.findIndex((o) => o.value === value)
+    const next = (idx + dir + options.length) % options.length
+    onChange(options[next].value)
+    requestAnimationFrame(() => wrapRef.current?.querySelectorAll('.seg__opt')[next]?.focus())
+  }
+
   return (
-    <div className="seg" role="group" aria-label={ariaLabel} ref={wrapRef}>
+    <div className="seg" role="radiogroup" aria-label={ariaLabel} ref={wrapRef}>
       {thumb && <span className="seg__thumb" style={{ left: thumb.left, width: thumb.width, top: thumb.top, height: thumb.height }} />}
       {options.map((o) => (
         <button
           key={o.value}
           type="button"
+          role="radio"
           className={`seg__opt ${o.value === value ? 'is-on' : ''}`}
           onClick={() => onChange(o.value)}
-          aria-pressed={o.value === value}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); move(1) }
+            if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); move(-1) }
+          }}
+          aria-checked={o.value === value}
+          tabIndex={o.value === value ? 0 : -1}
         >
           {o.icon && <Icon name={o.icon} size={15} />}
           {o.label}
@@ -92,6 +106,7 @@ export function Segmented({ options, value, onChange, ariaLabel }) {
 
 export function Field({ label, error, hint, children, className = '', span2 }) {
   const autoId = useId()
+  const descId = useId()
   let child = children
   let labelFor
   if (
@@ -100,15 +115,19 @@ export function Field({ label, error, hint, children, className = '', span2 }) {
     ['input', 'select', 'textarea'].includes(children.type)
   ) {
     labelFor = children.props.id || autoId
-    child = cloneElement(children, { id: labelFor })
+    child = cloneElement(children, {
+      id: labelFor,
+      'aria-invalid': error ? true : undefined,
+      'aria-describedby': error ? descId : hint ? descId : undefined,
+    })
   }
   return (
     <div className={`field ${error ? 'has-error' : ''} ${span2 ? 'span2' : ''} ${className}`}>
       {label && <label className="field__label" htmlFor={labelFor}>{label}</label>}
       {child}
-      {hint && !error && <span className="field__hint">{hint}</span>}
+      {hint && !error && <span className="field__hint" id={descId}>{hint}</span>}
       {error && (
-        <span className="field__error">
+        <span className="field__error" id={descId}>
           <Icon name="alert" size={13} /> {error}
         </span>
       )}
@@ -141,7 +160,7 @@ export function Toggle({ on, onChange, label }) {
   )
 }
 
-export function Avatar({ name, color = '#a4596b', size = 38 }) {
+export function Avatar({ name, color = '#964d5f', size = 38 }) {
   return (
     <span
       className="avatar"
@@ -183,7 +202,24 @@ export function Popover({ trigger, children, align = 'left', open, setOpen }) {
   useEffect(() => {
     if (!open) return
     const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
-    const onKey = (e) => { if (e.key === 'Escape') setOpen(false) }
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        setOpen(false)
+        // menu contract: Escape hands focus back to the trigger
+        ref.current?.querySelector('button, [tabindex]')?.focus()
+      }
+      // expected menu keyboard model: arrows walk the items
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        const items = [...(popRef.current?.querySelectorAll('.popover__item') || [])]
+        if (!items.length) return
+        e.preventDefault()
+        const idx = items.indexOf(document.activeElement)
+        const next = e.key === 'ArrowDown'
+          ? items[Math.min(idx + 1, items.length - 1)] || items[0]
+          : idx <= 0 ? items[items.length - 1] : items[idx - 1]
+        next.focus()
+      }
+    }
     // fixed coordinates go stale the moment anything scrolls or resizes
     const onMove = () => setOpen(false)
     document.addEventListener('mousedown', onDoc)
@@ -204,12 +240,17 @@ export function Popover({ trigger, children, align = 'left', open, setOpen }) {
     if (el) window.gsap.fromTo(el, { autoAlpha: 0, y: -6, scale: 0.97 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.28, ease: 'power3.out' })
   }, [open])
 
+  const wiredTrigger = isValidElement(trigger)
+    ? cloneElement(trigger, { 'aria-expanded': !!open, 'aria-haspopup': 'menu' })
+    : trigger
+
   return (
     <span className="pop-wrap" ref={ref}>
-      {trigger}
+      {wiredTrigger}
       {open && (
         <div
           className="popover"
+          role="menu"
           ref={popRef}
           style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: 0, visibility: 'hidden' }}
         >
@@ -222,7 +263,7 @@ export function Popover({ trigger, children, align = 'left', open, setOpen }) {
 
 export function PopItem({ on, children, ...rest }) {
   return (
-    <button type="button" className={`popover__item ${on ? 'is-on' : ''}`} {...rest}>
+    <button type="button" role="menuitemradio" aria-checked={!!on} className={`popover__item ${on ? 'is-on' : ''}`} {...rest}>
       {children}
     </button>
   )
@@ -297,7 +338,7 @@ export function SearchInput({ value, onChange, placeholder = 'Szukaj…' }) {
   )
 }
 
-function ToastItem({ toast }) {
+function ToastItem({ toast, onDismiss }) {
   const ref = useRef(null)
   useEffect(() => {
     if (!motionOK() || !ref.current) return
@@ -307,8 +348,12 @@ function ToastItem({ toast }) {
       { autoAlpha: 1, y: 0, scale: 1, duration: 0.45, ease: 'back.out(1.6)' }
     )
   }, [])
+  useEffect(() => {
+    if (!toast.leaving || !motionOK() || !ref.current) return
+    window.gsap.to(ref.current, { autoAlpha: 0, y: 12, scale: 0.95, duration: 0.28, ease: 'power2.in' })
+  }, [toast.leaving])
   return (
-    <div className="toast" ref={ref} role="status">
+    <div className="toast" ref={ref} onClick={onDismiss} title="Zamknij">
       <Icon name={toast.icon} size={16} />
       {toast.msg}
     </div>
@@ -316,11 +361,11 @@ function ToastItem({ toast }) {
 }
 
 export function ToastHost() {
-  const toasts = useToasts()
+  const { toasts, dismissToast } = useToasts()
   return (
     <div className="toasts" aria-live="polite">
       {toasts.map((t) => (
-        <ToastItem key={t.id} toast={t} />
+        <ToastItem key={t.id} toast={t} onDismiss={() => dismissToast(t.id)} />
       ))}
     </div>
   )

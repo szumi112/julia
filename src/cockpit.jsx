@@ -2,7 +2,7 @@
 // from the live chip in the topbar. Desktop: anchored dropdown under the
 // chip; phones: a bottom sheet. Shows the next session, today's progress,
 // outstanding payments and quick actions.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useApp, totalOutstanding } from './store.jsx'
 import { useShell } from './shell-ctx.js'
 import { useIsPhone } from './responsive.js'
@@ -116,21 +116,27 @@ function CockpitBody({ m, onClose }) {
             <span>{m.done} z {total} {sessionsWord(total)} za Tobą</span>
             <span className="faint">{cap(fmtWeekday(m.today))}</span>
           </div>
-          <div className="cockpit__list">
-            {m.todays.map((s) => {
+          <div className="cockpit__list spine">
+            <span className="spine__rule" aria-hidden="true" />
+            {m.todays.map((s, i) => {
               const p = psychOf(s.psychId)
               const live = m.running && s.id === m.running.id
+              const nowHere = !m.running &&
+                timeToMin(s.time) > m.nowMin &&
+                (i === 0 || timeToMin(m.todays[i - 1].time) <= m.nowMin)
               return (
-                <button
-                  key={s.id}
-                  className={`cockpit__row ${s.status === 'completed' ? 'is-done' : ''} ${live ? 'is-live' : ''}`}
-                  onClick={() => go(() => openSessionForm({ session: s }))}
-                >
-                  <span className="cockpit__row-time">{s.time}</span>
-                  <span className="cockpit__row-name">{clientOf(s.clientId)?.name}</span>
-                  <span className="dot" style={{ background: p?.color }} />
-                  <Icon name={s.status === 'completed' ? 'check' : live ? 'wave' : 'clock'} size={14} />
-                </button>
+                <Fragment key={s.id}>
+                  {nowHere && <div className="spine__now" aria-hidden="true">teraz</div>}
+                  <button
+                    className={`spine__row ${s.status === 'completed' ? 'is-done' : ''} ${live ? 'is-live' : ''}`}
+                    style={{ '--node-color': p?.color }}
+                    onClick={() => go(() => openSessionForm({ session: s }))}
+                  >
+                    <span className="spine__time">{s.time}</span>
+                    <span className="spine__name">{clientOf(s.clientId)?.name}</span>
+                    <Icon name={s.status === 'completed' ? 'check' : live ? 'wave' : 'clock'} size={14} className="faint" />
+                  </button>
+                </Fragment>
               )
             })}
           </div>
@@ -208,11 +214,40 @@ function CockpitPop({ anchorRef, onClose, children }) {
     )
   }, [])
 
+  // place meaningful focus on open, keep Tab inside, restore the chip on close
+  useEffect(() => {
+    const opener = document.activeElement
+    const pop = ref.current
+    pop?.querySelector('button')?.focus()
+    const onTab = (e) => {
+      if (e.key !== 'Tab' || !pop) return
+      const els = [...pop.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
+        .filter((el) => !el.disabled && el.offsetParent !== null)
+      if (!els.length) return
+      const first = els[0]
+      const last = els[els.length - 1]
+      const inside = pop.contains(document.activeElement)
+      if (e.shiftKey && (document.activeElement === first || !inside)) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && (document.activeElement === last || !inside)) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', onTab)
+    return () => {
+      document.removeEventListener('keydown', onTab)
+      if (opener && typeof opener.focus === 'function') opener.focus()
+    }
+  }, [])
+
   return (
     <div
       className="cockpit cockpit--pop"
       ref={ref}
       role="dialog"
+      aria-modal="true"
       aria-label="Panel dnia"
       style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: 0, visibility: 'hidden' }}
     >
@@ -251,6 +286,8 @@ function CockpitSheet({ onClose, children }) {
   useEffect(() => {
     const opener = document.activeElement
     const sheet = ref.current
+    // meaningful focus goes to the first action, not the trigger under the backdrop
+    sheet?.querySelector('button')?.focus()
     const onTab = (e) => {
       if (e.key !== 'Tab' || !sheet) return
       const els = [...sheet.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
@@ -285,13 +322,16 @@ function CockpitSheet({ onClose, children }) {
   )
 }
 
-export function TodayCockpit() {
+export function TodayCockpit({ closeKey }) {
   const { state } = useApp()
   const m = useTodayModel()
   const [open, setOpen] = useState(false)
   const isPhone = useIsPhone()
   const triggerRef = useRef(null)
   const close = useCallback(() => setOpen(false), [])
+
+  // one modal layer: any sibling overlay opening (drawer, palette, nav) wins
+  useEffect(() => { setOpen(false) }, [closeKey])
 
   const firstName = (id) => state.clients.find((c) => c.id === id)?.name.split(' ')[0]
   let text

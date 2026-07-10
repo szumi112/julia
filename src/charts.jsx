@@ -1,7 +1,18 @@
 // Hand-rolled SVG data-viz, animated with GSAP.
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { fmtMoney, fmtMonthName, cap } from './format.js'
 import { motionOK } from './anim.js'
+
+// Chart colors come from the same custom properties the CSS uses; read lazily
+// (first render happens after the stylesheet is in place) and memoized.
+const tokens = {}
+export const tok = (name, fallback) => {
+  if (!(name in tokens)) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+    tokens[name] = v || fallback
+  }
+  return tokens[name]
+}
 
 // Catmull-Rom → cubic bezier smooth path
 const smoothPath = (pts) => {
@@ -19,10 +30,11 @@ const smoothPath = (pts) => {
   return d
 }
 
-export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtMoney }) {
+export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtMoney, label = 'Wykres przychodów' }) {
   const wrapRef = useRef(null)
   const lineRef = useRef(null)
   const fillRef = useRef(null)
+  const gradId = useId().replace(/:/g, '')
   const [hover, setHover] = useState(null)
   const [width, setWidth] = useState(640)
 
@@ -65,26 +77,48 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [width, data])
 
-  const onMove = (e) => {
+  // pointer events cover mouse and touch; arrows cover the keyboard
+  const onPoint = (e) => {
     const rect = wrapRef.current.getBoundingClientRect()
     const x = e.clientX - rect.left
     let best = 0
     pts.forEach((p, i) => { if (Math.abs(p[0] - x) < Math.abs(pts[best][0] - x)) best = i })
     setHover(best)
   }
+  const onKey = (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+    e.preventDefault()
+    setHover((h) => {
+      const cur = h ?? data.length - 1
+      return e.key === 'ArrowRight' ? Math.min(cur + 1, data.length - 1) : Math.max(cur - 1, 0)
+    })
+  }
+
+  const rose = tok('--rose', '#c2808d')
+  const roseDeep = tok('--rose-deep', '#964d5f')
+  const gold = tok('--gold', '#ac8a4e')
+  const goldDeep = tok('--gold-deep', '#7d5f33')
+  const faint = tok('--ink-faint', '#7a6871')
+  const surface = tok('--surface', '#fcfaf5')
 
   return (
     <div
       ref={wrapRef}
       style={{ position: 'relative' }}
-      onMouseMove={onMove}
-      onMouseLeave={() => setHover(null)}
+      tabIndex={0}
+      aria-label={`${label} — strzałki w lewo i w prawo przeglądają wartości`}
+      onPointerMove={onPoint}
+      onPointerDown={onPoint}
+      onPointerLeave={() => setHover(null)}
+      onKeyDown={onKey}
+      onFocus={() => setHover((h) => h ?? data.length - 1)}
+      onBlur={() => setHover(null)}
     >
-      <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Wykres przychodów">
+      <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
         <defs>
-          <linearGradient id="areaFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#c2808d" stopOpacity="0.32" />
-            <stop offset="100%" stopColor="#c2808d" stopOpacity="0.015" />
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={rose} stopOpacity="0.32" />
+            <stop offset="100%" stopColor={rose} stopOpacity="0.015" />
           </linearGradient>
         </defs>
         {/* horizontal guides */}
@@ -99,12 +133,12 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
             strokeDasharray="3 5"
           />
         ))}
-        <path ref={fillRef} d={area} fill="url(#areaFill)" />
+        <path ref={fillRef} d={area} fill={`url(#${gradId})`} />
         <path
           ref={lineRef}
           d={line}
           fill="none"
-          stroke="#a4596b"
+          stroke={roseDeep}
           strokeWidth="2.4"
           strokeLinecap="round"
         />
@@ -114,8 +148,8 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
               cx={p[0]}
               cy={p[1]}
               r={hover === i ? 5.5 : i === pts.length - 1 ? 4.5 : 3}
-              fill={i === pts.length - 1 ? '#ac8a4e' : '#a4596b'}
-              stroke="#fcfaf5"
+              fill={i === pts.length - 1 ? gold : roseDeep}
+              stroke={surface}
               strokeWidth="2"
               style={{ transition: 'r .18s' }}
             />
@@ -125,7 +159,7 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
               textAnchor="middle"
               fontSize="11"
               fontWeight={i === pts.length - 1 ? 700 : 500}
-              fill={i === pts.length - 1 ? '#86683a' : '#a08e96'}
+              fill={i === pts.length - 1 ? goldDeep : faint}
             >
               {cap(fmtMonthName(data[i].ym)).slice(0, 3)}
             </text>
@@ -137,11 +171,23 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
             x2={pts[hover][0]}
             y1={pad.t - 4}
             y2={pad.t + innerH}
-            stroke="rgba(164,89,107,0.25)"
+            stroke="rgba(150,77,95,0.3)"
             strokeWidth="1.2"
           />
         )}
       </svg>
+      {/* the same numbers, readable without a pointer */}
+      <table className="sr-only">
+        <caption>{label}</caption>
+        <tbody>
+          {data.map((d) => (
+            <tr key={d.ym}>
+              <th scope="row">{cap(fmtMonthName(d.ym))}</th>
+              <td>{fmt(d[valueKey])}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
       <div
         className="chart-tip"
         style={
@@ -161,7 +207,8 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
   )
 }
 
-export function Sparkline({ values, color = '#a4596b', w = 74, h = 26 }) {
+export function Sparkline({ values, color, w = 74, h = 26 }) {
+  const stroke = color || tok('--rose-deep', '#964d5f')
   const max = Math.max(...values, 1)
   const min = Math.min(...values, 0)
   const pts = values.map((v, i) => [
@@ -170,13 +217,13 @@ export function Sparkline({ values, color = '#a4596b', w = 74, h = 26 }) {
   ])
   return (
     <svg width={w} height={h} className="stat__spark" aria-hidden="true">
-      <path d={smoothPath(pts)} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" opacity="0.55" />
-      <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r="2.6" fill={color} />
+      <path d={smoothPath(pts)} fill="none" stroke={stroke} strokeWidth="1.8" strokeLinecap="round" opacity="0.55" />
+      <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r="2.6" fill={stroke} />
     </svg>
   )
 }
 
-export function Donut({ parts, size = 190, thickness = 26, centerTop, centerBottom }) {
+export function Donut({ parts, size = 190, thickness = 26, centerTop, centerBottom, fmt = fmtMoney, label = 'Udział przychodów' }) {
   const ref = useRef(null)
   const total = Math.max(parts.reduce((a, p) => a + p.value, 0), 1)
   const r = (size - thickness) / 2
@@ -195,8 +242,8 @@ export function Donut({ parts, size = 190, thickness = 26, centerTop, centerBott
 
   return (
     <div style={{ position: 'relative', width: size, height: size }} ref={ref}>
-      <svg width={size} height={size} role="img" aria-label="Udział przychodów">
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#efe6d8" strokeWidth={thickness} />
+      <svg width={size} height={size} aria-hidden="true">
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={tok('--paper-deep', '#efe6d8')} strokeWidth={thickness} />
         {parts.map((p, i) => {
           const frac = p.value / total
           const dash = `${Math.max(frac * C - 5, 0.01)} ${C}`
@@ -219,6 +266,18 @@ export function Donut({ parts, size = 190, thickness = 26, centerTop, centerBott
           )
         })}
       </svg>
+      {/* per-part values for assistive tech (the legend carries only percentages) */}
+      <table className="sr-only">
+        <caption>{label}</caption>
+        <tbody>
+          {parts.map((p, i) => (
+            <tr key={i}>
+              <th scope="row">{p.label}</th>
+              <td>{fmt(p.value)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
       <div
         style={{
           position: 'absolute',
@@ -245,15 +304,15 @@ export function BarFill({ segments, totalMax }) {
     100
   )
   useEffect(() => {
-    if (!ref.current) return
-    if (!motionOK()) {
-      ref.current.style.width = pct + '%'
-      return
-    }
+    const el = ref.current
+    if (!el) return
+    // width lands immediately; only the compositor-friendly scale animates
+    el.style.width = pct + '%'
+    if (!motionOK()) return
     window.gsap.fromTo(
-      ref.current,
-      { width: '0%' },
-      { width: pct + '%', duration: 1.2, ease: 'power3.out', delay: 0.2 }
+      el,
+      { scaleX: 0, transformOrigin: 'left center' },
+      { scaleX: 1, duration: 1.2, ease: 'power3.out', delay: 0.2, clearProps: 'transform' }
     )
   }, [pct])
   const sum = Math.max(segments.reduce((a, s) => a + s.value, 0), 1)

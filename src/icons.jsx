@@ -194,7 +194,7 @@ export function Bloom({ size = 34 }) {
             opacity="0.85"
           />
         ))}
-        <circle cx="24" cy="24" r="3" fill="#a4596b" />
+        <circle cx="24" cy="24" r="3" fill="#964d5f" />
       </g>
     </svg>
   )

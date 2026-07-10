@@ -21,6 +21,8 @@ export const onMotionChange = (fn) => {
 export const setReduceMotion = (v) => {
   if (reduceOverride === !!v) return
   reduceOverride = !!v
+  // CSS animations (breathing dots, transitions) obey the in-app pref too
+  document.documentElement.classList.toggle('rm', reduceOverride)
   notifyMotion()
 }
 
@@ -58,6 +60,16 @@ export function useReveal(deps = []) {
           clearProps: CLEAR,
           overwrite: 'auto',
         }
+      )
+    }
+
+    // day-thread rules ([data-spine]) draw in from the top once per mount
+    const spines = root.querySelectorAll('[data-spine]')
+    if (spines.length) {
+      g().fromTo(
+        spines,
+        { scaleY: 0 },
+        { scaleY: 1, duration: 0.9, ease: 'power3.inOut', delay: 0.15, clearProps: 'transform' }
       )
     }
 
@@ -153,13 +165,15 @@ export function useMagnetic(strength = 0.32) {
   return ref
 }
 
-// View-exit animation used by the router before swapping views.
-export function animateOut(el) {
+// View-exit animation used by the router before swapping views. dir encodes
+// drill-in continuity: 1 = deeper (list → detail, exits left), -1 = back out.
+export function animateOut(el, dir = 0) {
   return new Promise((resolve) => {
     if (!el || !motionOK()) return resolve()
     g().to(el, {
       autoAlpha: 0,
-      y: -14,
+      x: dir ? -18 * dir : 0,
+      y: dir ? 0 : -14,
       duration: 0.22,
       ease: 'power2.in',
       onComplete: resolve,
@@ -300,7 +314,7 @@ export function goldBurst(el) {
   if (!r.width && !r.height) return
   const cx = r.left + r.width / 2
   const cy = r.top + r.height / 2
-  const colors = ['#ac8a4e', '#c2808d', '#dcc488', '#a4596b', '#e8cfa0', '#7d8c6c']
+  const colors = ['#ac8a4e', '#c2808d', '#dcc488', '#964d5f', '#e8cfa0', '#7d8c6c']
   const wrap = document.createElement('div')
   wrap.className = 'burst'
   document.body.appendChild(wrap)

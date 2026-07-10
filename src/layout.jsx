@@ -268,7 +268,7 @@ function MobileTabbar({ route, navigate, onAdd }) {
   )
 }
 
-function Topbar({ route, onLogout, onSearch, onMenu }) {
+function Topbar({ route, onLogout, onSearch, onMenu, overlayKey }) {
   const { state } = useApp()
   const titleRef = useRef(null)
   const title = TITLES[route.name] || ''
@@ -296,11 +296,7 @@ function Topbar({ route, onLogout, onSearch, onMenu }) {
           <span>Szukaj…</span>
           <kbd>Ctrl K</kbd>
         </button>
-        <TodayCockpit />
-        <span className="month-chip">
-          <Icon name="sparkle" size={14} />
-          {fmtMonthYear(monthKey(new Date()))}
-        </span>
+        <TodayCockpit closeKey={overlayKey} />
         <div className="userchip">
           <Avatar name={state.user.name} size={37} />
           <div>
@@ -328,12 +324,12 @@ function useMonthSettled() {
     if (prev.current) {
       for (const ym of Object.keys(prev.current)) {
         if (prev.current[ym] > 0 && (byMonth[ym] || 0) === 0) {
-          // order matters: the month chip exists but is display:none below
-          // desktop, and goldBurst skips zero-size anchors
+          // order matters: goldBurst skips zero-size anchors, so fall through
+          // to whichever gold signal the current view actually shows
           goldBurst(
+            document.querySelector('.figures__item--gold') ||
             document.querySelector('.stat--gold') ||
-            document.querySelector('.today-chip') ||
-            document.querySelector('.month-chip')
+            document.querySelector('.today-chip')
           )
           toast(`${cap(fmtMonthYear(ym))} rozliczony w całości ✨`)
           break
@@ -343,6 +339,9 @@ function useMonthSettled() {
     prev.current = byMonth
   }, [state.sessions, toast])
 }
+
+// details sit one level below their list view — used for drill-in continuity
+const DEPTH = { client: 1, psych: 1 }
 
 export function Shell({ onLogout }) {
   const [route, setRoute] = useState({ name: 'dashboard' })
@@ -374,11 +373,20 @@ export function Shell({ onLogout }) {
     )
   }, [])
 
+  // one modal layer at a time: opening any overlay closes its siblings, and
+  // the background view is marked inert while one is up (the cockpit gets the
+  // same signal via overlayKey)
+  const anyModal = !!drawer || cmdOpen || navOpen
+  useEffect(() => {
+    contentRef.current?.toggleAttribute('inert', anyModal)
+  }, [anyModal])
+
   // global search shortcut
   useEffect(() => {
     const onKey = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
+        setNavOpen(false)
         setCmdOpen((v) => !v)
       }
     }
@@ -390,17 +398,21 @@ export function Shell({ onLogout }) {
     if (busy.current) return
     if (route.name === name && JSON.stringify(route.params) === JSON.stringify(params)) return
     busy.current = true
-    animateOut(viewRef.current).then(() => {
+    const dir = (DEPTH[name] || 0) - (DEPTH[route.name] || 0)
+    animateOut(viewRef.current, dir).then(() => {
       setRoute({ name, params })
       if (contentRef.current) contentRef.current.scrollTop = 0
       busy.current = false
     })
   }
 
-  const openSessionForm = (opts = {}) => setDrawer({ kind: 'session', opts })
-  const openClientForm = (opts = {}) => setDrawer({ kind: 'client', opts })
-  const openPsychForm = (opts = {}) => setDrawer({ kind: 'psych', opts })
-  const closeDrawer = () => setDrawer(null)
+  const openSessionForm = (opts = {}) => { setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'session', opts }) }
+  const openClientForm = (opts = {}) => { setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'client', opts }) }
+  const openPsychForm = (opts = {}) => { setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'psych', opts }) }
+  // inert must drop before the closing overlay's cleanup restores focus into
+  // the content area, or the focus() call lands on an inert subtree and dies
+  const unInert = () => contentRef.current?.removeAttribute('inert')
+  const closeDrawer = () => { unInert(); setDrawer(null) }
 
   const View = VIEWS[route.name] || Dashboard
 
@@ -414,6 +426,7 @@ export function Shell({ onLogout }) {
             onLogout={onLogout}
             onSearch={() => setCmdOpen(true)}
             onMenu={isCompact ? () => setNavOpen(true) : undefined}
+            overlayKey={`${drawer?.kind || ''}-${cmdOpen}-${navOpen}`}
           />
           <main className="content" ref={contentRef}>
             <div className="view" ref={viewRef} key={route.name + JSON.stringify(route.params || {})}>
@@ -422,14 +435,16 @@ export function Shell({ onLogout }) {
           </main>
         </div>
       </div>
+      {/* view changes are announced — the router moves no focus by itself */}
+      <div className="sr-only" aria-live="polite">{TITLES[route.name] || ''}</div>
       {isPhone && <MobileTabbar route={route} navigate={navigate} onAdd={() => openSessionForm()} />}
       {isCompact && navOpen && (
-        <MobileNavDrawer route={route} navigate={navigate} onClose={() => setNavOpen(false)} />
+        <MobileNavDrawer route={route} navigate={navigate} onClose={() => { unInert(); setNavOpen(false) }} />
       )}
       {drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {cmdOpen && <CommandPalette onClose={() => setCmdOpen(false)} />}
+      {cmdOpen && <CommandPalette onClose={() => { unInert(); setCmdOpen(false) }} />}
     </ShellCtx.Provider>
   )
 }
