@@ -662,15 +662,7 @@ input, select, textarea { font-family: inherit; color: inherit; }
   .stat { padding: 16px 16px 14px; }
   .stat__value { font-size: 25px; }
   .stat__value small { font-size: 14px; }
-  .stat__spark { right: 10px; bottom: 10px; transform: scale(0.85); transform-origin: bottom right; }
 }
-.stat__delta { margin-top: 9px; font-size: 12.5px; color: var(--ink-soft); display: flex; align-items: center; gap: 5px; }
-.stat__delta b { font-weight: 700; }
-.stat__delta .up { color: var(--sage-deep); }
-.stat__delta .down { color: var(--error); }
-.stat__spark { position: absolute; right: 14px; bottom: 14px; opacity: 0.9; }
-.stat--gold { background: linear-gradient(140deg, #f8f1e2, #f3e8d2); border-color: rgba(172, 138, 78, 0.25); }
-.stat--gold .stat__value { color: var(--gold-deep); }
 
 /* figures line — secondary KPIs as one quiet hairline-ruled row instead of
    equal-weight cards; each figure links to the view it summarizes */
@@ -893,6 +885,9 @@ button.figures__item:hover .figures__value { color: var(--rose-deep); }
   box-shadow: 0 0 0 4px rgba(176, 74, 51, 0.12);
 }
 
+.input--rate { width: 96px; height: 38px; }
+.toggle:disabled { opacity: 0.55; cursor: not-allowed; }
+
 .select {
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%236e5a63' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
@@ -1054,6 +1049,21 @@ button.figures__item:hover .figures__value { color: var(--rose-deep); }
 
 /* summary row (Reports) — class so the sticky first column inherits the tint */
 .table .table__total td { background: var(--surface-warm); }
+
+/* financial exceptions scan without color alone: gold rail + warm tint on
+   rows that still owe money (opaque tint so sticky first cells keep it) */
+.table tr.is-due td { background: #f9f2e3; }
+.table tr.is-due td:first-child { box-shadow: inset 3px 0 0 var(--gold); }
+.table-scroll .table:not(.table--cards) tr.is-due td:first-child {
+  background: #f9f2e3;
+  box-shadow: inset 3px 0 0 var(--gold), 8px 0 10px -8px rgba(58, 44, 50, 0.18);
+}
+
+/* collection meter under the finance figures */
+.collect { margin: -6px 0 24px; }
+.collect__labels { margin-top: 6px; font-size: 12.5px; }
+.collect__due { color: var(--gold-deep); font-weight: 650; }
+.collect__ok { color: var(--sage-deep); font-weight: 650; }
 
 /* data-dense tables (Payments, Reports): the table alone scrolls sideways,
    with soft fades hinting at clipped columns and an anchored first column */
@@ -1861,11 +1871,57 @@ button.spine__row:hover { background: rgba(240, 220, 218, 0.3); }
   .tip__bubble { max-width: 190px; }
 }
 
+/* identity band — full-width header for client/specialist detail views;
+   the top edge carries the responsible specialist's color */
+.id-band {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 26px 28px 24px;
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  box-shadow: var(--shadow-1);
+  margin-bottom: 20px;
+}
+.id-band::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 5px;
+  background: linear-gradient(90deg, var(--band-color, var(--rose)), transparent 82%);
+}
+.id-band__main { flex: 1; min-width: 0; }
+.id-band__name { font-size: clamp(23px, 2.4vw, 28px); overflow-wrap: anywhere; }
+.id-band__sub { color: var(--ink-soft); font-size: 13.5px; margin-top: 3px; }
+.id-band__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.id-band__meta > * { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.id-band__pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.id-band__actions { display: flex; gap: 10px; flex-shrink: 0; flex-wrap: wrap; }
+@media (max-width: 768px) {
+  .id-band { flex-wrap: wrap; padding: 22px 20px 20px; }
+  .id-band__actions { width: 100%; }
+  .id-band__actions .btn { flex: 1; }
+}
+
 /* psychologist cards */
 .psy-card { position: relative; overflow: hidden; padding: 26px; cursor: pointer; transition: transform 0.3s var(--ease-out), box-shadow 0.3s var(--ease-out); }
 .psy-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-2); }
 .psy-card__band { position: absolute; top: 0; left: 0; right: 0; height: 5px; }
 .psy-card__spec { color: var(--ink-soft); font-size: 13px; margin-top: 2px; }
+.psy-card__today { font-size: 12.5px; color: var(--ink-faint); margin-top: 7px; }
+.psy-card__today b { color: var(--ink-soft); font-weight: 650; }
 .psy-card__stats { display: flex; gap: 0; margin-top: 22px; border-top: 1px solid var(--line-soft); padding-top: 16px; }
 .psy-card__stat { flex: 1; }
 .psy-card__stat + .psy-card__stat { border-left: 1px solid var(--line-soft); padding-left: 16px; }
@@ -1877,12 +1933,6 @@ button.spine__row:hover { background: rgba(240, 220, 218, 0.3); }
 }
 .psy-card__stat b { display: block; font-family: var(--font-display); font-size: 21px; font-weight: 470; font-variant-numeric: tabular-nums; }
 .psy-card__stat span { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); font-weight: 650; }
-
-/* client status badge inside detail */
-.kv { display: flex; flex-direction: column; gap: 14px; }
-.kv__row { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 14px; }
-.kv__key { color: var(--ink-faint); font-size: 13px; flex-shrink: 0; }
-.kv__val { font-weight: 600; text-align: right; min-width: 0; overflow-wrap: anywhere; }
 
 /* notes timeline */
 .notes { display: flex; flex-direction: column; gap: 0; }
@@ -1950,58 +2000,26 @@ button.spine__row:hover { background: rgba(240, 220, 218, 0.3); }
 }
 .bpost-more:hover { color: var(--terra-deep); }
 
-/* report hero */
-.report-hero {
-  position: relative;
-  overflow: hidden;
-  padding: 36px 40px;
-  border-radius: var(--r-xl);
-  background: linear-gradient(130deg, #f9f3e8, #f4e6dd 55%, #f0ddd6);
-  border: 1px solid rgba(255, 255, 255, 0.7);
-  box-shadow: var(--shadow-1);
-}
-.report-hero__month {
-  position: absolute;
-  right: -10px;
-  bottom: -38px;
+/* report lead — the month written out, its figures set inline in Fraunces */
+.report-lead { max-width: 62ch; margin-bottom: 26px; }
+.report-lead__text {
+  margin: 0;
   font-family: var(--font-display);
+  font-weight: 420;
+  font-size: clamp(19px, 2.1vw, 23px);
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.report-lead__text em {
   font-style: italic;
-  font-weight: 400;
-  font-size: 150px;
-  line-height: 1;
-  color: rgba(164, 89, 107, 0.09);
-  pointer-events: none;
-  white-space: nowrap;
-  text-transform: capitalize;
-}
-.report-bignum { display: flex; gap: 56px; flex-wrap: wrap; }
-.report-bignum__item b {
-  display: block;
-  font-family: var(--font-display);
-  font-size: 44px;
-  font-weight: 430;
-  letter-spacing: -0.01em;
+  font-weight: 480;
+  color: var(--rose-deep);
   font-variant-numeric: tabular-nums;
-  line-height: 1.05;
+  white-space: nowrap;
 }
-.report-bignum__item b small { font-size: 22px; font-weight: 400; color: var(--ink-soft); }
-.report-bignum__item > span {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--gold-deep);
-  display: block;
-  margin-bottom: 10px;
-}
-@media (max-width: 640px) {
-  .report-hero { padding: 26px 22px; }
-  .report-hero__month { font-size: 92px; bottom: -24px; }
-  .report-bignum { gap: 22px 32px; }
-  .report-bignum__item b { font-size: 32px; }
-  .report-bignum__item b small { font-size: 17px; }
-  .report-bignum__item > span { margin-bottom: 6px; }
-}
+
+/* print-only content (report letterhead) */
+.print-only { display: none; }
 
 /* settings */
 .settings-grid { display: grid; grid-template-columns: 220px 1fr; gap: 36px; align-items: start; }
@@ -2021,15 +2039,6 @@ button.spine__row:hover { background: rgba(240, 220, 218, 0.3); }
 }
 .pref-row__title { font-weight: 600; font-size: 14.5px; }
 .pref-row__desc { font-size: 13px; color: var(--ink-faint); margin-top: 2px; max-width: 48ch; }
-
-/* decorative blob behind headers */
-.deco-blob {
-  position: absolute;
-  pointer-events: none;
-  z-index: 0;
-  opacity: 0.5;
-  filter: blur(2px);
-}
 
 /* dashboard hero scene — greeting on the left, the day thread working panel
    on the right (the one sanctioned translucent hero moment) */
@@ -2414,6 +2423,12 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
   .table-scroll { overflow: visible; background: none; }
   .table-scroll .table th:first-child,
   .table-scroll .table td:first-child { position: static; }
+  /* report clarity: letterhead visible, ink text, no split cards */
+  .print-only { display: block; }
+  .report-lead__text, .report-lead__text em { color: #000; }
+  .grid-31 { display: block; }
+  .grid-31 > * { break-inside: avoid; margin-bottom: 16px; }
+  .figures__value { color: #000; }
 }
 
 /* reduced motion — the OS preference and the in-app toggle (html.rm, set by

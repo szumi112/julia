@@ -39,6 +39,9 @@ export function ClientDrawer({ opts, onClose }) {
     setErrors(errs)
     if (Object.keys(errs).length) {
       shake()
+      requestAnimationFrame(() =>
+        drawerRef.current?.querySelector('.has-error input, .has-error select, .has-error textarea')?.focus()
+      )
       return
     }
     const payload = {

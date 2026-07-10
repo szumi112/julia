@@ -1,21 +1,38 @@
-// Monthly report — the hero view replacing the Excel sheet.
+// Monthly report — Aurelia's editorial data story: the month opens as two
+// written sentences with its figures set inline, then the operational table.
 import { useMemo, useState } from 'react'
 import { useApp, sessionsInMonth, monthStats, availableMonths } from '../store.jsx'
-import { useReveal, useCountUp } from '../anim.js'
-import { Avatar, Button, Chip, IconBtn } from '../ui.jsx'
+import { useReveal } from '../anim.js'
+import { Avatar, Button, Chip, IconBtn, Figure } from '../ui.jsx'
 import { Donut, BarFill } from '../charts.jsx'
 import {
-  fmtMoney, fmtNumber, monthKey, addMonths, fmtMonthYear, fmtMonthName, cap,
-  isBillable, collectedOf, plural,
+  fmtMoney, fmtNumber, monthKey, addMonths, fmtMonthYear, fmtMonthLocative, fmtMonthName, cap,
+  isBillable, collectedOf, plural, sessionsWord,
 } from '../format.js'
 
-function BigNum({ label, value, fmt }) {
-  const ref = useCountUp(value, fmt)
+const hoursWord = (h) => plural(h, 'godzina', 'godziny', 'godzin')
+
+// the written lead — calm Polish prose over the same numbers the table shows
+function ReportLead({ ym, stats, scopeName, avg }) {
+  const inMonth = `W ${fmtMonthLocative(ym)}`
+  const h = Math.round(stats.hours)
+  if (stats.count === 0) {
+    return (
+      <p className="report-lead__text">
+        {inMonth} {scopeName ? <em>{scopeName}</em> : 'centrum'} nie {scopeName ? 'przeprowadziła' : 'przeprowadziło'} żadnych sesji.
+        Gdy pojawią się pierwsze spotkania, ten raport opowie ich historię.
+      </p>
+    )
+  }
   return (
-    <div className="report-bignum__item">
-      <span>{label}</span>
-      <b><span ref={ref}>0</span></b>
-    </div>
+    <p className="report-lead__text">
+      {inMonth} {scopeName ? <em>{scopeName}</em> : 'zespół'} {scopeName ? 'przeprowadziła' : 'przeprowadził'}{' '}
+      <em>{stats.completed} {sessionsWord(stats.completed)}</em> — <em>{h} {hoursWord(h)}</em> rozmów.
+      Wystawiono <em>{fmtMoney(stats.revenue)}</em>{stats.revenue > 0 && stats.outstanding === 0
+        ? <> i wszystko zostało już rozliczone.</>
+        : <>; zebrano dotąd <em>{fmtMoney(stats.collected)}</em>, a <em>{fmtMoney(stats.outstanding)}</em> czeka na wpłaty.</>}
+      {stats.completed > 0 && <> Średnia sesja to <em>{fmtMoney(avg)}</em>.</>}
+    </p>
   )
 }
 
@@ -78,7 +95,7 @@ export function Reports() {
           </div>
           <Button variant="ghost" icon="print" onClick={() => window.print()}>Drukuj</Button>
           <Button icon="download" magnetic onClick={() => toast('Raport PDF wyeksportowany (demo)')}>
-            Eksport
+            Eksport (demo)
           </Button>
         </div>
       </div>
@@ -93,22 +110,31 @@ export function Reports() {
         ))}
       </div>
 
-      <section className="report-hero" data-reveal>
-        <div className="report-hero__month" aria-hidden="true">{fmtMonthName(ym)}</div>
-        <div className="report-bignum">
-          <BigNum
-            label={psychFilter
-              ? state.psychologists.find((p) => p.id === psychFilter)?.name.split(' ')[0] + ' — przychód'
-              : 'Przychód centrum'}
-            value={stats.revenue}
-            fmt={fmtMoney}
-          />
-          <BigNum label="Zebrane" value={stats.collected} fmt={fmtMoney} />
-          <BigNum label="Godziny terapii" value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
-          <BigNum label="Sesje odbyte" value={stats.completed} fmt={(v) => fmtNumber(Math.round(v))} />
-          <BigNum label="Średnio / sesję" value={avg} fmt={fmtMoney} />
-        </div>
+      <p className="print-only faint" style={{ margin: '0 0 14px', fontSize: 13 }}>
+        {state.center.name} · {state.center.address}
+      </p>
+
+      <section className="report-lead" data-reveal>
+        <ReportLead
+          ym={ym}
+          stats={stats}
+          avg={avg}
+          scopeName={psychFilter ? state.psychologists.find((p) => p.id === psychFilter)?.name : null}
+        />
       </section>
+
+      <div className="figures" data-reveal role="group"
+        aria-label={`${psychFilter ? state.psychologists.find((p) => p.id === psychFilter)?.name : 'Całe centrum'} — ${fmtMonthYear(ym)}`}>
+        <Figure
+          label={`${psychFilter ? state.psychologists.find((p) => p.id === psychFilter)?.name.split(' ')[0] : 'Centrum'} · przychód`}
+          value={stats.revenue}
+          fmt={fmtMoney}
+        />
+        <Figure label="Zebrane" value={stats.collected} fmt={fmtMoney} />
+        <Figure label="Godziny terapii" value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
+        <Figure label="Sesje odbyte" value={stats.completed} fmt={(v) => fmtNumber(Math.round(v))} />
+        <Figure label="Średnio / sesję" value={avg} fmt={fmtMoney} />
+      </div>
 
       <div className="grid-31" style={{ marginTop: 20 }}>
         <div className="card card--pad" data-reveal>

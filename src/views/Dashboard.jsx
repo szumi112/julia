@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useApp, monthStats, upcomingSessions, totalOutstanding, clientOutstanding, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { useReveal, useCountUp, useDrawerFX, motionOK } from '../anim.js'
+import { useReveal, useDrawerFX, motionOK } from '../anim.js'
 import { Ambient } from '../three-scene.jsx'
 import { AreaChart, BarFill } from '../charts.jsx'
-import { Button, Avatar, Pill, IconBtn, EmptyState } from '../ui.jsx'
+import { Button, Avatar, Pill, IconBtn, EmptyState, Figure } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import {
   fmtMoney, fmtNumber, monthKey, addMonths, fmtWeekday, fmtDayMonth, fmtShortDate, toISODate, pad2,
@@ -14,27 +14,6 @@ import {
 const vocative = (name) => {
   const first = name.split(' ')[0]
   return first.endsWith('a') ? first.slice(0, -1) + 'o' : first
-}
-
-// one entry in the figures line — a quiet, linked number instead of a card
-function Figure({ label, value, fmt = fmtNumber, suffix, sub, gold, onClick }) {
-  const ref = useCountUp(value, fmt)
-  const Tag = onClick ? 'button' : 'div'
-  return (
-    <Tag
-      type={onClick ? 'button' : undefined}
-      className={`figures__item ${gold ? 'figures__item--gold' : ''}`}
-      onClick={onClick}
-      data-reveal
-    >
-      <span className="figures__label">{label}</span>
-      <span className="figures__value">
-        <span ref={ref}>0</span>
-        {suffix && <small>{suffix}</small>}
-      </span>
-      {sub && <span className="figures__sub">{sub}</span>}
-    </Tag>
-  )
 }
 
 // today's sessions on the day thread — the hero's working half

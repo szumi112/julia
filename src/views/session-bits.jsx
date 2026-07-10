@@ -16,7 +16,7 @@ export function StatusPicker({ session }) {
       open={open}
       setOpen={setOpen}
       trigger={
-        <Pill tone={STATUS_TONE[session.status]} dot onClick={() => setOpen(!open)} aria-haspopup="menu">
+        <Pill tone={STATUS_TONE[session.status]} dot onClick={() => setOpen(!open)}>
           {STATUS_LABELS[session.status]}
           <Icon name="chevD" size={11} />
         </Pill>
@@ -52,7 +52,7 @@ export function PaymentPicker({ session }) {
       open={open}
       setOpen={setOpen}
       trigger={
-        <Pill tone={PAY_TONE[session.payment]} dot onClick={() => setOpen(!open)} aria-haspopup="menu">
+        <Pill tone={PAY_TONE[session.payment]} dot onClick={() => setOpen(!open)}>
           {label}
           <Icon name="chevD" size={11} />
         </Pill>

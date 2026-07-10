@@ -44,6 +44,9 @@ const shortDateFmt = new Intl.DateTimeFormat('pl-PL', { day: 'numeric', month: '
 
 export const fmtMonthName = (ym) => monthLong.format(monthKeyToDate(ym))
 export const fmtMonthYear = (ym) => monthYearFmt.format(monthKeyToDate(ym))
+// locative case for prose ("w lipcu") — Intl only provides the nominative
+const MONTHS_LOC = ['styczniu', 'lutym', 'marcu', 'kwietniu', 'maju', 'czerwcu', 'lipcu', 'sierpniu', 'wrześniu', 'październiku', 'listopadzie', 'grudniu']
+export const fmtMonthLocative = (ym) => MONTHS_LOC[Number(ym.slice(5, 7)) - 1]
 export const fmtDayMonth = (iso) => dayMonthFmt.format(parseISO(iso))
 export const fmtFullDate = (iso) => fullDateFmt.format(parseISO(iso))
 export const fmtWeekday = (iso) => weekdayFmt.format(parseISO(iso))

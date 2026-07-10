@@ -1,25 +1,15 @@
 import { useMemo, useState } from 'react'
 import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { useReveal, useCountUp, useFlip } from '../anim.js'
-import { Avatar, Pill, Chip, IconBtn, Button, InfoTip, EmptyState } from '../ui.jsx'
+import { useReveal, useFlip } from '../anim.js'
+import { Avatar, Pill, Chip, IconBtn, Button, InfoTip, EmptyState, Figure } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { BarFill } from '../charts.jsx'
 import { PaymentPicker } from './session-bits.jsx'
 import {
   fmtMoney, monthKey, addMonths, fmtMonthYear, fmtShortDate,
-  isBillable, collectedOf, outstandingOf, sessionsWord,
+  isBillable, collectedOf, outstandingOf, sessionsWord, cap,
 } from '../format.js'
-
-function MoneyStat({ label, value, tone, tip }) {
-  const ref = useCountUp(value, fmtMoney)
-  return (
-    <div className={`card stat card--lift ${tone === 'gold' ? 'stat--gold' : ''}`} data-reveal>
-      <div className="stat__label">{label}{tip && <InfoTip text={tip} />}</div>
-      <div className="stat__value"><span ref={ref}>0</span></div>
-    </div>
-  )
-}
 
 export function Payments() {
   const { state, dispatch, toast } = useApp()
@@ -100,20 +90,52 @@ export function Payments() {
         </Chip>
       </div>
 
-      <div className="stats-row stats-row--3">
-        <MoneyStat
-          label="Wystawione (mies.)"
+      {/* every number below carries its scope explicitly */}
+      <div className="eyebrow" data-reveal style={{ marginBottom: 2 }}>
+        {psychFilter ? psychOf(psychFilter)?.name : 'Cały zespół'}
+        {unpaidOnly ? ' · tylko zaległe' : ''} · {fmtMonthYear(ym)}
+      </div>
+      <div className="figures" role="group" aria-label={`Rozliczenia — ${fmtMonthYear(ym)}`}>
+        <Figure
+          label={<>Wystawione <InfoTip text="Suma kwot za sesje rozliczane w tym miesiącu — odbyte i nieobecności. Sesje odwołane nie są fakturowane." /></>}
           value={collected + outstanding}
-          tip="Suma kwot za sesje rozliczane w tym miesiącu — odbyte i nieobecności. Sesje odwołane nie są fakturowane."
+          fmt={fmtMoney}
         />
-        <MoneyStat label="Zebrane" value={collected} tip="Kwoty już wpłacone przez klientów, łącznie z wpłatami częściowymi." />
-        <MoneyStat
-          label="Zaległe"
+        <Figure
+          label={<>Zebrane <InfoTip text="Kwoty już wpłacone przez klientów, łącznie z wpłatami częściowymi." /></>}
+          value={collected}
+          fmt={fmtMoney}
+        />
+        <Figure
+          label={<>Zaległe <InfoTip text="To, czego klienci jeszcze nie wpłacili. Zniknie, gdy oznaczysz sesje jako opłacone." /></>}
           value={outstanding}
-          tone="gold"
-          tip="To, czego klienci jeszcze nie wpłacili. Zniknie, gdy oznaczysz sesje jako opłacone."
+          fmt={fmtMoney}
+          gold
         />
       </div>
+
+      {/* the month's collection at a glance */}
+      {collected + outstanding > 0 && (
+        <div className="collect" data-reveal>
+          <div className="hbar__track" style={{ height: 16 }}>
+            <BarFill
+              segments={[
+                { value: collected, color: 'var(--sage)', label: 'zebrane' },
+                { value: outstanding, color: 'var(--gold-mid)', label: 'zaległe' },
+              ]}
+              totalMax={collected + outstanding}
+            />
+          </div>
+          <div className="row row--between collect__labels">
+            <span className="muted">
+              zebrane {fmtMoney(collected)} · {Math.round((collected / (collected + outstanding)) * 100)}%
+            </span>
+            {outstanding > 0
+              ? <span className="collect__due">do zebrania {fmtMoney(outstanding)}</span>
+              : <span className="collect__ok">wszystko rozliczone</span>}
+          </div>
+        </div>
+      )}
 
       <div className="grid-13" style={{ marginTop: 4 }}>
         <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
@@ -185,7 +207,7 @@ export function Payments() {
                 const p = psychOf(s.psychId)
                 const out = outstandingOf(s)
                 return (
-                  <tr key={s.id} data-flip-id={s.id}>
+                  <tr key={s.id} data-flip-id={s.id} className={out > 0 ? 'is-due' : ''}>
                     <td style={{ fontWeight: 600 }}>{fmtShortDate(s.date)}</td>
                     <td>{clientOf(s.clientId)?.name}</td>
                     <td>

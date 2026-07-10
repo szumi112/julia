@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, setReduceMotion } from '../anim.js'
+import { useMediaQuery } from '../responsive.js'
 import { Button, Field, Avatar, Toggle, IconBtn } from '../ui.jsx'
 
 // quick rate edit — local while typing, committed to the store on blur so a
@@ -17,17 +18,20 @@ function RateInput({ psych }) {
       dispatch({ type: 'UPDATE_PSYCH', id: psych.id, patch: { rate } })
       toast(`Stawka zaktualizowana: ${psych.name.split(' ')[0]}`)
     } else {
+      // a rejected value never reverts silently
+      if (String(psych.rate) !== val && !(rate === psych.rate)) {
+        toast('Stawka musi być liczbą większą od zera', 'alert')
+      }
       setVal(String(psych.rate))
     }
   }
 
   return (
     <input
-      className="input"
+      className="input input--rate"
       type="number"
       min="0"
       step="10"
-      style={{ width: 96, height: 38 }}
       value={val}
       aria-label={`Stawka — ${psych.name}`}
       onChange={(e) => setVal(e.target.value)}
@@ -41,15 +45,26 @@ export function Settings() {
   const { state, dispatch, toast } = useApp()
   const { openPsychForm } = useShell()
   const ref = useReveal()
+  const osReduce = useMediaQuery('(prefers-reduced-motion: reduce)')
 
   const [profile, setProfile] = useState({ name: state.user.name, email: state.user.email })
   const [center, setCenter] = useState({ ...state.center })
+  const [errors, setErrors] = useState({})
 
   const saveProfile = () => {
-    dispatch({ type: 'UPDATE_USER', patch: profile })
+    const errs = {}
+    if (!profile.name.trim()) errs.profileName = 'Podaj imię i nazwisko'
+    if (!profile.email.trim()) errs.profileEmail = 'Podaj adres e-mail'
+    setErrors((e) => ({ ...e, profileName: errs.profileName, profileEmail: errs.profileEmail }))
+    if (errs.profileName || errs.profileEmail) return
+    dispatch({ type: 'UPDATE_USER', patch: { name: profile.name.trim(), email: profile.email.trim() } })
     toast('Profil zaktualizowany')
   }
   const saveCenter = () => {
+    const errs = {}
+    if (!center.name.trim()) errs.centerName = 'Podaj nazwę centrum'
+    setErrors((e) => ({ ...e, centerName: errs.centerName }))
+    if (errs.centerName) return
     dispatch({ type: 'UPDATE_CENTER', patch: center })
     toast('Dane centrum zapisane')
   }
@@ -68,13 +83,13 @@ export function Settings() {
           <div className="card card--pad" data-reveal>
             <h2 className="card-title">Twój profil</h2>
             <div className="stack" style={{ marginTop: 18 }}>
-              <Field label="Imię i nazwisko">
+              <Field label="Imię i nazwisko" error={errors.profileName}>
                 <input className="input" value={profile.name}
-                  onChange={(e) => setProfile({ ...profile, name: e.target.value })} />
+                  onChange={(e) => { setProfile({ ...profile, name: e.target.value }); setErrors((x) => ({ ...x, profileName: null })) }} />
               </Field>
-              <Field label="Adres e-mail">
+              <Field label="Adres e-mail" error={errors.profileEmail}>
                 <input className="input" type="email" value={profile.email}
-                  onChange={(e) => setProfile({ ...profile, email: e.target.value })} />
+                  onChange={(e) => { setProfile({ ...profile, email: e.target.value }); setErrors((x) => ({ ...x, profileEmail: null })) }} />
               </Field>
               <div><Button size="sm" onClick={saveProfile}>Zapisz profil</Button></div>
             </div>
@@ -83,9 +98,9 @@ export function Settings() {
           <div className="card card--pad" data-reveal>
             <h2 className="card-title">Dane centrum</h2>
             <div className="stack" style={{ marginTop: 18 }}>
-              <Field label="Nazwa">
+              <Field label="Nazwa" error={errors.centerName}>
                 <input className="input" value={center.name}
-                  onChange={(e) => setCenter({ ...center, name: e.target.value })} />
+                  onChange={(e) => { setCenter({ ...center, name: e.target.value }); setErrors((x) => ({ ...x, centerName: null })) }} />
               </Field>
               <Field label="Adres">
                 <input className="input" value={center.address}
@@ -112,11 +127,14 @@ export function Settings() {
                 <div>
                   <div className="pref-row__title">Ogranicz animacje</div>
                   <div className="pref-row__desc">
-                    Wycisza efekty ruchu w całej aplikacji — przydatne przy wrażliwości na ruch.
+                    {osReduce
+                      ? 'System już ogranicza ruch — ustawienie systemowe ma pierwszeństwo i animacje pozostają wyciszone.'
+                      : 'Wycisza efekty ruchu w całej aplikacji — przydatne przy wrażliwości na ruch.'}
                   </div>
                 </div>
                 <Toggle
-                  on={state.prefs.reduceMotion}
+                  on={osReduce || state.prefs.reduceMotion}
+                  disabled={osReduce}
                   label="Ogranicz animacje"
                   onChange={(v) => {
                     dispatch({ type: 'SET_PREF', key: 'reduceMotion', value: v })

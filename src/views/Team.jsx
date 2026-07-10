@@ -5,13 +5,18 @@ import { useReveal, useCountUp } from '../anim.js'
 import { Avatar, Pill, Button, Chip, IconBtn, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { AreaChart } from '../charts.jsx'
-import { fmtMoney, fmtNumber, fmtShortDate, monthKey, addMonths, fmtMonthYear, sessionsWord, fmtDayMonth, clientsWord } from '../format.js'
+import {
+  fmtMoney, fmtNumber, fmtShortDate, monthKey, addMonths, fmtMonthYear, fmtMonthName,
+  sessionsWord, fmtDayMonth, clientsWord, toISODate,
+} from '../format.js'
 
 export function Team() {
   const { state } = useApp()
   const { navigate, openPsychForm } = useShell()
   const ref = useReveal()
   const ym = monthKey(new Date())
+  const today = toISODate(new Date())
+  const monthShort = fmtMonthName(ym).slice(0, 3)
 
   return (
     <div ref={ref}>
@@ -45,6 +50,9 @@ export function Team() {
         {state.psychologists.map((p) => {
           const clients = state.clients.filter((c) => c.psychId === p.id)
           const stats = monthStats(state.sessions.filter((s) => s.psychId === p.id), ym)
+          const todays = state.sessions
+            .filter((s) => s.psychId === p.id && s.date === today && s.status !== 'cancelled')
+            .sort((a, b) => (a.time < b.time ? -1 : 1))
           return (
             <div className="card psy-card" key={p.id} data-reveal onClick={() => navigate('psych', { id: p.id })}
               role="button" tabIndex={0}
@@ -62,6 +70,11 @@ export function Team() {
                     {p.title} {p.name}
                   </h2>
                   <div className="psy-card__spec">{p.spec}</div>
+                  <div className="psy-card__today">
+                    {todays.length > 0
+                      ? <>dziś <b>{todays.length} {sessionsWord(todays.length)}</b> · {todays.map((s) => s.time).join(', ')}</>
+                      : 'dziś bez sesji'}
+                  </div>
                 </div>
                 <Icon name="chevR" size={18} className="faint" />
               </div>
@@ -72,15 +85,15 @@ export function Team() {
                 </div>
                 <div className="psy-card__stat">
                   <b>{stats.count}</b>
-                  <span>{sessionsWord(stats.count)} (mies.)</span>
+                  <span>{sessionsWord(stats.count)} · {monthShort}</span>
                 </div>
                 <div className="psy-card__stat">
                   <b>{Math.round(stats.hours)} h</b>
-                  <span>godziny</span>
+                  <span>godziny · {monthShort}</span>
                 </div>
                 <div className="psy-card__stat">
                   <b>{fmtMoney(stats.revenue)}</b>
-                  <span>przychód</span>
+                  <span>przychód · {monthShort}</span>
                 </div>
               </div>
             </div>
@@ -136,34 +149,31 @@ export function PsychDetail({ params }) {
         <Icon name="arrowL" size={16} /> Wróć do zespołu
       </button>
 
-      <div className="card card--pad" data-reveal style={{ position: 'relative', overflow: 'hidden' }}>
-        <span className="psy-card__band" style={{ background: `linear-gradient(90deg, ${psych.color}, ${psych.color}55)` }} />
-        <div className="row row--between" style={{ flexWrap: 'wrap', gap: 20 }}>
-          <div className="row" style={{ gap: 18 }}>
-            <Avatar name={psych.name} color={psych.color} size={64} />
-            <div>
-              <h1 className="display" style={{ fontSize: 28 }}>{psych.title} {psych.name}</h1>
-              <div className="muted" style={{ marginTop: 4 }}>{psych.spec}</div>
-              <div className="row" style={{ gap: 14, marginTop: 10, fontSize: 13, color: 'var(--ink-soft)', flexWrap: 'wrap' }}>
-                <span className="row" style={{ gap: 6 }}><Icon name="mail" size={14} /> {psych.email}</span>
-                <span className="row" style={{ gap: 6 }}><Icon name="phone" size={14} /> {psych.phone}</span>
-                <span className="row" style={{ gap: 6 }}><Icon name="room" size={14} /> {psych.room}</span>
-                <Pill tone="gold">{fmtMoney(psych.rate)} / sesja</Pill>
-              </div>
-            </div>
+      <div className="id-band" data-reveal style={{ '--band-color': psych.color }}>
+        <Avatar name={psych.name} color={psych.color} size={64} />
+        <div className="id-band__main">
+          <h1 className="display id-band__name">{psych.title} {psych.name}</h1>
+          <div className="id-band__sub">{psych.spec}</div>
+          <div className="id-band__meta">
+            <span><Icon name="mail" size={14} /> {psych.email}</span>
+            <span><Icon name="phone" size={14} /> {psych.phone}</span>
+            <span><Icon name="room" size={14} /> {psych.room}</span>
           </div>
-          <div className="row" style={{ gap: 10 }}>
-            <Button variant="ghost" icon="edit" onClick={() => openPsychForm({ psych })}>Edytuj profil</Button>
-            <Button icon="plus" onClick={() => openSessionForm({ psychId: psych.id })}>Nowa sesja</Button>
+          <div className="id-band__pills">
+            <Pill tone="gold">{fmtMoney(psych.rate)} / sesja</Pill>
           </div>
+        </div>
+        <div className="id-band__actions">
+          <Button variant="ghost" icon="edit" onClick={() => openPsychForm({ psych })}>Edytuj profil</Button>
+          <Button icon="plus" onClick={() => openSessionForm({ psychId: psych.id })}>Nowa sesja</Button>
         </div>
       </div>
 
-      <div className="stats-row stats-row--4" style={{ marginTop: 20 }}>
+      <div className="stats-row stats-row--4">
         <PsychStat label="Klienci" value={clients.length} fmt={fmtNumber} />
-        <PsychStat label={`Sesje · ${fmtMonthYear(ym)}`} value={stats.count} fmt={(v) => fmtNumber(Math.round(v))} />
-        <PsychStat label="Godziny (mies.)" value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
-        <PsychStat label="Przychód (mies.)" value={stats.revenue} fmt={fmtMoney} />
+        <PsychStat label={`Sesje · ${fmtMonthName(ym)}`} value={stats.count} fmt={(v) => fmtNumber(Math.round(v))} />
+        <PsychStat label={`Godziny · ${fmtMonthName(ym)}`} value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
+        <PsychStat label={`Przychód · ${fmtMonthName(ym)}`} value={stats.revenue} fmt={fmtMoney} />
       </div>
 
       <div className="grid-31" style={{ marginTop: 4 }}>

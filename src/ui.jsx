@@ -1,8 +1,8 @@
 import { cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Icon } from './icons.jsx'
-import { initials } from './format.js'
+import { initials, fmtNumber } from './format.js'
 import { useToasts } from './store.jsx'
-import { useMagnetic, motionOK } from './anim.js'
+import { useMagnetic, useCountUp, motionOK } from './anim.js'
 
 export function Button({ children, icon, variant = 'primary', size, magnetic, className = '', ...rest }) {
   const magRef = useMagnetic(0.22)
@@ -135,6 +135,28 @@ export function Field({ label, error, hint, children, className = '', span2 }) {
   )
 }
 
+// one entry in a figures line — a quiet, optionally linked number that
+// replaces equal-weight KPI cards (dashboard, finances, reports)
+export function Figure({ label, value, fmt = fmtNumber, suffix, sub, gold, onClick }) {
+  const ref = useCountUp(value, fmt)
+  const Tag = onClick ? 'button' : 'div'
+  return (
+    <Tag
+      type={onClick ? 'button' : undefined}
+      className={`figures__item ${gold ? 'figures__item--gold' : ''}`}
+      onClick={onClick}
+      data-reveal
+    >
+      <span className="figures__label">{label}</span>
+      <span className="figures__value">
+        <span ref={ref}>0</span>
+        {suffix && <small>{suffix}</small>}
+      </span>
+      {sub && <span className="figures__sub">{sub}</span>}
+    </Tag>
+  )
+}
+
 export function Check({ checked, onChange, children }) {
   return (
     <label className="check">
@@ -147,7 +169,7 @@ export function Check({ checked, onChange, children }) {
   )
 }
 
-export function Toggle({ on, onChange, label }) {
+export function Toggle({ on, onChange, label, disabled }) {
   return (
     <button
       type="button"
@@ -155,6 +177,7 @@ export function Toggle({ on, onChange, label }) {
       role="switch"
       aria-checked={on}
       aria-label={label}
+      disabled={disabled}
       onClick={() => onChange(!on)}
     />
   )

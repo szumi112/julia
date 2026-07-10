@@ -50,6 +50,9 @@ export function PsychDrawer({ opts, onClose }) {
     setErrors(errs)
     if (Object.keys(errs).length) {
       shake()
+      requestAnimationFrame(() =>
+        drawerRef.current?.querySelector('.has-error input, .has-error select, .has-error textarea')?.focus()
+      )
       return
     }
     const payload = {
@@ -173,11 +176,12 @@ export function PsychDrawer({ opts, onClose }) {
             />
           </Field>
 
-          {editing && blocked && confirmDel && (
+          {/* a permanently blocked delete is explained up front, not after a press */}
+          {editing && blocked && (
             <div className="form-warn" role="note">
               <Icon name="alert" size={15} />
               <span>
-                Nie można usunąć tego profilu — ma{' '}
+                Profilu nie można usunąć — ma{' '}
                 {[
                   assigned > 0 && `${assigned} ${plural(assigned, 'klienta', 'klientów', 'klientów')} pod opieką`,
                   upcoming > 0 && `${upcoming} ${plural(upcoming, 'zaplanowaną sesję', 'zaplanowane sesje', 'zaplanowanych sesji')}`,
@@ -214,8 +218,8 @@ export function PsychDrawer({ opts, onClose }) {
               <Button variant="primary" onClick={submit}>
                 {editing ? 'Zapisz zmiany' : 'Dodaj do zespołu'}
               </Button>
-              {editing && (
-                <Button variant="danger" onClick={() => setConfirmDel((c) => !c)}>
+              {editing && !blocked && (
+                <Button variant="danger" onClick={() => setConfirmDel(true)}>
                   Usuń
                 </Button>
               )}

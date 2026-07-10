@@ -61,7 +61,14 @@ export function SessionDrawer({ opts, onClose }) {
       psychId,
       amount: amountTouched.current ? f.amount : psych ? psych.rate : f.amount,
     }))
+    setErrors((e) => ({ ...e, psychId: null }))
   }
+
+  // acceptance target: a failed submit lands focus on the first invalid field
+  const focusFirstInvalid = () =>
+    requestAnimationFrame(() =>
+      drawerRef.current?.querySelector('.has-error input, .has-error select, .has-error textarea')?.focus()
+    )
 
   // non-blocking warning: the chosen specialist already has a session then
   const conflict = useMemo(() => {
@@ -109,6 +116,7 @@ export function SessionDrawer({ opts, onClose }) {
     setErrors(errs)
     if (Object.keys(errs).length) {
       shake()
+      focusFirstInvalid()
       return
     }
     const payload = {

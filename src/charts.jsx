@@ -207,22 +207,6 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
   )
 }
 
-export function Sparkline({ values, color, w = 74, h = 26 }) {
-  const stroke = color || tok('--rose-deep', '#964d5f')
-  const max = Math.max(...values, 1)
-  const min = Math.min(...values, 0)
-  const pts = values.map((v, i) => [
-    2 + ((w - 4) * i) / Math.max(values.length - 1, 1),
-    h - 3 - ((h - 6) * (v - min)) / Math.max(max - min, 1),
-  ])
-  return (
-    <svg width={w} height={h} className="stat__spark" aria-hidden="true">
-      <path d={smoothPath(pts)} fill="none" stroke={stroke} strokeWidth="1.8" strokeLinecap="round" opacity="0.55" />
-      <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r="2.6" fill={stroke} />
-    </svg>
-  )
-}
-
 export function Donut({ parts, size = 190, thickness = 26, centerTop, centerBottom, fmt = fmtMoney, label = 'Udział przychodów' }) {
   const ref = useRef(null)
   const total = Math.max(parts.reduce((a, p) => a + p.value, 0), 1)
