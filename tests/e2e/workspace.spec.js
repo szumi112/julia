@@ -53,6 +53,49 @@ test('therapist mode guards dashboard destinations and filters command palette',
   await expect(palette).not.toContainText('dr Julia Wolanin')
 })
 
+test('therapist search only exposes their client context and hides note prose from other roles', async ({ page }) => {
+  await login(page)
+  await switchToTherapist(page)
+  await page.getByRole('button', { name: /Szukaj/ }).click()
+  await page.getByRole('combobox', { name: /Szukaj w Aurelii/ }).fill('Joanna')
+  await page.getByRole('option', { name: /Joanna Madej/ }).click()
+  await expect(page.getByRole('heading', { name: /Joanna Madej/ })).toBeVisible()
+  await expect(page.getByText(/Notatki kliniczne/)).toBeVisible()
+  await expect(page.getByLabel('Nowa notatka')).toBeVisible()
+})
+
+test('centre roles receive a neutral clinical-notes state', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
+  await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
+})
+
+test('client form validates a supplied email and keeps email optional', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('button', { name: 'Dodaj klienta' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowy klient' })
+  await drawer.getByLabel('Imię i nazwisko').fill('Testowa osoba')
+  await drawer.getByLabel('Specjalistka prowadząca').selectOption('p1')
+  await drawer.getByLabel('E-mail').fill('niepoprawny-adres')
+  await drawer.getByRole('button', { name: 'Dodaj klienta' }).click()
+  await expect(drawer.getByText('Podaj poprawny adres e-mail')).toBeVisible()
+  await drawer.getByLabel('E-mail').fill('')
+  await drawer.getByRole('button', { name: 'Dodaj klienta' }).click()
+  await expect(drawer).toHaveCount(0)
+})
+
+test('switching to therapist ignores a previous team client filter', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('button', { name: 'Julia', exact: true }).click()
+  await expect(page.getByRole('row', { name: /Zofia Mazur/ })).toBeVisible()
+  await switchToTherapist(page)
+  await expect(page.getByRole('row', { name: /Joanna Madej/ })).toBeVisible()
+})
+
 test('Today prioritises the next action above monthly metrics', async ({ page }) => {
   await login(page)
   await expect(page.getByRole('region', { name: /Teraz lub następna sesja/ })).toBeVisible()

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { roleById, sessionsForRole, dayAttention, todayWorkspace, sessionMatchesFilters } from '../../src/workspace.js'
+import { roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters } from '../../src/workspace.js'
 import { paymentPatchFor } from '../../src/format.js'
 
 const state = {
@@ -14,6 +14,28 @@ const state = {
 
 test('therapist scope contains only their own sessions', () => {
   assert.deepEqual(sessionsForRole(state, roleById('therapist')).map((s) => s.id), ['s-therapist'])
+})
+
+test('therapist scope contains only their own clients', () => {
+  const scopedState = {
+    ...state,
+    clients: [
+      { id: 'c-owner', psychId: 'p1' },
+      { id: 'c-therapist', psychId: 'p2' },
+    ],
+  }
+  assert.deepEqual(clientsForRole(scopedState, roleById('therapist')).map((client) => client.id), ['c-therapist'])
+})
+
+test('centre roles retain all client records', () => {
+  const scopedState = {
+    ...state,
+    clients: [
+      { id: 'c-owner', psychId: 'p1' },
+      { id: 'c-therapist', psychId: 'p2' },
+    ],
+  }
+  assert.deepEqual(clientsForRole(scopedState, roleById('coordinator')).map((client) => client.id), ['c-owner', 'c-therapist'])
 })
 
 test('day attention exposes a partial payment with an explicit amount', () => {

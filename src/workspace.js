@@ -6,6 +6,9 @@ export const roleById = (id) => DEMO_ROLES.find((role) => role.id === id) || DEM
 export const sessionsForRole = (state, role) =>
   role.scope === 'own' ? state.sessions.filter((session) => session.psychId === role.psychId) : state.sessions
 
+export const clientsForRole = (state, role) =>
+  role.scope === 'own' ? state.clients.filter((client) => client.psychId === role.psychId) : state.clients
+
 export const sessionMatchesFilters = (session, filters) => {
   const afterStart = !filters.dateFrom || session.date >= filters.dateFrom
   const beforeEnd = !filters.dateTo || session.date <= filters.dateTo

@@ -7,6 +7,8 @@ import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, plural, fmtMoney } from '../format.js'
 
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
 export function ClientDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
   const { route, navigate } = useShell()
@@ -36,6 +38,7 @@ export function ClientDrawer({ opts, onClose }) {
     const errs = {}
     if (!form.name.trim()) errs.name = 'Podaj imię i nazwisko'
     if (!form.psychId) errs.psychId = 'Wybierz specjalistkę'
+    if (form.email.trim() && !EMAIL_SHAPE.test(form.email.trim())) errs.email = 'Podaj poprawny adres e-mail'
     setErrors(errs)
     if (Object.keys(errs).length) {
       shake()
@@ -113,7 +116,7 @@ export function ClientDrawer({ opts, onClose }) {
           </Field>
 
           <div className="form-grid">
-            <Field label="E-mail">
+            <Field label="E-mail" error={errors.email}>
               <input
                 type="email"
                 className="input"

@@ -7,6 +7,7 @@ import { motionOK } from './anim.js'
 import { Icon } from './icons.jsx'
 import { Avatar, EmptyState } from './ui.jsx'
 import { searchNorm as norm, plural } from './format.js'
+import { clientsForRole } from './workspace.js'
 
 const VIEW_ITEMS = [
   { view: 'dashboard', label: 'Pulpit', icon: 'dashboard' },
@@ -43,7 +44,7 @@ export function CommandPalette({ onClose }) {
   const results = useMemo(() => {
     const psychOf = (id) => state.psychologists.find((p) => p.id === id)
     const out = []
-    state.clients
+    clientsForRole(state, role)
       .filter((c) => !q || norm(c.name + ' ' + c.email).includes(q))
       .slice(0, q ? 6 : 4)
       .forEach((c) =>
