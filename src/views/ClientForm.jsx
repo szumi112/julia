@@ -23,10 +23,21 @@ export function ClientDrawer({ opts, onClose }) {
     email: editing?.email || '',
     phone: editing?.phone || '',
     status: editing?.status || 'active',
+    familyOtherId: '',
+    familyRole: editing?.familyRole || '',
     note: '',
   })
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
+
+  // the drawer may unlink while open — read the live record, not the snapshot
+  const current = editing ? state.clients.find((c) => c.id === editing.id) || editing : null
+  const familyMembers = current?.familyId
+    ? state.clients.filter((c) => c.familyId === current.familyId && c.id !== current.id)
+    : []
+  const linkables = state.clients.filter(
+    (c) => c.id !== editing?.id && !familyMembers.some((m) => m.id === c.id)
+  )
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -55,7 +66,12 @@ export function ClientDrawer({ opts, onClose }) {
       status: form.status,
     }
     if (editing) {
-      dispatch({ type: 'UPDATE_CLIENT', id: editing.id, patch: payload })
+      const patch = { ...payload }
+      if (current?.familyId && !form.familyOtherId) patch.familyRole = form.familyRole || null
+      dispatch({ type: 'UPDATE_CLIENT', id: editing.id, patch })
+      if (form.familyOtherId) {
+        dispatch({ type: 'LINK_FAMILY', clientId: editing.id, otherId: form.familyOtherId, role: form.familyRole || null })
+      }
       toast('Dane klienta zapisane')
     } else {
       const note = form.note.trim()
@@ -66,6 +82,9 @@ export function ClientDrawer({ opts, onClose }) {
           since: toISODate(new Date()),
           notes: note ? [{ date: toISODate(new Date()), text: note }] : [],
         },
+        familyLink: form.familyOtherId
+          ? { otherId: form.familyOtherId, role: form.familyRole || null }
+          : undefined,
       })
       toast('Nowy klient dodany do kartoteki')
     }
@@ -150,6 +169,62 @@ export function ClientDrawer({ opts, onClose }) {
               ]}
             />
           </Field>
+
+          <Field
+            label="Rodzina"
+            hint="Rodzic i dziecko bywają zapisani pod różnymi nazwiskami — powiązanie łączy ich karty."
+          >
+            <div className="stack" style={{ gap: 10, paddingTop: 2 }}>
+              {familyMembers.length > 0 && (
+                <div className="stack" style={{ gap: 6 }}>
+                  {familyMembers.map((m) => (
+                    <div key={m.id} style={{ fontSize: 14 }}>
+                      {m.name}
+                      {m.familyRole && <span className="faint"> · {m.familyRole}</span>}
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className="link"
+                    style={{ alignSelf: 'flex-start', fontSize: 13 }}
+                    onClick={() => {
+                      dispatch({ type: 'UNLINK_FAMILY', clientId: editing.id })
+                      set('familyRole', '')
+                      toast('Powiązanie rodzinne usunięte', 'close')
+                    }}
+                  >
+                    Usuń powiązanie z rodziną
+                  </button>
+                </div>
+              )}
+              <select
+                className="select"
+                aria-label="Powiąż z klientem"
+                value={form.familyOtherId}
+                onChange={(e) => set('familyOtherId', e.target.value)}
+              >
+                <option value="">— powiąż z klientem —</option>
+                {linkables.map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+          </Field>
+
+          {(current?.familyId || form.familyOtherId) && (
+            <Field label="Rola w rodzinie">
+              <Segmented
+                ariaLabel="Rola w rodzinie"
+                value={form.familyRole}
+                onChange={(v) => set('familyRole', v)}
+                options={[
+                  { value: '', label: '—' },
+                  { value: 'rodzic', label: 'Rodzic' },
+                  { value: 'dziecko', label: 'Dziecko' },
+                ]}
+              />
+            </Field>
+          )}
 
           {!editing && (
             <Field label="Pierwsza notatka (opcjonalnie)">

@@ -207,6 +207,9 @@ export function ClientDetail({ params }) {
   const completed = all.filter((s) => s.status === 'completed')
   const debt = clientOutstanding(state.sessions, client.id)
   const next = upcoming[0] || null
+  const family = client.familyId
+    ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
+    : []
   const canReadClinicalNotes = role.scope === 'own' && client.psychId === role.psychId
 
   const addNote = () => {
@@ -280,6 +283,22 @@ export function ClientDetail({ params }) {
             <div className="care-overview__item">
               <span>Saldo klienta</span>
               <b className={debt > 0 ? 'care-overview__debt' : ''}>{debt > 0 ? `Do rozliczenia ${fmtMoney(debt)}` : 'Rozliczony'}</b>
+            </div>
+            <div className="care-overview__item">
+              <span>Rodzina</span>
+              {family.length > 0 ? (
+                <span className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+                  {family.map((member) => (
+                    <button
+                      key={member.id}
+                      className="link care-overview__value"
+                      onClick={() => navigate('client', { id: member.id })}
+                    >
+                      {member.name}{member.familyRole ? ` (${member.familyRole})` : ''}
+                    </button>
+                  ))}
+                </span>
+              ) : <b>—</b>}
             </div>
           </div>
         </section>
