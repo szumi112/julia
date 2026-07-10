@@ -1,0 +1,29 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { roleById, sessionsForRole, dayAttention } from '../../src/workspace.js'
+
+const state = {
+  sessions: [
+    { id: 's-owner', psychId: 'p1', date: '2026-07-10', time: '09:00', status: 'scheduled', amount: 220, payment: 'unpaid', paidAmount: 0 },
+    { id: 's-therapist', psychId: 'p2', date: '2026-07-10', time: '10:00', status: 'completed', amount: 260, payment: 'partial', paidAmount: 130 },
+  ],
+  clients: [],
+  psychologists: [],
+}
+
+test('therapist scope contains only their own sessions', () => {
+  assert.deepEqual(sessionsForRole(state, roleById('therapist')).map((s) => s.id), ['s-therapist'])
+})
+
+test('day attention exposes a partial payment with an explicit amount', () => {
+  assert.deepEqual(dayAttention(state, roleById('owner'), '2026-07-10')[0], {
+    kind: 'payment', sessionId: 's-therapist', amount: 130,
+  })
+})
+
+test('day attention ignores a scheduled partial payment', () => {
+  assert.deepEqual(dayAttention({
+    ...state,
+    sessions: [{ ...state.sessions[1], status: 'scheduled' }],
+  }, roleById('owner'), '2026-07-10'), [])
+})

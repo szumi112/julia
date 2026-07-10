@@ -1,6 +1,6 @@
 // In-memory app state — no persistence by design (demo).
 import { createContext, useContext, useMemo, useReducer, useState, useCallback } from 'react'
-import { INITIAL_STATE } from './data.js'
+import { DEMO_ROLES, INITIAL_STATE } from './data.js'
 import { monthKey, isBillable, collectedOf, outstandingOf } from './format.js'
 
 const AppCtx = createContext(null)
@@ -63,6 +63,10 @@ function reducer(state, action) {
       return { ...state, center: { ...state.center, ...action.patch } }
     case 'UPDATE_USER':
       return { ...state, user: { ...state.user, ...action.patch } }
+    case 'SET_DEMO_ROLE':
+      return DEMO_ROLES.some((role) => role.id === action.roleId)
+        ? { ...state, demoRoleId: action.roleId }
+        : state
     case 'SET_PREF':
       return { ...state, prefs: { ...state.prefs, [action.key]: action.value } }
     default:

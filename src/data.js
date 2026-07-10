@@ -65,6 +65,12 @@ export const PSYCHOLOGISTS = [
   },
 ]
 
+export const DEMO_ROLES = [
+  { id: 'owner', label: 'Właścicielka', name: 'Julia Wolanin', psychId: 'p1', scope: 'centre' },
+  { id: 'coordinator', label: 'Koordynatorka', name: 'Maja Nowak', psychId: null, scope: 'centre' },
+  { id: 'therapist', label: 'Specjalistka', name: 'Marta Zielińska', psychId: 'p2', scope: 'own' },
+]
+
 const NOTE_POOL = [
   'Kontynuujemy pracę nad technikami regulacji emocji. Zalecane ćwiczenia oddechowe 2× dziennie.',
   'Widoczny postęp w obszarze asertywności. Dzienniczek myśli automatycznych — kontynuacja.',
@@ -198,6 +204,18 @@ CLIENTS.forEach((client, ci) => {
   }
 })
 
+const scenarioDate = toISODate(TODAY)
+const DEMO_SCENARIOS = [
+  { id: 'demo-owner-completed', clientId: 'c1', psychId: 'p1', date: scenarioDate, time: '08:00', duration: 50, amount: 220, status: 'completed', payment: 'paid', paidAmount: 220, note: '' },
+  { id: 'demo-therapist-next', clientId: 'c6', psychId: 'p2', date: scenarioDate, time: '10:00', duration: 80, amount: 260, status: 'scheduled', payment: 'unpaid', paidAmount: 0, note: '' },
+  { id: 'demo-cancelled', clientId: 'c10', psychId: 'p3', date: scenarioDate, time: '12:00', duration: 50, amount: 190, status: 'cancelled', payment: 'unpaid', paidAmount: 0, note: '' },
+  { id: 'demo-noshow', clientId: 'c15', psychId: 'p4', date: scenarioDate, time: '13:00', duration: 50, amount: 240, status: 'noshow', payment: 'unpaid', paidAmount: 0, note: '' },
+  { id: 'demo-unpaid', clientId: 'c2', psychId: 'p1', date: scenarioDate, time: '14:00', duration: 50, amount: 220, status: 'completed', payment: 'unpaid', paidAmount: 0, note: '' },
+  { id: 'demo-partial', clientId: 'c7', psychId: 'p2', date: scenarioDate, time: '15:00', duration: 80, amount: 260, status: 'completed', payment: 'partial', paidAmount: 130, note: '' },
+  { id: 'demo-overlap', clientId: 'c3', psychId: 'p1', date: scenarioDate, time: '14:00', duration: 50, amount: 220, status: 'scheduled', payment: 'unpaid', paidAmount: 0, note: '' },
+]
+sessions.push(...DEMO_SCENARIOS)
+
 sessions.sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : 1))
 
 export const SESSIONS = sessions
@@ -222,6 +240,7 @@ export const POSTS = [
 
 export const INITIAL_STATE = {
   user: { name: 'Julia Wolanin', role: 'Założycielka', email: 'julia@aurelia.pl', psychId: 'p1' },
+  demoRoleId: 'owner',
   center: {
     name: 'Aurelia — Centrum Psychoterapii',
     address: 'ul. Złota 12/3, 58-500 Jelenia Góra',
