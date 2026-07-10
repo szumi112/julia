@@ -326,7 +326,7 @@ function CockpitSheet({ onClose, children }) {
   )
 }
 
-export function TodayCockpit({ closeKey }) {
+export function TodayCockpit({ closeKey, forceClosed, onOpen }) {
   const { state } = useApp()
   const m = useTodayModel()
   const [open, setOpen] = useState(false)
@@ -336,6 +336,7 @@ export function TodayCockpit({ closeKey }) {
 
   // one modal layer: any sibling overlay opening (drawer, palette, nav) wins
   useEffect(() => { setOpen(false) }, [closeKey])
+  useEffect(() => { if (forceClosed) setOpen(false) }, [forceClosed])
 
   const firstName = (id) => state.clients.find((c) => c.id === id)?.name.split(' ')[0]
   let text
@@ -349,7 +350,10 @@ export function TodayCockpit({ closeKey }) {
       <button
         className="today-chip"
         ref={triggerRef}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          if (!open) onOpen?.()
+          setOpen(!open)
+        }}
         aria-haspopup="dialog"
         aria-expanded={open}
         title="Panel dnia"

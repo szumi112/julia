@@ -20,7 +20,7 @@ const VIEW_ITEMS = [
 
 export function CommandPalette({ onClose }) {
   const { state } = useApp()
-  const { navigate } = useShell()
+  const { role, canAccess, navigate } = useShell()
   const [query, setQuery] = useState('')
   const [sel, setSel] = useState(0)
   const panelRef = useRef(null)
@@ -57,7 +57,7 @@ export function CommandPalette({ onClose }) {
         })
       )
     state.psychologists
-      .filter((p) => !q || norm(p.name + ' ' + p.spec).includes(q))
+      .filter((p) => canAccess('team', role) && (!q || norm(p.name + ' ' + p.spec).includes(q)))
       .slice(0, q ? 5 : 3)
       .forEach((p) =>
         out.push({
@@ -70,7 +70,7 @@ export function CommandPalette({ onClose }) {
         })
       )
     if (q) {
-      VIEW_ITEMS.filter((v) => norm(v.label).includes(q)).forEach((v) =>
+      VIEW_ITEMS.filter((v) => canAccess(v.view, role) && norm(v.label).includes(q)).forEach((v) =>
         out.push({
           key: `v-${v.view}`,
           group: 'Przejdź do',
@@ -81,7 +81,7 @@ export function CommandPalette({ onClose }) {
       )
     }
     return out
-  }, [q, state.clients, state.psychologists, navigate])
+  }, [q, role, state.clients, state.psychologists, canAccess, navigate])
 
   useEffect(() => { setSel(0) }, [q])
 

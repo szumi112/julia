@@ -202,7 +202,7 @@ export function Avatar({ name, color = '#964d5f', size = 38 }) {
 // Lightweight popover (status pickers, menus). Closes on outside click / Esc.
 // Positioned with fixed viewport coordinates so it escapes scroll containers
 // (.table-scroll) and flips/clamps instead of clipping at viewport edges.
-export function Popover({ trigger, children, align = 'left', ariaLabel, open, setOpen }) {
+export function Popover({ trigger, children, align = 'left', ariaLabel, contentRole = 'menu', open, setOpen }) {
   const ref = useRef(null)
   const popRef = useRef(null)
   const [pos, setPos] = useState(null)
@@ -232,7 +232,7 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, open, se
         ref.current?.querySelector('button, [tabindex]')?.focus()
       }
       // expected menu keyboard model: arrows walk the items
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (contentRole === 'menu' && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
         const items = [...(popRef.current?.querySelectorAll('.popover__item') || [])]
         if (!items.length) return
         e.preventDefault()
@@ -255,7 +255,7 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, open, se
       window.removeEventListener('scroll', onMove, true)
       window.removeEventListener('resize', onMove)
     }
-  }, [open, setOpen])
+  }, [contentRole, open, setOpen])
 
   useEffect(() => {
     if (!open || !motionOK()) return
@@ -264,7 +264,10 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, open, se
   }, [open])
 
   const wiredTrigger = isValidElement(trigger)
-    ? cloneElement(trigger, { 'aria-expanded': !!open, 'aria-haspopup': 'menu' })
+    ? cloneElement(trigger, {
+      'aria-expanded': !!open,
+      ...(contentRole === 'menu' ? { 'aria-haspopup': 'menu' } : {}),
+    })
     : trigger
 
   return (
@@ -273,7 +276,7 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, open, se
       {open && (
         <div
           className="popover"
-          role="menu"
+          role={contentRole}
           aria-label={ariaLabel}
           ref={popRef}
           style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: 0, visibility: 'hidden' }}

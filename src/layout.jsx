@@ -303,9 +303,8 @@ function MobileTabbar({ route, navigate, role, onAdd }) {
   )
 }
 
-function Topbar({ route, role, setDemoRole, onLogout, onSearch, onMenu, overlayKey }) {
+function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, onCockpitOpen, onLogout, onSearch, onMenu, overlayKey }) {
   const titleRef = useRef(null)
-  const [roleMenuOpen, setRoleMenuOpen] = useState(false)
   const title = routeTitle(route.name, role)
 
   useEffect(() => {
@@ -331,26 +330,29 @@ function Topbar({ route, role, setDemoRole, onLogout, onSearch, onMenu, overlayK
           <span>Szukaj…</span>
           <kbd>{META_K}</kbd>
         </button>
-        <TodayCockpit closeKey={overlayKey} />
+        <TodayCockpit closeKey={overlayKey} forceClosed={roleMenuOpen} onOpen={onCockpitOpen} />
         <Popover
           align="right"
           ariaLabel="Tryb demonstracyjny"
+          contentRole="group"
           open={roleMenuOpen}
           setOpen={setRoleMenuOpen}
           trigger={
             <button
               type="button"
               className="userchip userchip--button"
-              onClick={() => setRoleMenuOpen((open) => !open)}
+              onClick={() => setRoleMenuOpen(!roleMenuOpen)}
             >
               <Avatar name={role.name} size={37} />
               <span>
+                <span className="userchip__mode">Tryb demonstracyjny</span>
                 <span className="userchip__name">{role.name}</span>
                 <span className="userchip__role">{role.label}</span>
               </span>
             </button>
           }
         >
+          <div className="popover__label">Tryb demonstracyjny</div>
           {DEMO_ROLES.map((demoRole) => (
             <PopItem
               key={demoRole.id}
@@ -411,6 +413,7 @@ export function Shell({ onLogout }) {
   const [drawer, setDrawer] = useState(null)
   const [cmdOpen, setCmdOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false)
+  const [roleMenuOpen, setRoleMenuOpen] = useState(false)
   const isCompact = useIsCompact()
   const isPhone = useIsPhone()
   const viewRef = useRef(null)
@@ -456,6 +459,7 @@ export function Shell({ onLogout }) {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         if (overlayRef.current.drawer) return
+        setRoleMenuOpen(false)
         setNavOpen(false)
         if (overlayRef.current.cmd) contentRef.current?.removeAttribute('inert')
         setCmdOpen(!overlayRef.current.cmd)
@@ -466,6 +470,7 @@ export function Shell({ onLogout }) {
   }, [])
 
   const navigate = (name, params) => {
+    if (!canAccess(ACTIVE_OF[name] || name, role)) return
     if (busy.current) return
     if (route.name === name && JSON.stringify(route.params) === JSON.stringify(params)) return
     busy.current = true
@@ -487,9 +492,17 @@ export function Shell({ onLogout }) {
     dispatch({ type: 'SET_DEMO_ROLE', roleId })
   }
 
-  const openSessionForm = (opts = {}) => { setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'session', opts }) }
-  const openClientForm = (opts = {}) => { setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'client', opts }) }
-  const openPsychForm = (opts = {}) => { setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'psych', opts }) }
+  const setRoleMenu = (open) => {
+    if (open) {
+      setDrawer(null)
+      setCmdOpen(false)
+      setNavOpen(false)
+    }
+    setRoleMenuOpen(open)
+  }
+  const openSessionForm = (opts = {}) => { setRoleMenuOpen(false); setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'session', opts }) }
+  const openClientForm = (opts = {}) => { setRoleMenuOpen(false); setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'client', opts }) }
+  const openPsychForm = (opts = {}) => { setRoleMenuOpen(false); setCmdOpen(false); setNavOpen(false); setDrawer({ kind: 'psych', opts }) }
   // inert must drop before the closing overlay's cleanup restores focus into
   // the content area, or the focus() call lands on an inert subtree and dies
   const unInert = () => contentRef.current?.removeAttribute('inert')
@@ -506,9 +519,12 @@ export function Shell({ onLogout }) {
             route={route}
             role={role}
             setDemoRole={setDemoRole}
+            roleMenuOpen={roleMenuOpen}
+            setRoleMenuOpen={setRoleMenu}
+            onCockpitOpen={() => setRoleMenuOpen(false)}
             onLogout={onLogout}
-            onSearch={() => setCmdOpen(true)}
-            onMenu={isCompact ? () => setNavOpen(true) : undefined}
+            onSearch={() => { setRoleMenuOpen(false); setNavOpen(false); setCmdOpen(true) }}
+            onMenu={isCompact ? () => { setRoleMenuOpen(false); setCmdOpen(false); setNavOpen(true) } : undefined}
             overlayKey={`${drawer?.kind || ''}-${cmdOpen}-${navOpen}`}
           />
           <main className="content" ref={contentRef}>
