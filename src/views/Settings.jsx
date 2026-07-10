@@ -167,6 +167,43 @@ export function Settings() {
               </div>
             </div>
           </div>
+
+          <div className="card card--pad" data-reveal>
+            <h2 className="card-title">Integracje</h2>
+            <div style={{ marginTop: 8 }}>
+              <div className="pref-row">
+                <div>
+                  <div className="pref-row__title">Google Calendar</div>
+                  <div className="pref-row__desc">
+                    Synchronizacja wizyt z kalendarzem Google (demo) — pełne połączenie wymaga wersji z kontami.
+                  </div>
+                </div>
+                {state.prefs.gcalConnected ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      dispatch({ type: 'SET_PREF', key: 'gcalConnected', value: false })
+                      toast('Rozłączono z Google Calendar', 'close')
+                    }}
+                  >
+                    Rozłącz
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="soft"
+                    onClick={() => {
+                      dispatch({ type: 'SET_PREF', key: 'gcalConnected', value: true })
+                      toast('Połączono z Google Calendar (demo)')
+                    }}
+                  >
+                    Połącz (demo)
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="card card--pad" data-reveal>
