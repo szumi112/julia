@@ -14,6 +14,7 @@ import { CalendarView } from './views/Calendar.jsx'
 import { Clients, ClientDetail } from './views/Clients.jsx'
 import { Team, PsychDetail } from './views/Team.jsx'
 import { TusGroups } from './views/Tus.jsx'
+import { TusGroupDetail } from './views/TusGroup.jsx'
 import { Payments } from './views/Payments.jsx'
 import { Reports } from './views/Reports.jsx'
 import { Settings } from './views/Settings.jsx'
@@ -59,6 +60,7 @@ const TITLES = {
   clients: 'Klienci',
   client: 'Karta klienta',
   tus: 'Zajęcia grupowe TUS',
+  tusGroup: 'Grupa TUS',
   team: 'Zespół',
   psych: 'Profil specjalistki',
   payments: 'Finanse',
@@ -72,6 +74,7 @@ const VIEWS = {
   clients: Clients,
   client: ClientDetail,
   tus: TusGroups,
+  tusGroup: TusGroupDetail,
   team: Team,
   psych: PsychDetail,
   payments: Payments,
@@ -79,7 +82,7 @@ const VIEWS = {
   settings: Settings,
 }
 
-const ACTIVE_OF = { client: 'clients', psych: 'team' }
+const ACTIVE_OF = { client: 'clients', psych: 'team', tusGroup: 'tus' }
 
 // the handler accepts Ctrl and Cmd alike — advertise the native chord
 const META_K = /Mac|iP/.test(navigator.platform) ? '⌘ K' : 'Ctrl K'
@@ -425,7 +428,7 @@ function useMonthSettled() {
 }
 
 // details sit one level below their list view — used for drill-in continuity
-const DEPTH = { client: 1, psych: 1 }
+const DEPTH = { client: 1, psych: 1, tusGroup: 1 }
 
 export function Shell({ onLogout }) {
   const { state, dispatch } = useApp()
