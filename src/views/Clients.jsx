@@ -187,6 +187,17 @@ export function ClientDetail({ params }) {
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
   const client = state.clients.find((c) => c.id === params.id)
+  const all = state.sessions.filter((s) => s.clientId === params.id)
+  // upcoming care first, everything else newest-first below it
+  const now = new Date()
+  const todayIso = toISODate(now)
+  const nowTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
+  const upcoming = all.filter(
+    (s) => s.status === 'scheduled' && (s.date > todayIso || (s.date === todayIso && s.time >= nowTime))
+  )
+  const upcomingIds = new Set(upcoming.map((s) => s.id))
+  const history = all.filter((s) => !upcomingIds.has(s.id)).slice().reverse()
+  const historyPages = usePagination(history, { pageSize: 10, resetKey: params.id })
   if (!client) {
     return (
       <EmptyState
@@ -199,17 +210,6 @@ export function ClientDetail({ params }) {
   }
 
   const psych = state.psychologists.find((p) => p.id === client.psychId)
-  const all = state.sessions.filter((s) => s.clientId === client.id)
-  // upcoming care first, everything else newest-first below it
-  const now = new Date()
-  const todayIso = toISODate(now)
-  const nowTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
-  const upcoming = all.filter(
-    (s) => s.status === 'scheduled' && (s.date > todayIso || (s.date === todayIso && s.time >= nowTime))
-  )
-  const upcomingIds = new Set(upcoming.map((s) => s.id))
-  const history = all.filter((s) => !upcomingIds.has(s.id)).slice().reverse()
-  const historyPages = usePagination(history, { pageSize: 10, resetKey: client.id })
   const completed = all.filter((s) => s.status === 'completed')
   const debt = clientOutstanding(state.sessions, client.id)
   const next = upcoming[0] || null
