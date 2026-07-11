@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useApp, clientOutstanding, lastSessionOf } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
-import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState } from '../ui.jsx'
+import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, usePagination, Pager } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
 import { fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, sessionsWord, toISODate, pad2, plural, searchNorm } from '../format.js'
@@ -37,7 +37,11 @@ export function Clients() {
     })
   }, [scopedClients, state.sessions, query, psychFilter, debtOnly, role.scope])
 
-  const tbodyRef = useFlip(filtered.map((c) => c.id).join(','))
+  const { pageItems, page, pages, setPage } = usePagination(filtered, {
+    pageSize: 25,
+    resetKey: `${query}|${psychFilter}|${debtOnly}`,
+  })
+  const tbodyRef = useFlip(pageItems.map((c) => c.id).join(','))
 
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
 
@@ -116,7 +120,7 @@ export function Clients() {
                 </td>
               </tr>
             )}
-            {filtered.map((c) => {
+            {pageItems.map((c) => {
               const p = psychOf(c.psychId)
               const last = lastSessionOf(state.sessions, c.id)
               const next = nextSessionOf(state.sessions, c.id)
@@ -171,6 +175,7 @@ export function Clients() {
           </tbody>
         </table>
         </div>
+        <Pager page={page} pages={pages} onPage={setPage} />
       </div>
     </div>
   )
@@ -204,6 +209,7 @@ export function ClientDetail({ params }) {
   )
   const upcomingIds = new Set(upcoming.map((s) => s.id))
   const history = all.filter((s) => !upcomingIds.has(s.id)).slice().reverse()
+  const historyPages = usePagination(history, { pageSize: 10, resetKey: client.id })
   const completed = all.filter((s) => s.status === 'completed')
   const debt = clientOutstanding(state.sessions, client.id)
   const next = upcoming[0] || null
@@ -354,6 +360,7 @@ export function ClientDetail({ params }) {
               </span>
             </h2>
             {history.length > 0 ? (
+              <>
               <div className="table-scroll table-scroll--until-tablet">
                 <table className="table table--cards" style={{ marginTop: 10 }}>
                   <thead>
@@ -367,7 +374,7 @@ export function ClientDetail({ params }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {history.map((s) => (
+                    {historyPages.pageItems.map((s) => (
                       <tr key={s.id}>
                         <td style={{ fontWeight: 600 }} data-th="Data">{fmtShortDate(s.date)}</td>
                         <td className="num-cell muted" data-th="Godzina">{s.time}</td>
@@ -382,6 +389,8 @@ export function ClientDetail({ params }) {
                   </tbody>
                 </table>
               </div>
+              <Pager page={historyPages.page} pages={historyPages.pages} onPage={historyPages.setPage} />
+              </>
             ) : (
               <EmptyState compact icon="calendar" title="Brak historii frekwencji" hint="Odbyte, odwołane i nieobecne spotkania pojawią się tutaj." />
             )}

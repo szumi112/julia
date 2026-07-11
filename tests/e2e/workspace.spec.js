@@ -192,6 +192,19 @@ test('switching to therapist ignores a previous team client filter', async ({ pa
   await expect(page.getByRole('row', { name: /Joanna Madej/ })).toBeVisible()
 })
 
+test('short lists render fully without a pager and history caps at ten rows', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  // 19 demo clients < 25: full roster, no pager anywhere on the view
+  await expect(page.locator('tbody tr').first()).toBeVisible()
+  expect(await page.locator('tbody tr').count()).toBeGreaterThan(15)
+  await expect(page.getByRole('navigation', { name: 'Stronicowanie' })).toHaveCount(0)
+  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await expect(page.getByRole('heading', { name: 'Historia frekwencji' })).toBeVisible()
+  const historyRows = await page.locator('.client-record__section:has(h2:text("Historia frekwencji")) tbody tr').count()
+  expect(historyRows).toBeLessThanOrEqual(10)
+})
+
 test('Today keeps the essential daily regions together', async ({ page }) => {
   await login(page)
   await expect(
