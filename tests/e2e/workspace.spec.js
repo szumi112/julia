@@ -19,7 +19,8 @@ async function switchToCoordinator(page) {
 
 test('the mock-data workspace opens after login', async ({ page }) => {
   await login(page)
-  await expect(page.getByRole('heading', { name: /Dziś|Dobry/ })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Pulpit dnia' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
 })
 
 test('navigation focuses the destination and a day cockpit excludes background controls', async ({ page }) => {
@@ -193,9 +194,11 @@ test('switching to therapist ignores a previous team client filter', async ({ pa
 
 test('Today keeps the essential daily regions together', async ({ page }) => {
   await login(page)
-  await expect(page.getByRole('region', { name: /Teraz lub następna sesja/ })).toBeVisible()
+  await expect(
+    page.getByRole('heading', { level: 1, name: /^\d{1,2}:\d{2}$|Wszystko za Tobą|Wolny dzień/ })
+  ).toBeVisible()
   await expect(page.getByRole('region', { name: /Wymaga uwagi/ })).toBeVisible()
-  await expect(page.getByRole('region', { name: /Plan dnia/ })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Skróty' })).toBeVisible()
 })
 
 test('Today is a compact viewport command centre without secondary reports', async ({ page }) => {
@@ -203,7 +206,7 @@ test('Today is a compact viewport command centre without secondary reports', asy
   const dashboard = page.getByRole('region', { name: 'Pulpit dnia' })
 
   await expect(dashboard).toBeVisible()
-  await expect(dashboard.getByRole('region', { name: 'Dzień w skrócie' })).toBeVisible()
+  await expect(dashboard.getByRole('region', { name: 'Dzień w skrócie' })).toHaveCount(0)
   await expect(dashboard.getByRole('region', { name: 'Skróty' })).toBeVisible()
   await expect(dashboard).not.toContainText('Przychód miesięczny')
   await expect(dashboard).not.toContainText('Najbliższe sesje')
@@ -225,13 +228,15 @@ test('Today keeps the page itself fixed on a short desktop viewport', async ({ p
   expect(contentOverflows).toBe(false)
 })
 
-test('Today keeps the next-session time separate from the client name on a narrow phone', async ({ page }) => {
+test('Today keeps the hero legible without horizontal overflow on a narrow phone', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 800 })
   await login(page)
 
-  const timeBox = await page.locator('.today-focus__time').boundingBox()
-  const clientBox = await page.locator('.today-focus__main').boundingBox()
-  expect(clientBox.x - (timeBox.x + timeBox.width)).toBeGreaterThanOrEqual(12)
+  await expect(page.locator('.today-hero').getByRole('heading', { level: 1 })).toBeVisible()
+  const overflows = await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth
+  )
+  expect(overflows).toBe(false)
 })
 
 test('team board is a Shell overlay that yields to global overlays', async ({ page }) => {
@@ -285,14 +290,13 @@ test('enabling reduced motion clears active GSAP tweens', async ({ page }) => {
 
 test('Today limits daily information to the active therapist', async ({ page }) => {
   await login(page)
-  const ownerSummary = await page.getByRole('region', { name: 'Dzień w skrócie' }).innerText()
+  const ownerEyebrow = await page.locator('.today-hero .eyebrow').innerText()
 
   await switchToTherapist(page)
-  const plan = page.getByRole('region', { name: 'Plan dnia' })
-  const therapistSummary = page.getByRole('region', { name: 'Dzień w skrócie' })
-  await expect(plan).not.toContainText('Julia Wolanin')
-  await expect(therapistSummary).toBeVisible()
-  await expect(therapistSummary).not.toHaveText(ownerSummary)
+  const therapistEyebrow = page.locator('.today-hero .eyebrow')
+  await expect(page.getByRole('region', { name: 'Plan dnia' })).not.toContainText('Julia Wolanin')
+  await expect(therapistEyebrow).toContainText('Mój dzień')
+  await expect(therapistEyebrow).not.toHaveText(ownerEyebrow)
   await expect(page.getByText('Stan praktyki')).toHaveCount(0)
 })
 
