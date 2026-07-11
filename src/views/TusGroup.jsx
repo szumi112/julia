@@ -2,14 +2,15 @@ import { useState } from 'react'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
+import { useMinuteNow } from '../clock.js'
 import { Avatar, Pill, Button, Check, IconBtn, EmptyState, Figure, Popover, PopItem } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import {
-  fmtMoney, fmtDayMonth, fmtMonthYear, monthKey, addMonths, toISODate,
+  fmtMoney, fmtDayMonth, fmtMonthYear, monthKey, addMonths, toISODate, parseISO, pad2,
   METHOD_LABELS, PAY_LABELS, WEEKDAY_SHORT,
 } from '../format.js'
 import {
-  canLeadGroup, kidsOfGroup, classesInMonth, tusMonths, attendanceRate,
+  canLeadGroup, classHasStarted, kidsOfGroup, classesInMonth, tusMonths, attendanceRate,
   tusPaymentFor, tusMonthSummary,
 } from '../tus.js'
 import { kidsWord } from './Tus.jsx'
@@ -71,6 +72,7 @@ export function TusGroupDetail({ params }) {
   const { navigate, role, openTusGroupForm, openTusKidForm, openTusClassForm } = useShell()
   const ref = useReveal([params.id])
   const [ym, setYm] = useState(monthKey(new Date()))
+  const now = useMinuteNow()
   const group = state.tusGroups.find((g) => g.id === params.id)
   const centre = role.scope !== 'own'
 
@@ -86,12 +88,14 @@ export function TusGroupDetail({ params }) {
   }
 
   const canEdit = canLeadGroup(group, role)
-  const todayIso = toISODate(new Date())
+  const todayIso = toISODate(now)
+  const nowIso = `${todayIso}T${pad2(now.getHours())}:${pad2(now.getMinutes())}`
   const roster = kidsOfGroup(state.tusKids, group.id)
   const groupClasses = state.tusClasses.filter((c) => c.groupId === group.id)
   const months = tusMonths(groupClasses)
+  const hasMonths = months.length > 0
   const monthClasses = classesInMonth(groupClasses, ym)
-  const m = tusMonthSummary(group, state.tusClasses, state.tusKids, state.tusPayments, ym, todayIso)
+  const m = tusMonthSummary(group, state.tusClasses, state.tusKids, state.tusPayments, ym, nowIso)
   const leaders = group.leaderIds.map((id) => state.psychologists.find((p) => p.id === id)).filter(Boolean)
   const currentYm = monthKey(new Date())
 
@@ -111,8 +115,14 @@ export function TusGroupDetail({ params }) {
         <Avatar name={group.name.replace('Grupa ', '')} color={leaders[0]?.color} size={64} />
         <div className="id-band__main">
           <h1 className="display id-band__name">{group.name}</h1>
-          <div className="id-band__sub">
-            {leaders.length === 1 ? 'prowadzi' : 'prowadzą'} {leaders.map((p) => p.name).join(' i ')}
+          <div className="id-band__sub id-band__leaders">
+            <span>{leaders.length === 1 ? 'prowadzi' : 'prowadzą'}</span>
+            {leaders.map((p) => (
+              <span className="row" key={p.id}>
+                <Avatar name={p.name} color={p.color} size={24} />
+                <span>{p.name}</span>
+              </span>
+            ))}
           </div>
           <div className="id-band__meta">
             <span><Icon name="calendar" size={14} /> co tydzień · {WEEKDAY_SHORT[group.weekday]} {group.time}</span>
@@ -137,9 +147,9 @@ export function TusGroupDetail({ params }) {
             <Button variant="ghost" size="sm" onClick={() => setYm(currentYm)}>Bieżący miesiąc</Button>
           )}
           <div className="month-nav">
-            <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={ym <= months[0]} onClick={() => setYm(addMonths(ym, -1))} />
+            <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={!hasMonths || ym <= months[0]} onClick={() => setYm(addMonths(ym, -1))} />
             <span className="month-nav__label">{fmtMonthYear(ym)}</span>
-            <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= months[months.length - 1]} onClick={() => setYm(addMonths(ym, 1))} />
+            <IconBtn name="chevR" label="Następny miesiąc" disabled={!hasMonths || ym >= months[months.length - 1]} onClick={() => setYm(addMonths(ym, 1))} />
           </div>
         </div>
       </div>
@@ -183,7 +193,7 @@ export function TusGroupDetail({ params }) {
                   <tr>
                     <th>Zajęcia</th>
                     {roster.map((k) => (
-                      <th className="att-col" key={k.id}>
+                      <th className="att-col" key={k.id} aria-label={k.name}>
                         <span title={k.name}>
                           <Avatar name={k.name} size={24} />
                           {k.name.split(' ')[0]}
@@ -201,20 +211,25 @@ export function TusGroupDetail({ params }) {
                     </tr>
                   )}
                   {monthClasses.map((c) => {
-                    const future = c.date > todayIso
+                    const future = !classHasStarted(c, nowIso)
                     return (
                       <tr key={c.id}>
                         <td>
                           {canEdit ? (
-                            <button className="link" onClick={() => openTusClassForm({ cls: c })} title="Edytuj lub przenieś zajęcia">
-                              <b>{fmtDayMonth(c.date)}</b> · {c.time}
+                            <button className="link tus-class-link" onClick={() => openTusClassForm({ cls: c })} title="Edytuj lub przenieś zajęcia">
+                              <span><b>{fmtDayMonth(c.date)}</b> · {WEEKDAY_SHORT[parseISO(c.date).getDay()]} · {c.time}</span>
+                              <span className={c.topic ? 'muted' : 'faint'}>
+                                {c.topic || (future ? 'zaplanowane' : 'temat do uzupełnienia')}
+                              </span>
                             </button>
                           ) : (
-                            <span><b>{fmtDayMonth(c.date)}</b> · {c.time}</span>
+                            <span className="tus-class-link">
+                              <span><b>{fmtDayMonth(c.date)}</b> · {WEEKDAY_SHORT[parseISO(c.date).getDay()]} · {c.time}</span>
+                              <span className={c.topic ? 'muted' : 'faint'}>
+                                {c.topic || (future ? 'zaplanowane' : 'temat do uzupełnienia')}
+                              </span>
+                            </span>
                           )}
-                          <div className={c.topic ? 'muted' : 'faint'} style={{ fontSize: 12.5, marginTop: 2 }}>
-                            {c.topic || (future ? 'zaplanowane' : 'temat do uzupełnienia')}
-                          </div>
                         </td>
                         {roster.map((k) => (
                           <td className="att-cell" key={k.id}>
@@ -330,9 +345,22 @@ export function TusGroupDetail({ params }) {
                       <td>
                         <span className="row" style={{ gap: 10 }}>
                           <Avatar name={k.name} size={32} />
-                          <span style={{ fontWeight: 600 }}>
-                            {k.name} <span className="faint" style={{ fontWeight: 400 }}>· {k.age} l.</span>
-                          </span>
+                          {k.clientId ? (
+                            <button
+                              type="button"
+                              className="link tus-client-link"
+                              aria-label={`Otwórz kartę klienta: ${k.name}`}
+                              onClick={() => navigate('client', { id: k.clientId })}
+                            >
+                              <span>{k.name}</span>
+                              {k.age != null ? <span className="faint">· {k.age} l.</span> : null}
+                            </button>
+                          ) : (
+                            <span style={{ fontWeight: 600 }}>
+                              {k.name}
+                              {k.age != null ? <span className="faint" style={{ fontWeight: 400 }}> · {k.age} l.</span> : null}
+                            </span>
+                          )}
                         </span>
                       </td>
                       <td data-th="Rodzic">

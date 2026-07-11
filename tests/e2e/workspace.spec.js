@@ -39,6 +39,33 @@ test('therapist demo mode narrows navigation to daily care work', async ({ page 
   await expect(page.getByRole('navigation')).not.toContainText('Raporty')
 })
 
+test('therapist session form is scoped to their own practice', async ({ page }) => {
+  await login(page)
+  await switchToTherapist(page)
+  await page.getByRole('button', { name: 'Nowa sesja' }).first().click()
+  const drawer = page.getByRole('dialog', { name: 'Nowa sesja' })
+  const clients = drawer.getByLabel('Klient')
+  const psychologists = drawer.getByLabel('Specjalistka')
+
+  await expect(clients).toContainText('Joanna Madej')
+  await expect(clients).not.toContainText('Zofia Mazur')
+  await expect(psychologists.locator('option')).toHaveCount(2)
+  await expect(psychologists).toHaveValue('p2')
+})
+
+test('therapist client form cannot reassign care outside their practice', async ({ page }) => {
+  await login(page)
+  await switchToTherapist(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('button', { name: 'Dodaj klienta' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowy klient' })
+  const psychologists = drawer.getByLabel('Specjalistka prowadząca')
+
+  await expect(psychologists.locator('option')).toHaveCount(2)
+  await expect(psychologists).toHaveValue('p2')
+  await expect(drawer.getByLabel('Powiąż z klientem')).not.toContainText('Zofia Mazur')
+})
+
 test('demo role picker is a labelled button group and closes for command search', async ({ page }) => {
   await login(page)
   const picker = page.getByRole('button', { name: /Tryb demonstracyjny.*Julia Wolanin/ })
@@ -55,7 +82,7 @@ test('demo role picker is a labelled button group and closes for command search'
 test('therapist mode guards dashboard destinations and filters command palette', async ({ page }) => {
   await login(page)
   await switchToTherapist(page)
-  await page.getByRole('button', { name: 'Zespół →' }).click()
+  await expect(page.getByRole('region', { name: 'Skróty' }).getByRole('button', { name: 'Zespół' })).toHaveCount(0)
   await expect(page.getByRole('navigation').getByRole('button', { name: 'Mój dzień' })).toHaveAttribute('aria-current', 'page')
 
   await page.keyboard.press('Control+K')
@@ -104,6 +131,10 @@ test('non-owning therapist receives the neutral clinical-notes state', async ({ 
   await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
   await expect(page.locator('.note__text')).toHaveCount(0)
   await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
+  await expect(page.locator('.id-band__actions').getByRole('button')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Edytuj sesję' })).toHaveCount(0)
+  await expect(page.getByTitle('Zmień status sesji')).toHaveCount(0)
+  await expect(page.getByTitle('Zmień płatność')).toHaveCount(0)
 })
 
 test('client detail adapts its primary CTA to the active role', async ({ page }) => {
@@ -160,23 +191,59 @@ test('switching to therapist ignores a previous team client filter', async ({ pa
   await expect(page.getByRole('row', { name: /Joanna Madej/ })).toBeVisible()
 })
 
-test('Today prioritises the next action above monthly metrics', async ({ page }) => {
+test('Today keeps the essential daily regions together', async ({ page }) => {
   await login(page)
   await expect(page.getByRole('region', { name: /Teraz lub następna sesja/ })).toBeVisible()
   await expect(page.getByRole('region', { name: /Wymaga uwagi/ })).toBeVisible()
   await expect(page.getByRole('region', { name: /Plan dnia/ })).toBeVisible()
 })
 
+test('Today is a compact viewport command centre without secondary reports', async ({ page }) => {
+  await login(page)
+  const dashboard = page.getByRole('region', { name: 'Pulpit dnia' })
+
+  await expect(dashboard).toBeVisible()
+  await expect(dashboard.getByRole('region', { name: 'Dzień w skrócie' })).toBeVisible()
+  await expect(dashboard.getByRole('region', { name: 'Skróty' })).toBeVisible()
+  await expect(dashboard).not.toContainText('Przychód miesięczny')
+  await expect(dashboard).not.toContainText('Najbliższe sesje')
+  await expect(dashboard).not.toContainText('Zespół dziś')
+
+  const contentOverflows = await page.locator('main.content').evaluate(
+    (element) => element.scrollHeight > element.clientHeight + 1
+  )
+  expect(contentOverflows).toBe(false)
+})
+
+test('Today keeps the page itself fixed on a short desktop viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 })
+  await login(page)
+
+  const contentOverflows = await page.locator('main.content').evaluate(
+    (element) => element.scrollHeight > element.clientHeight + 1
+  )
+  expect(contentOverflows).toBe(false)
+})
+
+test('Today keeps the next-session time separate from the client name on a narrow phone', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 800 })
+  await login(page)
+
+  const timeBox = await page.locator('.today-focus__time').boundingBox()
+  const clientBox = await page.locator('.today-focus__main').boundingBox()
+  expect(clientBox.x - (timeBox.x + timeBox.width)).toBeGreaterThanOrEqual(12)
+})
+
 test('team board is a Shell overlay that yields to global overlays', async ({ page }) => {
   await login(page)
-  const composer = page.getByLabel('Nowy wpis na tablicy')
-  await composer.fill('Pierwszy wpis testowy')
-  await page.getByRole('button', { name: 'Opublikuj' }).click()
-  await composer.fill('Drugi wpis testowy')
-  await page.getByRole('button', { name: 'Opublikuj' }).click()
-  await page.getByRole('button', { name: /Cała tablica/ }).click()
+  await page.getByRole('region', { name: 'Skróty' }).getByRole('button', { name: 'Tablica zespołu' }).click()
   const board = page.getByRole('dialog', { name: 'Tablica zespołu' })
   await expect(board).toBeVisible()
+  const composer = board.getByLabel('Nowy wpis na tablicy')
+  await composer.fill('Pierwszy wpis testowy')
+  await board.getByRole('button', { name: 'Opublikuj' }).click()
+  await composer.fill('Drugi wpis testowy')
+  await board.getByRole('button', { name: 'Opublikuj' }).click()
   await expect(page.getByRole('main')).toHaveAttribute('inert', '')
 
   await page.keyboard.press('Control+K')
@@ -193,9 +260,11 @@ test('team board is a Shell overlay that yields to global overlays', async ({ pa
 
 test('toasts dismiss with the keyboard', async ({ page }) => {
   await login(page)
-  const composer = page.getByLabel('Nowy wpis na tablicy')
+  await page.getByRole('region', { name: 'Skróty' }).getByRole('button', { name: 'Tablica zespołu' }).click()
+  const board = page.getByRole('dialog', { name: 'Tablica zespołu' })
+  const composer = board.getByLabel('Nowy wpis na tablicy')
   await composer.fill('Wpis do testu powiadomienia')
-  await page.getByRole('button', { name: 'Opublikuj' }).click()
+  await board.getByRole('button', { name: 'Opublikuj' }).click()
   const toast = page.getByRole('button', { name: /Zamknij: Wpis dodany na tablicę/ })
   await expect(toast).toBeVisible()
   await toast.focus()
@@ -214,14 +283,17 @@ test('enabling reduced motion clears active GSAP tweens', async ({ page }) => {
   await expect.poll(() => page.evaluate(() => window.gsap.globalTimeline.getChildren().length)).toBe(0)
 })
 
-test('Today limits the day plan to the therapist and keeps practice status owner-only', async ({ page }) => {
+test('Today limits daily information to the active therapist', async ({ page }) => {
   await login(page)
-  await expect(page.getByRole('region', { name: 'Stan praktyki' })).toBeVisible()
+  const ownerSummary = await page.getByRole('region', { name: 'Dzień w skrócie' }).innerText()
 
   await switchToTherapist(page)
   const plan = page.getByRole('region', { name: 'Plan dnia' })
+  const therapistSummary = page.getByRole('region', { name: 'Dzień w skrócie' })
   await expect(plan).not.toContainText('Julia Wolanin')
-  await expect(page.getByRole('region', { name: 'Stan praktyki' })).toHaveCount(0)
+  await expect(therapistSummary).toBeVisible()
+  await expect(therapistSummary).not.toHaveText(ownerSummary)
+  await expect(page.getByText('Stan praktyki')).toHaveCount(0)
 })
 
 test('therapist Today omits all-team board posts and controls', async ({ page }) => {
@@ -369,13 +441,12 @@ test('custom month range dims the selected out-of-range day and filters its sess
   await expect(selectedDay.locator('.cal__item')).toHaveCount(0)
 })
 
-test('owner outstanding figure opens matching all-period unpaid payments', async ({ page }) => {
+test('owner attention opens matching all-period unpaid payments', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
-  const amount = await page.locator('.figures__item--gold .figures__value').innerText()
-  await page.locator('.figures__item--gold').click()
+  await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('button').first().click()
   await expect(page.getByText(/wszystkie okresy.*tylko zaległe/i)).toBeVisible()
-  await expect(page.locator('.figures__item--gold .figures__value')).toHaveText(amount)
+  await expect(page.locator('.figures__item--gold .figures__value')).toBeVisible()
   const issuedTip = page.locator('.figures__item').filter({ hasText: 'Wystawione' }).getByRole('button', { name: 'Wyjaśnienie' })
   await issuedTip.focus()
   const issuedTipId = await issuedTip.getAttribute('aria-describedby')

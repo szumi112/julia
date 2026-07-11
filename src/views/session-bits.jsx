@@ -11,7 +11,11 @@ const PAY_TONE = { paid: 'sage', unpaid: 'error', partial: 'gold' }
 
 export function StatusPicker({ session }) {
   const { dispatch, toast } = useApp()
+  const { role } = useShell()
   const [open, setOpen] = useState(false)
+  if (role.scope === 'own' && session.psychId !== role.psychId) {
+    return <Pill tone={STATUS_TONE[session.status]} dot>{STATUS_LABELS[session.status]}</Pill>
+  }
   return (
     <Popover
       open={open}
@@ -46,12 +50,15 @@ export function StatusPicker({ session }) {
 
 export function PaymentPicker({ session }) {
   const { dispatch, toast } = useApp()
-  const { openSessionForm } = useShell()
+  const { openSessionForm, role } = useShell()
   const [open, setOpen] = useState(false)
   const label =
     session.payment === 'partial'
       ? `${PAY_LABELS.partial} · ${fmtMoney(session.paidAmount)}`
       : PAY_LABELS[session.payment]
+  if (role.scope === 'own' && session.psychId !== role.psychId) {
+    return <Pill tone={PAY_TONE[session.payment]} dot>{label}</Pill>
+  }
   return (
     <Popover
       open={open}

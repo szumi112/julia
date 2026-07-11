@@ -562,7 +562,11 @@ export function Shell({ onLogout }) {
             onMenu={isCompact ? () => openOverlay('navigation') : undefined}
             overlayKey={overlay}
           />
-          <main className="content" ref={contentRef} inert={hasOverlay ? '' : undefined}>
+          <main
+            className={`content ${route.name === 'dashboard' ? 'content--dashboard' : ''}`}
+            ref={contentRef}
+            inert={hasOverlay ? '' : undefined}
+          >
             <div className="view" ref={viewRef} tabIndex={-1} key={route.name + JSON.stringify(route.params || {})}>
               <View params={route.params || {}} />
             </div>

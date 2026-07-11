@@ -1,19 +1,18 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, monthStats, upcomingSessions, totalOutstanding, clientOutstanding, revenueSeries } from '../store.jsx'
+import { Fragment, useRef, useState } from 'react'
+import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { useReveal, useDrawerFX, motionOK } from '../anim.js'
-import { AreaChart, BarFill } from '../charts.jsx'
-import { Button, Avatar, Pill, IconBtn, EmptyState, Figure } from '../ui.jsx'
+import { useReveal, useDrawerFX } from '../anim.js'
+import { Button, Avatar, Pill, IconBtn, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
-import { sessionsForRole, todayWorkspace } from '../workspace.js'
+import { todayWorkspace } from '../workspace.js'
 import {
-  fmtMoney, monthKey, addMonths, fmtWeekday, fmtDayMonth, fmtShortDate, toISODate, pad2,
-  sessionsWord, outstandingOf, isBillable, cap, fmtMonthName, plural, timeToMin,
+  fmtMoney, fmtWeekday, fmtDayMonth, fmtShortDate, toISODate, pad2,
+  sessionsWord, cap, plural, timeToMin,
 } from '../format.js'
 
 // today's sessions on the day thread — the hero's working half
 function TodayThread({ sessions, nowMin, onOpen, onCalendar }) {
-  const MAX = 6
+  const MAX = 4
   const shown = sessions.slice(0, MAX)
   const hidden = sessions.length - shown.length
   const done = sessions.filter((s) => s.status === 'completed').length
@@ -70,11 +69,15 @@ function TodayThread({ sessions, nowMin, onOpen, onCalendar }) {
   )
 }
 
-// --- Tablica zespołu — lightweight in-memory announcements board. The
-// dashboard card shows only the newest posts; the full board lives in a
-// slide-over drawer.
+// The dashboard only links to destinations that help with today's work.
+// Detailed finance, reporting and team views stay in the main navigation.
 
-const BOARD_PREVIEW = 3
+const TODAY_SHORTCUTS = [
+  { id: 'calendar', label: 'Kalendarz', icon: 'calendar' },
+  { id: 'clients', label: 'Klienci', icon: 'clients' },
+  { id: 'board', label: 'Tablica zespołu', icon: 'pin', roles: ['owner', 'coordinator'] },
+  { id: 'tus', label: 'Zajęcia TUS', icon: 'group' },
+]
 
 const relDay = (iso) => {
   const today = toISODate(new Date())
@@ -187,121 +190,36 @@ export function BoardDrawer({ onClose }) {
   )
 }
 
-function TeamBoard() {
-  const { state } = useApp()
-  const { openTeamBoard } = useShell()
-  const listRef = useRef(null)
-  const prevCount = useRef(state.posts.length)
-
-  // gently slide a freshly published post in
-  useEffect(() => {
-    if (state.posts.length > prevCount.current && motionOK() && listRef.current?.firstElementChild) {
-      window.gsap.fromTo(
-        listRef.current.firstElementChild,
-        { autoAlpha: 0, y: -10 },
-        { autoAlpha: 1, y: 0, duration: 0.5, ease: 'power3.out', clearProps: 'transform,opacity,visibility' }
-      )
-    }
-    prevCount.current = state.posts.length
-  }, [state.posts.length])
-
-  const visible = state.posts.slice(0, BOARD_PREVIEW)
-  const hidden = state.posts.length - visible.length
-
-  return (
-    <>
-      <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
-        <h2 className="card-title">
-          <span className="row" style={{ gap: 8 }}>
-            <Icon name="pin" size={17} style={{ color: 'var(--gold-deep)' }} />
-            Tablica zespołu
-          </span>
-          {state.posts.length > BOARD_PREVIEW && (
-            <button className="link" onClick={openTeamBoard}>
-              Cała tablica ({state.posts.length}) →
-            </button>
-          )}
-        </h2>
-        <div style={{ marginTop: 14 }}>
-          <BoardComposer />
-        </div>
-        <div style={{ marginTop: 8 }} ref={listRef}>
-          {state.posts.length === 0 && (
-            <EmptyState compact icon="pin" title="Tablica jest pusta" hint="Zostaw zespołowi pierwszą wiadomość." />
-          )}
-          {visible.map((p) => (
-            <BoardPost key={p.id} post={p} />
-          ))}
-        </div>
-        {hidden > 0 && (
-          <button className="bpost-more" onClick={openTeamBoard}>
-            Pokaż {hidden} {plural(hidden, 'starszy wpis', 'starsze wpisy', 'starszych wpisów')} →
-          </button>
-        )}
-      </div>
-    </>
-  )
-}
-
 export function Dashboard() {
   const { state } = useApp()
-  const { navigate, openSessionForm, openClientForm, role } = useShell()
+  const { navigate, openSessionForm, openClientForm, openTeamBoard, role } = useShell()
   const ref = useReveal()
 
   const now = new Date()
   const today = toISODate(now)
   const nowMin = now.getHours() * 60 + now.getMinutes()
   const workspace = todayWorkspace(state, role, now)
-  const roleSessions = sessionsForRole(state, role)
   const selectedSession = workspace.current || workspace.next
-  const ym = monthKey(now)
-  const months = useMemo(() => Array.from({ length: 6 }, (_, i) => addMonths(ym, i - 5)), [ym])
-  const series = useMemo(() => revenueSeries(roleSessions, months), [roleSessions, months])
-  const monthName = fmtMonthName(ym)
-
-  const outstanding = totalOutstanding(roleSessions)
-  const unpaidCount = roleSessions.filter((s) => isBillable(s) && outstandingOf(s) > 0).length
-  const upcoming = upcomingSessions(roleSessions, 5)
 
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
   const clientOf = (id) => state.clients.find((c) => c.id === id)
 
   const todays = workspace.schedule
     .map((s) => ({ ...s, psych: psychOf(s.psychId), client: clientOf(s.clientId) }))
-
-  // The secondary billing card stays useful in each role, without exposing
-  // another specialist's client balance in therapist mode.
-  const debtors = state.clients
-    .map((c) => ({ c, due: clientOutstanding(roleSessions, c.id) }))
-    .filter((d) => d.due > 0)
-    .sort((a, b) => b.due - a.due)
-    .slice(0, 3)
-
-  const psychMonth = state.psychologists.map((p) => {
-    const sess = roleSessions.filter((s) => s.psychId === p.id)
-    const todayCount = todays.filter((s) => s.psychId === p.id).length
-    return { p, todayCount, ...monthStats(sess, ym) }
-  })
-  const visiblePsychMonth = role.scope === 'own'
-    ? psychMonth.filter(({ p }) => p.id === role.psychId)
-    : psychMonth
-  const maxRev = Math.max(...visiblePsychMonth.map((x) => x.revenue), 1)
+  const completedCount = todays.filter((session) => session.status === 'completed').length
+  const scheduledCount = todays.filter((session) => session.status === 'scheduled').length
+  const shortcuts = TODAY_SHORTCUTS.filter((shortcut) => !shortcut.roles || shortcut.roles.includes(role.id))
   const focusPsych = selectedSession ? psychOf(selectedSession.psychId) : null
   const focusClient = selectedSession ? clientOf(selectedSession.clientId) : null
 
   return (
-    <div ref={ref}>
+    <section className="today-page" role="region" aria-label="Pulpit dnia" ref={ref}>
       <header className="today-head" data-reveal>
         <div>
           <div className="eyebrow">{cap(fmtWeekday(today))}, {fmtDayMonth(today)}</div>
           <h1 className="display today-head__title">
             {role.id === 'therapist' ? 'Mój dzień' : 'Dziś'}
           </h1>
-          <p className="today-head__sub">
-            {todays.length > 0
-              ? <>W planie {todays.length} {sessionsWord(todays.length)}. Zacznij od tego, co najbliżej.</>
-              : 'Dziś kalendarz jest wolny — czas na oddech.'}
-          </p>
         </div>
         <div className="today-head__actions">
           <Button icon="plus" magnetic onClick={() => openSessionForm()}>Nowa sesja</Button>
@@ -309,221 +227,132 @@ export function Dashboard() {
         </div>
       </header>
 
-      <div className="today-workspace">
-        <section className="today-region today-region--focus card card--pad" aria-labelledby="today-focus-title" data-reveal>
-          <div className="today-region__head">
-            <div>
-              <span className="eyebrow">Najbliższe działanie</span>
-              <h2 id="today-focus-title" className="card-title">Teraz lub następna sesja</h2>
-            </div>
-            {workspace.current && <Pill tone="rose" dot>Trwa teraz</Pill>}
-          </div>
-          {selectedSession ? (
-            <div className="today-focus">
-              <div className="today-focus__time">{selectedSession.time}</div>
-              <div className="today-focus__main">
-                <b>{focusClient?.name}</b>
-                <span>{focusPsych?.room || 'Gabinet do potwierdzenia'} · {focusPsych?.name}</span>
-              </div>
-              <Button onClick={() => openSessionForm({ session: selectedSession })}>Otwórz sesję</Button>
-            </div>
-          ) : (
-            <EmptyState compact icon="calendar" title="Brak kolejnej sesji" hint="Zaplanuj spotkanie, gdy pojawi się nowa potrzeba." />
-          )}
-        </section>
-
-        <section className="today-region today-region--attention card card--pad" aria-labelledby="today-attention-title" data-reveal>
-          <div className="today-region__head">
-            <div>
-              <span className="eyebrow">Do działania</span>
-              <h2 id="today-attention-title" className="card-title">Wymaga uwagi</h2>
-            </div>
-            {workspace.attention.length > 0 && <Pill tone="gold">{workspace.attention.length}</Pill>}
-          </div>
-          {workspace.attention.length === 0 ? (
-            <EmptyState compact icon="check" title="Wszystko pod kontrolą" hint="Nie ma dziś spraw wymagających działania." />
-          ) : (
-            <div className="today-attention">
-              {workspace.attention.map((item) => {
-                const session = state.sessions.find((entry) => entry.id === item.sessionId)
-                const client = session && clientOf(session.clientId)
-                const canOpenPayments = role.id !== 'therapist'
-                return (
-                  <button
-                    key={item.sessionId}
-                    className="today-attention__row"
-                    onClick={() => canOpenPayments
-                      ? navigate('payments', { allPeriods: true, unpaidOnly: true })
-                      : openSessionForm({ session })}
-                  >
-                    <Icon name="payments" size={16} />
-                    <span>
-                      <b>{client?.name || 'Klient'}</b>
-                      <small>Zaległa płatność · {fmtMoney(item.amount)}</small>
-                    </span>
-                    <Icon name="chevR" size={15} className="faint" />
-                  </button>
-                )
-              })}
-            </div>
-          )}
-        </section>
-
-        <section className="today-region today-region--plan" aria-label="Plan dnia">
-          <TodayThread
-            sessions={todays}
-            nowMin={nowMin}
-            onOpen={(s) => openSessionForm({ session: state.sessions.find((x) => x.id === s.id) })}
-            onCalendar={() => navigate('calendar')}
-          />
-        </section>
-
-        {workspace.summary && (
-          <section className="today-region today-region--summary" aria-label="Stan praktyki" data-reveal>
+      <div className="today-command">
+        <div className="today-primary">
+          <section className="today-region today-region--focus card card--pad" aria-labelledby="today-focus-title" data-reveal>
             <div className="today-region__head">
               <div>
-                <span className="eyebrow">Właścicielka</span>
-                <h2 className="card-title">Stan praktyki</h2>
+                <span className="eyebrow">Najbliższe działanie</span>
+                <h2 id="today-focus-title" className="card-title">Teraz lub następna sesja</h2>
+              </div>
+              {workspace.current && <Pill tone="rose" dot>Trwa teraz</Pill>}
+            </div>
+            {selectedSession ? (
+              <div className="today-focus">
+                <div className="today-focus__time">{selectedSession.time}</div>
+                <div className="today-focus__main">
+                  <b>{focusClient?.name}</b>
+                  <span>{focusPsych?.room || 'Gabinet do potwierdzenia'} · {focusPsych?.name}</span>
+                </div>
+                <Button onClick={() => openSessionForm({ session: selectedSession })}>Otwórz sesję</Button>
+              </div>
+            ) : (
+              <EmptyState compact icon="calendar" title="Brak kolejnej sesji" hint="Zaplanuj spotkanie, gdy pojawi się nowa potrzeba." />
+            )}
+          </section>
+
+          <section className="today-region today-region--plan" aria-label="Plan dnia">
+            <TodayThread
+              sessions={todays}
+              nowMin={nowMin}
+              onOpen={(s) => openSessionForm({ session: state.sessions.find((x) => x.id === s.id) })}
+              onCalendar={() => navigate('calendar')}
+            />
+          </section>
+        </div>
+
+        <aside className="today-side card card--pad" data-reveal>
+          <section className="today-side__section" aria-label="Dzień w skrócie">
+            <div className="today-region__head">
+              <div>
+                <span className="eyebrow">Na szybko</span>
+                <h2 className="card-title">Dzień w skrócie</h2>
               </div>
             </div>
-            <div className="figures" role="group" aria-label="Stan praktyki">
-              <Figure
-                label="Sesje zakończone"
-                value={workspace.summary.completedToday.value}
-                sub="dzisiaj"
-                onClick={() => navigate('calendar')}
-              />
-              <Figure
-                label={`Przychód · ${monthName}`}
-                value={workspace.summary.revenueMonth.value}
-                fmt={fmtMoney}
-                sub="bieżący miesiąc"
-                onClick={() => navigate('reports')}
-              />
-              <Figure
-                label="Zaległe · łącznie"
-                value={workspace.summary.outstandingAllTime.value}
-                fmt={fmtMoney}
-                gold
-                sub="wszystkie okresy"
-                onClick={() => navigate('payments', { allPeriods: true, unpaidOnly: true })}
-              />
+            <div className="today-stats">
+              <div className="today-stat">
+                <strong>{todays.length}</strong>
+                <span>sesji dzisiaj</span>
+              </div>
+              <div className="today-stat">
+                <strong>{scheduledCount}</strong>
+                <span>zaplanowane</span>
+              </div>
+              <div className="today-stat">
+                <strong>{completedCount}</strong>
+                <span>zakończone</span>
+              </div>
             </div>
           </section>
-        )}
-      </div>
 
-      <div className="grid-31 today-secondary">
-        <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
-          <h2 className="card-title">
-            Przychód miesięczny
-            <button className="link" onClick={() => navigate('reports')}>Pełny raport →</button>
-          </h2>
-          <div style={{ marginTop: 14 }}>
-            <AreaChart data={series} />
-          </div>
-        </div>
-
-        <div className="stack">
-          <div className="card card--pad" data-reveal>
-            <h2 className="card-title">
-              Najbliższe sesje
-              <button className="link" onClick={() => navigate('calendar')}>Kalendarz →</button>
-            </h2>
-            <div className="agenda" style={{ marginTop: 8 }}>
-              {upcoming.length === 0 && (
-                <EmptyState
-                  compact
-                  icon="calendar"
-                  title="Brak zaplanowanych sesji"
-                  hint="Zaplanuj spotkanie, a pojawi się tutaj."
-                  action={<Button size="sm" variant="soft" icon="plus" onClick={() => openSessionForm()}>Nowa sesja</Button>}
-                />
+          <section className="today-side__section today-side__section--attention" aria-labelledby="today-attention-title">
+            <div className="today-region__head">
+              <div>
+                <span className="eyebrow">Do działania</span>
+                <h2 id="today-attention-title" className="card-title">Wymaga uwagi</h2>
+              </div>
+              {workspace.attention.length > 0 && (
+                <Pill tone="gold">{workspace.attention.length === 3 ? '3+' : workspace.attention.length}</Pill>
               )}
-              {upcoming.map((s) => {
-                const p = psychOf(s.psychId)
-                const c = clientOf(s.clientId)
-                return (
-                  <button
-                    key={s.id}
-                    className="agenda__row hover-row"
-                    style={{ width: '100%', textAlign: 'left' }}
-                    onClick={() => openSessionForm({ session: s })}
-                  >
-                    <span className="agenda__time">{s.time}</span>
-                    <span className="agenda__main">
-                      <span className="agenda__client">{c?.name}</span>
-                      <span className="agenda__meta">
-                        <span className="dot" style={{ width: 7, height: 7, borderRadius: 99, background: p?.color, display: 'inline-block' }} />
-                        {p?.name} · {s.date === today ? 'dziś' : fmtDayMonth(s.date)}
-                      </span>
-                    </span>
-                    <Icon name="chevR" size={15} className="faint" />
-                  </button>
-                )
-              })}
             </div>
-          </div>
-
-          <div className="card card--pad" data-reveal>
-            <h2 className="card-title">
-              Do rozliczenia
-              <button className="link" onClick={() => navigate('payments')}>Finanse →</button>
-            </h2>
-            {debtors.length === 0 ? (
-              <EmptyState compact icon="check" title="Wszystko rozliczone" hint="Żaden klient nie ma zaległości." />
+            {workspace.attention.length === 0 ? (
+              <div className="today-calm">
+                <span className="today-calm__icon"><Icon name="check" size={16} /></span>
+                <span>
+                  <b>Wszystko pod kontrolą</b>
+                  <small>Brak pilnych spraw na dziś.</small>
+                </span>
+              </div>
             ) : (
-              <div style={{ marginTop: 8 }}>
-                {debtors.map(({ c, due }) => (
-                  <button
-                    key={c.id}
-                    className="hover-row row row--between"
-                    style={{ width: '100%', textAlign: 'left' }}
-                    onClick={() => navigate('client', { id: c.id })}
-                  >
-                    <span className="row" style={{ gap: 10, minWidth: 0 }}>
-                      <Avatar name={c.name} size={28} />
-                      <span style={{ fontWeight: 600, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
-                    </span>
-                    <Pill tone="gold">{fmtMoney(due)}</Pill>
-                  </button>
-                ))}
-                <div className="figures__sub" style={{ marginTop: 10 }}>
-                  Łącznie {fmtMoney(outstanding)} · {unpaidCount} {sessionsWord(unpaidCount)}
-                </div>
+              <div className="today-attention">
+                {workspace.attention.slice(0, 2).map((item) => {
+                  const session = state.sessions.find((entry) => entry.id === item.sessionId)
+                  const client = session && clientOf(session.clientId)
+                  const canOpenPayments = role.id !== 'therapist'
+                  return (
+                    <button
+                      key={item.sessionId}
+                      className="today-attention__row"
+                      onClick={() => canOpenPayments
+                        ? navigate('payments', { allPeriods: true, unpaidOnly: true })
+                        : openSessionForm({ session })}
+                    >
+                      <Icon name="payments" size={16} />
+                      <span>
+                        <b>{client?.name || 'Klient'}</b>
+                        <small>Zaległa płatność · {fmtMoney(item.amount)}</small>
+                      </span>
+                      <Icon name="chevR" size={15} className="faint" />
+                    </button>
+                  )
+                })}
               </div>
             )}
-          </div>
-        </div>
-      </div>
+          </section>
 
-      <div className={`grid-31 today-secondary ${role.scope === 'own' ? 'grid-31--single' : ''}`} style={{ marginTop: 20 }}>
-        <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
-          <h2 className="card-title">
-            Zespół dziś
-            <button className="link" onClick={() => navigate('team')}>Zespół →</button>
-          </h2>
-          <div className="hbar" style={{ marginTop: 20 }}>
-            {visiblePsychMonth.map(({ p, todayCount, count, revenue }) => (
-              <div className="hbar__row" key={p.id}>
-                <button className="hbar__name link" style={{ color: 'var(--ink)', display: 'flex' }} aria-label={`Otwórz profil specjalistki: ${p.name}`} onClick={() => navigate('psych', { id: p.id })}>
-                  <Avatar name={p.name} color={p.color} size={30} />
-                  <span>{p.name}</span>
-                </button>
-                <div className="hbar__track">
-                  <BarFill segments={[{ value: revenue, color: p.color, label: p.name }]} totalMax={maxRev} />
-                </div>
-                <div className="hbar__val">
-                  {todayCount > 0 ? `dziś ${todayCount} ${sessionsWord(todayCount)}` : 'dziś wolne'}
-                  <span className="faint" style={{ fontWeight: 500 }}> · {fmtMoney(revenue)} / {monthName.slice(0, 3)} · {count} {sessionsWord(count)}</span>
-                </div>
+          <section className="today-side__section today-shortcuts" aria-label="Skróty">
+            <div className="today-region__head">
+              <div>
+                <span className="eyebrow">Przejdź do</span>
+                <h2 className="card-title">Skróty</h2>
               </div>
-            ))}
-          </div>
-        </div>
-
-        {role.scope !== 'own' && <TeamBoard />}
+            </div>
+            <div className="today-shortcuts__grid">
+              {shortcuts.map((shortcut) => (
+                <button
+                  key={shortcut.id}
+                  className="today-shortcut"
+                  onClick={() => shortcut.id === 'board' ? openTeamBoard() : navigate(shortcut.id)}
+                >
+                  <Icon name={shortcut.icon} size={16} />
+                  <span>{shortcut.label}</span>
+                  <Icon name="chevR" size={13} className="today-shortcut__chev" />
+                </button>
+              ))}
+            </div>
+          </section>
+        </aside>
       </div>
-    </div>
+    </section>
   )
 }

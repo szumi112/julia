@@ -211,6 +211,7 @@ export function ClientDetail({ params }) {
     ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
     : []
   const canReadClinicalNotes = role.scope === 'own' && client.psychId === role.psychId
+  const canManageCare = role.scope !== 'own' || client.psychId === role.psychId
 
   const addNote = () => {
     if (!canReadClinicalNotes) return
@@ -260,12 +261,14 @@ export function ClientDetail({ params }) {
                 </Pill>
               </div>
             </div>
-            <div className="id-band__actions">
-              <Button variant="ghost" icon="edit" onClick={() => openClientForm({ client })}>Edytuj</Button>
-              <Button icon="plus" onClick={() => openSessionForm({ clientId: client.id })}>
-                {role.scope === 'own' ? 'Przygotuj sesję' : 'Umów spotkanie'}
-              </Button>
-            </div>
+            {canManageCare && (
+              <div className="id-band__actions">
+                <Button variant="ghost" icon="edit" onClick={() => openClientForm({ client })}>Edytuj</Button>
+                <Button icon="plus" onClick={() => openSessionForm({ clientId: client.id })}>
+                  {role.scope === 'own' ? 'Przygotuj sesję' : 'Umów spotkanie'}
+                </Button>
+              </div>
+            )}
           </div>
           <div className="care-overview" aria-label="Podsumowanie opieki">
             <div className="care-overview__item">
@@ -289,7 +292,7 @@ export function ClientDetail({ params }) {
               {family.length > 0 ? (
                 <span className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
                   {family.map((member) => {
-                    const label = `${member.name}${member.familyRole ? ` (${member.familyRole})` : ''}`
+                    const label = `${member.name} (${member.familyRole || 'rodzina'})`
                     // a therapist sees the family fact, but only their own
                     // clients' cards open from here
                     return role.scope === 'own' && member.psychId !== role.psychId ? (
@@ -332,7 +335,7 @@ export function ClientDetail({ params }) {
                         <PaymentPicker session={s} />
                       </span>
                     </span>
-                    <IconBtn name="edit" label="Edytuj sesję" size={16} onClick={() => openSessionForm({ session: s })} />
+                    {canManageCare && <IconBtn name="edit" label="Edytuj sesję" size={16} onClick={() => openSessionForm({ session: s })} />}
                   </div>
                 ))}
               </div>
@@ -372,7 +375,7 @@ export function ClientDetail({ params }) {
                         <td className="right num-cell" data-th="Kwota">{fmtMoney(s.amount)}</td>
                         <td data-th="Płatność"><PaymentPicker session={s} /></td>
                         <td className="right td--actions" style={{ width: 44 }}>
-                          <IconBtn name="edit" label="Edytuj sesję" size={15} onClick={() => openSessionForm({ session: s })} />
+                          {canManageCare && <IconBtn name="edit" label="Edytuj sesję" size={15} onClick={() => openSessionForm({ session: s })} />}
                         </td>
                       </tr>
                     ))}

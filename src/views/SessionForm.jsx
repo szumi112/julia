@@ -1,13 +1,16 @@
 // Add/Edit session — slide-over drawer with validation.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from '../store.jsx'
+import { useShell } from '../shell-ctx.js'
 import { Button, Field, Segmented, IconBtn } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX, motionOK } from '../anim.js'
 import { toISODate, timeToMin, fmtDayMonth, isBillable, STATUS_LABELS, PAY_LABELS, METHOD_LABELS } from '../format.js'
+import { clientsForRole } from '../workspace.js'
 
 export function SessionDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
+  const { role } = useShell()
   const editing = opts.session || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
@@ -19,7 +22,12 @@ export function SessionDrawer({ opts, onClose }) {
     editing?.psychId ||
     (defaultClient ? state.clients.find((c) => c.id === defaultClient)?.psychId : '') ||
     opts.psychId ||
+    (role.scope === 'own' ? role.psychId : '') ||
     ''
+  const availableClients = clientsForRole(state, role)
+  const availablePsychologists = role.scope === 'own'
+    ? state.psychologists.filter((psych) => psych.id === role.psychId)
+    : state.psychologists
 
   const [form, setForm] = useState({
     clientId: defaultClient,
@@ -129,6 +137,12 @@ export function SessionDrawer({ opts, onClose }) {
     const amount = Number(form.amount)
     if (!Number.isFinite(amount) || amount <= 0) errs.amount = 'Podaj kwotę większą od zera'
     const selectedClient = state.clients.find((c) => c.id === form.clientId)
+    if (role.scope === 'own' && selectedClient?.psychId !== role.psychId) {
+      errs.clientId = 'Wybierz klienta przypisanego do Twojej opieki'
+    }
+    if (role.scope === 'own' && form.psychId !== role.psychId) {
+      errs.psychId = 'Sesję może prowadzić tylko aktywna specjalistka'
+    }
     if (selectedClient && form.psychId && selectedClient.psychId !== form.psychId) {
       errs.psychId = 'Wybrana specjalistka nie prowadzi tego klienta'
     }
@@ -196,7 +210,7 @@ export function SessionDrawer({ opts, onClose }) {
                 records the opener, breaking focus restore on close */}
             <select className="select" value={form.clientId} onChange={(e) => onClientChange(e.target.value)}>
               <option value="">— wybierz klienta —</option>
-              {state.clients.map((c) => (
+              {availableClients.map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
             </select>
@@ -205,7 +219,7 @@ export function SessionDrawer({ opts, onClose }) {
           <Field label="Specjalistka" error={errors.psychId}>
             <select className="select" value={form.psychId} onChange={(e) => onPsychChange(e.target.value)}>
               <option value="">— wybierz —</option>
-              {state.psychologists.map((p) => (
+              {availablePsychologists.map((p) => (
                 <option key={p.id} value={p.id}>{p.title} {p.name}</option>
               ))}
             </select>

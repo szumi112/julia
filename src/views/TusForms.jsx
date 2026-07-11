@@ -5,6 +5,7 @@ import { Button, Field, Check, IconBtn } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, parseISO, fmtDayMonth } from '../format.js'
+import { TusChildQuickCreate, TusMemberPicker } from './TusMemberPicker.jsx'
 
 const WEEKDAY_OPTIONS = [
   { value: 1, label: 'Poniedziałek' },
@@ -35,6 +36,12 @@ export function TusGroupDrawer({ opts, onClose }) {
     fee: editing?.fee ?? 300,
   })
   const [errors, setErrors] = useState({})
+  const [mode, setMode] = useState('group')
+  const [memberKeys, setMemberKeys] = useState(() => editing
+    ? state.tusKids.filter((kid) => kid.groupId === editing.id).map((kid) => `kid:${kid.id}`)
+    : [])
+  const [newChildren, setNewChildren] = useState([])
+  const nextDraftId = useRef(1)
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -42,6 +49,19 @@ export function TusGroupDrawer({ opts, onClose }) {
   }
   const toggleLeader = (id) =>
     set('leaderIds', form.leaderIds.includes(id) ? form.leaderIds.filter((x) => x !== id) : [...form.leaderIds, id])
+  const toggleMember = (key) => setMemberKeys((current) =>
+    current.includes(key) ? current.filter((candidate) => candidate !== key) : [...current, key]
+  )
+  const removeMember = (key) => {
+    setMemberKeys((current) => current.filter((candidate) => candidate !== key))
+    if (key.startsWith('new:')) setNewChildren((current) => current.filter((draft) => draft.key !== key))
+  }
+  const addDraftChild = (draft) => {
+    const key = `new:${nextDraftId.current++}`
+    setNewChildren((current) => [...current, { ...draft, key }])
+    setMemberKeys((current) => [...current, key])
+    setMode('group')
+  }
 
   const submit = (e) => {
     e.preventDefault()
@@ -65,10 +85,10 @@ export function TusGroupDrawer({ opts, onClose }) {
       fee: Number(form.fee),
     }
     if (editing) {
-      dispatch({ type: 'UPDATE_TUS_GROUP', id: editing.id, patch: payload })
+      dispatch({ type: 'UPDATE_TUS_GROUP', id: editing.id, patch: payload, memberKeys, newChildren })
       toast('Grupa zapisana')
     } else {
-      dispatch({ type: 'ADD_TUS_GROUP', group: payload })
+      dispatch({ type: 'ADD_TUS_GROUP', group: payload, memberKeys, newChildren })
       toast('Nowa grupa utworzona')
     }
     close()
@@ -77,56 +97,96 @@ export function TusGroupDrawer({ opts, onClose }) {
   return (
     <>
       <div className="drawer-backdrop" ref={backRef} onClick={close} />
-      <aside className="drawer" ref={drawerRef} role="dialog" aria-modal="true" aria-label={editing ? 'Edycja grupy TUS' : 'Nowa grupa TUS'}>
+      <aside
+        className="drawer"
+        ref={drawerRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={mode === 'child' ? 'Nowe dziecko i rodzic' : editing ? 'Edycja grupy TUS' : 'Nowa grupa TUS'}
+      >
         <div className="drawer__head">
-          <div>
-            <h2 className="drawer__title">{editing ? 'Edycja grupy' : 'Nowa grupa'}</h2>
-            <p className="drawer__sub">{editing ? editing.name : 'Utwórz grupę wiekową zajęć TUS.'}</p>
+          <div className="drawer__head-main">
+            {mode === 'child' ? <IconBtn name="arrowL" label="Wróć do grupy" onClick={() => setMode('group')} /> : null}
+            <div>
+              <h2 className="drawer__title">{mode === 'child' ? 'Nowe dziecko' : editing ? 'Edycja grupy' : 'Nowa grupa'}</h2>
+              <p className="drawer__sub">
+                {mode === 'child'
+                  ? 'Dodaj dziecko i dane rodzica lub opiekuna.'
+                  : editing ? editing.name : 'Utwórz grupę wiekową zajęć TUS.'}
+              </p>
+            </div>
           </div>
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
 
-        <form className="drawer__body" onSubmit={submit} noValidate>
-          <Field label="Nazwa grupy" error={errors.name}>
-            <input className="input" value={form.name} placeholder="np. Grupa TUS 5–6 lat" onChange={(e) => set('name', e.target.value)} />
-          </Field>
+        {mode === 'child' ? (
+          <TusChildQuickCreate
+            clients={state.clients}
+            pendingParents={newChildren}
+            onAdd={addDraftChild}
+            onCancel={() => setMode('group')}
+            onInvalid={() => {
+              shake()
+              focusFirstInvalid(drawerRef)
+            }}
+          />
+        ) : (
+          <>
+            <form className="drawer__body" onSubmit={submit} noValidate>
+              <Field label="Nazwa grupy" error={errors.name}>
+                <input className="input" value={form.name} placeholder="np. Grupa TUS 5–6 lat" onChange={(e) => set('name', e.target.value)} />
+              </Field>
 
-          <Field label="Przedział wiekowy" hint="Dzieci dzielone są na grupy według wieku.">
-            <input className="input" value={form.age} placeholder="np. 5–6 lat" onChange={(e) => set('age', e.target.value)} />
-          </Field>
+              <Field label="Przedział wiekowy" hint="Dzieci dzielone są na grupy według wieku.">
+                <input className="input" value={form.age} placeholder="np. 5–6 lat" onChange={(e) => set('age', e.target.value)} />
+              </Field>
 
-          <Field label="Prowadzące" error={errors.leaderIds} hint="Zwykle dwie psycholożki na grupę.">
-            <div className="stack" style={{ gap: 9, paddingTop: 2 }}>
-              {state.psychologists.map((p) => (
-                <Check key={p.id} checked={form.leaderIds.includes(p.id)} onChange={() => toggleLeader(p.id)}>
-                  {p.title} {p.name}
-                </Check>
-              ))}
+              <TusMemberPicker
+                clients={state.clients}
+                kids={state.tusKids}
+                groups={state.tusGroups}
+                selectedKeys={memberKeys}
+                newChildren={newChildren}
+                onToggle={toggleMember}
+                onRemove={removeMember}
+                onStartCreate={() => setMode('child')}
+                targetGroupId={editing?.id || null}
+              />
+
+              <Field label="Prowadzące" error={errors.leaderIds} hint="Zwykle dwie psycholożki na grupę.">
+                <div className="stack" style={{ gap: 9, paddingTop: 2 }}>
+                  {state.psychologists.map((p) => (
+                    <Check key={p.id} checked={form.leaderIds.includes(p.id)} onChange={() => toggleLeader(p.id)}>
+                      {p.title} {p.name}
+                    </Check>
+                  ))}
+                </div>
+              </Field>
+
+              <div className="form-grid">
+                <Field label="Dzień tygodnia">
+                  <select className="select" value={form.weekday} onChange={(e) => set('weekday', Number(e.target.value))}>
+                    {WEEKDAY_OPTIONS.map((w) => (
+                      <option key={w.value} value={w.value}>{w.label}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Godzina" error={errors.time}>
+                  <input type="time" className="input" value={form.time} onChange={(e) => set('time', e.target.value)} />
+                </Field>
+              </div>
+
+              <Field label="Opłata miesięczna (zł)" error={errors.fee}>
+                <input type="number" min="0" step="25" inputMode="numeric" className="input" value={form.fee} onChange={(e) => set('fee', e.target.value)} />
+              </Field>
+            </form>
+
+            <div className="drawer__foot">
+              <Button variant="primary" onClick={submit}>{editing ? 'Zapisz zmiany' : 'Utwórz grupę'}</Button>
+              <Button variant="ghost" onClick={close}>Anuluj</Button>
             </div>
-          </Field>
-
-          <div className="form-grid">
-            <Field label="Dzień tygodnia">
-              <select className="select" value={form.weekday} onChange={(e) => set('weekday', Number(e.target.value))}>
-                {WEEKDAY_OPTIONS.map((w) => (
-                  <option key={w.value} value={w.value}>{w.label}</option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Godzina" error={errors.time}>
-              <input type="time" className="input" value={form.time} onChange={(e) => set('time', e.target.value)} />
-            </Field>
-          </div>
-
-          <Field label="Opłata miesięczna (zł)" error={errors.fee}>
-            <input type="number" min="0" step="25" inputMode="numeric" className="input" value={form.fee} onChange={(e) => set('fee', e.target.value)} />
-          </Field>
-        </form>
-
-        <div className="drawer__foot">
-          <Button variant="primary" onClick={submit}>{editing ? 'Zapisz zmiany' : 'Utwórz grupę'}</Button>
-          <Button variant="ghost" onClick={close}>Anuluj</Button>
-        </div>
+          </>
+        )}
       </aside>
     </>
   )

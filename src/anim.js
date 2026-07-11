@@ -213,9 +213,10 @@ export function useDrawerFX(drawerRef, backRef, onClose) {
       )
     }
     // the entrance stagger starts fields at visibility:hidden, so focus the
-    // first form control once it is visible again
+    // first form control once it is visible again. If someone already moved
+    // focus into the drawer, keep their choice instead of stealing it back.
     const t = setTimeout(() => {
-      drawer.querySelector('input, select, textarea')?.focus()
+      if (!drawer.contains(document.activeElement)) drawer.querySelector('input, select, textarea')?.focus()
     }, motionOK() ? 220 : 0)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps

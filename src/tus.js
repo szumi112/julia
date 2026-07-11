@@ -1,7 +1,9 @@
 // Pure TUS domain logic (group classes) — kept .js and side-effect free so it
 // is unit-testable like workspace.js. TUS money is intentionally separate from
 // session billing: nothing here feeds isBillable/monthStats.
-import { monthKey } from './format.js'
+import { monthKey, searchNorm } from './format.js'
+
+const polishNameOrder = new Intl.Collator('pl', { sensitivity: 'base' })
 
 export const tusGroupsForRole = (state, role) =>
   role.scope === 'own' ? state.tusGroups.filter((g) => g.leaderIds.includes(role.psychId)) : state.tusGroups
@@ -13,12 +15,274 @@ export const kidsOfGroup = (kids, groupId) => kids.filter((k) => k.groupId === g
 
 export const unassignedKids = (kids) => kids.filter((k) => !k.groupId)
 
-export const classesInMonth = (classes, ym) => classes.filter((c) => monthKey(c.date) === ym)
+export const tusMemberOptions = (clients, kids, groups) => {
+  const clientsById = new Map(clients.map((client) => [client.id, client]))
+  const groupsById = new Map(groups.map((group) => [group.id, group]))
+  const enrolledClientIds = new Set(kids.map((kid) => kid.clientId).filter(Boolean))
+
+  const parentOf = (client, guardianClientId) => {
+    if (guardianClientId && clientsById.has(guardianClientId)) return clientsById.get(guardianClientId)
+    if (!client?.familyId) return null
+    return clients.find((candidate) =>
+      candidate.familyId === client.familyId && candidate.id !== client.id && candidate.familyRole === 'rodzic'
+    ) || null
+  }
+
+  const options = kids.map((kid) => {
+    const client = clientsById.get(kid.clientId)
+    const parent = parentOf(client, kid.guardianClientId)
+    return {
+      key: `kid:${kid.id}`,
+      kidId: kid.id,
+      clientId: client?.id || null,
+      name: client?.name || kid.name,
+      age: kid.age ?? null,
+      parentName: parent?.name || kid.parentName || '',
+      parentPhone: parent?.phone || kid.parentPhone || '',
+      groupId: kid.groupId || null,
+      groupName: groupsById.get(kid.groupId)?.name || '',
+      source: 'tus',
+    }
+  })
+
+  for (const client of clients) {
+    if (client.familyRole !== 'dziecko' || enrolledClientIds.has(client.id)) continue
+    const parent = parentOf(client)
+    options.push({
+      key: `client:${client.id}`,
+      kidId: null,
+      clientId: client.id,
+      name: client.name,
+      age: client.age ?? null,
+      parentName: parent?.name || '',
+      parentPhone: parent?.phone || '',
+      groupId: null,
+      groupName: '',
+      source: 'client',
+    })
+  }
+
+  return options.sort((a, b) => polishNameOrder.compare(a.name, b.name) || a.key.localeCompare(b.key))
+}
+
+const memberSearchText = (option) =>
+  `${searchNorm([option.name, option.parentName, option.parentPhone, option.groupName].filter(Boolean).join(' '))
+    .replace(/[–—]/g, '-')} ${String(option.parentPhone || '').replace(/\D/g, '')}`
+
+export const filterTusMemberOptions = (options, query) => {
+  const needle = searchNorm(query).replace(/[–—]/g, '-').trim()
+  return needle ? options.filter((option) => memberSearchText(option).includes(needle)) : options
+}
+
+export const assignTusGroupMembers = (kids, groupId, memberKidIds) => {
+  const selected = new Set(memberKidIds)
+  return kids.map((kid) => {
+    if (selected.has(kid.id)) {
+      if (kid.groupId && kid.groupId !== groupId) return kid
+      return kid.groupId === groupId ? kid : { ...kid, groupId }
+    }
+    if (kid.groupId === groupId) return { ...kid, groupId: null }
+    return kid
+  })
+}
+
+export const materializeTusGroupMembers = ({
+  clients,
+  kids,
+  groupId,
+  memberKeys,
+  newChildren = [],
+  leaderId = null,
+  today,
+  makeId,
+}) => {
+  let nextClients = [...clients]
+  let nextKids = [...kids]
+  const clientsById = new Map(nextClients.map((client) => [client.id, client]))
+  const draftsByKey = new Map(newChildren.map((draft) => [draft.key, draft]))
+  const newParentsByIdentity = new Map()
+  const selectedKidIds = []
+
+  const replaceClient = (client) => {
+    clientsById.set(client.id, client)
+    const index = nextClients.findIndex((candidate) => candidate.id === client.id)
+    if (index === -1) nextClients = [...nextClients, client]
+    else nextClients = nextClients.map((candidate) => candidate.id === client.id ? client : candidate)
+  }
+
+  const familyParentOf = (client) => {
+    if (!client?.familyId) return null
+    return nextClients.find((candidate) =>
+      candidate.id !== client.id && candidate.familyId === client.familyId && candidate.familyRole === 'rodzic'
+    ) || null
+  }
+
+  const addClientEnrollment = (client) => {
+    const enrolled = nextKids.find((kid) => kid.clientId === client.id)
+    if (enrolled) {
+      selectedKidIds.push(enrolled.id)
+      return
+    }
+    const parent = familyParentOf(client)
+    const kid = {
+      id: makeId('k'),
+      clientId: client.id,
+      guardianClientId: parent?.id || null,
+      name: client.name,
+      age: client.age ?? null,
+      groupId: null,
+      parentName: parent?.name || '',
+      parentPhone: parent?.phone || '',
+      regulationsSigned: false,
+      note: '',
+    }
+    nextKids = [...nextKids, kid]
+    selectedKidIds.push(kid.id)
+  }
+
+  const addDraftChild = (draft) => {
+    const parentIdentity = !draft.parentClientId
+      ? `${searchNorm(draft.parentName).trim()}|${String(draft.parentPhone || '').replace(/\D/g, '')}|${searchNorm(draft.parentEmail).trim()}`
+      : ''
+    let parent = draft.parentClientId
+      ? clientsById.get(draft.parentClientId)
+      : newParentsByIdentity.get(parentIdentity)
+    if (!parent) {
+      parent = {
+        id: makeId('c'),
+        name: draft.parentName,
+        psychId: leaderId,
+        email: draft.parentEmail || '',
+        phone: draft.parentPhone || '',
+        since: today,
+        status: 'active',
+        notes: [],
+        familyId: null,
+        familyRole: 'rodzic',
+      }
+    }
+
+    const familyId = parent.familyId || makeId('f')
+    parent = {
+      ...parent,
+      familyId,
+      familyRole: parent.familyRole || 'rodzic',
+    }
+    replaceClient(parent)
+    if (parentIdentity) newParentsByIdentity.set(parentIdentity, parent)
+
+    const child = {
+      id: makeId('c'),
+      name: draft.childName,
+      age: Number(draft.age),
+      psychId: leaderId || parent.psychId || null,
+      email: '',
+      phone: parent.phone || '',
+      since: today,
+      status: 'active',
+      notes: [],
+      familyId,
+      familyRole: 'dziecko',
+    }
+    replaceClient(child)
+
+    const kid = {
+      id: makeId('k'),
+      clientId: child.id,
+      guardianClientId: parent.id,
+      name: child.name,
+      age: child.age,
+      groupId: null,
+      parentName: parent.name,
+      parentPhone: parent.phone || '',
+      regulationsSigned: !!draft.regulationsSigned,
+      note: '',
+    }
+    nextKids = [...nextKids, kid]
+    selectedKidIds.push(kid.id)
+  }
+
+  for (const key of memberKeys) {
+    const [kind, id] = key.split(':')
+    if (kind === 'kid' && nextKids.some((kid) => kid.id === id)) selectedKidIds.push(id)
+    if (kind === 'client') {
+      const client = clientsById.get(id)
+      if (client) addClientEnrollment(client)
+    }
+    if (kind === 'new') {
+      const draft = draftsByKey.get(key)
+      if (draft) addDraftChild(draft)
+    }
+  }
+
+  return {
+    clients: nextClients,
+    kids: assignTusGroupMembers(nextKids, groupId, selectedKidIds),
+  }
+}
+
+export const updateTusKidAndClients = (clients, kids, kidId, patch) => {
+  const current = kids.find((kid) => kid.id === kidId)
+  if (!current) return { clients, kids }
+  const has = (key) => Object.prototype.hasOwnProperty.call(patch, key)
+  return {
+    kids: kids.map((kid) => kid.id === kidId ? { ...kid, ...patch } : kid),
+    clients: clients.map((client) => {
+      let next = client
+      if (client.id === current.clientId) {
+        next = {
+          ...next,
+          ...(has('name') ? { name: patch.name } : {}),
+          ...(has('age') ? { age: patch.age } : {}),
+          ...(has('parentPhone') ? { phone: patch.parentPhone } : {}),
+        }
+      }
+      if (client.id === current.guardianClientId) {
+        next = {
+          ...next,
+          ...(has('parentName') ? { name: patch.parentName } : {}),
+          ...(has('parentPhone') ? { phone: patch.parentPhone } : {}),
+        }
+      }
+      return next
+    }),
+  }
+}
+
+export const linkTusGuardian = (kids, childClientId, guardian) => kids.map((kid) =>
+  kid.clientId === childClientId
+    ? {
+        ...kid,
+        guardianClientId: guardian.id,
+        parentName: guardian.name,
+        parentPhone: guardian.phone || '',
+      }
+    : kid
+)
+
+export const unlinkTusGuardian = (kids, clientId) => kids.map((kid) =>
+  kid.clientId === clientId || kid.guardianClientId === clientId
+    ? { ...kid, guardianClientId: null, parentName: '', parentPhone: '' }
+    : kid
+)
+
+export const classesInMonth = (classes, ym) =>
+  classes
+    .filter((c) => monthKey(c.date) === ym)
+    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
 
 export const tusMonths = (classes) => [...new Set(classes.map((c) => monthKey(c.date)))].sort()
 
+const normalizedMoment = (value) => value.includes('T') ? value.slice(0, 16) : `${value}T00:00`
+
+export const tusClassMoment = (cls) => `${cls.date}T${cls.time || '00:00'}`
+
+export const classHasStarted = (cls, nowIso) => tusClassMoment(cls) <= normalizedMoment(nowIso)
+
 export const nextClassOf = (classes, groupId, nowIso) =>
-  classes.find((c) => c.groupId === groupId && c.date >= nowIso) || null
+  classes
+    .filter((c) => c.groupId === groupId && tusClassMoment(c) >= normalizedMoment(nowIso))
+    .sort((a, b) => tusClassMoment(a).localeCompare(tusClassMoment(b)))[0] || null
 
 // Rate over marked cells only — unmarked (future) classes don't dilute it.
 // kidFilter: a kid id, an array of kid ids, or nothing (every mark). Callers
@@ -38,6 +302,12 @@ export const attendanceRate = (classes, kidFilter) => {
   return marked ? Math.round((present / marked) * 100) : null
 }
 
+export const setAttendanceForRoster = (attendance, rosterIds, kidId, present) => ({
+  ...Object.fromEntries(rosterIds.map((id) => [id, false])),
+  ...attendance,
+  [kidId]: present,
+})
+
 export const tusPaymentFor = (payments, kidId, ym) =>
   payments.find((p) => p.kidId === kidId && p.ym === ym) || {
     kidId, ym, status: 'unpaid', method: null, invoice: false, paidDate: null, note: '', amount: null,
@@ -46,15 +316,17 @@ export const tusPaymentFor = (payments, kidId, ym) =>
 export const tusMonthSummary = (group, classes, kids, payments, ym, nowIso) => {
   const monthClasses = classesInMonth(classes, ym).filter((c) => c.groupId === group.id)
   const roster = kidsOfGroup(kids, group.id)
-  const paidCount = roster.filter((k) => tusPaymentFor(payments, k.id, ym).status === 'paid').length
-  const dueCount = roster.length - paidCount
+  const paymentRows = roster.map((k) => tusPaymentFor(payments, k.id, ym))
+  const paidCount = paymentRows.filter((payment) => payment.status === 'paid').length
+  const dueRows = paymentRows.filter((payment) => payment.status !== 'paid')
+  const dueCount = dueRows.length
   return {
     classCount: monthClasses.length,
-    heldCount: monthClasses.filter((c) => c.date <= nowIso).length,
+    heldCount: monthClasses.filter((c) => classHasStarted(c, nowIso)).length,
     attendanceRate: attendanceRate(monthClasses, roster.map((k) => k.id)),
     paidCount,
     dueCount,
-    dueAmount: dueCount * group.fee,
+    dueAmount: dueRows.reduce((sum, payment) => sum + (payment.amount ?? group.fee), 0),
   }
 }
 

@@ -1,8 +1,11 @@
 // In-memory app state — no persistence by design (demo).
 import { createContext, useContext, useMemo, useReducer, useState, useCallback } from 'react'
 import { DEMO_ROLES, INITIAL_STATE } from './data.js'
-import { monthKey, billableSummary, outstandingOf, paymentPatchFor } from './format.js'
-import { stripKid } from './tus.js'
+import { monthKey, billableSummary, outstandingOf, paymentPatchFor, toISODate } from './format.js'
+import {
+  linkTusGuardian, materializeTusGroupMembers, setAttendanceForRoster, stripKid,
+  unlinkTusGuardian, updateTusKidAndClients,
+} from './tus.js'
 import { dissolveLoneFamilies } from './workspace.js'
 
 const AppCtx = createContext(null)
@@ -11,6 +14,8 @@ const AppCtx = createContext(null)
 const ToastCtx = createContext([])
 
 let nextId = 10000
+
+const makeId = (prefix) => `${prefix}${nextId++}`
 
 const sortClasses = (list) => [...list].sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
 
@@ -62,6 +67,19 @@ function reducer(state, action) {
       return {
         ...state,
         clients: state.clients.map((c) => (c.id === action.id ? { ...c, ...action.patch } : c)),
+        tusKids: state.tusKids.map((kid) => {
+          if (kid.clientId === action.id) {
+            return { ...kid, ...(action.patch.name == null ? {} : { name: action.patch.name }) }
+          }
+          if (kid.guardianClientId === action.id) {
+            return {
+              ...kid,
+              ...(action.patch.name == null ? {} : { parentName: action.patch.name }),
+              ...(action.patch.phone == null ? {} : { parentPhone: action.patch.phone }),
+            }
+          }
+          return kid
+        }),
       }
     case 'DELETE_CLIENT':
       // removing a client also removes their session history (in-memory demo)
@@ -70,6 +88,11 @@ function reducer(state, action) {
         ...state,
         clients: dissolveLoneFamilies(state.clients.filter((c) => c.id !== action.id)),
         sessions: state.sessions.filter((s) => s.clientId !== action.id),
+        tusKids: state.tusKids.map((kid) => ({
+          ...kid,
+          ...(kid.clientId === action.id ? { clientId: null } : {}),
+          ...(kid.guardianClientId === action.id ? { guardianClientId: null } : {}),
+        })),
       }
     case 'ADD_POST': {
       const post = { ...action.post, id: `b${nextId++}` }
@@ -93,15 +116,28 @@ function reducer(state, action) {
       // the acting client's family wins, so linking from an existing member
       // grows that family instead of stranding it
       const familyId = acting?.familyId || other?.familyId || `f${nextId++}`
-      return {
-        ...state,
-        clients: dissolveLoneFamilies(state.clients.map((c) =>
+      const clients = dissolveLoneFamilies(state.clients.map((c) =>
           c.id === action.clientId
             ? { ...c, familyId, familyRole: action.role || null }
             : c.id === action.otherId
               ? { ...c, familyId }
               : c
-        )),
+        ))
+      const actingRole = action.role || acting?.familyRole
+      let childClientId = null
+      let guardian = null
+      if (actingRole === 'dziecko') [childClientId, guardian] = [acting?.id, other]
+      else if (actingRole === 'rodzic') [childClientId, guardian] = [other?.id, acting]
+      else if (other?.familyRole === 'dziecko') [childClientId, guardian] = [other.id, acting]
+      else if (other?.familyRole === 'rodzic') [childClientId, guardian] = [acting?.id, other]
+      else if (state.tusKids.some((kid) => kid.clientId === acting?.id)) [childClientId, guardian] = [acting.id, other]
+      else if (state.tusKids.some((kid) => kid.clientId === other?.id)) [childClientId, guardian] = [other.id, acting]
+      return {
+        ...state,
+        clients,
+        tusKids: childClientId && guardian
+          ? linkTusGuardian(state.tusKids, childClientId, guardian)
+          : state.tusKids,
       }
     }
     case 'UNLINK_FAMILY':
@@ -110,15 +146,50 @@ function reducer(state, action) {
         clients: dissolveLoneFamilies(
           state.clients.map((c) => (c.id === action.clientId ? { ...c, familyId: null, familyRole: null } : c))
         ),
+        tusKids: unlinkTusGuardian(state.tusKids, action.clientId),
       }
-    case 'ADD_TUS_GROUP':
-      return { ...state, tusGroups: [...state.tusGroups, { ...action.group, id: `g${nextId++}` }] }
-    case 'UPDATE_TUS_GROUP':
-      return { ...state, tusGroups: state.tusGroups.map((g) => (g.id === action.id ? { ...g, ...action.patch } : g)) }
+    case 'ADD_TUS_GROUP': {
+      const group = { ...action.group, id: makeId('g') }
+      if (action.memberKeys == null) return { ...state, tusGroups: [...state.tusGroups, group] }
+      const roster = materializeTusGroupMembers({
+        clients: state.clients,
+        kids: state.tusKids,
+        groupId: group.id,
+        memberKeys: action.memberKeys,
+        newChildren: action.newChildren,
+        leaderId: group.leaderIds[0] || null,
+        today: toISODate(new Date()),
+        makeId,
+      })
+      return {
+        ...state,
+        clients: roster.clients,
+        tusKids: roster.kids,
+        tusGroups: [...state.tusGroups, group],
+      }
+    }
+    case 'UPDATE_TUS_GROUP': {
+      const tusGroups = state.tusGroups.map((g) => (g.id === action.id ? { ...g, ...action.patch } : g))
+      if (action.memberKeys == null) return { ...state, tusGroups }
+      const group = tusGroups.find((candidate) => candidate.id === action.id)
+      const roster = materializeTusGroupMembers({
+        clients: state.clients,
+        kids: state.tusKids,
+        groupId: action.id,
+        memberKeys: action.memberKeys,
+        newChildren: action.newChildren,
+        leaderId: group?.leaderIds[0] || null,
+        today: toISODate(new Date()),
+        makeId,
+      })
+      return { ...state, clients: roster.clients, tusKids: roster.kids, tusGroups }
+    }
     case 'ADD_TUS_KID':
       return { ...state, tusKids: [...state.tusKids, { ...action.kid, id: `k${nextId++}` }] }
-    case 'UPDATE_TUS_KID':
-      return { ...state, tusKids: state.tusKids.map((k) => (k.id === action.id ? { ...k, ...action.patch } : k)) }
+    case 'UPDATE_TUS_KID': {
+      const linked = updateTusKidAndClients(state.clients, state.tusKids, action.id, action.patch)
+      return { ...state, clients: linked.clients, tusKids: linked.kids }
+    }
     case 'DELETE_TUS_KID': {
       // removing a kid also clears their attendance marks and fee history
       const { classes, payments } = stripKid(state.tusClasses, state.tusPayments, action.id)
@@ -135,13 +206,18 @@ function reducer(state, action) {
       return { ...state, tusClasses: sortClasses(state.tusClasses.map((c) => (c.id === action.id ? { ...c, ...action.patch } : c))) }
     case 'DELETE_TUS_CLASS':
       return { ...state, tusClasses: state.tusClasses.filter((c) => c.id !== action.id) }
-    case 'SET_TUS_ATTENDANCE':
+    case 'SET_TUS_ATTENDANCE': {
+      const cls = state.tusClasses.find((item) => item.id === action.classId)
+      const rosterIds = state.tusKids.filter((kid) => kid.groupId === cls?.groupId).map((kid) => kid.id)
       return {
         ...state,
         tusClasses: state.tusClasses.map((c) =>
-          c.id === action.classId ? { ...c, attendance: { ...c.attendance, [action.kidId]: action.present } } : c
+          c.id === action.classId
+            ? { ...c, attendance: setAttendanceForRoster(c.attendance, rosterIds, action.kidId, action.present) }
+            : c
         ),
       }
+    }
     case 'UPSERT_TUS_PAYMENT': {
       const existing = state.tusPayments.find((p) => p.kidId === action.kidId && p.ym === action.ym)
       if (existing) {

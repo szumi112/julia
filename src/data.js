@@ -1,6 +1,6 @@
 // Mock data — deterministic, generated relative to "today" so the demo
 // is always richly populated (past months + upcoming sessions).
-import { toISODate, monthKey } from './format.js'
+import { toISODate, monthKey, pad2 } from './format.js'
 
 // seeded PRNG (mulberry32) — deterministic across reloads
 const mulberry32 = (seed) => () => {
@@ -326,14 +326,16 @@ const TUS_TOPICS = [
 export const TUS_CLASSES = []
 let tcId = 1
 const todayIso = toISODate(TODAY)
+const tusNow = new Date()
+const tusNowMoment = `${toISODate(tusNow)}T${pad2(tusNow.getHours())}:${pad2(tusNow.getMinutes())}`
 for (const group of TUS_GROUPS) {
   const kids = TUS_KIDS.filter((k) => k.groupId === group.id)
   for (let weekOffset = -10; weekOffset <= 3; weekOffset++) {
     const d = new Date(TODAY)
     d.setDate(d.getDate() - d.getDay() + group.weekday + weekOffset * 7)
     const iso = toISODate(d)
-    // hour-aware like the session generator: a class later today is not held yet
-    const past = iso < todayIso || (iso === todayIso && Number(group.time.slice(0, 2)) < new Date().getHours())
+    // time-aware like the session generator: a class later today is not held yet
+    const past = `${iso}T${group.time}` <= tusNowMoment
     const attendance = {}
     if (past) for (const kid of kids) attendance[kid.id] = tusRand() < 0.85
     TUS_CLASSES.push({

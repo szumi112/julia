@@ -1,9 +1,10 @@
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
+import { useMinuteNow } from '../clock.js'
 import { Avatar, Pill, Button, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
-import { monthKey, toISODate, fmtDayMonth, fmtMoney, WEEKDAY_SHORT, plural } from '../format.js'
+import { monthKey, toISODate, fmtDayMonth, fmtMoney, pad2, WEEKDAY_SHORT, plural } from '../format.js'
 import { tusGroupsForRole, kidsOfGroup, unassignedKids, nextClassOf, tusMonthSummary } from '../tus.js'
 
 export const kidsWord = (n) => plural(n, 'dziecko', 'dzieci', 'dzieci')
@@ -15,8 +16,12 @@ export function TusGroups() {
   const centre = role.scope !== 'own'
   const groups = tusGroupsForRole(state, role)
   const ym = monthKey(new Date())
-  const todayIso = toISODate(new Date())
+  const now = useMinuteNow()
+  const nowIso = `${toISODate(now)}T${pad2(now.getHours())}:${pad2(now.getMinutes())}`
   const loose = unassignedKids(state.tusKids)
+  const visibleKidCount = centre
+    ? state.tusKids.length
+    : groups.reduce((sum, group) => sum + kidsOfGroup(state.tusKids, group.id).length, 0)
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
 
   return (
@@ -26,8 +31,8 @@ export function TusGroups() {
           <div className="eyebrow">Zajęcia grupowe</div>
           <h1 className="display view-head__title">Grupa <em>TUS</em></h1>
           <p className="view-head__sub">
-            Trening umiejętności społecznych dla dzieci — osobna kategoria od codziennych sesji.
-            Prowadzące wpisują temat zajęć i odhaczają obecność.
+            {groups.length} {plural(groups.length, 'grupa', 'grupy', 'grup')} · {visibleKidCount} {kidsWord(visibleKidCount)}.
+            {' '}Trening umiejętności społecznych — prowadzące wpisują temat zajęć i odhaczają obecność.
           </p>
         </div>
         {centre && (
@@ -54,8 +59,8 @@ export function TusGroups() {
       <div className="grid-2">
         {groups.map((g) => {
           const roster = kidsOfGroup(state.tusKids, g.id)
-          const next = nextClassOf(state.tusClasses, g.id, todayIso)
-          const m = tusMonthSummary(g, state.tusClasses, state.tusKids, state.tusPayments, ym, todayIso)
+          const next = nextClassOf(state.tusClasses, g.id, nowIso)
+          const m = tusMonthSummary(g, state.tusClasses, state.tusKids, state.tusPayments, ym, nowIso)
           const leaders = g.leaderIds.map(psychOf).filter(Boolean)
           return (
             <div
@@ -74,7 +79,10 @@ export function TusGroups() {
             >
               <div className="row row--between" style={{ gap: 12 }}>
                 <div>
-                  <h2 className="gcard__name">{g.name}</h2>
+                  <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                    <h2 className="gcard__name">{g.name}</h2>
+                    <Pill tone="mauve">{g.age}</Pill>
+                  </div>
                   <div className="gcard__meta">
                     co tydzień · {WEEKDAY_SHORT[g.weekday]} {g.time} · {fmtMoney(g.fee)} / mies.
                   </div>

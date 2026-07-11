@@ -40,6 +40,9 @@ export function ClientDrawer({ opts, onClose }) {
   const linkables = clientsForRole(state, role).filter(
     (c) => c.id !== editing?.id && !familyMembers.some((m) => m.id === c.id)
   )
+  const availablePsychologists = role.scope === 'own'
+    ? state.psychologists.filter((psych) => psych.id === role.psychId)
+    : state.psychologists
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -51,6 +54,9 @@ export function ClientDrawer({ opts, onClose }) {
     const errs = {}
     if (!form.name.trim()) errs.name = 'Podaj imię i nazwisko'
     if (!form.psychId) errs.psychId = 'Wybierz specjalistkę'
+    if (role.scope === 'own' && form.psychId !== role.psychId) {
+      errs.psychId = 'Klient musi pozostać pod opieką aktywnej specjalistki'
+    }
     if (form.email.trim() && !EMAIL_SHAPE.test(form.email.trim())) errs.email = 'Podaj poprawny adres e-mail'
     setErrors(errs)
     if (Object.keys(errs).length) {
@@ -130,7 +136,7 @@ export function ClientDrawer({ opts, onClose }) {
           <Field label="Specjalistka prowadząca" error={errors.psychId}>
             <select className="select" value={form.psychId} onChange={(e) => set('psychId', e.target.value)}>
               <option value="">— wybierz —</option>
-              {state.psychologists.map((p) => (
+              {availablePsychologists.map((p) => (
                 <option key={p.id} value={p.id}>{p.title} {p.name}</option>
               ))}
             </select>
@@ -182,7 +188,7 @@ export function ClientDrawer({ opts, onClose }) {
                   {familyMembers.map((m) => (
                     <div key={m.id} style={{ fontSize: 14 }}>
                       {m.name}
-                      {m.familyRole && <span className="faint"> · {m.familyRole}</span>}
+                      <span className="faint"> · {m.familyRole || 'rodzina'}</span>
                     </div>
                   ))}
                   <button
