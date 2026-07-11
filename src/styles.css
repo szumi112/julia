@@ -1611,9 +1611,6 @@ body.is-grabbing, body.is-grabbing * { cursor: grabbing !important; }
   transform: translateY(-2px) scale(1.02);
   box-shadow: 0 0 0 3px rgba(164, 89, 107, 0.18), var(--shadow-2);
 }
-.cal-hint { color: var(--ink-faint); }
-@media (max-width: 1024px) { .cal-hint { display: none; } }
-
 /* calendar toolbar row (month nav + counter) */
 .cal-toolbar { margin-bottom: 18px; }
 

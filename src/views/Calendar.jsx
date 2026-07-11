@@ -291,7 +291,6 @@ export function CalendarView() {
   // Filtered events retain spatial continuity in every operational view.
   const agendaFlipRef = useFlip(`agenda|${filterKey}`)
   const gridFlipRef = useFlip(`cal|${filterKey}`)
-  const listFlipRef = useFlip(`list|${filterKey}`)
 
   const changeMonth = (d) => {
     const next = addMonths(ym, d)
@@ -319,11 +318,6 @@ export function CalendarView() {
   }
 
   const daySessions = selected ? (byDate[selected] || []) : []
-
-  const listDays = useMemo(() => {
-    const days = Object.keys(byDate).sort()
-    return days.map((iso) => ({ iso, items: byDate[iso].sort((a, b) => (a.time < b.time ? -1 : 1)) }))
-  }, [byDate])
 
   // --- phone agenda mode ---
   const stripDays = useMemo(() => {
@@ -523,7 +517,7 @@ export function CalendarView() {
                 compact
                 icon="calendar"
                 title="Brak sesji tego dnia"
-                hint="Dodaj sesję przyciskiem poniżej."
+                hint="Dodaj pierwszą sesję przyciskiem poniżej."
               />
             ) : (
               dayThread(shownAgendaSessions, false, agendaSel, agendaFlipRef)
@@ -544,7 +538,7 @@ export function CalendarView() {
             </Button>
           </section>
         </>
-      ) : mode === 'cal' ? (
+      ) : (
         <div className="grid-31" data-reveal>
           <div>
             <div className="cal" style={{ gridTemplateColumns: `repeat(${showWeekends ? 7 : 5}, 1fr)`, marginBottom: 7 }}>
@@ -631,7 +625,7 @@ export function CalendarView() {
                 compact
                 icon="calendar"
                 title="Brak sesji tego dnia"
-                hint="Dodaj sesję przyciskiem poniżej."
+                hint="Dodaj pierwszą sesję przyciskiem poniżej."
               />
             )}
             {daySessions.length > 0 &&
@@ -643,67 +637,6 @@ export function CalendarView() {
               </Button>
             )}
           </div>
-        </div>
-      ) : (
-        <div className="stack" ref={listFlipRef} data-reveal>
-          {listDays.length === 0 && (
-            <div className="card card--pad">
-              {sessionsInMonth(roleSessions, ym).some((s) => s.status !== 'cancelled') ? (
-                <EmptyState
-                  icon="search"
-                  title="Nic nie pasuje do filtrów"
-                  hint="Zmień lub wyłącz filtry, aby zobaczyć sesje miesiąca."
-                  action={<Button size="sm" icon="plus" onClick={() => openSessionForm({ date: today })}>Nowa sesja</Button>}
-                />
-              ) : (
-                <EmptyState
-                  icon="calendar"
-                  title="Brak sesji w tym miesiącu"
-                  hint="Zaplanuj pierwsze spotkanie, aby pojawiło się w grafiku."
-                  action={<Button size="sm" icon="plus" onClick={() => openSessionForm({ date: today })}>Nowa sesja</Button>}
-                />
-              )}
-            </div>
-          )}
-          {listDays.map(({ iso, items }) => (
-            <div className="card card--pad" key={iso} data-flip-id={iso} style={{ padding: '18px 24px' }}>
-              <div className="row row--between" style={{ marginBottom: 4 }}>
-                <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 17, fontWeight: 500 }}>
-                  {cap(fmtWeekday(iso))}, {fmtDayMonth(iso)}
-                  {iso === today && <span className="pill pill--gold" style={{ marginLeft: 10 }}>dziś</span>}
-                </h3>
-                <span className="faint" style={{ fontSize: 12.5 }}>{items.length} {sessionsWord(items.length)}</span>
-              </div>
-              <div className="table-scroll table-scroll--until-tablet">
-              <table className="table table--cards">
-                <tbody>
-                  {items.map((s) => {
-                    const c = clientOf(s.clientId)
-                    const p = psychOf(s.psychId)
-                    return (
-                      <tr key={s.id}>
-                        <td className="num-cell td--time" data-th="Godzina">{s.time}</td>
-                        <td style={{ fontWeight: 600 }}>{c?.name}</td>
-                        <td data-th="Specjalistka">
-                          <span className="row" style={{ gap: 8 }}>
-                            <span className="dot" style={{ width: 8, height: 8, borderRadius: 99, background: p?.color, display: 'inline-block' }} />
-                            <span className="muted">{p?.name}</span>
-                          </span>
-                        </td>
-                        <td className="num-cell" data-th="Kwota">{fmtMoney(s.amount)}</td>
-                        <td data-th="Status"><StatusPicker session={s} /></td>
-                        <td data-th="Płatność"><PaymentPicker session={s} /></td>
-                        <td className="right td--actions" style={{ width: 50 }}>
-                          <IconBtn name="edit" label="Edytuj sesję" size={16} onClick={() => openSessionForm({ session: s })} />
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-              </div>
-            </div>
-          ))}
         </div>
       )}
     </div>
