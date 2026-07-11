@@ -455,6 +455,19 @@ test('calendar day strip scrolls with the page instead of covering the agenda', 
   expect(before - after).toBeGreaterThanOrEqual(scrolled - 2)
 })
 
+test('selecting a day keeps the visible calendar in place', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 })
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  const strip = page.locator('.day-strip')
+  await expect(strip).toBeVisible()
+  // today's pill: its panel is already on screen, so selecting must not scroll
+  await strip.locator('.day-strip__day.is-today').click()
+  await page.waitForTimeout(600)
+  expect(await page.locator('main.content').evaluate((el) => el.scrollTop)).toBe(0)
+  expect(await strip.evaluate((el) => el.getBoundingClientRect().top)).toBeGreaterThan(0)
+})
+
 test('month view shows sessions across the whole month by default', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()

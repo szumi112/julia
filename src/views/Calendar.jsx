@@ -307,14 +307,20 @@ export function CalendarView() {
   const hasActiveFilters = activeFilterCount > 0
   const rolePsychId = role.scope === 'own' ? role.psychId : undefined
 
-  // A selected day always returns the operator to its actionable session list.
+  // Selecting a day brings its session list into view only when it is off
+  // screen — a panel the user can already see must not move under them.
   const selectDay = (iso) => {
     setSelected(iso)
     const panel = mode === 'agenda' ? agendaPanelRef.current : dayPanelRef.current
     if (!panel) return
-    requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      const scrollport = panel.closest('.content')?.getBoundingClientRect()
+      const rect = panel.getBoundingClientRect()
+      const inView = scrollport &&
+        rect.top < scrollport.bottom - 80 && rect.bottom > scrollport.top + 80
+      if (inView) return
       panel.scrollIntoView({ behavior: motionOK() ? 'smooth' : 'auto', block: 'start' })
-    )
+    })
   }
 
   const daySessions = selected ? (byDate[selected] || []) : []
