@@ -14,11 +14,6 @@ import {
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
 const STRIP_DOW = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
-const DATE_PRESETS = [
-  { value: 'today', label: 'Dzisiaj' },
-  { value: 'week', label: 'Ten tydzień' },
-  { value: 'month', label: 'Ten miesiąc' },
-]
 const PAYMENT_FILTERS = [
   { value: 'all', label: 'Wszystkie' },
   { value: 'paid', label: 'Opłacone' },
@@ -33,30 +28,7 @@ const ATTENDANCE_FILTERS = [
   { value: 'scheduled', label: 'Zaplanowana' },
 ]
 
-const dateBoundsFor = (preset, now = new Date()) => {
-  const start = new Date(now)
-  start.setHours(0, 0, 0, 0)
-  if (preset === 'week') {
-    start.setDate(start.getDate() - ((start.getDay() + 6) % 7))
-    const end = new Date(start)
-    end.setDate(end.getDate() + 6)
-    return { dateFrom: toISODate(start), dateTo: toISODate(end) }
-  }
-  if (preset === 'month') {
-    start.setDate(1)
-    const end = new Date(start.getFullYear(), start.getMonth() + 1, 0)
-    return { dateFrom: toISODate(start), dateTo: toISODate(end) }
-  }
-  const date = toISODate(start)
-  return { dateFrom: date, dateTo: date }
-}
-
-const defaultCalendarFilters = () => ({
-  datePreset: 'today',
-  ...dateBoundsFor('today'),
-  payment: 'all',
-  attendance: 'all',
-})
+const defaultCalendarFilters = () => ({ payment: 'all', attendance: 'all' })
 
 function monthGrid(ym) {
   const [y, m] = ym.split('-').map(Number)
@@ -135,6 +107,7 @@ export function CalendarView() {
   const [mode, setMode] = useState('agenda')
   const [selected, setSelected] = useState(today)
   const [filters, setFilters] = useState(defaultCalendarFilters)
+  const [filtersOpen, setFiltersOpen] = useState(false)
   const [agendaExpanded, setAgendaExpanded] = useState(false)
   const isPhone = useIsPhone()
   // dragging an agenda row would trap touch scrolling, so it stays a desktop affordance
@@ -314,7 +287,7 @@ export function CalendarView() {
     )
   }, [ym, mode, showWeekends])
 
-  const filterKey = `${ym}|${filters.dateFrom}|${filters.dateTo}|${filters.payment}|${filters.attendance}`
+  const filterKey = `${ym}|${filters.payment}|${filters.attendance}`
   // Filtered events retain spatial continuity in every operational view.
   const agendaFlipRef = useFlip(`agenda|${filterKey}`)
   const gridFlipRef = useFlip(`cal|${filterKey}`)
@@ -327,19 +300,12 @@ export function CalendarView() {
     setSelected(next === curYm ? today : `${next}-01`)
   }
 
-  const selectDatePreset = (datePreset) => {
-    setFilters((current) => ({ ...current, datePreset, ...dateBoundsFor(datePreset) }))
-  }
-  const setCustomDate = (key, value) => {
-    setFilters((current) => ({ ...current, datePreset: 'custom', [key]: value }))
-  }
   const toggleFilter = (key, value) => {
     setFilters((current) => ({ ...current, [key]: current[key] === value ? 'all' : value }))
   }
-  const isOutsideDateRange = (iso) =>
-    (filters.dateFrom && iso < filters.dateFrom) || (filters.dateTo && iso > filters.dateTo)
-  const hasActiveFilters =
-    filters.datePreset !== 'today' || filters.payment !== 'all' || filters.attendance !== 'all'
+  const activeFilterCount =
+    (filters.payment !== 'all' ? 1 : 0) + (filters.attendance !== 'all' ? 1 : 0)
+  const hasActiveFilters = activeFilterCount > 0
   const rolePsychId = role.scope === 'own' ? role.psychId : undefined
 
   // A selected day always returns the operator to its actionable session list.
@@ -477,51 +443,6 @@ export function CalendarView() {
         </div>
       </div>
 
-      <section className="cal-filter-rail" aria-label="Filtry kalendarza" data-reveal>
-        <div className="cal-filter-rail__groups">
-          <div className="cal-filter-rail__group" role="group" aria-label="Zakres dat">
-            <span className="cal-filter-rail__label">Termin</span>
-            {DATE_PRESETS.map((preset) => (
-              <Chip key={preset.value} on={filters.datePreset === preset.value} onClick={() => selectDatePreset(preset.value)}>
-                {preset.label}
-              </Chip>
-            ))}
-            <label className="cal-filter-rail__date">
-              Od
-              <input type="date" className="input" value={filters.dateFrom} onChange={(event) => setCustomDate('dateFrom', event.target.value)} />
-            </label>
-            <label className="cal-filter-rail__date">
-              Do
-              <input type="date" className="input" value={filters.dateTo} onChange={(event) => setCustomDate('dateTo', event.target.value)} />
-            </label>
-          </div>
-          <div className="cal-filter-rail__group" role="group" aria-label="Płatność">
-            <span className="cal-filter-rail__label">Płatność</span>
-            {PAYMENT_FILTERS.map((payment) => (
-              <Chip key={payment.value} on={filters.payment === payment.value} onClick={() => toggleFilter('payment', payment.value)}>
-                {payment.label}
-              </Chip>
-            ))}
-          </div>
-          <div className="cal-filter-rail__group" role="group" aria-label="Obecność klienta">
-            <span className="cal-filter-rail__label">Obecność</span>
-            {ATTENDANCE_FILTERS.map((attendance) => (
-              <Chip key={attendance.value} on={filters.attendance === attendance.value} onClick={() => toggleFilter('attendance', attendance.value)}>
-                {attendance.label}
-              </Chip>
-            ))}
-          </div>
-          {hasActiveFilters && (
-            <Button variant="ghost" size="sm" onClick={() => setFilters(defaultCalendarFilters)}>
-              Wyczyść filtry
-            </Button>
-          )}
-        </div>
-        <p className="cal-filter-rail__result" aria-live="polite">
-          Wyświetlono {filteredSessions.length} {sessionsWord(filteredSessions.length)} po zastosowaniu filtrów.
-        </p>
-      </section>
-
       <div className="row row--between cal-toolbar" data-reveal>
         <div className="row" style={{ gap: 14 }}>
           <div className="month-nav">
@@ -535,13 +456,47 @@ export function CalendarView() {
             </Button>
           )}
         </div>
-        <span className="faint" style={{ fontSize: 13.5 }}>
-          {monthSessions.length} {sessionsWord(monthSessions.length)} w tym miesiącu
-          {mode === 'cal' && (
-            <span className="cal-hint"> · przeciągnij sesję na inny dzień albo zmień datę w edycji sesji</span>
-          )}
-        </span>
+        <div className="row" style={{ gap: 10 }}>
+          <span className="faint" aria-live="polite" style={{ fontSize: 13.5 }}>
+            {monthSessions.length} {sessionsWord(monthSessions.length)} w tym miesiącu
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon="filter"
+            aria-expanded={filtersOpen}
+            onClick={() => setFiltersOpen((open) => !open)}
+          >
+            Filtry{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ''}
+          </Button>
+        </div>
       </div>
+
+      {filtersOpen && (
+        <section className="cal-filters" aria-label="Filtry kalendarza">
+          <div className="cal-filters__group" role="group" aria-label="Płatność">
+            <span className="cal-filters__label">Płatność</span>
+            {PAYMENT_FILTERS.map((payment) => (
+              <Chip key={payment.value} on={filters.payment === payment.value} onClick={() => toggleFilter('payment', payment.value)}>
+                {payment.label}
+              </Chip>
+            ))}
+          </div>
+          <div className="cal-filters__group" role="group" aria-label="Obecność klienta">
+            <span className="cal-filters__label">Obecność</span>
+            {ATTENDANCE_FILTERS.map((attendance) => (
+              <Chip key={attendance.value} on={filters.attendance === attendance.value} onClick={() => toggleFilter('attendance', attendance.value)}>
+                {attendance.label}
+              </Chip>
+            ))}
+          </div>
+          {hasActiveFilters && (
+            <Button variant="ghost" size="sm" onClick={() => setFilters(defaultCalendarFilters)}>
+              Wyczyść filtry
+            </Button>
+          )}
+        </section>
+      )}
 
       {mode === 'agenda' ? (
         <>
@@ -614,7 +569,6 @@ export function CalendarView() {
                       cell.inMonth ? '' : 'is-out',
                       cell.iso === today ? 'is-today' : '',
                       cell.iso === selected ? 'is-sel' : '',
-                      isOutsideDateRange(cell.iso) ? 'is-filtered-out' : '',
                       cell.dow >= 5 ? 'is-weekend' : '',
                     ].join(' ')}
                     onClick={() => { if (!suppressClick.current) selectDay(cell.iso) }}

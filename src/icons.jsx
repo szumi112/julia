@@ -152,6 +152,7 @@ const PATHS = {
     </>
   ),
   menu: <path d="M4 7h16M4 12h12.5M4 17h16" />,
+  filter: <path d="M4 6h16M7.5 12h9M10.5 18h3" />,
   group: (
     <>
       <circle cx="12" cy="7.4" r="2.9" />

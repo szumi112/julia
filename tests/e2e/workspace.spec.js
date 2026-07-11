@@ -342,6 +342,8 @@ test('older attention debt opens all-period unpaid payments', async ({ page }) =
 test('calendar exposes explicit payment and attendance reset choices', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('group', { name: 'Płatność' })).toHaveCount(0)
+  await page.getByRole('button', { name: /^Filtry/ }).click()
   const payment = page.getByRole('group', { name: 'Płatność' })
   const attendance = page.getByRole('group', { name: 'Obecność klienta' })
   const allPayments = payment.getByRole('button', { name: 'Wszystkie' })
@@ -390,12 +392,14 @@ test('calendar opens the therapist agenda and exposes exact partial payment edit
   await expect(page.getByRole('dialog', { name: 'Edycja sesji' }).getByLabel('Wpłacono (zł)')).toBeFocused()
 })
 
-test('calendar combines date, payment, and attendance filters after role scope', async ({ page }) => {
+test('calendar combines payment and attendance filters after role scope', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
   await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('button', { name: /^Filtry/ }).click()
   await page.getByRole('button', { name: 'Nieopłacone' }).click()
   await page.getByRole('button', { name: 'Nieobecny' }).click()
+  await expect(page.getByRole('button', { name: 'Filtry · 2' })).toBeVisible()
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
   await expect(agenda.locator('[data-payment="unpaid"][data-attendance="noshow"]')).toHaveCount(1)
   await page.getByRole('button', { name: 'Wyczyść filtry' }).click()
@@ -406,6 +410,13 @@ test('calendar combines date, payment, and attendance filters after role scope',
   expect(await agenda.locator('.agenda__row').count()).toBeGreaterThan(4)
 })
 
+test('month view shows sessions across the whole month by default', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await page.getByRole('radio', { name: 'Miesiąc' }).click()
+  expect(await page.locator('.cal__day:has(.cal__item)').count()).toBeGreaterThan(1)
+})
+
 test('therapist agenda excludes other therapists and payment updates stay coherent', async ({ page }) => {
   await login(page)
   await page.getByRole('button', { name: /Tryb demonstracyjny/ }).click()
@@ -413,35 +424,6 @@ test('therapist agenda excludes other therapists and payment updates stay cohere
   await page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' }).click()
   await expect(page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' })).toHaveAttribute('aria-current', 'page')
   await expect(page.getByRole('region', { name: /Plan dnia/ }).locator('[data-psych-id="p1"]')).toHaveCount(0)
-})
-
-test('custom month range dims the selected out-of-range day and filters its sessions', async ({ page }) => {
-  await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
-  await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
-  await page.getByRole('radio', { name: 'Miesiąc' }).click()
-
-  const { dateFrom, dateTo, selectedDate } = await page.evaluate(() => {
-    const format = (date) => [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-')
-    const selected = new Date()
-    const start = new Date(selected)
-    const end = new Date(selected)
-    if (selected.getDate() <= 2) {
-      start.setDate(3)
-      end.setDate(4)
-    } else {
-      start.setDate(1)
-      end.setDate(2)
-    }
-    return { dateFrom: format(start), dateTo: format(end), selectedDate: format(selected) }
-  })
-
-  await page.getByRole('textbox', { name: 'Od', exact: true }).fill(dateFrom)
-  await page.getByRole('textbox', { name: 'Do', exact: true }).fill(dateTo)
-  const selectedDay = page.locator(`.cal__day[data-iso="${selectedDate}"]`)
-  await expect(selectedDay).toHaveClass(/is-filtered-out/)
-  await expect(selectedDay).toHaveCSS('opacity', '0.48')
-  await expect(selectedDay.locator('.cal__item')).toHaveCount(0)
 })
 
 test('owner attention opens matching all-period unpaid payments', async ({ page }) => {
