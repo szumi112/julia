@@ -3,6 +3,7 @@ import { Icon } from './icons.jsx'
 import { initials, fmtNumber } from './format.js'
 import { useToasts } from './store.jsx'
 import { useMagnetic, useCountUp, motionOK } from './anim.js'
+import { pageCount, pageSlice } from './pagination.js'
 
 export function Button({ children, icon, variant = 'primary', size, magnetic, className = '', ...rest }) {
   const magRef = useMagnetic(0.22)
@@ -402,5 +403,27 @@ export function ToastHost() {
         <ToastItem key={t.id} toast={t} onDismiss={() => dismissToast(t.id)} />
       ))}
     </div>
+  )
+}
+
+// Pagination fallback for long lists: invisible at one page, classic pager beyond.
+// resetKey = the caller's filter signature (never the items array), so data
+// edits keep the current page while filter changes jump back to page 1.
+export function usePagination(items, { pageSize, resetKey }) {
+  const [page, setPage] = useState(1)
+  useEffect(() => setPage(1), [resetKey])
+  const pages = pageCount(items.length, pageSize)
+  const current = Math.min(page, pages)
+  return { pageItems: pageSlice(items, current, pageSize), page: current, pages, setPage }
+}
+
+export function Pager({ page, pages, onPage }) {
+  if (pages <= 1) return null
+  return (
+    <nav className="pager" aria-label="Stronicowanie">
+      <IconBtn name="chevL" label="Poprzednia strona" disabled={page <= 1} onClick={() => onPage(page - 1)} />
+      <span className="pager__label" aria-live="polite">Strona {page} z {pages}</span>
+      <IconBtn name="chevR" label="Następna strona" disabled={page >= pages} onClick={() => onPage(page + 1)} />
+    </nav>
   )
 }

@@ -1627,6 +1627,18 @@ body.is-grabbing, body.is-grabbing * { cursor: grabbing !important; }
 @media (max-width: 640px) {
   .month-nav__label { min-width: 142px; font-size: 18px; }
 }
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+.pager__label {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
 
 /* agenda mode: horizontal month strip of day pills, scrolling with the page */
 .day-strip {
