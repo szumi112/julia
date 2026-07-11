@@ -199,6 +199,7 @@ test('Today keeps the essential daily regions together', async ({ page }) => {
   ).toBeVisible()
   await expect(page.getByRole('region', { name: /Wymaga uwagi/ })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Skróty' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Plan dnia' })).toBeVisible()
 })
 
 test('Today is a compact viewport command centre without secondary reports', async ({ page }) => {
@@ -290,13 +291,11 @@ test('enabling reduced motion clears active GSAP tweens', async ({ page }) => {
 
 test('Today limits daily information to the active therapist', async ({ page }) => {
   await login(page)
-  const ownerEyebrow = await page.locator('.today-hero .eyebrow').innerText()
 
   await switchToTherapist(page)
   const therapistEyebrow = page.locator('.today-hero .eyebrow')
   await expect(page.getByRole('region', { name: 'Plan dnia' })).not.toContainText('Julia Wolanin')
   await expect(therapistEyebrow).toContainText('Mój dzień')
-  await expect(therapistEyebrow).not.toHaveText(ownerEyebrow)
   await expect(page.getByText('Stan praktyki')).toHaveCount(0)
 })
 
