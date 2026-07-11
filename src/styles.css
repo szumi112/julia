@@ -2314,6 +2314,16 @@ button.today-attn__row:hover b { color: var(--rose-deep); }
 .today-links__item { font-size: 13px; font-weight: 600; color: var(--ink-soft); transition: color var(--dur-fast); }
 .today-links__item:hover { color: var(--rose-deep); }
 
+/* Moderate desktop heights: tighten the stage's quiet spacing so the full
+   day plan stays visible; internal scroll is reserved for extreme shortness. */
+@media (max-height: 800px) {
+  .today-page { gap: 14px; }
+  .today-hero__time { margin-top: 8px; }
+  .today-hero__title { margin-top: 8px; }
+  .today-hero__actions { margin-top: 12px; }
+  .today-plan .spine__row { padding-top: 6px; padding-bottom: 6px; }
+}
+
 @media (max-width: 900px) {
   .content--dashboard { display: block; padding-bottom: 72px; }
   .content--dashboard > .view { display: block; min-height: 0; }
