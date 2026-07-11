@@ -67,16 +67,12 @@ test('partial payment keeps a strict partial amount for low positive totals', ()
   assert.deepEqual(paymentPatchFor('partial', 1, 1), { payment: 'partial', paidAmount: 0.5 })
 })
 
-test('session filters combine inclusive date, payment, and attendance constraints', () => {
-  const filters = {
-    dateFrom: '2026-07-10',
-    dateTo: '2026-07-10',
-    payment: 'partial',
-    attendance: 'completed',
-  }
+test('session filters combine payment and attendance constraints', () => {
+  const filters = { payment: 'partial', attendance: 'completed' }
   assert.equal(sessionMatchesFilters(state.sessions[1], filters), true)
   assert.equal(sessionMatchesFilters({ ...state.sessions[1], payment: 'unpaid' }, filters), false)
-  assert.equal(sessionMatchesFilters({ ...state.sessions[1], date: '2026-07-11' }, filters), false)
+  assert.equal(sessionMatchesFilters({ ...state.sessions[1], status: 'noshow' }, filters), false)
+  assert.equal(sessionMatchesFilters(state.sessions[1], { payment: 'all', attendance: 'all' }), true)
 })
 
 test('families with fewer than two members dissolve completely', () => {

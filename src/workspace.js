@@ -22,11 +22,9 @@ export const dissolveLoneFamilies = (clients) => {
 }
 
 export const sessionMatchesFilters = (session, filters) => {
-  const afterStart = !filters.dateFrom || session.date >= filters.dateFrom
-  const beforeEnd = !filters.dateTo || session.date <= filters.dateTo
   const paymentMatches = filters.payment === 'all' || session.payment === filters.payment
   const attendanceMatches = filters.attendance === 'all' || session.status === filters.attendance
-  return afterStart && beforeEnd && paymentMatches && attendanceMatches
+  return paymentMatches && attendanceMatches
 }
 
 export const dayAttention = (state, role, date) => {
