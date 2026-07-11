@@ -16,7 +16,11 @@ today's volumes.
 Approach: one shared hook + one shared Pager component (no per-view copies,
 no numbered pages, no page-size picker).
 
-### 1. Shared unit — `src/pagination.jsx`
+### 1. Shared unit — `src/pagination.js` + `src/ui.jsx`
+
+Split so the pure part stays testable with `node --test` (which cannot parse
+JSX): pure helpers live in `src/pagination.js` (no imports); `usePagination`
+and `Pager` live with the other shared primitives in `src/ui.jsx`.
 
 - Pure helpers, unit-testable without React:
   - `pageCount(total, pageSize)` → number of pages (min 1).
