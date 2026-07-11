@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
-import { Avatar, Pill, Chip, IconBtn, Button, InfoTip, EmptyState, Figure } from '../ui.jsx'
+import { Avatar, Pill, Chip, IconBtn, Button, InfoTip, EmptyState, Figure, usePagination, Pager } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { BarFill } from '../charts.jsx'
 import { PaymentPicker } from './session-bits.jsx'
@@ -44,7 +44,11 @@ export function Payments() {
   const scopeCollected = scopeFilteredBillable.reduce((a, s) => a + collectedOf(s), 0)
   const scopeOutstanding = scopeFilteredBillable.reduce((a, s) => a + outstandingOf(s), 0)
 
-  const flipRef = useFlip(filtered.map((s) => s.id).join(','))
+  const { pageItems, page, pages, setPage } = usePagination(filtered, {
+    pageSize: 25,
+    resetKey: `${allPeriods}|${ym}|${psychFilter}|${unpaidOnly}`,
+  })
+  const flipRef = useFlip(pageItems.map((s) => s.id).join(','))
 
   const perPsych = state.psychologists.map((p) => {
     const own = scopeBillable.filter((s) => s.psychId === p.id)
@@ -236,7 +240,7 @@ export function Payments() {
                   </td>
                 </tr>
               )}
-              {filtered.map((s) => {
+              {pageItems.map((s) => {
                 const p = psychOf(s.psychId)
                 const out = outstandingOf(s)
                 return (
@@ -266,6 +270,7 @@ export function Payments() {
             </tbody>
           </table>
           </div>
+          <Pager page={page} pages={pages} onPage={setPage} />
         </div>
       </div>
     </div>

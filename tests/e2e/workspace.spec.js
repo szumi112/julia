@@ -376,6 +376,19 @@ test('Payments exposes an all-status control to reverse unpaid filtering', async
   await expect(unpaid).toHaveAttribute('aria-pressed', 'false')
 })
 
+test('payments table paginates a month with more than 25 settlements', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Finanse' }).click()
+  await page.getByRole('button', { name: 'Poprzedni miesiąc' }).click()
+  const pager = page.getByRole('navigation', { name: 'Stronicowanie' })
+  await expect(pager).toBeVisible()
+  expect(await page.locator('tbody tr').count()).toBeLessThanOrEqual(25)
+  const firstRowBefore = await page.locator('tbody tr').first().innerText()
+  await pager.getByRole('button', { name: 'Następna strona' }).click()
+  await expect(pager).toContainText(/Strona 2 z \d+/)
+  expect(await page.locator('tbody tr').first().innerText()).not.toBe(firstRowBefore)
+})
+
 test('calendar opens the therapist agenda and exposes exact partial payment editing', async ({ page }) => {
   await login(page)
   await page.getByRole('button', { name: /Tryb demonstracyjny.*Julia Wolanin/ }).click()
