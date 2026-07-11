@@ -1628,18 +1628,13 @@ body.is-grabbing, body.is-grabbing * { cursor: grabbing !important; }
   .month-nav__label { min-width: 142px; font-size: 18px; }
 }
 
-/* phone agenda mode: horizontal month strip of day pills. Sticks just below
-   the topbar while the day's agenda scrolls underneath. */
+/* agenda mode: horizontal month strip of day pills, scrolling with the page */
 .day-strip {
-  position: sticky;
-  top: 0;
-  z-index: 5;
   display: flex;
   gap: 7px;
   overflow-x: auto;
   margin: 0 -16px 16px;
   padding: 6px 16px 10px;
-  background: var(--paper);
   scroll-snap-type: x proximity;
   scrollbar-width: none;
   -webkit-overflow-scrolling: touch;

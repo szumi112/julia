@@ -410,6 +410,25 @@ test('calendar combines payment and attendance filters after role scope', async 
   expect(await agenda.locator('.agenda__row').count()).toBeGreaterThan(4)
 })
 
+test('calendar day strip scrolls with the page instead of covering the agenda', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  const agenda = page.getByRole('region', { name: /Plan dnia/ })
+  const more = agenda.getByRole('button', { name: /Jeszcze/ })
+  await more.click()
+  // clicking auto-scrolled the button into view; measure from the top
+  await page.locator('main.content').evaluate((el) => el.scrollTo(0, 0))
+  const strip = page.locator('.day-strip')
+  const before = await strip.evaluate((el) => el.getBoundingClientRect().top)
+  const scrolled = await page.locator('main.content').evaluate((el) => {
+    el.scrollTo(0, 300)
+    return el.scrollTop
+  })
+  const after = await strip.evaluate((el) => el.getBoundingClientRect().top)
+  expect(scrolled).toBeGreaterThan(50)
+  expect(before - after).toBeGreaterThanOrEqual(scrolled - 2)
+})
+
 test('month view shows sessions across the whole month by default', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
