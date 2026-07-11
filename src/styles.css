@@ -2263,20 +2263,20 @@ button.spine__row:hover { background: rgba(240, 220, 218, 0.3); }
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: clamp(14px, 2.8vh, 14px);
+  gap: clamp(14px, 2.8vh, 26px);
   text-align: center;
 }
-.today-hero { display: flex; flex-direction: column; align-items: center; min-width: 0; max-width: 100%; }
+.today-hero { display: flex; flex-direction: column; align-items: center; min-width: 0; max-width: 100%; flex-shrink: 0; }
 .today-hero__time {
   margin-top: clamp(8px, 2vh, 18px);
-  font-size: clamp(42px, 8vh, 42px);
+  font-size: clamp(42px, 8vh, 64px);
   font-weight: 520;
   line-height: 1;
   color: var(--rose-deep);
   font-variant-numeric: tabular-nums;
 }
 .today-hero__name { margin-top: 8px; font-size: clamp(19px, 3vh, 25px); font-weight: 500; }
-.today-hero__title { margin-top: clamp(8px, 2vh, 18px); font-size: clamp(26px, 5vh, 26px); font-weight: 500; }
+.today-hero__title { margin-top: clamp(8px, 2vh, 18px); font-size: clamp(26px, 5vh, 36px); font-weight: 500; }
 .today-hero__meta { margin-top: 5px; color: var(--ink-soft); font-size: 13px; }
 .today-hero__actions {
   display: flex;
@@ -2291,12 +2291,15 @@ button.spine__row:hover { background: rgba(240, 220, 218, 0.3); }
   border: 0;
   border-top: 1px solid var(--line);
   margin: 0;
+  flex-shrink: 0;
 }
-.today-plan { width: min(560px, 100%); text-align: left; }
+/* The plan is the page's only compressible region: on short viewports it
+   shrinks and scrolls internally so the stage itself never overflows. */
+.today-plan { width: min(560px, 100%); min-height: 0; overflow-y: auto; text-align: left; }
 .dash-hero__day { min-width: 0; }
 .spine__row.is-next .spine__time { color: var(--rose-deep); font-size: 19px; }
 .spine__row.is-next .spine__name { font-size: 15px; }
-.today-attn { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.today-attn { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
 .today-attn__row {
   display: inline-flex;
   align-items: center;
@@ -2307,7 +2310,7 @@ button.spine__row:hover { background: rgba(240, 220, 218, 0.3); }
 }
 .today-attn__row b { color: var(--ink); }
 button.today-attn__row:hover b { color: var(--rose-deep); }
-.today-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 26px; }
+.today-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 26px; flex-shrink: 0; }
 .today-links__item { font-size: 13px; font-weight: 600; color: var(--ink-soft); transition: color var(--dur-fast); }
 .today-links__item:hover { color: var(--rose-deep); }
 
