@@ -3,10 +3,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { fmtNumber } from './format.js'
 
-// Entrance tweens only touch transform + autoAlpha — clearing exactly those
-// keeps inline layout styles on animated elements intact ('all' would wipe them).
-const CLEAR = 'transform,opacity,visibility'
-
 let reduceOverride = false
 
 // Long-lived animation loops (Three.js scenes) subscribe here so flipping the
@@ -53,14 +49,13 @@ export function useReveal(deps = []) {
     if (items.length) {
       g().fromTo(
         items,
-        { autoAlpha: 0, y: 22 },
+        { y: 12 },
         {
-          autoAlpha: 1,
           y: 0,
-          duration: 0.85,
+          duration: 0.22,
           ease: 'power3.out',
-          stagger: 0.07,
-          clearProps: CLEAR,
+          stagger: { amount: 0.03 },
+          clearProps: 'transform',
           overwrite: 'auto',
         }
       )
@@ -72,23 +67,22 @@ export function useReveal(deps = []) {
       g().fromTo(
         spines,
         { scaleY: 0 },
-        { scaleY: 1, duration: 0.9, ease: 'power3.inOut', delay: 0.15, clearProps: 'transform' }
+        { scaleY: 1, duration: 0.22, ease: 'power3.inOut', clearProps: 'transform' }
       )
     }
 
     let io
     if (scrollItems.length) {
-      g().set(scrollItems, { autoAlpha: 0, y: 26 })
+      g().set(scrollItems, { y: 12 })
       io = new IntersectionObserver(
         (entries) => {
           entries.forEach((e) => {
             if (e.isIntersecting) {
               g().to(e.target, {
-                autoAlpha: 1,
                 y: 0,
-                duration: 0.9,
+                duration: 0.22,
                 ease: 'power3.out',
-                clearProps: CLEAR,
+                clearProps: 'transform',
               })
               io.unobserve(e.target)
             }
@@ -106,12 +100,19 @@ export function useReveal(deps = []) {
 
 // Animated number counter. Tracks the value actually on screen so an
 // interrupted tween restarts from the displayed number, not the old target.
-export function useCountUp(value, fmt = fmtNumber, duration = 1.4) {
+export function useCountUp(value, fmt = fmtNumber, duration = 0.22) {
   const ref = useRef(null)
-  const shown = useRef(0)
+  const shown = useRef(value)
+  const mounted = useRef(false)
   useEffect(() => {
     const el = ref.current
     if (!el) return
+    if (!mounted.current) {
+      mounted.current = true
+      shown.current = value
+      el.textContent = fmt(value)
+      return
+    }
     if (!motionOK()) {
       el.textContent = fmt(value)
       shown.current = value
@@ -142,8 +143,8 @@ export function useMagnetic(strength = 0.32) {
     if (!el || !motionOK()) return
     let toX, toY
     const enter = () => {
-      toX = g().quickTo(el, 'x', { duration: 0.5, ease: 'power3.out' })
-      toY = g().quickTo(el, 'y', { duration: 0.5, ease: 'power3.out' })
+      toX = g().quickTo(el, 'x', { duration: 0.2, ease: 'power3.out' })
+      toY = g().quickTo(el, 'y', { duration: 0.2, ease: 'power3.out' })
     }
     const move = (e) => {
       if (!toX) enter()
@@ -153,7 +154,7 @@ export function useMagnetic(strength = 0.32) {
     }
     const leave = () => {
       toX = toY = null
-      g().to(el, { x: 0, y: 0, duration: 0.8, ease: 'elastic.out(1, 0.45)', overwrite: 'auto' })
+      g().to(el, { x: 0, y: 0, duration: 0.22, ease: 'power3.out', overwrite: 'auto' })
     }
     el.addEventListener('mouseenter', enter)
     el.addEventListener('mousemove', move)
@@ -174,10 +175,9 @@ export function animateOut(el, dir = 0) {
   return new Promise((resolve) => {
     if (!el || !motionOK()) return resolve()
     g().to(el, {
-      autoAlpha: 0,
       x: dir ? -18 * dir : 0,
       y: dir ? 0 : -14,
-      duration: 0.22,
+      duration: 0.18,
       ease: 'power2.in',
       onComplete: resolve,
     })
@@ -188,8 +188,8 @@ export function animateIn(el) {
   if (!el || !motionOK()) return
   g().fromTo(
     el,
-    { autoAlpha: 0, y: 10 },
-    { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power3.out', clearProps: CLEAR }
+    { y: 10 },
+    { y: 0, duration: 0.22, ease: 'power3.out', clearProps: 'transform' }
   )
 }
 
@@ -203,21 +203,20 @@ export function useDrawerFX(drawerRef, backRef, onClose) {
     const drawer = drawerRef.current
     if (!drawer) return
     if (motionOK()) {
-      g().fromTo(backRef.current, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.35 })
-      g().fromTo(drawer, { x: '102%' }, { x: '0%', duration: 0.55, ease: 'power4.out' })
+      g().fromTo(backRef.current, { opacity: 0 }, { opacity: 1, duration: 0.2 })
+      g().fromTo(drawer, { x: '102%' }, { x: '0%', duration: 0.22, ease: 'power3.out' })
       const items = drawer.querySelectorAll('.field, .drawer__head, .drawer__foot')
       g().fromTo(
         items,
-        { autoAlpha: 0, x: 26 },
-        { autoAlpha: 1, x: 0, duration: 0.55, ease: 'power3.out', stagger: 0.035, delay: 0.1, clearProps: CLEAR }
+        { x: 16 },
+        { x: 0, duration: 0.2, ease: 'power3.out', stagger: 0.01, clearProps: 'transform' }
       )
     }
-    // the entrance stagger starts fields at visibility:hidden, so focus the
-    // first form control once it is visible again. If someone already moved
-    // focus into the drawer, keep their choice instead of stealing it back.
+    // Focus the first control without waiting for the translation to finish.
+    // If someone already moved focus into the drawer, keep their choice.
     const t = setTimeout(() => {
       if (!drawer.contains(document.activeElement)) drawer.querySelector('input, select, textarea')?.focus()
-    }, motionOK() ? 220 : 0)
+    }, 0)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -226,8 +225,8 @@ export function useDrawerFX(drawerRef, backRef, onClose) {
     if (closing.current) return
     if (!motionOK()) return onClose()
     closing.current = true
-    g().to(backRef.current, { autoAlpha: 0, duration: 0.3 })
-    g().to(drawerRef.current, { x: '102%', duration: 0.42, ease: 'power3.in', onComplete: onClose })
+    g().to(backRef.current, { opacity: 0, duration: 0.18 })
+    g().to(drawerRef.current, { x: '102%', duration: 0.2, ease: 'power3.in', onComplete: onClose })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onClose])
 
@@ -247,9 +246,7 @@ export function useDrawerFX(drawerRef, backRef, onClose) {
     const drawer = drawerRef.current
     const onTab = (e) => {
       if (e.key !== 'Tab' || !drawer) return
-      // visibility check matters during the entrance stagger: autoAlpha keeps
-      // fields visibility:hidden (offsetParent non-null), and the browser
-      // skips those in real Tab order — the trap must reason over the same set
+      // Match the browser's real Tab order, including any caller-hidden fields.
       const els = [...drawer.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')]
         .filter((el) => !el.disabled && el.offsetParent !== null && getComputedStyle(el).visibility !== 'hidden')
       if (!els.length) return
@@ -300,10 +297,10 @@ export function useFlip(depKey) {
         if (prev != null) {
           const dy = prev - next.get(el.dataset.flipId)
           if (Math.abs(dy) > 2) {
-            g().fromTo(el, { y: dy }, { y: 0, duration: 0.55, ease: 'power3.out', clearProps: 'transform', overwrite: true })
+            g().fromTo(el, { y: dy }, { y: 0, duration: 0.22, ease: 'power3.out', clearProps: 'transform', overwrite: true })
           }
         } else {
-          g().fromTo(el, { autoAlpha: 0, y: 10 }, { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power2.out', clearProps: CLEAR, overwrite: true })
+          g().fromTo(el, { y: 10 }, { y: 0, duration: 0.22, ease: 'power2.out', clearProps: 'transform', overwrite: true })
         }
       })
     }

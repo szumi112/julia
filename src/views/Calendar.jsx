@@ -67,7 +67,7 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
   }, [selected, days])
 
   return (
-    <div className="day-strip" ref={ref} data-reveal>
+    <div className="day-strip" ref={ref}>
       {days.map((iso) => {
         const items = byDate[iso] || []
         const dowIdx = (parseISO(iso).getDay() + 6) % 7

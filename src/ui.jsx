@@ -150,7 +150,7 @@ export function Figure({ label, value, fmt = fmtNumber, suffix, sub, gold, onCli
     >
       <span className="figures__label">{label}</span>
       <span className="figures__value">
-        <span ref={ref}>0</span>
+        <span ref={ref}>{fmt(value)}</span>
         {suffix && <small>{suffix}</small>}
       </span>
       {sub && <span className="figures__sub">{sub}</span>}
@@ -244,17 +244,23 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, contentR
         next.focus()
       }
     }
-    // fixed coordinates go stale the moment anything scrolls or resizes
-    const onMove = () => setOpen(false)
+    // Fixed coordinates only go stale when the viewport or an ancestor of the
+    // trigger moves. A sibling scrollport (for example main content beneath a
+    // topbar popover) does not move the trigger and must not dismiss its menu.
+    const onMove = (event) => {
+      const scroller = event.target
+      if (scroller === document || scroller?.contains?.(ref.current)) setOpen(false)
+    }
+    const onResize = () => setOpen(false)
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
     window.addEventListener('scroll', onMove, true)
-    window.addEventListener('resize', onMove)
+    window.addEventListener('resize', onResize)
     return () => {
       document.removeEventListener('mousedown', onDoc)
       document.removeEventListener('keydown', onKey)
       window.removeEventListener('scroll', onMove, true)
-      window.removeEventListener('resize', onMove)
+      window.removeEventListener('resize', onResize)
     }
   }, [contentRole, open, setOpen])
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Icon, Bloom } from './icons.jsx'
 import { Avatar, IconBtn, PopItem, Popover } from './ui.jsx'
 import { useApp } from './store.jsx'
@@ -23,6 +23,11 @@ import { ClientDrawer } from './views/ClientForm.jsx'
 import { PsychDrawer } from './views/PsychForm.jsx'
 import { TusGroupDrawer, TusKidDrawer, TusClassDrawer } from './views/TusForms.jsx'
 import { CommandPalette } from './command-palette.jsx'
+import {
+  patchRouteViewState as patchRegistryRoute,
+  readRouteViewState,
+  resetRouteViewState as resetRegistryRoute,
+} from './view-state.js'
 
 const NAV = [
   { id: 'dashboard', label: 'Dziś', icon: 'dashboard' },
@@ -41,31 +46,22 @@ const ROLE_NAV = {
 }
 const canAccess = (routeName, role) => ROLE_NAV[role.id].includes(routeName)
 
-const navLabel = (item, role) => {
-  if (role.id !== 'therapist') return item.label
-  return {
-    dashboard: 'Mój dzień',
-    calendar: 'Mój kalendarz',
-    clients: 'Moi klienci',
-  }[item.id] || item.label
-}
-
-const routeTitle = (routeName, role) => {
+const routeTitle = (routeName) => {
   const navItem = NAV.find((item) => item.id === routeName)
-  return navItem ? navLabel(navItem, role) : TITLES[routeName] || ''
+  return navItem ? navItem.label : TITLES[routeName] || ''
 }
 
 const TITLES = {
-  dashboard: 'Pulpit',
-  calendar: 'Kalendarz sesji',
+  dashboard: 'Dziś',
+  calendar: 'Kalendarz',
   clients: 'Klienci',
   client: 'Karta klienta',
-  tus: 'Zajęcia grupowe TUS',
+  tus: 'Zajęcia TUS',
   tusGroup: 'Grupa TUS',
   team: 'Zespół',
   psych: 'Profil specjalistki',
   payments: 'Finanse',
-  reports: 'Raport miesięczny',
+  reports: 'Raporty',
   settings: 'Ustawienia',
 }
 
@@ -100,7 +96,7 @@ export function Logotype({ light }) {
   )
 }
 
-function Sidebar({ route, navigate, role, className = '', innerRef, inert }) {
+function Sidebar({ route, navigate, role, accountControls, className = '', innerRef, inert }) {
   const { state } = useApp()
   const navRef = useRef(null)
   const pillRef = useRef(null)
@@ -119,7 +115,7 @@ function Sidebar({ route, navigate, role, className = '', innerRef, inert }) {
     if (!el) { pill.style.opacity = 0; return }
     const target = { top: el.offsetTop, height: el.offsetHeight, opacity: 1 }
     if (motionOK()) {
-      window.gsap.to(pill, { ...target, duration: 0.45, ease: 'elastic.out(1, 0.75)', overwrite: true })
+      window.gsap.to(pill, { ...target, duration: 0.22, ease: 'power2.out', overwrite: true })
     } else {
       Object.assign(pill.style, { top: target.top + 'px', height: target.height + 'px', opacity: 1 })
     }
@@ -146,7 +142,7 @@ function Sidebar({ route, navigate, role, className = '', innerRef, inert }) {
             data-shell-reveal
           >
             <Icon name={n.icon} size={19} />
-            {navLabel(n, role)}
+            {n.label}
           </button>
         ))}
         {showSettings && (
@@ -165,6 +161,7 @@ function Sidebar({ route, navigate, role, className = '', innerRef, inert }) {
         )}
       </nav>
       <div className="sidebar__foot" data-shell-reveal>
+        {accountControls}
         <div className="today-card">
           <div className="today-card__label">Dziś · {fmtWeekday(today)}</div>
           <div className="today-card__line">
@@ -177,25 +174,51 @@ function Sidebar({ route, navigate, role, className = '', innerRef, inert }) {
   )
 }
 
+function MobileRoleControls({ role, onRoleChange, onLogout }) {
+  return (
+    <div className="mobile-account">
+      <div className="mobile-account__roles" role="group" aria-label="Tryb demonstracyjny">
+        <div className="mobile-account__label">Tryb demonstracyjny</div>
+        {DEMO_ROLES.map((demoRole) => (
+          <button
+            key={demoRole.id}
+            type="button"
+            className={`mobile-account__role ${demoRole.id === role.id ? 'is-active' : ''}`}
+            aria-pressed={demoRole.id === role.id}
+            onClick={() => onRoleChange(demoRole.id)}
+          >
+            <Avatar name={demoRole.name} size={30} />
+            <span>{demoRole.label} · {demoRole.name}</span>
+          </button>
+        ))}
+      </div>
+      <button type="button" className="mobile-account__logout" onClick={onLogout}>
+        <Icon name="logout" size={18} />
+        Wyloguj się
+      </button>
+    </div>
+  )
+}
+
 // Compact-shell navigation: the sidebar slides in from the left as a drawer,
 // with the same GSAP choreography as the form drawers (mirrored).
-function MobileNavDrawer({ route, navigate, role, onClose }) {
+function MobileNavDrawer({ route, navigate, role, onRoleChange, onLogout, showAccountControls, onClose }) {
   const asideRef = useRef(null)
   const backRef = useRef(null)
   const closing = useRef(false)
 
   useEffect(() => {
     if (!motionOK() || !asideRef.current) return
-    window.gsap.fromTo(backRef.current, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.3 })
-    window.gsap.fromTo(asideRef.current, { x: '-104%' }, { x: '0%', duration: 0.5, ease: 'power4.out' })
+    window.gsap.fromTo(backRef.current, { opacity: 0 }, { opacity: 1, duration: 0.2 })
+    window.gsap.fromTo(asideRef.current, { x: '-104%' }, { x: '0%', duration: 0.22, ease: 'power3.out' })
   }, [])
 
   const close = useCallback(() => {
     if (closing.current) return
     if (!motionOK() || !asideRef.current) return onClose()
     closing.current = true
-    window.gsap.to(backRef.current, { autoAlpha: 0, duration: 0.25 })
-    window.gsap.to(asideRef.current, { x: '-104%', duration: 0.38, ease: 'power3.in', onComplete: onClose })
+    window.gsap.to(backRef.current, { opacity: 0, duration: 0.18 })
+    window.gsap.to(asideRef.current, { x: '-104%', duration: 0.2, ease: 'power3.in', onComplete: onClose })
   }, [onClose])
 
   useEffect(() => {
@@ -244,6 +267,13 @@ function MobileNavDrawer({ route, navigate, role, onClose }) {
         route={route}
         navigate={(name, params) => { navigate(name, params); close() }}
         role={role}
+        accountControls={showAccountControls ? (
+          <MobileRoleControls
+            role={role}
+            onRoleChange={(roleId) => { onRoleChange(roleId); close() }}
+            onLogout={onLogout}
+          />
+        ) : undefined}
         className="sidebar--drawer"
         innerRef={asideRef}
       />
@@ -255,11 +285,13 @@ function MobileNavDrawer({ route, navigate, role, onClose }) {
 // "new session" action in the centre. Secondary pages (Zespół, Raporty,
 // Ustawienia) stay in the hamburger drawer.
 const TABBAR = NAV.filter((n) => ['dashboard', 'calendar', 'clients', 'payments'].includes(n.id))
+const MORE_ROUTES = new Set(['tus', 'team', 'reports', 'settings'])
 
-function MobileTabbar({ route, navigate, role, onAdd }) {
+function MobileTabbar({ route, navigate, role, onAdd, onMore }) {
   const barRef = useRef(null)
   const [pill, setPill] = useState(null)
   const activeId = ACTIVE_OF[route.name] || route.name
+  const activeTabId = MORE_ROUTES.has(activeId) ? 'more' : activeId
   const tabs = TABBAR.filter((item) => canAccess(item.id, role))
 
   // the gliding blob behind the active icon — measured, then moved via CSS
@@ -268,7 +300,7 @@ function MobileTabbar({ route, navigate, role, onAdd }) {
     const bar = barRef.current
     if (!bar) return
     const measure = () => {
-      const btn = bar.querySelector(`.tabbar__item[data-id="${activeId}"]`)
+      const btn = bar.querySelector(`.tabbar__item[data-id="${activeTabId}"]`)
       if (!btn) return setPill(null)
       setPill({ left: btn.offsetLeft + (btn.offsetWidth - 46) / 2 })
     }
@@ -276,14 +308,14 @@ function MobileTabbar({ route, navigate, role, onAdd }) {
     const ro = new ResizeObserver(measure)
     ro.observe(bar)
     return () => ro.disconnect()
-  }, [activeId])
+  }, [activeTabId])
 
   useEffect(() => {
     if (!motionOK() || !barRef.current) return
     window.gsap.fromTo(
       barRef.current,
-      { y: 84 },
-      { y: 0, duration: 0.7, ease: 'power4.out', delay: 0.15, clearProps: 'transform' }
+      { y: 12 },
+      { y: 0, duration: 0.22, ease: 'power3.out', clearProps: 'transform' }
     )
   }, [])
 
@@ -296,33 +328,47 @@ function MobileTabbar({ route, navigate, role, onAdd }) {
       aria-current={activeId === n.id ? 'page' : undefined}
     >
       <Icon name={n.icon} size={21} />
-      <span>{navLabel(n, role)}</span>
+      <span>{n.label}</span>
     </button>
   )
 
   return (
     <nav className="tabbar" ref={barRef} aria-label="Nawigacja dolna">
       {pill && <span className="tabbar__pill" style={{ left: pill.left }} />}
-      {tabs.slice(0, 2).map(tab)}
+      <div className="tabbar__side">
+        {tabs.slice(0, 2).map(tab)}
+      </div>
       <button className="tabbar__fab" onClick={onAdd} aria-label="Nowa sesja">
         <Icon name="plus" size={22} />
       </button>
-      {tabs.slice(2).map(tab)}
+      <div className="tabbar__side">
+        {tabs.slice(2).map(tab)}
+        <button
+          type="button"
+          data-id="more"
+          className={`tabbar__item ${MORE_ROUTES.has(activeId) ? 'is-active' : ''}`}
+          onClick={onMore}
+          aria-current={MORE_ROUTES.has(activeId) ? 'page' : undefined}
+        >
+          <Icon name="menu" size={21} />
+          <span>Więcej</span>
+        </button>
+      </div>
     </nav>
   )
 }
 
-function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, onCockpitChange, onLogout, onSearch, onMenu, overlayKey }) {
+function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, showAccountControls, onCockpitChange, onLogout, onSearch, onMenu, overlayKey }) {
   const titleRef = useRef(null)
-  const title = routeTitle(route.name, role)
+  const title = routeTitle(route.name)
   const controlsInert = overlayKey ? '' : undefined
 
   useEffect(() => {
     if (!motionOK() || !titleRef.current) return
     window.gsap.fromTo(
       titleRef.current,
-      { autoAlpha: 0, y: 6 },
-      { autoAlpha: 1, y: 0, duration: 0.4, ease: 'power2.out' }
+      { y: 6 },
+      { y: 0, duration: 0.2, ease: 'power2.out', clearProps: 'transform' }
     )
   }, [title])
 
@@ -349,44 +395,48 @@ function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, onCoc
             <span>Szukaj…</span>
             <kbd>{META_K}</kbd>
           </button>
-          <Popover
-            align="right"
-            ariaLabel="Tryb demonstracyjny"
-            contentRole="group"
-            open={roleMenuOpen}
-            setOpen={setRoleMenuOpen}
-            trigger={
-              <button
-                type="button"
-                className="userchip userchip--button"
-                onClick={() => setRoleMenuOpen(!roleMenuOpen)}
+          {showAccountControls && (
+            <>
+              <Popover
+                align="right"
+                ariaLabel="Tryb demonstracyjny"
+                contentRole="group"
+                open={roleMenuOpen}
+                setOpen={setRoleMenuOpen}
+                trigger={
+                  <button
+                    type="button"
+                    className="userchip userchip--button"
+                    onClick={() => setRoleMenuOpen(!roleMenuOpen)}
+                  >
+                    <Avatar name={role.name} size={37} />
+                    <span>
+                      <span className="userchip__mode">Tryb demonstracyjny</span>
+                      <span className="userchip__name">{role.name}</span>
+                      <span className="userchip__role">{role.label}</span>
+                    </span>
+                  </button>
+                }
               >
-                <Avatar name={role.name} size={37} />
-                <span>
-                  <span className="userchip__mode">Tryb demonstracyjny</span>
-                  <span className="userchip__name">{role.name}</span>
-                  <span className="userchip__role">{role.label}</span>
-                </span>
-              </button>
-            }
-          >
-            <div className="popover__label">Tryb demonstracyjny</div>
-            {DEMO_ROLES.map((demoRole) => (
-              <PopItem
-                key={demoRole.id}
-                role="button"
-                on={demoRole.id === role.id}
-                pressed
-                onClick={() => {
-                  setDemoRole(demoRole.id)
-                  setRoleMenuOpen(false)
-                }}
-              >
-                {demoRole.label} · {demoRole.name}
-              </PopItem>
-            ))}
-          </Popover>
-          <IconBtn name="logout" label="Wyloguj się" onClick={onLogout} />
+                <div className="popover__label">Tryb demonstracyjny</div>
+                {DEMO_ROLES.map((demoRole) => (
+                  <PopItem
+                    key={demoRole.id}
+                    role="button"
+                    on={demoRole.id === role.id}
+                    pressed
+                    onClick={() => {
+                      setDemoRole(demoRole.id)
+                      setRoleMenuOpen(false)
+                    }}
+                  >
+                    {demoRole.label} · {demoRole.name}
+                  </PopItem>
+                ))}
+              </Popover>
+              <IconBtn name="logout" label="Wyloguj się" onClick={onLogout} />
+            </>
+          )}
         </div>
         <TodayCockpit
           open={overlayKey === 'cockpit'}
@@ -443,7 +493,14 @@ export function Shell({ onLogout }) {
   const contentRef = useRef(null)
   const shellRef = useRef(null)
   const busy = useRef(false)
+  const navigationIdRef = useRef(0)
+  const viewRegistryRef = useRef({})
   const role = DEMO_ROLES.find((demoRole) => demoRole.id === state.demoRoleId) || DEMO_ROLES[0]
+  const routeRef = useRef(route)
+  const roleRef = useRef(role)
+  const routeParamsKey = JSON.stringify(route.params || {})
+  routeRef.current = route
+  roleRef.current = role
 
   useMonthSettled()
 
@@ -458,8 +515,8 @@ export function Shell({ onLogout }) {
     const items = shellRef.current.querySelectorAll('[data-shell-reveal]')
     window.gsap.fromTo(
       items,
-      { autoAlpha: 0, x: -14 },
-      { autoAlpha: 1, x: 0, duration: 0.7, ease: 'power3.out', stagger: 0.05, clearProps: 'transform,opacity,visibility' }
+      { x: -10 },
+      { x: 0, duration: 0.22, ease: 'power3.out', stagger: { amount: 0.03 }, clearProps: 'transform' }
     )
   }, [])
 
@@ -489,61 +546,135 @@ export function Shell({ onLogout }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const navigate = (name, params) => {
-    if (!canAccess(ACTIVE_OF[name] || name, role)) return
+  const getViewState = useCallback((routeName, defaults = {}) => (
+    readRouteViewState(viewRegistryRef.current, role.id, routeName, defaults)
+  ), [role.id])
+
+  const patchViewState = useCallback((routeName, patch) => {
+    viewRegistryRef.current = patchRegistryRoute(viewRegistryRef.current, role.id, routeName, patch)
+  }, [role.id])
+
+  const resetViewState = useCallback((routeName) => {
+    viewRegistryRef.current = resetRegistryRoute(viewRegistryRef.current, role.id, routeName)
+  }, [role.id])
+
+  const navigate = useCallback((name, params) => {
+    const currentRole = roleRef.current
+    const currentRoute = routeRef.current
+    if (!canAccess(ACTIVE_OF[name] || name, currentRole)) return
     if (busy.current) return
     setRoleMenuOpen(false)
     setOverlay(null)
-    if (route.name === name && JSON.stringify(route.params) === JSON.stringify(params)) return
+    if (currentRoute.name === name && JSON.stringify(currentRoute.params) === JSON.stringify(params)) return
     busy.current = true
-    const dir = (DEPTH[name] || 0) - (DEPTH[route.name] || 0)
+    const navigationId = ++navigationIdRef.current
+    const dir = (DEPTH[name] || 0) - (DEPTH[currentRoute.name] || 0)
     animateOut(viewRef.current, dir).then(() => {
+      if (navigationId !== navigationIdRef.current) return
+      const activeRole = roleRef.current
+      if (!canAccess(ACTIVE_OF[name] || name, activeRole)) {
+        busy.current = false
+        return
+      }
+      viewRegistryRef.current = patchRegistryRoute(
+        viewRegistryRef.current,
+        currentRole.id,
+        currentRoute.name,
+        { scrollY: contentRef.current?.scrollTop || 0 }
+      )
       setRoute({ name, params })
-      if (contentRef.current) contentRef.current.scrollTop = 0
       busy.current = false
     })
-  }
+  }, [])
 
-  const setDemoRole = (roleId) => {
+  const setDemoRole = useCallback((roleId) => {
     const nextRole = DEMO_ROLES.find((demoRole) => demoRole.id === roleId)
     if (!nextRole) return
-    if (!canAccess(ACTIVE_OF[route.name] || route.name, nextRole)) {
+    const currentRole = roleRef.current
+    if (nextRole.id === currentRole.id) return
+    const currentRoute = routeRef.current
+    navigationIdRef.current += 1
+    busy.current = false
+    viewRegistryRef.current = patchRegistryRoute(
+      viewRegistryRef.current,
+      currentRole.id,
+      currentRoute.name,
+      { scrollY: contentRef.current?.scrollTop || 0 }
+    )
+    if (!canAccess(ACTIVE_OF[currentRoute.name] || currentRoute.name, nextRole)) {
       setRoute({ name: 'dashboard' })
-      if (contentRef.current) contentRef.current.scrollTop = 0
     }
     dispatch({ type: 'SET_DEMO_ROLE', roleId })
-  }
+  }, [dispatch])
 
-  const setRoleMenu = (open) => {
+  useLayoutEffect(() => {
+    const { scrollY } = readRouteViewState(viewRegistryRef.current, role.id, route.name, { scrollY: 0 })
+    if (contentRef.current) contentRef.current.scrollTop = Number.isFinite(scrollY) ? scrollY : 0
+  }, [role.id, route.name, routeParamsKey])
+
+  const setRoleMenu = useCallback((open) => {
     if (open) {
       setOverlay(null)
     }
     setRoleMenuOpen(open)
-  }
-  const openSessionForm = (opts = {}) => { setDrawer({ kind: 'session', opts }); openOverlay('drawer') }
-  const openClientForm = (opts = {}) => { setDrawer({ kind: 'client', opts }); openOverlay('drawer') }
-  const openPsychForm = (opts = {}) => { setDrawer({ kind: 'psych', opts }); openOverlay('drawer') }
-  const openTusGroupForm = (opts = {}) => { setDrawer({ kind: 'tusGroup', opts }); openOverlay('drawer') }
-  const openTusKidForm = (opts = {}) => { setDrawer({ kind: 'tusKid', opts }); openOverlay('drawer') }
-  const openTusClassForm = (opts = {}) => { setDrawer({ kind: 'tusClass', opts }); openOverlay('drawer') }
-  const openTeamBoard = () => { setDrawer({ kind: 'board' }); openOverlay('drawer') }
-  const closeDrawer = () => {
+  }, [])
+  const openSessionForm = useCallback((opts = {}) => { setDrawer({ kind: 'session', opts }); openOverlay('drawer') }, [openOverlay])
+  const openClientForm = useCallback((opts = {}) => { setDrawer({ kind: 'client', opts }); openOverlay('drawer') }, [openOverlay])
+  const openPsychForm = useCallback((opts = {}) => { setDrawer({ kind: 'psych', opts }); openOverlay('drawer') }, [openOverlay])
+  const openTusGroupForm = useCallback((opts = {}) => { setDrawer({ kind: 'tusGroup', opts }); openOverlay('drawer') }, [openOverlay])
+  const openTusKidForm = useCallback((opts = {}) => { setDrawer({ kind: 'tusKid', opts }); openOverlay('drawer') }, [openOverlay])
+  const openTusClassForm = useCallback((opts = {}) => { setDrawer({ kind: 'tusClass', opts }); openOverlay('drawer') }, [openOverlay])
+  const openTeamBoard = useCallback(() => { setDrawer({ kind: 'board' }); openOverlay('drawer') }, [openOverlay])
+  const closeDrawer = useCallback(() => {
     closeOverlay('drawer')
     setDrawer(null)
-  }
+  }, [closeOverlay])
 
   // The new .view exists only after animateOut has committed a route swap.
   // Moving focus here gives screen-reader and keyboard users the destination
   // context without interrupting the existing live-region announcement.
   useEffect(() => {
     viewRef.current?.focus({ preventScroll: true })
-  }, [route])
+  }, [role.id, route.name, routeParamsKey])
 
   const View = VIEWS[route.name] || Dashboard
   const hasOverlay = overlay !== null
+  const handleCockpitChange = useCallback((open) => {
+    if (open) openOverlay('cockpit')
+    else closeOverlay('cockpit')
+  }, [closeOverlay, openOverlay])
+  const toggleSearch = useCallback(() => {
+    setRoleMenuOpen(false)
+    setOverlay((active) => active === 'palette' ? null : 'palette')
+  }, [])
+  const openNavigation = useCallback(() => openOverlay('navigation'), [openOverlay])
+  const closeNavigation = useCallback(() => closeOverlay('navigation'), [closeOverlay])
+  const openNewSession = useCallback(() => openSessionForm(), [openSessionForm])
+  const shellValue = useMemo(() => ({
+    role,
+    setDemoRole,
+    canAccess,
+    route,
+    navigate,
+    getViewState,
+    patchViewState,
+    resetViewState,
+    openSessionForm,
+    openClientForm,
+    openPsychForm,
+    openTusGroupForm,
+    openTusKidForm,
+    openTusClassForm,
+    openTeamBoard,
+  }), [
+    getViewState, navigate, openClientForm, openPsychForm, openSessionForm, openTeamBoard,
+    openTusClassForm, openTusGroupForm, openTusKidForm, patchViewState, resetViewState, role, route,
+    setDemoRole,
+  ])
 
   return (
-    <ShellCtx.Provider value={{ role, setDemoRole, canAccess, route, navigate, openSessionForm, openClientForm, openPsychForm, openTusGroupForm, openTusKidForm, openTusClassForm, openTeamBoard }}>
+    <ShellCtx.Provider value={shellValue}>
+      <a className="skip-link" href="#main-content">Przejdź do treści</a>
       <div className="shell" ref={shellRef}>
         {!isCompact && <Sidebar route={route} navigate={navigate} role={role} inert={hasOverlay ? '' : undefined} />}
         <div className="main">
@@ -553,35 +684,49 @@ export function Shell({ onLogout }) {
             setDemoRole={setDemoRole}
             roleMenuOpen={roleMenuOpen}
             setRoleMenuOpen={setRoleMenu}
-            onCockpitChange={(open) => open ? openOverlay('cockpit') : closeOverlay('cockpit')}
+            showAccountControls={!isPhone}
+            onCockpitChange={handleCockpitChange}
             onLogout={onLogout}
-            onSearch={() => {
-              setRoleMenuOpen(false)
-              setOverlay((active) => active === 'palette' ? null : 'palette')
-            }}
-            onMenu={isCompact ? () => openOverlay('navigation') : undefined}
+            onSearch={toggleSearch}
+            onMenu={isCompact ? openNavigation : undefined}
             overlayKey={overlay}
           />
           <main
+            id="main-content"
             className={`content ${route.name === 'dashboard' ? 'content--dashboard' : ''}`}
             ref={contentRef}
+            tabIndex={-1}
             inert={hasOverlay ? '' : undefined}
           >
-            <div className="view" ref={viewRef} tabIndex={-1} key={route.name + JSON.stringify(route.params || {})}>
+            <div className="view" ref={viewRef} tabIndex={-1} key={`${role.id}:${route.name}:${routeParamsKey}`}>
               <View params={route.params || {}} />
             </div>
           </main>
         </div>
       </div>
       {/* view changes are announced — the router moves no focus by itself */}
-      <div className="sr-only" aria-live="polite">{routeTitle(route.name, role)}</div>
+      <div className="sr-only" aria-live="polite">{routeTitle(route.name)}</div>
       {isPhone && (
         <div inert={hasOverlay ? '' : undefined}>
-          <MobileTabbar route={route} navigate={navigate} role={role} onAdd={() => openSessionForm()} />
+          <MobileTabbar
+            route={route}
+            navigate={navigate}
+            role={role}
+            onAdd={openNewSession}
+            onMore={openNavigation}
+          />
         </div>
       )}
       {isCompact && overlay === 'navigation' && (
-        <MobileNavDrawer route={route} navigate={navigate} role={role} onClose={() => closeOverlay('navigation')} />
+        <MobileNavDrawer
+          route={route}
+          navigate={navigate}
+          role={role}
+          onRoleChange={setDemoRole}
+          onLogout={onLogout}
+          showAccountControls={isPhone}
+          onClose={closeNavigation}
+        />
       )}
       {overlay === 'drawer' && drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}

@@ -25,19 +25,299 @@ test('the mock-data workspace opens after login', async ({ page }) => {
 
 test('navigation focuses the destination and a day cockpit excludes background controls', async ({ page }) => {
   await login(page)
-  await page.getByRole('button', { name: /Kalendarz/ }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Kalendarz' }).click()
   await expect(page.locator('.view')).toBeFocused()
   await page.getByRole('button', { name: /Panel dnia/ }).click()
   await expect(page.getByRole('dialog', { name: /Panel dnia/ })).toBeVisible()
   await expect(page.getByRole('main')).toHaveAttribute('inert', '')
 })
 
-test('therapist demo mode narrows navigation to daily care work', async ({ page }) => {
+test('skip link reveals on focus and moves focus to the main landmark', async ({ page }) => {
+  await login(page)
+  const skipLink = page.getByRole('link', { name: 'Przejdź do treści' })
+
+  await skipLink.focus()
+  await expect(skipLink).toBeFocused()
+  expect((await skipLink.boundingBox()).y).toBeGreaterThanOrEqual(0)
+  await page.keyboard.press('Enter')
+  await expect(page.getByRole('main')).toBeFocused()
+})
+
+test('mobile shell keeps direct destinations, a full title, search, and More access', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await login(page)
+
+  const topbar = page.locator('.topbar')
+  await expect(topbar.getByRole('button', { name: 'Otwórz menu' })).toBeVisible()
+  await expect(topbar.getByText('Dziś', { exact: true })).toBeVisible()
+  await expect(topbar.getByRole('button', { name: /Szukaj w Aurelii/ })).toBeVisible()
+
+  const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
+  for (const label of ['Dziś', 'Finanse', 'Kalendarz', 'Klienci', 'Więcej']) {
+    await expect(bottomNavigation.getByRole('button', { name: label, exact: true })).toBeVisible()
+  }
+  await expect(bottomNavigation.getByRole('button', { name: 'Nowa sesja' })).toBeVisible()
+  const fab = await bottomNavigation.getByRole('button', { name: 'Nowa sesja' }).boundingBox()
+  expect(Math.abs(fab.x + fab.width / 2 - 195)).toBeLessThanOrEqual(1)
+
+  await bottomNavigation.getByRole('button', { name: 'Więcej' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nawigacja' })
+  await drawer.getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await expect(topbar.getByText('Zajęcia TUS', { exact: true })).toBeVisible()
+  await expect(bottomNavigation.getByRole('button', { name: 'Więcej' })).toHaveAttribute('aria-current', 'page')
+  await expect(topbar.locator('.topbar__title')).toHaveCSS('text-overflow', 'clip')
+})
+
+test('mobile navigation drawer keeps role switching and logout reachable', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await login(page)
+  const more = page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('button', { name: 'Więcej' })
+
+  await more.click()
+  let drawer = page.getByRole('dialog', { name: 'Nawigacja' })
+  const roles = drawer.getByRole('group', { name: 'Tryb demonstracyjny' })
+  await expect(roles.getByRole('button', { name: /Koordynatorka.*Maja Nowak/ })).toBeVisible()
+  await roles.getByRole('button', { name: /Koordynatorka.*Maja Nowak/ }).click()
+
+  await more.click()
+  drawer = page.getByRole('dialog', { name: 'Nawigacja' })
+  await expect(drawer.getByRole('button', { name: 'Wyloguj się' })).toBeVisible()
+  await drawer.getByRole('button', { name: 'Wyloguj się' }).click()
+  await expect(page.getByRole('button', { name: 'Zaloguj się' })).toBeVisible()
+})
+
+test('Figure exposes its formatted value on the first rendered frame', async ({ page }) => {
+  await login(page)
+  await page.evaluate(() => {
+    window.__initialFigureTexts = []
+    const capture = (root) => {
+      const values = root.matches?.('.figures__value > span')
+        ? [root]
+        : [...(root.querySelectorAll?.('.figures__value > span') || [])]
+      values.forEach((value) => window.__initialFigureTexts.push(value.textContent))
+    }
+    window.__figureObserver = new MutationObserver((records) => {
+      records.forEach((record) => record.addedNodes.forEach((node) => {
+        if (node.nodeType === Node.ELEMENT_NODE) capture(node)
+      }))
+    })
+    window.__figureObserver.observe(document.body, { childList: true, subtree: true })
+  })
+
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Finanse' }).click()
+  const firstFigure = page.locator('.figures__value > span').first()
+  await expect(firstFigure).toBeVisible()
+  await page.waitForTimeout(1800)
+  const initialText = await page.waitForFunction(() => window.__initialFigureTexts[0]).then((handle) => handle.jsonValue())
+
+  expect(initialText).toBe(await firstFigure.textContent())
+})
+
+test('navigation restores each route scroll position', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 600 })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await login(page)
+  const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+  const content = page.locator('main.content')
+
+  await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+  await page.getByRole('region', { name: /Plan dnia/ }).getByRole('button', { name: /Jeszcze/ }).click()
+  const savedScroll = await content.evaluate((element) => {
+    element.scrollTop = 300
+    return element.scrollTop
+  })
+  expect(savedScroll).toBeGreaterThan(50)
+
+  await navigation.getByRole('button', { name: 'Klienci' }).click()
+  await expect(page.getByRole('heading', { name: /Klienci/ })).toBeVisible()
+  await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+  await expect.poll(() => content.evaluate((element) => element.scrollTop)).toBe(savedScroll)
+})
+
+test('therapist demo mode keeps canonical labels while narrowing navigation', async ({ page }) => {
   await login(page)
   await switchToTherapist(page)
-  await expect(page.getByRole('navigation')).toContainText('Mój dzień')
-  await expect(page.getByRole('navigation')).not.toContainText('Finanse')
-  await expect(page.getByRole('navigation')).not.toContainText('Raporty')
+  const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+  await expect(navigation).toContainText('Dziś')
+  await expect(navigation).toContainText('Kalendarz')
+  await expect(navigation).toContainText('Klienci')
+  await expect(navigation).not.toContainText('Mój dzień')
+  await expect(navigation).not.toContainText('Finanse')
+  await expect(navigation).not.toContainText('Raporty')
+})
+
+test('command navigation uses canonical destination labels', async ({ page }) => {
+  await login(page)
+  await page.keyboard.press('Control+K')
+  const palette = page.getByRole('dialog', { name: 'Szukaj w Aurelii' })
+  await palette.getByRole('combobox', { name: 'Szukaj w Aurelii' }).fill('kalendarz')
+
+  await expect(palette.getByRole('option', { name: 'Kalendarz', exact: true })).toBeVisible()
+  await expect(palette.getByText('Kalendarz sesji', { exact: true })).toHaveCount(0)
+})
+
+test('role switch cannot finish a pending forbidden navigation', async ({ page }) => {
+  await login(page)
+  await page.evaluate(async () => {
+    const buttons = [...document.querySelectorAll('button')]
+    buttons.find((button) => button.textContent.trim() === 'Finanse').click()
+    buttons.find((button) => (
+      button.textContent.includes('Tryb demonstracyjny') && button.textContent.includes('Julia Wolanin')
+    )).click()
+    await new Promise(requestAnimationFrame)
+    ;[...document.querySelectorAll('button')]
+      .find((button) => button.textContent.includes('Specjalistka') && button.textContent.includes('Marta Zielińska'))
+      .click()
+  })
+
+  await page.waitForTimeout(300)
+  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
+  await expect(
+    page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Dziś' })
+  ).toHaveAttribute('aria-current', 'page')
+})
+
+test('same-route view state does not leak when the demo role changes', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Klienci' }).click()
+  const search = page.getByPlaceholder('Szukaj klienta…')
+  await search.fill('Zofia')
+  await expect(search).toHaveValue('Zofia')
+
+  await switchToTherapist(page)
+
+  await expect(page.getByPlaceholder('Szukaj klienta…')).toHaveValue('')
+  await expect(page.getByRole('heading', { name: /Moi klienci/ })).toBeVisible()
+})
+
+test('coarse pointers expose complete 44px targets without enlarging pills', async ({ browser }, testInfo) => {
+  const context = await browser.newContext({
+    baseURL: testInfo.project.use.baseURL,
+    hasTouch: true,
+    viewport: { width: 390, height: 844 },
+  })
+  const page = await context.newPage()
+
+  try {
+    await login(page)
+    const todayChip = page.locator('.today-chip')
+    const todayChipHit = await todayChip.evaluate((element) => {
+      const rect = element.getBoundingClientRect()
+      const pseudo = getComputedStyle(element, '::after')
+      return { height: rect.height, hitHeight: parseFloat(pseudo.height) }
+    })
+    expect(todayChipHit.height).toBe(36)
+    expect(todayChipHit.hitHeight).toBeGreaterThanOrEqual(44)
+
+    for (const selector of ['.bpost-more', '.spine__row', '.today-attn__row', '.today-links__item']) {
+      const target = page.locator(selector).first()
+      await expect(target).toBeVisible()
+      const box = await target.boundingBox()
+      expect(box.height, selector).toBeGreaterThanOrEqual(44)
+      expect(box.width, selector).toBeGreaterThanOrEqual(44)
+    }
+
+    await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('button', { name: 'Klienci' }).click()
+    const chip = page.locator('.chips-row .chip').first()
+    await expect(chip).toBeVisible()
+    await chip.scrollIntoViewIfNeeded()
+    const chipHit = await chip.evaluate((element) => {
+      const rect = element.getBoundingClientRect()
+      const ownsPoint = (y) => {
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, y)
+        return hit === element || element.contains(hit)
+      }
+      const pseudo = getComputedStyle(element, '::after')
+      return {
+        height: rect.height,
+        hitHeight: parseFloat(pseudo.height),
+        top: ownsPoint(rect.top - 4.5),
+        bottom: ownsPoint(rect.bottom + 4.5),
+      }
+    })
+    expect(chipHit.height).toBe(34)
+    expect(chipHit.hitHeight).toBeGreaterThanOrEqual(44)
+    expect(chipHit.top).toBe(true)
+    expect(chipHit.bottom).toBe(true)
+
+    await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('button', { name: 'Więcej' }).click()
+    await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Ustawienia' }).click()
+    const smallPrimary = page.getByRole('button', { name: 'Zapisz profil' })
+    await smallPrimary.scrollIntoViewIfNeeded()
+    const buttonHit = await smallPrimary.evaluate((element) => {
+      const rect = element.getBoundingClientRect()
+      const ownsPoint = (y) => {
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, y)
+        return hit === element || element.contains(hit)
+      }
+      return { height: rect.height, top: ownsPoint(rect.top - 4), bottom: ownsPoint(rect.bottom + 4) }
+    })
+    expect(buttonHit.height).toBe(34)
+    expect(buttonHit.top).toBe(true)
+    expect(buttonHit.bottom).toBe(true)
+
+    const toggle = page.locator('.toggle').first()
+    const toggleHit = await toggle.evaluate((element) => {
+      const rect = element.getBoundingClientRect()
+      const pseudo = getComputedStyle(element, '::before')
+      return { height: rect.height, hitHeight: parseFloat(pseudo.height) }
+    })
+    expect(toggleHit.height).toBe(27)
+    expect(toggleHit.hitHeight).toBeGreaterThanOrEqual(44)
+
+    await page.setViewportSize({ width: 800, height: 844 })
+    const searchTrigger = page.locator('.cmd-trigger')
+    await expect(searchTrigger).toBeVisible()
+    const searchBox = await searchTrigger.boundingBox()
+    expect(searchBox.height).toBeGreaterThanOrEqual(44)
+  } finally {
+    await context.close()
+  }
+})
+
+test('shell and reveal motion finishes within 250ms', async ({ page }) => {
+  await page.goto('.')
+  await page.evaluate(() => {
+    window.__task2Motion = []
+    const original = window.gsap.fromTo.bind(window.gsap)
+    window.gsap.fromTo = (targets, fromVars, toVars) => {
+      const elements = window.gsap.utils.toArray(targets)
+      const kind = elements.some((element) => element.matches?.('[data-shell-reveal]'))
+        ? 'shell'
+        : elements.some((element) => element.matches?.('[data-reveal]')) ? 'reveal' : null
+      if (kind) {
+        const stagger = typeof toVars.stagger === 'number'
+          ? toVars.stagger * Math.max(elements.length - 1, 0)
+          : Number(toVars.stagger?.amount || 0)
+        window.__task2Motion.push({ kind, total: Number(toVars.duration || 0) + stagger })
+      }
+      return original(targets, fromVars, toVars)
+    }
+  })
+  await page.getByLabel('Hasło').fill('demo')
+  await page.getByRole('button', { name: 'Zaloguj się' }).click()
+  await expect(page.getByRole('main')).toBeVisible()
+
+  const motion = await page.evaluate(() => window.__task2Motion)
+  expect(motion.length).toBeGreaterThan(0)
+  expect(Math.max(...motion.map((entry) => entry.total))).toBeLessThanOrEqual(0.25)
+
+  const navIconDuration = await page.locator('.nav__item svg').first().evaluate((element) => (
+    Math.max(...getComputedStyle(element).transitionDuration.split(',').map((value) => parseFloat(value)))
+  ))
+  expect(navIconDuration).toBeLessThanOrEqual(0.25)
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  const tabMotion = await page.locator('.tabbar').evaluate((element) => {
+    const duration = (selector) => Math.max(
+      ...getComputedStyle(element.querySelector(selector)).transitionDuration
+        .split(',')
+        .map((value) => parseFloat(value))
+    )
+    return { icon: duration('.tabbar__item svg'), pill: duration('.tabbar__pill') }
+  })
+  expect(tabMotion.icon).toBeLessThanOrEqual(0.25)
+  expect(tabMotion.pill).toBeLessThanOrEqual(0.25)
 })
 
 test('therapist session form is scoped to their own practice', async ({ page }) => {
@@ -84,7 +364,7 @@ test('therapist mode guards dashboard destinations and filters command palette',
   await login(page)
   await switchToTherapist(page)
   await expect(page.getByRole('region', { name: 'Skróty' }).getByRole('button', { name: 'Zespół' })).toHaveCount(0)
-  await expect(page.getByRole('navigation').getByRole('button', { name: 'Mój dzień' })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('navigation').getByRole('button', { name: 'Dziś' })).toHaveAttribute('aria-current', 'page')
 
   await page.keyboard.press('Control+K')
   const palette = page.getByRole('dialog', { name: 'Szukaj w Aurelii' })
@@ -406,8 +686,8 @@ test('calendar opens the therapist agenda and exposes exact partial payment edit
   await login(page)
   await page.getByRole('button', { name: /Tryb demonstracyjny.*Julia Wolanin/ }).click()
   await page.getByRole('button', { name: /Specjalistka.*Marta Zielińska/ }).click()
-  await page.getByRole('button', { name: /Mój kalendarz/ }).click()
-  await expect(page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
   await expect(agenda).toBeVisible()
   const partialPayment = agenda.getByRole('button', { name: /Częściowo/ })
@@ -479,8 +759,8 @@ test('therapist agenda excludes other therapists and payment updates stay cohere
   await login(page)
   await page.getByRole('button', { name: /Tryb demonstracyjny/ }).click()
   await page.getByRole('button', { name: /Specjalistka.*Marta Zielińska/ }).click()
-  await page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' }).click()
-  await expect(page.getByRole('navigation').getByRole('button', { name: 'Mój kalendarz' })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
   await expect(page.getByRole('region', { name: /Plan dnia/ }).locator('[data-psych-id="p1"]')).toHaveCount(0)
 })
 
