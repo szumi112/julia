@@ -2,8 +2,56 @@
 // is unit-testable like workspace.js. TUS money is intentionally separate from
 // session billing: nothing here feeds isBillable/monthStats.
 import { monthKey, searchNorm } from './format.js'
+import { normalizeSearchText } from './workspace.js'
 
 const polishNameOrder = new Intl.Collator('pl', { sensitivity: 'base' })
+
+export const withTusGroupDefaults = (group) => ({
+  ...group,
+  capacity: group.capacity ?? 8,
+  ageMin: group.ageMin ?? null,
+  ageMax: group.ageMax ?? null,
+})
+
+export const searchTusOverview = ({ groups = [], kids = [], query } = {}) => {
+  const normalizedQuery = normalizeSearchText(query)
+  if (!normalizedQuery) return { groups: [], kids: [] }
+  return {
+    groups: groups.filter((group) => normalizeSearchText(group.name).includes(normalizedQuery)),
+    kids: kids.filter((kid) =>
+      [kid.name, kid.parentName, kid.parentPhone]
+        .some((value) => normalizeSearchText(value).includes(normalizedQuery))
+    ),
+  }
+}
+
+export const tusAssignmentOptions = ({ groups = [], kids = [], kid } = {}) => {
+  const memberCounts = new Map()
+  for (const member of kids) {
+    if (!member.groupId) continue
+    memberCounts.set(member.groupId, (memberCounts.get(member.groupId) || 0) + 1)
+  }
+
+  return groups
+    .map((sourceGroup) => {
+      const group = withTusGroupDefaults(sourceGroup)
+      const memberCount = memberCounts.get(group.id) || 0
+      const remaining = Math.max(group.capacity - memberCount, 0)
+      const isFull = memberCount >= group.capacity
+      const hasAge = kid?.age !== null && kid?.age !== undefined && kid?.age !== ''
+      const hasBounds = group.ageMin !== null && group.ageMax !== null
+      const ageMatch = hasAge && hasBounds
+        ? Number(kid.age) >= Number(group.ageMin) && Number(kid.age) <= Number(group.ageMax)
+        : null
+      return { ...group, ageMatch, isFull, memberCount, remaining }
+    })
+    .sort((a, b) => {
+      const tierOf = (group) => group.isFull ? 2 : group.ageMatch === false ? 1 : 0
+      return tierOf(a) - tierOf(b)
+        || polishNameOrder.compare(a.name, b.name)
+        || a.id.localeCompare(b.id)
+    })
+}
 
 export const tusGroupsForRole = (state, role) =>
   role.scope === 'own' ? state.tusGroups.filter((g) => g.leaderIds.includes(role.psychId)) : state.tusGroups

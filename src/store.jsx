@@ -4,9 +4,9 @@ import { DEMO_ROLES, INITIAL_STATE } from './data.js'
 import { monthKey, billableSummary, outstandingOf, paymentPatchFor, toISODate } from './format.js'
 import {
   linkTusGuardian, materializeTusGroupMembers, setAttendanceForRoster, stripKid,
-  unlinkTusGuardian, updateTusKidAndClients,
+  unlinkTusGuardian, updateTusKidAndClients, withTusGroupDefaults,
 } from './tus.js'
-import { dissolveLoneFamilies } from './workspace.js'
+import { dissolveLoneFamilies, withPsychologistDefaults } from './workspace.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -40,7 +40,7 @@ function reducer(state, action) {
     case 'DELETE_SESSION':
       return { ...state, sessions: state.sessions.filter((s) => s.id !== action.id) }
     case 'ADD_PSYCH': {
-      const psych = { ...action.psych, id: `p${nextId++}` }
+      const psych = withPsychologistDefaults({ ...action.psych, id: `p${nextId++}` })
       return { ...state, psychologists: [...state.psychologists, psych] }
     }
     case 'UPDATE_PSYCH':
@@ -149,7 +149,7 @@ function reducer(state, action) {
         tusKids: unlinkTusGuardian(state.tusKids, action.clientId),
       }
     case 'ADD_TUS_GROUP': {
-      const group = { ...action.group, id: makeId('g') }
+      const group = withTusGroupDefaults({ ...action.group, id: makeId('g') })
       if (action.memberKeys == null) return { ...state, tusGroups: [...state.tusGroups, group] }
       const roster = materializeTusGroupMembers({
         clients: state.clients,

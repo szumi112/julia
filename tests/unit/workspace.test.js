@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters, dissolveLoneFamilies } from '../../src/workspace.js'
+import * as workspace from '../../src/workspace.js'
+import { PSYCHOLOGISTS } from '../../src/data.js'
 import { billableSummary, paymentPatchFor } from '../../src/format.js'
+
+const {
+  roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters,
+  dissolveLoneFamilies, normalizeSearchText, clientMatchesQuery, dayStatusSummary, sessionConflicts,
+  scopedBillingSummary, withPsychologistDefaults,
+} = workspace
 
 const state = {
   sessions: [
@@ -57,6 +64,141 @@ test('today workspace selects the next scheduled session for the active role', (
     sessions: [{ ...state.sessions[1], status: 'scheduled' }],
   }, roleById('therapist'), new Date('2026-07-10T09:30:00'))
   assert.equal(workspace.next.id, 's-therapist')
+  assert.deepEqual(workspace.daySummary, {
+    total: 1,
+    completed: 0,
+    noshow: 0,
+    scheduled: 1,
+    unresolvedPast: 0,
+    current: 0,
+    future: 1,
+  })
+})
+
+test('search normalization folds Polish diacritics and removes separators', () => {
+  assert.equal(normalizeSearchText('  ŻÓŁĆ, +48 (500) 100-200  '), 'zolc48500100200')
+})
+
+test('client search matches a normalized name', () => {
+  const client = { name: 'Łucja Żak', email: 'lucja.zak@example.pl', phone: '+48 501 234 567' }
+  assert.equal(clientMatchesQuery(client, '  LUCJA ZAK '), true)
+})
+
+test('client search matches a normalized email', () => {
+  const client = { name: 'Łucja Żak', email: 'lucja.zak@example.pl', phone: '+48 501 234 567' }
+  assert.equal(clientMatchesQuery(client, 'LUCJA.ZAK@EXAMPLE.PL'), true)
+})
+
+test('client search compares formatted and unformatted phone numbers', () => {
+  const client = { name: 'Łucja Żak', email: 'lucja.zak@example.pl', phone: '+48 501 234 567' }
+  assert.equal(clientMatchesQuery(client, '48501234567'), true)
+  assert.equal(clientMatchesQuery(client, '501-234-567'), true)
+  assert.equal(clientMatchesQuery(client, '502234567'), false)
+})
+
+test('an empty normalized client query matches every client', () => {
+  assert.equal(clientMatchesQuery({ name: 'Dowolna osoba' }, '  ---  '), true)
+})
+
+test('day status summary gives current interval boundaries precedence', () => {
+  const sessions = [
+    { id: 's-ended', date: '2026-07-10', time: '09:10', duration: 50, status: 'scheduled' },
+    { id: 's-starting', date: '2026-07-10', time: '10:00', duration: 50, status: 'scheduled' },
+    { id: 's-future', date: '2026-07-10', time: '10:01', duration: 50, status: 'scheduled' },
+  ]
+
+  assert.deepEqual(dayStatusSummary(sessions, '2026-07-10', 10 * 60), {
+    total: 3,
+    completed: 0,
+    noshow: 0,
+    scheduled: 3,
+    unresolvedPast: 1,
+    current: 1,
+    future: 1,
+  })
+})
+
+test('day status summary excludes cancelled and other-day sessions', () => {
+  const sessions = [
+    { id: 's-completed', date: '2026-07-10', time: '09:00', status: 'completed' },
+    { id: 's-noshow', date: '2026-07-10', time: '10:00', status: 'noshow' },
+    { id: 's-cancelled', date: '2026-07-10', time: '11:00', status: 'cancelled' },
+    { id: 's-other-day', date: '2026-07-11', time: '12:00', status: 'scheduled' },
+  ]
+
+  assert.deepEqual(dayStatusSummary(sessions, '2026-07-10', 12 * 60), {
+    total: 2,
+    completed: 1,
+    noshow: 1,
+    scheduled: 0,
+    unresolvedPast: 0,
+    current: 0,
+    future: 0,
+  })
+})
+
+test('session conflicts report overlaps in stable date, time, and ID order', () => {
+  const sessions = [
+    { id: 's-z', psychId: 'p2', date: '2026-07-11', time: '09:00', duration: 60, status: 'scheduled' },
+    { id: 's-a', psychId: 'p2', date: '2026-07-11', time: '09:30', duration: 30, status: 'completed' },
+    { id: 's-d', psychId: 'p1', date: '2026-07-10', time: '14:20', duration: 30, status: 'scheduled' },
+    { id: 's-c', psychId: 'p1', date: '2026-07-10', time: '14:00', duration: 50, status: 'noshow' },
+    { id: 's-other-psych', psychId: 'p3', date: '2026-07-10', time: '14:10', duration: 50, status: 'scheduled' },
+  ]
+
+  assert.deepEqual(sessionConflicts(sessions), [
+    { date: '2026-07-10', psychId: 'p1', sessionIds: ['s-c', 's-d'] },
+    { date: '2026-07-11', psychId: 'p2', sessionIds: ['s-a', 's-z'] },
+  ])
+  assert.deepEqual(sessionConflicts(sessions, { date: '2026-07-11' }), [
+    { date: '2026-07-11', psychId: 'p2', sessionIds: ['s-a', 's-z'] },
+  ])
+})
+
+test('adjacent session intervals are not conflicts', () => {
+  const sessions = [
+    { id: 's-early', psychId: 'p1', date: '2026-07-10', time: '09:00', duration: 50, status: 'scheduled' },
+    { id: 's-late', psychId: 'p1', date: '2026-07-10', time: '09:50', duration: 50, status: 'scheduled' },
+  ]
+  assert.deepEqual(sessionConflicts(sessions), [])
+})
+
+test('cancelled sessions never create conflicts', () => {
+  const sessions = [
+    { id: 's-active', psychId: 'p1', date: '2026-07-10', time: '09:00', duration: 50, status: 'scheduled' },
+    { id: 's-cancelled', psychId: 'p1', date: '2026-07-10', time: '09:10', duration: 50, status: 'cancelled' },
+  ]
+  assert.deepEqual(sessionConflicts(sessions), [])
+})
+
+test('billing summary scopes billable amounts to one specialist', () => {
+  const sessions = [
+    { id: 's1', psychId: 'p1', status: 'completed', amount: 200, payment: 'paid', paidAmount: 200 },
+    { id: 's2', psychId: 'p1', status: 'noshow', amount: 100, payment: 'partial', paidAmount: 40 },
+    { id: 's3', psychId: 'p1', status: 'scheduled', amount: 900, payment: 'unpaid', paidAmount: 0 },
+    { id: 's4', psychId: 'p2', status: 'completed', amount: 300, payment: 'unpaid', paidAmount: 0 },
+  ]
+
+  assert.deepEqual(scopedBillingSummary(sessions, { psychId: 'p1' }), {
+    due: 300,
+    collected: 240,
+    outstanding: 60,
+  })
+  assert.deepEqual(scopedBillingSummary(sessions), {
+    due: 600,
+    collected: 240,
+    outstanding: 360,
+  })
+})
+
+test('psychologist capacity defaults to twenty while preserving explicit values', () => {
+  assert.deepEqual(withPsychologistDefaults({ id: 'p-new', weeklyCapacity: 12 }), {
+    id: 'p-new', weeklyCapacity: 12,
+  })
+  assert.deepEqual(withPsychologistDefaults({ id: 'p-default' }), {
+    id: 'p-default', weeklyCapacity: 20,
+  })
+  assert.equal(PSYCHOLOGISTS.every((psychologist) => psychologist.weeklyCapacity === 20), true)
 })
 
 test('partial payment replaces an invalid full paid amount with a valid partial amount', () => {

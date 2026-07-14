@@ -29,6 +29,7 @@ export const PSYCHOLOGISTS = [
     phone: '+48 601 224 187',
     room: 'Gabinet 1',
     rate: 220,
+    weeklyCapacity: 20,
   },
   {
     id: 'p2',
@@ -41,6 +42,7 @@ export const PSYCHOLOGISTS = [
     phone: '+48 604 882 341',
     room: 'Gabinet 2',
     rate: 260,
+    weeklyCapacity: 20,
   },
   {
     id: 'p3',
@@ -53,6 +55,7 @@ export const PSYCHOLOGISTS = [
     phone: '+48 503 119 906',
     room: 'Gabinet 3',
     rate: 190,
+    weeklyCapacity: 20,
   },
   {
     id: 'p4',
@@ -65,6 +68,7 @@ export const PSYCHOLOGISTS = [
     phone: '+48 698 450 233',
     room: 'Gabinet 4',
     rate: 240,
+    weeklyCapacity: 20,
   },
 ]
 
@@ -281,8 +285,8 @@ export const POSTS = [
 // attendance; parents pay a monthly fee (mirrors the practice's Excel tab).
 
 export const TUS_GROUPS = [
-  { id: 'g1', name: 'Grupa TUS 5–6 lat', age: '5–6 lat', leaderIds: ['p2', 'p3'], weekday: 3, time: '16:00', fee: 300 },
-  { id: 'g2', name: 'Grupa TUS 4 lata', age: '4 lata', leaderIds: ['p3', 'p4'], weekday: 4, time: '17:00', fee: 300 },
+  { id: 'g1', name: 'Grupa TUS 5–6 lat', age: '5–6 lat', ageMin: 5, ageMax: 6, capacity: 8, leaderIds: ['p2', 'p3'], weekday: 3, time: '16:00', fee: 300 },
+  { id: 'g2', name: 'Grupa TUS 4 lata', age: '4 lata', ageMin: 4, ageMax: 4, capacity: 8, leaderIds: ['p3', 'p4'], weekday: 4, time: '17:00', fee: 300 },
 ]
 
 const TUS_KID_DEFS = [

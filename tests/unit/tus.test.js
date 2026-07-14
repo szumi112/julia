@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { roleById } from '../../src/workspace.js'
-import {
+import * as tus from '../../src/tus.js'
+import { TUS_GROUPS } from '../../src/data.js'
+
+const {
   tusGroupsForRole, canLeadGroup, kidsOfGroup, unassignedKids, classesInMonth, tusMonths,
   nextClassOf, attendanceRate, setAttendanceForRoster, tusPaymentFor, tusMonthSummary, stripKid,
   tusMemberOptions, filterTusMemberOptions, assignTusGroupMembers, materializeTusGroupMembers,
-  linkTusGuardian, unlinkTusGuardian, updateTusKidAndClients,
-} from '../../src/tus.js'
+  linkTusGuardian, unlinkTusGuardian, updateTusKidAndClients, searchTusOverview, tusAssignmentOptions,
+  withTusGroupDefaults,
+} = tus
 
 const groups = [
   { id: 'g1', name: 'Grupa TUS 5–6 lat', leaderIds: ['p2', 'p3'], fee: 300 },
@@ -42,6 +46,87 @@ test('leadership requires centre scope or being a leader', () => {
 test('kids split into roster and unassigned pool', () => {
   assert.deepEqual(kidsOfGroup(kids, 'g1').map((k) => k.id), ['k1', 'k2'])
   assert.deepEqual(unassignedKids(kids).map((k) => k.id), ['k3'])
+})
+
+test('TUS overview search stays empty for an empty normalized query', () => {
+  const overview = searchTusOverview({
+    groups: [{ id: 'g1', name: 'Grupa Żółta' }],
+    kids: [{ id: 'k1', name: 'Łucja Żak', parentName: 'Renata Żak', parentPhone: '+48 501 234 567' }],
+    query: '  ---  ',
+  })
+  assert.deepEqual(overview, { groups: [], kids: [] })
+})
+
+test('TUS overview search matches normalized group display names', () => {
+  const overviewGroups = [
+    { id: 'g1', name: 'Grupa Żółta' },
+    { id: 'g2', name: 'Grupa Niebieska' },
+  ]
+  const overview = searchTusOverview({ groups: overviewGroups, kids: [], query: 'zolta' })
+  assert.deepEqual(overview, { groups: [overviewGroups[0]], kids: [] })
+})
+
+test('TUS overview search matches child and parent contact fields', () => {
+  const overviewKids = [
+    { id: 'k1', name: 'Łucja Żak', parentName: 'Renata Gawryś', parentPhone: '+48 501 234 567' },
+    { id: 'k2', name: 'Jan Nowak', parentName: 'Piotr Nowak', parentPhone: '+48 502 111 222' },
+  ]
+
+  assert.deepEqual(searchTusOverview({ groups: [], kids: overviewKids, query: 'lucja' }).kids, [overviewKids[0]])
+  assert.deepEqual(searchTusOverview({ groups: [], kids: overviewKids, query: 'gawrys' }).kids, [overviewKids[0]])
+  assert.deepEqual(searchTusOverview({ groups: [], kids: overviewKids, query: '501234567' }).kids, [overviewKids[0]])
+})
+
+test('TUS assignment options tier available age matches before other and full groups', () => {
+  const assignmentGroups = [
+    { id: 'g-beta', name: 'Beta', capacity: 3, ageMin: 5, ageMax: 6 },
+    { id: 'g-delta', name: 'Delta', capacity: 5, ageMin: 8, ageMax: 9 },
+    { id: 'g-gamma', name: 'Gamma', capacity: 1, ageMin: 5, ageMax: 6 },
+    { id: 'g-alfa', name: 'Alfa', capacity: 4, ageMin: null, ageMax: null },
+    { id: 'g-epsilon', name: 'Epsilon', capacity: 1, ageMin: 8, ageMax: 9 },
+  ]
+  const roster = [
+    { id: 'k1', groupId: 'g-beta' },
+    { id: 'k2', groupId: 'g-beta' },
+    { id: 'k3', groupId: 'g-delta' },
+    { id: 'k4', groupId: 'g-gamma' },
+    { id: 'k5', groupId: 'g-epsilon' },
+  ]
+
+  const options = tusAssignmentOptions({ groups: assignmentGroups, kids: roster, kid: { id: 'target', age: 5 } })
+
+  assert.deepEqual(options.map((group) => group.id), [
+    'g-alfa', 'g-beta', 'g-delta', 'g-epsilon', 'g-gamma',
+  ])
+  assert.deepEqual(options.map(({ id, ageMatch, isFull, memberCount, remaining }) => ({
+    id, ageMatch, isFull, memberCount, remaining,
+  })), [
+    { id: 'g-alfa', ageMatch: null, isFull: false, memberCount: 0, remaining: 4 },
+    { id: 'g-beta', ageMatch: true, isFull: false, memberCount: 2, remaining: 1 },
+    { id: 'g-delta', ageMatch: false, isFull: false, memberCount: 1, remaining: 4 },
+    { id: 'g-epsilon', ageMatch: false, isFull: true, memberCount: 1, remaining: 0 },
+    { id: 'g-gamma', ageMatch: true, isFull: true, memberCount: 1, remaining: 0 },
+  ])
+  assert.deepEqual(assignmentGroups, [
+    { id: 'g-beta', name: 'Beta', capacity: 3, ageMin: 5, ageMax: 6 },
+    { id: 'g-delta', name: 'Delta', capacity: 5, ageMin: 8, ageMax: 9 },
+    { id: 'g-gamma', name: 'Gamma', capacity: 1, ageMin: 5, ageMax: 6 },
+    { id: 'g-alfa', name: 'Alfa', capacity: 4, ageMin: null, ageMax: null },
+    { id: 'g-epsilon', name: 'Epsilon', capacity: 1, ageMin: 8, ageMax: 9 },
+  ])
+})
+
+test('TUS group defaults add neutral bounds and capacity while preserving explicit capacity', () => {
+  assert.deepEqual(withTusGroupDefaults({ id: 'g-new' }), {
+    id: 'g-new', capacity: 8, ageMin: null, ageMax: null,
+  })
+  assert.deepEqual(withTusGroupDefaults({ id: 'g-large', capacity: 12, ageMin: 7, ageMax: 9 }), {
+    id: 'g-large', capacity: 12, ageMin: 7, ageMax: 9,
+  })
+  assert.deepEqual(TUS_GROUPS.map(({ id, capacity, ageMin, ageMax }) => ({ id, capacity, ageMin, ageMax })), [
+    { id: 'g1', capacity: 8, ageMin: 5, ageMax: 6 },
+    { id: 'g2', capacity: 8, ageMin: 4, ageMax: 4 },
+  ])
 })
 
 test('classes filter by month and months list is sorted unique', () => {
