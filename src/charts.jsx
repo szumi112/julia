@@ -67,13 +67,16 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
     const path = lineRef.current
     const fill = fillRef.current
     if (!path || !motionOK()) return
-    const len = path.getTotalLength()
     window.gsap.fromTo(
       path,
-      { strokeDasharray: len, strokeDashoffset: len },
-      { strokeDashoffset: 0, duration: 1.6, ease: 'power3.inOut', delay: 0.15 }
+      { scaleY: 0.96, transformOrigin: 'center center' },
+      { scaleY: 1, duration: 0.2, ease: 'power2.out', clearProps: 'transform' }
     )
-    window.gsap.fromTo(fill, { opacity: 0 }, { opacity: 1, duration: 1.1, delay: 0.7 })
+    window.gsap.fromTo(
+      fill,
+      { scaleY: 0.98, transformOrigin: 'center bottom' },
+      { scaleY: 1, duration: 0.18, ease: 'power2.out', clearProps: 'transform' }
+    )
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [width, data])
 
@@ -219,8 +222,8 @@ export function Donut({ parts, size = 190, thickness = 26, centerTop, centerBott
     const segs = ref.current.querySelectorAll('.donut-seg')
     window.gsap.fromTo(
       segs,
-      { opacity: 0, svgOrigin: `${size / 2} ${size / 2}`, rotation: -14 },
-      { opacity: 1, rotation: 0, duration: 1.1, ease: 'power3.out', stagger: 0.1 }
+      { svgOrigin: `${size / 2} ${size / 2}`, rotation: -6 },
+      { rotation: 0, duration: 0.18, ease: 'power3.out', stagger: { amount: 0.05 } }
     )
   }, [size, parts.length])
 
@@ -290,18 +293,17 @@ export function BarFill({ segments, totalMax }) {
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    // width lands immediately; only the compositor-friendly scale animates
-    el.style.width = pct + '%'
+    // Data lands immediately; a slight compositor-only scale adds polish.
     if (!motionOK()) return
     window.gsap.fromTo(
       el,
-      { scaleX: 0, transformOrigin: 'left center' },
-      { scaleX: 1, duration: 1.2, ease: 'power3.out', delay: 0.2, clearProps: 'transform' }
+      { scaleX: 0.96, transformOrigin: 'left center' },
+      { scaleX: 1, duration: 0.18, ease: 'power3.out', clearProps: 'transform' }
     )
   }, [pct])
   const sum = Math.max(segments.reduce((a, s) => a + s.value, 0), 1)
   return (
-    <div className="hbar__fill" ref={ref} style={{ width: 0 }}>
+    <div className="hbar__fill" ref={ref} style={{ width: `${pct}%` }}>
       {segments.map((s, i) => (
         <span
           key={i}

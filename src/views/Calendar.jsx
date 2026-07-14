@@ -282,8 +282,8 @@ export function CalendarView() {
     if (mode !== 'cal' || !motionOK() || !gridRef.current) return
     window.gsap.fromTo(
       gridRef.current.children,
-      { autoAlpha: 0, y: 10 },
-      { autoAlpha: 1, y: 0, duration: 0.4, ease: 'power2.out', stagger: 0.006, clearProps: 'transform,opacity,visibility' }
+      { y: 6 },
+      { y: 0, duration: 0.18, ease: 'power2.out', stagger: { amount: 0.05 }, clearProps: 'transform' }
     )
   }, [ym, mode, showWeekends])
 
@@ -356,8 +356,8 @@ export function CalendarView() {
     if (!motionOK() || !agendaPanelRef.current) return
     window.gsap.fromTo(
       agendaPanelRef.current.querySelectorAll('.agenda__row, .empty'),
-      { autoAlpha: 0, y: 12 },
-      { autoAlpha: 1, y: 0, duration: 0.45, ease: 'power3.out', stagger: 0.05, clearProps: 'transform,opacity,visibility' }
+      { y: 6 },
+      { y: 0, duration: 0.18, ease: 'power3.out', stagger: { amount: 0.05 }, clearProps: 'transform' }
     )
   }, [agendaSel, mode])
 

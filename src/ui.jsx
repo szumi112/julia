@@ -385,13 +385,13 @@ function ToastItem({ toast, onDismiss }) {
     if (!motionOK() || !ref.current) return
     window.gsap.fromTo(
       ref.current,
-      { autoAlpha: 0, y: 18, scale: 0.94 },
-      { autoAlpha: 1, y: 0, scale: 1, duration: 0.45, ease: 'back.out(1.6)' }
+      { y: 10, scale: 0.98 },
+      { y: 0, scale: 1, duration: 0.2, ease: 'power3.out' }
     )
   }, [])
   useEffect(() => {
     if (!toast.leaving || !motionOK() || !ref.current) return
-    window.gsap.to(ref.current, { autoAlpha: 0, y: 12, scale: 0.95, duration: 0.28, ease: 'power2.in' })
+    window.gsap.to(ref.current, { y: 8, scale: 0.98, duration: 0.18, ease: 'power2.in' })
   }, [toast.leaving])
   return (
     <button type="button" className="toast" ref={ref} onClick={onDismiss} title="Zamknij" aria-label={`Zamknij: ${toast.msg}`}>

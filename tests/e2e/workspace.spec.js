@@ -17,6 +17,67 @@ async function switchToCoordinator(page) {
   await page.getByRole('button', { name: /Koordynatorka.*Maja Nowak/ }).click()
 }
 
+async function installNamedMotionCapture(page) {
+  await page.evaluate(() => {
+    window.__namedMotion = []
+    const classify = (targets) => {
+      const elements = window.gsap.utils.toArray(targets)
+      const element = elements[0]
+      if (!element?.matches) return { kind: null, count: elements.length }
+      if (element.matches('.cal__day')) return { kind: 'calendar-grid', count: elements.length }
+      if (element.matches('.agenda__row, .empty')) return { kind: 'calendar-agenda', count: elements.length }
+      if (element.matches('.form-warn')) return { kind: 'session-conflict', count: elements.length }
+      if (element.matches('.toast')) return { kind: 'toast', count: elements.length }
+      if (element.matches('.donut-seg')) return { kind: 'chart-donut', count: elements.length }
+      if (element.matches('.hbar__fill')) return { kind: 'chart-bar', count: elements.length }
+      if (element.tagName.toLowerCase() === 'path' && element.closest('[aria-label^="Wykres przychodów"]')) {
+        return { kind: element.getAttribute('fill') === 'none' ? 'chart-area-line' : 'chart-area-fill', count: elements.length }
+      }
+      return { kind: null, count: elements.length }
+    }
+    const pick = (vars = {}) => ({
+      autoAlpha: vars.autoAlpha,
+      opacity: vars.opacity,
+      scaleX: vars.scaleX,
+      strokeDashoffset: vars.strokeDashoffset,
+      visibility: vars.visibility,
+    })
+    const total = (vars = {}, count = 1) => {
+      const stagger = typeof vars.stagger === 'number'
+        ? vars.stagger * Math.max(count - 1, 0)
+        : Number(vars.stagger?.amount || 0)
+      return Number(vars.duration || 0) + Number(vars.delay || 0) + stagger
+    }
+    const originalFromTo = window.gsap.fromTo.bind(window.gsap)
+    const originalTo = window.gsap.to.bind(window.gsap)
+    window.gsap.fromTo = (targets, fromVars, toVars) => {
+      const { kind, count } = classify(targets)
+      if (kind) window.__namedMotion.push({ kind, method: 'fromTo', from: pick(fromVars), to: pick(toVars), total: total(toVars, count) })
+      return originalFromTo(targets, fromVars, toVars)
+    }
+    window.gsap.to = (targets, toVars) => {
+      const { kind, count } = classify(targets)
+      if (kind) window.__namedMotion.push({ kind, method: 'to', to: pick(toVars), total: total(toVars, count) })
+      return originalTo(targets, toVars)
+    }
+  })
+}
+
+function expectVisibleFastMotion(records, requiredKinds) {
+  const kinds = new Set(records.map((record) => record.kind))
+  for (const kind of requiredKinds) expect(kinds.has(kind), kind).toBe(true)
+  for (const record of records.filter(({ kind }) => requiredKinds.includes(kind))) {
+    expect(record.total, `${record.kind} total`).toBeLessThanOrEqual(0.25)
+    for (const vars of [record.from, record.to].filter(Boolean)) {
+      expect(vars.autoAlpha, `${record.kind} autoAlpha`).not.toBe(0)
+      expect(vars.opacity, `${record.kind} opacity`).not.toBe(0)
+      expect(vars.visibility, `${record.kind} visibility`).not.toBe('hidden')
+    }
+    expect(record.from?.scaleX, `${record.kind} scaleX`).not.toBe(0)
+    expect(Number(record.from?.strokeDashoffset || 0), `${record.kind} stroke draw`).toBeLessThanOrEqual(0)
+  }
+}
+
 test('the mock-data workspace opens after login', async ({ page }) => {
   await login(page)
   await expect(page.getByRole('region', { name: 'Pulpit dnia' })).toBeVisible()
@@ -492,6 +553,80 @@ test('segmented, switch, and interactive control CSS transitions stay within 250
   for (const [control, duration] of Object.entries(durations)) {
     expect(duration, control).toBeLessThanOrEqual(0.25)
   }
+})
+
+test('calendar operational swaps stay visible and finish within 250ms including stagger', async ({ page }) => {
+  await login(page)
+  await installNamedMotionCapture(page)
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Kalendarz' }).click()
+
+  await page.locator('.day-strip__day:not(.is-on)').first().click()
+  await expect.poll(() => page.evaluate(() => window.__namedMotion.some(({ kind }) => kind === 'calendar-agenda'))).toBe(true)
+  await page.getByRole('radio', { name: 'Miesiąc' }).click()
+  await expect.poll(() => page.evaluate(() => window.__namedMotion.some(({ kind }) => kind === 'calendar-grid'))).toBe(true)
+
+  const records = await page.evaluate(() => window.__namedMotion)
+  expectVisibleFastMotion(records, ['calendar-agenda', 'calendar-grid'])
+})
+
+test('session conflict warning is visible immediately and finishes motion within 250ms', async ({ page }) => {
+  await login(page)
+  await installNamedMotionCapture(page)
+  await page.getByRole('button', { name: 'Nowa sesja' }).first().click()
+  const drawer = page.getByRole('dialog', { name: 'Nowa sesja' })
+  await drawer.getByLabel('Klient').selectOption({ label: 'Zofia Mazur' })
+  await drawer.getByLabel('Godzina').fill('08:10')
+  await expect(drawer.getByRole('status')).toBeVisible()
+
+  const records = await page.evaluate(() => window.__namedMotion)
+  expectVisibleFastMotion(records, ['session-conflict'])
+})
+
+test('toast messages use visible transform-only enter and exit motion within 250ms', async ({ page }) => {
+  await login(page)
+  await installNamedMotionCapture(page)
+  await page.getByRole('region', { name: 'Skróty' }).getByRole('button', { name: 'Tablica zespołu' }).click()
+  const board = page.getByRole('dialog', { name: 'Tablica zespołu' })
+  await board.getByLabel('Nowy wpis na tablicy').fill('Wpis do testu globalnego ruchu')
+  await board.getByRole('button', { name: 'Opublikuj' }).click()
+  const toast = page.getByRole('button', { name: /Zamknij: Wpis dodany na tablicę/ })
+  await expect(toast).toBeVisible()
+  await toast.focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => page.evaluate(() => window.__namedMotion.filter(({ kind }) => kind === 'toast').length)).toBe(2)
+
+  const records = await page.evaluate(() => window.__namedMotion)
+  expectVisibleFastMotion(records, ['toast'])
+  await expect(toast).toHaveCount(0)
+})
+
+test('Today cockpit progress transition finishes within 250ms', async ({ page }) => {
+  await login(page)
+  await page.getByRole('button', { name: /Panel dnia/ }).click()
+  const progress = page.getByRole('dialog', { name: 'Panel dnia' }).locator('.cockpit__progress span')
+  await expect(progress).toBeVisible()
+  const duration = await progress.evaluate((element) => Math.max(
+    ...getComputedStyle(element).transitionDuration.split(',').map((value) => (
+      value.endsWith('ms') ? parseFloat(value) / 1000 : parseFloat(value)
+    ))
+  ))
+  expect(duration).toBeLessThanOrEqual(0.25)
+})
+
+test('chart data stays visible while decorative motion finishes within 250ms', async ({ page }) => {
+  await login(page)
+  await installNamedMotionCapture(page)
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Zespół' }).click()
+  await page.locator('.psy-card').first().click()
+  await expect.poll(() => page.evaluate(() => window.__namedMotion.some(({ kind }) => kind === 'chart-area-line'))).toBe(true)
+
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Raporty' }).click()
+  await expect.poll(() => page.evaluate(() => (
+    ['chart-area-fill', 'chart-bar', 'chart-donut'].every((kind) => window.__namedMotion.some((record) => record.kind === kind))
+  ))).toBe(true)
+
+  const records = await page.evaluate(() => window.__namedMotion)
+  expectVisibleFastMotion(records, ['chart-area-fill', 'chart-area-line', 'chart-bar', 'chart-donut'])
 })
 
 test('therapist session form is scoped to their own practice', async ({ page }) => {

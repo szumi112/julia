@@ -121,8 +121,8 @@ export function SessionDrawer({ opts, onClose }) {
     if (conflict && motionOK() && warnRef.current) {
       window.gsap.fromTo(
         warnRef.current,
-        { autoAlpha: 0, y: -6 },
-        { autoAlpha: 1, y: 0, duration: 0.35, ease: 'power2.out', clearProps: 'transform,opacity,visibility' }
+        { y: -4 },
+        { y: 0, duration: 0.2, ease: 'power2.out', clearProps: 'transform' }
       )
     }
   }, [conflict?.id])
