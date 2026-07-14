@@ -9,7 +9,7 @@ import { useIsPhone } from './responsive.js'
 import { motionOK } from './anim.js'
 import { Icon } from './icons.jsx'
 import { Avatar, Button, IconBtn, EmptyState } from './ui.jsx'
-import { sessionsForRole } from './workspace.js'
+import { sessionsForRole, todayWorkspace } from './workspace.js'
 import {
   toISODate, timeToMin, pad2, fmtMoney, fmtDayMonth, fmtWeekday, cap,
   sessionsWord, outstandingOf, isBillable,
@@ -42,15 +42,13 @@ function useTodayModel() {
   const today = toISODate(now)
   const nowMin = now.getHours() * 60 + now.getMinutes()
   return useMemo(() => {
+    const workspace = todayWorkspace(state, role, now)
     const scopedSessions = sessionsForRole(state, role)
-    const todays = scopedSessions
-      .filter((s) => s.date === today && s.status !== 'cancelled')
-      .sort((a, b) => (a.time < b.time ? -1 : 1))
-    const done = todays.filter((s) => s.status === 'completed').length
-    const running = todays.find(
-      (s) => s.status === 'scheduled' && timeToMin(s.time) <= nowMin && nowMin < timeToMin(s.time) + s.duration
-    )
-    const next = todays.find((s) => s.status === 'scheduled' && timeToMin(s.time) > nowMin)
+    const todays = workspace.schedule
+    const done = workspace.daySummary.completed
+    const total = workspace.daySummary.total
+    const running = workspace.current
+    const next = workspace.next
     // sessions are kept sorted by date+time, so the first future match wins
     const future = !running && !next
       ? scopedSessions.find((s) => s.status === 'scheduled' && s.date > today)
@@ -60,7 +58,7 @@ function useTodayModel() {
     const unpaidCount = showFinance
       ? state.sessions.filter((s) => isBillable(s) && outstandingOf(s) > 0).length
       : 0
-    return { today, nowMin, todays, done, running, next, future, outstanding, unpaidCount, showFinance }
+    return { today, nowMin, todays, done, total, running, next, future, outstanding, unpaidCount, showFinance }
   }, [state, role, today, nowMin])
 }
 
@@ -73,7 +71,7 @@ function CockpitBody({ m, onClose }) {
 
   const focus = m.running || m.next
   const focusPsych = focus ? psychOf(focus.psychId) : null
-  const total = m.todays.length
+  const total = m.total
   const pct = total ? Math.round((m.done / total) * 100) : 0
 
   return (
@@ -338,7 +336,7 @@ export function TodayCockpit({ open, onOpenChange, disabled = false }) {
   let text
   if (m.running) text = `Trwa · ${firstName(m.running.clientId)}`
   else if (m.next) text = `${untilLabel(timeToMin(m.next.time) - m.nowMin)} · ${m.next.time}`
-  else if (m.todays.length > 0) text = `Po sesjach · ${m.done}/${m.todays.length}`
+  else if (m.total > 0) text = `Po sesjach · ${m.done}/${m.total}`
   else text = 'Wolny dzień'
 
   return (
