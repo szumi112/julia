@@ -1762,6 +1762,34 @@ test.describe('Task 4 administrative redesign', () => {
     await expect(row).toHaveAttribute('data-paid-date', '2026-07-14')
   })
 
+  test('Finanse and Raporty present fractional payments to the exact cent', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    const row = page.locator('tr[data-session-id="demo-unpaid"]')
+
+    await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
+    let dialog = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+    await expect(dialog).toContainText('pozostało 220 zł')
+    await dialog.getByLabel('Kwota wpłaty').fill('8.21')
+    await dialog.getByLabel('Forma płatności').selectOption('cash')
+    await dialog.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+
+    await expect(row.locator('td').nth(4)).toHaveText(/8,21\s*zł/)
+    await expect(page.locator('.toast').filter({ hasText: 'Zaksięgowano wpłatę' })).toContainText(/8,21\s*zł/)
+    await expect(page.locator('.figures__item').filter({ hasText: 'Wpłacono' }).first()).toContainText(/,21\s*zł/)
+
+    await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
+    dialog = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+    await expect(dialog.getByLabel('Kwota wpłaty')).toHaveValue('211.79')
+    await expect(dialog).toContainText(/pozostało 211,79\s*zł/)
+    await dialog.getByRole('button', { name: 'Anuluj' }).click()
+
+    await navigation.getByRole('button', { name: 'Raporty' }).click()
+    await expect(page.locator('.figures__item').filter({ hasText: 'Wpłacono' }).first()).toContainText(/,21\s*zł/)
+  })
+
   test('actionable finance toasts clear on logout and role boundaries', async ({ page }) => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
@@ -1859,6 +1887,54 @@ test.describe('Task 4 administrative redesign', () => {
     await expect(summaries.getByRole('article')).toHaveCount(1)
     await expect(summaries).toContainText('Anna Lewandowska')
     await expectNoHorizontalPageOverflow(page)
+  })
+
+  test('Ustawienia limits the coordinator to personal calendar and integration preferences', async ({ page }) => {
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('navigation', { name: 'Sekcje ustawień' })
+      .getByRole('button', { name: 'Zespół i stawki' }).click()
+
+    await switchToCoordinator(page)
+
+    const main = page.getByRole('main')
+    const sections = main.getByRole('navigation', { name: 'Sekcje ustawień' })
+    await expect(main.getByRole('heading', { level: 1, name: 'Ustawienia osobiste' })).toBeVisible()
+    await expect(main).toContainText('Kalendarz, integracje i preferencje dla: Maja Nowak · Koordynatorka.')
+    await expect(sections.getByRole('button')).toHaveText(['Kalendarz i integracje'])
+    await expect(sections.getByRole('button', { name: 'Kalendarz i integracje' })).toHaveAttribute('aria-current', 'true')
+    await expect(main.getByRole('heading', { name: 'Kalendarz i integracje', exact: true })).toBeVisible()
+    await expect(main.getByRole('switch', { name: 'Weekendy w kalendarzu' })).toBeVisible()
+    await expect(main.getByRole('form', { name: 'Twoje konto' })).toHaveCount(0)
+    await expect(main.getByRole('form', { name: 'Dane centrum' })).toHaveCount(0)
+    await expect(main.getByRole('form', { name: 'Zespół i stawki' })).toHaveCount(0)
+    await expect(main.getByRole('button', { name: /Edytuj profil/ })).toHaveCount(0)
+    await expect(main.getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(0)
+  })
+
+  test('Ustawienia limits the therapist to personal calendar and integration preferences', async ({ page }) => {
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('navigation', { name: 'Sekcje ustawień' })
+      .getByRole('button', { name: 'Centrum' }).click()
+
+    await switchToTherapist(page)
+
+    const main = page.getByRole('main')
+    const sections = main.getByRole('navigation', { name: 'Sekcje ustawień' })
+    await expect(main.getByRole('heading', { level: 1, name: 'Ustawienia osobiste' })).toBeVisible()
+    await expect(main).toContainText('Kalendarz, integracje i preferencje dla: Marta Zielińska · Specjalistka.')
+    await expect(sections.getByRole('button')).toHaveText(['Kalendarz i integracje'])
+    await expect(sections.getByRole('button', { name: 'Kalendarz i integracje' })).toHaveAttribute('aria-current', 'true')
+    await expect(main.getByRole('heading', { name: 'Kalendarz i integracje', exact: true })).toBeVisible()
+    await expect(main.getByRole('switch', { name: 'Weekendy w kalendarzu' })).toBeVisible()
+    await expect(main.getByRole('form', { name: 'Twoje konto' })).toHaveCount(0)
+    await expect(main.getByRole('form', { name: 'Dane centrum' })).toHaveCount(0)
+    await expect(main.getByRole('form', { name: 'Zespół i stawki' })).toHaveCount(0)
+    await expect(main.getByRole('button', { name: /Edytuj profil/ })).toHaveCount(0)
+    await expect(main.getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(0)
   })
 
   test('Ustawienia keeps ordered local section navigation on desktop and mobile', async ({ page }) => {

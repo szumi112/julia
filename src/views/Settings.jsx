@@ -11,6 +11,7 @@ const SECTIONS = [
   { id: 'calendar', label: 'Kalendarz i integracje' },
   { id: 'team', label: 'Zespół i stawki' },
 ]
+const PERSONAL_SECTIONS = SECTIONS.filter((section) => section.id === 'calendar')
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -60,18 +61,23 @@ function PreferenceSwitch({ title, description, on, disabled, onChange }) {
 
 export function Settings() {
   const { state, dispatch, toast } = useApp()
-  const { getViewState, openPsychForm, patchViewState } = useShell()
+  const { getViewState, openPsychForm, patchViewState, role } = useShell()
   const ref = useReveal()
   const isPhone = useIsPhone()
   const osReduce = useMediaQuery('(prefers-reduced-motion: reduce)')
   const sectionRefs = useRef({})
+  const isOwner = role.id === 'owner'
+  const availableSections = isOwner ? SECTIONS : PERSONAL_SECTIONS
+  const defaultSection = isOwner ? 'account' : 'calendar'
   const psychologists = useMemo(
     () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
     [state.psychologists]
   )
   const [initialSection] = useState(() => {
-    const saved = getViewState('settings', { section: 'account' })
-    return SECTIONS.some((section) => section.id === saved.section) ? saved.section : 'account'
+    const saved = getViewState('settings', { section: defaultSection })
+    return availableSections.some((section) => section.id === saved.section)
+      ? saved.section
+      : defaultSection
   })
   const [activeSection, setActiveSection] = useState(initialSection)
   const [profile, setProfile] = useState({ name: state.user.name, email: state.user.email })
@@ -213,10 +219,14 @@ export function Settings() {
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">Konfiguracja</div>
-          <h1 className="display view-head__title">Ustawienia <em>centrum</em></h1>
+          <div className="eyebrow">{isOwner ? 'Konfiguracja' : 'Twoje preferencje'}</div>
+          <h1 className="display view-head__title">
+            Ustawienia <em>{isOwner ? 'centrum' : 'osobiste'}</em>
+          </h1>
           <p className="view-head__sub">
-            Konto, dane centrum, integracje oraz stawki i limity zespołu.
+            {isOwner
+              ? 'Konto, dane centrum, integracje oraz stawki i limity zespołu.'
+              : `Kalendarz, integracje i preferencje dla: ${role.name} · ${role.label}.`}
           </p>
         </div>
       </div>
@@ -230,7 +240,7 @@ export function Settings() {
             value={activeSection}
             onChange={(event) => selectSection(event.target.value)}
           >
-            {SECTIONS.map((section) => (
+            {availableSections.map((section) => (
               <option key={section.id} value={section.id}>{section.label}</option>
             ))}
           </select>
@@ -240,7 +250,7 @@ export function Settings() {
       <div className="settings-grid">
         {!isPhone && (
           <nav className="settings-local-nav" aria-label="Sekcje ustawień">
-            {SECTIONS.map((section) => (
+            {availableSections.map((section) => (
               <button
                 type="button"
                 key={section.id}
@@ -255,11 +265,13 @@ export function Settings() {
         )}
 
         <div className="settings-sections">
-          <section
-            className="settings-section"
-            ref={(element) => { sectionRefs.current.account = element }}
-            aria-labelledby="settings-account-title"
-          >
+          {isOwner && (
+            <>
+              <section
+                className="settings-section"
+                ref={(element) => { sectionRefs.current.account = element }}
+                aria-labelledby="settings-account-title"
+              >
             <h2 className="settings-section__title" id="settings-account-title" tabIndex={-1}>Twoje konto</h2>
             <form className="card card--pad stack" aria-label="Twoje konto" onSubmit={saveProfile} noValidate>
               <Field label="Imię i nazwisko" error={profileErrors.name}>
@@ -292,13 +304,13 @@ export function Settings() {
                 label="Zapisz konto"
               />
             </form>
-          </section>
+              </section>
 
-          <section
-            className="settings-section"
-            ref={(element) => { sectionRefs.current.center = element }}
-            aria-labelledby="settings-center-title"
-          >
+              <section
+                className="settings-section"
+                ref={(element) => { sectionRefs.current.center = element }}
+                aria-labelledby="settings-center-title"
+              >
             <h2 className="settings-section__title" id="settings-center-title" tabIndex={-1}>Dane centrum</h2>
             <form className="card card--pad stack" aria-label="Dane centrum" onSubmit={saveCenter} noValidate>
               <Field label="Nazwa" error={centerErrors.name}>
@@ -356,7 +368,9 @@ export function Settings() {
                 label="Zapisz dane centrum"
               />
             </form>
-          </section>
+              </section>
+            </>
+          )}
 
           <section
             className="settings-section"
@@ -421,11 +435,12 @@ export function Settings() {
             </div>
           </section>
 
-          <section
-            className="settings-section"
-            ref={(element) => { sectionRefs.current.team = element }}
-            aria-labelledby="settings-team-title"
-          >
+          {isOwner && (
+            <section
+              className="settings-section"
+              ref={(element) => { sectionRefs.current.team = element }}
+              aria-labelledby="settings-team-title"
+            >
             <h2 className="settings-section__title" id="settings-team-title" tabIndex={-1}>Zespół i stawki</h2>
             <form className="card card--pad" aria-label="Zespół i stawki" onSubmit={saveTeam} noValidate>
               <div className="stack team-settings-list">
@@ -512,7 +527,8 @@ export function Settings() {
                 </Button>
               </div>
             </form>
-          </section>
+            </section>
+          )}
         </div>
       </div>
     </div>

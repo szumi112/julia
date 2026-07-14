@@ -1,12 +1,23 @@
 // Formatting helpers — Polish locale throughout.
 
-const moneyFmt = new Intl.NumberFormat('pl-PL', {
+const wholeMoneyFmt = new Intl.NumberFormat('pl-PL', {
   style: 'currency',
   currency: 'PLN',
+  minimumFractionDigits: 0,
   maximumFractionDigits: 0,
 })
+const fractionalMoneyFmt = new Intl.NumberFormat('pl-PL', {
+  style: 'currency',
+  currency: 'PLN',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
 
-export const fmtMoney = (n) => moneyFmt.format(Math.round(n || 0))
+export const fmtMoney = (n) => {
+  const numeric = Number(n)
+  const value = Number.isFinite(numeric) ? Math.round(numeric * 100) / 100 : 0
+  return (Number.isInteger(value) ? wholeMoneyFmt : fractionalMoneyFmt).format(value)
+}
 
 export const fmtNumber = (n) => new Intl.NumberFormat('pl-PL').format(n)
 
