@@ -254,11 +254,15 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, contentR
     const onResize = () => setOpen(false)
     document.addEventListener('mousedown', onDoc)
     document.addEventListener('keydown', onKey)
-    window.addEventListener('scroll', onMove, true)
+    // A trigger may be scrolled into view in the same frame that activates it
+    // (keyboard focus and Playwright both do this). Let that opening scroll
+    // settle before treating later ancestor movement as a dismissal signal.
+    const scrollFrame = requestAnimationFrame(() => window.addEventListener('scroll', onMove, true))
     window.addEventListener('resize', onResize)
     return () => {
       document.removeEventListener('mousedown', onDoc)
       document.removeEventListener('keydown', onKey)
+      cancelAnimationFrame(scrollFrame)
       window.removeEventListener('scroll', onMove, true)
       window.removeEventListener('resize', onResize)
     }
@@ -381,8 +385,11 @@ export function SearchInput({ value, onChange, placeholder = 'Szukaj…' }) {
 
 function ToastItem({ toast, onDismiss }) {
   const ref = useRef(null)
+  const entered = useRef(false)
+  const inactive = useRef(false)
   useEffect(() => {
-    if (!motionOK() || !ref.current) return
+    if (entered.current || !motionOK() || !ref.current) return
+    entered.current = true
     window.gsap.fromTo(
       ref.current,
       { y: 10, scale: 0.98 },
@@ -393,11 +400,40 @@ function ToastItem({ toast, onDismiss }) {
     if (!toast.leaving || !motionOK() || !ref.current) return
     window.gsap.to(ref.current, { y: 8, scale: 0.98, duration: 0.18, ease: 'power2.in' })
   }, [toast.leaving])
+  const dismiss = () => {
+    if (inactive.current) return
+    inactive.current = true
+    onDismiss()
+  }
+  const runAction = () => {
+    if (inactive.current || toast.leaving || !toast.action) return
+    inactive.current = true
+    try {
+      toast.action.onClick()
+    } finally {
+      onDismiss()
+    }
+  }
   return (
-    <button type="button" className="toast" ref={ref} onClick={onDismiss} title="Zamknij" aria-label={`Zamknij: ${toast.msg}`}>
+    <div className="toast" ref={ref} role="status">
       <Icon name={toast.icon} size={16} />
-      {toast.msg}
-    </button>
+      <span className="toast__message">{toast.msg}</span>
+      {toast.action && (
+        <button type="button" className="toast__action" disabled={toast.leaving} onClick={runAction}>
+          {toast.action.label}
+        </button>
+      )}
+      <button
+        type="button"
+        className="toast__dismiss"
+        disabled={toast.leaving}
+        onClick={dismiss}
+        title="Zamknij"
+        aria-label={`Zamknij: ${toast.msg}`}
+      >
+        <Icon name="close" size={15} />
+      </button>
+    </div>
   )
 }
 

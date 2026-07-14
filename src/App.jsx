@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { AppProvider, useApp } from './store.jsx'
+import { AppProvider, useApp, useToasts } from './store.jsx'
 import { Shell } from './layout.jsx'
 import { Login } from './views/Login.jsx'
 import { ToastHost } from './ui.jsx'
@@ -15,13 +15,18 @@ function MotionSync() {
 
 function Root() {
   const [authed, setAuthed] = useState(false)
+  const { clearToasts } = useToasts()
+  const setAuthenticated = (value) => {
+    clearToasts()
+    setAuthed(value)
+  }
   return (
     <>
       <MotionSync />
       {authed ? (
-        <Shell key="shell" onLogout={() => setAuthed(false)} />
+        <Shell key="shell" onLogout={() => setAuthenticated(false)} />
       ) : (
-        <Login key="login" onLogin={() => setAuthed(true)} />
+        <Login key="login" onLogin={() => setAuthenticated(true)} />
       )}
       <ToastHost />
       <div className="grain" aria-hidden="true" />

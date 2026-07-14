@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Icon, Bloom } from './icons.jsx'
 import { Avatar, IconBtn, PopItem, Popover } from './ui.jsx'
-import { useApp } from './store.jsx'
+import { useApp, useToasts } from './store.jsx'
 import { ShellCtx } from './shell-ctx.js'
 import { DEMO_ROLES } from './data.js'
 import { useIsCompact, useIsPhone } from './responsive.js'
@@ -481,6 +481,7 @@ function useMonthSettled() {
 
 export function Shell({ onLogout }) {
   const { state, dispatch } = useApp()
+  const { clearToasts } = useToasts()
   const role = DEMO_ROLES.find((demoRole) => demoRole.id === state.demoRoleId) || DEMO_ROLES[0]
   const [route, setRoute] = useState(() => {
     const requested = routeFromHash(window.location.hash)
@@ -600,11 +601,14 @@ export function Shell({ onLogout }) {
     const parentRoute = ACTIVE_OF[currentRoute.name]
     const candidate = parentRoute || currentRoute.name
     const nextRoute = { name: canAccess(candidate, nextRole) ? candidate : 'dashboard' }
+    // Clear scoped actions in the same event as the authority change so no
+    // sensitive toast can paint once under the incoming role.
+    clearToasts()
     routeRef.current = nextRoute
     roleRef.current = nextRole
     setRoute(nextRoute)
     dispatch({ type: 'SET_DEMO_ROLE', roleId })
-  }, [dispatch])
+  }, [clearToasts, dispatch])
 
   useLayoutEffect(() => {
     const { scrollY } = readRouteViewState(viewRegistryRef.current, role.id, route.name, { scrollY: 0 })

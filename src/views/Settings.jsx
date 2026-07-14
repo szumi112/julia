@@ -1,73 +1,212 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { useReveal, setReduceMotion } from '../anim.js'
-import { useMediaQuery } from '../responsive.js'
-import { Button, Field, Avatar, Toggle, IconBtn } from '../ui.jsx'
+import { motionOK, setReduceMotion, useReveal } from '../anim.js'
+import { useIsPhone, useMediaQuery } from '../responsive.js'
+import { Button, Field, Avatar, IconBtn } from '../ui.jsx'
 
-// quick rate edit — local while typing, committed to the store on blur so a
-// half-typed value never leaks into session amounts
-function RateInput({ psych }) {
-  const { dispatch, toast } = useApp()
-  const [val, setVal] = useState(String(psych.rate))
-  useEffect(() => { setVal(String(psych.rate)) }, [psych.rate])
+const SECTIONS = [
+  { id: 'account', label: 'Konto' },
+  { id: 'center', label: 'Centrum' },
+  { id: 'calendar', label: 'Kalendarz i integracje' },
+  { id: 'team', label: 'Zespół i stawki' },
+]
 
-  const commit = () => {
-    const rate = Number(val)
-    if (rate > 0 && rate !== psych.rate) {
-      dispatch({ type: 'UPDATE_PSYCH', id: psych.id, patch: { rate } })
-      toast(`Stawka zaktualizowana: ${psych.name.split(' ')[0]}`)
-    } else {
-      // a rejected value never reverts silently
-      if (String(psych.rate) !== val && !(rate === psych.rate)) {
-        toast('Stawka musi być liczbą większą od zera', 'alert')
-      }
-      setVal(String(psych.rate))
-    }
-  }
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
+const teamDraftOf = (psychologists, current = {}) => Object.fromEntries(
+  psychologists.map((psychologist) => [
+    psychologist.id,
+    current[psychologist.id] || {
+      rate: String(psychologist.rate),
+      weeklyCapacity: String(psychologist.weeklyCapacity),
+    },
+  ])
+)
+
+function SaveControls({ status, dirty, disabled, label, onSave }) {
+  const message = status === 'saving'
+    ? 'Zapisywanie…'
+    : status === 'saved'
+      ? 'Zapisano'
+      : dirty ? 'Niezapisane zmiany' : ''
   return (
-    <input
-      className="input input--rate"
-      type="number"
-      min="0"
-      step="10"
-      inputMode="numeric"
-      value={val}
-      aria-label={`Stawka — ${psych.name}`}
-      onChange={(e) => setVal(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }}
-    />
+    <div className="settings-save">
+      <span className="settings-save__status" role="status" aria-live="polite">{message}</span>
+      <Button size="sm" type="submit" disabled={disabled} onClick={onSave}>{label}</Button>
+    </div>
+  )
+}
+
+function PreferenceSwitch({ title, description, on, disabled, onChange }) {
+  return (
+    <button
+      type="button"
+      className="pref-row pref-row--switch"
+      role="switch"
+      aria-checked={on}
+      aria-label={title}
+      disabled={disabled}
+      onClick={() => onChange(!on)}
+    >
+      <span>
+        <span className="pref-row__title">{title}</span>
+        <span className="pref-row__desc">{description}</span>
+      </span>
+      <span className={`toggle ${on ? 'is-on' : ''}`} aria-hidden="true" />
+    </button>
   )
 }
 
 export function Settings() {
   const { state, dispatch, toast } = useApp()
-  const { openPsychForm } = useShell()
+  const { getViewState, openPsychForm, patchViewState } = useShell()
   const ref = useReveal()
+  const isPhone = useIsPhone()
   const osReduce = useMediaQuery('(prefers-reduced-motion: reduce)')
-
+  const sectionRefs = useRef({})
+  const psychologists = useMemo(
+    () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
+    [state.psychologists]
+  )
+  const [initialSection] = useState(() => {
+    const saved = getViewState('settings', { section: 'account' })
+    return SECTIONS.some((section) => section.id === saved.section) ? saved.section : 'account'
+  })
+  const [activeSection, setActiveSection] = useState(initialSection)
   const [profile, setProfile] = useState({ name: state.user.name, email: state.user.email })
   const [center, setCenter] = useState({ ...state.center })
-  const [errors, setErrors] = useState({})
+  const [team, setTeam] = useState(() => teamDraftOf(psychologists))
+  const teamSourceRef = useRef(teamDraftOf(psychologists))
+  const [profileStatus, setProfileStatus] = useState('idle')
+  const [centerStatus, setCenterStatus] = useState('idle')
+  const [teamStatus, setTeamStatus] = useState('idle')
 
-  const saveProfile = () => {
-    const errs = {}
-    if (!profile.name.trim()) errs.profileName = 'Podaj imię i nazwisko'
-    if (!profile.email.trim()) errs.profileEmail = 'Podaj adres e-mail'
-    setErrors((e) => ({ ...e, profileName: errs.profileName, profileEmail: errs.profileEmail }))
-    if (errs.profileName || errs.profileEmail) return
-    dispatch({ type: 'UPDATE_USER', patch: { name: profile.name.trim(), email: profile.email.trim() } })
-    toast('Profil zapisany')
+  useEffect(() => {
+    patchViewState('settings', { section: activeSection })
+  }, [activeSection, patchViewState])
+
+  useEffect(() => {
+    const previousSource = teamSourceRef.current
+    const nextSource = teamDraftOf(psychologists)
+    setTeam((current) => Object.fromEntries(psychologists.map((psychologist) => {
+      const previous = previousSource[psychologist.id]
+      const next = nextSource[psychologist.id]
+      const draft = current[psychologist.id] || next
+      return [psychologist.id, {
+        rate: !previous || draft.rate === previous.rate ? next.rate : draft.rate,
+        weeklyCapacity: !previous || draft.weeklyCapacity === previous.weeklyCapacity
+          ? next.weeklyCapacity
+          : draft.weeklyCapacity,
+      }]
+    })))
+    teamSourceRef.current = nextSource
+  }, [psychologists])
+
+  const profileErrors = {
+    name: profile.name.trim() ? null : 'Podaj imię i nazwisko',
+    email: !profile.email.trim()
+      ? 'Podaj adres e-mail'
+      : EMAIL.test(profile.email.trim()) ? null : 'Podaj poprawny adres e-mail',
   }
-  const saveCenter = () => {
-    const errs = {}
-    if (!center.name.trim()) errs.centerName = 'Podaj nazwę centrum'
-    setErrors((e) => ({ ...e, centerName: errs.centerName }))
-    if (errs.centerName) return
-    dispatch({ type: 'UPDATE_CENTER', patch: center })
-    toast('Dane centrum zapisane')
+  const centerErrors = {
+    name: center.name.trim() ? null : 'Podaj nazwę centrum',
+    email: center.email.trim() && !EMAIL.test(center.email.trim()) ? 'Podaj poprawny adres e-mail' : null,
+  }
+  const profileDirty = profile.name !== state.user.name || profile.email !== state.user.email
+  const centerDirty = Object.keys(center).some((key) => center[key] !== state.center[key])
+  const teamErrors = Object.fromEntries(psychologists.map((psychologist) => {
+    const draft = team[psychologist.id] || { rate: '', weeklyCapacity: '' }
+    const rate = Number(draft.rate)
+    const weeklyCapacity = Number(draft.weeklyCapacity)
+    return [psychologist.id, {
+      rate: Number.isFinite(rate) && rate > 0 ? null : 'Stawka musi być większa od zera',
+      weeklyCapacity: Number.isInteger(weeklyCapacity) && weeklyCapacity > 0
+        ? null
+        : 'Limit musi być dodatnią liczbą całkowitą',
+    }]
+  }))
+  const teamDirty = psychologists.some((psychologist) => {
+    const draft = team[psychologist.id]
+    return draft && (
+      draft.rate !== String(psychologist.rate)
+      || draft.weeklyCapacity !== String(psychologist.weeklyCapacity)
+    )
+  })
+  const teamInvalid = Object.values(teamErrors).some((errors) => errors.rate || errors.weeklyCapacity)
+
+  const markDraftChanged = (setStatus) => setStatus((current) => current === 'saving' ? current : 'idle')
+  const completeSave = (save, setStatus) => {
+    setStatus('saving')
+    window.setTimeout(() => {
+      save()
+      setStatus('saved')
+    }, 80)
+  }
+
+  const selectSection = (sectionId) => {
+    setActiveSection(sectionId)
+    requestAnimationFrame(() => {
+      const section = sectionRefs.current[sectionId]
+      const heading = section?.querySelector('h2')
+      heading?.focus({ preventScroll: true })
+      section?.scrollIntoView({ behavior: motionOK() ? 'smooth' : 'auto', block: 'start' })
+    })
+  }
+
+  const saveProfile = (event) => {
+    event?.preventDefault()
+    if (!profileDirty || profileErrors.name || profileErrors.email || profileStatus === 'saving') return
+    const patch = { name: profile.name.trim(), email: profile.email.trim() }
+    completeSave(() => {
+      dispatch({ type: 'UPDATE_USER', patch })
+      setProfile(patch)
+    }, setProfileStatus)
+  }
+
+  const saveCenter = (event) => {
+    event?.preventDefault()
+    if (!centerDirty || centerErrors.name || centerErrors.email || centerStatus === 'saving') return
+    const patch = Object.fromEntries(Object.entries(center).map(([key, value]) => [key, value.trim()]))
+    completeSave(() => {
+      dispatch({ type: 'UPDATE_CENTER', patch })
+      setCenter(patch)
+    }, setCenterStatus)
+  }
+
+  const saveTeam = (event) => {
+    event?.preventDefault()
+    if (!teamDirty || teamInvalid || teamStatus === 'saving') return
+    const nextDraft = teamDraftOf(psychologists, team)
+    completeSave(() => {
+      for (const psychologist of psychologists) {
+        const rate = Number(nextDraft[psychologist.id].rate)
+        const weeklyCapacity = Number(nextDraft[psychologist.id].weeklyCapacity)
+        if (rate === psychologist.rate && weeklyCapacity === psychologist.weeklyCapacity) continue
+        dispatch({
+          type: 'UPDATE_PSYCH',
+          id: psychologist.id,
+          patch: { rate, weeklyCapacity },
+        })
+        nextDraft[psychologist.id] = { rate: String(rate), weeklyCapacity: String(weeklyCapacity) }
+      }
+      setTeam({ ...nextDraft })
+    }, setTeamStatus)
+  }
+
+  const setPreference = (key, value, message, sideEffect) => {
+    const previous = state.prefs[key]
+    dispatch({ type: 'SET_PREF', key, value })
+    sideEffect?.(value)
+    toast(message, 'check', {
+      label: 'Cofnij',
+      key: `preference:${key}`,
+      timeoutMs: 5000,
+      onClick: () => {
+        dispatch({ type: 'SET_PREF', key, value: previous })
+        sideEffect?.(previous)
+      },
+    })
   }
 
   return (
@@ -77,100 +216,186 @@ export function Settings() {
           <div className="eyebrow">Konfiguracja</div>
           <h1 className="display view-head__title">Ustawienia <em>centrum</em></h1>
           <p className="view-head__sub">
-            Profil, dane centrum, stawki zespołu i preferencje — wszystko w jednym miejscu.
+            Konto, dane centrum, integracje oraz stawki i limity zespołu.
           </p>
         </div>
       </div>
 
-      <div className="grid-2" style={{ alignItems: 'start' }}>
-        <div className="stack">
-          <div className="card card--pad" data-reveal>
-            <h2 className="card-title">Twój profil</h2>
-            {/* real form so Enter saves, like every other form in the app */}
-            <form className="stack" style={{ marginTop: 18 }} noValidate
-              onSubmit={(e) => { e.preventDefault(); saveProfile() }}>
-              <Field label="Imię i nazwisko" error={errors.profileName}>
-                <input className="input" value={profile.name}
-                  onChange={(e) => { setProfile({ ...profile, name: e.target.value }); setErrors((x) => ({ ...x, profileName: null })) }} />
-              </Field>
-              <Field label="Adres e-mail" error={errors.profileEmail}>
-                <input className="input" type="email" value={profile.email}
-                  onChange={(e) => { setProfile({ ...profile, email: e.target.value }); setErrors((x) => ({ ...x, profileEmail: null })) }} />
-              </Field>
-              {/* real submit button: Chrome skips implicit (Enter) submission
-                  in multi-input forms that have none */}
-              <div><Button size="sm" type="submit">Zapisz profil</Button></div>
-            </form>
-          </div>
+      {isPhone ? (
+        <label className="settings-mobile-nav">
+          <span>Przejdź do sekcji</span>
+          <select
+            className="select"
+            aria-label="Sekcja ustawień"
+            value={activeSection}
+            onChange={(event) => selectSection(event.target.value)}
+          >
+            {SECTIONS.map((section) => (
+              <option key={section.id} value={section.id}>{section.label}</option>
+            ))}
+          </select>
+        </label>
+      ) : null}
 
-          <div className="card card--pad" data-reveal>
-            <h2 className="card-title">Dane centrum</h2>
-            <form className="stack" style={{ marginTop: 18 }} noValidate
-              onSubmit={(e) => { e.preventDefault(); saveCenter() }}>
-              <Field label="Nazwa" error={errors.centerName}>
-                <input className="input" value={center.name}
-                  onChange={(e) => { setCenter({ ...center, name: e.target.value }); setErrors((x) => ({ ...x, centerName: null })) }} />
+      <div className="settings-grid">
+        {!isPhone && (
+          <nav className="settings-local-nav" aria-label="Sekcje ustawień">
+            {SECTIONS.map((section) => (
+              <button
+                type="button"
+                key={section.id}
+                className={activeSection === section.id ? 'is-active' : ''}
+                aria-current={activeSection === section.id ? 'true' : undefined}
+                onClick={() => selectSection(section.id)}
+              >
+                {section.label}
+              </button>
+            ))}
+          </nav>
+        )}
+
+        <div className="settings-sections">
+          <section
+            className="settings-section"
+            ref={(element) => { sectionRefs.current.account = element }}
+            aria-labelledby="settings-account-title"
+          >
+            <h2 className="settings-section__title" id="settings-account-title" tabIndex={-1}>Twoje konto</h2>
+            <form className="card card--pad stack" aria-label="Twoje konto" onSubmit={saveProfile} noValidate>
+              <Field label="Imię i nazwisko" error={profileErrors.name}>
+                <input
+                  className="input"
+                  disabled={profileStatus === 'saving'}
+                  value={profile.name}
+                  onChange={(event) => {
+                    setProfile((current) => ({ ...current, name: event.target.value }))
+                    markDraftChanged(setProfileStatus)
+                  }}
+                />
+              </Field>
+              <Field label="Adres e-mail" error={profileErrors.email}>
+                <input
+                  className="input"
+                  type="email"
+                  disabled={profileStatus === 'saving'}
+                  value={profile.email}
+                  onChange={(event) => {
+                    setProfile((current) => ({ ...current, email: event.target.value }))
+                    markDraftChanged(setProfileStatus)
+                  }}
+                />
+              </Field>
+              <SaveControls
+                status={profileStatus}
+                dirty={profileDirty}
+                disabled={!profileDirty || Boolean(profileErrors.name || profileErrors.email) || profileStatus === 'saving'}
+                label="Zapisz konto"
+              />
+            </form>
+          </section>
+
+          <section
+            className="settings-section"
+            ref={(element) => { sectionRefs.current.center = element }}
+            aria-labelledby="settings-center-title"
+          >
+            <h2 className="settings-section__title" id="settings-center-title" tabIndex={-1}>Dane centrum</h2>
+            <form className="card card--pad stack" aria-label="Dane centrum" onSubmit={saveCenter} noValidate>
+              <Field label="Nazwa" error={centerErrors.name}>
+                <input
+                  className="input"
+                  disabled={centerStatus === 'saving'}
+                  value={center.name}
+                  onChange={(event) => {
+                    setCenter((current) => ({ ...current, name: event.target.value }))
+                    markDraftChanged(setCenterStatus)
+                  }}
+                />
               </Field>
               <Field label="Adres">
-                <input className="input" value={center.address}
-                  onChange={(e) => setCenter({ ...center, address: e.target.value })} />
+                <input
+                  className="input"
+                  disabled={centerStatus === 'saving'}
+                  value={center.address}
+                  onChange={(event) => {
+                    setCenter((current) => ({ ...current, address: event.target.value }))
+                    markDraftChanged(setCenterStatus)
+                  }}
+                />
               </Field>
               <div className="form-grid">
                 <Field label="Telefon">
-                  <input className="input" type="tel" value={center.phone}
-                    onChange={(e) => setCenter({ ...center, phone: e.target.value })} />
+                  <input
+                    className="input"
+                    type="tel"
+                    disabled={centerStatus === 'saving'}
+                    value={center.phone}
+                    onChange={(event) => {
+                      setCenter((current) => ({ ...current, phone: event.target.value }))
+                      markDraftChanged(setCenterStatus)
+                    }}
+                  />
                 </Field>
-                <Field label="E-mail">
-                  <input className="input" type="email" value={center.email}
-                    onChange={(e) => setCenter({ ...center, email: e.target.value })} />
+                <Field label="E-mail" error={centerErrors.email}>
+                  <input
+                    className="input"
+                    type="email"
+                    disabled={centerStatus === 'saving'}
+                    value={center.email}
+                    onChange={(event) => {
+                      setCenter((current) => ({ ...current, email: event.target.value }))
+                      markDraftChanged(setCenterStatus)
+                    }}
+                  />
                 </Field>
               </div>
-              <div><Button size="sm" type="submit">Zapisz dane</Button></div>
+              <SaveControls
+                status={centerStatus}
+                dirty={centerDirty}
+                disabled={!centerDirty || Boolean(centerErrors.name || centerErrors.email) || centerStatus === 'saving'}
+                label="Zapisz dane centrum"
+              />
             </form>
-          </div>
+          </section>
 
-          <div className="card card--pad" data-reveal>
-            <h2 className="card-title">Preferencje</h2>
-            <div style={{ marginTop: 8 }}>
-              <div className="pref-row">
-                <div>
-                  <div className="pref-row__title">Ogranicz animacje</div>
-                  <div className="pref-row__desc">
-                    {osReduce
-                      ? 'System już ogranicza ruch — ustawienie systemowe ma pierwszeństwo i animacje pozostają wyciszone.'
-                      : 'Wycisza efekty ruchu w całej aplikacji — przydatne przy wrażliwości na ruch.'}
-                  </div>
-                </div>
-                <Toggle
+          <section
+            className="settings-section"
+            ref={(element) => { sectionRefs.current.calendar = element }}
+            aria-labelledby="settings-calendar-title"
+          >
+            <h2 className="settings-section__title" id="settings-calendar-title" tabIndex={-1}>Kalendarz i integracje</h2>
+            <div className="card card--pad">
+              <h3 className="card-title">Preferencje kalendarza</h3>
+              <div className="settings-pref-list">
+                <PreferenceSwitch
+                  title="Ogranicz animacje"
+                  description={osReduce
+                    ? 'System już ogranicza ruch — ustawienie systemowe ma pierwszeństwo.'
+                    : 'Wycisza efekty ruchu w całej aplikacji.'}
                   on={osReduce || state.prefs.reduceMotion}
                   disabled={osReduce}
-                  label="Ogranicz animacje"
-                  onChange={(v) => {
-                    dispatch({ type: 'SET_PREF', key: 'reduceMotion', value: v })
-                    setReduceMotion(v)
-                    toast(v ? 'Animacje ograniczone' : 'Animacje włączone')
-                  }}
+                  onChange={(value) => setPreference(
+                    'reduceMotion',
+                    value,
+                    value ? 'Ogranicz animacje — włączone' : 'Ogranicz animacje — wyłączone',
+                    setReduceMotion
+                  )}
                 />
-              </div>
-              <div className="pref-row">
-                <div>
-                  <div className="pref-row__title">Weekendy w kalendarzu</div>
-                  <div className="pref-row__desc">
-                    Pokazuj soboty i niedziele w widoku miesiąca.
-                  </div>
-                </div>
-                <Toggle
+                <PreferenceSwitch
+                  title="Weekendy w kalendarzu"
+                  description="Pokazuj soboty i niedziele w widoku miesiąca."
                   on={state.prefs.weekendsInCalendar}
-                  label="Weekendy w kalendarzu"
-                  onChange={(v) => dispatch({ type: 'SET_PREF', key: 'weekendsInCalendar', value: v })}
+                  onChange={(value) => setPreference(
+                    'weekendsInCalendar',
+                    value,
+                    `Weekendy w kalendarzu — ${value ? 'włączone' : 'wyłączone'}`
+                  )}
                 />
               </div>
             </div>
-          </div>
 
-          <div className="card card--pad" data-reveal>
-            <h2 className="card-title">Integracje</h2>
-            <div style={{ marginTop: 8 }}>
+            <div className="card card--pad settings-integration">
+              <h3 className="card-title">Integracje</h3>
               <div className="pref-row">
                 <div>
                   <div className="pref-row__title">Google Calendar</div>
@@ -178,67 +403,116 @@ export function Settings() {
                     Synchronizacja wizyt z kalendarzem Google (demo) — pełne połączenie wymaga wersji z kontami.
                   </div>
                 </div>
-                {state.prefs.gcalConnected ? (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      dispatch({ type: 'SET_PREF', key: 'gcalConnected', value: false })
-                      toast('Rozłączono z Google Calendar', 'close')
-                    }}
-                  >
-                    Rozłącz
-                  </Button>
-                ) : (
-                  <Button
-                    size="sm"
-                    variant="soft"
-                    onClick={() => {
-                      dispatch({ type: 'SET_PREF', key: 'gcalConnected', value: true })
-                      toast('Połączono z Google Calendar (demo)')
-                    }}
-                  >
-                    Połącz (demo)
-                  </Button>
-                )}
+                <Button
+                  size="sm"
+                  variant={state.prefs.gcalConnected ? 'ghost' : 'soft'}
+                  onClick={() => {
+                    const connected = !state.prefs.gcalConnected
+                    setPreference(
+                      'gcalConnected',
+                      connected,
+                      connected ? 'Połączono z Google Calendar (demo)' : 'Rozłączono z Google Calendar'
+                    )
+                  }}
+                >
+                  {state.prefs.gcalConnected ? 'Rozłącz' : 'Połącz (demo)'}
+                </Button>
               </div>
             </div>
-          </div>
-        </div>
+          </section>
 
-        <div className="card card--pad" data-reveal>
-          <h2 className="card-title">Zespół</h2>
-          <div className="stack" style={{ marginTop: 16, gap: 0 }}>
-            {state.psychologists.map((p) => (
-              <div className="pref-row" key={p.id}>
-                <span className="row" style={{ gap: 12 }}>
-                  <Avatar name={p.name} color={p.color} size={38} />
-                  <span>
-                    <div className="pref-row__title">{p.title} {p.name}</div>
-                    <div className="pref-row__desc">{p.spec}</div>
-                  </span>
-                </span>
-                <span className="row" style={{ gap: 10 }}>
-                  <RateInput psych={p} />
-                  <span className="faint" style={{ fontSize: 13 }}>zł / sesja</span>
-                  <IconBtn name="edit" label={`Edytuj profil — ${p.name}`} size={16} onClick={() => openPsychForm({ psych: p })} />
-                </span>
+          <section
+            className="settings-section"
+            ref={(element) => { sectionRefs.current.team = element }}
+            aria-labelledby="settings-team-title"
+          >
+            <h2 className="settings-section__title" id="settings-team-title" tabIndex={-1}>Zespół i stawki</h2>
+            <form className="card card--pad" aria-label="Zespół i stawki" onSubmit={saveTeam} noValidate>
+              <div className="stack team-settings-list">
+                {psychologists.map((psychologist) => {
+                  const draft = team[psychologist.id] || { rate: '', weeklyCapacity: '' }
+                  const errors = teamErrors[psychologist.id]
+                  return (
+                    <div className="team-settings-row" key={psychologist.id}>
+                      <span className="team-settings-row__person">
+                        <Avatar name={psychologist.name} color={psychologist.color} size={38} />
+                        <span>
+                          <span className="pref-row__title">{psychologist.title} {psychologist.name}</span>
+                          <span className="pref-row__desc">{psychologist.spec}</span>
+                        </span>
+                      </span>
+                      <div className="team-settings-row__fields">
+                        <Field label="Stawka (zł)" error={errors?.rate}>
+                          <input
+                            className="input input--rate"
+                            type="number"
+                            disabled={teamStatus === 'saving'}
+                            min="0.01"
+                            step="10"
+                            inputMode="decimal"
+                            aria-label={`Stawka — ${psychologist.name}`}
+                            value={draft.rate}
+                            onChange={(event) => {
+                              setTeam((current) => ({
+                                ...current,
+                                [psychologist.id]: { ...current[psychologist.id], rate: event.target.value },
+                              }))
+                              markDraftChanged(setTeamStatus)
+                            }}
+                          />
+                        </Field>
+                        <Field label="Limit tygodniowy" error={errors?.weeklyCapacity}>
+                          <input
+                            className="input input--capacity"
+                            type="number"
+                            disabled={teamStatus === 'saving'}
+                            min="1"
+                            step="1"
+                            inputMode="numeric"
+                            aria-label={`Limit tygodniowy — ${psychologist.name}`}
+                            value={draft.weeklyCapacity}
+                            onChange={(event) => {
+                              setTeam((current) => ({
+                                ...current,
+                                [psychologist.id]: { ...current[psychologist.id], weeklyCapacity: event.target.value },
+                              }))
+                              markDraftChanged(setTeamStatus)
+                            }}
+                          />
+                        </Field>
+                        <IconBtn
+                          name="edit"
+                          label={`Edytuj profil — ${psychologist.name}`}
+                          size={16}
+                          disabled={teamStatus === 'saving'}
+                          onClick={() => openPsychForm({ psych: psychologist })}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
-            ))}
-          </div>
 
-          <div className="divider-soft" />
-          <div className="row row--between" style={{ gap: 16 }}>
-            <div>
-              <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 16.5, fontWeight: 500 }}>
-                Dodaj specjalistkę
-              </h3>
-              <p className="pref-row__desc" style={{ marginTop: 4 }}>
-                Pełny profil — specjalizacja, stawka, kontakt i gabinet.
-              </p>
-            </div>
-            <Button size="sm" icon="plus" onClick={() => openPsychForm()}>Dodaj</Button>
-          </div>
+              <div className="divider-soft" />
+              <div className="settings-team-actions">
+                <SaveControls
+                  status={teamStatus}
+                  dirty={teamDirty}
+                  disabled={!teamDirty || teamInvalid || teamStatus === 'saving'}
+                  label="Zapisz zespół"
+                />
+                <Button
+                  size="sm"
+                  icon="plus"
+                  type="button"
+                  disabled={teamStatus === 'saving'}
+                  onClick={() => openPsychForm()}
+                >
+                  Dodaj specjalistkę
+                </Button>
+              </div>
+            </form>
+          </section>
         </div>
       </div>
     </div>

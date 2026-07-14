@@ -1,5 +1,5 @@
 // In-memory app state — no persistence by design (demo).
-import { createContext, useContext, useMemo, useReducer, useState, useCallback } from 'react'
+import { createContext, useContext, useMemo, useReducer, useState, useCallback, useEffect } from 'react'
 import { DEMO_ROLES, INITIAL_STATE } from './data.js'
 import { monthKey, billableSummary, outstandingOf, paymentPatchFor, toISODate } from './format.js'
 import {
@@ -245,18 +245,43 @@ function reducer(state, action) {
 export function AppProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE)
   const [toasts, setToasts] = useState([])
+  const clearToasts = useCallback(() => setToasts([]), [])
+
+  // Toast actions can mutate scoped data. A role boundary invalidates both
+  // their visible context and their authority, so never carry them across it.
+  useEffect(() => {
+    clearToasts()
+  }, [clearToasts, state.demoRoleId])
 
   // toasts auto-expire but stay interruptible: a tap marks them leaving so the
   // exit tween can play before removal; rapid actions cap the stack at 3
   const leave = useCallback((id, delay) => {
-    setTimeout(() => setToasts((t) => t.map((x) => (x.id === id ? { ...x, leaving: true } : x))), delay)
+    const beginLeaving = () => setToasts((t) => t.map((x) => (x.id === id ? { ...x, leaving: true } : x)))
+    if (delay > 0) setTimeout(beginLeaving, delay)
+    else beginLeaving()
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), delay + 350)
   }, [])
 
-  const toast = useCallback((msg, icon = 'check') => {
+  const toast = useCallback((msg, icon = 'check', action) => {
     const id = ++nextId
-    setToasts((t) => [...t.slice(-2), { id, msg, icon }])
-    leave(id, 3000)
+    const normalizedAction = action?.label && typeof action.onClick === 'function'
+      ? {
+          label: action.label,
+          onClick: action.onClick,
+          timeoutMs: action.timeoutMs,
+          key: typeof action.key === 'string' && action.key ? action.key : null,
+        }
+      : null
+    setToasts((t) => {
+      const available = normalizedAction?.key
+        ? t.filter((item) => item.action?.key !== normalizedAction.key)
+        : t
+      return [...available.slice(-2), { id, msg, icon, action: normalizedAction }]
+    })
+    const timeoutMs = Number.isFinite(normalizedAction?.timeoutMs)
+      ? Math.max(0, normalizedAction.timeoutMs)
+      : 3000
+    leave(id, timeoutMs)
   }, [leave])
 
   const dismissToast = useCallback((id) => leave(id, 0), [leave])
@@ -265,7 +290,10 @@ export function AppProvider({ children }) {
     () => ({ state, dispatch, toast }),
     [state, toast]
   )
-  const toastValue = useMemo(() => ({ toasts, dismissToast }), [toasts, dismissToast])
+  const toastValue = useMemo(
+    () => ({ toasts, dismissToast, clearToasts }),
+    [clearToasts, dismissToast, toasts]
+  )
   return (
     <AppCtx.Provider value={value}>
       <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>

@@ -54,7 +54,7 @@ export function StatusPicker({ session, accessibleLabel }) {
   )
 }
 
-export function PaymentPicker({ session, accessibleLabel }) {
+export function PaymentPicker({ session, accessibleLabel, readOnly = false }) {
   const { dispatch, toast } = useApp()
   const { openSessionForm, role } = useShell()
   const [open, setOpen] = useState(false)
@@ -62,7 +62,7 @@ export function PaymentPicker({ session, accessibleLabel }) {
     session.payment === 'partial'
       ? `${PAY_LABELS.partial} · ${fmtMoney(session.paidAmount)}`
       : PAY_LABELS[session.payment]
-  if (role.scope === 'own' && session.psychId !== role.psychId) {
+  if (readOnly || (role.scope === 'own' && session.psychId !== role.psychId)) {
     return <Pill tone={PAY_TONE[session.payment]} dot>{label}</Pill>
   }
   return (

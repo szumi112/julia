@@ -7,7 +7,7 @@ import { billableSummary, paymentPatchFor } from '../../src/format.js'
 const {
   roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters,
   dissolveLoneFamilies, normalizeSearchText, clientMatchesQuery, dayStatusSummary, sessionConflicts,
-  scopedBillingSummary, withPsychologistDefaults,
+  paymentEntryFor, paymentSnapshotOf, scopedBillingSummary, withPsychologistDefaults,
 } = workspace
 
 const state = {
@@ -234,4 +234,136 @@ test('billable summary includes billable no-shows in its average population', ()
     { status: 'completed', amount: 200, payment: 'paid', paidAmount: 200 },
     { status: 'noshow', amount: 100, payment: 'unpaid', paidAmount: 0 },
   ]), { billable: 2, revenue: 300, collected: 200, outstanding: 100 })
+})
+
+test('payment entry marks an exact remainder as fully paid', () => {
+  const session = {
+    amount: 220,
+    payment: 'unpaid',
+    paidAmount: 0,
+    method: null,
+    paidDate: null,
+    status: 'completed',
+  }
+
+  assert.deepEqual(paymentEntryFor(session, {
+    amount: '220',
+    method: 'transfer',
+    paidDate: '2026-07-14',
+  }), {
+    errors: {},
+    patch: {
+      payment: 'paid',
+      paidAmount: 220,
+      method: 'transfer',
+      paidDate: '2026-07-14',
+    },
+  })
+})
+
+test('payment entry adds to a prior amount and remains partial below the total', () => {
+  const session = {
+    amount: 260,
+    payment: 'partial',
+    paidAmount: 130,
+    method: 'cash',
+    paidDate: '2026-07-01',
+    status: 'completed',
+  }
+
+  assert.deepEqual(paymentEntryFor(session, {
+    amount: '60',
+    method: 'card',
+    paidDate: '2026-07-14',
+  }), {
+    errors: {},
+    patch: {
+      payment: 'partial',
+      paidAmount: 190,
+      method: 'card',
+      paidDate: '2026-07-14',
+    },
+  })
+})
+
+test('payment entry rejects a missing method and an amount above the exact remainder', () => {
+  const session = {
+    amount: 260,
+    payment: 'partial',
+    paidAmount: 130,
+    method: 'cash',
+    paidDate: '2026-07-01',
+    status: 'completed',
+  }
+
+  assert.deepEqual(paymentEntryFor(session, {
+    amount: '131',
+    method: '',
+    paidDate: '2026-07-14',
+  }), {
+    errors: {
+      amount: 'Kwota nie może przekraczać pozostałej kwoty',
+      method: 'Wybierz formę płatności',
+    },
+    patch: null,
+  })
+})
+
+test('payment entry requires an amount greater than zero', () => {
+  const session = {
+    amount: 220,
+    payment: 'unpaid',
+    paidAmount: 0,
+    method: null,
+    paidDate: null,
+    status: 'completed',
+  }
+
+  assert.deepEqual(paymentEntryFor(session, {
+    amount: '0',
+    method: 'cash',
+    paidDate: '2026-07-14',
+  }), {
+    errors: { amount: 'Podaj kwotę większą od zera' },
+    patch: null,
+  })
+})
+
+test('payment entry accepts the exact cent remainder without floating-point rejection', () => {
+  const session = {
+    amount: 100,
+    payment: 'partial',
+    paidAmount: 8.21,
+    method: 'cash',
+    paidDate: '2026-07-01',
+    status: 'completed',
+  }
+
+  assert.deepEqual(paymentEntryFor(session, {
+    amount: '91.79',
+    method: 'card',
+    paidDate: '2026-07-14',
+  }), {
+    errors: {},
+    patch: {
+      payment: 'paid',
+      paidAmount: 100,
+      method: 'card',
+      paidDate: '2026-07-14',
+    },
+  })
+})
+
+test('payment snapshot preserves every value needed to undo a booking', () => {
+  assert.deepEqual(paymentSnapshotOf({
+    payment: 'partial',
+    paidAmount: 80,
+    method: 'cash',
+    paidDate: '2026-07-01',
+  }), {
+    payment: 'partial',
+    paidAmount: 80,
+    method: 'cash',
+    paidDate: '2026-07-01',
+  })
 })

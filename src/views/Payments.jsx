@@ -1,76 +1,251 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
-import { Avatar, Pill, Chip, IconBtn, Button, InfoTip, EmptyState, Figure, usePagination, Pager } from '../ui.jsx'
+import {
+  Avatar, Chip, IconBtn, Button, InfoTip, EmptyState, Figure, Field, Popover,
+  usePagination, Pager,
+} from '../ui.jsx'
+import { FilterGroup } from '../ux-patterns.jsx'
 import { Icon } from '../icons.jsx'
 import { BarFill } from '../charts.jsx'
 import { PaymentPicker } from './session-bits.jsx'
 import {
-  fmtMoney, monthKey, addMonths, fmtMonthYear, fmtShortDate,
-  isBillable, collectedOf, outstandingOf, sessionsWord, cap, METHOD_LABELS,
+  cap, fmtFullDate, fmtMoney, monthKey, addMonths, fmtMonthYear, fmtShortDate,
+  isBillable, collectedOf, outstandingOf, sessionsWord, METHOD_LABELS, toISODate,
 } from '../format.js'
+import { paymentEntryFor, paymentSnapshotOf, scopedBillingSummary } from '../workspace.js'
+
+const validMonth = (value) => /^\d{4}-\d{2}$/.test(value || '')
+
+function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
+  const [open, setOpen] = useState(false)
+  const [form, setForm] = useState({ amount: '', method: '' })
+  const [errors, setErrors] = useState({})
+  const wrapRef = useRef(null)
+  const amountRef = useRef(null)
+  const methodRef = useRef(null)
+  const remainder = Math.round(outstandingOf(session) * 100) / 100
+
+  const begin = () => {
+    setForm({ amount: String(remainder), method: session.method || '' })
+    setErrors({})
+    setOpen(true)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    requestAnimationFrame(() => amountRef.current?.focus({ preventScroll: true }))
+  }, [open])
+
+  const focusAfterClose = (useFallback = false) => {
+    requestAnimationFrame(() => {
+      const trigger = wrapRef.current?.querySelector('button')
+      const target = useFallback ? fallbackFocusRef?.current : trigger || fallbackFocusRef?.current
+      target?.focus({ preventScroll: true })
+    })
+  }
+
+  const cancel = () => {
+    setOpen(false)
+    focusAfterClose()
+  }
+
+  const save = (event) => {
+    event.preventDefault()
+    const result = paymentEntryFor(session, {
+      amount: form.amount,
+      method: form.method,
+      paidDate: toISODate(new Date()),
+    })
+    setErrors(result.errors)
+    if (!result.patch) {
+      requestAnimationFrame(() => {
+        if (result.errors.amount) amountRef.current?.focus({ preventScroll: true })
+        else if (result.errors.method) methodRef.current?.focus({ preventScroll: true })
+      })
+      return
+    }
+    onBook(result.patch)
+    setOpen(false)
+    focusAfterClose(result.patch.payment === 'paid')
+  }
+
+  return (
+    <span ref={wrapRef}>
+      <Popover
+        open={open}
+        setOpen={setOpen}
+        contentRole="dialog"
+        ariaLabel="Zaksięguj wpłatę"
+        align="right"
+        trigger={(
+          <Button
+            variant="soft"
+            size="sm"
+            aria-haspopup="dialog"
+            aria-label={`Zaksięguj wpłatę — ${client?.name || 'klient'}, ${fmtFullDate(session.date)}`}
+            onClick={begin}
+          >
+            Zaksięguj
+          </Button>
+        )}
+      >
+        <form className="payment-entry" onSubmit={save} noValidate>
+          <div>
+            <strong>{client?.name || 'Klient'}</strong>
+            <p>{fmtFullDate(session.date)} · pozostało {fmtMoney(remainder)}</p>
+          </div>
+          <Field label="Kwota wpłaty" error={errors.amount}>
+            <input
+              ref={amountRef}
+              className="input"
+              type="number"
+              min="0.01"
+              max={remainder}
+              step="0.01"
+              inputMode="decimal"
+              value={form.amount}
+              onChange={(event) => {
+                setForm((current) => ({ ...current, amount: event.target.value }))
+                setErrors((current) => ({ ...current, amount: null }))
+              }}
+            />
+          </Field>
+          <Field label="Forma płatności" error={errors.method}>
+            <select
+              ref={methodRef}
+              className="select"
+              value={form.method}
+              onChange={(event) => {
+                setForm((current) => ({ ...current, method: event.target.value }))
+                setErrors((current) => ({ ...current, method: null }))
+              }}
+            >
+              <option value="">Wybierz</option>
+              {Object.entries(METHOD_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </Field>
+          <div className="payment-entry__actions">
+            <Button size="sm" variant="ghost" onClick={cancel}>Anuluj</Button>
+            <Button size="sm" type="submit">Zapisz wpłatę</Button>
+          </div>
+        </form>
+      </Popover>
+    </span>
+  )
+}
 
 export function Payments() {
   const { state, dispatch, toast } = useApp()
-  const { openSessionForm, route } = useShell()
+  const { getViewState, openSessionForm, patchViewState, route } = useShell()
   const ref = useReveal()
-  const [ym, setYm] = useState(monthKey(new Date()))
-  const [psychFilter, setPsychFilter] = useState(null)
-  const allPeriods = route.params?.allPeriods === true
-  const [unpaidOnly, setUnpaidOnly] = useState(() => route.params?.unpaidOnly === true)
+  const ledgerTitleRef = useRef(null)
+  const maxYm = monthKey(new Date())
+  const [initial] = useState(() => {
+    const saved = getViewState('payments', {
+      allPeriods: false,
+      ym: maxYm,
+      specialist: null,
+      unpaidOnly: false,
+      page: 1,
+    })
+    return {
+      allPeriods: typeof route.params?.allPeriods === 'boolean'
+        ? route.params.allPeriods
+        : saved.allPeriods === true,
+      ym: validMonth(saved.ym) ? saved.ym : maxYm,
+      specialist: state.psychologists.some((psychologist) => psychologist.id === saved.specialist)
+        ? saved.specialist
+        : null,
+      unpaidOnly: typeof route.params?.unpaidOnly === 'boolean'
+        ? route.params.unpaidOnly
+        : saved.unpaidOnly === true,
+      page: Math.max(1, Number(saved.page) || 1),
+    }
+  })
+  const [ym, setYm] = useState(initial.ym)
+  const [allPeriods, setAllPeriods] = useState(initial.allPeriods)
+  const [psychFilter, setPsychFilter] = useState(initial.specialist)
+  const [unpaidOnly, setUnpaidOnly] = useState(initial.unpaidOnly)
 
   const months = useMemo(() => availableMonths(state.sessions), [state.sessions])
-  const maxYm = monthKey(new Date()) // billing always stops at the current month
-  const scopeSessions = useMemo(
+  const psychologists = useMemo(
+    () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
+    [state.psychologists]
+  )
+  const periodSessions = useMemo(
     () => allPeriods ? state.sessions : sessionsInMonth(state.sessions, ym),
     [allPeriods, state.sessions, ym]
   )
-  const scopeBillable = useMemo(
-    () => scopeSessions.filter(isBillable).reverse(),
-    [scopeSessions]
+  const periodBillable = useMemo(() => periodSessions.filter(isBillable), [periodSessions])
+  const scopedBillable = useMemo(
+    () => periodBillable.filter((session) => !psychFilter || session.psychId === psychFilter).reverse(),
+    [periodBillable, psychFilter]
   )
-  const filtered = scopeBillable.filter(
-    (s) => (!psychFilter || s.psychId === psychFilter) && (!unpaidOnly || outstandingOf(s) > 0)
+  const ledgerRows = useMemo(
+    () => scopedBillable.filter((session) => !unpaidOnly || outstandingOf(session) > 0),
+    [scopedBillable, unpaidOnly]
+  )
+  const summary = useMemo(
+    () => scopedBillingSummary(periodSessions, { psychId: psychFilter }),
+    [periodSessions, psychFilter]
   )
 
-  const collected = filtered.reduce((a, s) => a + collectedOf(s), 0)
-  const outstanding = filtered.reduce((a, s) => a + outstandingOf(s), 0)
-
-  // the collection meter always shows the scope's true progress for the
-  // visible specialist scope — "Tylko zaległe" narrows the list and the
-  // figures (existing behavior), but must not fake a 0% collection rate
-  const scopeFilteredBillable = scopeBillable.filter((s) => !psychFilter || s.psychId === psychFilter)
-  const scopeCollected = scopeFilteredBillable.reduce((a, s) => a + collectedOf(s), 0)
-  const scopeOutstanding = scopeFilteredBillable.reduce((a, s) => a + outstandingOf(s), 0)
-
-  const { pageItems, page, pages, setPage } = usePagination(filtered, {
+  const { pageItems, page, pages, setPage } = usePagination(ledgerRows, {
     pageSize: 25,
     resetKey: `${allPeriods}|${ym}|${psychFilter}|${unpaidOnly}`,
+    initialPage: initial.page,
   })
-  const flipRef = useFlip(pageItems.map((s) => s.id).join(','))
+  const flipRef = useFlip(pageItems.map((session) => session.id).join(','))
 
-  const perPsych = state.psychologists.map((p) => {
-    const own = scopeBillable.filter((s) => s.psychId === p.id)
-    return {
-      p,
-      collected: own.reduce((a, s) => a + collectedOf(s), 0),
-      outstanding: own.reduce((a, s) => a + outstandingOf(s), 0),
+  useEffect(() => {
+    patchViewState('payments', {
+      allPeriods,
+      ym,
+      specialist: psychFilter,
+      unpaidOnly,
+      page,
+    })
+  }, [allPeriods, page, patchViewState, psychFilter, unpaidOnly, ym])
+
+  const comparisonPsychologists = psychFilter
+    ? psychologists.filter((psychologist) => psychologist.id === psychFilter)
+    : psychologists
+  const comparison = useMemo(() => {
+    const totals = new Map(comparisonPsychologists.map((psychologist) => [
+      psychologist.id,
+      { psychologist, collected: 0, outstanding: 0 },
+    ]))
+    for (const session of periodBillable) {
+      const item = totals.get(session.psychId)
+      if (!item) continue
+      item.collected += collectedOf(session)
+      item.outstanding += outstandingOf(session)
     }
-  })
-  const maxPsych = Math.max(...perPsych.map((x) => x.collected + x.outstanding), 1)
+    return [...totals.values()]
+  }, [comparisonPsychologists, periodBillable])
+  const maxPsych = Math.max(...comparison.map((item) => item.collected + item.outstanding), 1)
 
-  const clientOf = (id) => state.clients.find((c) => c.id === id)
-  const psychOf = (id) => state.psychologists.find((p) => p.id === id)
-  const scopeLabel = [
-    allPeriods ? 'Wszystkie okresy' : fmtMonthYear(ym),
-    unpaidOnly ? 'tylko zaległe' : null,
-    psychFilter ? psychOf(psychFilter)?.name : 'Cały zespół',
-  ].filter(Boolean).join(' · ')
+  const clientOf = (id) => state.clients.find((client) => client.id === id)
+  const psychOf = (id) => state.psychologists.find((psychologist) => psychologist.id === id)
+  const selectedPsychologist = psychFilter ? psychOf(psychFilter) : null
+  const periodLabel = allPeriods ? 'Wszystkie okresy' : cap(fmtMonthYear(ym))
+  const scopeLabel = `${periodLabel} · ${selectedPsychologist?.name || 'Cały zespół'}`
 
-  const markPaid = (s) => {
-    dispatch({ type: 'UPDATE_SESSION', id: s.id, patch: { payment: 'paid', paidAmount: s.amount } })
-    toast(`Zaksięgowano ${fmtMoney(outstandingOf(s))} — ${clientOf(s.clientId)?.name}`)
+  const bookPayment = (session, patch) => {
+    const snapshot = paymentSnapshotOf(session)
+    const amount = patch.paidAmount - snapshot.paidAmount
+    const client = clientOf(session.clientId)
+    dispatch({ type: 'UPDATE_SESSION', id: session.id, patch })
+    toast(`Zaksięgowano wpłatę ${fmtMoney(amount)} — ${client?.name || 'klient'}`, 'payments', {
+      label: 'Cofnij',
+      key: `payment:${session.id}`,
+      timeoutMs: 5000,
+      onClick: () => dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: snapshot }),
+    })
   }
 
   return (
@@ -83,195 +258,213 @@ export function Payments() {
             Sesje rozliczane: odbyte i nieobecności. Odwołane nie są fakturowane.
           </p>
         </div>
-        <div className="view-head__actions">
-          {!allPeriods && <>
-            {ym !== maxYm && (
-              <Button variant="ghost" size="sm" onClick={() => setYm(maxYm)}>
-                Bieżący miesiąc
-              </Button>
+      </div>
+
+      <section className="finance-scope" role="region" aria-label="Zakres finansów" data-reveal>
+        <div className="finance-scope__summary">Zakres: {scopeLabel}</div>
+        <div className="finance-scope__controls">
+          <FilterGroup label="Okres">
+            <Chip on={!allPeriods} onClick={() => setAllPeriods(false)}>Wybrany miesiąc</Chip>
+            <Chip on={allPeriods} onClick={() => setAllPeriods(true)}>Wszystkie okresy</Chip>
+            {!allPeriods && (
+              <div className="month-nav">
+                <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={ym <= months[0]} onClick={() => setYm(addMonths(ym, -1))} />
+                <span className="month-nav__label">{fmtMonthYear(ym)}</span>
+                <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= maxYm} onClick={() => setYm(addMonths(ym, 1))} />
+              </div>
             )}
-            <div className="month-nav">
-              <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={ym <= months[0]} onClick={() => setYm(addMonths(ym, -1))} />
-              <span className="month-nav__label">{fmtMonthYear(ym)}</span>
-              <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= maxYm} onClick={() => setYm(addMonths(ym, 1))} />
-            </div>
-          </>}
+          </FilterGroup>
+          <FilterGroup label="Specjalistka">
+            <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
+            {psychologists.map((psychologist) => (
+              <Chip
+                key={psychologist.id}
+                on={psychFilter === psychologist.id}
+                swatch={psychologist.color}
+                aria-label={psychologist.name}
+                onClick={() => setPsychFilter(psychologist.id)}
+              >
+                {psychologist.name.split(' ')[0]}
+              </Chip>
+            ))}
+          </FilterGroup>
         </div>
-      </div>
+      </section>
 
-      <div className="row chips-row" data-reveal>
-        <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
-        {state.psychologists.map((p) => (
-          <Chip key={p.id} on={psychFilter === p.id} swatch={p.color}
-            onClick={() => setPsychFilter(psychFilter === p.id ? null : p.id)}>
-            {p.name.split(' ')[0]}
-          </Chip>
-        ))}
-        <span className="chips-row__divider" />
-        <Chip on={!unpaidOnly} onClick={() => setUnpaidOnly(false)}>
-          Wszystkie płatności
-        </Chip>
-        <Chip on={unpaidOnly} onClick={() => setUnpaidOnly(!unpaidOnly)}>
-          <Icon name="payments" size={14} /> Tylko zaległe
-        </Chip>
-      </div>
-
-      {/* every number below carries its scope explicitly */}
-      <div className="eyebrow" data-reveal style={{ marginBottom: 2 }}>
-        {scopeLabel}
-      </div>
-      <div className="figures" role="group" aria-label={`Rozliczenia — ${allPeriods ? 'wszystkie okresy' : fmtMonthYear(ym)}`}>
+      <div className="figures" role="group" aria-label={`Rozliczenia — ${scopeLabel}`}>
         <Figure
-          label={<>Wystawione <InfoTip text={allPeriods
+          label={<><span className="finance-figure-label">Należne za rozliczone sesje</span> <InfoTip text={allPeriods
             ? 'Suma kwot za sesje rozliczane we wszystkich okresach — odbyte i nieobecności. Sesje odwołane nie są fakturowane.'
             : 'Suma kwot za sesje rozliczane w tym miesiącu — odbyte i nieobecności. Sesje odwołane nie są fakturowane.'
           } /></>}
-          value={collected + outstanding}
+          value={summary.due}
           fmt={fmtMoney}
         />
         <Figure
-          label={<>Zebrane <InfoTip text="Kwoty już wpłacone przez klientów, łącznie z wpłatami częściowymi." /></>}
-          value={collected}
+          label={<><span className="finance-figure-label">Wpłacono</span> <InfoTip text="Gotówka już wpłacona przez klientów, łącznie z wpłatami częściowymi." /></>}
+          value={summary.collected}
           fmt={fmtMoney}
         />
         <Figure
-          label={<>Zaległe <InfoTip text="To, czego klienci jeszcze nie wpłacili. Zniknie, gdy oznaczysz sesje jako opłacone." /></>}
-          value={outstanding}
+          label={<><span className="finance-figure-label">Pozostało do zapłaty</span> <InfoTip text="Część należności, której klienci jeszcze nie wpłacili." /></>}
+          value={summary.outstanding}
           fmt={fmtMoney}
           gold
         />
       </div>
 
-      {/* the month's collection at a glance (specialist scope, full month) */}
-      {scopeCollected + scopeOutstanding > 0 && (
+      {summary.due > 0 && (
         <div className="collect" data-reveal>
           <div className="hbar__track" style={{ height: 16 }}>
             <BarFill
               segments={[
-                { value: scopeCollected, color: 'var(--sage)', label: 'zebrane' },
-                { value: scopeOutstanding, color: 'var(--gold-mid)', label: 'zaległe' },
+                { value: summary.collected, color: 'var(--sage)', label: 'wpłacono' },
+                { value: summary.outstanding, color: 'var(--gold-mid)', label: 'pozostało do zapłaty' },
               ]}
-              totalMax={scopeCollected + scopeOutstanding}
+              totalMax={summary.due}
             />
           </div>
           <div className="row row--between collect__labels">
             <span className="muted">
-              zebrane {fmtMoney(scopeCollected)} · {Math.round((scopeCollected / (scopeCollected + scopeOutstanding)) * 100)}%
+              wpłacono {fmtMoney(summary.collected)} · {Math.round((summary.collected / summary.due) * 100)}%
             </span>
-            {scopeOutstanding > 0
-              ? <span className="collect__due">do zebrania {fmtMoney(scopeOutstanding)}</span>
+            {summary.outstanding > 0
+              ? <span className="collect__due">pozostało {fmtMoney(summary.outstanding)}</span>
               : <span className="collect__ok">wszystko rozliczone</span>}
           </div>
         </div>
       )}
 
-      <div className="grid-13" style={{ marginTop: 4 }}>
-        <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
-          <h2 className="card-title">Zespół · {allPeriods ? 'wszystkie okresy' : fmtMonthYear(ym)}</h2>
+      <div className="grid-13 finance-grid" style={{ marginTop: 4 }}>
+        <section className="card card--pad" data-reveal role="region" aria-label="Porównanie specjalistek" style={{ alignSelf: 'start' }}>
+          <h2 className="card-title">Porównanie specjalistek · {periodLabel.toLowerCase()}</h2>
           <div className="hbar" style={{ marginTop: 20 }}>
-            {perPsych.map(({ p, collected: col, outstanding: out }) => (
-              <div className="hbar__row hbar__row--labeled" key={p.id}>
+            {comparison.map(({ psychologist, collected, outstanding }) => (
+              <div className="hbar__row hbar__row--labeled finance-comparison__row" key={psychologist.id}>
                 <span className="hbar__name">
-                  <Avatar name={p.name} color={p.color} size={26} />
-                  <span>{p.name.split(' ')[0]}</span>
+                  <Avatar name={psychologist.name} color={psychologist.color} size={26} />
+                  <span>{psychologist.name.split(' ')[0]}</span>
                 </span>
                 <div>
                   <div className="hbar__track">
                     <BarFill
                       segments={[
-                        { value: col, color: 'var(--sage)', label: 'zebrane' },
-                        { value: out, color: 'var(--gold-mid)', label: 'zaległe' },
+                        { value: collected, color: 'var(--sage)', label: 'wpłacono' },
+                        { value: outstanding, color: 'var(--gold-mid)', label: 'pozostało do zapłaty' },
                       ]}
                       totalMax={maxPsych}
                     />
                   </div>
-                  <div className="row row--between" style={{ marginTop: 5, fontSize: 12 }}>
-                    <span className="muted">{fmtMoney(col)} zebrane</span>
-                    {out > 0 && <span style={{ color: 'var(--gold-deep)', fontWeight: 650 }}>{fmtMoney(out)} zaległe</span>}
+                  <div className="row row--between finance-comparison__amounts">
+                    <span className="muted">{fmtMoney(collected)} wpłacono</span>
+                    {outstanding > 0 && <span>{fmtMoney(outstanding)} pozostało</span>}
                   </div>
                 </div>
               </div>
             ))}
           </div>
           <div className="legend" style={{ marginTop: 18 }}>
-            <span className="legend__item"><span className="legend__swatch" style={{ background: 'var(--sage)' }} /> Zebrane</span>
-            <span className="legend__item"><span className="legend__swatch" style={{ background: 'var(--gold-mid)' }} /> Zaległe</span>
+            <span className="legend__item"><span className="legend__swatch" style={{ background: 'var(--sage)' }} /> Wpłacono</span>
+            <span className="legend__item"><span className="legend__swatch" style={{ background: 'var(--gold-mid)' }} /> Pozostało do zapłaty</span>
           </div>
-        </div>
+        </section>
 
-        <div className="card" data-reveal style={{ overflow: 'hidden' }}>
-          <div className="row row--between" style={{ padding: '20px 24px 0' }}>
-            <h2 className="card-title">Rozliczenia sesji</h2>
-            <span className="faint" style={{ fontSize: 13 }}>
-              {filtered.length} {sessionsWord(filtered.length)}
-            </span>
+        <section className="card finance-ledger" data-reveal aria-labelledby="finance-ledger-title">
+          <div className="finance-ledger__head">
+            <div>
+              <h2 className="card-title" id="finance-ledger-title" ref={ledgerTitleRef} tabIndex={-1}>Lista rozliczeń</h2>
+              <span className="faint">{ledgerRows.length} {sessionsWord(ledgerRows.length)}</span>
+            </div>
+            <section className="ledger-filters" role="region" aria-label="Filtry listy rozliczeń">
+              <p>Dotyczy tylko: <strong>Lista rozliczeń</strong></p>
+              <FilterGroup label="Płatność">
+                <Chip on={!unpaidOnly} onClick={() => setUnpaidOnly(false)}>Wszystkie płatności</Chip>
+                <Chip on={unpaidOnly} onClick={() => setUnpaidOnly(true)}>Pozostałe do zapłaty</Chip>
+              </FilterGroup>
+            </section>
           </div>
-          <div className="table-scroll" style={{ marginTop: 8 }}>
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Data</th>
-                <th>Klient</th>
-                <th>Specjalistka</th>
-                <th className="right">Kwota</th>
-                <th className="right">Zapłacono</th>
-                <th>Forma</th>
-                <th>Płatność</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody ref={flipRef}>
-              {filtered.length === 0 && (
+          <div className="table-scroll">
+            <table className="table" aria-label="Lista rozliczeń">
+              <thead>
                 <tr>
-                  <td colSpan={8}>
-                    {scopeBillable.length === 0 ? (
-                      <EmptyState
-                        icon="payments"
-                        title={allPeriods ? 'Brak rozliczeń we wszystkich okresach' : 'Brak rozliczeń w tym miesiącu'}
-                        hint="Rozliczane są sesje odbyte i nieobecności — pojawią się tu po zakończeniu."
-                      />
-                    ) : (
-                      <EmptyState
-                        icon="search"
-                        title="Nic nie pasuje do filtrów"
-                        hint="Zmień lub wyłącz filtry, aby zobaczyć rozliczenia miesiąca."
-                      />
-                    )}
-                  </td>
+                  <th>Data</th>
+                  <th>Klient</th>
+                  <th>Specjalistka</th>
+                  <th className="right">Należne</th>
+                  <th className="right">Wpłacono</th>
+                  <th>Forma</th>
+                  <th>Płatność</th>
+                  <th></th>
                 </tr>
-              )}
-              {pageItems.map((s) => {
-                const p = psychOf(s.psychId)
-                const out = outstandingOf(s)
-                return (
-                  <tr key={s.id} data-flip-id={s.id} className={out > 0 ? 'is-due' : ''}>
-                    <td style={{ fontWeight: 600 }}>{fmtShortDate(s.date)}</td>
-                    <td>{clientOf(s.clientId)?.name}</td>
-                    <td>
-                      <span className="row" style={{ gap: 8 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: 99, background: p?.color, display: 'inline-block' }} />
-                        <span className="muted">{p ? p.name.split(' ')[0] : '—'}</span>
-                      </span>
-                    </td>
-                    <td className="right num-cell">{fmtMoney(s.amount)}</td>
-                    <td className="right num-cell muted">{fmtMoney(collectedOf(s))}</td>
-                    <td className="muted">{METHOD_LABELS[s.method] || '—'}</td>
-                    <td><PaymentPicker session={s} /></td>
-                    <td className="right">
-                      {out > 0 ? (
-                        <Button variant="soft" size="sm" title="Oznacz pełną wpłatę za tę sesję" onClick={() => markPaid(s)}>Zaksięguj</Button>
+              </thead>
+              <tbody ref={flipRef}>
+                {ledgerRows.length === 0 && (
+                  <tr>
+                    <td colSpan={8}>
+                      {scopedBillable.length === 0 ? (
+                        <EmptyState
+                          icon="payments"
+                          title={allPeriods ? 'Brak rozliczeń we wszystkich okresach' : 'Brak rozliczeń w tym miesiącu'}
+                          hint="Rozliczane są sesje odbyte i nieobecności — pojawią się tu po zakończeniu."
+                        />
                       ) : (
-                        <Icon name="check" size={16} style={{ color: 'var(--sage-deep)' }} />
+                        <EmptyState
+                          icon="search"
+                          title="Brak kwot pozostałych do zapłaty"
+                          hint="Wszystkie należności w tym zakresie zostały wpłacone."
+                        />
                       )}
                     </td>
                   </tr>
-                )
-              })}
-            </tbody>
-          </table>
+                )}
+                {pageItems.map((session) => {
+                  const psychologist = psychOf(session.psychId)
+                  const client = clientOf(session.clientId)
+                  const outstanding = outstandingOf(session)
+                  return (
+                    <tr
+                      key={session.id}
+                      data-flip-id={session.id}
+                      data-session-id={session.id}
+                      data-payment={session.payment}
+                      data-paid-amount={String(session.paidAmount ?? 0)}
+                      data-method={session.method || ''}
+                      data-paid-date={session.paidDate || ''}
+                      data-outstanding={String(outstanding)}
+                      className={outstanding > 0 ? 'is-due' : ''}
+                    >
+                      <td style={{ fontWeight: 600 }}>{fmtShortDate(session.date)}</td>
+                      <td>{client?.name}</td>
+                      <td>
+                        <span className="row" style={{ gap: 8 }}>
+                          <span className="finance-ledger__swatch" style={{ background: psychologist?.color }} />
+                          <span className="muted">{psychologist ? psychologist.name.split(' ')[0] : '—'}</span>
+                        </span>
+                      </td>
+                      <td className="right num-cell">{fmtMoney(session.amount)}</td>
+                      <td className="right num-cell muted">{fmtMoney(collectedOf(session))}</td>
+                      <td className="muted">{METHOD_LABELS[session.method] || '—'}</td>
+                      <td><PaymentPicker session={session} readOnly /></td>
+                      <td className="right">
+                        {outstanding > 0 ? (
+                          <PaymentEntry
+                            session={session}
+                            client={client}
+                            fallbackFocusRef={ledgerTitleRef}
+                            onBook={(patch) => bookPayment(session, patch)}
+                          />
+                        ) : (
+                          <Icon name="check" size={16} style={{ color: 'var(--sage-deep)' }} />
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
           <Pager page={page} pages={pages} onPage={setPage} />
-        </div>
+        </section>
       </div>
     </div>
   )

@@ -344,12 +344,13 @@ test('role switch discards a client detail identity outside the next role scope'
 test('role switch clears top-level route parameters and their derived filters', async ({ page }) => {
   await login(page)
   await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('button').first().click()
-  await expect(page.getByText(/Wszystkie okresy.*tylko zaległe/i)).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Zakres finansów' })).toContainText('Wszystkie okresy')
+  await expect(page.getByRole('region', { name: 'Filtry listy rozliczeń' })).toContainText('Pozostałe do zapłaty')
 
   await switchToCoordinator(page)
 
   await expect(page.locator('.topbar__title b')).toHaveText('Finanse')
-  await expect(page.getByText(/Wszystkie okresy.*tylko zaległe/i)).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Zakres finansów' })).not.toContainText('Zakres: Wszystkie okresy')
   await expect(page.getByRole('button', { name: 'Wszystkie płatności' })).toHaveAttribute('aria-pressed', 'true')
 })
 
@@ -406,7 +407,7 @@ test('coarse pointers expose complete 44px targets without enlarging pills', asy
 
     await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('button', { name: 'Więcej' }).click()
     await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Ustawienia' }).click()
-    const smallPrimary = page.getByRole('button', { name: 'Zapisz profil' })
+    const smallPrimary = page.getByRole('button', { name: 'Zapisz konto' })
     await smallPrimary.scrollIntoViewIfNeeded()
     const buttonHit = await smallPrimary.evaluate((element) => {
       const rect = element.getBoundingClientRect()
@@ -648,6 +649,7 @@ test('toast messages use visible transform-only enter and exit motion within 250
   await expect.poll(() => page.evaluate(() => window.__namedMotion.filter(({ kind }) => kind === 'toast').length)).toBe(2)
 
   const records = await page.evaluate(() => window.__namedMotion)
+  expect(records.filter(({ kind }) => kind === 'toast').map(({ method }) => method)).toEqual(['fromTo', 'to'])
   expectVisibleFastMotion(records, ['toast'])
   await expect(toast).toHaveCount(0)
 })
@@ -991,7 +993,8 @@ test('therapist sidebar count is scoped to their daily sessions', async ({ page 
 test('older attention debt opens all-period unpaid payments', async ({ page }) => {
   await login(page)
   await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('button').first().click()
-  await expect(page.getByText(/Wszystkie okresy.*tylko zaległe/i)).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Zakres finansów' })).toContainText('Wszystkie okresy')
+  await expect(page.getByRole('region', { name: 'Filtry listy rozliczeń' }).getByRole('button', { name: 'Pozostałe do zapłaty' })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('tr.is-due')).not.toHaveCount(0)
 })
 
@@ -1018,11 +1021,11 @@ test('calendar exposes explicit payment and attendance reset choices', async ({ 
   await expect(allAttendance).toHaveAttribute('aria-pressed', 'true')
 })
 
-test('Payments exposes an all-status control to reverse unpaid filtering', async ({ page }) => {
+test('Payments exposes an all-status control to reverse ledger-only filtering', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Finanse' }).click()
   const allStatuses = page.getByRole('button', { name: 'Wszystkie płatności' })
-  const unpaid = page.getByRole('button', { name: 'Tylko zaległe' })
+  const unpaid = page.getByRole('button', { name: 'Pozostałe do zapłaty' })
 
   await expect(allStatuses).toHaveAttribute('aria-pressed', 'true')
   await unpaid.click()
@@ -1133,9 +1136,10 @@ test('owner attention opens matching all-period unpaid payments', async ({ page 
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
   await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('button').first().click()
-  await expect(page.getByText(/wszystkie okresy.*tylko zaległe/i)).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Zakres finansów' })).toContainText('Wszystkie okresy')
+  await expect(page.getByRole('region', { name: 'Filtry listy rozliczeń' })).toContainText('Pozostałe do zapłaty')
   await expect(page.locator('.figures__item--gold .figures__value')).toBeVisible()
-  const issuedTip = page.locator('.figures__item').filter({ hasText: 'Wystawione' }).getByRole('button', { name: 'Wyjaśnienie' })
+  const issuedTip = page.locator('.figures__item').filter({ hasText: 'Należne za rozliczone sesje' }).getByRole('button', { name: 'Wyjaśnienie' })
   await issuedTip.focus()
   const issuedTipId = await issuedTip.getAttribute('aria-describedby')
   await expect(page.locator(`[id="${issuedTipId}"]`)).toHaveText('Suma kwot za sesje rozliczane we wszystkich okresach — odbyte i nieobecności. Sesje odwołane nie są fakturowane.')
@@ -1622,5 +1626,413 @@ test.describe('Task 3 daily-care redesign', () => {
     await expect(page.getByText('Nie znaleziono klienta')).toBeVisible()
     await expect(page.getByRole('heading', { level: 1, name: 'Zofia Mazur' })).toHaveCount(0)
     await expect(page.getByText('+48 521 172 603')).toHaveCount(0)
+  })
+})
+
+test.describe('Task 4 administrative redesign', () => {
+  test('Finanse keeps page figures stable across ledger filters and restores every scope control', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Finanse' }).click()
+
+    const scope = page.getByRole('region', { name: 'Zakres finansów' })
+    await expect(scope).toContainText('Zakres: Lipiec 2026 · Cały zespół')
+    await expect(page.locator('.finance-figure-label')).toHaveText([
+      'Należne za rozliczone sesje',
+      'Wpłacono',
+      'Pozostało do zapłaty',
+    ])
+
+    const figures = page.locator('.figures__value')
+    const figuresBefore = await figures.allTextContents()
+    const ledgerFilters = page.getByRole('region', { name: 'Filtry listy rozliczeń' })
+    await expect(ledgerFilters).toContainText('Dotyczy tylko: Lista rozliczeń')
+    await ledgerFilters.getByRole('button', { name: 'Pozostałe do zapłaty' }).click()
+    await expect(figures).toHaveText(figuresBefore)
+    await expect(page.getByRole('table', { name: 'Lista rozliczeń' }).locator('tbody tr')).not.toHaveCount(0)
+    expect(await page.getByRole('table', { name: 'Lista rozliczeń' }).locator('tbody tr').evaluateAll(
+      (rows) => rows.every((row) => Number(row.dataset.outstanding) > 0)
+    )).toBe(true)
+
+    const specialistButtons = scope.getByRole('group', { name: 'Specjalistka' }).getByRole('button')
+    await expect(specialistButtons).toHaveText(['Cały zespół', 'Anna', 'Julia', 'Karolina', 'Marta'])
+    await scope.getByRole('button', { name: 'Anna Lewandowska' }).click()
+    await expect(scope).toContainText('Anna Lewandowska')
+    const comparison = page.getByRole('region', { name: 'Porównanie specjalistek' })
+    await expect(comparison.locator('.finance-comparison__row')).toHaveCount(1)
+    await expect(comparison).toContainText('Anna')
+    await expect(comparison).not.toContainText('Julia')
+
+    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    await expect(scope.getByRole('button', { name: 'Anna Lewandowska' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(ledgerFilters.getByRole('button', { name: 'Pozostałe do zapłaty' })).toHaveAttribute('aria-pressed', 'true')
+
+    await scope.getByRole('button', { name: 'Cały zespół' }).click()
+    await ledgerFilters.getByRole('button', { name: 'Wszystkie płatności' }).click()
+    await page.getByRole('button', { name: 'Poprzedni miesiąc' }).click()
+    const savedMonth = await page.locator('.month-nav__label').textContent()
+    const pager = page.getByRole('navigation', { name: 'Stronicowanie' })
+    await expect(pager).toBeVisible()
+    await pager.getByRole('button', { name: 'Następna strona' }).click()
+    await expect(pager).toContainText('Strona 2')
+
+    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    await expect(page.locator('.month-nav__label')).toHaveText(savedMonth)
+    await expect(page.getByRole('navigation', { name: 'Stronicowanie' })).toContainText('Strona 2')
+  })
+
+  test('Finanse validates additive payments and Undo restores all four snapshot fields', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Finanse' }).click()
+
+    const row = page.locator('tr[data-session-id="demo-unpaid"]')
+    await expect(row).toHaveAttribute('data-payment', 'unpaid')
+    await expect(row).toHaveAttribute('data-paid-amount', '0')
+    await expect(row).toHaveAttribute('data-method', '')
+    await expect(row).toHaveAttribute('data-paid-date', '')
+    await expect(row.getByTitle('Zmień płatność')).toHaveCount(0)
+
+    const bookButton = row.getByRole('button', { name: /Zaksięguj wpłatę.*Aleksandra Krawczyk.*14 lipca 2026/ })
+    await bookButton.click()
+    let dialog = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+    await expect(dialog).toContainText('Aleksandra Krawczyk')
+    await expect(dialog).toContainText('14 lipca 2026')
+    const amount = dialog.getByLabel('Kwota wpłaty')
+    const method = dialog.getByLabel('Forma płatności')
+    await expect(amount).toHaveValue('220')
+    await dialog.getByRole('button', { name: 'Anuluj' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(bookButton).toBeFocused()
+    await bookButton.click()
+    dialog = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+
+    await amount.fill('221')
+    await dialog.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+    await expect(dialog.getByText('Kwota nie może przekraczać pozostałej kwoty')).toBeVisible()
+    await expect(dialog.getByText('Wybierz formę płatności')).toBeVisible()
+    await expect(amount).toHaveValue('221')
+    await expect(amount).toBeFocused()
+
+    await amount.fill('100')
+    await method.selectOption('cash')
+    await dialog.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(row).toHaveAttribute('data-payment', 'partial')
+    await expect(row).toHaveAttribute('data-paid-amount', '100')
+    await expect(row).toHaveAttribute('data-method', 'cash')
+    await expect(row).toHaveAttribute('data-paid-date', '2026-07-14')
+    await expect(row.getByRole('button', { name: /Zaksięguj wpłatę/ })).toBeFocused()
+    const partialToast = page.locator('.toast').filter({ hasText: 'Zaksięgowano wpłatę' })
+    await expect(partialToast.getByRole('button', { name: 'Cofnij' })).toBeVisible()
+    await expect(partialToast.getByRole('button', { name: /Zamknij:/ })).toBeVisible()
+    await partialToast.evaluate((element) => {
+      const buttons = [...element.querySelectorAll('button')]
+      const dismiss = buttons.find((button) => button.getAttribute('aria-label')?.startsWith('Zamknij:'))
+      const undo = buttons.find((button) => button.textContent.trim() === 'Cofnij')
+      dismiss.click()
+      undo.click()
+    })
+    await expect(partialToast).toHaveCount(0)
+    await expect(row).toHaveAttribute('data-payment', 'partial')
+    await expect(row).toHaveAttribute('data-paid-amount', '100')
+
+    await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
+    dialog = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+    await expect(dialog.getByLabel('Kwota wpłaty')).toHaveValue('120')
+    await dialog.getByLabel('Forma płatności').selectOption('transfer')
+    await dialog.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+    await expect(row).toHaveAttribute('data-payment', 'paid')
+    await expect(row).toHaveAttribute('data-paid-amount', '220')
+    await expect(row).toHaveAttribute('data-method', 'transfer')
+    await expect(row).toHaveAttribute('data-paid-date', '2026-07-14')
+    await expect(page.getByRole('heading', { name: 'Lista rozliczeń' })).toBeFocused()
+
+    const fullToast = page.locator('.toast').filter({ hasText: 'Zaksięgowano wpłatę' })
+    await page.waitForTimeout(3200)
+    await expect(fullToast).toBeVisible()
+    await fullToast.getByRole('button', { name: 'Cofnij' }).click()
+    await expect(fullToast).toHaveCount(0)
+    await expect(row).toHaveAttribute('data-payment', 'partial')
+    await expect(row).toHaveAttribute('data-paid-amount', '100')
+    await expect(row).toHaveAttribute('data-method', 'cash')
+    await expect(row).toHaveAttribute('data-paid-date', '2026-07-14')
+  })
+
+  test('actionable finance toasts clear on logout and role boundaries', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    const row = page.locator('tr[data-session-id="demo-unpaid"]')
+
+    await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
+    let dialog = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+    await dialog.getByLabel('Kwota wpłaty').fill('100')
+    await dialog.getByLabel('Forma płatności').selectOption('cash')
+    await dialog.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+    let paymentToast = page.locator('.toast').filter({ hasText: 'Aleksandra Krawczyk' })
+    await expect(paymentToast).toBeVisible()
+
+    await page.getByRole('button', { name: 'Wyloguj się' }).click()
+    await expect(page.getByRole('button', { name: 'Zaloguj się' })).toBeVisible()
+    await expect(paymentToast).toHaveCount(0, { timeout: 750 })
+
+    await page.getByLabel('Hasło').fill('demo')
+    await page.getByRole('button', { name: 'Zaloguj się' }).click()
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Finanse' }).click()
+    await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
+    dialog = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+    await dialog.getByLabel('Forma płatności').selectOption('transfer')
+    await dialog.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+    paymentToast = page.locator('.toast').filter({ hasText: 'Aleksandra Krawczyk' })
+    await expect(paymentToast).toBeVisible()
+
+    await page.getByRole('button', { name: /Tryb demonstracyjny.*Julia Wolanin/ }).click()
+    await page.getByRole('button', { name: /Specjalistka.*Marta Zielińska/ }).click()
+    await expect(paymentToast).toHaveCount(0, { timeout: 750 })
+    await expect(page.getByRole('navigation', { name: 'Nawigacja główna' })).not.toContainText('Finanse')
+  })
+
+  test('only the newest payment Undo remains actionable for one session', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Finanse' }).click()
+    const row = page.locator('tr[data-session-id="demo-unpaid"]')
+    const book = async (amount, method) => {
+      await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
+      const dialog = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+      await dialog.getByLabel('Kwota wpłaty').fill(amount)
+      await dialog.getByLabel('Forma płatności').selectOption(method)
+      await dialog.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+    }
+
+    await book('50', 'cash')
+    await book('25', 'card')
+    await expect(row).toHaveAttribute('data-paid-amount', '75')
+    const paymentToasts = page.locator('.toast').filter({ hasText: 'Zaksięgowano wpłatę' })
+    await expect(paymentToasts).toHaveCount(1)
+    await paymentToasts.getByRole('button', { name: 'Cofnij' }).click()
+    await expect(row).toHaveAttribute('data-paid-amount', '50')
+    await expect(row).toHaveAttribute('data-method', 'cash')
+  })
+
+  test('Raporty scopes its narrative, figures, rows, chart, and mobile summaries together', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Raporty' }).click()
+
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText('Raport miesięczny — lipiec 2026')
+    await expect(page.getByText('Zakres raportu: Cały zespół', { exact: true })).toBeVisible()
+    await expect(page.locator('.figures__label')).toContainText([
+      'Należne za rozliczone sesje',
+      'Wpłacono',
+      'Pozostało do zapłaty',
+    ])
+
+    await page.getByRole('group', { name: 'Specjalistka raportu' }).getByRole('button', { name: 'Anna Lewandowska' }).click()
+    const body = page.getByRole('region', { name: 'Treść raportu' })
+    await expect(page.getByText('Zakres raportu: Anna Lewandowska', { exact: true })).toBeVisible()
+    await expect(page.getByText('Godziny i należności w tym raporcie obejmują wyłącznie: Anna Lewandowska.', { exact: true })).toBeVisible()
+    await expect(page.getByText(/w podziale na specjalistki oraz dla całego centrum/)).toHaveCount(0)
+    await expect(body).toContainText('Anna Lewandowska')
+    await expect(body).not.toContainText('Marta Zielińska')
+    const table = page.getByRole('table', { name: 'Porównanie specjalistek' })
+    await expect(table.locator('tbody tr[data-specialist-id]')).toHaveCount(1)
+    await expect(table).not.toContainText('Całe centrum')
+    await expect(page.getByRole('table', { name: 'Struktura należności — Anna Lewandowska' }).locator('tbody tr')).toHaveCount(1)
+
+    await page.getByRole('button', { name: 'Poprzedni miesiąc' }).click()
+    const savedHeading = await page.getByRole('heading', { level: 1 }).textContent()
+    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    await navigation.getByRole('button', { name: 'Raporty' }).click()
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText(savedHeading)
+    await expect(page.getByRole('group', { name: 'Specjalistka raportu' }).getByRole('button', { name: 'Anna Lewandowska' })).toHaveAttribute('aria-pressed', 'true')
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(table).toBeHidden()
+    const summaries = page.getByRole('region', { name: 'Podsumowania specjalistek' })
+    await expect(summaries.getByRole('article')).toHaveCount(1)
+    await expect(summaries).toContainText('Anna Lewandowska')
+    await expectNoHorizontalPageOverflow(page)
+  })
+
+  test('Ustawienia keeps ordered local section navigation on desktop and mobile', async ({ page }) => {
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+
+    const localNavigation = page.getByRole('navigation', { name: 'Sekcje ustawień' })
+    await expect(localNavigation.getByRole('button')).toHaveText([
+      'Konto',
+      'Centrum',
+      'Kalendarz i integracje',
+      'Zespół i stawki',
+    ])
+    expect((await localNavigation.getByRole('button', { name: 'Konto' }).boundingBox()).height).toBeGreaterThanOrEqual(44)
+    await localNavigation.getByRole('button', { name: 'Zespół i stawki' }).click()
+    await expect(page.getByRole('heading', { name: 'Zespół i stawki', exact: true })).toBeFocused()
+
+    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await expect(localNavigation.getByRole('button', { name: 'Zespół i stawki' })).toHaveAttribute('aria-current', 'true')
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    const select = page.getByLabel('Sekcja ustawień')
+    await expect(select.locator('option')).toHaveText([
+      'Konto',
+      'Centrum',
+      'Kalendarz i integracje',
+      'Zespół i stawki',
+    ])
+    await select.selectOption('calendar')
+    await expect(page.getByRole('heading', { name: 'Kalendarz i integracje', exact: true })).toBeFocused()
+    await expectNoHorizontalPageOverflow(page)
+  })
+
+  test('Ustawienia validates local drafts and saves the whole team explicitly', async ({ page }) => {
+    await login(page)
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Ustawienia' }).click()
+
+    const account = page.getByRole('form', { name: 'Twoje konto' })
+    const saveAccount = account.getByRole('button', { name: 'Zapisz konto' })
+    const accountEmail = account.getByLabel('Adres e-mail')
+    await expect(saveAccount).toBeDisabled()
+    await accountEmail.fill('niepoprawny')
+    await expect(account.getByText('Podaj poprawny adres e-mail')).toBeVisible()
+    await expect(accountEmail).toHaveValue('niepoprawny')
+    await expect(saveAccount).toBeDisabled()
+    await accountEmail.fill('julia+task4@aurelia.pl')
+    await expect(account.getByRole('status')).toHaveText('Niezapisane zmiany')
+    await expect(saveAccount).toBeEnabled()
+    await saveAccount.click()
+    await expect(account.getByRole('status')).toHaveText('Zapisywanie…')
+    await expect(accountEmail).toBeDisabled()
+    await expect(account.getByRole('status')).toHaveText('Zapisano')
+    await expect(accountEmail).toBeEnabled()
+    await expect(saveAccount).toBeDisabled()
+
+    const center = page.getByRole('form', { name: 'Dane centrum' })
+    const saveCenter = center.getByRole('button', { name: 'Zapisz dane centrum' })
+    await expect(saveCenter).toBeDisabled()
+    await center.getByLabel('E-mail').fill('centrum@')
+    await expect(center.getByText('Podaj poprawny adres e-mail')).toBeVisible()
+    await expect(center.getByLabel('E-mail')).toHaveValue('centrum@')
+    await expect(saveCenter).toBeDisabled()
+    await center.getByLabel('E-mail').fill('biuro@aurelia.pl')
+    await expect(center.getByRole('status')).toHaveText('Niezapisane zmiany')
+
+    await page.getByRole('navigation', { name: 'Sekcje ustawień' }).getByRole('button', { name: 'Zespół i stawki' }).click()
+    const team = page.getByRole('form', { name: 'Zespół i stawki' })
+    const saveTeam = team.getByRole('button', { name: 'Zapisz zespół' })
+    await expect(saveTeam).toBeDisabled()
+    const juliaRate = team.getByLabel('Stawka — Julia Wolanin')
+    const martaCapacity = team.getByLabel('Limit tygodniowy — Marta Zielińska')
+    await juliaRate.fill('0')
+    await expect(team.getByText('Stawka musi być większa od zera')).toBeVisible()
+    await expect(juliaRate).toHaveValue('0')
+    await martaCapacity.fill('12.5')
+    await expect(team.getByText('Limit musi być dodatnią liczbą całkowitą')).toBeVisible()
+    await expect(martaCapacity).toHaveValue('12.5')
+    await expect(saveTeam).toBeDisabled()
+
+    await juliaRate.fill('230')
+    await martaCapacity.fill('21')
+    await expect(team.getByRole('status')).toHaveText('Niezapisane zmiany')
+    await expect(saveTeam).toBeEnabled()
+    await saveTeam.click()
+    await expect(team.getByRole('status')).toHaveText('Zapisywanie…')
+    await expect(juliaRate).toBeDisabled()
+    await expect(martaCapacity).toBeDisabled()
+    await expect(team.getByRole('status')).toHaveText('Zapisano')
+    await expect(juliaRate).toBeEnabled()
+    await expect(martaCapacity).toBeEnabled()
+    await expect(saveTeam).toBeDisabled()
+    await expect(juliaRate).toHaveValue('230')
+    await expect(martaCapacity).toHaveValue('21')
+  })
+
+  test('team drafts rebase pristine fields while preserving dirty fields after profile edits', async ({ page }) => {
+    await login(page)
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('navigation', { name: 'Sekcje ustawień' }).getByRole('button', { name: 'Zespół i stawki' }).click()
+    const team = page.getByRole('form', { name: 'Zespół i stawki' })
+    const juliaRate = team.getByLabel('Stawka — Julia Wolanin')
+    const juliaCapacity = team.getByLabel('Limit tygodniowy — Julia Wolanin')
+    await juliaCapacity.fill('21')
+
+    await team.getByRole('button', { name: 'Edytuj profil — Julia Wolanin' }).click()
+    const drawer = page.getByRole('dialog', { name: 'Edycja profilu specjalistki' })
+    await drawer.getByLabel('Stawka (zł / sesja)').fill('230')
+    await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()
+    await expect(drawer).toHaveCount(0)
+
+    await expect(juliaRate).toHaveValue('230')
+    await expect(juliaCapacity).toHaveValue('21')
+    await expect(team.getByRole('status')).toHaveText('Niezapisane zmiany')
+    await team.getByRole('button', { name: 'Zapisz zespół' }).click()
+    await expect(team.getByRole('status')).toHaveText('Zapisano')
+    await expect(juliaRate).toHaveValue('230')
+    await expect(juliaCapacity).toHaveValue('21')
+  })
+
+  test('preference rows are full-size switches whose five-second Undo restores the prior value', async ({ page }) => {
+    await login(page)
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('navigation', { name: 'Sekcje ustawień' }).getByRole('button', { name: 'Kalendarz i integracje' }).click()
+
+    const weekends = page.getByRole('switch', { name: 'Weekendy w kalendarzu' })
+    await expect(weekends).toHaveAttribute('aria-checked', 'true')
+    const hitBox = await weekends.boundingBox()
+    expect(hitBox.height).toBeGreaterThanOrEqual(44)
+    expect(hitBox.width).toBeGreaterThanOrEqual(44)
+    await weekends.click()
+    await expect(weekends).toHaveAttribute('aria-checked', 'false')
+
+    const toast = page.locator('.toast').filter({ hasText: 'Weekendy w kalendarzu' })
+    const undo = toast.getByRole('button', { name: 'Cofnij' })
+    const dismiss = toast.getByRole('button', { name: /Zamknij:/ })
+    await expect(undo).toBeVisible()
+    await expect(dismiss).toBeVisible()
+    expect((await undo.boundingBox()).height).toBeGreaterThanOrEqual(44)
+    expect((await dismiss.boundingBox()).height).toBeGreaterThanOrEqual(44)
+    await undo.click()
+    await expect(toast).toHaveCount(0)
+    await expect(weekends).toHaveAttribute('aria-checked', 'true')
+
+    await weekends.click()
+    const expiringToast = page.locator('.toast').filter({ hasText: 'Weekendy w kalendarzu' })
+    const expiringUndo = expiringToast.getByRole('button', { name: 'Cofnij' })
+    await expect(expiringUndo).toBeEnabled()
+    await page.waitForTimeout(5050)
+    await expect(expiringUndo).toBeDisabled()
+    await expect(weekends).toHaveAttribute('aria-checked', 'false')
+    await expect(expiringToast).toHaveCount(0)
+    await expect(weekends).toHaveAttribute('aria-checked', 'false')
+  })
+
+  test('Finanse, Raporty, and Ustawienia avoid page overflow at 320 and 390 pixels', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await page.setViewportSize({ width: 320, height: 844 })
+    await login(page)
+
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
+      await bottomNavigation.getByRole('button', { name: 'Finanse', exact: true }).click()
+      await expectNoHorizontalPageOverflow(page)
+
+      await bottomNavigation.getByRole('button', { name: 'Więcej', exact: true }).click()
+      await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Raporty' }).click()
+      await expectNoHorizontalPageOverflow(page)
+
+      await bottomNavigation.getByRole('button', { name: 'Więcej', exact: true }).click()
+      await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Ustawienia' }).click()
+      await expectNoHorizontalPageOverflow(page)
+    }
   })
 })

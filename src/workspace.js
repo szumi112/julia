@@ -1,5 +1,5 @@
 import { DEMO_ROLES } from './data.js'
-import { collectedOf, isBillable, monthKey, outstandingOf, timeToMin, toISODate } from './format.js'
+import { collectedOf, isBillable, METHOD_LABELS, monthKey, outstandingOf, timeToMin, toISODate } from './format.js'
 
 export const withPsychologistDefaults = (psychologist) => ({
   ...psychologist,
@@ -106,6 +106,39 @@ export const scopedBillingSummary = (sessions, { psychId = null } = {}) => {
     summary.outstanding += outstandingOf(session)
   }
   return summary
+}
+
+export const paymentSnapshotOf = (session) => ({
+  payment: session.payment,
+  paidAmount: session.paidAmount ?? 0,
+  method: session.method ?? null,
+  paidDate: session.paidDate ?? null,
+})
+
+export const paymentEntryFor = (session, { amount, method, paidDate }) => {
+  const entryAmount = Number(amount)
+  const entryCents = Math.round(entryAmount * 100)
+  const remainderCents = Math.round(outstandingOf(session) * 100)
+  const errors = {}
+  if (!Number.isFinite(entryAmount) || entryAmount <= 0 || entryCents <= 0) {
+    errors.amount = 'Podaj kwotę większą od zera'
+  } else if (entryCents > remainderCents) {
+    errors.amount = 'Kwota nie może przekraczać pozostałej kwoty'
+  }
+  if (!Object.hasOwn(METHOD_LABELS, method)) errors.method = 'Wybierz formę płatności'
+  if (Object.keys(errors).length > 0) return { errors, patch: null }
+
+  const totalCents = Math.round(Number(session.amount) * 100)
+  const paidCents = Math.round((Number(session.paidAmount) || 0) * 100) + entryCents
+  return {
+    errors,
+    patch: {
+      payment: paidCents === totalCents ? 'paid' : 'partial',
+      paidAmount: paidCents / 100,
+      method,
+      paidDate,
+    },
+  }
 }
 
 export const roleById = (id) => DEMO_ROLES.find((role) => role.id === id) || DEMO_ROLES[0]
