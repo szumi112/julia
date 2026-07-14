@@ -216,8 +216,8 @@ function CockpitPop({ anchorRef, onClose, children }) {
     if (!motionOK() || !ref.current) return
     window.gsap.fromTo(
       ref.current,
-      { autoAlpha: 0, y: -8, scale: 0.98 },
-      { autoAlpha: 1, y: 0, scale: 1, duration: 0.32, ease: 'power3.out' }
+      { y: -6, scale: 0.99 },
+      { y: 0, scale: 1, duration: 0.2, ease: 'power3.out' }
     )
   }, [])
 
@@ -225,9 +225,7 @@ function CockpitPop({ anchorRef, onClose, children }) {
   useEffect(() => {
     const opener = document.activeElement
     const pop = ref.current
-    // the entrance tween starts at autoAlpha 0 (visibility:hidden) in this
-    // same commit — focus only sticks once the panel is visible again
-    const t = setTimeout(() => pop?.querySelector('button')?.focus(), motionOK() ? 80 : 0)
+    pop?.querySelector('button')?.focus()
     const onTab = (e) => {
       if (e.key !== 'Tab' || !pop) return
       const els = [...pop.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
@@ -246,7 +244,6 @@ function CockpitPop({ anchorRef, onClose, children }) {
     }
     document.addEventListener('keydown', onTab)
     return () => {
-      clearTimeout(t)
       document.removeEventListener('keydown', onTab)
       if (opener && typeof opener.focus === 'function') opener.focus()
     }
@@ -259,7 +256,7 @@ function CockpitPop({ anchorRef, onClose, children }) {
       role="dialog"
       aria-modal="true"
       aria-label="Panel dnia"
-      style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: 0, visibility: 'hidden' }}
+      style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: 0 }}
     >
       {children(onClose)}
     </div>
@@ -275,16 +272,14 @@ function CockpitSheet({ onClose, children }) {
 
   useEffect(() => {
     if (!motionOK() || !ref.current) return
-    window.gsap.fromTo(backRef.current, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.3 })
-    window.gsap.fromTo(ref.current, { y: '104%' }, { y: '0%', duration: 0.5, ease: 'power4.out' })
+    window.gsap.fromTo(ref.current, { y: 12 }, { y: 0, duration: 0.22, ease: 'power3.out' })
   }, [])
 
   const close = useCallback(() => {
     if (closing.current) return
     if (!motionOK() || !ref.current) return onClose()
     closing.current = true
-    window.gsap.to(backRef.current, { autoAlpha: 0, duration: 0.25 })
-    window.gsap.to(ref.current, { y: '104%', duration: 0.38, ease: 'power3.in', onComplete: onClose })
+    window.gsap.to(ref.current, { y: 12, duration: 0.18, ease: 'power3.in', onComplete: onClose })
   }, [onClose])
 
   useEffect(() => {

@@ -6,7 +6,7 @@ import { ShellCtx } from './shell-ctx.js'
 import { DEMO_ROLES } from './data.js'
 import { useIsCompact, useIsPhone } from './responsive.js'
 import { TodayCockpit } from './cockpit.jsx'
-import { animateOut, motionOK, goldBurst } from './anim.js'
+import { motionOK, goldBurst } from './anim.js'
 import { fmtMonthYear, monthKey, toISODate, fmtWeekday, cap, sessionsWord, outstandingOf } from './format.js'
 import { sessionsForRole } from './workspace.js'
 import { BoardDrawer, Dashboard } from './views/Dashboard.jsx'
@@ -293,6 +293,7 @@ function MobileTabbar({ route, navigate, role, onAdd, onMore }) {
   const activeId = ACTIVE_OF[route.name] || route.name
   const activeTabId = MORE_ROUTES.has(activeId) ? 'more' : activeId
   const tabs = TABBAR.filter((item) => canAccess(item.id, role))
+  const tabSetKey = tabs.map((item) => item.id).join(':')
 
   // the gliding blob behind the active icon — measured, then moved via CSS
   // transition (same pattern as Segmented, survives orientation changes)
@@ -308,7 +309,7 @@ function MobileTabbar({ route, navigate, role, onAdd, onMore }) {
     const ro = new ResizeObserver(measure)
     ro.observe(bar)
     return () => ro.disconnect()
-  }, [activeTabId])
+  }, [activeTabId, role.id, tabSetKey])
 
   useEffect(() => {
     if (!motionOK() || !barRef.current) return
@@ -478,9 +479,6 @@ function useMonthSettled() {
   }, [state.sessions, toast])
 }
 
-// details sit one level below their list view — used for drill-in continuity
-const DEPTH = { client: 1, psych: 1, tusGroup: 1 }
-
 export function Shell({ onLogout }) {
   const { state, dispatch } = useApp()
   const [route, setRoute] = useState({ name: 'dashboard' })
@@ -492,8 +490,6 @@ export function Shell({ onLogout }) {
   const viewRef = useRef(null)
   const contentRef = useRef(null)
   const shellRef = useRef(null)
-  const busy = useRef(false)
-  const navigationIdRef = useRef(0)
   const viewRegistryRef = useRef({})
   const role = DEMO_ROLES.find((demoRole) => demoRole.id === state.demoRoleId) || DEMO_ROLES[0]
   const routeRef = useRef(route)
@@ -562,29 +558,18 @@ export function Shell({ onLogout }) {
     const currentRole = roleRef.current
     const currentRoute = routeRef.current
     if (!canAccess(ACTIVE_OF[name] || name, currentRole)) return
-    if (busy.current) return
     setRoleMenuOpen(false)
     setOverlay(null)
     if (currentRoute.name === name && JSON.stringify(currentRoute.params) === JSON.stringify(params)) return
-    busy.current = true
-    const navigationId = ++navigationIdRef.current
-    const dir = (DEPTH[name] || 0) - (DEPTH[currentRoute.name] || 0)
-    animateOut(viewRef.current, dir).then(() => {
-      if (navigationId !== navigationIdRef.current) return
-      const activeRole = roleRef.current
-      if (!canAccess(ACTIVE_OF[name] || name, activeRole)) {
-        busy.current = false
-        return
-      }
-      viewRegistryRef.current = patchRegistryRoute(
-        viewRegistryRef.current,
-        currentRole.id,
-        currentRoute.name,
-        { scrollY: contentRef.current?.scrollTop || 0 }
-      )
-      setRoute({ name, params })
-      busy.current = false
-    })
+    viewRegistryRef.current = patchRegistryRoute(
+      viewRegistryRef.current,
+      currentRole.id,
+      currentRoute.name,
+      { scrollY: contentRef.current?.scrollTop || 0 }
+    )
+    const nextRoute = { name, params }
+    routeRef.current = nextRoute
+    setRoute(nextRoute)
   }, [])
 
   const setDemoRole = useCallback((roleId) => {
@@ -593,17 +578,18 @@ export function Shell({ onLogout }) {
     const currentRole = roleRef.current
     if (nextRole.id === currentRole.id) return
     const currentRoute = routeRef.current
-    navigationIdRef.current += 1
-    busy.current = false
     viewRegistryRef.current = patchRegistryRoute(
       viewRegistryRef.current,
       currentRole.id,
       currentRoute.name,
       { scrollY: contentRef.current?.scrollTop || 0 }
     )
-    if (!canAccess(ACTIVE_OF[currentRoute.name] || currentRoute.name, nextRole)) {
-      setRoute({ name: 'dashboard' })
-    }
+    const parentRoute = ACTIVE_OF[currentRoute.name]
+    const candidate = parentRoute || currentRoute.name
+    const nextRoute = { name: canAccess(candidate, nextRole) ? candidate : 'dashboard' }
+    routeRef.current = nextRoute
+    roleRef.current = nextRole
+    setRoute(nextRoute)
     dispatch({ type: 'SET_DEMO_ROLE', roleId })
   }, [dispatch])
 
@@ -630,8 +616,7 @@ export function Shell({ onLogout }) {
     setDrawer(null)
   }, [closeOverlay])
 
-  // The new .view exists only after animateOut has committed a route swap.
-  // Moving focus here gives screen-reader and keyboard users the destination
+  // Moving focus after the immediate route commit gives screen-reader and keyboard users the destination
   // context without interrupting the existing live-region announcement.
   useEffect(() => {
     viewRef.current?.focus({ preventScroll: true })
@@ -674,7 +659,7 @@ export function Shell({ onLogout }) {
 
   return (
     <ShellCtx.Provider value={shellValue}>
-      <a className="skip-link" href="#main-content">Przejdź do treści</a>
+      <a className="skip-link" href="#main-content" inert={hasOverlay ? '' : undefined}>Przejdź do treści</a>
       <div className="shell" ref={shellRef}>
         {!isCompact && <Sidebar route={route} navigate={navigate} role={role} inert={hasOverlay ? '' : undefined} />}
         <div className="main">

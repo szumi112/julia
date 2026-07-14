@@ -611,7 +611,7 @@ input, select, textarea { font-family: inherit; color: inherit; }
   inset: 0;
   background: linear-gradient(115deg, var(--terra-deep), var(--terra) 50%, var(--rose-deep));
   opacity: 0;
-  transition: opacity 0.35s var(--ease-out);
+  transition: opacity 0.22s var(--ease-out);
 }
 .btn--primary > * { position: relative; z-index: 1; }
 .btn--primary:hover::before { opacity: 1; }
@@ -667,7 +667,7 @@ input, select, textarea { font-family: inherit; color: inherit; }
 .card--pad { padding: 24px; }
 
 /* gentle hover elevation (stat cards, interactive surfaces) */
-.card--lift { transition: transform 0.28s var(--ease-out), box-shadow 0.28s var(--ease-out); }
+.card--lift { transition: transform 0.22s var(--ease-out), box-shadow 0.22s var(--ease-out); }
 .card--lift:hover { transform: translateY(-3px); box-shadow: var(--shadow-2); }
 
 .card-title {
@@ -887,8 +887,8 @@ button.figures__item:hover .figures__value { color: var(--rose-deep); }
   border-radius: 9px;
   background: var(--surface);
   box-shadow: var(--shadow-1);
-  transition: left 0.32s var(--ease-spring), width 0.32s var(--ease-spring),
-    top 0.32s var(--ease-spring), height 0.32s var(--ease-spring);
+  transition: left 0.22s var(--ease-spring), width 0.22s var(--ease-spring),
+    top 0.22s var(--ease-spring), height 0.22s var(--ease-spring);
 }
 /* phone: long segmented controls (session status/payment) wrap to a 2-up grid */
 @media (max-width: 640px) {
@@ -1032,7 +1032,7 @@ button.figures__item:hover .figures__value { color: var(--rose-deep); }
   border-radius: 99px;
   background: var(--paper-deep);
   border: 1px solid var(--line-strong);
-  transition: background 0.3s var(--ease-out), border-color 0.3s;
+  transition: background 0.22s var(--ease-out), border-color 0.22s;
   flex-shrink: 0;
 }
 .toggle::after {
@@ -1045,7 +1045,7 @@ button.figures__item:hover .figures__value { color: var(--rose-deep); }
   border-radius: 99px;
   background: #fff;
   box-shadow: 0 1px 4px rgba(58, 44, 50, 0.25);
-  transition: transform 0.3s var(--ease-spring);
+  transition: transform 0.22s var(--ease-spring);
 }
 .toggle.is-on { background: var(--rose-deep); border-color: var(--rose-deep); }
 .toggle.is-on::after { transform: translateX(18px); }
@@ -1065,7 +1065,7 @@ button.figures__item:hover .figures__value { color: var(--rose-deep); }
   border: 1px solid var(--line-strong);
   background: var(--surface);
   font-size: 14px;
-  transition: width 0.35s var(--ease-out), border-color 0.22s, box-shadow 0.22s;
+  transition: width 0.22s var(--ease-out), border-color 0.22s, box-shadow 0.22s;
 }
 .search input:focus { width: 310px; border-color: var(--rose); box-shadow: 0 0 0 4px rgba(194, 128, 141, 0.14); outline: none; }
 @media (max-width: 640px) {
@@ -2161,7 +2161,7 @@ button.spine__row:hover { background: rgba(240, 220, 218, 0.3); }
 }
 
 /* psychologist cards */
-.psy-card { position: relative; overflow: hidden; padding: 26px; cursor: pointer; transition: transform 0.3s var(--ease-out), box-shadow 0.3s var(--ease-out); }
+.psy-card { position: relative; overflow: hidden; padding: 26px; cursor: pointer; transition: transform 0.22s var(--ease-out), box-shadow 0.22s var(--ease-out); }
 .psy-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-2); }
 .psy-card__band { position: absolute; top: 0; left: 0; right: 0; height: 5px; }
 .psy-card__spec { color: var(--ink-soft); font-size: 13px; margin-top: 2px; }

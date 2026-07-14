@@ -30,6 +30,7 @@ test('navigation focuses the destination and a day cockpit excludes background c
   await page.getByRole('button', { name: /Panel dnia/ }).click()
   await expect(page.getByRole('dialog', { name: /Panel dnia/ })).toBeVisible()
   await expect(page.getByRole('main')).toHaveAttribute('inert', '')
+  await expect(page.locator('.skip-link')).toHaveAttribute('inert', '')
 })
 
 test('skip link reveals on focus and moves focus to the main landmark', async ({ page }) => {
@@ -84,6 +85,30 @@ test('mobile navigation drawer keeps role switching and logout reachable', async
   await expect(drawer.getByRole('button', { name: 'Wyloguj się' })).toBeVisible()
   await drawer.getByRole('button', { name: 'Wyloguj się' }).click()
   await expect(page.getByRole('button', { name: 'Zaloguj się' })).toBeVisible()
+})
+
+test('mobile active pill remeasures when role permissions change the tab set', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await login(page)
+  const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
+
+  await bottomNavigation.getByRole('button', { name: 'Więcej' }).click()
+  await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await expect(page.locator('.topbar__title b')).toHaveText('Zajęcia TUS')
+  await expect(page.getByRole('dialog', { name: 'Nawigacja' })).toHaveCount(0)
+  await page.waitForTimeout(250)
+  await bottomNavigation.getByRole('button', { name: 'Więcej' }).click()
+  const roleButton = page.getByRole('dialog', { name: 'Nawigacja' })
+    .getByRole('button', { name: /Specjalistka.*Marta Zielińska/ })
+  await expect(roleButton).toBeVisible()
+  await roleButton.click()
+
+  await expect(bottomNavigation.getByRole('button', { name: 'Finanse' })).toHaveCount(0)
+  await expect.poll(async () => {
+    const more = await bottomNavigation.getByRole('button', { name: 'Więcej' }).boundingBox()
+    const pill = await bottomNavigation.locator('.tabbar__pill').boundingBox()
+    return Math.abs((more.x + more.width / 2) - (pill.x + pill.width / 2))
+  }).toBeLessThanOrEqual(1)
 })
 
 test('Figure exposes its formatted value on the first rendered frame', async ({ page }) => {
@@ -188,6 +213,32 @@ test('same-route view state does not leak when the demo role changes', async ({ 
 
   await expect(page.getByPlaceholder('Szukaj klienta…')).toHaveValue('')
   await expect(page.getByRole('heading', { name: /Moi klienci/ })).toBeVisible()
+})
+
+test('role switch discards a client detail identity outside the next role scope', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await expect(page.getByRole('heading', { name: 'Zofia Mazur' })).toBeVisible()
+
+  await switchToTherapist(page)
+
+  await expect(page.locator('.topbar__title b')).toHaveText('Klienci')
+  await expect(page.getByRole('heading', { name: 'Zofia Mazur' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: /Moi klienci/ })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Zofia Mazur/ })).toHaveCount(0)
+})
+
+test('role switch clears top-level route parameters and their derived filters', async ({ page }) => {
+  await login(page)
+  await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('button').first().click()
+  await expect(page.getByText(/Wszystkie okresy.*tylko zaległe/i)).toBeVisible()
+
+  await switchToCoordinator(page)
+
+  await expect(page.locator('.topbar__title b')).toHaveText('Finanse')
+  await expect(page.getByText(/Wszystkie okresy.*tylko zaległe/i)).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Wszystkie płatności' })).toHaveAttribute('aria-pressed', 'true')
 })
 
 test('coarse pointers expose complete 44px targets without enlarging pills', async ({ browser }, testInfo) => {
@@ -320,6 +371,129 @@ test('shell and reveal motion finishes within 250ms', async ({ page }) => {
   expect(tabMotion.pill).toBeLessThanOrEqual(0.25)
 })
 
+test('navigation commits its destination before the next paint', async ({ page }) => {
+  await login(page)
+
+  const titleAfterNextPaint = await page.evaluate(async () => {
+    const navigation = document.querySelector('nav[aria-label="Nawigacja główna"]')
+    ;[...navigation.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Kalendarz').click()
+    await new Promise(requestAnimationFrame)
+    return document.querySelector('.topbar__title b').textContent
+  })
+
+  expect(titleAfterNextPaint).toBe('Kalendarz')
+})
+
+test('operational overlays never fade in and finish motion within 250ms', async ({ page }) => {
+  await login(page)
+  await page.evaluate(() => {
+    window.__operationalMotion = []
+    const classify = (targets) => {
+      const element = window.gsap.utils.toArray(targets)[0]
+      if (!element?.matches) return null
+      if (element.matches('.cmd')) return 'command'
+      if (element.matches('.cmd-back')) return 'command-backdrop'
+      if (element.matches('.popover')) return 'popover'
+      if (element.matches('.cockpit--pop')) return 'cockpit-desktop'
+      if (element.matches('.cockpit--sheet')) return 'cockpit-phone'
+      if (element.matches('.cockpit-back')) return 'cockpit-backdrop'
+      return null
+    }
+    const pick = (vars = {}) => ({
+      autoAlpha: vars.autoAlpha,
+      delay: Number(vars.delay || 0),
+      duration: Number(vars.duration || 0),
+      opacity: vars.opacity,
+      visibility: vars.visibility,
+      y: vars.y,
+    })
+    const originalFromTo = window.gsap.fromTo.bind(window.gsap)
+    const originalTo = window.gsap.to.bind(window.gsap)
+    window.gsap.fromTo = (targets, fromVars, toVars) => {
+      const kind = classify(targets)
+      if (kind) window.__operationalMotion.push({ kind, method: 'fromTo', from: pick(fromVars), to: pick(toVars) })
+      return originalFromTo(targets, fromVars, toVars)
+    }
+    window.gsap.to = (targets, toVars) => {
+      const kind = classify(targets)
+      if (kind) window.__operationalMotion.push({ kind, method: 'to', to: pick(toVars) })
+      return originalTo(targets, toVars)
+    }
+  })
+
+  await page.getByRole('button', { name: /Szukaj/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Szukaj w Aurelii' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Szukaj w Aurelii' })).toHaveCount(0)
+
+  await page.getByRole('button', { name: /Tryb demonstracyjny.*Julia Wolanin/ }).click()
+  await expect(page.getByRole('group', { name: 'Tryb demonstracyjny' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('group', { name: 'Tryb demonstracyjny' })).toHaveCount(0)
+
+  await page.getByRole('button', { name: /Panel dnia/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Panel dnia' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Panel dnia' })).toHaveCount(0)
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.getByRole('navigation', { name: 'Nawigacja dolna' })).toBeVisible()
+  await page.getByRole('button', { name: /Panel dnia/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Panel dnia' }).locator('.cockpit--sheet')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Panel dnia' })).toHaveCount(0)
+
+  const records = await page.evaluate(() => window.__operationalMotion)
+  const kinds = new Set(records.map((record) => record.kind))
+  for (const kind of ['cockpit-desktop', 'cockpit-phone', 'command', 'popover']) {
+    expect(kinds.has(kind), kind).toBe(true)
+  }
+  for (const record of records) {
+    expect(record.to.duration + record.to.delay, `${record.kind} ${record.method}`).toBeLessThanOrEqual(0.25)
+    if (record.method !== 'fromTo') continue
+    expect(record.from.autoAlpha, `${record.kind} autoAlpha`).not.toBe(0)
+    expect(record.from.opacity, `${record.kind} opacity`).not.toBe(0)
+    expect(record.from.visibility, `${record.kind} visibility`).not.toBe('hidden')
+    if (record.kind === 'cockpit-phone') expect(String(record.from.y)).not.toContain('%')
+  }
+})
+
+test('segmented, switch, and interactive control CSS transitions stay within 250ms', async ({ page }) => {
+  await page.goto('.')
+  const durations = await page.evaluate(() => {
+    const fixture = document.createElement('div')
+    fixture.innerHTML = `
+      <button class="btn btn--primary"><span>Akcja</span></button>
+      <button class="card card--lift">Karta</button>
+      <div class="seg"><span class="seg__thumb"></span></div>
+      <button class="toggle"></button>
+      <div class="search"><input /></div>
+      <button class="psy-card">Profil</button>
+    `
+    document.body.append(fixture)
+    const maxDuration = (selector, pseudo) => Math.max(
+      ...getComputedStyle(fixture.querySelector(selector), pseudo).transitionDuration
+        .split(',')
+        .map((value) => value.endsWith('ms') ? parseFloat(value) / 1000 : parseFloat(value))
+    )
+    const result = {
+      button: maxDuration('.btn--primary', '::before'),
+      card: maxDuration('.card--lift'),
+      search: maxDuration('.search input'),
+      segmented: maxDuration('.seg__thumb'),
+      specialistCard: maxDuration('.psy-card'),
+      switchTrack: maxDuration('.toggle'),
+      switchThumb: maxDuration('.toggle', '::after'),
+    }
+    fixture.remove()
+    return result
+  })
+
+  for (const [control, duration] of Object.entries(durations)) {
+    expect(duration, control).toBeLessThanOrEqual(0.25)
+  }
+})
+
 test('therapist session form is scoped to their own practice', async ({ page }) => {
   await login(page)
   await switchToTherapist(page)
@@ -396,20 +570,23 @@ test('centre roles receive a neutral clinical-notes state', async ({ page }) => 
 
 test('coordinator receives the neutral clinical-notes state', async ({ page }) => {
   await login(page)
+  await switchToCoordinator(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
   await page.getByRole('row', { name: /Zofia Mazur/ }).click()
-  await switchToCoordinator(page)
   await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
   await expect(page.locator('.note__text')).toHaveCount(0)
   await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
 })
 
-test('non-owning therapist receives the neutral clinical-notes state', async ({ page }) => {
+test('non-owning therapist is remapped away from an unauthorized client detail', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
   await page.getByRole('row', { name: /Zofia Mazur/ }).click()
   await switchToTherapist(page)
-  await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
+  await expect(page.locator('.topbar__title b')).toHaveText('Klienci')
+  await expect(page.getByRole('heading', { name: /Moi klienci/ })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Zofia Mazur/ })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Zofia Mazur' })).toHaveCount(0)
   await expect(page.locator('.note__text')).toHaveCount(0)
   await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
   await expect(page.locator('.id-band__actions').getByRole('button')).toHaveCount(0)
@@ -426,7 +603,6 @@ test('client detail adapts its primary CTA to the active role', async ({ page })
   await expect(page.getByRole('button', { name: 'Przygotuj sesję' })).toHaveCount(0)
 
   await switchToTherapist(page)
-  await page.getByRole('button', { name: /Wróć do listy klientów/ }).click()
   await page.getByRole('row', { name: /Joanna Madej/ }).click()
   await expect(page.getByRole('button', { name: 'Przygotuj sesję' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Umów spotkanie' })).toHaveCount(0)

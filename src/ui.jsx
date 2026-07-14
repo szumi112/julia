@@ -267,7 +267,7 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, contentR
   useEffect(() => {
     if (!open || !motionOK()) return
     const el = popRef.current
-    if (el) window.gsap.fromTo(el, { autoAlpha: 0, y: -6, scale: 0.97 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.28, ease: 'power3.out' })
+    if (el) window.gsap.fromTo(el, { y: -4, scale: 0.99 }, { y: 0, scale: 1, duration: 0.2, ease: 'power3.out' })
   }, [open])
 
   const wiredTrigger = isValidElement(trigger)
@@ -286,7 +286,7 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, contentR
           role={contentRole}
           aria-label={ariaLabel}
           ref={popRef}
-          style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: 0, visibility: 'hidden' }}
+          style={pos ? { left: pos.left, top: pos.top } : { left: -9999, top: 0 }}
         >
           {children}
         </div>

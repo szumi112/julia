@@ -31,15 +31,6 @@ export function CommandPalette({ onClose }) {
   const inputRef = useRef(null)
   const closing = useRef(false)
 
-  // the entrance tween starts from opacity 0, so make sure focus lands in the
-  // input after the first paint
-  useEffect(() => {
-    const raf = requestAnimationFrame(() =>
-      requestAnimationFrame(() => inputRef.current?.focus())
-    )
-    return () => cancelAnimationFrame(raf)
-  }, [])
-
   const q = norm(query.trim())
 
   const results = useMemo(() => {
@@ -87,14 +78,13 @@ export function CommandPalette({ onClose }) {
 
   useEffect(() => { setSel(0) }, [q])
 
-  // entrance — plain opacity (not autoAlpha) so the input stays focusable
+  // Operational UI stays visible throughout; motion only reinforces its position.
   useEffect(() => {
     if (!motionOK()) return
-    window.gsap.fromTo(backRef.current, { opacity: 0 }, { opacity: 1, duration: 0.25 })
     window.gsap.fromTo(
       panelRef.current,
-      { opacity: 0, y: -14, scale: 0.985 },
-      { opacity: 1, y: 0, scale: 1, duration: 0.35, ease: 'power3.out' }
+      { y: -8, scale: 0.99 },
+      { y: 0, scale: 1, duration: 0.2, ease: 'power3.out' }
     )
   }, [])
 
@@ -102,8 +92,7 @@ export function CommandPalette({ onClose }) {
     if (closing.current) return
     if (!motionOK()) return onClose()
     closing.current = true
-    window.gsap.to(backRef.current, { opacity: 0, duration: 0.22 })
-    window.gsap.to(panelRef.current, { opacity: 0, y: -10, scale: 0.985, duration: 0.22, ease: 'power2.in', onComplete: onClose })
+    window.gsap.to(panelRef.current, { y: -8, scale: 0.99, duration: 0.18, ease: 'power2.in', onComplete: onClose })
   }
   const closeRef = useRef(close)
   closeRef.current = close
