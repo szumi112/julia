@@ -9,26 +9,78 @@ import { StatusPicker, PaymentPicker } from './session-bits.jsx'
 import { sessionMatchesFilters, sessionsForRole } from '../workspace.js'
 import {
   monthKey, addMonths, fmtMonthYear, toISODate, parseISO, pad2, cap,
-  fmtWeekday, fmtDayMonth, fmtMoney, sessionsWord, timeToMin,
+  fmtWeekday, fmtDayMonth, fmtMoney, sessionsWord, timeToMin, STATUS_LABELS, PAY_LABELS,
 } from '../format.js'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
 const STRIP_DOW = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
 const PAYMENT_FILTERS = [
   { value: 'all', label: 'Wszystkie' },
-  { value: 'paid', label: 'Opłacone' },
-  { value: 'partial', label: 'Częściowe' },
-  { value: 'unpaid', label: 'Nieopłacone' },
+  { value: 'partial', label: 'Częściowo opłacona' },
+  { value: 'unpaid', label: 'Nieopłacona' },
+  { value: 'paid', label: 'Opłacona' },
 ]
 const ATTENDANCE_FILTERS = [
-  { value: 'all', label: 'Wszyscy' },
-  { value: 'completed', label: 'Obecny' },
-  { value: 'noshow', label: 'Nieobecny' },
+  { value: 'all', label: 'Wszystkie' },
+  { value: 'noshow', label: 'Nieobecność' },
+  { value: 'completed', label: 'Odbyta' },
   { value: 'cancelled', label: 'Odwołana' },
   { value: 'scheduled', label: 'Zaplanowana' },
 ]
 
 const defaultCalendarFilters = () => ({ payment: 'all', attendance: 'all' })
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+function isISODate(value) {
+  if (!ISO_DATE.test(value || '')) return false
+  return toISODate(parseISO(value)) === value
+}
+
+function addDays(iso, amount) {
+  const date = parseISO(iso)
+  date.setDate(date.getDate() + amount)
+  return toISODate(date)
+}
+
+function weekDaysFor(iso) {
+  const date = parseISO(iso)
+  const mondayOffset = (date.getDay() + 6) % 7
+  const monday = addDays(iso, -mondayOffset)
+  return Array.from({ length: 7 }, (_, index) => addDays(monday, index))
+}
+
+function initialCalendarViewState(getViewState, params, today) {
+  const defaults = {
+    ym: monthKey(today),
+    selected: today,
+    mode: 'agenda',
+    filters: defaultCalendarFilters(),
+    filtersOpen: false,
+    expanded: false,
+  }
+  const persisted = getViewState('calendar', defaults)
+  const paramDate = isISODate(params?.date) ? params.date : null
+  const persistedDate = isISODate(persisted.selected) ? persisted.selected : today
+  const selected = paramDate || persistedDate
+  const payment = PAYMENT_FILTERS.some(({ value }) => value === persisted.filters?.payment)
+    ? persisted.filters.payment
+    : 'all'
+  const attendance = ATTENDANCE_FILTERS.some(({ value }) => value === persisted.filters?.attendance)
+    ? persisted.filters.attendance
+    : 'all'
+
+  return {
+    ym: paramDate
+      ? monthKey(paramDate)
+      : /^\d{4}-\d{2}$/.test(persisted.ym || '') ? persisted.ym : monthKey(selected),
+    selected,
+    mode: persisted.mode === 'cal' ? 'cal' : 'agenda',
+    filters: { payment, attendance },
+    filtersOpen: Boolean(persisted.filtersOpen),
+    expanded: Boolean(persisted.expanded),
+  }
+}
 
 function monthGrid(ym) {
   const [y, m] = ym.split('-').map(Number)
@@ -51,11 +103,13 @@ function monthGrid(ym) {
   return cells
 }
 
-// Phone agenda mode: horizontally scrollable month strip — day pills with
-// psychologist-colored dots; the selected day auto-centers in the strip.
-function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
+// Seven-day, Monday-first strip. Keyboard movement updates selection and focus
+// together so only the active date participates in the tab order.
+function DayStrip({ selected, today, byDate, psychOf, onSelect }) {
   const ref = useRef(null)
   const first = useRef(true)
+  const focusDate = useRef(null)
+  const days = useMemo(() => weekDaysFor(selected), [selected])
 
   useEffect(() => {
     const strip = ref.current
@@ -66,49 +120,93 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
     first.current = false
   }, [selected, days])
 
+  useEffect(() => {
+    if (!focusDate.current) return
+    const iso = focusDate.current
+    focusDate.current = null
+    ref.current?.querySelector(`[data-iso="${iso}"]`)?.focus()
+  }, [days, selected])
+
+  const selectAndFocus = (iso) => {
+    focusDate.current = iso
+    onSelect(iso)
+  }
+
+  const onDayKeyDown = (event, iso) => {
+    let next = null
+    if (event.key === 'ArrowLeft') next = addDays(iso, -1)
+    if (event.key === 'ArrowRight') next = addDays(iso, 1)
+    if (event.key === 'Home') next = days[0]
+    if (event.key === 'End') next = days[6]
+    if (event.key === 'PageUp') next = addDays(iso, -7)
+    if (event.key === 'PageDown') next = addDays(iso, 7)
+    if (!next) return
+    event.preventDefault()
+    selectAndFocus(next)
+  }
+
   return (
-    <div className="day-strip" ref={ref}>
-      {days.map((iso) => {
-        const items = byDate[iso] || []
-        const dowIdx = (parseISO(iso).getDay() + 6) % 7
-        return (
-          <button
-            key={iso}
-            className={[
-              'day-strip__day',
-              iso === selected ? 'is-on' : '',
-              iso === today ? 'is-today' : '',
-              dowIdx >= 5 ? 'is-weekend' : '',
-            ].join(' ')}
-            onClick={() => onSelect(iso)}
-            aria-pressed={iso === selected}
-            aria-label={`${fmtDayMonth(iso)} — ${items.length} ${sessionsWord(items.length)}`}
-          >
-            <span className="day-strip__dow">{STRIP_DOW[dowIdx]}</span>
-            <span className="day-strip__num">{Number(iso.slice(8))}</span>
-            <span className="day-strip__dots">
-              {items.slice(0, 3).map((s) => (
-                <span key={s.id} className="dot" style={{ background: psychOf(s.psychId)?.color }} />
-              ))}
-            </span>
-          </button>
-        )
-      })}
+    <div className="week-strip">
+      <div className="week-strip__controls">
+        <IconBtn name="chevL" label="Poprzedni tydzień" onClick={() => onSelect(addDays(selected, -7))} />
+        <label className="week-strip__date">
+          <span>Wybierz datę</span>
+          <input
+            type="date"
+            value={selected}
+            onChange={(event) => { if (event.target.value) onSelect(event.target.value) }}
+          />
+        </label>
+        <IconBtn name="chevR" label="Następny tydzień" onClick={() => onSelect(addDays(selected, 7))} />
+      </div>
+      <div className="day-strip" ref={ref} role="group" aria-label="Tydzień">
+        {days.map((iso) => {
+          const items = byDate[iso] || []
+          const dowIdx = (parseISO(iso).getDay() + 6) % 7
+          return (
+            <button
+              type="button"
+              key={iso}
+              data-iso={iso}
+              className={[
+                'day-strip__day',
+                iso === selected ? 'is-on' : '',
+                iso === today ? 'is-today' : '',
+                dowIdx >= 5 ? 'is-weekend' : '',
+              ].join(' ')}
+              onClick={() => onSelect(iso)}
+              onKeyDown={(event) => onDayKeyDown(event, iso)}
+              aria-pressed={iso === selected}
+              aria-label={`${fmtDayMonth(iso)} — ${items.length} ${sessionsWord(items.length)}`}
+              tabIndex={iso === selected ? 0 : -1}
+            >
+              <span className="day-strip__dow">{STRIP_DOW[dowIdx]}</span>
+              <span className="day-strip__num">{Number(iso.slice(8))}</span>
+              <span className="day-strip__dots">
+                {items.slice(0, 3).map((session) => (
+                  <span key={session.id} className="dot" style={{ background: psychOf(session.psychId)?.color }} />
+                ))}
+              </span>
+            </button>
+          )
+        })}
+      </div>
     </div>
   )
 }
 
-export function CalendarView() {
+export function CalendarView({ params = {} }) {
   const { state, dispatch, toast } = useApp()
-  const { openSessionForm, role } = useShell()
+  const { getViewState, openSessionForm, patchViewState, role } = useShell()
   const today = toISODate(new Date())
   const curYm = monthKey(new Date())
-  const [ym, setYm] = useState(curYm)
-  const [mode, setMode] = useState('agenda')
-  const [selected, setSelected] = useState(today)
-  const [filters, setFilters] = useState(defaultCalendarFilters)
-  const [filtersOpen, setFiltersOpen] = useState(false)
-  const [agendaExpanded, setAgendaExpanded] = useState(false)
+  const [initialViewState] = useState(() => initialCalendarViewState(getViewState, params, today))
+  const [ym, setYm] = useState(initialViewState.ym)
+  const [mode, setMode] = useState(initialViewState.mode)
+  const [selected, setSelected] = useState(initialViewState.selected)
+  const [filters, setFilters] = useState(initialViewState.filters)
+  const [filtersOpen, setFiltersOpen] = useState(initialViewState.filtersOpen)
+  const [expanded, setExpanded] = useState(initialViewState.expanded)
   const isPhone = useIsPhone()
   // dragging an agenda row would trap touch scrolling, so it stays a desktop affordance
   const agendaDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
@@ -122,6 +220,16 @@ export function CalendarView() {
     () => sessionsForRole(state, role),
     [state.sessions, role.psychId, role.scope]
   )
+  const highlightIdsKey = Array.isArray(params.highlightSessionIds)
+    ? params.highlightSessionIds.join('|')
+    : ''
+  const highlightedSessionIds = useMemo(() => {
+    const inRole = new Set(roleSessions.map((session) => session.id))
+    return new Set(
+      (Array.isArray(params.highlightSessionIds) ? params.highlightSessionIds : [])
+        .filter((id) => inRole.has(id))
+    )
+  }, [highlightIdsKey, roleSessions])
   const rolePsychologists = useMemo(
     () => role.scope === 'own'
       ? state.psychologists.filter((psychologist) => psychologist.id === role.psychId)
@@ -137,8 +245,10 @@ export function CalendarView() {
 
   // Role scope always precedes the local operational filters.
   const filteredSessions = useMemo(
-    () => roleSessions.filter((session) => sessionMatchesFilters(session, filters)),
-    [filters, roleSessions]
+    () => roleSessions.filter((session) => (
+      sessionMatchesFilters(session, filters) || highlightedSessionIds.has(session.id)
+    )),
+    [filters, highlightedSessionIds, roleSessions]
   )
   const monthSessions = useMemo(
     () => sessionsInMonth(filteredSessions, ym),
@@ -149,6 +259,17 @@ export function CalendarView() {
     monthSessions.forEach((s) => { (map[s.date] = map[s.date] || []).push(s) })
     return map
   }, [monthSessions])
+  const weekByDate = useMemo(() => {
+    const map = {}
+    filteredSessions.forEach((session) => {
+      (map[session.date] = map[session.date] || []).push(session)
+    })
+    return map
+  }, [filteredSessions])
+
+  useEffect(() => {
+    patchViewState('calendar', { ym, selected, mode, filters, filtersOpen, expanded })
+  }, [expanded, filters, filtersOpen, mode, patchViewState, selected, ym])
 
   const clientOf = (id) => state.clients.find((c) => c.id === id)
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
@@ -310,6 +431,7 @@ export function CalendarView() {
   // Selecting a day brings its session list into view only when it is off
   // screen — a panel the user can already see must not move under them.
   const selectDay = (iso) => {
+    setYm(monthKey(iso))
     setSelected(iso)
     const panel = mode === 'agenda' ? agendaPanelRef.current : dayPanelRef.current
     if (!panel) return
@@ -325,22 +447,41 @@ export function CalendarView() {
 
   const daySessions = selected ? (byDate[selected] || []) : []
 
-  // --- phone agenda mode ---
-  const stripDays = useMemo(() => {
-    const [y, m] = ym.split('-').map(Number)
-    const n = new Date(y, m, 0).getDate()
-    return Array.from({ length: n }, (_, i) => `${y}-${pad2(m)}-${pad2(i + 1)}`)
-  }, [ym])
-
   const agendaSel = selected || (ym === curYm ? today : `${ym}-01`)
   const agendaSessions = useMemo(
     () => (byDate[agendaSel] || []).slice().sort((a, b) => (a.time < b.time ? -1 : 1)),
     [byDate, agendaSel]
   )
-  const shownAgendaSessions = agendaExpanded ? agendaSessions : agendaSessions.slice(0, 4)
-  const hiddenAgendaSessions = agendaSessions.length - shownAgendaSessions.length
+  const activeAgendaSessions = useMemo(
+    () => agendaSessions.filter((session) => session.status === 'scheduled' || session.status === 'noshow'),
+    [agendaSessions]
+  )
+  const terminalAgendaSessions = useMemo(
+    () => agendaSessions.filter((session) => session.status === 'completed' || session.status === 'cancelled'),
+    [agendaSessions]
+  )
 
-  useEffect(() => setAgendaExpanded(false), [agendaSel, filterKey])
+  // A terminal deep-link has to reveal its row before focus can move to it.
+  useEffect(() => {
+    if (terminalAgendaSessions.some((session) => highlightedSessionIds.has(session.id))) {
+      setExpanded(true)
+    }
+  }, [highlightIdsKey, highlightedSessionIds, terminalAgendaSessions])
+
+  const focusedHighlightKey = useRef(null)
+  useEffect(() => {
+    if (highlightedSessionIds.size === 0) return
+    const requestKey = `${agendaSel}|${highlightIdsKey}|${mode}`
+    if (focusedHighlightKey.current === requestKey) return
+    const panel = mode === 'agenda' ? agendaPanelRef.current : dayPanelRef.current
+    const row = panel?.querySelector('.agenda__row.is-highlighted')
+    if (!row) return
+    const frame = requestAnimationFrame(() => {
+      row.focus()
+      focusedHighlightKey.current = requestKey
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [agendaSel, expanded, highlightIdsKey, highlightedSessionIds, mode])
 
   // gentle row cascade when another day is picked from the strip
   const firstAgendaSwap = useRef(true)
@@ -362,40 +503,56 @@ export function CalendarView() {
   }, [agendaSel, mode])
 
   // one session row — shared by the desktop day panel and the phone agenda
-  const dayRow = (s, dragOk) => {
+  const dayRow = (s, dragOk, terminal = false) => {
     const c = clientOf(s.clientId)
     const p = psychOf(s.psychId)
     const draggable = dragOk && s.status === 'scheduled'
+    const clientName = c?.name || 'Klient'
+    const highlighted = highlightedSessionIds.has(s.id)
     return (
       <div
-        className="agenda__row"
+        className={`agenda__row ${highlighted ? 'is-highlighted' : ''}`}
         key={s.id}
         data-flip-id={s.id}
         data-payment={s.payment}
         data-attendance={s.status}
         data-psych-id={s.psychId}
+        data-terminal={terminal ? 'true' : undefined}
         onPointerDown={draggable ? (e) => onChipDown(e, s) : undefined}
         style={{ '--node-color': p?.color, ...(draggable ? { touchAction: 'none' } : null) }}
+        tabIndex={highlighted ? -1 : undefined}
+        aria-label={highlighted ? `Wyróżniona sesja — ${clientName}, ${s.time}` : undefined}
       >
         <span className="agenda__time">{s.time}</span>
         <span className="agenda__main">
-          <span className="agenda__client">{c?.name}</span>
+          <span className="agenda__client">{clientName}</span>
           <span className="agenda__meta">
             <Avatar name={p?.name || '?'} color={p?.color} size={16} />
             {p?.name} · {fmtMoney(s.amount)}
           </span>
           <span className="agenda__pills">
-            <StatusPicker session={s} />
-            <PaymentPicker session={s} />
+            <StatusPicker
+              session={s}
+              accessibleLabel={`Status: ${STATUS_LABELS[s.status]} — ${clientName}, ${s.time}`}
+            />
+            <PaymentPicker
+              session={s}
+              accessibleLabel={`Płatność: ${PAY_LABELS[s.payment]} — ${clientName}, ${s.time}`}
+            />
           </span>
         </span>
-        <IconBtn name="edit" label="Edytuj sesję" size={16} onClick={() => openSessionForm({ session: s })} />
+        <IconBtn
+          name="edit"
+          label={`Edytuj sesję — ${clientName}, ${s.time}`}
+          size={16}
+          onClick={() => openSessionForm({ session: s })}
+        />
       </div>
     )
   }
 
   // a day's rows on the day thread, with the "teraz" marker when it is today
-  const dayThread = (sessions, dragOk, iso, flipRef) => {
+  const dayThread = (sessions, dragOk, iso, flipRef, terminal = false) => {
     const now = new Date()
     const nowMin = now.getHours() * 60 + now.getMinutes()
     const isToday = iso === today
@@ -409,7 +566,7 @@ export function CalendarView() {
           return (
             <Fragment key={s.id}>
               {nowHere && <div className="spine__now" aria-hidden="true">teraz</div>}
-              {dayRow(s, dragOk)}
+              {dayRow(s, dragOk, terminal)}
             </Fragment>
           )
         })}
@@ -451,7 +608,7 @@ export function CalendarView() {
             <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= monthsRange[monthsRange.length - 1]} onClick={() => changeMonth(1)} />
           </div>
           {ym !== curYm && (
-            <Button variant="ghost" size="sm" onClick={() => { setYm(curYm); setSelected(today) }}>
+            <Button variant="ghost" size="sm" onClick={() => selectDay(today)}>
               Dziś
             </Button>
           )}
@@ -501,10 +658,9 @@ export function CalendarView() {
       {mode === 'agenda' ? (
         <>
           <DayStrip
-            days={stripDays}
             selected={agendaSel}
             today={today}
-            byDate={byDate}
+            byDate={weekByDate}
             psychOf={psychOf}
             onSelect={selectDay}
           />
@@ -526,17 +682,23 @@ export function CalendarView() {
                 hint="Dodaj pierwszą sesję przyciskiem poniżej."
               />
             ) : (
-              dayThread(shownAgendaSessions, false, agendaSel, agendaFlipRef)
-            )}
-            {hiddenAgendaSessions > 0 && (
-              <button
-                type="button"
-                className="bpost-more"
-                aria-label={`Jeszcze ${hiddenAgendaSessions} ${sessionsWord(hiddenAgendaSessions)}`}
-                onClick={() => setAgendaExpanded(true)}
-              >
-                +{hiddenAgendaSessions} więcej
-              </button>
+              <>
+                {activeAgendaSessions.length > 0 &&
+                  dayThread(activeAgendaSessions, false, agendaSel, agendaFlipRef)}
+                {terminalAgendaSessions.length > 0 && (
+                  <div className="agenda-terminal">
+                    <button
+                      type="button"
+                      className="bpost-more agenda-terminal__toggle"
+                      aria-expanded={expanded}
+                      onClick={() => setExpanded((current) => !current)}
+                    >
+                      Zakończone i odwołane ({terminalAgendaSessions.length})
+                    </button>
+                    {expanded && dayThread(terminalAgendaSessions, false, agendaSel, undefined, true)}
+                  </div>
+                )}
+              </>
             )}
             <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
               onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId })}>

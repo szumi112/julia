@@ -9,7 +9,7 @@ import { STATUS_LABELS, STATUS_PILL, PAY_LABELS, PAY_PILL, METHOD_LABELS, fmtMon
 const STATUS_TONE = { scheduled: 'rose', completed: 'sage', cancelled: 'mauve', noshow: 'error' }
 const PAY_TONE = { paid: 'sage', unpaid: 'error', partial: 'gold' }
 
-export function StatusPicker({ session }) {
+export function StatusPicker({ session, accessibleLabel }) {
   const { dispatch, toast } = useApp()
   const { role } = useShell()
   const [open, setOpen] = useState(false)
@@ -21,7 +21,13 @@ export function StatusPicker({ session }) {
       open={open}
       setOpen={setOpen}
       trigger={
-        <Pill tone={STATUS_TONE[session.status]} dot onClick={() => setOpen(!open)} title="Zmień status sesji">
+        <Pill
+          tone={STATUS_TONE[session.status]}
+          dot
+          onClick={() => setOpen(!open)}
+          title="Zmień status sesji"
+          aria-label={accessibleLabel}
+        >
           {STATUS_LABELS[session.status]}
           <Icon name="chevD" size={11} />
         </Pill>
@@ -48,7 +54,7 @@ export function StatusPicker({ session }) {
   )
 }
 
-export function PaymentPicker({ session }) {
+export function PaymentPicker({ session, accessibleLabel }) {
   const { dispatch, toast } = useApp()
   const { openSessionForm, role } = useShell()
   const [open, setOpen] = useState(false)
@@ -64,7 +70,13 @@ export function PaymentPicker({ session }) {
       open={open}
       setOpen={setOpen}
       trigger={
-        <Pill tone={PAY_TONE[session.payment]} dot onClick={() => setOpen(!open)} title="Zmień płatność">
+        <Pill
+          tone={PAY_TONE[session.payment]}
+          dot
+          onClick={() => setOpen(!open)}
+          title="Zmień płatność"
+          aria-label={accessibleLabel}
+        >
           {label}
           <Icon name="chevD" size={11} />
         </Pill>

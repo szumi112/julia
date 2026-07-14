@@ -7,6 +7,28 @@ async function login(page) {
   await expect(page.getByRole('main')).toBeVisible()
 }
 
+async function freezeTime(page, iso) {
+  // GSAP's ticker reads Date.now; reduced motion keeps the app in its final
+  // visual state while the business clock is frozen for deterministic data.
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.addInitScript((frozen) => {
+    const NativeDate = Date
+    const frozenTime = new NativeDate(frozen).getTime()
+    class FrozenDate extends NativeDate {
+      constructor(...args) {
+        super(...(args.length ? args : [frozenTime]))
+      }
+
+      static now() {
+        return frozenTime
+      }
+    }
+    FrozenDate.parse = NativeDate.parse
+    FrozenDate.UTC = NativeDate.UTC
+    window.Date = FrozenDate
+  }, iso)
+}
+
 async function switchToTherapist(page) {
   await page.getByRole('button', { name: /Tryb demonstracyjny.*Julia Wolanin/ }).click()
   await page.getByRole('button', { name: /Specjalistka.*Marta Zielińska/ }).click()
@@ -207,7 +229,7 @@ test('navigation restores each route scroll position', async ({ page }) => {
   const content = page.locator('main.content')
 
   await navigation.getByRole('button', { name: 'Kalendarz' }).click()
-  await page.getByRole('region', { name: /Plan dnia/ }).getByRole('button', { name: /Jeszcze/ }).click()
+  await page.getByRole('region', { name: /Plan dnia/ }).getByRole('button', { name: /Zakończone i odwołane/ }).click()
   const savedScroll = await content.evaluate((element) => {
     element.scrollTop = 300
     return element.scrollTop
@@ -266,20 +288,20 @@ test('role switch cannot finish a pending forbidden navigation', async ({ page }
 test('same-route view state does not leak when the demo role changes', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Klienci' }).click()
-  const search = page.getByPlaceholder('Szukaj klienta…')
+  const search = page.getByPlaceholder('Imię, e-mail lub telefon')
   await search.fill('Zofia')
   await expect(search).toHaveValue('Zofia')
 
   await switchToTherapist(page)
 
-  await expect(page.getByPlaceholder('Szukaj klienta…')).toHaveValue('')
+  await expect(page.getByPlaceholder('Imię, e-mail lub telefon')).toHaveValue('')
   await expect(page.getByRole('heading', { name: /Moi klienci/ })).toBeVisible()
 })
 
 test('role switch discards a client detail identity outside the next role scope', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Klienci' }).click()
-  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByRole('heading', { name: 'Zofia Mazur' })).toBeVisible()
 
   await switchToTherapist(page)
@@ -321,7 +343,7 @@ test('coarse pointers expose complete 44px targets without enlarging pills', asy
     expect(todayChipHit.height).toBe(36)
     expect(todayChipHit.hitHeight).toBeGreaterThanOrEqual(44)
 
-    for (const selector of ['.bpost-more', '.spine__row', '.today-attn__row', '.today-links__item']) {
+    for (const selector of ['.today-completed__trigger', '.spine__row', '.today-attn__row', '.today-links__item']) {
       const target = page.locator(selector).first()
       await expect(target).toBeVisible()
       const box = await target.boundingBox()
@@ -330,7 +352,8 @@ test('coarse pointers expose complete 44px targets without enlarging pills', asy
     }
 
     await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('button', { name: 'Klienci' }).click()
-    const chip = page.locator('.chips-row .chip').first()
+    await page.getByRole('button', { name: /^Filtry/ }).click()
+    const chip = page.getByRole('region', { name: 'Filtry klientów' }).locator('.chip').first()
     await expect(chip).toBeVisible()
     await chip.scrollIntoViewIfNeeded()
     const chipHit = await chip.evaluate((element) => {
@@ -698,7 +721,7 @@ test('therapist search only exposes their client context and hides note prose fr
 test('centre roles receive a neutral clinical-notes state', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
-  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
   await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
 })
@@ -707,7 +730,7 @@ test('coordinator receives the neutral clinical-notes state', async ({ page }) =
   await login(page)
   await switchToCoordinator(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
-  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
   await expect(page.locator('.note__text')).toHaveCount(0)
   await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
@@ -716,7 +739,7 @@ test('coordinator receives the neutral clinical-notes state', async ({ page }) =
 test('non-owning therapist is remapped away from an unauthorized client detail', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
-  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await switchToTherapist(page)
   await expect(page.locator('.topbar__title b')).toHaveText('Klienci')
   await expect(page.getByRole('heading', { name: /Moi klienci/ })).toBeVisible()
@@ -733,12 +756,12 @@ test('non-owning therapist is remapped away from an unauthorized client detail',
 test('client detail adapts its primary CTA to the active role', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
-  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByRole('button', { name: 'Umów spotkanie' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Przygotuj sesję' })).toHaveCount(0)
 
   await switchToTherapist(page)
-  await page.getByRole('row', { name: /Joanna Madej/ }).click()
+  await page.getByRole('link', { name: 'Otwórz kartę — Joanna Madej' }).click()
   await expect(page.getByRole('button', { name: 'Przygotuj sesję' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Umów spotkanie' })).toHaveCount(0)
 })
@@ -746,7 +769,7 @@ test('client detail adapts its primary CTA to the active role', async ({ page })
 test('client detail presents care headings in record order', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
-  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByRole('heading', { name: 'Przegląd opieki' })).toBeVisible()
   const headings = await page.locator('main h2').evaluateAll((elements) =>
     elements.map((element) => element.firstChild.textContent.trim())
@@ -790,7 +813,7 @@ test('short lists render fully without a pager and history caps at ten rows', as
   await expect(page.locator('tbody tr').first()).toBeVisible()
   expect(await page.locator('tbody tr').count()).toBeGreaterThan(15)
   await expect(page.getByRole('navigation', { name: 'Stronicowanie' })).toHaveCount(0)
-  await page.getByRole('row', { name: /Zofia Mazur/ }).click()
+  await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByRole('heading', { name: 'Historia frekwencji' })).toBeVisible()
   const historyRows = await page.locator('.client-record__section:has(h2:text("Historia frekwencji")) tbody tr').count()
   expect(historyRows).toBeLessThanOrEqual(10)
@@ -799,7 +822,7 @@ test('short lists render fully without a pager and history caps at ten rows', as
 test('Today keeps the essential daily regions together', async ({ page }) => {
   await login(page)
   await expect(
-    page.getByRole('heading', { level: 1, name: /^\d{1,2}:\d{2}$|Wszystko za Tobą|Wolny dzień/ })
+    page.getByRole('heading', { level: 1, name: /^\d{1,2}:\d{2}$|\d+ sesji wymaga statusu|Dzień zakończony|Wolny dzień/ })
   ).toBeVisible()
   await expect(page.getByRole('region', { name: /Wymaga uwagi/ })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Skróty' })).toBeVisible()
@@ -951,16 +974,16 @@ test('calendar exposes explicit payment and attendance reset choices', async ({ 
   const payment = page.getByRole('group', { name: 'Płatność' })
   const attendance = page.getByRole('group', { name: 'Obecność klienta' })
   const allPayments = payment.getByRole('button', { name: 'Wszystkie' })
-  const allAttendance = attendance.getByRole('button', { name: 'Wszyscy' })
+  const allAttendance = attendance.getByRole('button', { name: 'Wszystkie' })
 
   await expect(allPayments).toHaveAttribute('aria-pressed', 'true')
-  await payment.getByRole('button', { name: 'Nieopłacone' }).click()
+  await payment.getByRole('button', { name: 'Nieopłacona' }).click()
   await expect(allPayments).toHaveAttribute('aria-pressed', 'false')
   await allPayments.click()
   await expect(allPayments).toHaveAttribute('aria-pressed', 'true')
 
   await expect(allAttendance).toHaveAttribute('aria-pressed', 'true')
-  await attendance.getByRole('button', { name: 'Nieobecny' }).click()
+  await attendance.getByRole('button', { name: 'Nieobecność' }).click()
   await expect(allAttendance).toHaveAttribute('aria-pressed', 'false')
   await allAttendance.click()
   await expect(allAttendance).toHaveAttribute('aria-pressed', 'true')
@@ -1001,10 +1024,11 @@ test('calendar opens the therapist agenda and exposes exact partial payment edit
   await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
   await expect(agenda).toBeVisible()
+  await agenda.getByRole('button', { name: /Zakończone i odwołane/ }).click()
   const partialPayment = agenda.getByRole('button', { name: /Częściowo/ })
   await partialPayment.scrollIntoViewIfNeeded()
   await partialPayment.click()
-  await page.getByRole('menuitemradio', { name: 'Częściowo' }).click()
+  await page.getByRole('menuitemradio', { name: 'Częściowo opłacona' }).click()
   await page.getByRole('menuitem', { name: 'Edytuj kwotę' }).click()
   await expect(page.getByRole('dialog', { name: 'Edycja sesji' }).getByLabel('Wpłacono (zł)')).toBeFocused()
 })
@@ -1014,16 +1038,17 @@ test('calendar combines payment and attendance filters after role scope', async 
   await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
   await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
   await page.getByRole('button', { name: /^Filtry/ }).click()
-  await page.getByRole('button', { name: 'Nieopłacone' }).click()
-  await page.getByRole('button', { name: 'Nieobecny' }).click()
+  const filters = page.getByRole('region', { name: 'Filtry kalendarza' })
+  await filters.getByRole('button', { name: 'Nieopłacona', exact: true }).click()
+  await filters.getByRole('button', { name: 'Nieobecność', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Filtry · 2' })).toBeVisible()
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
   await expect(agenda.locator('[data-payment="unpaid"][data-attendance="noshow"]')).toHaveCount(1)
   await page.getByRole('button', { name: 'Wyczyść filtry' }).click()
-  const more = agenda.getByRole('button', { name: /Jeszcze/ })
-  await expect(more).toBeVisible()
-  await more.click()
-  await expect(more).toHaveCount(0)
+  const terminal = agenda.getByRole('button', { name: /Zakończone i odwołane/ })
+  await expect(terminal).toBeVisible()
+  await terminal.click()
+  await expect(terminal).toHaveAttribute('aria-expanded', 'true')
   expect(await agenda.locator('.agenda__row').count()).toBeGreaterThan(4)
 })
 
@@ -1031,8 +1056,8 @@ test('calendar day strip scrolls with the page instead of covering the agenda', 
   await login(page)
   await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
-  const more = agenda.getByRole('button', { name: /Jeszcze/ })
-  await more.click()
+  const terminal = agenda.getByRole('button', { name: /Zakończone i odwołane/ })
+  await terminal.click()
   // clicking auto-scrolled the button into view; measure from the top
   await page.locator('main.content').evaluate((el) => el.scrollTo(0, 0))
   const strip = page.locator('.day-strip')
@@ -1085,4 +1110,262 @@ test('owner attention opens matching all-period unpaid payments', async ({ page 
   await issuedTip.focus()
   const issuedTipId = await issuedTip.getAttribute('aria-describedby')
   await expect(page.locator(`[id="${issuedTipId}"]`)).toHaveText('Suma kwot za sesje rozliczane we wszystkich okresach — odbyte i nieobecności. Sesje odwołane nie są fakturowane.')
+})
+
+test.describe('Task 3 daily-care redesign', () => {
+  test('Today exposes hero precedence, one day summary, and the complete prioritized agenda', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+
+    const hero = page.locator('.today-hero')
+    await expect(hero.getByText('Trwa teraz', { exact: true })).toBeVisible()
+    await expect(hero.getByRole('heading', { level: 1 })).toHaveText('10:00')
+
+    const summary = page.getByRole('region', { name: 'Podsumowanie dnia' })
+    await expect(summary).toContainText('Odbyte 3')
+    await expect(summary).toContainText('Nieobecności 1')
+    await expect(summary).toContainText('Pozostałe 3')
+    await expect(page.locator('.sidebar .today-card__line')).toContainText('7 sesji')
+
+    const plan = page.getByRole('region', { name: 'Plan dnia' })
+    const visibleRows = plan.locator('.today-session')
+    await expect(visibleRows).toHaveCount(4)
+    expect(await visibleRows.evaluateAll((rows) => rows.map((row) => row.dataset.priority))).toEqual([
+      'current',
+      'next',
+      'future',
+      'noshow',
+    ])
+    for (const row of await visibleRows.all()) {
+      await expect(row.locator('.today-session__status')).not.toBeEmpty()
+    }
+
+    const completed = plan.getByRole('button', { name: 'Odbyte (3)' })
+    await expect(completed).toHaveAttribute('aria-expanded', 'false')
+    await expect(plan.locator('.today-session[data-status="completed"]')).toHaveCount(0)
+    await completed.click()
+    await expect(plan.locator('.today-session[data-status="completed"]')).toHaveCount(3)
+  })
+
+  test('Today asks for status after the last scheduled session ends', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T20:00:00')
+    await login(page)
+
+    await expect(page.getByRole('heading', { level: 1, name: '2 sesji wymaga statusu' })).toBeVisible()
+    await expect(page.locator('.today-hero')).toContainText(/Zaktualizuj.*status/i)
+  })
+
+  test('Calendar shows the whole active agenda, groups terminal rows, and uses a roving seven-day week', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+
+    const agenda = page.getByRole('region', { name: 'Plan dnia' })
+    await expect(agenda.locator('[data-attendance="scheduled"], [data-attendance="noshow"]')).toHaveCount(4)
+    await expect(agenda.getByRole('button', { name: /Jeszcze|więcej/ })).toHaveCount(0)
+
+    const terminal = agenda.getByRole('button', { name: 'Zakończone i odwołane (4)' })
+    await expect(terminal).toHaveAttribute('aria-expanded', 'false')
+    await expect(agenda.locator('[data-terminal="true"]')).toHaveCount(0)
+    await terminal.click()
+    await expect(agenda.locator('[data-terminal="true"]')).toHaveCount(4)
+    await expect(agenda.getByRole('button', { name: /Status: .+ — .+, \d{2}:\d{2}/ }).first()).toBeVisible()
+    await expect(agenda.getByRole('button', { name: /Płatność: .+ — .+, \d{2}:\d{2}/ }).first()).toBeVisible()
+    await expect(agenda.getByRole('button', { name: /Edytuj sesję — .+, \d{2}:\d{2}/ }).first()).toBeVisible()
+
+    const week = page.getByRole('group', { name: 'Tydzień' })
+    await expect(week.getByRole('button')).toHaveCount(7)
+    await expect(week.locator('button[tabindex="0"]')).toHaveCount(1)
+    const dateInput = page.getByLabel('Wybierz datę')
+    await expect(dateInput).toHaveValue('2026-07-14')
+
+    await week.locator('button[tabindex="0"]').focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(dateInput).toHaveValue('2026-07-15')
+    await expect(week.locator('button[tabindex="0"]')).toBeFocused()
+    await page.keyboard.press('PageDown')
+    await expect(dateInput).toHaveValue('2026-07-22')
+    await page.keyboard.press('Home')
+    await expect(dateInput).toHaveValue('2026-07-20')
+    await page.keyboard.press('End')
+    await expect(dateInput).toHaveValue('2026-07-26')
+  })
+
+  test('a client appointment deep-link highlights and focuses its calendar row without hiding peers', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+    await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
+
+    const upcoming = page.getByRole('region', { name: 'Najbliższe spotkania' })
+    await upcoming.getByRole('link', { name: /Pokaż w kalendarzu — 16 lipca, 13:00/ }).click()
+
+    await expect(page.getByLabel('Wybierz datę')).toHaveValue('2026-07-16')
+    const agenda = page.getByRole('region', { name: 'Plan dnia' })
+    const highlighted = agenda.locator('.agenda__row.is-highlighted')
+    await expect(highlighted).toHaveCount(1)
+    await expect(highlighted).toBeFocused()
+    await expect(highlighted).toHaveAccessibleName(/Wyróżniona sesja.*Zofia Mazur.*13:00/)
+    await expect(agenda.locator('.agenda__row')).toHaveCount(2)
+  })
+
+  test('Calendar restores its date, month, mode, filters, and expanded terminal context', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+
+    await page.getByLabel('Wybierz datę').fill('2026-06-30')
+    await page.getByRole('button', { name: /^Filtry/ }).click()
+    await page.getByRole('region', { name: 'Filtry kalendarza' })
+      .getByRole('button', { name: 'Opłacona', exact: true })
+      .click()
+    await page.getByRole('region', { name: 'Plan dnia' })
+      .getByRole('button', { name: 'Zakończone i odwołane (1)' })
+      .click()
+    await page.getByRole('radio', { name: 'Miesiąc' }).click()
+
+    await navigation.getByRole('button', { name: 'Klienci' }).click()
+    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+
+    await expect(page.getByRole('radio', { name: 'Miesiąc' })).toHaveAttribute('aria-checked', 'true')
+    await expect(page.locator('.month-nav__label')).toContainText('czerwiec 2026')
+    await expect(page.getByRole('button', { name: 'Filtry · 1' })).toHaveAttribute('aria-expanded', 'true')
+    await page.getByRole('radio', { name: 'Plan dnia' }).click()
+    await expect(page.getByLabel('Wybierz datę')).toHaveValue('2026-06-30')
+    const terminal = page.getByRole('region', { name: 'Plan dnia' })
+      .getByRole('button', { name: 'Zakończone i odwołane (1)' })
+    await expect(terminal).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.getByRole('region', { name: 'Plan dnia' }).locator('[data-terminal="true"]')).toHaveCount(1)
+  })
+
+  test('Calendar week keeps adjacent-month session metadata', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+
+    await page.getByLabel('Wybierz datę').fill('2026-07-01')
+
+    const adjacentDay = page.getByRole('group', { name: 'Tydzień' })
+      .locator('[data-iso="2026-06-30"]')
+    await expect(adjacentDay).toHaveAccessibleName('30 czerwca — 1 sesja')
+    await expect(adjacentDay.locator('.day-strip__dots .dot')).toHaveCount(1)
+  })
+
+  test('Clients supports phone search, responsive labelled filters, and one clear action', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('button', { name: 'Klienci' }).click()
+
+    const search = page.getByPlaceholder('Imię, e-mail lub telefon')
+    await search.fill('512384664')
+    await expect(page.getByRole('row', { name: /Renata Gawrys/ })).toBeVisible()
+    await expect(page.getByRole('row', { name: /Ignacy Borkowski/ })).toBeVisible()
+    await expect(page.getByRole('status')).toContainText('2')
+
+    await expect(page.getByRole('group', { name: 'Specjalistka' })).toHaveCount(0)
+    const filtersButton = page.getByRole('button', { name: /^Filtry/ })
+    await filtersButton.click()
+    const filters = page.getByRole('region', { name: 'Filtry klientów' })
+    await expect(filters.getByRole('group', { name: 'Płatności' })).toBeVisible()
+    await expect(filters.getByRole('group', { name: 'Specjalistka' })).toBeVisible()
+    await expect(filters.getByRole('group', { name: 'Status klienta' })).toBeVisible()
+    await filters.getByRole('group', { name: 'Specjalistka' }).getByRole('button', { name: 'Karolina' }).click()
+    await expect(page.getByRole('button', { name: 'Filtry · 1' })).toBeVisible()
+    await expect(filters).toContainText('Specjalistka: Karolina')
+    await expect(filters.getByRole('button', { name: 'Wyczyść filtry' })).toHaveCount(1)
+
+    await page.setViewportSize({ width: 320, height: 800 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+  })
+
+  test('Clients keeps view context and uses a semantic entity link while role filters stay isolated', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Klienci' }).click()
+
+    await page.getByPlaceholder('Imię, e-mail lub telefon').fill('Joanna')
+    await page.getByRole('group', { name: 'Specjalistka' }).getByRole('button', { name: 'Marta' }).click()
+    await page.getByRole('group', { name: 'Status klienta' }).getByRole('button', { name: 'Aktywni' }).click()
+    const link = page.getByRole('link', { name: 'Otwórz kartę — Joanna Madej' })
+    await expect(link).toHaveAttribute('href', /#\/client\?id=c8$/)
+    await expect(link.locator('xpath=ancestor::tr')).not.toHaveAttribute('tabindex')
+    await link.click()
+
+    await navigation.getByRole('button', { name: 'Klienci' }).click()
+    await expect(page.getByPlaceholder('Imię, e-mail lub telefon')).toHaveValue('Joanna')
+    await expect(page.getByRole('group', { name: 'Specjalistka' }).getByRole('button', { name: 'Marta' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByRole('group', { name: 'Status klienta' }).getByRole('button', { name: 'Aktywni' })).toHaveAttribute('aria-pressed', 'true')
+
+    await switchToTherapist(page)
+    await expect(page.getByRole('group', { name: 'Specjalistka' })).toHaveCount(0)
+    await expect(page.getByRole('link', { name: 'Otwórz kartę — Joanna Madej' })).toBeVisible()
+  })
+
+  test('Clients restores page two after leaving the route in StrictMode', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Klienci' }).click()
+
+    for (let index = 1; index <= 5; index += 1) {
+      await page.locator('.view-head__actions').getByRole('button', { name: 'Dodaj klienta' }).click()
+      const dialog = page.getByRole('dialog', { name: 'Nowy klient' })
+      await dialog.getByLabel('Imię i nazwisko').fill(`Testowa Osoba ${index}`)
+      await dialog.getByLabel('Specjalistka prowadząca').selectOption('p1')
+      await dialog.getByRole('button', { name: 'Dodaj klienta' }).click()
+      await expect(dialog).toBeHidden()
+    }
+
+    const pager = page.getByRole('navigation', { name: 'Stronicowanie' })
+    await pager.getByRole('button', { name: 'Następna strona' }).click()
+    await expect(pager).toContainText('Strona 2 z 2')
+
+    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('button', { name: 'Klienci' }).click()
+
+    await page.waitForTimeout(250)
+    await expect(page.getByRole('navigation', { name: 'Stronicowanie' })).toContainText('Strona 2 z 2')
+  })
+
+  test('entity-link hrefs hydrate client and highlighted calendar routes after login', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+
+    const clientHref = await page.getByRole('link', { name: 'Otwórz kartę — Joanna Madej' }).getAttribute('href')
+    await page.goto(new URL(clientHref, page.url()).href)
+    await page.reload()
+    await page.getByLabel('Hasło').fill('demo')
+    await page.getByRole('button', { name: 'Zaloguj się' }).click()
+    await expect(page.getByRole('heading', { level: 1, name: 'Joanna Madej' })).toBeVisible()
+
+    const calendarHref = await page.getByRole('link', { name: /Pokaż w kalendarzu/ }).first().getAttribute('href')
+    const calendarUrl = new URL(calendarHref, page.url())
+    const expectedDate = new URLSearchParams(calendarUrl.hash.split('?')[1]).get('date')
+    await page.goto(calendarUrl.href)
+    await page.reload()
+    await page.getByLabel('Hasło').fill('demo')
+    await page.getByRole('button', { name: 'Zaloguj się' }).click()
+
+    await expect(page.getByLabel('Wybierz datę')).toHaveValue(expectedDate)
+    await expect(page.getByRole('region', { name: 'Plan dnia' }).locator('.agenda__row.is-highlighted')).toHaveCount(1)
+  })
+
+  test('hydrated client routes cannot cross a persisted therapist scope', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    await switchToTherapist(page)
+    await page.getByRole('button', { name: 'Wyloguj się' }).click()
+
+    await page.evaluate(() => { window.location.hash = '#/client?id=c1' })
+    await page.getByLabel('Hasło').fill('demo')
+    await page.getByRole('button', { name: 'Zaloguj się' }).click()
+
+    await expect(page.getByText('Nie znaleziono klienta')).toBeVisible()
+    await expect(page.getByRole('heading', { level: 1, name: 'Zofia Mazur' })).toHaveCount(0)
+    await expect(page.getByText('+48 521 172 603')).toHaveCount(0)
+  })
 })

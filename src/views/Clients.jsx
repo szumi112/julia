@@ -1,12 +1,13 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp, clientOutstanding, lastSessionOf } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
 import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, usePagination, Pager } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
-import { fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, sessionsWord, toISODate, pad2, plural, searchNorm } from '../format.js'
-import { clientsForRole } from '../workspace.js'
+import { fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, sessionsWord, toISODate, pad2, plural } from '../format.js'
+import { clientMatchesQuery, clientsForRole, sessionsForRole } from '../workspace.js'
+import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
 
 // the client's next scheduled visit — sessions stay sorted by date+time
 const nextSessionOf = (sessions, clientId) => {
@@ -21,29 +22,82 @@ const nextSessionOf = (sessions, clientId) => {
 
 export function Clients() {
   const { state } = useApp()
-  const { navigate, openClientForm, role } = useShell()
+  const { getViewState, openClientForm, patchViewState, role } = useShell()
   const ref = useReveal()
-  const [query, setQuery] = useState('')
-  const [psychFilter, setPsychFilter] = useState(null)
-  const [debtOnly, setDebtOnly] = useState(false)
+  const initialState = useRef(null)
+  if (!initialState.current) {
+    const saved = getViewState('clients', {
+      query: '',
+      specialist: null,
+      debtOnly: false,
+      status: 'all',
+      page: 1,
+    })
+    initialState.current = {
+      query: typeof saved.query === 'string' ? saved.query : '',
+      specialist: role.scope !== 'own' && state.psychologists.some((p) => p.id === saved.specialist)
+        ? saved.specialist
+        : null,
+      debtOnly: saved.debtOnly === true,
+      status: ['active', 'paused'].includes(saved.status) ? saved.status : 'all',
+      page: Math.max(1, Number(saved.page) || 1),
+    }
+  }
+  const [query, setQuery] = useState(initialState.current.query)
+  const [psychFilter, setPsychFilter] = useState(initialState.current.specialist)
+  const [debtOnly, setDebtOnly] = useState(initialState.current.debtOnly)
+  const [statusFilter, setStatusFilter] = useState(initialState.current.status)
 
   const scopedClients = useMemo(() => clientsForRole(state, role), [state, role])
   const filtered = useMemo(() => {
     return scopedClients.filter((c) => {
       if (role.scope !== 'own' && psychFilter && c.psychId !== psychFilter) return false
       if (debtOnly && clientOutstanding(state.sessions, c.id) <= 0) return false
-      if (query && !searchNorm(c.name + ' ' + c.email).includes(searchNorm(query))) return false
+      if (statusFilter !== 'all' && c.status !== statusFilter) return false
+      if (!clientMatchesQuery(c, query)) return false
       return true
     })
-  }, [scopedClients, state.sessions, query, psychFilter, debtOnly, role.scope])
+  }, [scopedClients, state.sessions, query, psychFilter, debtOnly, role.scope, statusFilter])
 
   const { pageItems, page, pages, setPage } = usePagination(filtered, {
     pageSize: 25,
-    resetKey: `${query}|${psychFilter}|${debtOnly}`,
+    resetKey: `${query}|${psychFilter}|${debtOnly}|${statusFilter}`,
+    initialPage: initialState.current.page,
   })
   const tbodyRef = useFlip(pageItems.map((c) => c.id).join(','))
+  const psychologists = useMemo(
+    () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
+    [state.psychologists]
+  )
+
+  useEffect(() => {
+    patchViewState('clients', {
+      query,
+      specialist: role.scope === 'own' ? null : psychFilter,
+      debtOnly,
+      status: statusFilter,
+      page,
+    })
+  }, [debtOnly, page, patchViewState, psychFilter, query, role.scope, statusFilter])
 
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
+  const activeFilterCount =
+    (role.scope !== 'own' && psychFilter ? 1 : 0)
+    + (debtOnly ? 1 : 0)
+    + (statusFilter !== 'all' ? 1 : 0)
+  const filterSummary = [
+    role.scope !== 'own' && psychFilter
+      ? `Specjalistka: ${psychOf(psychFilter)?.name.split(' ')[0]}`
+      : null,
+    debtOnly ? 'Płatności: z zaległościami' : null,
+    statusFilter === 'active' ? 'Status klienta: aktywni' : null,
+    statusFilter === 'paused' ? 'Status klienta: wstrzymani' : null,
+  ].filter(Boolean).join(' · ')
+  const clearFilters = () => {
+    setPsychFilter(null)
+    setDebtOnly(false)
+    setStatusFilter('all')
+  }
 
   return (
     <div ref={ref}>
@@ -61,29 +115,52 @@ export function Clients() {
           </p>
         </div>
         <div className="view-head__actions">
-          <SearchInput value={query} onChange={setQuery} placeholder="Szukaj klienta…" />
+          <SearchInput value={query} onChange={setQuery} placeholder="Imię, e-mail lub telefon" />
           <Button icon="plus" magnetic onClick={() => openClientForm({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
             Dodaj klienta
           </Button>
         </div>
       </div>
 
-      <div className="row chips-row" data-reveal>
-        {role.scope !== 'own' && (
-          <>
-            <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
-            {state.psychologists.map((p) => (
-              <Chip key={p.id} on={psychFilter === p.id} swatch={p.color} onClick={() => setPsychFilter(psychFilter === p.id ? null : p.id)}>
-                {p.name.split(' ')[0]}
-              </Chip>
-            ))}
-            <span className="chips-row__divider" />
-          </>
-        )}
-        <Chip on={debtOnly} onClick={() => setDebtOnly(!debtOnly)}>
-          <Icon name="payments" size={14} /> Z zaległościami
-        </Chip>
+      <div data-reveal>
+        <FilterBar
+          activeCount={activeFilterCount}
+          summary={filterSummary}
+          onClear={clearFilters}
+          label="Filtry klientów"
+        >
+          {role.scope !== 'own' && (
+            <FilterGroup label="Specjalistka">
+              <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
+              {psychologists.map((p) => (
+                <Chip
+                  key={p.id}
+                  on={psychFilter === p.id}
+                  swatch={p.color}
+                  onClick={() => setPsychFilter(p.id)}
+                >
+                  {p.name.split(' ')[0]}
+                </Chip>
+              ))}
+            </FilterGroup>
+          )}
+          <FilterGroup label="Płatności">
+            <Chip on={!debtOnly} onClick={() => setDebtOnly(false)}>Wszystkie</Chip>
+            <Chip on={debtOnly} onClick={() => setDebtOnly(true)}>
+              <Icon name="payments" size={14} /> Z zaległościami
+            </Chip>
+          </FilterGroup>
+          <FilterGroup label="Status klienta">
+            <Chip on={statusFilter === 'all'} onClick={() => setStatusFilter('all')}>Wszyscy</Chip>
+            <Chip on={statusFilter === 'active'} onClick={() => setStatusFilter('active')}>Aktywni</Chip>
+            <Chip on={statusFilter === 'paused'} onClick={() => setStatusFilter('paused')}>Wstrzymani</Chip>
+          </FilterGroup>
+        </FilterBar>
       </div>
+
+      <p className="client-results" role="status" aria-live="polite">
+        {filtered.length} {plural(filtered.length, 'wynik', 'wyniki', 'wyników')}
+      </p>
 
       <div className="card card--table" data-reveal>
         <div className="table-scroll table-scroll--until-tablet">
@@ -129,25 +206,21 @@ export function Clients() {
                 <tr
                   key={c.id}
                   data-flip-id={c.id}
-                  className="is-click"
-                  tabIndex={0}
-                  aria-label={`Otwórz kartę: ${c.name}`}
-                  onClick={() => navigate('client', { id: c.id })}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault()
-                      navigate('client', { id: c.id })
-                    }
-                  }}
+                  className="client-row"
                 >
                   <td>
-                    <span className="row" style={{ gap: 12 }}>
+                    <EntityLink
+                      route="client"
+                      params={{ id: c.id }}
+                      label={`Otwórz kartę — ${c.name}`}
+                      className="client-entity-link"
+                    >
                       <Avatar name={c.name} color={p?.color} size={36} />
                       <span>
                         <span style={{ fontWeight: 650, display: 'block' }}>{c.name}</span>
                         <span className="faint" style={{ fontSize: 12.5 }}>{c.phone}</span>
                       </span>
-                    </span>
+                    </EntityLink>
                   </td>
                   <td data-th="Opieka">
                     <span className="row" style={{ gap: 8 }}>
@@ -186,8 +259,10 @@ export function ClientDetail({ params }) {
   const { navigate, openSessionForm, openClientForm, role } = useShell()
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
-  const client = state.clients.find((c) => c.id === params.id)
-  const all = state.sessions.filter((s) => s.clientId === params.id)
+  const client = clientsForRole(state, role).find((candidate) => candidate.id === params.id)
+  const all = client
+    ? sessionsForRole(state, role).filter((session) => session.clientId === client.id)
+    : []
   // upcoming care first, everything else newest-first below it
   const now = new Date()
   const todayIso = toISODate(now)
@@ -334,7 +409,14 @@ export function ClientDetail({ params }) {
                   <div className="agenda__row" key={s.id} style={{ '--node-color': psych?.color }}>
                     <span className="agenda__time">{s.time}</span>
                     <span className="agenda__main">
-                      <span className="agenda__client">{cap(fmtWeekday(s.date))}, {fmtDayMonth(s.date)}</span>
+                      <EntityLink
+                        route="calendar"
+                        params={{ date: s.date, highlightSessionIds: [s.id] }}
+                        label={`Pokaż w kalendarzu — ${fmtDayMonth(s.date)}, ${s.time}`}
+                        className="agenda__client agenda__client-link"
+                      >
+                        {cap(fmtWeekday(s.date))}, {fmtDayMonth(s.date)}
+                      </EntityLink>
                       <span className="agenda__meta">{s.duration} min · {fmtMoney(s.amount)}</span>
                       <span className="agenda__pills">
                         <StatusPicker session={s} />

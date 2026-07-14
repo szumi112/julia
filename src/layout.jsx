@@ -28,6 +28,7 @@ import {
   readRouteViewState,
   resetRouteViewState as resetRegistryRoute,
 } from './view-state.js'
+import { routeFromHash, routeHref } from './routing.js'
 
 const NAV = [
   { id: 'dashboard', label: 'Dziś', icon: 'dashboard' },
@@ -123,7 +124,7 @@ function Sidebar({ route, navigate, role, accountControls, className = '', inner
 
   const today = toISODate(new Date())
   const todayCount = sessionsForRole(state, role).filter(
-    (s) => s.date === today && (s.status === 'scheduled' || s.status === 'completed')
+    (s) => s.date === today && s.status !== 'cancelled'
   ).length
 
   return (
@@ -481,7 +482,14 @@ function useMonthSettled() {
 
 export function Shell({ onLogout }) {
   const { state, dispatch } = useApp()
-  const [route, setRoute] = useState({ name: 'dashboard' })
+  const role = DEMO_ROLES.find((demoRole) => demoRole.id === state.demoRoleId) || DEMO_ROLES[0]
+  const [route, setRoute] = useState(() => {
+    const requested = routeFromHash(window.location.hash)
+    if (!requested || !VIEWS[requested.name] || !canAccess(ACTIVE_OF[requested.name] || requested.name, role)) {
+      return { name: 'dashboard' }
+    }
+    return requested
+  })
   const [drawer, setDrawer] = useState(null)
   const [overlay, setOverlay] = useState(null)
   const [roleMenuOpen, setRoleMenuOpen] = useState(false)
@@ -491,12 +499,18 @@ export function Shell({ onLogout }) {
   const contentRef = useRef(null)
   const shellRef = useRef(null)
   const viewRegistryRef = useRef({})
-  const role = DEMO_ROLES.find((demoRole) => demoRole.id === state.demoRoleId) || DEMO_ROLES[0]
   const routeRef = useRef(route)
   const roleRef = useRef(role)
   const routeParamsKey = JSON.stringify(route.params || {})
   routeRef.current = route
   roleRef.current = role
+
+  useEffect(() => {
+    const nextHash = routeHref(route.name, route.params)
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(window.history.state, '', nextHash)
+    }
+  }, [route.name, routeParamsKey])
 
   useMonthSettled()
 

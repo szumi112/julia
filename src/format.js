@@ -108,7 +108,7 @@ export const STATUS_PILL = {
 export const PAY_LABELS = {
   paid: 'Opłacona',
   unpaid: 'Nieopłacona',
-  partial: 'Częściowo',
+  partial: 'Częściowo opłacona',
 }
 
 export const PAY_PILL = {

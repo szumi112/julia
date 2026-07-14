@@ -415,9 +415,14 @@ export function ToastHost() {
 // Pagination fallback for long lists: invisible at one page, classic pager beyond.
 // resetKey = the caller's filter signature (never the items array), so data
 // edits keep the current page while filter changes jump back to page 1.
-export function usePagination(items, { pageSize, resetKey }) {
-  const [page, setPage] = useState(1)
-  useEffect(() => setPage(1), [resetKey])
+export function usePagination(items, { pageSize, resetKey, initialPage = 1 }) {
+  const [page, setPage] = useState(() => Math.max(1, Number(initialPage) || 1))
+  const previousResetKey = useRef(resetKey)
+  useEffect(() => {
+    if (Object.is(previousResetKey.current, resetKey)) return
+    previousResetKey.current = resetKey
+    setPage(1)
+  }, [resetKey])
   const pages = pageCount(items.length, pageSize)
   const current = Math.min(page, pages)
   return { pageItems: pageSlice(items, current, pageSize), page: current, pages, setPage }

@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useDrawerFX } from '../anim.js'
@@ -7,51 +7,79 @@ import { Icon } from '../icons.jsx'
 import { todayWorkspace } from '../workspace.js'
 import {
   fmtMoney, fmtWeekday, fmtDayMonth, fmtShortDate, toISODate, pad2,
-  sessionsWord, cap, plural, timeToMin,
+  cap, plural, timeToMin,
 } from '../format.js'
 
 // today's sessions on the day thread — the hero's working half
-function TodayThread({ sessions, nowMin, onOpen, onCalendar }) {
-  const MAX = 4
-  const shown = sessions.slice(0, MAX)
-  const hidden = sessions.length - shown.length
-  const running = sessions.find(
-    (s) => s.status === 'scheduled' && timeToMin(s.time) <= nowMin && nowMin < timeToMin(s.time) + s.duration
+function TodayThread({ sessions, nowMin, currentId, nextId, onOpen }) {
+  const [completedOpen, setCompletedOpen] = useState(false)
+  const scheduled = sessions.filter((session) => session.status === 'scheduled')
+  const current = scheduled.filter((session) => session.id === currentId)
+  const concurrent = scheduled.filter((session) => {
+    const start = timeToMin(session.time)
+    return session.id !== currentId && start <= nowMin && nowMin < start + (session.duration || 50)
+  })
+  const next = scheduled.filter((session) => session.id === nextId && session.id !== currentId)
+  const unresolved = scheduled.filter((session) => (
+    session.id !== currentId
+    && session.id !== nextId
+    && !concurrent.some((currentSession) => currentSession.id === session.id)
+    && timeToMin(session.time) + (session.duration || 50) <= nowMin
+  ))
+  const future = scheduled.filter((session) => (
+    session.id !== currentId
+    && session.id !== nextId
+    && !concurrent.some((currentSession) => currentSession.id === session.id)
+    && timeToMin(session.time) > nowMin
+  ))
+  const noShows = sessions.filter((session) => session.status === 'noshow')
+  const completed = sessions.filter((session) => session.status === 'completed')
+  const visible = [
+    ...current.map((session) => ({ session, priority: 'current', status: 'Zaplanowana · Trwa teraz' })),
+    ...concurrent.map((session) => ({ session, priority: 'current', status: 'Zaplanowana · Trwa teraz' })),
+    ...next.map((session) => ({ session, priority: 'next', status: 'Zaplanowana · Następna sesja' })),
+    ...unresolved.map((session) => ({ session, priority: 'unresolved', status: 'Zaplanowana · Wymaga statusu' })),
+    ...future.map((session) => ({ session, priority: 'future', status: 'Zaplanowana' })),
+    ...noShows.map((session) => ({ session, priority: 'noshow', status: 'Nieobecność' })),
+  ]
+
+  const row = ({ session, priority, status }) => (
+    <button
+      key={session.id}
+      className={`spine__row today-session ${priority === 'current' ? 'is-live' : ''} ${priority === 'next' ? 'is-next' : ''}`}
+      data-priority={priority}
+      data-status={session.status}
+      style={{ '--node-color': session.psych?.color }}
+      onClick={() => onOpen(session)}
+    >
+      <span className="spine__time">{session.time}</span>
+      <span className="spine__name">{session.client?.name}</span>
+      <span className="today-session__status">{status}</span>
+    </button>
   )
-  const nextId = sessions.find((s) => s.status === 'scheduled' && timeToMin(s.time) > nowMin)?.id
 
   return (
     <div className="dash-hero__day" data-reveal>
       <div className="spine">
         <span className="spine__rule" data-spine aria-hidden="true" />
-        {shown.map((s, i) => {
-          const nowHere = !running &&
-            timeToMin(s.time) > nowMin &&
-            (i === 0 || timeToMin(shown[i - 1].time) <= nowMin)
-          return (
-            <Fragment key={s.id}>
-              {nowHere && <div className="spine__now" aria-hidden="true">teraz</div>}
-              <button
-                className={`spine__row ${s.status === 'completed' ? 'is-done' : ''} ${s.id === nextId ? 'is-next' : ''}`}
-                style={{ '--node-color': s.psych?.color }}
-                onClick={() => onOpen(s)}
-              >
-                <span className="spine__time">{s.time}</span>
-                <span className="spine__name">{s.client?.name}</span>
-                <span className="spine__meta">{s.psych?.name.split(' ')[0]}</span>
-                <Icon
-                  name={s.status === 'completed' ? 'check' : running?.id === s.id ? 'wave' : 'clock'}
-                  size={14}
-                  className="faint"
-                />
-              </button>
-            </Fragment>
-          )
-        })}
-        {hidden > 0 && (
-          <button className="bpost-more" onClick={onCalendar}>
-            Jeszcze {hidden} {sessionsWord(hidden)} — otwórz kalendarz →
-          </button>
+        {visible.map(row)}
+        {completed.length > 0 && (
+          <div className="today-completed">
+            <button
+              type="button"
+              className="today-completed__trigger"
+              aria-expanded={completedOpen}
+              aria-controls="today-completed-sessions"
+              onClick={() => setCompletedOpen((open) => !open)}
+            >
+              Odbyte ({completed.length})
+            </button>
+            {completedOpen && (
+              <div id="today-completed-sessions">
+                {completed.map((session) => row({ session, priority: 'completed', status: 'Odbyta' }))}
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -195,17 +223,25 @@ export function Dashboard() {
 
   const todays = workspace.schedule
     .map((s) => ({ ...s, psych: psychOf(s.psychId), client: clientOf(s.clientId) }))
-  const doneCount = todays.filter((session) => session.status === 'completed').length
+  const daySummary = workspace.daySummary
   const shortcuts = TODAY_SHORTCUTS.filter((shortcut) => !shortcut.roles || shortcut.roles.includes(role.id))
   const heroPsych = heroSession ? psychOf(heroSession.psychId) : null
   const heroClient = heroSession ? clientOf(heroSession.clientId) : null
+  const heroState = workspace.current ? 'Trwa teraz' : workspace.next ? 'Następna sesja' : null
+  const terminalHeading = daySummary.unresolvedPast > 0
+    ? `${daySummary.unresolvedPast} sesji wymaga statusu`
+    : daySummary.total > 0 ? 'Dzień zakończony' : 'Wolny dzień'
+  const terminalSupport = daySummary.unresolvedPast > 0
+    ? 'Zaktualizuj status zakończonych sesji, aby domknąć plan dnia.'
+    : daySummary.total > 0
+      ? 'Wszystkie dzisiejsze sesje mają uzupełniony status.'
+      : 'Kalendarz jest dziś pusty — czas na oddech.'
 
   // the eyebrow is the whole page header: role, date, day progress
   const eyebrow = [
     role.id === 'therapist' && 'Mój dzień',
     `${cap(fmtWeekday(today))}, ${fmtDayMonth(today)}`,
-    heroSession && `${doneCount} z ${todays.length} sesji za Tobą`,
-    workspace.current && 'trwa teraz',
+    heroSession && `${daySummary.completed} z ${daySummary.total} sesji za Tobą`,
   ].filter(Boolean).join(' · ')
 
   return (
@@ -214,6 +250,7 @@ export function Dashboard() {
         <p className="eyebrow">{eyebrow}</p>
         {heroSession ? (
           <>
+            <p className="today-hero__state">{heroState}</p>
             <h1 className="display today-hero__time">{heroSession.time}</h1>
             <p className="display today-hero__name">{heroClient?.name}</p>
             <p className="today-hero__meta">
@@ -222,14 +259,8 @@ export function Dashboard() {
           </>
         ) : (
           <>
-            <h1 className="display today-hero__title">
-              {todays.length > 0 ? 'Wszystko za Tobą' : 'Wolny dzień'}
-            </h1>
-            <p className="today-hero__meta">
-              {todays.length > 0
-                ? `${doneCount} z ${todays.length} sesji zakończonych`
-                : 'Kalendarz jest dziś pusty — czas na oddech.'}
-            </p>
+            <h1 className="display today-hero__title">{terminalHeading}</h1>
+            <p className="today-hero__meta">{terminalSupport}</p>
           </>
         )}
         <div className="today-hero__actions">
@@ -248,15 +279,23 @@ export function Dashboard() {
         </div>
       </header>
 
-      {todays.length > 0 && (
+      <section className="today-summary" aria-label="Podsumowanie dnia">
+        <h2 className="sr-only">Podsumowanie dnia</h2>
+        <span>Odbyte <b>{daySummary.completed}</b></span>
+        <span>Nieobecności <b>{daySummary.noshow}</b></span>
+        <span>Pozostałe <b>{daySummary.scheduled}</b></span>
+      </section>
+
+      {daySummary.total > 0 && (
         <>
           <hr className="today-rule" aria-hidden="true" />
           <section className="today-plan" aria-label="Plan dnia">
             <TodayThread
               sessions={todays}
               nowMin={nowMin}
+              currentId={workspace.current?.id}
+              nextId={workspace.next?.id}
               onOpen={(s) => openSessionForm({ session: state.sessions.find((x) => x.id === s.id) })}
-              onCalendar={() => navigate('calendar')}
             />
           </section>
         </>
