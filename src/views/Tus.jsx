@@ -98,8 +98,9 @@ function AssignmentDialog({ fallbackRef, groups, kid, kids, onClose }) {
 }
 
 function GroupCard({ centre, group, leaders, monthSummary, next, roster }) {
+  const titleId = `tus-group-title-${group.id}`
   return (
-    <article className="card card--lift gcard" data-reveal>
+    <article className="card card--lift gcard" data-reveal aria-labelledby={titleId}>
       <div className="gcard__head">
         <EntityLink
           route="tusGroup"
@@ -107,10 +108,10 @@ function GroupCard({ centre, group, leaders, monthSummary, next, roster }) {
           label={`Otwórz grupę — ${group.name}`}
           className="gcard__link"
         >
-          <span className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-            <span className="gcard__name">{group.name}</span>
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            <h2 className="gcard__name" id={titleId}>{group.name}</h2>
             <Pill tone="mauve">{group.age || tusAgeLabel(group.ageMin, group.ageMax)}</Pill>
-          </span>
+          </div>
           <Icon name="chevR" size={18} className="faint" />
         </EntityLink>
         <div className="gcard__meta">

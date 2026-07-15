@@ -548,6 +548,7 @@ export function Shell({ onLogout }) {
     const onKey = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
+        if (document.querySelector('dialog:modal')) return
         setRoleMenuOpen(false)
         setOverlay((active) => active === 'palette' ? null : 'palette')
       }

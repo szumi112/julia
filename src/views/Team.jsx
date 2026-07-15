@@ -8,7 +8,7 @@ import { Icon } from '../icons.jsx'
 import { AreaChart } from '../charts.jsx'
 import {
   fmtMoney, fmtNumber, fmtShortDate, monthKey, addMonths, fmtMonthName,
-  sessionsWord, fmtDayMonth, clientsWord, toISODate,
+  sessionsWord, fmtDayMonth, clientsWord, plural, toISODate,
 } from '../format.js'
 import { sessionConflicts, specialistWeekLoad } from '../workspace.js'
 import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
@@ -19,9 +19,8 @@ const TEAM_FILTERS = [
   { value: 'full', label: 'Pełne obłożenie' },
 ]
 
-const specialistsWord = (count) => count === 1 ? 'specjalistka' : count >= 2 && count <= 4 ? 'specjalistki' : 'specjalistek'
-
 function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
+  const titleId = `team-specialist-title-${psychologist.id}`
   const todaySessions = sessions
     .filter((session) => session.date === today && session.status !== 'cancelled')
     .toSorted((a, b) => a.time.localeCompare(b.time) || a.id.localeCompare(b.id))
@@ -35,7 +34,12 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
       : `Przekroczono limit o ${Math.abs(load.remaining)} ${sessionsWord(Math.abs(load.remaining))}`
 
   return (
-    <article className={`card team-card team-card--${load.status}`} data-reveal data-psych-id={psychologist.id}>
+    <article
+      className={`card team-card team-card--${load.status}`}
+      data-reveal
+      data-psych-id={psychologist.id}
+      aria-labelledby={titleId}
+    >
       <span className="team-card__band" style={{ background: `linear-gradient(90deg, ${psychologist.color}, ${psychologist.color}55)` }} />
       <EntityLink
         route="psych"
@@ -44,15 +48,15 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
         className="team-card__profile"
       >
         <Avatar name={psychologist.name} color={psychologist.color} size={52} />
-        <span className="team-card__identity">
-          <span className="team-card__name">{psychologist.title} {psychologist.name}</span>
+        <div className="team-card__identity">
+          <h2 className="team-card__name" id={titleId}>{psychologist.title} {psychologist.name}</h2>
           <span className="team-card__spec">{psychologist.spec}</span>
           <span className="team-card__today">
             {todaySessions.length > 0
               ? <>dziś <b>{todaySessions.length} {sessionsWord(todaySessions.length)}</b> · {todaySessions.map((session) => session.time).join(', ')}</>
               : 'dziś bez sesji'}
           </span>
-        </span>
+        </div>
         <Icon name="chevR" size={18} className="faint" />
       </EntityLink>
 
@@ -86,7 +90,7 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
                 <EntityLink
                   route="calendar"
                   params={{ date: conflict.date, highlightSessionIds: conflict.sessionIds }}
-                  label={`Otwórz konflikt — ${psychologist.name}, ${fmtDayMonth(conflict.date)}`}
+                  label={`Otwórz konflikt — ${psychologist.name}, ${fmtDayMonth(conflict.date)}, ${conflictSessions.map((session) => `${session.time} (${session.id})`).join(' i ')}`}
                 >
                   Sprawdź
                 </EntityLink>
@@ -215,7 +219,7 @@ export function Team() {
             </FilterGroup>
           </FilterBar>
           <p className="team-results" role="status" aria-live="polite" aria-label="Liczba specjalistek">
-            {visible.length} {specialistsWord(visible.length)}
+            {visible.length} {plural(visible.length, 'specjalistka', 'specjalistki', 'specjalistek')}
           </p>
         </div>
       ) : null}

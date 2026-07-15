@@ -456,6 +456,23 @@ test.describe('Task 5 TUS redesign', () => {
     ])
     const groupLink = page.getByRole('link', { name: 'Otwórz grupę — Grupa TUS 5–6 lat', exact: true })
     await expect(groupLink).toHaveAccessibleName('Otwórz grupę — Grupa TUS 5–6 lat')
+    const namedGroupCard = page.getByRole('article', { name: 'Grupa TUS 5–6 lat', exact: true })
+    await expect(namedGroupCard.getByRole('heading', { level: 2, name: 'Grupa TUS 5–6 lat', exact: true })).toBeVisible()
+    const groupCardLabels = await page.locator('.gcard').evaluateAll((cards) => cards.map((card) => card.getAttribute('aria-labelledby')))
+    expect(groupCardLabels.every(Boolean)).toBe(true)
+    expect(new Set(groupCardLabels).size).toBe(groupCardLabels.length)
+
+    await page.setViewportSize({ width: 1280, height: 420 })
+    const content = page.locator('main.content')
+    const savedScroll = await content.evaluate((element) => {
+      element.scrollTop = Math.min(180, element.scrollHeight - element.clientHeight)
+      return element.scrollTop
+    })
+    expect(savedScroll).toBeGreaterThan(0)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await navigation.getByRole('button', { name: 'Zajęcia TUS' }).click()
+    await expect.poll(() => content.evaluate((element) => element.scrollTop)).toBe(savedScroll)
 
     const search = page.getByPlaceholder('Dziecko, rodzic lub grupa')
     await search.fill('5')
@@ -540,6 +557,35 @@ test.describe('Task 5 TUS redesign', () => {
     await expect(payment).toContainText('Nieopłacona')
   })
 
+  test('quick assignment keeps ownership of Ctrl and Cmd K while its native modal is open', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await login(page)
+    await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+    const search = page.getByPlaceholder('Dziecko, rodzic lub grupa')
+    await search.fill('Borys Cygan')
+    const assignment = page.getByRole('button', { name: 'Przypisz dziecko — Borys Cygan' })
+    await assignment.click()
+
+    const dialog = page.getByRole('dialog', { name: 'Przypisz do grupy — Borys Cygan' })
+    const firstOption = dialog.getByRole('radio').first()
+    await expect(dialog).toBeVisible()
+    expect(await dialog.evaluate((element) => element.matches(':modal'))).toBe(true)
+    await expect(firstOption).toBeFocused()
+
+    for (const shortcut of ['Control+K', 'Meta+K']) {
+      await page.keyboard.press(shortcut)
+      await expect(page.getByRole('dialog', { name: 'Szukaj w Aurelii' })).toHaveCount(0)
+      expect(await dialog.evaluate((element) => element.matches(':modal'))).toBe(true)
+      await expect(firstOption).toBeFocused()
+    }
+
+    await firstOption.press('Space')
+    await expect(firstOption).toBeChecked()
+    await dialog.getByRole('button', { name: 'Zamknij' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(assignment).toBeFocused()
+  })
+
   test('group form validates integer bounds and synchronizes its readable age label', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await login(page)
@@ -560,6 +606,13 @@ test.describe('Task 5 TUS redesign', () => {
     await drawer.getByLabel('Wiek od').fill('3')
     await expect(drawer.getByText('Wiek końcowy nie może być mniejszy niż początkowy')).toHaveCount(0)
     await expect(drawer.getByText('Przedział: 3–4 lat')).toBeVisible()
+
+    await drawer.getByLabel('Wiek do').fill('2.5')
+    await drawer.getByRole('button', { name: 'Utwórz grupę' }).click()
+    await expect(drawer.getByText('Wiek musi być dodatnią liczbą całkowitą')).toBeVisible()
+    await drawer.getByLabel('Wiek od').fill('2')
+    await expect(drawer.getByText('Wiek musi być dodatnią liczbą całkowitą')).toBeVisible()
+
     await drawer.getByLabel('Wiek od').fill('5')
     await drawer.getByLabel('Wiek do').fill('5')
     await drawer.getByLabel('Liczba miejsc').fill('2.5')

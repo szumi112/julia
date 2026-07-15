@@ -16,6 +16,8 @@ const WEEKDAY_OPTIONS = [
   { value: 5, label: 'Piątek' },
 ]
 
+const AGE_RANGE_ERROR = 'Wiek końcowy nie może być mniejszy niż początkowy'
+
 const focusFirstInvalid = (drawerRef) =>
   requestAnimationFrame(() =>
     drawerRef.current?.querySelector('.has-error input, .has-error select, .has-error textarea')?.focus()
@@ -48,8 +50,8 @@ export function TusGroupDrawer({ opts, onClose }) {
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
-    setErrors((e) => k === 'ageMin' || k === 'ageMax'
-      ? { ...e, ageMin: null, ageMax: null }
+    setErrors((e) => k === 'ageMin'
+      ? { ...e, ageMin: null, ageMax: e.ageMax === AGE_RANGE_ERROR ? null : e.ageMax }
       : { ...e, [k]: null })
   }
   const toggleLeader = (id) =>
@@ -78,7 +80,7 @@ export function TusGroupDrawer({ opts, onClose }) {
     if (!Number.isInteger(ageMin) || ageMin <= 0) errs.ageMin = 'Wiek musi być dodatnią liczbą całkowitą'
     if (!Number.isInteger(ageMax) || ageMax <= 0) errs.ageMax = 'Wiek musi być dodatnią liczbą całkowitą'
     if (!errs.ageMin && !errs.ageMax && ageMin > ageMax) {
-      errs.ageMax = 'Wiek końcowy nie może być mniejszy niż początkowy'
+      errs.ageMax = AGE_RANGE_ERROR
     }
     if (!Number.isInteger(capacity) || capacity <= 0) {
       errs.capacity = 'Liczba miejsc musi być dodatnią liczbą całkowitą'

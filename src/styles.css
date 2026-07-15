@@ -3134,7 +3134,7 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
 /* --- Grupa TUS ------------------------------------------------------- */
 
 .gcard { padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; cursor: pointer; }
-.gcard__name { font-family: var(--font-display); font-size: 21px; font-weight: 490; }
+.gcard__name { margin: 0; font-family: var(--font-display); font-size: 21px; font-weight: 490; }
 .gcard__meta { color: var(--ink-soft); font-size: 13.5px; margin-top: 3px; }
 .gcard__leaders { display: flex; gap: 18px; align-items: center; }
 .gcard__stats {
@@ -3289,7 +3289,7 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
 .team-card__profile:focus-visible { outline: 2px solid var(--rose-deep); outline-offset: 5px; }
 .team-card__identity { flex: 1; min-width: 0; }
 .team-card__name, .team-card__spec, .team-card__today { display: block; overflow-wrap: anywhere; }
-.team-card__name { font-family: var(--font-display); font-size: 21px; font-weight: 490; }
+.team-card__name { margin: 0; font-family: var(--font-display); font-size: 21px; font-weight: 490; }
 .team-card__spec { margin-top: 2px; color: var(--ink-soft); font-size: 13px; }
 .team-card__today { margin-top: 7px; color: var(--ink-faint); font-size: 12.5px; }
 .team-card__today b { color: var(--ink-soft); }

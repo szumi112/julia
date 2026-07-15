@@ -2134,6 +2134,11 @@ test.describe('Task 5 team redesign', () => {
       /Karolina Wójcik/,
       /Marta Zielińska/,
     ])
+    const namedJuliaCard = page.getByRole('article', { name: 'dr Julia Wolanin', exact: true })
+    await expect(namedJuliaCard.getByRole('heading', { level: 2, name: 'dr Julia Wolanin', exact: true })).toBeVisible()
+    const teamCardLabels = await page.locator('.team-card').evaluateAll((cards) => cards.map((card) => card.getAttribute('aria-labelledby')))
+    expect(teamCardLabels.every(Boolean)).toBe(true)
+    expect(new Set(teamCardLabels).size).toBe(teamCardLabels.length)
     const juliaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Julia Wolanin' }) })
     await expect(juliaCard).toContainText('8 / 8 sesji w tym tygodniu')
     await expect(juliaCard.getByRole('progressbar')).toHaveAttribute('max', '8')
@@ -2187,7 +2192,12 @@ test.describe('Task 5 team redesign', () => {
     const juliaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Julia Wolanin' }) })
     const alert = juliaCard.getByRole('alert')
     await expect(alert).toContainText('Konflikt')
-    await alert.getByRole('link').first().click()
+    const conflictLink = alert.getByRole('link', {
+      name: 'Otwórz konflikt — Julia Wolanin, 14 lipca, 14:00 (demo-overlap) i 14:00 (demo-unpaid)',
+      exact: true,
+    })
+    await expect(conflictLink).toBeVisible()
+    await conflictLink.click()
     await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
     await expect(page.locator('.agenda__row.is-highlighted')).toHaveCount(2)
     await expect(page.locator('.agenda__row.is-highlighted').first()).toBeFocused()
@@ -2205,6 +2215,24 @@ test.describe('Task 5 team redesign', () => {
     await expect(page.getByRole('heading', { level: 1, name: 'Moi klienci' })).toBeVisible()
     await expect(page.getByRole('region', { name: 'Filtry klientów' })).not.toContainText('Specjalistka')
     await expect(page.getByRole('link', { name: 'Otwórz kartę — Joanna Madej' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' })).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Wyloguj się' }).click()
+    await expect(page.getByRole('button', { name: 'Zaloguj się' })).toBeVisible()
+    await page.evaluate(() => window.history.replaceState(window.history.state, '', '#/clients?specialist=p1'))
+    await page.getByLabel('Hasło').fill('demo')
+    await page.getByRole('button', { name: 'Zaloguj się' }).click()
+
+    await expect(page.getByRole('heading', { level: 1, name: 'Moi klienci' })).toBeVisible()
+    await expect(page.getByRole('region', { name: 'Filtry klientów' })).not.toContainText('Specjalistka')
+    expect(await page.getByRole('main').getByRole('link', { name: /^Otwórz kartę —/ }).evaluateAll(
+      (links) => links.map((link) => link.getAttribute('aria-label'))
+    )).toEqual([
+      'Otwórz kartę — Anna i Paweł Romanowscy',
+      'Otwórz kartę — Magda i Tomasz Wielgosz',
+      'Otwórz kartę — Joanna Madej',
+      'Otwórz kartę — Marcin Duda',
+    ])
     await expect(page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' })).toHaveCount(0)
   })
 
