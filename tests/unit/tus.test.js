@@ -9,7 +9,7 @@ const {
   nextClassOf, attendanceRate, setAttendanceForRoster, tusPaymentFor, tusMonthSummary, stripKid,
   tusMemberOptions, filterTusMemberOptions, assignTusGroupMembers, materializeTusGroupMembers,
   linkTusGuardian, unlinkTusGuardian, updateTusKidAndClients, searchTusOverview, tusAssignmentOptions,
-  withTusGroupDefaults,
+  tusAgeLabel, tusAssignmentStatusLabel, withTusGroupDefaults,
 } = tus
 
 const groups = [
@@ -77,6 +77,21 @@ test('TUS overview search matches child and parent contact fields', () => {
   assert.deepEqual(searchTusOverview({ groups: [], kids: overviewKids, query: '501234567' }).kids, [overviewKids[0]])
 })
 
+test('TUS overview search alphabetizes group and child display names', () => {
+  const overviewGroups = [
+    { id: 'g2', name: 'Jan — grupa żółta' },
+    { id: 'g1', name: 'Jan — grupa błękitna' },
+  ]
+  const overviewKids = [
+    { id: 'k2', name: 'Żaneta Wrona', parentName: 'Jan Wrona' },
+    { id: 'k1', name: 'Adam Nowak', parentName: 'Jan Nowak' },
+  ]
+
+  const overview = searchTusOverview({ groups: overviewGroups, kids: overviewKids, query: 'jan' })
+  assert.deepEqual(overview.groups.map((group) => group.id), ['g1', 'g2'])
+  assert.deepEqual(overview.kids.map((kid) => kid.id), ['k1', 'k2'])
+})
+
 test('TUS assignment options tier available age matches before other and full groups', () => {
   const assignmentGroups = [
     { id: 'g-beta', name: 'Beta', capacity: 3, ageMin: 5, ageMax: 6 },
@@ -96,13 +111,13 @@ test('TUS assignment options tier available age matches before other and full gr
   const options = tusAssignmentOptions({ groups: assignmentGroups, kids: roster, kid: { id: 'target', age: 5 } })
 
   assert.deepEqual(options.map((group) => group.id), [
-    'g-alfa', 'g-beta', 'g-delta', 'g-epsilon', 'g-gamma',
+    'g-beta', 'g-alfa', 'g-delta', 'g-epsilon', 'g-gamma',
   ])
   assert.deepEqual(options.map(({ id, ageMatch, isFull, memberCount, remaining }) => ({
     id, ageMatch, isFull, memberCount, remaining,
   })), [
-    { id: 'g-alfa', ageMatch: null, isFull: false, memberCount: 0, remaining: 4 },
     { id: 'g-beta', ageMatch: true, isFull: false, memberCount: 2, remaining: 1 },
+    { id: 'g-alfa', ageMatch: null, isFull: false, memberCount: 0, remaining: 4 },
     { id: 'g-delta', ageMatch: false, isFull: false, memberCount: 1, remaining: 4 },
     { id: 'g-epsilon', ageMatch: false, isFull: true, memberCount: 1, remaining: 0 },
     { id: 'g-gamma', ageMatch: true, isFull: true, memberCount: 1, remaining: 0 },
@@ -116,6 +131,13 @@ test('TUS assignment options tier available age matches before other and full gr
   ])
 })
 
+test('TUS assignment labels reserve recommendations for explicit age matches', () => {
+  assert.equal(tusAssignmentStatusLabel({ ageMatch: true, isFull: false }), 'Polecana')
+  assert.equal(tusAssignmentStatusLabel({ ageMatch: false, isFull: false }), 'Poza przedziałem wiekowym')
+  assert.equal(tusAssignmentStatusLabel({ ageMatch: null, isFull: false }), 'Brak przedziału wiekowego')
+  assert.equal(tusAssignmentStatusLabel({ ageMatch: true, isFull: true }), 'Brak miejsc')
+})
+
 test('TUS group defaults add neutral bounds and capacity while preserving explicit capacity', () => {
   assert.deepEqual(withTusGroupDefaults({ id: 'g-new' }), {
     id: 'g-new', capacity: 8, ageMin: null, ageMax: null,
@@ -127,6 +149,14 @@ test('TUS group defaults add neutral bounds and capacity while preserving explic
     { id: 'g1', capacity: 8, ageMin: 5, ageMax: 6 },
     { id: 'g2', capacity: 8, ageMin: 4, ageMax: 4 },
   ])
+})
+
+test('TUS age labels collapse equal bounds and preserve readable ranges', () => {
+  assert.equal(tusAgeLabel(1, 1), '1 rok')
+  assert.equal(tusAgeLabel(4, 4), '4 lata')
+  assert.equal(tusAgeLabel(5, 6), '5–6 lat')
+  assert.equal(tusAgeLabel(6, 5), '')
+  assert.equal(tusAgeLabel(null, null), '')
 })
 
 test('classes filter by month and months list is sorted unique', () => {

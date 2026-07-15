@@ -6,6 +6,10 @@ import { normalizeSearchText } from './workspace.js'
 
 const polishNameOrder = new Intl.Collator('pl', { sensitivity: 'base' })
 
+export const sortTusByName = (items) => items.toSorted((a, b) =>
+  polishNameOrder.compare(a.name, b.name) || a.id.localeCompare(b.id)
+)
+
 export const withTusGroupDefaults = (group) => ({
   ...group,
   capacity: group.capacity ?? 8,
@@ -13,15 +17,35 @@ export const withTusGroupDefaults = (group) => ({
   ageMax: group.ageMax ?? null,
 })
 
+export const tusAgeLabel = (ageMin, ageMax) => {
+  const min = Number(ageMin)
+  const max = Number(ageMax)
+  if (!Number.isInteger(min) || !Number.isInteger(max) || min <= 0 || max <= 0 || min > max) return ''
+  if (min !== max) return `${min}–${max} lat`
+  if (min === 1) return '1 rok'
+  const lastTwo = min % 100
+  const last = min % 10
+  return last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)
+    ? `${min} lata`
+    : `${min} lat`
+}
+
+export const tusAssignmentStatusLabel = ({ ageMatch, isFull }) => {
+  if (isFull) return 'Brak miejsc'
+  if (ageMatch === true) return 'Polecana'
+  if (ageMatch === false) return 'Poza przedziałem wiekowym'
+  return 'Brak przedziału wiekowego'
+}
+
 export const searchTusOverview = ({ groups = [], kids = [], query } = {}) => {
   const normalizedQuery = normalizeSearchText(query)
   if (!normalizedQuery) return { groups: [], kids: [] }
   return {
-    groups: groups.filter((group) => normalizeSearchText(group.name).includes(normalizedQuery)),
-    kids: kids.filter((kid) =>
+    groups: sortTusByName(groups.filter((group) => normalizeSearchText(group.name).includes(normalizedQuery))),
+    kids: sortTusByName(kids.filter((kid) =>
       [kid.name, kid.parentName, kid.parentPhone]
         .some((value) => normalizeSearchText(value).includes(normalizedQuery))
-    ),
+    )),
   }
 }
 
@@ -46,7 +70,7 @@ export const tusAssignmentOptions = ({ groups = [], kids = [], kid } = {}) => {
       return { ...group, ageMatch, isFull, memberCount, remaining }
     })
     .sort((a, b) => {
-      const tierOf = (group) => group.isFull ? 2 : group.ageMatch === false ? 1 : 0
+      const tierOf = (group) => group.isFull ? 2 : group.ageMatch === true ? 0 : 1
       return tierOf(a) - tierOf(b)
         || polishNameOrder.compare(a.name, b.name)
         || a.id.localeCompare(b.id)

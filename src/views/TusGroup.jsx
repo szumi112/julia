@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
@@ -75,6 +75,17 @@ export function TusGroupDetail({ params }) {
   const now = useMinuteNow()
   const group = state.tusGroups.find((g) => g.id === params.id)
   const centre = role.scope !== 'own'
+
+  useEffect(() => {
+    if (!params.focusKidId) return
+    const frame = requestAnimationFrame(() => {
+      const row = ref.current?.querySelector(`[data-kid-id="${CSS.escape(params.focusKidId)}"]`)
+      if (!row) return
+      row.scrollIntoView({ block: 'center', behavior: 'auto' })
+      row.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [params.focusKidId, params.id, ref])
 
   if (!group || !canLeadGroup(group, role)) {
     return (
@@ -341,7 +352,13 @@ export function TusGroupDetail({ params }) {
                 {roster.map((k) => {
                   const rate = attendanceRate(groupClasses, k.id)
                   return (
-                    <tr key={k.id}>
+                    <tr
+                      key={k.id}
+                      data-kid-id={k.id}
+                      className={params.focusKidId === k.id ? 'tus-kid-row is-highlighted' : 'tus-kid-row'}
+                      tabIndex={params.focusKidId === k.id ? -1 : undefined}
+                      aria-label={params.focusKidId === k.id ? `Wybrane dziecko — ${k.name}` : undefined}
+                    >
                       <td>
                         <span className="row" style={{ gap: 10 }}>
                           <Avatar name={k.name} size={32} />

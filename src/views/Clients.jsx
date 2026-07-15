@@ -20,7 +20,7 @@ const nextSessionOf = (sessions, clientId) => {
   )
 }
 
-export function Clients() {
+export function Clients({ params = {} }) {
   const { state } = useApp()
   const { getViewState, openClientForm, patchViewState, role } = useShell()
   const ref = useReveal()
@@ -33,11 +33,18 @@ export function Clients() {
       status: 'all',
       page: 1,
     })
+    const requestedSpecialist = role.scope !== 'own'
+      && typeof params.specialist === 'string'
+      && state.psychologists.some((psychologist) => psychologist.id === params.specialist)
+      ? params.specialist
+      : null
     initialState.current = {
       query: typeof saved.query === 'string' ? saved.query : '',
-      specialist: role.scope !== 'own' && state.psychologists.some((p) => p.id === saved.specialist)
-        ? saved.specialist
-        : null,
+      specialist: requestedSpecialist || (
+        role.scope !== 'own' && state.psychologists.some((p) => p.id === saved.specialist)
+          ? saved.specialist
+          : null
+      ),
       debtOnly: saved.debtOnly === true,
       status: ['active', 'paused'].includes(saved.status) ? saved.status : 'all',
       page: Math.max(1, Number(saved.page) || 1),

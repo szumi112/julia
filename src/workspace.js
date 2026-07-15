@@ -6,6 +6,32 @@ export const withPsychologistDefaults = (psychologist) => ({
   weeklyCapacity: psychologist.weeklyCapacity ?? 20,
 })
 
+export const specialistWeekLoad = (sessions, psychologist, date = new Date()) => {
+  const monday = new Date(date)
+  monday.setHours(12, 0, 0, 0)
+  monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7))
+  const sunday = new Date(monday)
+  sunday.setDate(sunday.getDate() + 6)
+  const start = toISODate(monday)
+  const end = toISODate(sunday)
+  const capacity = withPsychologistDefaults(psychologist).weeklyCapacity
+  const booked = sessions.filter((session) => (
+    session.psychId === psychologist.id
+    && session.status !== 'cancelled'
+    && session.date >= start
+    && session.date <= end
+  )).length
+  const remaining = capacity - booked
+  return {
+    start,
+    end,
+    booked,
+    capacity,
+    remaining,
+    status: remaining > 0 ? 'available' : remaining === 0 ? 'full' : 'over',
+  }
+}
+
 export const normalizeSearchText = (value) =>
   String(value ?? '')
     .toLowerCase()

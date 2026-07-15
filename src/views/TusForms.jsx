@@ -5,6 +5,7 @@ import { Button, Field, Check, IconBtn } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, parseISO, fmtDayMonth } from '../format.js'
+import { tusAgeLabel } from '../tus.js'
 import { TusChildQuickCreate, TusMemberPicker } from './TusMemberPicker.jsx'
 
 const WEEKDAY_OPTIONS = [
@@ -29,7 +30,9 @@ export function TusGroupDrawer({ opts, onClose }) {
 
   const [form, setForm] = useState({
     name: editing?.name || '',
-    age: editing?.age || '',
+    ageMin: editing?.ageMin ?? '',
+    ageMax: editing?.ageMax ?? '',
+    capacity: editing?.capacity ?? 8,
     leaderIds: editing?.leaderIds || [],
     weekday: editing?.weekday ?? 3,
     time: editing?.time || '16:00',
@@ -45,7 +48,9 @@ export function TusGroupDrawer({ opts, onClose }) {
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
-    setErrors((e) => ({ ...e, [k]: null }))
+    setErrors((e) => k === 'ageMin' || k === 'ageMax'
+      ? { ...e, ageMin: null, ageMax: null }
+      : { ...e, [k]: null })
   }
   const toggleLeader = (id) =>
     set('leaderIds', form.leaderIds.includes(id) ? form.leaderIds.filter((x) => x !== id) : [...form.leaderIds, id])
@@ -67,6 +72,17 @@ export function TusGroupDrawer({ opts, onClose }) {
     e.preventDefault()
     const errs = {}
     if (!form.name.trim()) errs.name = 'Podaj nazwę grupy'
+    const ageMin = Number(form.ageMin)
+    const ageMax = Number(form.ageMax)
+    const capacity = Number(form.capacity)
+    if (!Number.isInteger(ageMin) || ageMin <= 0) errs.ageMin = 'Wiek musi być dodatnią liczbą całkowitą'
+    if (!Number.isInteger(ageMax) || ageMax <= 0) errs.ageMax = 'Wiek musi być dodatnią liczbą całkowitą'
+    if (!errs.ageMin && !errs.ageMax && ageMin > ageMax) {
+      errs.ageMax = 'Wiek końcowy nie może być mniejszy niż początkowy'
+    }
+    if (!Number.isInteger(capacity) || capacity <= 0) {
+      errs.capacity = 'Liczba miejsc musi być dodatnią liczbą całkowitą'
+    }
     if (form.leaderIds.length === 0) errs.leaderIds = 'Wybierz co najmniej jedną prowadzącą'
     if (!(Number(form.fee) > 0)) errs.fee = 'Podaj kwotę większą od zera'
     if (!form.time) errs.time = 'Podaj godzinę zajęć'
@@ -78,7 +94,10 @@ export function TusGroupDrawer({ opts, onClose }) {
     }
     const payload = {
       name: form.name.trim(),
-      age: form.age.trim(),
+      age: tusAgeLabel(ageMin, ageMax),
+      ageMin,
+      ageMax,
+      capacity,
       leaderIds: form.leaderIds,
       weekday: Number(form.weekday),
       time: form.time,
@@ -137,9 +156,46 @@ export function TusGroupDrawer({ opts, onClose }) {
                 <input className="input" value={form.name} placeholder="np. Grupa TUS 5–6 lat" onChange={(e) => set('name', e.target.value)} />
               </Field>
 
-              <Field label="Przedział wiekowy" hint="Dzieci dzielone są na grupy według wieku.">
-                <input className="input" value={form.age} placeholder="np. 5–6 lat" onChange={(e) => set('age', e.target.value)} />
-              </Field>
+              <div className="form-grid form-grid--three">
+                <Field label="Wiek od" error={errors.ageMin}>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    className="input"
+                    value={form.ageMin}
+                    onChange={(e) => set('ageMin', e.target.value)}
+                  />
+                </Field>
+                <Field label="Wiek do" error={errors.ageMax}>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    className="input"
+                    value={form.ageMax}
+                    onChange={(e) => set('ageMax', e.target.value)}
+                  />
+                </Field>
+                <Field label="Liczba miejsc" error={errors.capacity}>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputMode="numeric"
+                    className="input"
+                    value={form.capacity}
+                    onChange={(e) => set('capacity', e.target.value)}
+                  />
+                </Field>
+              </div>
+              <p className="field__hint tus-age-preview" aria-live="polite">
+                {tusAgeLabel(form.ageMin, form.ageMax)
+                  ? `Przedział: ${tusAgeLabel(form.ageMin, form.ageMax)}`
+                  : 'Podaj poprawny przedział wiekowy.'}
+              </p>
 
               <TusMemberPicker
                 clients={state.clients}

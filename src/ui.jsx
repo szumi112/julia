@@ -368,11 +368,12 @@ export function InfoTip({ text }) {
   )
 }
 
-export function SearchInput({ value, onChange, placeholder = 'Szukaj…' }) {
+export function SearchInput({ value, onChange, placeholder = 'Szukaj…', inputRef }) {
   return (
     <div className="search">
       <Icon name="search" size={17} />
       <input
+        ref={inputRef}
         type="search"
         value={value}
         placeholder={placeholder}

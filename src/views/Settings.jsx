@@ -4,6 +4,7 @@ import { useShell } from '../shell-ctx.js'
 import { motionOK, setReduceMotion, useReveal } from '../anim.js'
 import { useIsPhone, useMediaQuery } from '../responsive.js'
 import { Button, Field, Avatar, IconBtn } from '../ui.jsx'
+import { EntityLink } from '../ux-patterns.jsx'
 
 const SECTIONS = [
   { id: 'account', label: 'Konto' },
@@ -516,15 +517,15 @@ export function Settings() {
                   disabled={!teamDirty || teamInvalid || teamStatus === 'saving'}
                   label="Zapisz zespół"
                 />
-                <Button
-                  size="sm"
-                  icon="plus"
-                  type="button"
-                  disabled={teamStatus === 'saving'}
-                  onClick={() => openPsychForm()}
+                <EntityLink
+                  route="team"
+                  label="Zarządzaj zespołem"
+                  className="btn btn--soft btn--sm settings-team-link"
+                  aria-disabled={teamStatus === 'saving' ? 'true' : undefined}
+                  onClick={(event) => { if (teamStatus === 'saving') event.preventDefault() }}
                 >
-                  Dodaj specjalistkę
-                </Button>
+                  Zarządzaj zespołem
+                </EntityLink>
               </div>
             </form>
             </section>

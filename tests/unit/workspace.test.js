@@ -7,7 +7,7 @@ import { billableSummary, paymentPatchFor } from '../../src/format.js'
 const {
   roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters,
   dissolveLoneFamilies, normalizeSearchText, clientMatchesQuery, dayStatusSummary, sessionConflicts,
-  paymentEntryFor, paymentSnapshotOf, scopedBillingSummary, withPsychologistDefaults,
+  paymentEntryFor, paymentSnapshotOf, scopedBillingSummary, specialistWeekLoad, withPsychologistDefaults,
 } = workspace
 
 const state = {
@@ -199,6 +199,30 @@ test('psychologist capacity defaults to twenty while preserving explicit values'
     id: 'p-default', weeklyCapacity: 20,
   })
   assert.equal(PSYCHOLOGISTS.every((psychologist) => psychologist.weeklyCapacity === 20), true)
+})
+
+test('specialist weekly load counts Monday through Sunday and excludes cancelled sessions', () => {
+  const sessions = [
+    { id: 'before', psychId: 'p1', date: '2026-07-12', status: 'scheduled' },
+    { id: 'monday', psychId: 'p1', date: '2026-07-13', status: 'completed' },
+    { id: 'cancelled', psychId: 'p1', date: '2026-07-14', status: 'cancelled' },
+    { id: 'sunday', psychId: 'p1', date: '2026-07-19', status: 'scheduled' },
+    { id: 'after', psychId: 'p1', date: '2026-07-20', status: 'scheduled' },
+    { id: 'other', psychId: 'p2', date: '2026-07-15', status: 'scheduled' },
+  ]
+
+  assert.deepEqual(specialistWeekLoad(sessions, { id: 'p1', weeklyCapacity: 2 }, new Date('2026-07-14T12:00:00')), {
+    start: '2026-07-13',
+    end: '2026-07-19',
+    booked: 2,
+    capacity: 2,
+    remaining: 0,
+    status: 'full',
+  })
+  assert.equal(
+    specialistWeekLoad([...sessions, { id: 'extra', psychId: 'p1', date: '2026-07-16', status: 'noshow' }], { id: 'p1', weeklyCapacity: 2 }, new Date('2026-07-14T12:00:00')).status,
+    'over'
+  )
 })
 
 test('partial payment replaces an invalid full paid amount with a valid partial amount', () => {

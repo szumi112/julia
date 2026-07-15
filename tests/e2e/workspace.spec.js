@@ -671,7 +671,7 @@ test('chart data stays visible while decorative motion finishes within 250ms', a
   await login(page)
   await installNamedMotionCapture(page)
   await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Zespół' }).click()
-  await page.locator('.psy-card').first().click()
+  await page.getByRole('link', { name: /Otwórz profil —/ }).first().click()
   await expect.poll(() => page.evaluate(() => window.__namedMotion.some(({ kind }) => kind === 'chart-area-line'))).toBe(true)
 
   await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Raporty' }).click()
@@ -2109,6 +2109,172 @@ test.describe('Task 4 administrative redesign', () => {
       await bottomNavigation.getByRole('button', { name: 'Więcej', exact: true }).click()
       await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Ustawienia' }).click()
       await expectNoHorizontalPageOverflow(page)
+    }
+  })
+})
+
+test.describe('Task 5 team redesign', () => {
+  test('weekly capacity cards are alphabetical, filterable, persisted, and semantically linked', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+
+    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('navigation', { name: 'Sekcje ustawień' }).getByRole('button', { name: 'Zespół i stawki' }).click()
+    const settingsTeam = page.getByRole('form', { name: 'Zespół i stawki' })
+    await settingsTeam.getByLabel('Limit tygodniowy — Julia Wolanin').fill('8')
+    await settingsTeam.getByRole('button', { name: 'Zapisz zespół' }).click()
+    await expect(settingsTeam.getByRole('status')).toHaveText('Zapisano')
+
+    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await expect(page.locator('.view-head__sub')).toContainText('2026-07-13–2026-07-19')
+    await expect(page.getByRole('link', { name: /^Otwórz profil —/ })).toHaveText([
+      /Anna Lewandowska/,
+      /Julia Wolanin/,
+      /Karolina Wójcik/,
+      /Marta Zielińska/,
+    ])
+    const juliaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Julia Wolanin' }) })
+    await expect(juliaCard).toContainText('8 / 8 sesji w tym tygodniu')
+    await expect(juliaCard.getByRole('progressbar')).toHaveAttribute('max', '8')
+    await expect(juliaCard).toContainText('Pełne obłożenie')
+    await expect(juliaCard.getByRole('alert').getByRole('link')).toHaveAttribute(
+      'href',
+      /#\/calendar\?date=2026-07-14&highlightSessionIds=demo-overlap%2Cdemo-unpaid/
+    )
+    for (const name of ['Anna Lewandowska', 'Karolina Wójcik', 'Marta Zielińska']) {
+      const card = page.locator('.team-card').filter({ has: page.getByRole('link', { name: `Otwórz profil — ${name}` }) })
+      await expect(card.getByRole('alert')).toHaveCount(0)
+    }
+    const karolinaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Karolina Wójcik' }) })
+    await expect(karolinaCard.locator('.team-card__today')).not.toContainText('12:00')
+
+    const filters = page.getByRole('group', { name: 'Obłożenie' })
+    await expect(filters.getByRole('button')).toHaveText(['Cały zespół', 'Dostępne miejsca', 'Pełne obłożenie'])
+    await filters.getByRole('button', { name: 'Pełne obłożenie' }).click()
+    await expect(page.getByRole('status', { name: 'Liczba specjalistek' })).toHaveText('1 specjalistka')
+    await expect(page.getByRole('link', { name: 'Otwórz profil — Julia Wolanin' })).toBeVisible()
+
+    await filters.getByRole('button', { name: 'Dostępne miejsca' }).click()
+    await expect(page.getByRole('status', { name: 'Liczba specjalistek' })).toHaveText('3 specjalistki')
+    await page.locator('main.content').evaluate((element) => element.scrollTo(0, 240))
+    await navigation.getByRole('button', { name: 'Raporty' }).click()
+    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await expect(filters.getByRole('button', { name: 'Dostępne miejsca' })).toHaveAttribute('aria-pressed', 'true')
+    expect(await page.locator('main.content').evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  })
+
+  test('team card actions scope clients and conflicts deep-link both sessions into Calendar', async ({ page }) => {
+    await freezeTime(page, '2026-07-14T10:30:00')
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Zespół' }).click()
+
+    const martaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Marta Zielińska' }) })
+    await martaCard.getByRole('link', { name: 'Klienci — Marta Zielińska' }).click()
+    await expect(page.getByRole('region', { name: 'Filtry klientów' })).toContainText('Specjalistka: Marta')
+
+    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await page.locator('.team-card')
+      .filter({ has: page.getByRole('link', { name: 'Otwórz profil — Marta Zielińska' }) })
+      .getByRole('link', { name: 'Kalendarz — Marta Zielińska' })
+      .click()
+    await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+    expect(await page.locator('.agenda__row.is-highlighted').count()).toBeGreaterThanOrEqual(1)
+
+    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    const juliaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Julia Wolanin' }) })
+    const alert = juliaCard.getByRole('alert')
+    await expect(alert).toContainText('Konflikt')
+    await alert.getByRole('link').first().click()
+    await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+    await expect(page.locator('.agenda__row.is-highlighted')).toHaveCount(2)
+    await expect(page.locator('.agenda__row.is-highlighted').first()).toBeFocused()
+  })
+
+  test('client specialist route params cannot escape therapist role scope', async ({ page }) => {
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    const juliaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Julia Wolanin' }) })
+    await juliaCard.getByRole('link', { name: 'Klienci — Julia Wolanin' }).click()
+    await expect(page.getByRole('region', { name: 'Filtry klientów' })).toContainText('Specjalistka: Julia')
+
+    await switchToTherapist(page)
+    await expect(page.getByRole('heading', { level: 1, name: 'Moi klienci' })).toBeVisible()
+    await expect(page.getByRole('region', { name: 'Filtry klientów' })).not.toContainText('Specjalistka')
+    await expect(page.getByRole('link', { name: 'Otwórz kartę — Joanna Madej' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' })).toHaveCount(0)
+  })
+
+  test('specialist creation is canonical on Team and Settings only links back to team management', async ({ page }) => {
+    await login(page)
+    const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await expect(page.getByRole('button', { name: 'Dodaj specjalistkę' })).toBeVisible()
+
+    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('navigation', { name: 'Sekcje ustawień' }).getByRole('button', { name: 'Zespół i stawki' }).click()
+    const teamSettings = page.getByRole('form', { name: 'Zespół i stawki' })
+    await expect(teamSettings.getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(0)
+    await teamSettings.getByRole('link', { name: 'Zarządzaj zespołem' }).click()
+    await expect(page.getByRole('heading', { level: 1, name: 'Zespół Aurelii' })).toBeVisible()
+  })
+
+  test('TUS and Team fit narrow screens and keep assignment, filters, and card actions touchable', async ({ browser }, testInfo) => {
+    const context = await browser.newContext({
+      baseURL: testInfo.project.use.baseURL,
+      hasTouch: true,
+      viewport: { width: 320, height: 844 },
+    })
+    const page = await context.newPage()
+
+    try {
+      await freezeTime(page, '2026-07-14T10:30:00')
+      await login(page)
+      const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
+
+      for (const width of [320, 390]) {
+        await page.setViewportSize({ width, height: 844 })
+        await bottomNavigation.getByRole('button', { name: 'Więcej' }).click()
+        await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Zajęcia TUS' }).click()
+        await expectNoHorizontalPageOverflow(page)
+        const search = page.getByPlaceholder('Dziecko, rodzic lub grupa')
+        await search.fill('Borys Cygan')
+        await expectNoHorizontalPageOverflow(page)
+        const assignment = page.getByRole('button', { name: 'Przypisz dziecko — Borys Cygan' })
+        const assignmentBox = await assignment.boundingBox()
+        expect(assignmentBox.height).toBeGreaterThanOrEqual(44)
+        await assignment.click()
+        await expectNoHorizontalPageOverflow(page)
+        await page.getByRole('dialog', { name: 'Przypisz do grupy — Borys Cygan' }).getByRole('button', { name: 'Zamknij' }).click()
+
+        await bottomNavigation.getByRole('button', { name: 'Więcej' }).click()
+        await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Zespół' }).click()
+        await page.getByRole('button', { name: /^Filtry/ }).click()
+        await expectNoHorizontalPageOverflow(page)
+        const filter = page.getByRole('group', { name: 'Obłożenie' }).getByRole('button', { name: 'Cały zespół' })
+        const clients = page.getByRole('link', { name: /^Klienci —/ }).first()
+        const filterHit = await filter.evaluate((element) => {
+          const rect = element.getBoundingClientRect()
+          const ownsPoint = (y) => {
+            const hit = document.elementFromPoint(rect.left + rect.width / 2, y)
+            return hit === element || element.contains(hit)
+          }
+          return {
+            hitHeight: parseFloat(getComputedStyle(element, '::after').height),
+            top: ownsPoint(rect.top - 4.5),
+            bottom: ownsPoint(rect.bottom + 4.5),
+          }
+        })
+        expect(filterHit.hitHeight).toBeGreaterThanOrEqual(44)
+        expect(filterHit.top).toBe(true)
+        expect(filterHit.bottom).toBe(true)
+        expect((await clients.boundingBox()).height).toBeGreaterThanOrEqual(44)
+      }
+    } finally {
+      await context.close()
     }
   })
 })
