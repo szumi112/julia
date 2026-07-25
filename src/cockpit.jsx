@@ -78,7 +78,7 @@ function CockpitBody({ m, onClose }) {
               <span className="cockpit__next-sub">{focusPsych?.name} · {focusPsych?.room}</span>
             </span>
           </span>
-          <span className={`pill ${m.running ? 'pill--rose' : 'pill--gold'}`}>
+          <span className={`pill ${m.running ? 'pill--coral' : 'pill--amber'}`}>
             {m.running
               ? `trwa · do ${minToTime(timeToMin(focus.time) + focus.duration)}`
               : untilLabel(timeToMin(focus.time) - m.nowMin)}

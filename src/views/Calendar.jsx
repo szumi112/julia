@@ -3,14 +3,16 @@ import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip, motionOK } from '../anim.js'
 import { useIsPhone, useMediaQuery, desktopMQ } from '../responsive.js'
-import { Button, IconBtn, Segmented, Avatar, Chip, EmptyState } from '../ui.jsx'
+import { Button, IconBtn, Segmented, Avatar, Chip, Pill, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { sessionMatchesFilters, sessionsForRole } from '../workspace.js'
+import { serviceBadge } from '../services.js'
 import {
   monthKey, addMonths, fmtMonthYear, toISODate, parseISO, pad2, cap,
-  fmtWeekday, fmtDayMonth, fmtMoney, sessionsWord, timeToMin, STATUS_LABELS, PAY_LABELS,
+  fmtWeekday, fmtDayMonth, fmtWeekRange, fmtMoney, sessionsWord, timeToMin,
+  STATUS_LABELS, PAY_LABELS,
 } from '../format.js'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
@@ -58,7 +60,6 @@ function initialCalendarViewState(getViewState, params, today) {
     mode: 'agenda',
     filters: defaultCalendarFilters(),
     filtersOpen: false,
-    expanded: false,
   }
   const persisted = getViewState('calendar', defaults)
   const paramDate = isISODate(params?.date) ? params.date : null
@@ -85,7 +86,6 @@ function initialCalendarViewState(getViewState, params, today) {
     mode: params?.mode === 'cal' ? 'cal' : persisted.mode === 'cal' ? 'cal' : 'agenda',
     filters: { payment, attendance },
     filtersOpen: Boolean(persisted.filtersOpen),
-    expanded: typeof params?.expanded === 'boolean' ? params.expanded : Boolean(persisted.expanded),
   }
 }
 
@@ -110,13 +110,13 @@ function monthGrid(ym) {
   return cells
 }
 
-// Seven-day, Monday-first strip. Keyboard movement updates selection and focus
+// Seven-day, Monday-first strip. The toolbar above owns week navigation, so the
+// strip is purely the day picker. Keyboard movement updates selection and focus
 // together so only the active date participates in the tab order.
-function DayStrip({ selected, today, byDate, psychOf, onSelect }) {
+function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
   const ref = useRef(null)
   const first = useRef(true)
   const focusDate = useRef(null)
-  const days = useMemo(() => weekDaysFor(selected), [selected])
 
   useEffect(() => {
     const strip = ref.current
@@ -153,51 +153,37 @@ function DayStrip({ selected, today, byDate, psychOf, onSelect }) {
   }
 
   return (
-    <div className="week-strip">
-      <div className="week-strip__controls">
-        <IconBtn name="chevL" label="Poprzedni tydzień" onClick={() => onSelect(addDays(selected, -7))} />
-        <label className="week-strip__date">
-          <span>Wybierz datę</span>
-          <input
-            type="date"
-            value={selected}
-            onChange={(event) => { if (event.target.value) onSelect(event.target.value) }}
-          />
-        </label>
-        <IconBtn name="chevR" label="Następny tydzień" onClick={() => onSelect(addDays(selected, 7))} />
-      </div>
-      <div className="day-strip" ref={ref} role="group" aria-label="Tydzień">
-        {days.map((iso) => {
-          const items = byDate[iso] || []
-          const dowIdx = (parseISO(iso).getDay() + 6) % 7
-          return (
-            <button
-              type="button"
-              key={iso}
-              data-iso={iso}
-              className={[
-                'day-strip__day',
-                iso === selected ? 'is-on' : '',
-                iso === today ? 'is-today' : '',
-                dowIdx >= 5 ? 'is-weekend' : '',
-              ].join(' ')}
-              onClick={() => onSelect(iso)}
-              onKeyDown={(event) => onDayKeyDown(event, iso)}
-              aria-pressed={iso === selected}
-              aria-label={`${fmtDayMonth(iso)} — ${items.length} ${sessionsWord(items.length)}`}
-              tabIndex={iso === selected ? 0 : -1}
-            >
-              <span className="day-strip__dow">{STRIP_DOW[dowIdx]}</span>
-              <span className="day-strip__num">{Number(iso.slice(8))}</span>
-              <span className="day-strip__dots">
-                {items.slice(0, 3).map((session) => (
-                  <span key={session.id} className="dot" style={{ background: psychOf(session.psychId)?.color }} />
-                ))}
-              </span>
-            </button>
-          )
-        })}
-      </div>
+    <div className="day-strip" ref={ref} role="group" aria-label="Tydzień">
+      {days.map((iso) => {
+        const items = byDate[iso] || []
+        const dowIdx = (parseISO(iso).getDay() + 6) % 7
+        return (
+          <button
+            type="button"
+            key={iso}
+            data-iso={iso}
+            className={[
+              'day-strip__day',
+              iso === selected ? 'is-on' : '',
+              iso === today ? 'is-today' : '',
+              dowIdx >= 5 ? 'is-weekend' : '',
+            ].join(' ')}
+            onClick={() => onSelect(iso)}
+            onKeyDown={(event) => onDayKeyDown(event, iso)}
+            aria-pressed={iso === selected}
+            aria-label={`${fmtDayMonth(iso)} — ${items.length} ${sessionsWord(items.length)}`}
+            tabIndex={iso === selected ? 0 : -1}
+          >
+            <span className="day-strip__dow">{STRIP_DOW[dowIdx]}</span>
+            <span className="day-strip__num">{Number(iso.slice(8))}</span>
+            <span className="day-strip__dots">
+              {items.slice(0, 3).map((session) => (
+                <span key={session.id} className="dot" style={{ background: psychOf(session.psychId)?.color }} />
+              ))}
+            </span>
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -213,7 +199,6 @@ export function CalendarView({ params = {} }) {
   const [selected, setSelected] = useState(initialViewState.selected)
   const [filters, setFilters] = useState(initialViewState.filters)
   const [filtersOpen, setFiltersOpen] = useState(initialViewState.filtersOpen)
-  const [expanded, setExpanded] = useState(initialViewState.expanded)
   const isPhone = useIsPhone()
   // dragging an agenda row or a month-grid chip would trap touch scrolling,
   // so it stays a fine-pointer affordance (reschedule via the session form)
@@ -276,8 +261,8 @@ export function CalendarView({ params = {} }) {
   }, [filteredSessions])
 
   useEffect(() => {
-    patchViewState('calendar', { ym, selected, mode, filters, filtersOpen, expanded })
-  }, [expanded, filters, filtersOpen, mode, patchViewState, selected, ym])
+    patchViewState('calendar', { ym, selected, mode, filters, filtersOpen })
+  }, [filters, filtersOpen, mode, patchViewState, selected, ym])
 
   // the whole visible scope lives in the URL — deep-link params pass through
   useRouteParamsSync('calendar', {
@@ -286,7 +271,6 @@ export function CalendarView({ params = {} }) {
     mode: mode === 'cal' ? 'cal' : undefined,
     payment: filters.payment !== 'all' ? filters.payment : undefined,
     attendance: filters.attendance !== 'all' ? filters.attendance : undefined,
-    expanded: expanded || undefined,
     highlightSessionIds: params.highlightSessionIds?.length ? params.highlightSessionIds : undefined,
   })
 
@@ -508,22 +492,35 @@ export function CalendarView({ params = {} }) {
     () => (byDate[agendaSel] || []).slice().sort((a, b) => (a.time < b.time ? -1 : 1)),
     [byDate, agendaSel]
   )
-  const activeAgendaSessions = useMemo(
-    () => agendaSessions.filter((session) => session.status === 'scheduled' || session.status === 'noshow'),
-    [agendaSessions]
-  )
-  const terminalAgendaSessions = useMemo(
-    () => agendaSessions.filter((session) => session.status === 'completed' || session.status === 'cancelled'),
-    [agendaSessions]
-  )
+  const weekDays = useMemo(() => weekDaysFor(agendaSel), [agendaSel])
 
-  // A terminal deep-link has to reveal its row before focus can move to it.
-  useEffect(() => {
-    if (terminalAgendaSessions.some((session) => highlightedSessionIds.has(session.id))) {
-      setExpanded(true)
+  // One navigator per view: Plan dnia moves by week, Miesiąc by month, and the
+  // toolbar counts whatever the user is actually looking at.
+  const firstMonth = monthsRange[0]
+  const lastMonth = monthsRange[monthsRange.length - 1]
+  const nav = mode === 'agenda'
+    ? {
+      label: fmtWeekRange(weekDays[0], weekDays[6]),
+      prevLabel: 'Poprzedni tydzień',
+      nextLabel: 'Następny tydzień',
+      prev: () => selectDay(addDays(agendaSel, -7)),
+      next: () => selectDay(addDays(agendaSel, 7)),
+      prevOff: monthKey(addDays(weekDays[0], -7)) < firstMonth,
+      nextOff: monthKey(addDays(weekDays[6], 7)) > lastMonth,
+      atToday: agendaSel === today,
+      count: `${agendaSessions.length} ${sessionsWord(agendaSessions.length)} tego dnia`,
     }
-  }, [highlightIdsKey, highlightedSessionIds, terminalAgendaSessions])
-
+    : {
+      label: fmtMonthYear(ym),
+      prevLabel: 'Poprzedni miesiąc',
+      nextLabel: 'Następny miesiąc',
+      prev: () => changeMonth(-1),
+      next: () => changeMonth(1),
+      prevOff: ym <= firstMonth,
+      nextOff: ym >= lastMonth,
+      atToday: ym === curYm,
+      count: `${monthSessions.length} ${sessionsWord(monthSessions.length)} w tym miesiącu`,
+    }
   const focusedHighlightKey = useRef(null)
   useEffect(() => {
     if (highlightedSessionIds.size === 0) return
@@ -537,7 +534,7 @@ export function CalendarView({ params = {} }) {
       focusedHighlightKey.current = requestKey
     })
     return () => cancelAnimationFrame(frame)
-  }, [agendaSel, expanded, highlightIdsKey, highlightedSessionIds, mode])
+  }, [agendaSel, highlightIdsKey, highlightedSessionIds, mode])
 
   // gentle row cascade when another day is picked from the strip
   const firstAgendaSwap = useRef(true)
@@ -559,12 +556,14 @@ export function CalendarView({ params = {} }) {
   }, [agendaSel, mode])
 
   // one session row — shared by the desktop day panel and the phone agenda
-  const dayRow = (s, dragOk, terminal = false) => {
+  const dayRow = (s, dragOk) => {
     const c = clientOf(s.clientId)
     const p = psychOf(s.psychId)
     const draggable = dragOk && s.status === 'scheduled'
     const clientName = c?.name || 'Klient'
     const highlighted = highlightedSessionIds.has(s.id)
+    // settled sessions stay in time order, dimmed — the day reads as one list
+    const terminal = s.status === 'completed' || s.status === 'cancelled'
     return (
       <div
         className={`agenda__row ${highlighted ? 'is-highlighted' : ''}`}
@@ -588,6 +587,7 @@ export function CalendarView({ params = {} }) {
             {p?.name} · {fmtMoney(s.amount)}
           </span>
           <span className="agenda__pills">
+            {serviceBadge(s.service) && <Pill tone="sky">{serviceBadge(s.service)}</Pill>}
             <StatusPicker
               session={s}
               accessibleLabel={`Status: ${STATUS_LABELS[s.status]} — ${clientName}, ${s.time}`}
@@ -608,13 +608,14 @@ export function CalendarView({ params = {} }) {
     )
   }
 
-  // a day's rows on the day thread, with the "teraz" marker when it is today
-  const dayThread = (sessions, dragOk, iso, flipRef, terminal = false) => {
+  // a day's rows on the day thread, with the "teraz" marker when it is today.
+  // `wide` lays each row out on one line where the column allows it.
+  const dayThread = (sessions, dragOk, iso, flipRef, wide = false) => {
     const now = new Date()
     const nowMin = now.getHours() * 60 + now.getMinutes()
     const isToday = iso === today
     return (
-      <div className="agenda agenda--spine" ref={flipRef} style={{ marginTop: 6 }}>
+      <div className={`agenda agenda--spine ${wide ? 'agenda--wide' : ''}`} ref={flipRef} style={{ marginTop: 6 }}>
         {sessions.length > 0 && <span className="spine__rule" aria-hidden="true" />}
         {sessions.map((s, i) => {
           const nowHere = isToday &&
@@ -623,7 +624,7 @@ export function CalendarView({ params = {} }) {
           return (
             <Fragment key={s.id}>
               {nowHere && <div className="spine__now" aria-hidden="true">teraz</div>}
-              {dayRow(s, dragOk, terminal)}
+              {dayRow(s, dragOk)}
             </Fragment>
           )
         })}
@@ -635,7 +636,6 @@ export function CalendarView({ params = {} }) {
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">Sesje i grafik</div>
           <h1 className="display view-head__title">Kalendarz <em>sesji</em></h1>
         </div>
         <div className="view-head__actions">
@@ -660,11 +660,11 @@ export function CalendarView({ params = {} }) {
       <div className="row row--between cal-toolbar" data-reveal>
         <div className="row" style={{ gap: 14 }}>
           <div className="month-nav">
-            <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={ym <= monthsRange[0]} onClick={() => changeMonth(-1)} />
-            <span className="month-nav__label">{fmtMonthYear(ym)}</span>
-            <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= monthsRange[monthsRange.length - 1]} onClick={() => changeMonth(1)} />
+            <IconBtn name="chevL" label={nav.prevLabel} disabled={nav.prevOff} onClick={nav.prev} />
+            <span className="month-nav__label month-nav__label--sentence">{cap(nav.label)}</span>
+            <IconBtn name="chevR" label={nav.nextLabel} disabled={nav.nextOff} onClick={nav.next} />
           </div>
-          {ym !== curYm && (
+          {!nav.atToday && (
             <Button variant="ghost" size="sm" onClick={() => selectDay(today)}>
               Dziś
             </Button>
@@ -672,7 +672,7 @@ export function CalendarView({ params = {} }) {
         </div>
         <div className="row" style={{ gap: 10 }}>
           <span className="faint" aria-live="polite" style={{ fontSize: 13.5 }}>
-            {monthSessions.length} {sessionsWord(monthSessions.length)} w tym miesiącu
+            {nav.count}
           </span>
           <Button
             variant="ghost"
@@ -715,6 +715,7 @@ export function CalendarView({ params = {} }) {
       {mode === 'agenda' ? (
         <>
           <DayStrip
+            days={weekDays}
             selected={agendaSel}
             today={today}
             byDate={weekByDate}
@@ -725,7 +726,7 @@ export function CalendarView({ params = {} }) {
             <h2 className="card-title">
               <span className="row" style={{ gap: 9 }}>
                 {cap(fmtWeekday(agendaSel))}, {fmtDayMonth(agendaSel)}
-                {agendaSel === today && <span className="pill pill--gold">dziś</span>}
+                {agendaSel === today && <span className="pill pill--amber">dziś</span>}
               </span>
               <span className="faint" style={{ fontFamily: 'var(--font-ui)', fontSize: 12.5, fontWeight: 550 }}>
                 {agendaSessions.length} {sessionsWord(agendaSessions.length)}
@@ -739,28 +740,7 @@ export function CalendarView({ params = {} }) {
                 hint="Dodaj pierwszą sesję przyciskiem poniżej."
               />
             ) : (
-              <>
-                {activeAgendaSessions.length > 0 &&
-                  dayThread(activeAgendaSessions, false, agendaSel, agendaFlipRef)}
-                {terminalAgendaSessions.length > 0 && (
-                  <div className="agenda-terminal">
-                    <button
-                      type="button"
-                      className="bpost-more agenda-terminal__toggle"
-                      aria-expanded={expanded}
-                      aria-controls="agenda-terminal-list"
-                      onClick={() => setExpanded((current) => !current)}
-                    >
-                      Zakończone i odwołane ({terminalAgendaSessions.length})
-                    </button>
-                    {expanded && (
-                      <div id="agenda-terminal-list">
-                        {dayThread(terminalAgendaSessions, false, agendaSel, undefined, true)}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </>
+              dayThread(agendaSessions, false, agendaSel, agendaFlipRef, true)
             )}
             <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
               onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId })}>
@@ -769,7 +749,7 @@ export function CalendarView({ params = {} }) {
           </section>
         </>
       ) : (
-        <div className="grid-31" data-reveal>
+        <div className="grid-31 cal-month" data-reveal>
           <div>
             <div className="cal" style={{ gridTemplateColumns: `repeat(${showWeekends ? 7 : 5}, 1fr)`, marginBottom: 7 }}>
               {(showWeekends ? DOW : DOW.slice(0, 5)).map((d) => (
@@ -817,12 +797,12 @@ export function CalendarView({ params = {} }) {
                             key={s.id}
                             className={`cal__item ${s.status === 'scheduled' && canDrag ? 'is-draggable' : ''}`}
                             data-flip-id={s.id}
-                            style={{ background: psychOf(s.psychId)?.soft }}
+                            style={{ background: psychOf(s.psychId)?.soft, '--node-color': psychOf(s.psychId)?.color }}
                             onPointerDown={(e) => { if (canDrag) onChipDown(e, s) }}
                             title={s.status === 'scheduled' && canDrag ? 'Przeciągnij, aby przełożyć sesję' : undefined}
                           >
-                            <span className="dot" style={{ background: psychOf(s.psychId)?.color }} />
-                            {s.time} {clientOf(s.clientId)?.name.split(' ')[0]}
+                            <span className="cal__item-time">{s.time}</span>
+                            <span className="cal__item-name">{clientOf(s.clientId)?.name.split(' ')[0]}</span>
                           </span>
                         ))}
                         {items.length > 3 && <span className="cal__more">+{items.length - 3} więcej</span>}
@@ -842,34 +822,40 @@ export function CalendarView({ params = {} }) {
             </div>
           </div>
 
-          <div className="card card--pad cal-day-panel" ref={dayPanelRef}>
-            <h2 className="card-title">
-              <span className="row" style={{ gap: 9 }}>
-                {selected ? cap(fmtWeekday(selected)) + ', ' + fmtDayMonth(selected) : 'Wybierz dzień'}
-                {selected === today && <span className="pill pill--gold">dziś</span>}
-              </span>
-              {selected && (
-                <span className="faint" style={{ fontFamily: 'var(--font-ui)', fontSize: 12.5, fontWeight: 550 }}>
-                  {daySessions.length} {sessionsWord(daySessions.length)}
+          {/* the side cell holds no flow content, so the month grid alone sets
+              the row height and the panel stretches to meet it */}
+          <div className="cal-month__side">
+            <div className="card card--pad cal-day-panel" ref={dayPanelRef}>
+              <h2 className="card-title">
+                <span className="row" style={{ gap: 9 }}>
+                  {selected ? cap(fmtWeekday(selected)) + ', ' + fmtDayMonth(selected) : 'Wybierz dzień'}
+                  {selected === today && <span className="pill pill--amber">dziś</span>}
                 </span>
+                {selected && (
+                  <span className="faint" style={{ fontFamily: 'var(--font-ui)', fontSize: 12.5, fontWeight: 550 }}>
+                    {daySessions.length} {sessionsWord(daySessions.length)}
+                  </span>
+                )}
+              </h2>
+              <div className="cal-day-panel__list">
+                {selected && daySessions.length === 0 && (
+                  <EmptyState
+                    compact
+                    icon="calendar"
+                    title="Brak sesji tego dnia"
+                    hint="Dodaj pierwszą sesję przyciskiem poniżej."
+                  />
+                )}
+                {daySessions.length > 0 &&
+                  dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), canDrag, selected)}
+              </div>
+              {selected && (
+                <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
+                  onClick={() => openSessionForm({ date: selected, psychId: rolePsychId })}>
+                  Dodaj sesję tego dnia
+                </Button>
               )}
-            </h2>
-            {selected && daySessions.length === 0 && (
-              <EmptyState
-                compact
-                icon="calendar"
-                title="Brak sesji tego dnia"
-                hint="Dodaj pierwszą sesję przyciskiem poniżej."
-              />
-            )}
-            {daySessions.length > 0 &&
-              dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), canDrag, selected)}
-            {selected && (
-              <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
-                onClick={() => openSessionForm({ date: selected, psychId: rolePsychId })}>
-                Dodaj sesję tego dnia
-              </Button>
-            )}
+            </div>
           </div>
         </div>
       )}

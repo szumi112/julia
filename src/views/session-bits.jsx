@@ -6,8 +6,8 @@ import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { STATUS_LABELS, STATUS_PILL, PAY_LABELS, PAY_PILL, METHOD_LABELS, fmtMoney } from '../format.js'
 
-const STATUS_TONE = { scheduled: 'rose', completed: 'sage', cancelled: 'mauve', noshow: 'error' }
-const PAY_TONE = { paid: 'sage', unpaid: 'error', partial: 'gold' }
+const STATUS_TONE = { scheduled: 'coral', completed: 'sage', cancelled: 'pink', noshow: 'error' }
+const PAY_TONE = { paid: 'sage', unpaid: 'error', partial: 'amber' }
 
 export function StatusPicker({ session, accessibleLabel }) {
   const { dispatch, toast } = useApp()

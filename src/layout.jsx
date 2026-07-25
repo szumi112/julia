@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Icon, Bloom } from './icons.jsx'
+import { Icon, BearMark } from './icons.jsx'
 import { Avatar, Button, IconBtn, PopItem, Popover } from './ui.jsx'
 import { useApp, useToasts } from './store.jsx'
 import { ShellCtx } from './shell-ctx.js'
 import { DEMO_ROLES } from './data.js'
 import { useIsCompact, useIsPhone } from './responsive.js'
 import { TodayCockpit } from './cockpit.jsx'
-import { motionOK, goldBurst } from './anim.js'
+import { motionOK, brandBurst } from './anim.js'
 import { fmtMonthYear, monthKey, toISODate, fmtWeekday, cap, sessionsWord, outstandingOf } from './format.js'
 import { todayWorkspace } from './workspace.js'
 import { BoardDrawer, Dashboard } from './views/Dashboard.jsx'
@@ -101,22 +101,33 @@ function navLink(navigate, name) {
 export function Logotype({ light }) {
   return (
     <div className="logotype">
-      <Bloom size={36} />
+      <BearMark size={36} />
       <div className="logotype__name" style={light ? { color: '#fff' } : undefined}>
-        Aurelia
-        <small>Centrum Psychoterapii</small>
+        <span translate="no">Bear with me</span>
+        <small>Centrum terapii</small>
       </div>
     </div>
   )
 }
 
-function Sidebar({ route, navigate, role, accountControls, className = '', innerRef, inert }) {
+function Sidebar({
+  route,
+  navigate,
+  role,
+  accountControls,
+  className = '',
+  innerRef,
+  inert,
+  navIds,
+  showTodayCard = true,
+}) {
   const { state } = useApp()
   const navRef = useRef(null)
   const pillRef = useRef(null)
   const activeId = ACTIVE_OF[route.name] || route.name
-  const items = NAV.filter((item) => canAccess(item.id, role))
-  const showSettings = canAccess('settings', role)
+  const items = NAV.filter((item) => canAccess(item.id, role) && (!navIds || navIds.includes(item.id)))
+  const showSettings = canAccess('settings', role) && (!navIds || navIds.includes('settings'))
+  const itemIds = items.map((item) => item.id).join(':')
 
   useLayoutEffect(() => {
     const nav = navRef.current
@@ -134,7 +145,7 @@ function Sidebar({ route, navigate, role, accountControls, className = '', inner
     } else {
       Object.assign(pill.style, { transform: `translateY(${el.offsetTop}px)`, height: `${el.offsetHeight}px`, opacity: 1 })
     }
-  }, [activeId, role.id, showSettings])
+  }, [activeId, itemIds, role.id, showSettings])
 
   const now = new Date()
   const today = toISODate(now)
@@ -176,13 +187,15 @@ function Sidebar({ route, navigate, role, accountControls, className = '', inner
       </nav>
       <div className="sidebar__foot" data-shell-reveal>
         {accountControls}
-        <div className="today-card">
-          <div className="today-card__label">Dziś · {fmtWeekday(today)}</div>
-          <div className="today-card__line">
-            {todayCount > 0 ? `${todayCount} ${sessionsWord(todayCount)} w grafiku` : 'Spokojny dzień'}
+        {showTodayCard && (
+          <div className="today-card">
+            <div className="today-card__label">Dziś · {fmtWeekday(today)}</div>
+            <div className="today-card__line">
+              {todayCount > 0 ? `${todayCount} ${sessionsWord(todayCount)} w grafiku` : 'Spokojny dzień'}
+            </div>
+            <div className="today-card__sub">Weź głęboki oddech 🌿</div>
           </div>
-          <div className="today-card__sub">Weź głęboki oddech 🌿</div>
-        </div>
+        )}
       </div>
     </aside>
   )
@@ -191,6 +204,13 @@ function Sidebar({ route, navigate, role, accountControls, className = '', inner
 function MobileRoleControls({ role, onRoleChange, onLogout }) {
   return (
     <div className="mobile-account">
+      <div className="mobile-account__identity">
+        <Avatar name={role.name} size={40} />
+        <span>
+          <b>{role.name}</b>
+          <small>{role.label}</small>
+        </span>
+      </div>
       <div className="mobile-account__roles" role="group" aria-label="Tryb demonstracyjny">
         <div className="mobile-account__label">Tryb demonstracyjny</div>
         {DEMO_ROLES.map((demoRole) => (
@@ -216,7 +236,9 @@ function MobileRoleControls({ role, onRoleChange, onLogout }) {
 
 // Compact-shell navigation: the sidebar slides in from the left as a drawer,
 // with the same GSAP choreography as the form drawers (mirrored).
-function MobileNavDrawer({ route, navigate, role, onRoleChange, onLogout, showAccountControls, onClose }) {
+const PHONE_MENU_IDS = ['clients', 'team', 'payments', 'reports', 'settings']
+
+function MobileNavDrawer({ route, navigate, role, onRoleChange, onLogout, phone, onClose }) {
   const asideRef = useRef(null)
   const backRef = useRef(null)
   const closing = useRef(false)
@@ -281,33 +303,32 @@ function MobileNavDrawer({ route, navigate, role, onRoleChange, onLogout, showAc
         route={route}
         navigate={(name, params) => { navigate(name, params); close() }}
         role={role}
-        accountControls={showAccountControls ? (
+        accountControls={phone ? (
           <MobileRoleControls
             role={role}
             onRoleChange={(roleId) => { onRoleChange(roleId); close() }}
             onLogout={onLogout}
           />
         ) : undefined}
-        className="sidebar--drawer"
+        className={`sidebar--drawer ${phone ? 'sidebar--phone' : ''}`}
         innerRef={asideRef}
+        navIds={phone ? PHONE_MENU_IDS : undefined}
+        showTodayCard={!phone}
       />
     </div>
   )
 }
 
-// Phone-first bottom navigation: the four daily destinations plus a raised
-// "new session" action in the centre. Secondary pages (Zespół, Raporty,
-// Ustawienia) stay in the hamburger drawer.
-const TABBAR = NAV.filter((n) => ['dashboard', 'calendar', 'clients', 'payments'].includes(n.id))
-const MORE_ROUTES = new Set(['tus', 'team', 'reports', 'settings'])
+// Phone-first bottom navigation: two daily destinations, a raised add action,
+// TUS, then the sole entry point to all secondary navigation and account tools.
+const PHONE_TAB_IDS = new Set(['dashboard', 'calendar', 'tus'])
+const PHONE_TABS = NAV.filter((item) => PHONE_TAB_IDS.has(item.id))
 
-function MobileTabbar({ route, navigate, role, onAdd, onMore }) {
+function MobileTabbar({ route, navigate, onAdd, onMenu }) {
   const barRef = useRef(null)
   const [pill, setPill] = useState(null)
   const activeId = ACTIVE_OF[route.name] || route.name
-  const activeTabId = MORE_ROUTES.has(activeId) ? 'more' : activeId
-  const tabs = TABBAR.filter((item) => canAccess(item.id, role))
-  const tabSetKey = tabs.map((item) => item.id).join(':')
+  const activeTabId = PHONE_TAB_IDS.has(activeId) ? activeId : 'menu'
 
   // the gliding blob behind the active icon — measured, then moved via CSS
   // transition (same pattern as Segmented, survives orientation changes)
@@ -323,7 +344,7 @@ function MobileTabbar({ route, navigate, role, onAdd, onMore }) {
     const ro = new ResizeObserver(measure)
     ro.observe(bar)
     return () => ro.disconnect()
-  }, [activeTabId, role.id, tabSetKey])
+  }, [activeTabId])
 
   useEffect(() => {
     if (!motionOK() || !barRef.current) return
@@ -343,7 +364,7 @@ function MobileTabbar({ route, navigate, role, onAdd, onMore }) {
       aria-current={activeId === n.id ? 'page' : undefined}
     >
       <Icon name={n.icon} size={21} />
-      <span>{n.label}</span>
+      <span>{n.id === 'tus' ? 'TUS' : n.label}</span>
     </a>
   )
 
@@ -351,22 +372,22 @@ function MobileTabbar({ route, navigate, role, onAdd, onMore }) {
     <nav className="tabbar" ref={barRef} aria-label="Nawigacja dolna">
       {pill && <span className="tabbar__pill" style={{ transform: `translateX(${pill.left}px)` }} />}
       <div className="tabbar__side">
-        {tabs.slice(0, 2).map(tab)}
+        {PHONE_TABS.slice(0, 2).map(tab)}
       </div>
       <button className="tabbar__fab" onClick={onAdd} aria-label="Nowa sesja">
         <Icon name="plus" size={22} />
       </button>
       <div className="tabbar__side">
-        {tabs.slice(2).map(tab)}
+        {PHONE_TABS.slice(2).map(tab)}
         <button
           type="button"
-          data-id="more"
-          className={`tabbar__item ${MORE_ROUTES.has(activeId) ? 'is-active' : ''}`}
-          onClick={onMore}
-          aria-current={MORE_ROUTES.has(activeId) ? 'page' : undefined}
+          data-id="menu"
+          className={`tabbar__item ${activeTabId === 'menu' ? 'is-active' : ''}`}
+          onClick={onMenu}
+          aria-current={activeTabId === 'menu' ? 'page' : undefined}
         >
           <Icon name="menu" size={21} />
-          <span>Więcej</span>
+          <span>Menu</span>
         </button>
       </div>
     </nav>
@@ -401,11 +422,11 @@ function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, showA
         />
       )}
       <div className="topbar__title" ref={titleRef} data-shell-reveal>
-        <span className="topbar__crumb">Aurelia <span style={{ opacity: 0.35, margin: '0 7px' }}>/</span> </span><b>{title}</b>
+        <span className="topbar__crumb" translate="no">Bear with me <span style={{ opacity: 0.35, margin: '0 7px' }}>/</span> </span><b>{title}</b>
       </div>
       <div className="topbar__right" data-shell-reveal>
         <div className="topbar__controls" inert={controlsInert}>
-          <button className="cmd-trigger" onClick={onSearch} title={`Szukaj w Aurelii (${META_K})`}>
+          <button className="cmd-trigger" onClick={onSearch} title={`Szukaj w panelu (${META_K})`}>
             <Icon name="search" size={15} />
             <span>Szukaj…</span>
             <kbd>{META_K}</kbd>
@@ -477,11 +498,11 @@ function useMonthSettled() {
     if (prev.current) {
       for (const ym of Object.keys(prev.current)) {
         if (prev.current[ym] > 0 && (byMonth[ym] || 0) === 0) {
-          // order matters: goldBurst skips zero-size anchors, so fall through
-          // to whichever gold signal the current view actually shows
-          goldBurst(
-            document.querySelector('.figures__item--gold') ||
-            document.querySelector('.stat--gold') ||
+          // order matters: brandBurst skips zero-size anchors, so fall through
+          // to whichever attention signal the current view actually shows
+          brandBurst(
+            document.querySelector('.figures__item--amber') ||
+            document.querySelector('.stat--amber') ||
             document.querySelector('.today-chip')
           )
           toast(`${cap(fmtMonthYear(ym))} rozliczony w całości ✨`)
@@ -840,7 +861,7 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
             onCockpitChange={handleCockpitChange}
             onLogout={onLogout}
             onSearch={toggleSearch}
-            onMenu={isCompact ? openNavigation : undefined}
+            onMenu={isCompact && !isPhone ? openNavigation : undefined}
             overlayKey={overlay}
           />
           <main
@@ -863,9 +884,8 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
           <MobileTabbar
             route={route}
             navigate={navigate}
-            role={role}
             onAdd={openNewSession}
-            onMore={openNavigation}
+            onMenu={openNavigation}
           />
         </div>
       )}
@@ -876,7 +896,7 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
           role={role}
           onRoleChange={setDemoRole}
           onLogout={onLogout}
-          showAccountControls={isPhone}
+          phone={isPhone}
           onClose={closeNavigation}
         />
       )}

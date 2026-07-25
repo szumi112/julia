@@ -1,7 +1,7 @@
 // Pure TUS domain logic (group classes) — kept .js and side-effect free so it
 // is unit-testable like workspace.js. TUS money is intentionally separate from
 // session billing: nothing here feeds isBillable/monthStats.
-import { monthKey, searchNorm } from './format.js'
+import { ageLabel, monthKey, searchNorm } from './format.js'
 import { normalizeSearchText } from './workspace.js'
 
 const polishNameOrder = new Intl.Collator('pl', { sensitivity: 'base' })
@@ -10,6 +10,18 @@ export const sortTusByName = (items) => items.toSorted((a, b) =>
   polishNameOrder.compare(a.name, b.name) || a.id.localeCompare(b.id)
 )
 
+/**
+ * Groups read as an age ladder, not an alphabet — „przedszkolaki 5–6" belongs
+ * before „nastolatki 13–16" however the names sort. Groups without bounds fall
+ * to the end, then alphabetically.
+ */
+export const sortTusGroups = (groups) => groups.toSorted((a, b) => {
+  const aAge = Number.isInteger(a.ageMin) ? a.ageMin : Infinity
+  const bAge = Number.isInteger(b.ageMin) ? b.ageMin : Infinity
+  if (aAge !== bAge) return aAge - bAge
+  return polishNameOrder.compare(a.name, b.name) || a.id.localeCompare(b.id)
+})
+
 export const withTusGroupDefaults = (group) => ({
   ...group,
   capacity: group.capacity ?? 8,
@@ -17,18 +29,8 @@ export const withTusGroupDefaults = (group) => ({
   ageMax: group.ageMax ?? null,
 })
 
-export const tusAgeLabel = (ageMin, ageMax) => {
-  const min = Number(ageMin)
-  const max = Number(ageMax)
-  if (!Number.isInteger(min) || !Number.isInteger(max) || min <= 0 || max <= 0 || min > max) return ''
-  if (min !== max) return `${min}–${max} lat`
-  if (min === 1) return '1 rok'
-  const lastTwo = min % 100
-  const last = min % 10
-  return last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)
-    ? `${min} lata`
-    : `${min} lat`
-}
+// group age ranges use the shared Polish age formatter
+export const tusAgeLabel = ageLabel
 
 export const tusAssignmentStatusLabel = ({ ageMatch, isFull }) => {
   if (isFull) return 'Brak miejsc'
@@ -41,7 +43,7 @@ export const searchTusOverview = ({ groups = [], kids = [], query } = {}) => {
   const normalizedQuery = normalizeSearchText(query)
   if (!normalizedQuery) return { groups: [], kids: [] }
   return {
-    groups: sortTusByName(groups.filter((group) => normalizeSearchText(group.name).includes(normalizedQuery))),
+    groups: sortTusGroups(groups.filter((group) => normalizeSearchText(group.name).includes(normalizedQuery))),
     kids: sortTusByName(kids.filter((kid) =>
       [kid.name, kid.parentName, kid.parentPhone]
         .some((value) => normalizeSearchText(value).includes(normalizedQuery))

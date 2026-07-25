@@ -5,8 +5,9 @@ import { useReveal, useFlip } from '../anim.js'
 import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, usePagination, Pager } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
-import { fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, sessionsWord, toISODate, pad2, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
+import { ageLabel, fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, sessionsWord, toISODate, pad2, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
 import { clientMatchesQuery, clientsForRole, sessionsForRole } from '../workspace.js'
+import { serviceBadge, serviceShort } from '../services.js'
 import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
 
 // the client's next scheduled visit — sessions stay sorted by date+time
@@ -225,7 +226,9 @@ export function Clients({ params = {} }) {
                       <Avatar name={c.name} color={p?.color} size={36} />
                       <span>
                         <span style={{ fontWeight: 650, display: 'block' }}>{c.name}</span>
-                        <span className="faint" style={{ fontSize: 12.5 }}>{c.phone}</span>
+                        <span className="faint" style={{ fontSize: 12.5 }}>
+                          {[ageLabel(c.age, c.age), c.phone].filter(Boolean).join(' · ')}
+                        </span>
                       </span>
                     </EntityLink>
                   </td>
@@ -242,10 +245,10 @@ export function Clients({ params = {} }) {
                       : <span className="faint">nie umówiono</span>}
                   </td>
                   <td className="right" data-th="Zaległość">
-                    {debt > 0 ? <Pill tone="rose">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
+                    {debt > 0 ? <Pill tone="coral">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
                   </td>
                   <td data-th="Status">
-                    <Pill tone={c.status === 'active' ? 'sage' : 'mauve'} dot>
+                    <Pill tone={c.status === 'active' ? 'sage' : 'pink'} dot>
                       {c.status === 'active' ? 'Aktywny' : 'Wstrzymany'}
                     </Pill>
                   </td>
@@ -338,13 +341,13 @@ export function ClientDetail({ params }) {
 
       <div className="client-record">
         <section className="client-record__section" aria-labelledby="care-overview-title" data-reveal>
-          <h2 className="client-record__title" id="care-overview-title">Przegląd opieki</h2>
           <div className="id-band" style={{ '--band-color': psych?.color }}>
             <Avatar name={client.name} color={psych?.color} size={64} />
             <div className="id-band__main">
               <p className="eyebrow id-band__eyebrow">Karta klienta</p>
               <h1 className="display id-band__name">{client.name}</h1>
               <div className="id-band__meta">
+                {ageLabel(client.age, client.age) && <span>{ageLabel(client.age, client.age)}</span>}
                 {client.phone && (
                   <span>
                     <Icon name="phone" size={14} />
@@ -357,11 +360,11 @@ export function ClientDetail({ params }) {
                     <a href={`mailto:${client.email}`}>{client.email}</a>
                   </span>
                 )}
-                <span>klient od {fmtFullDate(client.since)}</span>
+                <span>pod opieką od {fmtFullDate(client.since)}</span>
                 <span>{completed.length} {plural(completed.length, 'sesja odbyta', 'sesje odbyte', 'sesji odbytych')}</span>
               </div>
               <div className="id-band__pills">
-                <Pill tone={client.status === 'active' ? 'sage' : 'mauve'} dot>
+                <Pill tone={client.status === 'active' ? 'sage' : 'pink'} dot>
                   {client.status === 'active' ? 'Aktywny' : 'Wstrzymany'}
                 </Pill>
               </div>
@@ -375,6 +378,7 @@ export function ClientDetail({ params }) {
               </div>
             )}
           </div>
+          <h2 className="client-record__title" id="care-overview-title">Przegląd opieki</h2>
           <div className="care-overview" aria-label="Podsumowanie opieki">
             <div className="care-overview__item">
               <span>Specjalistka prowadząca</span>
@@ -442,7 +446,9 @@ export function ClientDetail({ params }) {
                       >
                         {cap(fmtWeekday(s.date))}, {fmtDayMonth(s.date)}
                       </EntityLink>
-                      <span className="agenda__meta">{s.duration} min · {fmtMoney(s.amount)}</span>
+                      <span className="agenda__meta">
+                        {serviceShort(s.service)} · {s.duration} min · {fmtMoney(s.amount)}
+                      </span>
                       <span className="agenda__pills">
                         <StatusPicker
                           session={s}
@@ -487,6 +493,7 @@ export function ClientDetail({ params }) {
                     <tr>
                       <th>Data</th>
                       <th>Godzina</th>
+                      <th>Rodzaj</th>
                       <th>Status</th>
                       <th className="right">Kwota</th>
                       <th>Płatność</th>
@@ -498,6 +505,7 @@ export function ClientDetail({ params }) {
                       <tr key={s.id}>
                         <td style={{ fontWeight: 600 }} data-th="Data">{fmtShortDate(s.date)}</td>
                         <td className="num-cell muted" data-th="Godzina">{s.time}</td>
+                        <td className="muted" data-th="Rodzaj">{serviceShort(s.service)}</td>
                         <td data-th="Status">
                           <StatusPicker
                             session={s}

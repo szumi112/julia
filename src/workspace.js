@@ -239,6 +239,7 @@ export const todayWorkspace = (state, role, now) => {
     schedule,
     daySummary: dayStatusSummary(schedule, today, nowMin),
     attention: dayAttention(state, role, today).slice(0, 3),
+    outstanding: scoped.reduce((sum, session) => sum + outstandingOf(session), 0),
     summary,
   }
 }

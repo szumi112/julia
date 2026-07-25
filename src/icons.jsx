@@ -185,28 +185,18 @@ export function Icon({ name, size = 20, strokeWidth = 1.7, className, style }) {
   )
 }
 
-// Brand mark — small gold "bloom" of overlapping petals.
-export function Bloom({ size = 34 }) {
-  const petals = [0, 60, 120, 180, 240, 300]
+// The Bear with me mark: two arches and a dot, in the four brand hues.
+// Fixed hex rather than tokens — a logotype keeps its colours on any surface,
+// including the dark sidebar and the login card.
+export function BearMark({ size = 34 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true">
-      <g>
-        {petals.map((a) => (
-          <ellipse
-            key={a}
-            cx="24"
-            cy="15.5"
-            rx="6.2"
-            ry="10.5"
-            transform={`rotate(${a} 24 24)`}
-            fill="none"
-            stroke="#ac8a4e"
-            strokeWidth="1.5"
-            opacity="0.85"
-          />
-        ))}
-        <circle cx="24" cy="24" r="3" fill="#964d5f" />
+      <g fill="none" strokeLinecap="round">
+        <path d="M11 39V23a8.5 8.5 0 0 1 17 0v16" stroke="#e88aac" strokeWidth="6" />
+        <path d="M19.5 39V27.5a4.6 4.6 0 0 1 9.2 0" stroke="#ed9936" strokeWidth="5.4" />
+        <path d="M33.5 17.5 39 38" stroke="#ed5a39" strokeWidth="6" />
       </g>
+      <circle cx="31.5" cy="34.5" r="3.2" fill="#b2d9ea" />
     </svg>
   )
 }

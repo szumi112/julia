@@ -198,7 +198,12 @@ test('psychologist capacity defaults to twenty while preserving explicit values'
   assert.deepEqual(withPsychologistDefaults({ id: 'p-default' }), {
     id: 'p-default', weeklyCapacity: 20,
   })
-  assert.equal(PSYCHOLOGISTS.every((psychologist) => psychologist.weeklyCapacity === 20), true)
+  // every seeded specialist declares her own capacity, so the default never
+  // has to fire — part-time members (the TUS trainers) sit below twenty
+  assert.equal(
+    PSYCHOLOGISTS.every((p) => Number.isInteger(p.weeklyCapacity) && p.weeklyCapacity > 0),
+    true,
+  )
 })
 
 test('specialist weekly load counts Monday through Sunday and excludes cancelled sessions', () => {

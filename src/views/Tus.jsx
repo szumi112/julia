@@ -7,7 +7,7 @@ import { Avatar, Pill, Button, EmptyState, IconBtn, SearchInput } from '../ui.js
 import { Icon } from '../icons.jsx'
 import { monthKey, toISODate, fmtDayMonth, fmtMoney, pad2, WEEKDAY_SHORT, plural } from '../format.js'
 import {
-  kidsOfGroup, nextClassOf, searchTusOverview, sortTusByName, tusAgeLabel, tusAssignmentOptions,
+  kidsOfGroup, nextClassOf, searchTusOverview, sortTusByName, sortTusGroups, tusAgeLabel, tusAssignmentOptions,
   tusAssignmentStatusLabel, tusGroupsForRole, tusMonthSummary, unassignedKids,
 } from '../tus.js'
 import { EntityLink } from '../ux-patterns.jsx'
@@ -110,7 +110,7 @@ function GroupCard({ centre, group, leaders, monthSummary, next, roster }) {
         >
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
             <h2 className="gcard__name" id={titleId}>{group.name}</h2>
-            <Pill tone="mauve">{group.age || tusAgeLabel(group.ageMin, group.ageMax)}</Pill>
+            <Pill tone="sky">{group.age || tusAgeLabel(group.ageMin, group.ageMax)}</Pill>
           </div>
           <Icon name="chevR" size={18} className="faint" />
         </EntityLink>
@@ -130,7 +130,7 @@ function GroupCard({ centre, group, leaders, monthSummary, next, roster }) {
         <span><b>{roster.length}/{group.capacity}</b> {kidsWord(roster.length)}</span>
         <span>najbliższe · <b>{next ? fmtDayMonth(next.date) : '—'}</b></span>
         <span>frekwencja · <b>{monthSummary.attendanceRate == null ? '—' : `${monthSummary.attendanceRate}%`}</b></span>
-        {centre && monthSummary.dueCount > 0 && <Pill tone="gold">{monthSummary.dueCount} do opłacenia</Pill>}
+        {centre && monthSummary.dueCount > 0 && <Pill tone="amber">{monthSummary.dueCount} do opłacenia</Pill>}
       </div>
     </article>
   )
@@ -142,7 +142,7 @@ export function TusGroups() {
   const ref = useReveal()
   const searchRef = useRef(null)
   const centre = role.scope !== 'own'
-  const groups = useMemo(() => sortTusByName(tusGroupsForRole(state, role)), [role, state])
+  const groups = useMemo(() => sortTusGroups(tusGroupsForRole(state, role)), [role, state])
   const groupIds = useMemo(() => new Set(groups.map((group) => group.id)), [groups])
   const visibleKids = useMemo(
     () => centre

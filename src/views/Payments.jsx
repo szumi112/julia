@@ -327,7 +327,7 @@ export function Payments() {
           label={<><span className="finance-figure-label">Pozostało do zapłaty</span> <InfoTip text="Część należności, której klienci jeszcze nie wpłacili." /></>}
           value={summary.outstanding}
           fmt={fmtMoney}
-          gold
+          attention
         />
       </div>
 
@@ -337,7 +337,7 @@ export function Payments() {
             <BarFill
               segments={[
                 { value: summary.collected, color: 'var(--sage)', label: 'wpłacono' },
-                { value: summary.outstanding, color: 'var(--gold-mid)', label: 'pozostało do zapłaty' },
+                { value: summary.outstanding, color: 'var(--amber-mid)', label: 'pozostało do zapłaty' },
               ]}
               totalMax={summary.due}
             />
@@ -368,7 +368,7 @@ export function Payments() {
                     <BarFill
                       segments={[
                         { value: collected, color: 'var(--sage)', label: 'wpłacono' },
-                        { value: outstanding, color: 'var(--gold-mid)', label: 'pozostało do zapłaty' },
+                        { value: outstanding, color: 'var(--amber-mid)', label: 'pozostało do zapłaty' },
                       ]}
                       totalMax={maxPsych}
                     />
@@ -383,7 +383,7 @@ export function Payments() {
           </div>
           <div className="legend" style={{ marginTop: 18 }}>
             <span className="legend__item"><span className="legend__swatch" style={{ background: 'var(--sage)' }} /> Wpłacono</span>
-            <span className="legend__item"><span className="legend__swatch" style={{ background: 'var(--gold-mid)' }} /> Pozostało do zapłaty</span>
+            <span className="legend__item"><span className="legend__swatch" style={{ background: 'var(--amber-mid)' }} /> Pozostało do zapłaty</span>
           </div>
         </section>
 

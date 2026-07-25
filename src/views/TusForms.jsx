@@ -7,6 +7,7 @@ import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, parseISO, fmtDayMonth } from '../format.js'
 import { tusAgeLabel } from '../tus.js'
+import { TUS_FEE } from '../data.js'
 import { TusChildQuickCreate, TusMemberPicker } from './TusMemberPicker.jsx'
 
 const WEEKDAY_OPTIONS = [
@@ -39,7 +40,7 @@ export function TusGroupDrawer({ opts, onClose }) {
     leaderIds: editing?.leaderIds || [],
     weekday: editing?.weekday ?? 3,
     time: editing?.time || '16:00',
-    fee: editing?.fee ?? 300,
+    fee: editing?.fee ?? TUS_FEE,
   })
   const [errors, setErrors] = useState({})
   const [mode, setMode] = useState('group')

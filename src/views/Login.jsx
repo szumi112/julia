@@ -7,7 +7,7 @@ import { useMagnetic, motionOK } from '../anim.js'
 
 export function Login({ onLogin }) {
   const { toast } = useApp()
-  const [email, setEmail] = useState('julia@aurelia.pl')
+  const [email, setEmail] = useState('anna@bearwithme.pl')
   const [password, setPassword] = useState('')
   const [remember, setRemember] = useState(true)
   const [errors, setErrors] = useState({})
@@ -70,7 +70,7 @@ export function Login({ onLogin }) {
           Witaj <em>z powrotem</em>
         </h1>
         <p className="login__sub" data-stagger>
-          Zaloguj się, aby zajrzeć do swojego centrum.
+          Zaloguj się, aby zajrzeć do dzisiejszego planu centrum.
         </p>
 
         <div className="float-field" data-stagger>
@@ -132,7 +132,7 @@ export function Login({ onLogin }) {
           <p className="login__demo">Wersja demonstracyjna — wystarczy dowolny e-mail i hasło.</p>
         </div>
       </form>
-      <div className="login__footer">Aurelia — Centrum Psychoterapii · Jelenia Góra</div>
+      <div className="login__footer">Bear with me · Centrum psychologiczno-edukacyjne · Jelenia Góra</div>
     </div>
   )
 }

@@ -171,7 +171,7 @@ export function CommandPalette({ onClose }) {
         ref={panelRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Szukaj w Aurelii"
+        aria-label="Szukaj w panelu"
         onKeyDown={onPanelKey}
       >
         <div className="cmd__head">
@@ -183,7 +183,7 @@ export function CommandPalette({ onClose }) {
             spellCheck={false}
             value={query}
             placeholder="Szukaj klienta, specjalistki, widoku…"
-            aria-label="Szukaj w Aurelii"
+            aria-label="Szukaj w panelu"
             role="combobox"
             aria-expanded="true"
             aria-controls="cmd-list"

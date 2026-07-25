@@ -323,15 +323,15 @@ export function useFlip(depKey) {
   return ref
 }
 
-// Celebration burst — small gold/rose petals scattering from an element.
-export function goldBurst(el) {
+// Celebration burst — small brand-coloured confetti scattering from an element.
+export function brandBurst(el) {
   if (!el || !motionOK()) return
   const r = el.getBoundingClientRect()
   // the anchor may be display:none on small screens (e.g. the month chip)
   if (!r.width && !r.height) return
   const cx = r.left + r.width / 2
   const cy = r.top + r.height / 2
-  const colors = ['#ac8a4e', '#c2808d', '#dcc488', '#964d5f', '#e8cfa0', '#7d8c6c']
+  const colors = ['#ed5a39', '#e88aac', '#ed9936', '#b2d9ea', '#f0c07e', '#6a9a6d']
   const wrap = document.createElement('div')
   wrap.className = 'burst'
   document.body.appendChild(wrap)

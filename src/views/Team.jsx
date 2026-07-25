@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useApp, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { useReveal, useCountUp } from '../anim.js'
+import { useReveal } from '../anim.js'
 import { useMinuteNow } from '../clock.js'
-import { Avatar, Pill, Button, Chip, IconBtn, EmptyState } from '../ui.jsx'
+import { Avatar, Pill, Button, Chip, IconBtn, EmptyState, Stat } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { AreaChart } from '../charts.jsx'
 import {
@@ -181,7 +181,7 @@ export function Team() {
       <div className="view-head" data-reveal>
         <div>
           <div className="eyebrow">Specjalistki</div>
-          <h1 className="display view-head__title">Zespół <em>Aurelii</em></h1>
+          <h1 className="display view-head__title">Zespół <em>centrum</em></h1>
           <p className="view-head__sub">
             Obłożenie od poniedziałku do niedzieli{firstLoad ? ` · ${fmtDayMonth(firstLoad.start)} – ${fmtDayMonth(firstLoad.end)}` : ''}. Konflikty prowadzą prosto do właściwych sesji.
           </p>
@@ -248,16 +248,6 @@ export function Team() {
   )
 }
 
-function PsychStat({ label, value, fmt }) {
-  const ref = useCountUp(value, fmt)
-  return (
-    <div className="card stat card--lift" data-reveal>
-      <div className="stat__label">{label}</div>
-      <div className="stat__value"><span ref={ref}>0</span></div>
-    </div>
-  )
-}
-
 export function PsychDetail({ params }) {
   const { state } = useApp()
   const { openSessionForm, openPsychForm } = useShell()
@@ -304,7 +294,7 @@ export function PsychDetail({ params }) {
             {psych.room && <span><Icon name="room" size={14} /> {psych.room}</span>}
           </div>
           <div className="id-band__pills">
-            <Pill tone="gold">{fmtMoney(psych.rate)} / sesja</Pill>
+            <Pill tone="amber">{fmtMoney(psych.rate)} / sesja</Pill>
           </div>
         </div>
         <div className="id-band__actions">
@@ -314,10 +304,10 @@ export function PsychDetail({ params }) {
       </div>
 
       <div className="stats-row stats-row--4">
-        <PsychStat label="Klienci" value={clients.length} fmt={fmtNumber} />
-        <PsychStat label={`Sesje · ${fmtMonthName(ym)}`} value={stats.count} fmt={(v) => fmtNumber(Math.round(v))} />
-        <PsychStat label={`Godziny · ${fmtMonthName(ym)}`} value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
-        <PsychStat label={`Przychód · ${fmtMonthName(ym)}`} value={stats.revenue} fmt={fmtMoney} />
+        <Stat label="Klienci" value={clients.length} fmt={fmtNumber} />
+        <Stat label={`Sesje · ${fmtMonthName(ym)}`} value={stats.count} fmt={(v) => fmtNumber(Math.round(v))} />
+        <Stat label={`Godziny · ${fmtMonthName(ym)}`} value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
+        <Stat label={`Przychód · ${fmtMonthName(ym)}`} value={stats.revenue} fmt={fmtMoney} />
       </div>
 
       <div className="grid-31" style={{ marginTop: 4 }}>
@@ -378,7 +368,7 @@ export function PsychDetail({ params }) {
                       <td className="muted" data-th="Ostatnia sesja">{last ? fmtShortDate(last.date) : '—'}</td>
                       <td className="right num-cell" data-th="Sesje">{count}</td>
                       <td className="right" data-th="Zaległość">
-                        {debt > 0 ? <Pill tone="gold">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
+                        {debt > 0 ? <Pill tone="amber">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
                       </td>
                     </tr>
                   )

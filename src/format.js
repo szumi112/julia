@@ -62,6 +62,14 @@ export const fmtDayMonth = (iso) => dayMonthFmt.format(parseISO(iso))
 export const fmtFullDate = (iso) => fullDateFmt.format(parseISO(iso))
 export const fmtWeekday = (iso) => weekdayFmt.format(parseISO(iso))
 export const fmtShortDate = (iso) => shortDateFmt.format(parseISO(iso))
+// Span label for a week ("20 – 26 lipca"); the month is only repeated on the
+// start when the week straddles two of them ("29 czerwca – 5 lipca").
+export const fmtWeekRange = (startIso, endIso) => {
+  const start = startIso.slice(0, 7) === endIso.slice(0, 7)
+    ? Number(startIso.slice(8))
+    : fmtDayMonth(startIso)
+  return `${start} – ${fmtDayMonth(endIso)}`
+}
 
 // Relative-day label in the app's short voice ("dziś" / "wczoraj"), falling
 // back to the short date beyond yesterday. Intl.RelativeTimeFormat would give
@@ -108,6 +116,24 @@ export const searchNorm = (s) =>
     .replace(/[̀-ͯ]/g, '')
 
 // Polish plural rules: 1 sesja / 2–4 sesje / 5+ sesji
+/**
+ * Polish age label for a single age (`ageLabel(7, 7)` → „7 lat") or a range
+ * (`ageLabel(5, 6)` → „5–6 lat"). Empty string for anything nonsensical, so
+ * callers can `||` a fallback. Shared by client records and TUS groups.
+ */
+export const ageLabel = (ageMin, ageMax) => {
+  const min = Number(ageMin)
+  const max = Number(ageMax)
+  if (!Number.isInteger(min) || !Number.isInteger(max) || min <= 0 || max <= 0 || min > max) return ''
+  if (min !== max) return `${min}–${max} lat`
+  if (min === 1) return '1 rok'
+  const lastTwo = min % 100
+  const last = min % 10
+  return last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)
+    ? `${min} lata`
+    : `${min} lat`
+}
+
 export const plural = (n, one, few, many) => {
   const abs = Math.abs(n)
   if (abs === 1) return one
@@ -138,9 +164,9 @@ export const STATUS_LABELS = {
 }
 
 export const STATUS_PILL = {
-  scheduled: 'pill--rose',
+  scheduled: 'pill--coral',
   completed: 'pill--sage',
-  cancelled: 'pill--mauve',
+  cancelled: 'pill--pink',
   noshow: 'pill--error',
 }
 
@@ -153,7 +179,7 @@ export const PAY_LABELS = {
 export const PAY_PILL = {
   paid: 'pill--sage',
   unpaid: 'pill--error',
-  partial: 'pill--gold',
+  partial: 'pill--amber',
 }
 
 export const METHOD_LABELS = {

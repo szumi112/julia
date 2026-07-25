@@ -1,5 +1,5 @@
 const ARRAY_PARAMS = new Set(['highlightSessionIds'])
-const BOOLEAN_PARAMS = new Set(['allPeriods', 'unpaidOnly', 'expanded'])
+const BOOLEAN_PARAMS = new Set(['allPeriods', 'unpaidOnly'])
 
 export function routeHref(route, params = {}) {
   const search = new URLSearchParams()

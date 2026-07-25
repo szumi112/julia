@@ -7,6 +7,7 @@ import { Icon } from '../icons.jsx'
 import { useDrawerFX, motionOK } from '../anim.js'
 import { toISODate, timeToMin, fmtDayMonth, isBillable, STATUS_LABELS, PAY_LABELS, METHOD_LABELS } from '../format.js'
 import { clientsForRole } from '../workspace.js'
+import { SERVICES, SERVICE_BY_ID, STANDARD_SERVICE, amountFor, durationFor } from '../services.js'
 
 export function SessionDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
@@ -28,13 +29,23 @@ export function SessionDrawer({ opts, onClose }) {
     ? state.psychologists.filter((psych) => psych.id === role.psychId)
     : state.psychologists
 
+  // a new session opens priced: the service and the specialist are both known
+  // up front, so the cennik can fill the amount before anything is typed
+  const defaultService = editing?.service || STANDARD_SERVICE
+  const defaultAmount = editing
+    ? editing.amount
+    : defaultPsych
+      ? amountFor(defaultService, state.psychologists.find((p) => p.id === defaultPsych))
+      : ''
+
   const [form, setForm] = useState({
     clientId: defaultClient,
     psychId: defaultPsych,
+    service: defaultService,
     date: editing?.date || opts.date || toISODate(new Date()),
     time: editing?.time || '12:00',
-    duration: editing?.duration || 50,
-    amount: editing ? editing.amount : '',
+    duration: editing?.duration || durationFor(defaultService),
+    amount: defaultAmount,
     status: editing?.status || 'scheduled',
     payment: editing?.payment || 'unpaid',
     paidAmount: editing?.paidAmount || '',
@@ -80,7 +91,7 @@ export function SessionDrawer({ opts, onClose }) {
       ...f,
       clientId,
       psychId,
-      amount: amountTouched.current ? f.amount : psych ? psych.rate : f.amount,
+      amount: amountTouched.current ? f.amount : amountFor(f.service, psych),
     }))
     setErrors((e) => ({ ...e, clientId: null }))
   }
@@ -90,9 +101,18 @@ export function SessionDrawer({ opts, onClose }) {
     setForm((f) => ({
       ...f,
       psychId,
-      amount: amountTouched.current ? f.amount : psych ? psych.rate : f.amount,
+      amount: amountTouched.current ? f.amount : amountFor(f.service, psych),
     }))
     setErrors((e) => ({ ...e, psychId: null }))
+  }
+
+  // Picking a position from the cennik restates length and price — an explicit
+  // choice of service outranks an earlier hand-typed amount.
+  const onServiceChange = (service) => {
+    const psych = state.psychologists.find((p) => p.id === form.psychId)
+    amountTouched.current = false
+    setForm((f) => ({ ...f, service, duration: durationFor(service), amount: amountFor(service, psych) }))
+    setErrors((e) => ({ ...e, amount: null }))
   }
 
   // acceptance target: a failed submit lands focus on the first invalid field
@@ -163,6 +183,7 @@ export function SessionDrawer({ opts, onClose }) {
     const payload = {
       clientId: form.clientId,
       psychId: form.psychId,
+      service: form.service,
       date: form.date,
       time: form.time,
       duration: Number(form.duration),
@@ -228,6 +249,14 @@ export function SessionDrawer({ opts, onClose }) {
             </select>
           </Field>
 
+          <Field label="Rodzaj spotkania" hint={SERVICE_BY_ID[form.service]?.note}>
+            <select name="session-service" autoComplete="off" className="select" value={form.service} onChange={(e) => onServiceChange(e.target.value)}>
+              {SERVICES.map((s) => (
+                <option key={s.id} value={s.id}>{s.label}</option>
+              ))}
+            </select>
+          </Field>
+
           <div className="form-grid">
             <Field label="Data" error={errors.date} hint={editing ? 'Zmiana daty przekłada sesję w kalendarzu.' : undefined}>
               <input type="date" name="session-date" autoComplete="off" className="input" value={form.date} onChange={(e) => set('date', e.target.value)} />
@@ -239,8 +268,8 @@ export function SessionDrawer({ opts, onClose }) {
               <select name="session-duration" autoComplete="off" className="select" value={form.duration} onChange={(e) => set('duration', e.target.value)}>
                 <option value="50">50 minut</option>
                 <option value="60">60 minut</option>
-                <option value="80">80 minut</option>
                 <option value="90">90 minut</option>
+                <option value="120">120 minut</option>
               </select>
             </Field>
             <Field label="Kwota (zł)" error={errors.amount}>
@@ -253,7 +282,7 @@ export function SessionDrawer({ opts, onClose }) {
                 autoComplete="off"
                 className="input"
                 value={form.amount}
-                placeholder="np. 220…"
+                placeholder="np. 180…"
                 onChange={(e) => { amountTouched.current = true; set('amount', e.target.value) }}
               />
             </Field>

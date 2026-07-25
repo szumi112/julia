@@ -97,12 +97,12 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
     })
   }
 
-  const rose = tok('--rose', '#c2808d')
-  const roseDeep = tok('--rose-deep', '#964d5f')
-  const gold = tok('--gold', '#ac8a4e')
-  const goldDeep = tok('--gold-deep', '#7d5f33')
-  const faint = tok('--ink-faint', '#7a6871')
-  const surface = tok('--surface', '#fcfaf5')
+  const coral = tok('--coral', '#ed5a39')
+  const coralDeep = tok('--coral-deep', '#b03a1c')
+  const amber = tok('--amber', '#ed9936')
+  const amberDeep = tok('--amber-deep', '#8f5a12')
+  const faint = tok('--ink-faint', '#6d6188')
+  const surface = tok('--surface', '#fdfbf8')
 
   return (
     <div
@@ -121,8 +121,8 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
       <svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
         <defs>
           <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={rose} stopOpacity="0.32" />
-            <stop offset="100%" stopColor={rose} stopOpacity="0.015" />
+            <stop offset="0%" stopColor={coral} stopOpacity="0.32" />
+            <stop offset="100%" stopColor={coral} stopOpacity="0.015" />
           </linearGradient>
         </defs>
         {/* horizontal guides */}
@@ -142,7 +142,7 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
           ref={lineRef}
           d={line}
           fill="none"
-          stroke={roseDeep}
+          stroke={coralDeep}
           strokeWidth="2.4"
           strokeLinecap="round"
         />
@@ -152,7 +152,7 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
               cx={p[0]}
               cy={p[1]}
               r={hover === i ? 5.5 : i === pts.length - 1 ? 4.5 : 3}
-              fill={i === pts.length - 1 ? gold : roseDeep}
+              fill={i === pts.length - 1 ? amber : coralDeep}
               stroke={surface}
               strokeWidth="2"
               style={{ transition: 'r .18s' }}
@@ -163,7 +163,7 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
               textAnchor="middle"
               fontSize="11"
               fontWeight={i === pts.length - 1 ? 700 : 500}
-              fill={i === pts.length - 1 ? goldDeep : faint}
+              fill={i === pts.length - 1 ? amberDeep : faint}
             >
               {cap(fmtMonthName(data[i].ym)).slice(0, 3)}
             </text>
@@ -231,7 +231,7 @@ export function Donut({ parts, size = 190, thickness = 26, centerTop, centerBott
   return (
     <div style={{ position: 'relative', width: size, height: size }} ref={ref}>
       <svg width={size} height={size} aria-hidden="true">
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={tok('--paper-deep', '#efe6d8')} strokeWidth={thickness} />
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={tok('--paper-deep', '#f0eae1')} strokeWidth={thickness} />
         {parts.map((p, i) => {
           const frac = p.value / total
           const dash = `${Math.max(frac * C - 5, 0.01)} ${C}`

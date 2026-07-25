@@ -194,13 +194,13 @@ export function Field({ label, error, hint, children, className = '', span2 }) {
 
 // one entry in a figures line — a quiet, optionally linked number that
 // replaces equal-weight KPI cards (dashboard, finances, reports)
-export function Figure({ label, value, fmt = fmtNumber, suffix, sub, gold, onClick }) {
+export function Figure({ label, value, fmt = fmtNumber, suffix, sub, attention, onClick }) {
   const ref = useCountUp(value, fmt)
   const Tag = onClick ? 'button' : 'div'
   return (
     <Tag
       type={onClick ? 'button' : undefined}
-      className={`figures__item ${gold ? 'figures__item--gold' : ''}`}
+      className={`figures__item ${attention ? 'figures__item--amber' : ''}`}
       onClick={onClick}
       data-reveal
     >
@@ -211,6 +211,20 @@ export function Figure({ label, value, fmt = fmtNumber, suffix, sub, gold, onCli
       </span>
       {sub && <span className="figures__sub">{sub}</span>}
     </Tag>
+  )
+}
+
+// Stat card — Figure's boxed sibling. Same count-up, but each metric sits in
+// its own card so a grid of them reads as a summary you scan rather than a
+// hairline-ruled row you read. `sub` carries the number's context.
+export function Stat({ label, value, fmt = fmtNumber, sub, tone }) {
+  const ref = useCountUp(value, fmt)
+  return (
+    <div className={`card stat card--lift ${tone ? `stat--${tone}` : ''}`} data-reveal>
+      <div className="stat__label">{label}</div>
+      <div className="stat__value"><span ref={ref}>{fmt(value)}</span></div>
+      {sub && <div className="stat__sub">{sub}</div>}
+    </div>
   )
 }
 
@@ -240,7 +254,7 @@ export function Toggle({ on, onChange, label, disabled }) {
   )
 }
 
-export function Avatar({ name, color = '#964d5f', size = 38 }) {
+export function Avatar({ name, color = '#b03a1c', size = 38 }) {
   return (
     <span
       className="avatar"

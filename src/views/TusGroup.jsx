@@ -128,7 +128,7 @@ export function TusGroupDetail({ params }) {
         <Icon name="arrowL" size={16} /> Wróć do zajęć TUS
       </EntityLink>
 
-      <div className="id-band" data-reveal style={{ '--band-color': leaders[0]?.color || 'var(--rose-deep)' }}>
+      <div className="id-band" data-reveal style={{ '--band-color': leaders[0]?.color || 'var(--coral-deep)' }}>
         <Avatar name={group.name.replace('Grupa ', '')} color={leaders[0]?.color} size={64} />
         <div className="id-band__main">
           <h1 className="display id-band__name">{group.name}</h1>
@@ -147,7 +147,7 @@ export function TusGroupDetail({ params }) {
             <span><Icon name="payments" size={14} /> {fmtMoney(group.fee)} / mies.</span>
           </div>
           <div className="id-band__pills">
-            <Pill tone="mauve">{group.age}</Pill>
+            <Pill tone="sky">{group.age}</Pill>
           </div>
         </div>
         <div className="id-band__actions">
@@ -183,7 +183,7 @@ export function TusGroupDetail({ params }) {
             label="Opłacone"
             value={m.paidCount}
             suffix={`/${roster.length}`}
-            gold={m.dueCount > 0}
+            attention={m.dueCount > 0}
           />
         )}
       </div>
@@ -404,7 +404,7 @@ export function TusGroupDetail({ params }) {
                             Podpisany
                           </Check>
                         ) : (
-                          <Pill tone={k.regulationsSigned ? 'sage' : 'gold'} dot>
+                          <Pill tone={k.regulationsSigned ? 'sage' : 'amber'} dot>
                             {k.regulationsSigned ? 'Podpisany' : 'Brak'}
                           </Pill>
                         )}

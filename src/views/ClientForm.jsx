@@ -19,6 +19,7 @@ export function ClientDrawer({ opts, onClose }) {
 
   const [form, setForm] = useState({
     name: editing?.name || '',
+    age: editing?.age ?? '',
     psychId: editing?.psychId || opts.psychId || '',
     email: editing?.email || '',
     phone: editing?.phone || '',
@@ -61,6 +62,10 @@ export function ClientDrawer({ opts, onClose }) {
       errs.psychId = 'Klient musi pozostać pod opieką aktywnej specjalistki'
     }
     if (form.email.trim() && !EMAIL_SHAPE.test(form.email.trim())) errs.email = 'Podaj poprawny adres e-mail'
+    if (String(form.age).trim()) {
+      const age = Number(form.age)
+      if (!Number.isInteger(age) || age < 1 || age > 26) errs.age = 'Podaj wiek od 1 do 26 lat'
+    }
     setErrors(errs)
     if (Object.keys(errs).length) {
       shake()
@@ -71,6 +76,8 @@ export function ClientDrawer({ opts, onClose }) {
     }
     const payload = {
       name: form.name.trim(),
+      // dorośli (rodzice na konsultacji) zostają bez wieku
+      age: String(form.age).trim() ? Number(form.age) : null,
       psychId: form.psychId,
       email: form.email.trim(),
       phone: form.phone.trim(),
@@ -133,22 +140,39 @@ export function ClientDrawer({ opts, onClose }) {
               autoComplete="off"
               className="input"
               value={form.name}
-              placeholder="np. Maria Nowak"
+              placeholder="np. Zofia Mazur"
               onChange={(e) => set('name', e.target.value)}
             />
           </Field>
 
-          <Field label="Specjalistka prowadząca" error={errors.psychId}>
-            <select name="client-psych" autoComplete="off" className="select" value={form.psychId} onChange={(e) => set('psychId', e.target.value)}>
-              <option value="">— wybierz —</option>
-              {availablePsychologists.map((p) => (
-                <option key={p.id} value={p.id}>{p.title} {p.name}</option>
-              ))}
-            </select>
-          </Field>
+          <div className="form-grid">
+            <Field label="Specjalistka prowadząca" error={errors.psychId}>
+              <select name="client-psych" autoComplete="off" className="select" value={form.psychId} onChange={(e) => set('psychId', e.target.value)}>
+                <option value="">— wybierz —</option>
+                {availablePsychologists.map((p) => (
+                  <option key={p.id} value={p.id}>{p.title} {p.name}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Wiek" error={errors.age} hint="Zostaw puste dla osoby dorosłej.">
+              <input
+                type="number"
+                min="1"
+                max="26"
+                step="1"
+                inputMode="numeric"
+                name="client-age"
+                autoComplete="off"
+                className="input"
+                value={form.age}
+                placeholder="np. 9"
+                onChange={(e) => set('age', e.target.value)}
+              />
+            </Field>
+          </div>
 
           <div className="form-grid">
-            <Field label="E-mail" error={errors.email}>
+            <Field label="E-mail" error={errors.email} hint="Kontakt do rodzica lub opiekuna.">
               <input
                 type="email"
                 name="client-email"
@@ -156,7 +180,7 @@ export function ClientDrawer({ opts, onClose }) {
                 spellCheck={false}
                 className="input"
                 value={form.email}
-                placeholder="np. maria@gmail.com"
+                placeholder="np. rodzic@gmail.com"
                 onChange={(e) => set('email', e.target.value)}
               />
             </Field>

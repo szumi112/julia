@@ -9,7 +9,7 @@ const {
   nextClassOf, attendanceRate, setAttendanceForRoster, tusPaymentFor, tusMonthSummary, stripKid,
   tusMemberOptions, filterTusMemberOptions, assignTusGroupMembers, materializeTusGroupMembers,
   linkTusGuardian, unlinkTusGuardian, updateTusKidAndClients, searchTusOverview, tusAssignmentOptions,
-  tusAgeLabel, tusAssignmentStatusLabel, withTusGroupDefaults,
+  tusAgeLabel, tusAssignmentStatusLabel, withTusGroupDefaults, sortTusGroups,
 } = tus
 
 const groups = [
@@ -147,8 +147,21 @@ test('TUS group defaults add neutral bounds and capacity while preserving explic
   })
   assert.deepEqual(TUS_GROUPS.map(({ id, capacity, ageMin, ageMax }) => ({ id, capacity, ageMin, ageMax })), [
     { id: 'g1', capacity: 8, ageMin: 5, ageMax: 6 },
-    { id: 'g2', capacity: 8, ageMin: 4, ageMax: 4 },
+    { id: 'g2', capacity: 8, ageMin: 7, ageMax: 9 },
+    { id: 'g3', capacity: 6, ageMin: 13, ageMax: 16 },
   ])
+})
+
+test('TUS groups sort as an age ladder, not alphabetically', () => {
+  const unordered = [
+    { id: 'g3', name: 'TUS · nastolatki 13–16 lat', ageMin: 13 },
+    { id: 'g9', name: 'TUS · bez przedziału', ageMin: null },
+    { id: 'g2', name: 'TUS · klasy 1–3', ageMin: 7 },
+    { id: 'g1', name: 'TUS · przedszkolaki 5–6 lat', ageMin: 5 },
+  ]
+  assert.deepEqual(sortTusGroups(unordered).map((g) => g.id), ['g1', 'g2', 'g3', 'g9'])
+  // the seeded offer already reads youngest-first
+  assert.deepEqual(sortTusGroups(TUS_GROUPS).map((g) => g.id), ['g1', 'g2', 'g3'])
 })
 
 test('TUS age labels collapse equal bounds and preserve readable ranges', () => {

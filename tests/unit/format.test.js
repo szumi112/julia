@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fmtMoney, isoWeek, relDayLabel, toISODate, untilLabel } from '../../src/format.js'
+import { fmtMoney, fmtWeekRange, isoWeek, relDayLabel, toISODate, untilLabel } from '../../src/format.js'
 
 test('money formatting preserves cents only for fractional złoty values', () => {
   assert.equal(fmtMoney(91.79), '91,79\u00a0zł')
@@ -21,6 +21,12 @@ test('isoWeek rolls across year boundaries', () => {
   assert.equal(isoWeek('2025-12-29'), 1) // Monday of ISO week 1/2026
   assert.equal(isoWeek('2026-12-31'), 53) // 2026 starts on a Thursday → 53 weeks
   assert.equal(isoWeek('2027-01-01'), 53) // Friday still in the last week of 2026
+})
+
+test('fmtWeekRange names the month once inside a month and twice across one', () => {
+  assert.equal(fmtWeekRange('2026-07-20', '2026-07-26'), '20 – 26 lipca')
+  assert.equal(fmtWeekRange('2026-06-29', '2026-07-05'), '29 czerwca – 5 lipca')
+  assert.equal(fmtWeekRange('2026-12-28', '2027-01-03'), '28 grudnia – 3 stycznia')
 })
 
 test('relDayLabel keeps the short voice for today and yesterday', () => {

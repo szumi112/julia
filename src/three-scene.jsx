@@ -84,7 +84,7 @@ void main(){
   // soft top-left light
   float lt = max(dot(vNormal, normalize(vec3(0.45, 0.7, 0.55))), 0.0);
   col *= 0.93 + lt * 0.13;
-  // gold sheen, then melt the rim into warm ivory so edges stay airy
+  // warm sheen, then melt the rim into pale paper so edges stay airy
   col = mix(col, uColorC, fresnel * 0.6);
   col = mix(col, vec3(0.964, 0.945, 0.912), fresnel * 0.55);
   gl_FragColor = vec4(col, 1.0);
@@ -99,7 +99,7 @@ export function createAmbient(container, opts = {}) {
     amp = 0.5,
     speed = 1,
     scale = 1,
-    colors = ['#efd5d9', '#c08a97', '#e6d5b5'],
+    colors = ['#f6d3c8', '#e88aac', '#b2d9ea'],
   } = opts
 
   // phones and low-core machines get fewer pixels and a lighter mesh —

@@ -8,12 +8,13 @@ import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, plural } from '../format.js'
 
-// palette for newly added specialists (color + soft pastel pair)
+// palette for newly added specialists — brand hues at text strength,
+// each paired with its ghost tint (same pairs as the seeded team)
 const NEW_PAIRS = [
-  ['#7c6373', '#e7dde4'],
-  ['#5f7050', '#e2e5d5'],
-  ['#b3756a', '#f3e0d6'],
-  ['#8a7baa', '#e9dee6'],
+  ['#3f6b47', '#e2eee1'],
+  ['#a83f66', '#fae7ee'],
+  ['#2a6a86', '#e3f0f6'],
+  ['#8f5a12', '#fbeeda'],
 ]
 
 export function PsychDrawer({ opts, onClose }) {
@@ -164,7 +165,7 @@ export function PsychDrawer({ opts, onClose }) {
                 spellCheck={false}
                 className="input"
                 value={form.email}
-                placeholder="np. maria@aurelia.pl"
+                placeholder="np. imie@bearwithme.pl"
                 onChange={(e) => set('email', e.target.value)}
               />
             </Field>

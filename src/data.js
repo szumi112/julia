@@ -1,6 +1,10 @@
 // Mock data — deterministic, generated relative to "today" so the demo
 // is always richly populated (past months + upcoming sessions).
-import { toISODate, monthKey, pad2 } from './format.js'
+//
+// The centre, team, price list and TUS offer mirror bearwithme.pl; every
+// child, parent and session below is fictional.
+import { toISODate, monthKey, pad2, isBillable } from './format.js'
+import { STANDARD_SERVICE, amountFor, durationFor } from './services.js'
 
 // seeded PRNG (mulberry32) — deterministic across reloads
 const mulberry32 = (seed) => () => {
@@ -17,91 +21,96 @@ const pick = (arr) => arr[Math.floor(rand() * arr.length)]
 const methodRand = mulberry32(20260712)
 const tusRand = mulberry32(20260713)
 
+// The team as listed on bearwithme.pl/Specjaliści — the four who run
+// sessions. Julia Wolanin coordinates the centre and appears in DEMO_ROLES
+// rather than here, because she does not carry her own caseload.
 export const PSYCHOLOGISTS = [
   {
     id: 'p1',
-    name: 'Julia Wolanin',
-    title: 'dr',
-    spec: 'Założycielka · Terapia poznawczo-behawioralna',
-    color: '#964d5f',
-    soft: '#f0dcda',
-    email: 'julia@aurelia.pl',
+    name: 'Anna Maria Janowska',
+    title: 'mgr',
+    spec: 'Główna psycholożka · Diagnoza i terapia',
+    color: '#b03a1c',
+    soft: '#fce8e2',
+    email: 'anna@bearwithme.pl',
     phone: '+48 601 224 187',
     room: 'Gabinet 1',
-    rate: 220,
+    rate: 180,
     weeklyCapacity: 20,
   },
   {
     id: 'p2',
-    name: 'Marta Zielińska',
+    name: 'Justyna Jarosz-Jarszewska',
     title: 'mgr',
-    spec: 'Terapia par i rodzin',
-    color: '#c26b4b',
-    soft: '#f3e0d6',
-    email: 'marta@aurelia.pl',
+    spec: 'Psycholożka · Wczesne wspomaganie rozwoju',
+    color: '#a83f66',
+    soft: '#fae7ee',
+    email: 'justyna@bearwithme.pl',
     phone: '+48 604 882 341',
     room: 'Gabinet 2',
-    rate: 260,
+    rate: 180,
     weeklyCapacity: 20,
   },
   {
     id: 'p3',
-    name: 'Karolina Wójcik',
+    name: 'Katarzyna Szelinger',
     title: 'mgr',
-    spec: 'Psychoterapia dzieci i młodzieży',
-    color: '#9d8190',
-    soft: '#e9dee6',
-    email: 'karolina@aurelia.pl',
+    spec: 'Pedagożka · Trenerka TUS',
+    color: '#2a6a86',
+    soft: '#e3f0f6',
+    email: 'katarzyna@bearwithme.pl',
     phone: '+48 503 119 906',
     room: 'Gabinet 3',
-    rate: 190,
-    weeklyCapacity: 20,
+    rate: 180,
+    weeklyCapacity: 18,
   },
   {
     id: 'p4',
-    name: 'Anna Lewandowska',
-    title: 'dr',
-    spec: 'Terapia traumy · EMDR',
-    color: '#ac8a4e',
-    soft: '#ece1c8',
-    email: 'anna@aurelia.pl',
+    name: 'Natasza Korneluk',
+    title: 'lic.',
+    spec: 'Wsparcie psychologiczne · Asystentka TUS',
+    color: '#8f5a12',
+    soft: '#fbeeda',
+    email: 'natasza@bearwithme.pl',
     phone: '+48 698 450 233',
-    room: 'Gabinet 4',
-    rate: 240,
-    weeklyCapacity: 20,
+    room: 'Sala TUS',
+    rate: 160,
+    weeklyCapacity: 16,
   },
 ]
 
 export const DEMO_ROLES = [
-  { id: 'owner', label: 'Właścicielka', name: 'Julia Wolanin', psychId: 'p1', scope: 'centre' },
-  { id: 'coordinator', label: 'Koordynatorka', name: 'Maja Nowak', psychId: null, scope: 'centre' },
-  { id: 'therapist', label: 'Specjalistka', name: 'Marta Zielińska', psychId: 'p2', scope: 'own' },
+  { id: 'owner', label: 'Główna psycholożka', name: 'Anna Maria Janowska', psychId: 'p1', scope: 'centre' },
+  { id: 'coordinator', label: 'Koordynatorka', name: 'Julia Wolanin', psychId: null, scope: 'centre' },
+  { id: 'therapist', label: 'Specjalistka', name: 'Justyna Jarosz-Jarszewska', psychId: 'p2', scope: 'own' },
 ]
 
 const NOTE_POOL = [
-  'Kontynuujemy pracę nad technikami regulacji emocji. Zalecane ćwiczenia oddechowe 2× dziennie.',
-  'Widoczny postęp w obszarze asertywności. Dzienniczek myśli automatycznych — kontynuacja.',
-  'Omówiono strategie radzenia sobie ze stresem w pracy. Praktyka uważności 10 min wieczorem.',
-  'Zalecona higiena snu: stałe pory, ograniczenie ekranów po 21:00. Obserwacja nastroju.',
-  'Praca nad komunikacją w relacji. Ćwiczenie „aktywne słuchanie” do następnej sesji.',
-  'Ekspozycja stopniowana przebiega zgodnie z planem. Utrzymujemy częstotliwość spotkań.',
-  'Sesja poświęcona psychoedukacji nt. lęku. Materiały przekazane, omówienie za tydzień.',
-  'Stabilizacja przed dalszą pracą z traumą. Ćwiczenie „bezpieczne miejsce” codziennie.',
-  'Zauważalna poprawa frekwencji szkolnej. Kontynuacja pracy nad samooceną.',
-  'Plan aktywności behawioralnej na kolejny tydzień ustalony wspólnie z klientem.',
-  'Przegląd celów terapii — dwa z trzech osiągnięte. Aktualizacja kontraktu terapeutycznego.',
-  'Wskazana konsultacja psychiatryczna w celu oceny farmakoterapii. Klient wyraził zgodę.',
+  'Praca nad rozpoznawaniem emocji na kartach uczuć. Do domu: „termometr nastroju” raz dziennie.',
+  'Ćwiczyliśmy czekanie na swoją kolej w grze planszowej — przegrana bez wybuchu złości. Duży postęp.',
+  'Zalecenia dla przedszkola: krótkie, pojedyncze polecenia, plan dnia obrazkowy, sygnał przed zmianą aktywności.',
+  'Omówione trudności w relacjach z rówieśnikami. Scenki: jak poprosić o dołączenie do zabawy.',
+  'Rodzice zgłaszają poprawę zasypiania. Utrzymujemy wieczorną rutynę i ograniczenie ekranów po 20:00.',
+  'Trening odmawiania i wyznaczania granic. Ćwiczymy komunikat „ja” w sytuacjach szkolnych.',
+  'Praca nad koncentracją — przerwy ruchowe co 10 minut. Wychowawczyni poinformowana o strategii.',
+  'Wprowadzony system żetonów za poranne czynności. Nagrody ustalone wspólnie z dzieckiem.',
+  'Wyciszanie po powrocie ze szkoły: kącik relaksu i słuchawki wygłuszające. Efekt widoczny po tygodniu.',
+  'Konsultacja z rodzicami — jak reagować na odmowę wyjścia z domu. Plan małych kroków na dwa tygodnie.',
+  'Przegląd celów z planu terapeutycznego: dwa z trzech osiągnięte. Aktualizujemy zalecenia.',
+  'Wskazana konsultacja psychiatryczna w celu uzupełnienia diagnozy. Rodzice wyrażają zgodę.',
 ]
 
+// [imię i nazwisko, wiek, specjalistka] — dzieci i nastolatkowie, zgodnie
+// z profilem centrum. Wiek `null` oznacza dorosłego (rodzic na konsultacji).
 const CLIENT_DEFS = [
-  ['Zofia Mazur', 'p1'], ['Aleksandra Krawczyk', 'p1'], ['Tomasz Bąk', 'p1'],
-  ['Michał Pawlak', 'p1'], ['Ewa Janik', 'p1'],
-  ['Anna i Paweł Romanowscy', 'p2'], ['Magda i Tomasz Wielgosz', 'p2'],
-  ['Joanna Madej', 'p2'], ['Marcin Duda', 'p2'],
-  ['Staś Przybylski', 'p3'], ['Oliwia Mróz', 'p3'], ['Hanna Stępień', 'p3'],
-  ['Kuba Kalinowski', 'p3'], ['Alicja Piątek', 'p3'],
-  ['Natalia Górska', 'p4'], ['Bartosz Sikora', 'p4'], ['Kamil Wrona', 'p4'],
-  ['Magdalena Sobczak', 'p4'], ['Łukasz Czarnecki', 'p4'],
+  ['Zofia Mazur', 9, 'p1'], ['Antoni Krawczyk', 7, 'p1'], ['Julian Bąk', 12, 'p1'],
+  ['Nadia Pawlak', 6, 'p1'], ['Ksawery Janik', 14, 'p1'],
+  ['Liliana Romanowska', 4, 'p2'], ['Tymon Wielgosz', 5, 'p2'],
+  ['Gabriel Madej', 3, 'p2'], ['Zuzanna Duda', 5, 'p2'],
+  ['Staś Przybylski', 8, 'p3'], ['Oliwia Mróz', 10, 'p3'], ['Hanna Stępień', 11, 'p3'],
+  ['Kuba Kalinowski', 8, 'p3'], ['Alicja Piątek', 13, 'p3'],
+  ['Natalia Górska', 15, 'p4'], ['Bartosz Sikora', 16, 'p4'], ['Kamil Wrona', 13, 'p4'],
+  ['Maja Sobczak', 17, 'p4'], ['Łukasz Czarnecki', 15, 'p4'],
 ]
 
 const slug = (name) =>
@@ -122,7 +131,7 @@ const daysAgo = (n) => {
   return d
 }
 
-export const CLIENTS = CLIENT_DEFS.map(([name, psychId], i) => {
+export const CLIENTS = CLIENT_DEFS.map(([name, age, psychId], i) => {
   const sinceDays = 60 + Math.floor(rand() * 320)
   const noteCount = 1 + Math.floor(rand() * 3)
   const notes = Array.from({ length: noteCount }, (_, k) => ({
@@ -132,7 +141,9 @@ export const CLIENTS = CLIENT_DEFS.map(([name, psychId], i) => {
   return {
     id: `c${i + 1}`,
     name,
+    age,
     psychId,
+    // kontakt prowadzi rodzic/opiekun — dziecko nie ma własnej skrzynki
     email: `${slug(name)}@gmail.com`,
     phone: `+48 ${500 + Math.floor(rand() * 399)} ${100 + Math.floor(rand() * 899)} ${100 + Math.floor(rand() * 899)}`,
     since: toISODate(daysAgo(sinceDays)),
@@ -145,7 +156,11 @@ export const CLIENTS = CLIENT_DEFS.map(([name, psychId], i) => {
 
 // --- session generation -------------------------------------------------
 // Each client has a stable weekly slot (weekday + hour, unique per
-// psychologist). Sessions span ~15 weeks back and ~3 weeks forward.
+// specialist) and a recurring service — the 50-minute standard session or,
+// for a few families, the 60-minute family therapy slot. Both fit inside one
+// hour, so the fixed grid never produces an overlap. Longer positions from
+// the cennik (konsultacje, diagnozy, obserwacje) are placed afterwards into
+// verified-free slots. Sessions span ~15 weeks back and ~3 weeks forward.
 
 const usedSlots = new Set()
 const clientSlots = CLIENTS.map((c) => {
@@ -165,9 +180,11 @@ let sid = 1
 CLIENTS.forEach((client, ci) => {
   const psych = PSYCHOLOGISTS.find((p) => p.id === client.psychId)
   const { wd, hour } = clientSlots[ci]
-  const isCouple = client.psychId === 'p2'
-  const duration = isCouple ? 80 : rand() < 0.2 ? 60 : 50
-  const amount = psych.rate + (duration === 60 ? 30 : 0)
+  // one draw, in the slot the old duration roll used, so the shared stream
+  // stays aligned and every downstream attendance/payment roll is unchanged
+  const service = rand() < 0.2 ? 'terapia-rodzinna' : STANDARD_SERVICE
+  const duration = durationFor(service)
+  const amount = amountFor(service, psych)
   const cadence = rand() < 0.7 ? 7 : 14 // weekly or biweekly
   const attendRate = client.status === 'paused' ? 0.45 : 0.88
 
@@ -201,6 +218,7 @@ CLIENTS.forEach((client, ci) => {
       id: `s${sid++}`,
       clientId: client.id,
       psychId: client.psychId,
+      service,
       date: toISODate(d),
       time: `${String(hour).padStart(2, '0')}:00`,
       duration,
@@ -217,19 +235,72 @@ CLIENTS.forEach((client, ci) => {
   }
 })
 
+const timeToMin = (t) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5))
+
+// First hour between 8:00 and 18:00 on `date` where `psychId` can fit a slot
+// of `duration` minutes without touching an already-generated session.
+const firstFreeHour = (psychId, date, duration) => {
+  const sameDay = sessions.filter((s) => s.psychId === psychId && s.date === date)
+  for (let hour = 8; hour <= 18; hour++) {
+    const start = hour * 60
+    const clash = sameDay.some(
+      (s) => start < timeToMin(s.time) + s.duration && timeToMin(s.time) < start + duration,
+    )
+    if (!clash) return hour
+  }
+  return null
+}
+
+// The rest of the cennik, booked into free slots: how a real week at the
+// centre looks — a first consultation, two diagnostics, an observation at a
+// preschool and a written therapeutic plan.
+const CATALOGUE_BOOKINGS = [
+  { id: 'demo-konsultacja', clientId: 'c4', psychId: 'p1', service: 'konsultacja', daysAgo: 26, status: 'completed', payment: 'paid', method: 'transfer', note: 'Wywiad rozwojowy, analiza opinii z poradni. Ustalony kierunek pracy.' },
+  { id: 'demo-asrs', clientId: 'c2', psychId: 'p1', service: 'asrs', daysAgo: 19, status: 'completed', payment: 'paid', method: 'transfer', note: 'Wyniki omówione z rodzicami. Zalecane pogłębienie diagnozy w poradni.' },
+  { id: 'demo-conners', clientId: 'c17', psychId: 'p4', service: 'conners', daysAgo: 12, status: 'completed', payment: 'partial', method: 'cash', note: 'Kwestionariusze od rodzica i wychowawcy zebrane. Konsultacja odbyta.' },
+  { id: 'demo-obserwacja', clientId: 'c7', psychId: 'p2', service: 'obserwacja-placowka', daysAgo: 8, status: 'completed', payment: 'unpaid', method: null, note: 'Obserwacja w przedszkolu — wnioski i zalecenia przekazane placówce.' },
+  { id: 'demo-plan', clientId: 'c11', psychId: 'p3', service: 'plan-spotkanie', daysAgo: 5, status: 'completed', payment: 'paid', method: 'card', note: 'Plan terapeutyczny na semestr, zalecenia do pracy w szkole i w domu.' },
+  { id: 'demo-warsztaty', clientId: 'c15', psychId: 'p4', service: 'warsztaty', daysAgo: -6, status: 'scheduled', payment: 'unpaid', method: null, note: '' },
+  { id: 'demo-konsultacja-next', clientId: 'c9', psychId: 'p2', service: 'konsultacja', daysAgo: -9, status: 'scheduled', payment: 'unpaid', method: null, note: '' },
+]
+
+for (const booking of CATALOGUE_BOOKINGS) {
+  const psych = PSYCHOLOGISTS.find((p) => p.id === booking.psychId)
+  const duration = durationFor(booking.service)
+  const amount = amountFor(booking.service, psych)
+  const date = toISODate(daysAgo(booking.daysAgo))
+  const hour = firstFreeHour(booking.psychId, date, duration)
+  if (hour === null) continue
+  sessions.push({
+    id: booking.id,
+    clientId: booking.clientId,
+    psychId: booking.psychId,
+    service: booking.service,
+    date,
+    time: `${String(hour).padStart(2, '0')}:00`,
+    duration,
+    amount,
+    status: booking.status,
+    payment: booking.payment,
+    paidAmount: booking.payment === 'paid' ? amount : booking.payment === 'partial' ? Math.round(amount / 2 / 10) * 10 : 0,
+    method: booking.method,
+    note: booking.note,
+  })
+}
+
 // Family demo — a parent and a child enrolled as separate clients (different
 // surnames), linked as one family. Hand-written after the generator so the
 // seeded stream stays stable.
 const FAMILY_CLIENTS = [
   {
-    id: 'c20', name: 'Renata Gawrys', psychId: 'p3',
+    id: 'c20', name: 'Renata Gawrys', age: null, psychId: 'p3',
     email: 'renata.gawrys@gmail.com', phone: '+48 512 384 664',
     since: toISODate(daysAgo(45)), status: 'active',
-    notes: [{ date: toISODate(daysAgo(38)), text: 'Konsultacja rodzicielska przed rozpoczęciem terapii syna. Omówiony wywiad rozwojowy.' }],
+    notes: [{ date: toISODate(daysAgo(38)), text: 'Konsultacja rodzicielska przed rozpoczęciem pracy z synem. Omówiony wywiad rozwojowy.' }],
     familyId: 'f1', familyRole: 'rodzic',
   },
   {
-    id: 'c21', name: 'Ignacy Borkowski', psychId: 'p3',
+    id: 'c21', name: 'Ignacy Borkowski', age: 6, psychId: 'p3',
     email: 'ignacy.borkowski@gmail.com', phone: '+48 512 384 664',
     since: toISODate(daysAgo(31)), status: 'active',
     notes: [{ date: toISODate(daysAgo(10)), text: 'Praca nad regulacją emocji przez zabawę. Dobra współpraca, kontynuujemy.' }],
@@ -239,23 +310,33 @@ const FAMILY_CLIENTS = [
 CLIENTS.push(...FAMILY_CLIENTS)
 
 const FAMILY_SESSIONS = [
-  { id: 'demo-family-parent', clientId: 'c20', psychId: 'p3', date: toISODate(daysAgo(38)), time: '11:00', duration: 50, amount: 190, status: 'completed', payment: 'paid', paidAmount: 190, method: 'transfer', note: '' },
-  { id: 'demo-family-child-past', clientId: 'c21', psychId: 'p3', date: toISODate(daysAgo(10)), time: '15:00', duration: 50, amount: 190, status: 'completed', payment: 'paid', paidAmount: 190, method: 'cash', note: '' },
-  { id: 'demo-family-child-next', clientId: 'c21', psychId: 'p3', date: toISODate(daysAgo(-4)), time: '15:00', duration: 50, amount: 190, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-family-parent', clientId: 'c20', psychId: 'p3', service: 'konsultacja', date: toISODate(daysAgo(38)), time: '11:00', duration: 90, amount: 250, status: 'completed', payment: 'paid', paidAmount: 250, method: 'transfer', note: '' },
+  { id: 'demo-family-child-past', clientId: 'c21', psychId: 'p3', service: STANDARD_SERVICE, date: toISODate(daysAgo(10)), time: '15:00', duration: 50, amount: 180, status: 'completed', payment: 'paid', paidAmount: 180, method: 'cash', note: '' },
+  { id: 'demo-family-child-next', clientId: 'c21', psychId: 'p3', service: STANDARD_SERVICE, date: toISODate(daysAgo(-4)), time: '15:00', duration: 50, amount: 180, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
 ]
 sessions.push(...FAMILY_SESSIONS)
 
 const scenarioDate = toISODate(TODAY)
 const DEMO_SCENARIOS = [
-  { id: 'demo-owner-completed', clientId: 'c1', psychId: 'p1', date: scenarioDate, time: '08:00', duration: 50, amount: 220, status: 'completed', payment: 'paid', paidAmount: 220, method: 'card', note: '' },
-  { id: 'demo-therapist-next', clientId: 'c6', psychId: 'p2', date: scenarioDate, time: '10:00', duration: 80, amount: 260, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
-  { id: 'demo-cancelled', clientId: 'c10', psychId: 'p3', date: scenarioDate, time: '12:00', duration: 50, amount: 190, status: 'cancelled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
-  { id: 'demo-noshow', clientId: 'c15', psychId: 'p4', date: scenarioDate, time: '13:00', duration: 50, amount: 240, status: 'noshow', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
-  { id: 'demo-unpaid', clientId: 'c2', psychId: 'p1', date: scenarioDate, time: '14:00', duration: 50, amount: 220, status: 'completed', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
-  { id: 'demo-partial', clientId: 'c7', psychId: 'p2', date: scenarioDate, time: '15:00', duration: 80, amount: 260, status: 'completed', payment: 'partial', paidAmount: 130, method: 'cash', note: '' },
-  { id: 'demo-overlap', clientId: 'c3', psychId: 'p1', date: scenarioDate, time: '14:00', duration: 50, amount: 220, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-owner-completed', clientId: 'c1', psychId: 'p1', service: STANDARD_SERVICE, date: scenarioDate, time: '08:00', duration: 50, amount: 180, status: 'completed', payment: 'paid', paidAmount: 180, method: 'card', note: '' },
+  { id: 'demo-therapist-next', clientId: 'c6', psychId: 'p2', service: 'terapia-rodzinna', date: scenarioDate, time: '10:00', duration: 60, amount: 220, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-cancelled', clientId: 'c10', psychId: 'p3', service: STANDARD_SERVICE, date: scenarioDate, time: '12:00', duration: 50, amount: 180, status: 'cancelled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-noshow', clientId: 'c15', psychId: 'p4', service: STANDARD_SERVICE, date: scenarioDate, time: '13:00', duration: 50, amount: 160, status: 'noshow', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-unpaid', clientId: 'c2', psychId: 'p1', service: STANDARD_SERVICE, date: scenarioDate, time: '14:00', duration: 50, amount: 180, status: 'completed', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
+  { id: 'demo-partial', clientId: 'c7', psychId: 'p2', service: 'terapia-rodzinna', date: scenarioDate, time: '15:00', duration: 60, amount: 220, status: 'completed', payment: 'partial', paidAmount: 110, method: 'cash', note: '' },
+  { id: 'demo-overlap', clientId: 'c3', psychId: 'p1', service: STANDARD_SERVICE, date: scenarioDate, time: '14:00', duration: 50, amount: 180, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: '' },
 ]
 sessions.push(...DEMO_SCENARIOS)
+
+// One of the two paused families leaves fully settled and one still owes, so
+// the kartoteka shows both endings of a break — and so the "wstrzymani" and
+// "z zaległościami" filters visibly narrow to different people.
+for (const session of sessions) {
+  if (session.clientId !== 'c6' || !isBillable(session)) continue
+  session.payment = 'paid'
+  session.paidAmount = session.amount
+  session.method = session.method || 'transfer'
+}
 
 sessions.sort((a, b) => (a.date + a.time < b.date + b.time ? -1 : 1))
 
@@ -265,28 +346,35 @@ export const SESSIONS = sessions
 export const POSTS = [
   {
     id: 'b1',
-    author: 'Julia Wolanin',
-    text: 'Superwizja zespołowa w piątek o 14:00 — sala konferencyjna. Przynieście opisy trudniejszych przypadków.',
+    author: 'Anna Maria Janowska',
+    text: 'Superwizja zespołowa w piątek o 14:00 — sala TUS. Przynieście opisy trudniejszych przypadków.',
     date: toISODate(daysAgo(1)),
     time: '09:12',
   },
   {
     id: 'b2',
-    author: 'Marta Zielińska',
-    text: 'W kuchni czeka nowa herbata z hibiskusa — częstujcie się między sesjami ☕',
+    author: 'Julia Wolanin',
+    text: 'Nowe pudełka sensoryczne stoją w sali TUS — proszę o odkładanie ich na miejsce po zajęciach 🧸',
     date: toISODate(daysAgo(3)),
     time: '15:40',
   },
 ]
 
-// --- Grupa TUS ----------------------------------------------------------
-// Group social-skills classes for kids — a category separate from the 1:1
-// sessions. Kids belong to age groups; classes are weekly with per-kid
-// attendance; parents pay a monthly fee (mirrors the practice's Excel tab).
+// --- Zajęcia TUS --------------------------------------------------------
+// Trening Umiejętności Społecznych — zajęcia grupowe, kategoria oddzielna od
+// spotkań indywidualnych. Zgodnie z cennikiem: grupa min. 4 osoby, ok. 60
+// minut, 85 zł za pojedyncze zajęcia lub 340 zł opłaty miesięcznej. Dzieci
+// należą do grup wiekowych, zajęcia są tygodniowe z obecnością per dziecko,
+// a rodzice płacą miesięcznie (odwzorowanie arkusza z Excela).
+
+export const TUS_FEE = 340
+export const TUS_SINGLE_FEE = 85
+export const TUS_MIN_GROUP = 4
 
 export const TUS_GROUPS = [
-  { id: 'g1', name: 'Grupa TUS 5–6 lat', age: '5–6 lat', ageMin: 5, ageMax: 6, capacity: 8, leaderIds: ['p2', 'p3'], weekday: 3, time: '16:00', fee: 300 },
-  { id: 'g2', name: 'Grupa TUS 4 lata', age: '4 lata', ageMin: 4, ageMax: 4, capacity: 8, leaderIds: ['p3', 'p4'], weekday: 4, time: '17:00', fee: 300 },
+  { id: 'g1', name: 'TUS · przedszkolaki 5–6 lat', age: '5–6 lat', ageMin: 5, ageMax: 6, capacity: 8, leaderIds: ['p3', 'p2'], weekday: 3, time: '16:00', fee: TUS_FEE },
+  { id: 'g2', name: 'TUS · klasy 1–3', age: '7–9 lat', ageMin: 7, ageMax: 9, capacity: 8, leaderIds: ['p3', 'p4'], weekday: 4, time: '17:00', fee: TUS_FEE },
+  { id: 'g3', name: 'TUS · nastolatki 13–16 lat', age: '13–16 lat', ageMin: 13, ageMax: 16, capacity: 6, leaderIds: ['p4', 'p1'], weekday: 2, time: '18:00', fee: TUS_FEE },
 ]
 
 const TUS_KID_DEFS = [
@@ -295,12 +383,15 @@ const TUS_KID_DEFS = [
   ['Pola Dec', 5, 'g1', 'Sylwia Nowicka', true],
   ['Ignacy Lis', 6, 'g1', 'Beata Lis', false],
   ['Maja Cichoń', 5, 'g1', 'Tomasz Cichoń', true],
-  ['Antek Duda', 4, 'g2', 'Marta Duda', true],
-  ['Zosia Kral', 4, 'g2', 'Piotr Kral', true],
-  ['Franek Bąk', 4, 'g2', 'Aneta Wilk', false],
-  ['Lena Szulc', 4, 'g2', 'Igor Szulc', true],
+  ['Antek Duda', 8, 'g2', 'Marta Duda', true],
+  ['Zosia Kral', 7, 'g2', 'Piotr Kral', true],
+  ['Franek Bąk', 9, 'g2', 'Aneta Wilk', false],
+  ['Lena Szulc', 8, 'g2', 'Igor Szulc', true],
+  ['Wiktor Sadowski', 14, 'g3', 'Dorota Sadowska', true],
+  ['Amelia Nowicka', 15, 'g3', 'Rafał Nowicki', true],
+  ['Igor Pietrzak', 13, 'g3', 'Monika Pietrzak', false],
   ['Borys Cygan', 5, null, 'Alina Cygan', false],
-  ['Tosia Wrona', 6, null, 'Jan Wrona', false],
+  ['Tosia Wrona', 8, null, 'Jan Wrona', false],
 ]
 
 export const TUS_KIDS = TUS_KID_DEFS.map(([name, age, groupId, parentName, regulationsSigned], i) => ({
@@ -325,6 +416,8 @@ const TUS_TOPICS = [
   'Mowa ciała',
   'Komplementy i podziękowania',
   'Wspólna zabawa — zasady',
+  'Wyznaczanie granic',
+  'Reagowanie na presję grupy',
 ]
 
 export const TUS_CLASSES = []
@@ -380,13 +473,13 @@ for (const ym of tusPaidMonths) {
 }
 
 export const INITIAL_STATE = {
-  user: { name: 'Julia Wolanin', role: 'Założycielka', email: 'julia@aurelia.pl', psychId: 'p1' },
+  user: { name: 'Anna Maria Janowska', role: 'Główna psycholożka', email: 'anna@bearwithme.pl', psychId: 'p1' },
   demoRoleId: 'owner',
   center: {
-    name: 'Aurelia — Centrum Psychoterapii',
-    address: 'ul. Złota 12/3, 58-500 Jelenia Góra',
-    phone: '+48 22 412 80 90',
-    email: 'kontakt@aurelia.pl',
+    name: 'Bear with me — Centrum Psychologiczno-Edukacyjne',
+    address: 'ul. Wojska Polskiego 87/2, 58-500 Jelenia Góra',
+    phone: '+48 539 363 986',
+    email: 'kontakt@bearwithme.pl',
   },
   psychologists: PSYCHOLOGISTS,
   clients: CLIENTS,
