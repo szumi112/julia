@@ -1,7 +1,8 @@
 // TUS management drawers: group, kid profile, and single class (reschedule).
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useApp } from '../store.jsx'
-import { Button, Field, Check, IconBtn } from '../ui.jsx'
+import { useShell } from '../shell-ctx.js'
+import { Button, Field, Check, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, parseISO, fmtDayMonth } from '../format.js'
@@ -25,10 +26,10 @@ const focusFirstInvalid = (drawerRef) =>
 
 export function TusGroupDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
+  const { registerLeaveGuard } = useShell()
   const editing = opts.group || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
-  const { close, shake } = useDrawerFX(drawerRef, backRef, onClose)
 
   const [form, setForm] = useState({
     name: editing?.name || '',
@@ -47,6 +48,10 @@ export function TusGroupDrawer({ opts, onClose }) {
     : [])
   const [newChildren, setNewChildren] = useState([])
   const nextDraftId = useRef(1)
+  const [initialSnapshot] = useState(() => JSON.stringify({ form, memberKeys, newChildren }))
+  const discardGuard = useDiscardGuard(JSON.stringify({ form, memberKeys, newChildren }) !== initialSnapshot)
+  const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
+  useEffect(() => registerLeaveGuard(discardGuard.check), [registerLeaveGuard, discardGuard.check])
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -112,7 +117,7 @@ export function TusGroupDrawer({ opts, onClose }) {
       dispatch({ type: 'ADD_TUS_GROUP', group: payload, memberKeys, newChildren })
       toast('Nowa grupa utworzona')
     }
-    close()
+    forceClose()
   }
 
   return (
@@ -155,7 +160,7 @@ export function TusGroupDrawer({ opts, onClose }) {
           <>
             <form className="drawer__body" onSubmit={submit} noValidate>
               <Field label="Nazwa grupy" error={errors.name}>
-                <input className="input" value={form.name} placeholder="np. Grupa TUS 5–6 lat" onChange={(e) => set('name', e.target.value)} />
+                <input name="tus-group-name" autoComplete="off" className="input" value={form.name} placeholder="np. Grupa TUS 5–6 lat" onChange={(e) => set('name', e.target.value)} />
               </Field>
 
               <div className="form-grid form-grid--three">
@@ -165,6 +170,8 @@ export function TusGroupDrawer({ opts, onClose }) {
                     min="1"
                     step="1"
                     inputMode="numeric"
+                    name="tus-age-min"
+                    autoComplete="off"
                     className="input"
                     value={form.ageMin}
                     onChange={(e) => set('ageMin', e.target.value)}
@@ -176,6 +183,8 @@ export function TusGroupDrawer({ opts, onClose }) {
                     min="1"
                     step="1"
                     inputMode="numeric"
+                    name="tus-age-max"
+                    autoComplete="off"
                     className="input"
                     value={form.ageMax}
                     onChange={(e) => set('ageMax', e.target.value)}
@@ -187,6 +196,8 @@ export function TusGroupDrawer({ opts, onClose }) {
                     min="1"
                     step="1"
                     inputMode="numeric"
+                    name="tus-capacity"
+                    autoComplete="off"
                     className="input"
                     value={form.capacity}
                     onChange={(e) => set('capacity', e.target.value)}
@@ -223,21 +234,25 @@ export function TusGroupDrawer({ opts, onClose }) {
 
               <div className="form-grid">
                 <Field label="Dzień tygodnia">
-                  <select className="select" value={form.weekday} onChange={(e) => set('weekday', Number(e.target.value))}>
+                  <select name="tus-weekday" autoComplete="off" className="select" value={form.weekday} onChange={(e) => set('weekday', Number(e.target.value))}>
                     {WEEKDAY_OPTIONS.map((w) => (
                       <option key={w.value} value={w.value}>{w.label}</option>
                     ))}
                   </select>
                 </Field>
                 <Field label="Godzina" error={errors.time}>
-                  <input type="time" className="input" value={form.time} onChange={(e) => set('time', e.target.value)} />
+                  <input type="time" name="tus-time" autoComplete="off" className="input" value={form.time} onChange={(e) => set('time', e.target.value)} />
                 </Field>
               </div>
 
               <Field label="Opłata miesięczna (zł)" error={errors.fee}>
-                <input type="number" min="0" step="25" inputMode="numeric" className="input" value={form.fee} onChange={(e) => set('fee', e.target.value)} />
+                <input type="number" min="0" step="25" inputMode="decimal" name="tus-fee" autoComplete="off" className="input" value={form.fee} onChange={(e) => set('fee', e.target.value)} />
               </Field>
             </form>
+
+            {discardGuard.confirming && (
+              <DiscardConfirm onStay={discardGuard.hide} onDiscard={forceClose} />
+            )}
 
             <div className="drawer__foot">
               <Button variant="primary" onClick={submit}>{editing ? 'Zapisz zmiany' : 'Utwórz grupę'}</Button>
@@ -252,10 +267,10 @@ export function TusGroupDrawer({ opts, onClose }) {
 
 export function TusKidDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
+  const { registerLeaveGuard } = useShell()
   const editing = opts.kid || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
-  const { close, shake } = useDrawerFX(drawerRef, backRef, onClose)
 
   const [form, setForm] = useState({
     name: editing?.name || '',
@@ -267,6 +282,10 @@ export function TusKidDrawer({ opts, onClose }) {
   })
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
+  const [initialForm] = useState(form)
+  const discardGuard = useDiscardGuard(JSON.stringify(form) !== JSON.stringify(initialForm))
+  const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
+  useEffect(() => registerLeaveGuard(discardGuard.check), [registerLeaveGuard, discardGuard.check])
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -300,13 +319,13 @@ export function TusKidDrawer({ opts, onClose }) {
       dispatch({ type: 'ADD_TUS_KID', kid: { ...payload, note: '' } })
       toast('Dziecko dodane do zajęć TUS')
     }
-    close()
+    forceClose()
   }
 
   const remove = () => {
     dispatch({ type: 'DELETE_TUS_KID', id: editing.id })
     toast('Profil dziecka usunięty', 'close')
-    close()
+    forceClose()
   }
 
   return (
@@ -324,13 +343,13 @@ export function TusKidDrawer({ opts, onClose }) {
         <form className="drawer__body" onSubmit={submit} noValidate>
           <div className="form-grid">
             <Field label="Imię i nazwisko" error={errors.name} className="span2">
-              <input className="input" value={form.name} placeholder="np. Hania Malik" onChange={(e) => set('name', e.target.value)} />
+              <input name="tus-kid-name" autoComplete="off" className="input" value={form.name} placeholder="np. Hania Malik" onChange={(e) => set('name', e.target.value)} />
             </Field>
             <Field label="Wiek" error={errors.age}>
-              <input type="number" min="3" max="12" inputMode="numeric" className="input" value={form.age} onChange={(e) => set('age', e.target.value)} />
+              <input type="number" min="3" max="12" inputMode="numeric" name="tus-kid-age" autoComplete="off" className="input" value={form.age} onChange={(e) => set('age', e.target.value)} />
             </Field>
             <Field label="Grupa" hint="Dziecko bez grupy czeka na przydział.">
-              <select className="select" value={form.groupId} onChange={(e) => set('groupId', e.target.value)}>
+              <select name="tus-kid-group" autoComplete="off" className="select" value={form.groupId} onChange={(e) => set('groupId', e.target.value)}>
                 <option value="">— Bez grupy —</option>
                 {state.tusGroups.map((g) => (
                   <option key={g.id} value={g.id}>{g.name}</option>
@@ -341,10 +360,10 @@ export function TusKidDrawer({ opts, onClose }) {
 
           <div className="form-grid">
             <Field label="Rodzic / opiekun" error={errors.parentName} hint="Rodzic bywa zapisany pod innym nazwiskiem.">
-              <input className="input" value={form.parentName} placeholder="np. Ewa Malik" onChange={(e) => set('parentName', e.target.value)} />
+              <input name="tus-parent-name" autoComplete="off" className="input" value={form.parentName} placeholder="np. Ewa Malik" onChange={(e) => set('parentName', e.target.value)} />
             </Field>
             <Field label="Telefon rodzica">
-              <input type="tel" className="input" value={form.parentPhone} placeholder="+48 600 000 000" onChange={(e) => set('parentPhone', e.target.value)} />
+              <input type="tel" name="tus-parent-phone" autoComplete="off" className="input" value={form.parentPhone} placeholder="+48 600 000 000" onChange={(e) => set('parentPhone', e.target.value)} />
             </Field>
           </div>
 
@@ -363,6 +382,10 @@ export function TusKidDrawer({ opts, onClose }) {
             </div>
           )}
         </form>
+
+        {discardGuard.confirming && (
+          <DiscardConfirm onStay={discardGuard.hide} onDiscard={forceClose} />
+        )}
 
         <div className="drawer__foot">
           {confirmDel ? (
@@ -385,10 +408,10 @@ export function TusKidDrawer({ opts, onClose }) {
 
 export function TusClassDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
+  const { registerLeaveGuard } = useShell()
   const editing = opts.cls || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
-  const { close, shake } = useDrawerFX(drawerRef, backRef, onClose)
 
   const group = state.tusGroups.find((g) => g.id === (editing?.groupId || opts.groupId))
 
@@ -408,6 +431,10 @@ export function TusClassDrawer({ opts, onClose }) {
   })
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
+  const [initialForm] = useState(form)
+  const discardGuard = useDiscardGuard(JSON.stringify(form) !== JSON.stringify(initialForm))
+  const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
+  useEffect(() => registerLeaveGuard(discardGuard.check), [registerLeaveGuard, discardGuard.check])
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -433,13 +460,13 @@ export function TusClassDrawer({ opts, onClose }) {
       dispatch({ type: 'ADD_TUS_CLASS', cls: { ...payload, groupId: group.id, attendance: {} } })
       toast('Zajęcia dodane')
     }
-    close()
+    forceClose()
   }
 
   const remove = () => {
     dispatch({ type: 'DELETE_TUS_CLASS', id: editing.id })
     toast('Zajęcia usunięte', 'close')
-    close()
+    forceClose()
   }
 
   return (
@@ -459,15 +486,15 @@ export function TusClassDrawer({ opts, onClose }) {
         <form className="drawer__body" onSubmit={submit} noValidate>
           <div className="form-grid">
             <Field label="Data" error={errors.date} hint={editing ? 'Zmiana daty przenosi zajęcia wraz z obecnością.' : undefined}>
-              <input type="date" className="input" value={form.date} onChange={(e) => set('date', e.target.value)} />
+              <input type="date" name="tus-class-date" autoComplete="off" className="input" value={form.date} onChange={(e) => set('date', e.target.value)} />
             </Field>
             <Field label="Godzina" error={errors.time}>
-              <input type="time" className="input" value={form.time} onChange={(e) => set('time', e.target.value)} />
+              <input type="time" name="tus-class-time" autoComplete="off" className="input" value={form.time} onChange={(e) => set('time', e.target.value)} />
             </Field>
           </div>
 
           <Field label="Temat zajęć" hint="Prowadzące uzupełniają temat po zajęciach.">
-            <input className="input" value={form.topic} placeholder="np. Rozpoznawanie emocji" onChange={(e) => set('topic', e.target.value)} />
+            <input name="tus-class-topic" autoComplete="off" className="input" value={form.topic} placeholder="np. Rozpoznawanie emocji" onChange={(e) => set('topic', e.target.value)} />
           </Field>
 
           {editing && confirmDel && (
@@ -479,6 +506,10 @@ export function TusClassDrawer({ opts, onClose }) {
             </div>
           )}
         </form>
+
+        {discardGuard.confirming && (
+          <DiscardConfirm onStay={discardGuard.hide} onDiscard={forceClose} />
+        )}
 
         <div className="drawer__foot">
           {confirmDel ? (

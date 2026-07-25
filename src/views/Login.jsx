@@ -76,11 +76,13 @@ export function Login({ onLogin }) {
         <div className="float-field" data-stagger>
           <input
             id="email"
+            name="email"
             type="email"
             placeholder=" "
             value={email}
             onChange={(e) => { setEmail(e.target.value); setErrors((x) => ({ ...x, email: null })) }}
             autoComplete="email"
+            spellCheck={false}
             aria-invalid={errors.email ? true : undefined}
             aria-describedby={errors.email ? 'email-error' : undefined}
             style={errors.email ? { borderColor: 'var(--error)' } : undefined}
@@ -94,6 +96,7 @@ export function Login({ onLogin }) {
         <div className="float-field" data-stagger>
           <input
             id="password"
+            name="password"
             type="password"
             placeholder=" "
             value={password}

@@ -1,9 +1,9 @@
 // Add/Edit client — slide-over drawer with validation and delete-with-confirm.
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useApp, clientOutstanding } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { clientsForRole } from '../workspace.js'
-import { Button, Field, Segmented, IconBtn } from '../ui.jsx'
+import { Button, Field, Segmented, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, plural, fmtMoney } from '../format.js'
@@ -12,11 +12,10 @@ const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export function ClientDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
-  const { route, navigate, role } = useShell()
+  const { route, navigate, role, registerLeaveGuard } = useShell()
   const editing = opts.client || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
-  const { close, shake } = useDrawerFX(drawerRef, backRef, onClose)
 
   const [form, setForm] = useState({
     name: editing?.name || '',
@@ -30,6 +29,10 @@ export function ClientDrawer({ opts, onClose }) {
   })
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
+  const [initialForm] = useState(form)
+  const discardGuard = useDiscardGuard(JSON.stringify(form) !== JSON.stringify(initialForm))
+  const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
+  useEffect(() => registerLeaveGuard(discardGuard.check), [registerLeaveGuard, discardGuard.check])
 
   // the drawer may unlink while open — read the live record, not the snapshot
   const current = editing ? state.clients.find((c) => c.id === editing.id) || editing : null
@@ -96,7 +99,7 @@ export function ClientDrawer({ opts, onClose }) {
       })
       toast('Nowy klient dodany do kartoteki')
     }
-    close()
+    forceClose()
   }
 
   const sessionCount = editing ? state.sessions.filter((s) => s.clientId === editing.id).length : 0
@@ -106,7 +109,7 @@ export function ClientDrawer({ opts, onClose }) {
     dispatch({ type: 'DELETE_CLIENT', id: editing.id })
     toast('Klient usunięty z kartoteki', 'close')
     if (route.name === 'client' && route.params?.id === editing.id) navigate('clients')
-    close()
+    forceClose()
   }
 
   return (
@@ -126,6 +129,8 @@ export function ClientDrawer({ opts, onClose }) {
         <form className="drawer__body" onSubmit={submit} noValidate>
           <Field label="Imię i nazwisko" error={errors.name}>
             <input
+              name="client-name"
+              autoComplete="off"
               className="input"
               value={form.name}
               placeholder="np. Maria Nowak"
@@ -134,7 +139,7 @@ export function ClientDrawer({ opts, onClose }) {
           </Field>
 
           <Field label="Specjalistka prowadząca" error={errors.psychId}>
-            <select className="select" value={form.psychId} onChange={(e) => set('psychId', e.target.value)}>
+            <select name="client-psych" autoComplete="off" className="select" value={form.psychId} onChange={(e) => set('psychId', e.target.value)}>
               <option value="">— wybierz —</option>
               {availablePsychologists.map((p) => (
                 <option key={p.id} value={p.id}>{p.title} {p.name}</option>
@@ -146,6 +151,9 @@ export function ClientDrawer({ opts, onClose }) {
             <Field label="E-mail" error={errors.email}>
               <input
                 type="email"
+                name="client-email"
+                autoComplete="off"
+                spellCheck={false}
                 className="input"
                 value={form.email}
                 placeholder="np. maria@gmail.com"
@@ -155,6 +163,8 @@ export function ClientDrawer({ opts, onClose }) {
             <Field label="Telefon">
               <input
                 type="tel"
+                name="client-phone"
+                autoComplete="off"
                 className="input"
                 value={form.phone}
                 placeholder="+48 600 000 000"
@@ -206,6 +216,8 @@ export function ClientDrawer({ opts, onClose }) {
                 </div>
               )}
               <select
+                name="client-family"
+                autoComplete="off"
                 className="select"
                 aria-label="Powiąż z klientem"
                 value={form.familyOtherId}
@@ -237,6 +249,8 @@ export function ClientDrawer({ opts, onClose }) {
           {!editing && (
             <Field label="Pierwsza notatka (opcjonalnie)">
               <textarea
+                name="client-note"
+                autoComplete="off"
                 className="textarea"
                 value={form.note}
                 placeholder="Powód zgłoszenia, pierwsze obserwacje…"
@@ -259,6 +273,10 @@ export function ClientDrawer({ opts, onClose }) {
             </div>
           )}
         </form>
+
+        {discardGuard.confirming && (
+          <DiscardConfirm onStay={discardGuard.hide} onDiscard={forceClose} />
+        )}
 
         <div className="drawer__foot">
           {confirmDel ? (

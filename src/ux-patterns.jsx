@@ -41,6 +41,25 @@ export function FilterGroup({ label, children }) {
   )
 }
 
+// Reflect view-owned UI state (month pickers, filters, pages) in the URL so a
+// scoped view can be shared, bookmarked, or restored from history. Writes use
+// replaceState only — filter tweaks must not flood the history stack. The
+// write is deferred one frame: child effects run before the shell's hash
+// writer, and writing immediately would overwrite the *previous* route's
+// history entry instead of merging params into the freshly pushed one.
+export function useRouteParamsSync(routeName, params) {
+  const key = JSON.stringify(params)
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const hash = routeHref(routeName, JSON.parse(key))
+      if (window.location.hash !== hash) {
+        window.history.replaceState(window.history.state, '', hash)
+      }
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [routeName, key])
+}
+
 export function FilterBar({
   activeCount,
   summary,

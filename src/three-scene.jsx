@@ -99,7 +99,7 @@ export function createAmbient(container, opts = {}) {
     amp = 0.5,
     speed = 1,
     scale = 1,
-    colors = ['#f2d6cf', '#d28d80', '#e8cfa0'],
+    colors = ['#efd5d9', '#c08a97', '#e6d5b5'],
   } = opts
 
   // phones and low-core machines get fewer pixels and a lighter mesh —

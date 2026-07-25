@@ -6,39 +6,23 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { useApp, totalOutstanding } from './store.jsx'
 import { useShell } from './shell-ctx.js'
 import { useIsPhone } from './responsive.js'
+import { useMinuteNow } from './clock.js'
 import { motionOK } from './anim.js'
 import { Icon } from './icons.jsx'
 import { Avatar, Button, IconBtn, EmptyState } from './ui.jsx'
+import { EntityLink } from './ux-patterns.jsx'
 import { sessionsForRole, todayWorkspace } from './workspace.js'
 import {
   toISODate, timeToMin, pad2, fmtMoney, fmtDayMonth, fmtWeekday, cap,
-  sessionsWord, outstandingOf, isBillable,
+  sessionsWord, outstandingOf, isBillable, untilLabel,
 } from './format.js'
 
 const minToTime = (m) => `${pad2(Math.floor((m % 1440) / 60))}:${pad2(m % 60)}`
 
-const untilLabel = (mins) => {
-  if (mins < 1) return 'za chwilę'
-  if (mins < 60) return `za ${mins} min`
-  const h = Math.floor(mins / 60)
-  const m = mins % 60
-  return m ? `za ${h} h ${m} min` : `za ${h} h`
-}
-
-// re-render every 30 s so the countdown and "trwa teraz" stay honest
-function useClock() {
-  const [now, setNow] = useState(() => new Date())
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 30000)
-    return () => clearInterval(id)
-  }, [])
-  return now
-}
-
 function useTodayModel() {
   const { state } = useApp()
   const { role } = useShell()
-  const now = useClock()
+  const now = useMinuteNow()
   const today = toISODate(now)
   const nowMin = now.getHours() * 60 + now.getMinutes()
   return useMemo(() => {
@@ -64,7 +48,7 @@ function useTodayModel() {
 
 function CockpitBody({ m, onClose }) {
   const { state } = useApp()
-  const { navigate, openSessionForm, openClientForm } = useShell()
+  const { openSessionForm, openClientForm } = useShell()
   const clientOf = (id) => state.clients.find((c) => c.id === id)
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
   const go = (fn) => { onClose(); fn() }
@@ -115,7 +99,15 @@ function CockpitBody({ m, onClose }) {
 
       {total > 0 && (
         <div>
-          <div className="cockpit__progress"><span style={{ width: `${pct}%` }} /></div>
+          <div
+            className="cockpit__progress"
+            role="progressbar"
+            aria-label="Postęp dnia"
+            aria-valuemin={0}
+            aria-valuemax={total}
+            aria-valuenow={m.done}
+            aria-valuetext={`${m.done} z ${total} sesji za Tobą`}
+          ><span style={{ transform: `scaleX(${pct / 100})` }} /></div>
           <div className="cockpit__meta">
             {/* genitive after "z" — always "sesji" */}
             <span>{m.done} z {total} sesji za Tobą</span>
@@ -149,14 +141,14 @@ function CockpitBody({ m, onClose }) {
       )}
 
       {m.showFinance && (m.outstanding > 0 ? (
-        <button className="cockpit__due" onClick={() => go(() => navigate('payments'))}>
+        <EntityLink route="payments" className="cockpit__due" onClick={onClose}>
           <Icon name="payments" size={19} />
           <span style={{ flex: 1 }}>
             Zaległe płatności
             <b style={{ display: 'block' }}>{fmtMoney(m.outstanding)} · {m.unpaidCount} {sessionsWord(m.unpaidCount)}</b>
           </span>
           <Icon name="chevR" size={15} />
-        </button>
+        </EntityLink>
       ) : (
         <div className="cockpit__due cockpit__due--ok">
           <Icon name="check" size={19} />
@@ -171,9 +163,10 @@ function CockpitBody({ m, onClose }) {
         <Button size="sm" variant="soft" icon="user" onClick={() => go(() => openClientForm())}>
           Nowy klient
         </Button>
-        <Button size="sm" variant="ghost" icon="calendar" onClick={() => go(() => navigate('calendar'))}>
-          Kalendarz
-        </Button>
+        <EntityLink route="calendar" className="btn btn--ghost btn--sm" onClick={onClose}>
+          <Icon name="calendar" size={17} />
+          <span>Kalendarz</span>
+        </EntityLink>
       </div>
     </>
   )
@@ -223,10 +216,11 @@ function CockpitPop({ anchorRef, onClose, children }) {
   useEffect(() => {
     const opener = document.activeElement
     const pop = ref.current
-    pop?.querySelector('button')?.focus()
+    // the primary action (next session) before the close button
+    ;(pop?.querySelector('.cockpit__next') || pop?.querySelector('button'))?.focus()
     const onTab = (e) => {
       if (e.key !== 'Tab' || !pop) return
-      const els = [...pop.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
+      const els = [...pop.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])')]
         .filter((el) => !el.disabled && el.offsetParent !== null)
       if (!els.length) return
       const first = els[0]
@@ -290,10 +284,10 @@ function CockpitSheet({ onClose, children }) {
     const opener = document.activeElement
     const sheet = ref.current
     // meaningful focus goes to the first action, not the trigger under the backdrop
-    sheet?.querySelector('button')?.focus()
+    ;(sheet?.querySelector('.cockpit__next') || sheet?.querySelector('button'))?.focus()
     const onTab = (e) => {
       if (e.key !== 'Tab' || !sheet) return
-      const els = [...sheet.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
+      const els = [...sheet.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])')]
         .filter((el) => !el.disabled && el.offsetParent !== null)
       if (!els.length) return
       const first = els[0]

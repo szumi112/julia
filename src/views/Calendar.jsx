@@ -6,6 +6,7 @@ import { useIsPhone, useMediaQuery, desktopMQ } from '../responsive.js'
 import { Button, IconBtn, Segmented, Avatar, Chip, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
+import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { sessionMatchesFilters, sessionsForRole } from '../workspace.js'
 import {
   monthKey, addMonths, fmtMonthYear, toISODate, parseISO, pad2, cap,
@@ -63,22 +64,28 @@ function initialCalendarViewState(getViewState, params, today) {
   const paramDate = isISODate(params?.date) ? params.date : null
   const persistedDate = isISODate(persisted.selected) ? persisted.selected : today
   const selected = paramDate || persistedDate
-  const payment = PAYMENT_FILTERS.some(({ value }) => value === persisted.filters?.payment)
-    ? persisted.filters.payment
-    : 'all'
-  const attendance = ATTENDANCE_FILTERS.some(({ value }) => value === persisted.filters?.attendance)
-    ? persisted.filters.attendance
-    : 'all'
+  // URL params win over the registry — a shared link must reproduce its scope
+  const payment = PAYMENT_FILTERS.some(({ value }) => value === params?.payment)
+    ? params.payment
+    : PAYMENT_FILTERS.some(({ value }) => value === persisted.filters?.payment)
+      ? persisted.filters.payment
+      : 'all'
+  const attendance = ATTENDANCE_FILTERS.some(({ value }) => value === params?.attendance)
+    ? params.attendance
+    : ATTENDANCE_FILTERS.some(({ value }) => value === persisted.filters?.attendance)
+      ? persisted.filters.attendance
+      : 'all'
+  const paramYm = /^\d{4}-\d{2}$/.test(params?.ym || '') ? params.ym : null
 
   return {
     ym: paramDate
       ? monthKey(paramDate)
-      : /^\d{4}-\d{2}$/.test(persisted.ym || '') ? persisted.ym : monthKey(selected),
+      : paramYm || (/^\d{4}-\d{2}$/.test(persisted.ym || '') ? persisted.ym : monthKey(selected)),
     selected,
-    mode: persisted.mode === 'cal' ? 'cal' : 'agenda',
+    mode: params?.mode === 'cal' ? 'cal' : persisted.mode === 'cal' ? 'cal' : 'agenda',
     filters: { payment, attendance },
     filtersOpen: Boolean(persisted.filtersOpen),
-    expanded: Boolean(persisted.expanded),
+    expanded: typeof params?.expanded === 'boolean' ? params.expanded : Boolean(persisted.expanded),
   }
 }
 
@@ -208,8 +215,9 @@ export function CalendarView({ params = {} }) {
   const [filtersOpen, setFiltersOpen] = useState(initialViewState.filtersOpen)
   const [expanded, setExpanded] = useState(initialViewState.expanded)
   const isPhone = useIsPhone()
-  // dragging an agenda row would trap touch scrolling, so it stays a desktop affordance
-  const agendaDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
+  // dragging an agenda row or a month-grid chip would trap touch scrolling,
+  // so it stays a fine-pointer affordance (reschedule via the session form)
+  const canDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
   const gridRef = useRef(null)
   const dayPanelRef = useRef(null)
   const agendaPanelRef = useRef(null)
@@ -270,6 +278,17 @@ export function CalendarView({ params = {} }) {
   useEffect(() => {
     patchViewState('calendar', { ym, selected, mode, filters, filtersOpen, expanded })
   }, [expanded, filters, filtersOpen, mode, patchViewState, selected, ym])
+
+  // the whole visible scope lives in the URL — deep-link params pass through
+  useRouteParamsSync('calendar', {
+    date: selected,
+    ym: mode === 'cal' ? ym : undefined,
+    mode: mode === 'cal' ? 'cal' : undefined,
+    payment: filters.payment !== 'all' ? filters.payment : undefined,
+    attendance: filters.attendance !== 'all' ? filters.attendance : undefined,
+    expanded: expanded || undefined,
+    highlightSessionIds: params.highlightSessionIds?.length ? params.highlightSessionIds : undefined,
+  })
 
   const clientOf = (id) => state.clients.find((c) => c.id === id)
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
@@ -445,6 +464,43 @@ export function CalendarView({ params = {} }) {
     })
   }
 
+  // The month grid mirrors the day strip's keyboard model: arrows move the
+  // selection (and the focus) while only the selected day sits in tab order.
+  const gridFocusDate = useRef(null)
+  useEffect(() => {
+    if (!gridFocusDate.current) return
+    const iso = gridFocusDate.current
+    gridFocusDate.current = null
+    gridRef.current?.querySelector(`[data-iso="${iso}"]`)?.focus()
+  }, [selected, cells])
+
+  const onGridDayKeyDown = (event, iso) => {
+    // with weekends hidden, skip the invisible cells so the selection (and
+    // the grid's only tab stop) never lands on a day that isn't rendered
+    const step = (delta) => {
+      let next = addDays(iso, delta)
+      if (!showWeekends) {
+        let guard = 0
+        while ((parseISO(next).getDay() + 6) % 7 >= 5 && guard < 7) {
+          next = addDays(next, delta > 0 ? 1 : -1)
+          guard += 1
+        }
+      }
+      return next
+    }
+    let next = null
+    if (event.key === 'ArrowLeft') next = step(-1)
+    if (event.key === 'ArrowRight') next = step(1)
+    if (event.key === 'ArrowUp') next = addDays(iso, -7)
+    if (event.key === 'ArrowDown') next = addDays(iso, 7)
+    if (event.key === 'Home') next = weekDaysFor(iso)[0]
+    if (event.key === 'End') next = showWeekends ? weekDaysFor(iso)[6] : weekDaysFor(iso)[4]
+    if (!next) return
+    event.preventDefault()
+    gridFocusDate.current = next
+    selectDay(next)
+  }
+
   const daySessions = selected ? (byDate[selected] || []) : []
 
   const agendaSel = selected || (ym === curYm ? today : `${ym}-01`)
@@ -521,6 +577,7 @@ export function CalendarView({ params = {} }) {
         onPointerDown={draggable ? (e) => onChipDown(e, s) : undefined}
         style={{ '--node-color': p?.color, ...(draggable ? { touchAction: 'none' } : null) }}
         tabIndex={highlighted ? -1 : undefined}
+        role={highlighted ? 'group' : undefined}
         aria-label={highlighted ? `Wyróżniona sesja — ${clientName}, ${s.time}` : undefined}
       >
         <span className="agenda__time">{s.time}</span>
@@ -691,11 +748,16 @@ export function CalendarView({ params = {} }) {
                       type="button"
                       className="bpost-more agenda-terminal__toggle"
                       aria-expanded={expanded}
+                      aria-controls="agenda-terminal-list"
                       onClick={() => setExpanded((current) => !current)}
                     >
                       Zakończone i odwołane ({terminalAgendaSessions.length})
                     </button>
-                    {expanded && dayThread(terminalAgendaSessions, false, agendaSel, undefined, true)}
+                    {expanded && (
+                      <div id="agenda-terminal-list">
+                        {dayThread(terminalAgendaSessions, false, agendaSel, undefined, true)}
+                      </div>
+                    )}
                   </div>
                 )}
               </>
@@ -734,7 +796,11 @@ export function CalendarView({ params = {} }) {
                       cell.dow >= 5 ? 'is-weekend' : '',
                     ].join(' ')}
                     onClick={() => { if (!suppressClick.current) selectDay(cell.iso) }}
+                    onKeyDown={(event) => onGridDayKeyDown(event, cell.iso)}
                     aria-label={`${fmtDayMonth(cell.iso)} — ${items.length} ${sessionsWord(items.length)}`}
+                    aria-pressed={cell.iso === selected}
+                    aria-current={cell.iso === today ? 'date' : undefined}
+                    tabIndex={cell.iso === selected ? 0 : -1}
                   >
                     <span className="cal__num">{Number(cell.iso.slice(8))}</span>
                     {isPhone ? (
@@ -749,11 +815,11 @@ export function CalendarView({ params = {} }) {
                         {items.slice(0, 3).map((s) => (
                           <span
                             key={s.id}
-                            className={`cal__item ${s.status === 'scheduled' ? 'is-draggable' : ''}`}
+                            className={`cal__item ${s.status === 'scheduled' && canDrag ? 'is-draggable' : ''}`}
                             data-flip-id={s.id}
                             style={{ background: psychOf(s.psychId)?.soft }}
-                            onPointerDown={(e) => onChipDown(e, s)}
-                            title={s.status === 'scheduled' ? 'Przeciągnij, aby przełożyć sesję' : undefined}
+                            onPointerDown={(e) => { if (canDrag) onChipDown(e, s) }}
+                            title={s.status === 'scheduled' && canDrag ? 'Przeciągnij, aby przełożyć sesję' : undefined}
                           >
                             <span className="dot" style={{ background: psychOf(s.psychId)?.color }} />
                             {s.time} {clientOf(s.clientId)?.name.split(' ')[0]}
@@ -797,7 +863,7 @@ export function CalendarView({ params = {} }) {
               />
             )}
             {daySessions.length > 0 &&
-              dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), agendaDrag, selected)}
+              dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), canDrag, selected)}
             {selected && (
               <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
                 onClick={() => openSessionForm({ date: selected, psychId: rolePsychId })}>

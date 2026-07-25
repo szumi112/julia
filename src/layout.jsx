@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Icon, Bloom } from './icons.jsx'
-import { Avatar, IconBtn, PopItem, Popover } from './ui.jsx'
+import { Avatar, Button, IconBtn, PopItem, Popover } from './ui.jsx'
 import { useApp, useToasts } from './store.jsx'
 import { ShellCtx } from './shell-ctx.js'
 import { DEMO_ROLES } from './data.js'
@@ -83,7 +83,20 @@ const VIEWS = {
 const ACTIVE_OF = { client: 'clients', psych: 'team', tusGroup: 'tus' }
 
 // the handler accepts Ctrl and Cmd alike — advertise the native chord
-const META_K = /Mac|iP/.test(navigator.platform) ? '⌘ K' : 'Ctrl K'
+const META_K = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent) ? '⌘ K' : 'Ctrl K'
+
+// Real hash links wherever the shell navigates: plain clicks go through the
+// SPA router, Cmd/Ctrl/middle clicks keep native open-in-new-tab behavior.
+function navLink(navigate, name) {
+  return {
+    href: routeHref(name),
+    onClick: (event) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      event.preventDefault()
+      navigate(name)
+    },
+  }
+}
 
 export function Logotype({ light }) {
   return (
@@ -114,11 +127,12 @@ function Sidebar({ route, navigate, role, accountControls, className = '', inner
     const idx = ids.indexOf(activeId)
     const el = navItems[idx]
     if (!el) { pill.style.opacity = 0; return }
-    const target = { top: el.offsetTop, height: el.offsetHeight, opacity: 1 }
+    // transform-only glide: the pill slides with translateY, height snaps
     if (motionOK()) {
-      window.gsap.to(pill, { ...target, duration: 0.22, ease: 'power2.out', overwrite: true })
+      window.gsap.set(pill, { height: el.offsetHeight, opacity: 1 })
+      window.gsap.to(pill, { y: el.offsetTop, duration: 0.22, ease: 'power2.out', overwrite: true })
     } else {
-      Object.assign(pill.style, { top: target.top + 'px', height: target.height + 'px', opacity: 1 })
+      Object.assign(pill.style, { transform: `translateY(${el.offsetTop}px)`, height: `${el.offsetHeight}px`, opacity: 1 })
     }
   }, [activeId, role.id, showSettings])
 
@@ -134,29 +148,29 @@ function Sidebar({ route, navigate, role, accountControls, className = '', inner
       <nav className="nav" ref={navRef} aria-label="Nawigacja główna">
         <span className="nav__pill" ref={pillRef} />
         {items.map((n) => (
-          <button
+          <a
             key={n.id}
+            {...navLink(navigate, n.id)}
             className={`nav__item ${activeId === n.id ? 'is-active' : ''}`}
-            onClick={() => navigate(n.id)}
             aria-current={activeId === n.id ? 'page' : undefined}
             data-shell-reveal
           >
             <Icon name={n.icon} size={19} />
             {n.label}
-          </button>
+          </a>
         ))}
         {showSettings && (
           <>
             <div className="nav__divider" data-shell-reveal />
-            <button
+            <a
+              {...navLink(navigate, 'settings')}
               className={`nav__item ${activeId === 'settings' ? 'is-active' : ''}`}
-              onClick={() => navigate('settings')}
               aria-current={activeId === 'settings' ? 'page' : undefined}
               data-shell-reveal
             >
               <Icon name="settings" size={19} />
               Ustawienia
-            </button>
+            </a>
           </>
         )}
       </nav>
@@ -239,7 +253,7 @@ function MobileNavDrawer({ route, navigate, role, onRoleChange, onLogout, showAc
     ;(aside?.querySelector('.nav__item.is-active') || aside?.querySelector('.nav__item'))?.focus()
     const onTab = (e) => {
       if (e.key !== 'Tab' || !aside) return
-      const els = [...aside.querySelectorAll('button, [tabindex]:not([tabindex="-1"])')]
+      const els = [...aside.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])')]
         .filter((el) => !el.disabled && el.offsetParent !== null)
       if (!els.length) return
       const first = els[0]
@@ -321,21 +335,21 @@ function MobileTabbar({ route, navigate, role, onAdd, onMore }) {
   }, [])
 
   const tab = (n) => (
-    <button
+    <a
       key={n.id}
+      {...navLink(navigate, n.id)}
       data-id={n.id}
       className={`tabbar__item ${activeId === n.id ? 'is-active' : ''}`}
-      onClick={() => navigate(n.id)}
       aria-current={activeId === n.id ? 'page' : undefined}
     >
       <Icon name={n.icon} size={21} />
       <span>{n.label}</span>
-    </button>
+    </a>
   )
 
   return (
     <nav className="tabbar" ref={barRef} aria-label="Nawigacja dolna">
-      {pill && <span className="tabbar__pill" style={{ left: pill.left }} />}
+      {pill && <span className="tabbar__pill" style={{ transform: `translateX(${pill.left}px)` }} />}
       <div className="tabbar__side">
         {tabs.slice(0, 2).map(tab)}
       </div>
@@ -479,8 +493,43 @@ function useMonthSettled() {
   }, [state.sessions, toast])
 }
 
-export function Shell({ onLogout }) {
-  const { state, dispatch } = useApp()
+// Modal confirm for a blocked route commit (dirty form/draft). Focus lands on
+// the safe choice; Escape and backdrop cancel.
+function LeaveConfirmDialog({ onCancel, onConfirm }) {
+  const cardRef = useRef(null)
+  useEffect(() => {
+    cardRef.current?.querySelector('button')?.focus()
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !e.defaultPrevented) {
+        e.preventDefault()
+        onCancel()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onCancel])
+  return (
+    <div className="leave-confirm">
+      <div className="leave-confirm__backdrop" onClick={onCancel} />
+      <div
+        className="leave-confirm__card"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="leave-confirm-title"
+        ref={cardRef}
+      >
+        <h2 className="display" id="leave-confirm-title">Niezapisane zmiany</h2>
+        <p>Masz niezapisane zmiany. Odrzucić je i kontynuować?</p>
+        <div className="leave-confirm__actions">
+          <Button variant="ghost" onClick={onCancel}>Kontynuuj edycję</Button>
+          <Button onClick={onConfirm}>Odrzuć i wyjdź</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
   const { clearToasts } = useToasts()
   const role = DEMO_ROLES.find((demoRole) => demoRole.id === state.demoRoleId) || DEMO_ROLES[0]
   const [route, setRoute] = useState(() => {
@@ -501,16 +550,84 @@ export function Shell({ onLogout }) {
   const viewRegistryRef = useRef({})
   const routeRef = useRef(route)
   const roleRef = useRef(role)
+  // distinguishes hash-driven route commits (replace) from in-app navigation
+  // (push) so browser back/forward walks views, not filter tweaks
+  const fromHashRef = useRef(false)
+  // role switches intentionally drop a previous route's params
+  const stripParamsRef = useRef(false)
+  // the hash as of the last shell commit — the push/replace decision reads
+  // this because a mounted view may have already rewritten the live hash with
+  // its own filter params earlier in the same commit
+  const committedHashRef = useRef(window.location.hash)
+  // leave guards: dirty views/forms register "is dirty?" checks, and every
+  // route commit (sidebar, back/forward, role switch) asks before discarding
+  const leaveGuardsRef = useRef(new Set())
+  const leaveBypassRef = useRef(false)
+  const [pendingLeave, setPendingLeave] = useState(null)
   const routeParamsKey = JSON.stringify(route.params || {})
   routeRef.current = route
   roleRef.current = role
 
   useEffect(() => {
-    const nextHash = routeHref(route.name, route.params)
-    if (window.location.hash !== nextHash) {
+    const viaHash = fromHashRef.current
+    fromHashRef.current = false
+    const stripParams = stripParamsRef.current
+    stripParamsRef.current = false
+    const currentHash = window.location.hash
+    const currentName = routeFromHash(currentHash)?.name
+    const previousName = routeFromHash(committedHashRef.current)?.name
+    // view-owned filter params survive a same-view commit; the shell strips
+    // them when it owns the params or intentionally resets them
+    const nextHash = route.params || stripParams || currentName !== route.name
+      ? routeHref(route.name, route.params)
+      : currentHash
+    const viewChanged = previousName !== route.name
+    if (!viaHash && previousName && viewChanged) {
+      window.history.pushState(window.history.state, '', nextHash)
+    } else if (nextHash !== currentHash) {
       window.history.replaceState(window.history.state, '', nextHash)
     }
+    committedHashRef.current = nextHash
   }, [route.name, routeParamsKey])
+
+  // External hash changes (back/forward, manual edits, bookmarks while the app
+  // is open) navigate too. The writer above uses pushState/replaceState, which
+  // never fire hashchange, so there is no loop.
+  useEffect(() => {
+    const onHashChange = () => {
+      const currentRole = roleRef.current
+      const currentRoute = routeRef.current
+      const requested = routeFromHash(window.location.hash)
+      const accessible = requested
+        && VIEWS[requested.name]
+        && canAccess(ACTIVE_OF[requested.name] || requested.name, currentRole)
+      const nextRoute = accessible ? requested : { name: 'dashboard' }
+      if (
+        currentRoute.name === nextRoute.name
+        && JSON.stringify(currentRoute.params || {}) === JSON.stringify(nextRoute.params || {})
+      ) return
+      const commit = () => {
+        viewRegistryRef.current = patchRegistryRoute(
+          viewRegistryRef.current,
+          currentRole.id,
+          currentRoute.name,
+          { scrollY: contentRef.current?.scrollTop || 0 }
+        )
+        fromHashRef.current = true
+        routeRef.current = nextRoute
+        setRoleMenuOpen(false)
+        setOverlay(null)
+        setRoute(nextRoute)
+      }
+      if (leaveBlocked()) {
+        setPendingLeave(() => () => requestLeave(commit))
+        return
+      }
+      commit()
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [])
 
   useMonthSettled()
 
@@ -561,6 +678,28 @@ export function Shell({ onLogout }) {
     readRouteViewState(viewRegistryRef.current, role.id, routeName, defaults)
   ), [role.id])
 
+  const registerLeaveGuard = useCallback((fn) => {
+    leaveGuardsRef.current.add(fn)
+    return () => leaveGuardsRef.current.delete(fn)
+  }, [])
+  const leaveBlocked = () => (
+    !leaveBypassRef.current && [...leaveGuardsRef.current].some((isDirty) => isDirty())
+  )
+  const requestLeave = useCallback((proceed) => {
+    leaveBypassRef.current = true
+    proceed()
+    leaveBypassRef.current = false
+  }, [])
+  const cancelLeave = useCallback(() => {
+    setPendingLeave(null)
+    // a blocked hashchange already moved the URL — put the current route back
+    const current = routeRef.current
+    const hash = routeHref(current.name, current.params)
+    if (window.location.hash !== hash) {
+      window.history.replaceState(window.history.state, '', hash)
+    }
+  }, [])
+
   const patchViewState = useCallback((routeName, patch) => {
     viewRegistryRef.current = patchRegistryRoute(viewRegistryRef.current, role.id, routeName, patch)
   }, [role.id])
@@ -573,9 +712,13 @@ export function Shell({ onLogout }) {
     const currentRole = roleRef.current
     const currentRoute = routeRef.current
     if (!canAccess(ACTIVE_OF[name] || name, currentRole)) return
+    if (currentRoute.name === name && JSON.stringify(currentRoute.params) === JSON.stringify(params)) return
+    if (leaveBlocked()) {
+      setPendingLeave(() => () => requestLeave(() => navigate(name, params)))
+      return
+    }
     setRoleMenuOpen(false)
     setOverlay(null)
-    if (currentRoute.name === name && JSON.stringify(currentRoute.params) === JSON.stringify(params)) return
     viewRegistryRef.current = patchRegistryRoute(
       viewRegistryRef.current,
       currentRole.id,
@@ -585,7 +728,7 @@ export function Shell({ onLogout }) {
     const nextRoute = { name, params }
     routeRef.current = nextRoute
     setRoute(nextRoute)
-  }, [])
+  }, [requestLeave])
 
   const setDemoRole = useCallback((roleId) => {
     const nextRole = DEMO_ROLES.find((demoRole) => demoRole.id === roleId)
@@ -602,14 +745,19 @@ export function Shell({ onLogout }) {
     const parentRoute = ACTIVE_OF[currentRoute.name]
     const candidate = parentRoute || currentRoute.name
     const nextRoute = { name: canAccess(candidate, nextRole) ? candidate : 'dashboard' }
+    if (leaveBlocked()) {
+      setPendingLeave(() => () => requestLeave(() => setDemoRole(roleId)))
+      return
+    }
     // Clear scoped actions in the same event as the authority change so no
     // sensitive toast can paint once under the incoming role.
     clearToasts()
+    stripParamsRef.current = true
     routeRef.current = nextRoute
     roleRef.current = nextRole
     setRoute(nextRoute)
     dispatch({ type: 'SET_DEMO_ROLE', roleId })
-  }, [clearToasts, dispatch])
+  }, [clearToasts, dispatch, requestLeave])
 
   useLayoutEffect(() => {
     const { scrollY } = readRouteViewState(viewRegistryRef.current, role.id, route.name, { scrollY: 0 })
@@ -669,10 +817,11 @@ export function Shell({ onLogout }) {
     openTusKidForm,
     openTusClassForm,
     openTeamBoard,
+    registerLeaveGuard,
   }), [
     getViewState, navigate, openClientForm, openPsychForm, openSessionForm, openTeamBoard,
-    openTusClassForm, openTusGroupForm, openTusKidForm, patchViewState, resetViewState, role, route,
-    setDemoRole,
+    openTusClassForm, openTusGroupForm, openTusKidForm, patchViewState, registerLeaveGuard,
+    resetViewState, role, route, setDemoRole,
   ])
 
   return (
@@ -739,6 +888,16 @@ export function Shell({ onLogout }) {
       {overlay === 'drawer' && drawer?.kind === 'tusClass' && <TusClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'board' && <BoardDrawer onClose={closeDrawer} />}
       {overlay === 'palette' && <CommandPalette onClose={() => closeOverlay('palette')} />}
+      {pendingLeave && (
+        <LeaveConfirmDialog
+          onCancel={cancelLeave}
+          onConfirm={() => {
+            const proceed = pendingLeave
+            setPendingLeave(null)
+            proceed()
+          }}
+        />
+      )}
     </ShellCtx.Provider>
   )
 }

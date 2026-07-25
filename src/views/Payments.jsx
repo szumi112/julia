@@ -6,7 +6,7 @@ import {
   Avatar, Chip, IconBtn, Button, InfoTip, EmptyState, Figure, Field, Popover,
   usePagination, Pager,
 } from '../ui.jsx'
-import { FilterGroup } from '../ux-patterns.jsx'
+import { FilterGroup, useRouteParamsSync } from '../ux-patterns.jsx'
 import { Icon } from '../icons.jsx'
 import { BarFill } from '../charts.jsx'
 import { PaymentPicker } from './session-bits.jsx'
@@ -105,6 +105,8 @@ function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
               max={remainder}
               step="0.01"
               inputMode="decimal"
+              name="payment-amount"
+              autoComplete="off"
               value={form.amount}
               onChange={(event) => {
                 setForm((current) => ({ ...current, amount: event.target.value }))
@@ -116,6 +118,8 @@ function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
             <select
               ref={methodRef}
               className="select"
+              name="payment-method"
+              autoComplete="off"
               value={form.method}
               onChange={(event) => {
                 setForm((current) => ({ ...current, method: event.target.value }))
@@ -156,14 +160,19 @@ export function Payments() {
       allPeriods: typeof route.params?.allPeriods === 'boolean'
         ? route.params.allPeriods
         : saved.allPeriods === true,
-      ym: validMonth(saved.ym) ? saved.ym : maxYm,
-      specialist: state.psychologists.some((psychologist) => psychologist.id === saved.specialist)
-        ? saved.specialist
-        : null,
+      // URL params win over the registry — a shared link must reproduce its scope
+      ym: validMonth(route.params?.ym)
+        ? route.params.ym
+        : validMonth(saved.ym) ? saved.ym : maxYm,
+      specialist: state.psychologists.some((psychologist) => psychologist.id === route.params?.specialist)
+        ? route.params.specialist
+        : state.psychologists.some((psychologist) => psychologist.id === saved.specialist)
+          ? saved.specialist
+          : null,
       unpaidOnly: typeof route.params?.unpaidOnly === 'boolean'
         ? route.params.unpaidOnly
         : saved.unpaidOnly === true,
-      page: Math.max(1, Number(saved.page) || 1),
+      page: Math.max(1, Number(route.params?.page ?? saved.page) || 1),
     }
   })
   const [ym, setYm] = useState(initial.ym)
@@ -210,6 +219,15 @@ export function Payments() {
       page,
     })
   }, [allPeriods, page, patchViewState, psychFilter, unpaidOnly, ym])
+
+  // the whole ledger scope lives in the URL, so a filtered month can be shared
+  useRouteParamsSync('payments', {
+    allPeriods: allPeriods || undefined,
+    unpaidOnly: unpaidOnly || undefined,
+    specialist: psychFilter || undefined,
+    ym: allPeriods ? undefined : ym,
+    page: page > 1 ? page : undefined,
+  })
 
   const comparisonPsychologists = psychFilter
     ? psychologists.filter((psychologist) => psychologist.id === psychFilter)

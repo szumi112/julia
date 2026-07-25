@@ -63,6 +63,34 @@ export const fmtFullDate = (iso) => fullDateFmt.format(parseISO(iso))
 export const fmtWeekday = (iso) => weekdayFmt.format(parseISO(iso))
 export const fmtShortDate = (iso) => shortDateFmt.format(parseISO(iso))
 
+// Relative-day label in the app's short voice ("dziś" / "wczoraj"), falling
+// back to the short date beyond yesterday. Intl.RelativeTimeFormat would give
+// the long "dzisiaj", which clashes with the compact labels used everywhere.
+export const relDayLabel = (iso) => {
+  const today = toISODate(new Date())
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  return iso === today ? 'dziś' : iso === toISODate(yesterday) ? 'wczoraj' : fmtShortDate(iso)
+}
+
+// Compact countdown ("za 2 h 5 min" / "za 45 min" / "za chwilę")
+export const untilLabel = (mins) => {
+  if (mins < 1) return 'za chwilę'
+  if (mins < 60) return `za ${mins} min`
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  return m ? `za ${h} h ${m} min` : `za ${h} h`
+}
+
+// ISO-8601 week number (1–53) — the dashboard masthead's "issue number"
+export const isoWeek = (iso) => {
+  const thursday = parseISO(iso)
+  thursday.setDate(thursday.getDate() + 3 - ((thursday.getDay() + 6) % 7))
+  const firstThursday = new Date(thursday.getFullYear(), 0, 4)
+  firstThursday.setDate(firstThursday.getDate() + 3 - ((firstThursday.getDay() + 6) % 7))
+  return 1 + Math.round((thursday - firstThursday) / 604800000)
+}
+
 export const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s)
 
 export const timeToMin = (t) => {

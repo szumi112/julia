@@ -195,9 +195,12 @@ export function animateIn(el) {
 
 // Shared slide-over drawer choreography (entrance stagger, animated exit,
 // Escape-to-close, focus trap + restore, shake-on-error) — used by every
-// form drawer.
-export function useDrawerFX(drawerRef, backRef, onClose) {
+// form drawer. `onAttempt` may gate every close path (backdrop, Escape,
+// footer buttons): returning false keeps the drawer open (dirty-form guard).
+export function useDrawerFX(drawerRef, backRef, onClose, onAttempt) {
   const closing = useRef(false)
+  const attemptRef = useRef(onAttempt)
+  attemptRef.current = onAttempt
 
   useEffect(() => {
     const drawer = drawerRef.current
@@ -214,8 +217,11 @@ export function useDrawerFX(drawerRef, backRef, onClose) {
     }
     // Focus the first control without waiting for the translation to finish.
     // If someone already moved focus into the drawer, keep their choice.
+    // Fine pointers only — on touch this would pop the on-screen keyboard.
     const t = setTimeout(() => {
-      if (!drawer.contains(document.activeElement)) drawer.querySelector('input, select, textarea')?.focus()
+      if (window.matchMedia('(pointer: fine)').matches && !drawer.contains(document.activeElement)) {
+        drawer.querySelector('input, select, textarea')?.focus()
+      }
     }, 0)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -230,15 +236,22 @@ export function useDrawerFX(drawerRef, backRef, onClose) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onClose])
 
+  // every user-driven close path goes through the gate; `forceClose` bypasses
+  // it (the confirm step of a dirty-form guard)
+  const requestClose = useCallback(() => {
+    if (attemptRef.current && !attemptRef.current()) return
+    close()
+  }, [close])
+
   // Escape closes the drawer — unless an overlay above it (command palette)
   // already handled the keypress
   useEffect(() => {
     const onKey = (e) => {
-      if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('.cmd')) close()
+      if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('.cmd')) requestClose()
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [close])
+  }, [requestClose])
 
   // focus trap (aria-modal promises it) + restore focus to the opener on close
   useEffect(() => {
@@ -276,7 +289,7 @@ export function useDrawerFX(drawerRef, backRef, onClose) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  return { close, shake }
+  return { close: requestClose, forceClose: close, shake }
 }
 
 // FLIP-style reorder for keyed children ([data-flip-id]) — rows that move

@@ -4,7 +4,7 @@ import { useShell } from '../shell-ctx.js'
 import { motionOK, setReduceMotion, useReveal } from '../anim.js'
 import { useIsPhone, useMediaQuery } from '../responsive.js'
 import { Button, Field, Avatar, IconBtn } from '../ui.jsx'
-import { EntityLink } from '../ux-patterns.jsx'
+import { EntityLink, useRouteParamsSync } from '../ux-patterns.jsx'
 
 const SECTIONS = [
   { id: 'account', label: 'Konto' },
@@ -60,9 +60,9 @@ function PreferenceSwitch({ title, description, on, disabled, onChange }) {
   )
 }
 
-export function Settings() {
+export function Settings({ params = {} }) {
   const { state, dispatch, toast } = useApp()
-  const { getViewState, openPsychForm, patchViewState, role } = useShell()
+  const { getViewState, openPsychForm, patchViewState, registerLeaveGuard, role } = useShell()
   const ref = useReveal()
   const isPhone = useIsPhone()
   const osReduce = useMediaQuery('(prefers-reduced-motion: reduce)')
@@ -75,6 +75,8 @@ export function Settings() {
     [state.psychologists]
   )
   const [initialSection] = useState(() => {
+    // URL params win over the registry — a shared link must reproduce its scope
+    if (availableSections.some((section) => section.id === params.section)) return params.section
     const saved = getViewState('settings', { section: defaultSection })
     return availableSections.some((section) => section.id === saved.section)
       ? saved.section
@@ -92,6 +94,9 @@ export function Settings() {
   useEffect(() => {
     patchViewState('settings', { section: activeSection })
   }, [activeSection, patchViewState])
+
+  // the active section lives in the URL, so a settings view can be shared
+  useRouteParamsSync('settings', { section: activeSection !== defaultSection ? activeSection : undefined })
 
   useEffect(() => {
     const previousSource = teamSourceRef.current
@@ -141,6 +146,10 @@ export function Settings() {
     )
   })
   const teamInvalid = Object.values(teamErrors).some((errors) => errors.rate || errors.weeklyCapacity)
+
+  // route commits (sidebar, back/forward, role switch) ask before discarding drafts
+  const settingsDirty = profileDirty || centerDirty || teamDirty
+  useEffect(() => registerLeaveGuard(() => settingsDirty), [registerLeaveGuard, settingsDirty])
 
   const markDraftChanged = (setStatus) => setStatus((current) => current === 'saving' ? current : 'idle')
   const completeSave = (save, setStatus) => {
@@ -278,6 +287,8 @@ export function Settings() {
               <Field label="Imię i nazwisko" error={profileErrors.name}>
                 <input
                   className="input"
+                  name="name"
+                  autoComplete="name"
                   disabled={profileStatus === 'saving'}
                   value={profile.name}
                   onChange={(event) => {
@@ -290,6 +301,9 @@ export function Settings() {
                 <input
                   className="input"
                   type="email"
+                  name="email"
+                  autoComplete="email"
+                  spellCheck={false}
                   disabled={profileStatus === 'saving'}
                   value={profile.email}
                   onChange={(event) => {
@@ -317,6 +331,8 @@ export function Settings() {
               <Field label="Nazwa" error={centerErrors.name}>
                 <input
                   className="input"
+                  name="organization"
+                  autoComplete="organization"
                   disabled={centerStatus === 'saving'}
                   value={center.name}
                   onChange={(event) => {
@@ -328,6 +344,8 @@ export function Settings() {
               <Field label="Adres">
                 <input
                   className="input"
+                  name="street-address"
+                  autoComplete="street-address"
                   disabled={centerStatus === 'saving'}
                   value={center.address}
                   onChange={(event) => {
@@ -341,6 +359,8 @@ export function Settings() {
                   <input
                     className="input"
                     type="tel"
+                    name="tel"
+                    autoComplete="tel"
                     disabled={centerStatus === 'saving'}
                     value={center.phone}
                     onChange={(event) => {
@@ -353,6 +373,9 @@ export function Settings() {
                   <input
                     className="input"
                     type="email"
+                    name="work-email"
+                    autoComplete="email"
+                    spellCheck={false}
                     disabled={centerStatus === 'saving'}
                     value={center.email}
                     onChange={(event) => {
@@ -466,6 +489,8 @@ export function Settings() {
                             min="0.01"
                             step="10"
                             inputMode="decimal"
+                            name={`rate-${psychologist.id}`}
+                            autoComplete="off"
                             aria-label={`Stawka — ${psychologist.name}`}
                             value={draft.rate}
                             onChange={(event) => {
@@ -485,6 +510,8 @@ export function Settings() {
                             min="1"
                             step="1"
                             inputMode="numeric"
+                            name={`capacity-${psychologist.id}`}
+                            autoComplete="off"
                             aria-label={`Limit tygodniowy — ${psychologist.name}`}
                             value={draft.weeklyCapacity}
                             onChange={(event) => {

@@ -1,9 +1,9 @@
 // Add/Edit psychologist — slide-over drawer. Delete is blocked while the
 // specialist still has assigned clients or upcoming sessions.
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { Button, Field, IconBtn } from '../ui.jsx'
+import { Button, Field, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, plural } from '../format.js'
@@ -18,11 +18,10 @@ const NEW_PAIRS = [
 
 export function PsychDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
-  const { route, navigate } = useShell()
+  const { route, navigate, registerLeaveGuard } = useShell()
   const editing = opts.psych || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
-  const { close, shake } = useDrawerFX(drawerRef, backRef, onClose)
 
   const [form, setForm] = useState({
     title: editing?.title || 'mgr',
@@ -35,6 +34,10 @@ export function PsychDrawer({ opts, onClose }) {
   })
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
+  const [initialForm] = useState(form)
+  const discardGuard = useDiscardGuard(JSON.stringify(form) !== JSON.stringify(initialForm))
+  const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
+  useEffect(() => registerLeaveGuard(discardGuard.check), [registerLeaveGuard, discardGuard.check])
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -59,9 +62,9 @@ export function PsychDrawer({ opts, onClose }) {
       title: form.title,
       name: form.name.trim(),
       spec: form.spec.trim() || 'Psychoterapia',
-      email: form.email.trim() || '—',
-      phone: form.phone.trim() || '—',
-      room: form.room.trim() || '—',
+      email: form.email.trim(),
+      phone: form.phone.trim(),
+      room: form.room.trim(),
       rate,
     }
     if (editing) {
@@ -72,7 +75,7 @@ export function PsychDrawer({ opts, onClose }) {
       dispatch({ type: 'ADD_PSYCH', psych: { ...payload, color, soft } })
       toast('Nowa specjalistka dodana do zespołu')
     }
-    close()
+    forceClose()
   }
 
   // delete guard — assigned clients, upcoming sessions or billing history all
@@ -88,7 +91,7 @@ export function PsychDrawer({ opts, onClose }) {
     dispatch({ type: 'DELETE_PSYCH', id: editing.id })
     toast('Specjalistka usunięta z zespołu', 'close')
     if (route.name === 'psych' && route.params?.id === editing.id) navigate('team')
-    close()
+    forceClose()
   }
 
   return (
@@ -108,7 +111,7 @@ export function PsychDrawer({ opts, onClose }) {
         <form className="drawer__body" onSubmit={submit} noValidate>
           <div className="form-grid">
             <Field label="Tytuł">
-              <select className="select" value={form.title} onChange={(e) => set('title', e.target.value)}>
+              <select name="psych-title" autoComplete="off" className="select" value={form.title} onChange={(e) => set('title', e.target.value)}>
                 <option value="mgr">mgr</option>
                 <option value="dr">dr</option>
                 <option value="dr hab.">dr hab.</option>
@@ -119,10 +122,12 @@ export function PsychDrawer({ opts, onClose }) {
                 type="number"
                 min="0"
                 step="10"
-                inputMode="numeric"
+                inputMode="decimal"
+                name="psych-rate"
+                autoComplete="off"
                 className="input"
                 value={form.rate}
-                placeholder="np. 220"
+                placeholder="np. 220…"
                 onChange={(e) => set('rate', e.target.value)}
               />
             </Field>
@@ -130,6 +135,8 @@ export function PsychDrawer({ opts, onClose }) {
 
           <Field label="Imię i nazwisko" error={errors.name}>
             <input
+              name="psych-name"
+              autoComplete="off"
               className="input"
               value={form.name}
               placeholder="np. Maria Nowak"
@@ -139,6 +146,8 @@ export function PsychDrawer({ opts, onClose }) {
 
           <Field label="Specjalizacja">
             <input
+              name="psych-spec"
+              autoComplete="off"
               className="input"
               value={form.spec}
               placeholder="np. Terapia ACT"
@@ -150,6 +159,9 @@ export function PsychDrawer({ opts, onClose }) {
             <Field label="E-mail">
               <input
                 type="email"
+                name="psych-email"
+                autoComplete="off"
+                spellCheck={false}
                 className="input"
                 value={form.email}
                 placeholder="np. maria@aurelia.pl"
@@ -159,6 +171,8 @@ export function PsychDrawer({ opts, onClose }) {
             <Field label="Telefon">
               <input
                 type="tel"
+                name="psych-phone"
+                autoComplete="off"
                 className="input"
                 value={form.phone}
                 placeholder="+48 600 000 000"
@@ -169,6 +183,8 @@ export function PsychDrawer({ opts, onClose }) {
 
           <Field label="Gabinet">
             <input
+              name="psych-room"
+              autoComplete="off"
               className="input"
               value={form.room}
               placeholder="np. Gabinet 5"
@@ -204,6 +220,10 @@ export function PsychDrawer({ opts, onClose }) {
             </div>
           )}
         </form>
+
+        {discardGuard.confirming && (
+          <DiscardConfirm onStay={discardGuard.hide} onDiscard={forceClose} />
+        )}
 
         <div className="drawer__foot">
           {confirmDel && !blocked ? (

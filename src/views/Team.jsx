@@ -85,7 +85,9 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
                 <Icon name="alert" size={16} />
                 <span>
                   <b>Konflikt w kalendarzu</b>
-                  <span>{fmtDayMonth(conflict.date)} · {conflictSessions.map((session) => session.time).join(' i ')}</span>
+                  <span>{fmtDayMonth(conflict.date)} · {conflictSessions.length > 1 && conflictSessions.every((session) => session.time === conflictSessions[0].time)
+                    ? `${conflictSessions.length}× ${conflictSessions[0].time}`
+                    : conflictSessions.map((session) => session.time).join(' i ')}</span>
                 </span>
                 <EntityLink
                   route="calendar"
@@ -181,7 +183,7 @@ export function Team() {
           <div className="eyebrow">Specjalistki</div>
           <h1 className="display view-head__title">Zespół <em>Aurelii</em></h1>
           <p className="view-head__sub">
-            Obłożenie od poniedziałku do niedzieli · {firstLoad?.start}–{firstLoad?.end}. Konflikty prowadzą prosto do właściwych sesji.
+            Obłożenie od poniedziałku do niedzieli{firstLoad ? ` · ${fmtDayMonth(firstLoad.start)} – ${fmtDayMonth(firstLoad.end)}` : ''}. Konflikty prowadzą prosto do właściwych sesji.
           </p>
         </div>
         <div className="view-head__actions">
@@ -258,7 +260,7 @@ function PsychStat({ label, value, fmt }) {
 
 export function PsychDetail({ params }) {
   const { state } = useApp()
-  const { navigate, openSessionForm, openPsychForm } = useShell()
+  const { openSessionForm, openPsychForm } = useShell()
   const ref = useReveal([params.id])
   const [debtOnly, setDebtOnly] = useState(false)
   const psych = state.psychologists.find((p) => p.id === params.id)
@@ -268,7 +270,7 @@ export function PsychDetail({ params }) {
         icon="team"
         title="Nie znaleziono profilu"
         hint="Być może profil został usunięty z zespołu."
-        action={<Button size="sm" variant="soft" onClick={() => navigate('team')}>Wróć do zespołu</Button>}
+        action={<EntityLink route="team" className="btn btn--soft btn--sm"><span>Wróć do zespołu</span></EntityLink>}
       />
     )
   }
@@ -287,9 +289,9 @@ export function PsychDetail({ params }) {
 
   return (
     <div ref={ref}>
-      <button className="link row" style={{ gap: 7, marginBottom: 20 }} onClick={() => navigate('team')} data-reveal>
+      <EntityLink route="team" className="link row" style={{ gap: 7, marginBottom: 20, width: 'fit-content' }} data-reveal>
         <Icon name="arrowL" size={16} /> Wróć do zespołu
-      </button>
+      </EntityLink>
 
       <div className="id-band" data-reveal style={{ '--band-color': psych.color }}>
         <Avatar name={psych.name} color={psych.color} size={64} />
@@ -297,9 +299,9 @@ export function PsychDetail({ params }) {
           <h1 className="display id-band__name">{psych.title} {psych.name}</h1>
           <div className="id-band__sub">{psych.spec}</div>
           <div className="id-band__meta">
-            <span><Icon name="mail" size={14} /> {psych.email}</span>
-            <span><Icon name="phone" size={14} /> {psych.phone}</span>
-            <span><Icon name="room" size={14} /> {psych.room}</span>
+            {psych.email && <span><Icon name="mail" size={14} /> {psych.email}</span>}
+            {psych.phone && <span><Icon name="phone" size={14} /> {psych.phone}</span>}
+            {psych.room && <span><Icon name="room" size={14} /> {psych.room}</span>}
           </div>
           <div className="id-band__pills">
             <Pill tone="gold">{fmtMoney(psych.rate)} / sesja</Pill>
@@ -359,23 +361,18 @@ export function PsychDetail({ params }) {
                   const count = state.sessions.filter((s) => s.clientId === c.id && s.status === 'completed').length
                   const debt = clientOutstanding(state.sessions, c.id)
                   return (
-                    <tr
-                      key={c.id}
-                      className="is-click"
-                      tabIndex={0}
-                      aria-label={`Otwórz kartę: ${c.name}`}
-                      onClick={() => navigate('client', { id: c.id })}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          navigate('client', { id: c.id })
-                        }
-                      }}
-                    >
+                    <tr key={c.id}>
                       <td>
                         <span className="row" style={{ gap: 11 }}>
                           <Avatar name={c.name} color={psych.color} size={32} />
-                          <span style={{ fontWeight: 600 }}>{c.name}</span>
+                          <EntityLink
+                            route="client"
+                            params={{ id: c.id }}
+                            label={`Otwórz kartę: ${c.name}`}
+                            style={{ fontWeight: 600 }}
+                          >
+                            {c.name}
+                          </EntityLink>
                         </span>
                       </td>
                       <td className="muted" data-th="Ostatnia sesja">{last ? fmtShortDate(last.date) : '—'}</td>

@@ -5,7 +5,7 @@ import { useReveal, useFlip } from '../anim.js'
 import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, usePagination, Pager } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
-import { fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, sessionsWord, toISODate, pad2, plural } from '../format.js'
+import { fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, sessionsWord, toISODate, pad2, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
 import { clientMatchesQuery, clientsForRole, sessionsForRole } from '../workspace.js'
 import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
 
@@ -122,7 +122,7 @@ export function Clients({ params = {} }) {
           </p>
         </div>
         <div className="view-head__actions">
-          <SearchInput value={query} onChange={setQuery} placeholder="Imię, e-mail lub telefon" />
+          <SearchInput value={query} onChange={setQuery} placeholder="Imię, e-mail lub telefon…" />
           <Button icon="plus" magnetic onClick={() => openClientForm({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
             Dodaj klienta
           </Button>
@@ -235,14 +235,14 @@ export function Clients({ params = {} }) {
                       <span className="muted">{p?.name}</span>
                     </span>
                   </td>
-                  <td className="muted" data-th="Ostatnia sesja">{last ? fmtShortDate(last.date) : '—'}</td>
+                  <td className="num-cell muted" data-th="Ostatnia sesja">{last ? fmtShortDate(last.date) : '—'}</td>
                   <td data-th="Następna sesja">
                     {next
-                      ? <span style={{ fontWeight: 600 }}>{fmtShortDate(next.date)} · {next.time}</span>
+                      ? <span className="num-cell" style={{ fontWeight: 600 }}>{fmtShortDate(next.date)} · {next.time}</span>
                       : <span className="faint">nie umówiono</span>}
                   </td>
                   <td className="right" data-th="Zaległość">
-                    {debt > 0 ? <Pill tone="gold">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
+                    {debt > 0 ? <Pill tone="rose">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
                   </td>
                   <td data-th="Status">
                     <Pill tone={c.status === 'active' ? 'sage' : 'mauve'} dot>
@@ -263,7 +263,7 @@ export function Clients({ params = {} }) {
 
 export function ClientDetail({ params }) {
   const { state, dispatch, toast } = useApp()
-  const { navigate, openSessionForm, openClientForm, role } = useShell()
+  const { openSessionForm, openClientForm, role } = useShell()
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
   const client = clientsForRole(state, role).find((candidate) => candidate.id === params.id)
@@ -286,7 +286,7 @@ export function ClientDetail({ params }) {
         icon="clients"
         title="Nie znaleziono klienta"
         hint="Być może został usunięty z kartoteki."
-        action={<Button size="sm" variant="soft" onClick={() => navigate('clients')}>Wróć do listy</Button>}
+        action={<EntityLink route="clients" className="btn btn--soft btn--sm">Wróć do listy</EntityLink>}
       />
     )
   }
@@ -316,19 +316,25 @@ export function ClientDetail({ params }) {
 
   const removeNote = (idx) => {
     if (!canReadClinicalNotes) return
+    const previous = client.notes
     dispatch({
       type: 'UPDATE_CLIENT',
       id: client.id,
       patch: { notes: client.notes.filter((_, k) => k !== idx) },
     })
-    toast('Notatka usunięta', 'close')
+    toast('Notatka usunięta', 'close', {
+      label: 'Cofnij',
+      key: `note:${client.id}:${idx}`,
+      timeoutMs: 5000,
+      onClick: () => dispatch({ type: 'UPDATE_CLIENT', id: client.id, patch: { notes: previous } }),
+    })
   }
 
   return (
     <div ref={ref}>
-      <button className="link row" style={{ gap: 7, marginBottom: 20 }} onClick={() => navigate('clients')} data-reveal>
+      <EntityLink route="clients" className="link row" style={{ gap: 7, marginBottom: 20, width: 'fit-content' }} data-reveal>
         <Icon name="arrowL" size={16} /> Wróć do listy klientów
-      </button>
+      </EntityLink>
 
       <div className="client-record">
         <section className="client-record__section" aria-labelledby="care-overview-title" data-reveal>
@@ -336,10 +342,21 @@ export function ClientDetail({ params }) {
           <div className="id-band" style={{ '--band-color': psych?.color }}>
             <Avatar name={client.name} color={psych?.color} size={64} />
             <div className="id-band__main">
+              <p className="eyebrow id-band__eyebrow">Karta klienta</p>
               <h1 className="display id-band__name">{client.name}</h1>
               <div className="id-band__meta">
-                <span><Icon name="phone" size={14} /> {client.phone}</span>
-                {client.email && <span><Icon name="mail" size={14} /> {client.email}</span>}
+                {client.phone && (
+                  <span>
+                    <Icon name="phone" size={14} />
+                    <a href={`tel:${client.phone.replace(/\s/g, '')}`}>{client.phone}</a>
+                  </span>
+                )}
+                {client.email && (
+                  <span>
+                    <Icon name="mail" size={14} />
+                    <a href={`mailto:${client.email}`}>{client.email}</a>
+                  </span>
+                )}
                 <span>klient od {fmtFullDate(client.since)}</span>
                 <span>{completed.length} {plural(completed.length, 'sesja odbyta', 'sesje odbyte', 'sesji odbytych')}</span>
               </div>
@@ -362,9 +379,9 @@ export function ClientDetail({ params }) {
             <div className="care-overview__item">
               <span>Specjalistka prowadząca</span>
               {psych && role.scope !== 'own' ? (
-                <button className="link care-overview__value" onClick={() => navigate('psych', { id: psych.id })}>
+                <EntityLink route="psych" params={{ id: psych.id }} className="link care-overview__value">
                   {psych.title} {psych.name}
-                </button>
+                </EntityLink>
               ) : <b>{psych ? `${psych.title} ${psych.name}` : 'Nieprzypisana'}</b>}
             </div>
             <div className="care-overview__item">
@@ -386,13 +403,14 @@ export function ClientDetail({ params }) {
                     return role.scope === 'own' && member.psychId !== role.psychId ? (
                       <b key={member.id}>{label}</b>
                     ) : (
-                      <button
+                      <EntityLink
                         key={member.id}
+                        route="client"
+                        params={{ id: member.id }}
                         className="link care-overview__value"
-                        onClick={() => navigate('client', { id: member.id })}
                       >
                         {label}
-                      </button>
+                      </EntityLink>
                     )
                   })}
                 </span>
@@ -426,11 +444,24 @@ export function ClientDetail({ params }) {
                       </EntityLink>
                       <span className="agenda__meta">{s.duration} min · {fmtMoney(s.amount)}</span>
                       <span className="agenda__pills">
-                        <StatusPicker session={s} />
-                        <PaymentPicker session={s} />
+                        <StatusPicker
+                          session={s}
+                          accessibleLabel={`Status: ${STATUS_LABELS[s.status]} — ${fmtDayMonth(s.date)}, ${s.time}`}
+                        />
+                        <PaymentPicker
+                          session={s}
+                          accessibleLabel={`Płatność: ${PAY_LABELS[s.payment]} — ${fmtDayMonth(s.date)}, ${s.time}`}
+                        />
                       </span>
                     </span>
-                    {canManageCare && <IconBtn name="edit" label="Edytuj sesję" size={16} onClick={() => openSessionForm({ session: s })} />}
+                    {canManageCare && (
+                      <IconBtn
+                        name="edit"
+                        label={`Edytuj sesję — ${fmtDayMonth(s.date)}, ${s.time}`}
+                        size={16}
+                        onClick={() => openSessionForm({ session: s })}
+                      />
+                    )}
                   </div>
                 ))}
               </div>
@@ -467,11 +498,28 @@ export function ClientDetail({ params }) {
                       <tr key={s.id}>
                         <td style={{ fontWeight: 600 }} data-th="Data">{fmtShortDate(s.date)}</td>
                         <td className="num-cell muted" data-th="Godzina">{s.time}</td>
-                        <td data-th="Status"><StatusPicker session={s} /></td>
+                        <td data-th="Status">
+                          <StatusPicker
+                            session={s}
+                            accessibleLabel={`Status: ${STATUS_LABELS[s.status]} — ${fmtDayMonth(s.date)}, ${s.time}`}
+                          />
+                        </td>
                         <td className="right num-cell" data-th="Kwota">{fmtMoney(s.amount)}</td>
-                        <td data-th="Płatność"><PaymentPicker session={s} /></td>
+                        <td data-th="Płatność">
+                          <PaymentPicker
+                            session={s}
+                            accessibleLabel={`Płatność: ${PAY_LABELS[s.payment]} — ${fmtDayMonth(s.date)}, ${s.time}`}
+                          />
+                        </td>
                         <td className="right td--actions" style={{ width: 44 }}>
-                          {canManageCare && <IconBtn name="edit" label="Edytuj sesję" size={15} onClick={() => openSessionForm({ session: s })} />}
+                          {canManageCare && (
+                            <IconBtn
+                              name="edit"
+                              label={`Edytuj sesję — ${fmtDayMonth(s.date)}, ${s.time}`}
+                              size={15}
+                              onClick={() => openSessionForm({ session: s })}
+                            />
+                          )}
                         </td>
                       </tr>
                     ))}

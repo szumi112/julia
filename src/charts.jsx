@@ -108,6 +108,7 @@ export function AreaChart({ data, height = 230, valueKey = 'revenue', fmt = fmtM
     <div
       ref={wrapRef}
       style={{ position: 'relative' }}
+      role="img"
       tabIndex={0}
       aria-label={`${label} — strzałki w lewo i w prawo przeglądają wartości`}
       onPointerMove={onPoint}

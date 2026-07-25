@@ -137,7 +137,7 @@ test('the mock-data workspace opens after login', async ({ page }) => {
 
 test('navigation focuses the destination and a day cockpit excludes background controls', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Kalendarz' }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Kalendarz' }).click()
   await expect(page.locator('.view')).toBeFocused()
   await page.getByRole('button', { name: /Panel dnia/ }).click()
   await expect(page.getByRole('dialog', { name: /Panel dnia/ })).toBeVisible()
@@ -166,16 +166,17 @@ test('mobile shell keeps direct destinations, a full title, search, and More acc
   await expect(topbar.getByRole('button', { name: /Szukaj w Aurelii/ })).toBeVisible()
 
   const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
-  for (const label of ['Dziś', 'Finanse', 'Kalendarz', 'Klienci', 'Więcej']) {
-    await expect(bottomNavigation.getByRole('button', { name: label, exact: true })).toBeVisible()
+  for (const label of ['Dziś', 'Finanse', 'Kalendarz', 'Klienci']) {
+    await expect(bottomNavigation.getByRole('link', { name: label, exact: true })).toBeVisible()
   }
+  await expect(bottomNavigation.getByRole('button', { name: 'Więcej', exact: true })).toBeVisible()
   await expect(bottomNavigation.getByRole('button', { name: 'Nowa sesja' })).toBeVisible()
   const fab = await bottomNavigation.getByRole('button', { name: 'Nowa sesja' }).boundingBox()
   expect(Math.abs(fab.x + fab.width / 2 - 195)).toBeLessThanOrEqual(1)
 
   await bottomNavigation.getByRole('button', { name: 'Więcej' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nawigacja' })
-  await drawer.getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await drawer.getByRole('link', { name: 'Zajęcia TUS' }).click()
   await expect(topbar.getByText('Zajęcia TUS', { exact: true })).toBeVisible()
   await expect(bottomNavigation.getByRole('button', { name: 'Więcej' })).toHaveAttribute('aria-current', 'page')
   await expect(topbar.locator('.topbar__title')).toHaveCSS('text-overflow', 'clip')
@@ -205,7 +206,7 @@ test('mobile active pill remeasures when role permissions change the tab set', a
   const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
 
   await bottomNavigation.getByRole('button', { name: 'Więcej' }).click()
-  await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('link', { name: 'Zajęcia TUS' }).click()
   await expect(page.locator('.topbar__title b')).toHaveText('Zajęcia TUS')
   await expect(page.getByRole('dialog', { name: 'Nawigacja' })).toHaveCount(0)
   await page.waitForTimeout(250)
@@ -215,7 +216,7 @@ test('mobile active pill remeasures when role permissions change the tab set', a
   await expect(roleButton).toBeVisible()
   await roleButton.click()
 
-  await expect(bottomNavigation.getByRole('button', { name: 'Finanse' })).toHaveCount(0)
+  await expect(bottomNavigation.getByRole('link', { name: 'Finanse' })).toHaveCount(0)
   await expect.poll(async () => {
     const more = await bottomNavigation.getByRole('button', { name: 'Więcej' }).boundingBox()
     const pill = await bottomNavigation.locator('.tabbar__pill').boundingBox()
@@ -241,7 +242,7 @@ test('Figure exposes its formatted value on the first rendered frame', async ({ 
     window.__figureObserver.observe(document.body, { childList: true, subtree: true })
   })
 
-  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Finanse' }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Finanse' }).click()
   const firstFigure = page.locator('.figures__value > span').first()
   await expect(firstFigure).toBeVisible()
   await page.waitForTimeout(1800)
@@ -257,7 +258,7 @@ test('navigation restores each route scroll position', async ({ page }) => {
   const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
   const content = page.locator('main.content')
 
-  await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+  await navigation.getByRole('link', { name: 'Kalendarz' }).click()
   await page.getByRole('region', { name: /Plan dnia/ }).getByRole('button', { name: /Zakończone i odwołane/ }).click()
   const savedScroll = await content.evaluate((element) => {
     element.scrollTop = 300
@@ -265,9 +266,9 @@ test('navigation restores each route scroll position', async ({ page }) => {
   })
   expect(savedScroll).toBeGreaterThan(50)
 
-  await navigation.getByRole('button', { name: 'Klienci' }).click()
+  await navigation.getByRole('link', { name: 'Klienci' }).click()
   await expect(page.getByRole('heading', { name: /Klienci/ })).toBeVisible()
-  await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+  await navigation.getByRole('link', { name: 'Kalendarz' }).click()
   await expect.poll(() => content.evaluate((element) => element.scrollTop)).toBe(savedScroll)
 })
 
@@ -296,11 +297,11 @@ test('command navigation uses canonical destination labels', async ({ page }) =>
 test('role switch cannot finish a pending forbidden navigation', async ({ page }) => {
   await login(page)
   await page.evaluate(async () => {
-    const buttons = [...document.querySelectorAll('button')]
-    buttons.find((button) => button.textContent.trim() === 'Finanse').click()
-    buttons.find((button) => (
-      button.textContent.includes('Tryb demonstracyjny') && button.textContent.includes('Julia Wolanin')
-    )).click()
+    const navigation = document.querySelector('nav[aria-label="Nawigacja główna"]')
+    ;[...navigation.querySelectorAll('a')].find((item) => item.textContent.trim() === 'Finanse').click()
+    ;[...document.querySelectorAll('button')]
+      .find((button) => button.textContent.includes('Tryb demonstracyjny') && button.textContent.includes('Julia Wolanin'))
+      .click()
     await new Promise(requestAnimationFrame)
     ;[...document.querySelectorAll('button')]
       .find((button) => button.textContent.includes('Specjalistka') && button.textContent.includes('Marta Zielińska'))
@@ -310,13 +311,13 @@ test('role switch cannot finish a pending forbidden navigation', async ({ page }
   await page.waitForTimeout(300)
   await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
   await expect(
-    page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Dziś' })
+    page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Dziś' })
   ).toHaveAttribute('aria-current', 'page')
 })
 
 test('same-route view state does not leak when the demo role changes', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Klienci' }).click()
   const search = page.getByPlaceholder('Imię, e-mail lub telefon')
   await search.fill('Zofia')
   await expect(search).toHaveValue('Zofia')
@@ -329,7 +330,7 @@ test('same-route view state does not leak when the demo role changes', async ({ 
 
 test('role switch discards a client detail identity outside the next role scope', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByRole('heading', { name: 'Zofia Mazur' })).toBeVisible()
 
@@ -343,7 +344,7 @@ test('role switch discards a client detail identity outside the next role scope'
 
 test('role switch clears top-level route parameters and their derived filters', async ({ page }) => {
   await login(page)
-  await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('button').first().click()
+  await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('link').first().click()
   await expect(page.getByRole('region', { name: 'Zakres finansów' })).toContainText('Wszystkie okresy')
   await expect(page.getByRole('region', { name: 'Filtry listy rozliczeń' })).toContainText('Pozostałe do zapłaty')
 
@@ -381,7 +382,7 @@ test('coarse pointers expose complete 44px targets without enlarging pills', asy
       expect(box.width, selector).toBeGreaterThanOrEqual(44)
     }
 
-    await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('button', { name: 'Klienci' }).click()
+    await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('link', { name: 'Klienci' }).click()
     await page.getByRole('button', { name: /^Filtry/ }).click()
     const chip = page.getByRole('region', { name: 'Filtry klientów' }).locator('.chip').first()
     await expect(chip).toBeVisible()
@@ -406,7 +407,7 @@ test('coarse pointers expose complete 44px targets without enlarging pills', asy
     expect(chipHit.bottom).toBe(true)
 
     await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('button', { name: 'Więcej' }).click()
-    await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('link', { name: 'Ustawienia' }).click()
     const smallPrimary = page.getByRole('button', { name: 'Zapisz konto' })
     await smallPrimary.scrollIntoViewIfNeeded()
     const buttonHit = await smallPrimary.evaluate((element) => {
@@ -490,7 +491,7 @@ test('navigation commits its destination before the next paint', async ({ page }
 
   const titleAfterNextPaint = await page.evaluate(async () => {
     const navigation = document.querySelector('nav[aria-label="Nawigacja główna"]')
-    ;[...navigation.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Kalendarz').click()
+    ;[...navigation.querySelectorAll('a')].find((item) => item.textContent.trim() === 'Kalendarz').click()
     await new Promise(requestAnimationFrame)
     return document.querySelector('.topbar__title b').textContent
   })
@@ -611,7 +612,7 @@ test('segmented, switch, and interactive control CSS transitions stay within 250
 test('calendar operational swaps stay visible and finish within 250ms including stagger', async ({ page }) => {
   await login(page)
   await installNamedMotionCapture(page)
-  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Kalendarz' }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Kalendarz' }).click()
 
   await page.locator('.day-strip__day:not(.is-on)').first().click()
   await expect.poll(() => page.evaluate(() => window.__namedMotion.some(({ kind }) => kind === 'calendar-agenda'))).toBe(true)
@@ -670,11 +671,11 @@ test('Today cockpit progress transition finishes within 250ms', async ({ page })
 test('chart data stays visible while decorative motion finishes within 250ms', async ({ page }) => {
   await login(page)
   await installNamedMotionCapture(page)
-  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Zespół' }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Zespół' }).click()
   await page.getByRole('link', { name: /Otwórz profil —/ }).first().click()
   await expect.poll(() => page.evaluate(() => window.__namedMotion.some(({ kind }) => kind === 'chart-area-line'))).toBe(true)
 
-  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Raporty' }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Raporty' }).click()
   await expect.poll(() => page.evaluate(() => (
     ['chart-area-fill', 'chart-bar', 'chart-donut'].every((kind) => window.__namedMotion.some((record) => record.kind === kind))
   ))).toBe(true)
@@ -700,7 +701,7 @@ test('therapist session form is scoped to their own practice', async ({ page }) 
 test('therapist client form cannot reassign care outside their practice', async ({ page }) => {
   await login(page)
   await switchToTherapist(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('button', { name: 'Dodaj klienta' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowy klient' })
   const psychologists = drawer.getByLabel('Specjalistka prowadząca')
@@ -726,8 +727,8 @@ test('demo role picker is a labelled button group and closes for command search'
 test('therapist mode guards dashboard destinations and filters command palette', async ({ page }) => {
   await login(page)
   await switchToTherapist(page)
-  await expect(page.getByRole('region', { name: 'Skróty' }).getByRole('button', { name: 'Zespół' })).toHaveCount(0)
-  await expect(page.getByRole('navigation').getByRole('button', { name: 'Dziś' })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('region', { name: 'Skróty' }).getByRole('link', { name: 'Zespół' })).toHaveCount(0)
+  await expect(page.getByRole('navigation').getByRole('link', { name: 'Dziś' })).toHaveAttribute('aria-current', 'page')
 
   await page.keyboard.press('Control+K')
   const palette = page.getByRole('dialog', { name: 'Szukaj w Aurelii' })
@@ -751,7 +752,7 @@ test('therapist search only exposes their client context and hides note prose fr
 
 test('centre roles receive a neutral clinical-notes state', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
   await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
@@ -760,7 +761,7 @@ test('centre roles receive a neutral clinical-notes state', async ({ page }) => 
 test('coordinator receives the neutral clinical-notes state', async ({ page }) => {
   await login(page)
   await switchToCoordinator(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByText('Notatki są dostępne w widoku specjalistki.')).toBeVisible()
   await expect(page.locator('.note__text')).toHaveCount(0)
@@ -769,7 +770,7 @@ test('coordinator receives the neutral clinical-notes state', async ({ page }) =
 
 test('non-owning therapist is remapped away from an unauthorized client detail', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await switchToTherapist(page)
   await expect(page.locator('.topbar__title b')).toHaveText('Klienci')
@@ -779,14 +780,14 @@ test('non-owning therapist is remapped away from an unauthorized client detail',
   await expect(page.locator('.note__text')).toHaveCount(0)
   await expect(page.getByLabel('Nowa notatka')).toHaveCount(0)
   await expect(page.locator('.id-band__actions').getByRole('button')).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Edytuj sesję' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /Edytuj sesję/ })).toHaveCount(0)
   await expect(page.getByTitle('Zmień status sesji')).toHaveCount(0)
   await expect(page.getByTitle('Zmień płatność')).toHaveCount(0)
 })
 
 test('client detail adapts its primary CTA to the active role', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await expect(page.getByRole('button', { name: 'Umów spotkanie' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Przygotuj sesję' })).toHaveCount(0)
@@ -797,11 +798,13 @@ test('client detail adapts its primary CTA to the active role', async ({ page })
   await expect(page.getByRole('button', { name: 'Umów spotkanie' })).toHaveCount(0)
 })
 
-test('client detail presents care headings in record order', async ({ page }) => {
+test('client detail presents care sections in record order, h1 first', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
-  await expect(page.getByRole('heading', { name: 'Przegląd opieki' })).toBeVisible()
+  // "Przegląd opieki" is the first section heading — the client name (h1)
+  // must still precede every section heading in the outline
+  await expect(page.locator('#care-overview-title')).toHaveText('Przegląd opieki')
   const headings = await page.locator('main h2').evaluateAll((elements) =>
     elements.map((element) => element.firstChild.textContent.trim())
   )
@@ -811,11 +814,17 @@ test('client detail presents care headings in record order', async ({ page }) =>
     'Historia frekwencji',
     'Notatki kliniczne',
   ])
+  const h1Precedes = await page.evaluate(() => {
+    const h1 = document.querySelector('main h1')
+    const firstH2 = document.querySelector('main h2')
+    return Boolean(h1.compareDocumentPosition(firstH2) & Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+  expect(h1Precedes).toBe(true)
 })
 
 test('client form validates a supplied email and keeps email optional', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('button', { name: 'Dodaj klienta' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowy klient' })
   await drawer.getByLabel('Imię i nazwisko').fill('Testowa osoba')
@@ -830,7 +839,7 @@ test('client form validates a supplied email and keeps email optional', async ({
 
 test('switching to therapist ignores a previous team client filter', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('button', { name: 'Julia', exact: true }).click()
   await expect(page.getByRole('row', { name: /Zofia Mazur/ })).toBeVisible()
   await switchToTherapist(page)
@@ -839,7 +848,7 @@ test('switching to therapist ignores a previous team client filter', async ({ pa
 
 test('short lists render fully without a pager and history caps at ten rows', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   // 19 demo clients < 25: full roster, no pager anywhere on the view
   await expect(page.locator('tbody tr').first()).toBeVisible()
   expect(await page.locator('tbody tr').count()).toBeGreaterThan(15)
@@ -853,8 +862,11 @@ test('short lists render fully without a pager and history caps at ten rows', as
 test('Today keeps the essential daily regions together', async ({ page }) => {
   await login(page)
   await expect(
-    page.getByRole('heading', { level: 1, name: /^\d{1,2}:\d{2}$|\d+ sesji wymaga statusu|Dzień zakończony|Wolny dzień/ })
+    page.getByRole('heading', { level: 1, name: /^(poniedziałek|wtorek|środa|czwartek|piątek|sobota|niedziela)$/ })
   ).toBeVisible()
+  await expect(page.locator('.today-hero')).toContainText(
+    /\d{1,2}:\d{2}|\d+ sesji wymaga statusu|Dzień zakończony|Wolny dzień/
+  )
   await expect(page.getByRole('region', { name: /Wymaga uwagi/ })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Skróty' })).toBeVisible()
   await expect(page.getByRole('region', { name: 'Plan dnia' })).toBeVisible()
@@ -938,7 +950,7 @@ test('toasts dismiss with the keyboard', async ({ page }) => {
 
 test('enabling reduced motion clears active GSAP tweens', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Ustawienia' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Ustawienia' }).click()
   await page.evaluate(() => {
     window.__motionProbe = { value: 0 }
     window.gsap.to(window.__motionProbe, { value: 100, duration: 5 })
@@ -992,7 +1004,7 @@ test('therapist sidebar count is scoped to their daily sessions', async ({ page 
 
 test('older attention debt opens all-period unpaid payments', async ({ page }) => {
   await login(page)
-  await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('button').first().click()
+  await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('link').first().click()
   await expect(page.getByRole('region', { name: 'Zakres finansów' })).toContainText('Wszystkie okresy')
   await expect(page.getByRole('region', { name: 'Filtry listy rozliczeń' }).getByRole('button', { name: 'Pozostałe do zapłaty' })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('tr.is-due')).not.toHaveCount(0)
@@ -1000,7 +1012,7 @@ test('older attention debt opens all-period unpaid payments', async ({ page }) =
 
 test('calendar exposes explicit payment and attendance reset choices', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
   await expect(page.getByRole('group', { name: 'Płatność' })).toHaveCount(0)
   await page.getByRole('button', { name: /^Filtry/ }).click()
   const payment = page.getByRole('group', { name: 'Płatność' })
@@ -1023,7 +1035,7 @@ test('calendar exposes explicit payment and attendance reset choices', async ({ 
 
 test('Payments exposes an all-status control to reverse ledger-only filtering', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Finanse' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Finanse' }).click()
   const allStatuses = page.getByRole('button', { name: 'Wszystkie płatności' })
   const unpaid = page.getByRole('button', { name: 'Pozostałe do zapłaty' })
 
@@ -1037,7 +1049,7 @@ test('Payments exposes an all-status control to reverse ledger-only filtering', 
 
 test('payments table paginates a month with more than 25 settlements', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Finanse' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Finanse' }).click()
   await page.getByRole('button', { name: 'Poprzedni miesiąc' }).click()
   const pager = page.getByRole('navigation', { name: 'Stronicowanie' })
   await expect(pager).toBeVisible()
@@ -1052,8 +1064,8 @@ test('calendar opens the therapist agenda and exposes exact partial payment edit
   await login(page)
   await page.getByRole('button', { name: /Tryb demonstracyjny.*Julia Wolanin/ }).click()
   await page.getByRole('button', { name: /Specjalistka.*Marta Zielińska/ }).click()
-  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Kalendarz' }).click()
-  await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
   await expect(agenda).toBeVisible()
   await agenda.getByRole('button', { name: /Zakończone i odwołane/ }).click()
@@ -1067,8 +1079,8 @@ test('calendar opens the therapist agenda and exposes exact partial payment edit
 
 test('calendar combines payment and attendance filters after role scope', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
-  await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
   await page.getByRole('button', { name: /^Filtry/ }).click()
   const filters = page.getByRole('region', { name: 'Filtry kalendarza' })
   await filters.getByRole('button', { name: 'Nieopłacona', exact: true }).click()
@@ -1086,7 +1098,7 @@ test('calendar combines payment and attendance filters after role scope', async 
 
 test('calendar day strip scrolls with the page instead of covering the agenda', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
   const terminal = agenda.getByRole('button', { name: /Zakończone i odwołane/ })
   await terminal.click()
@@ -1106,7 +1118,7 @@ test('calendar day strip scrolls with the page instead of covering the agenda', 
 test('selecting a day keeps the visible calendar in place', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 600 })
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
   const strip = page.locator('.day-strip')
   await expect(strip).toBeVisible()
   // today's pill: its panel is already on screen, so selecting must not scroll
@@ -1118,7 +1130,7 @@ test('selecting a day keeps the visible calendar in place', async ({ page }) => 
 
 test('month view shows sessions across the whole month by default', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
   await page.getByRole('radio', { name: 'Miesiąc' }).click()
   expect(await page.locator('.cal__day:has(.cal__item)').count()).toBeGreaterThan(1)
 })
@@ -1127,15 +1139,15 @@ test('therapist agenda excludes other therapists and payment updates stay cohere
   await login(page)
   await page.getByRole('button', { name: /Tryb demonstracyjny/ }).click()
   await page.getByRole('button', { name: /Specjalistka.*Marta Zielińska/ }).click()
-  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
-  await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
   await expect(page.getByRole('region', { name: /Plan dnia/ }).locator('[data-psych-id="p1"]')).toHaveCount(0)
 })
 
 test('owner attention opens matching all-period unpaid payments', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
-  await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('button').first().click()
+  await page.getByRole('region', { name: 'Wymaga uwagi' }).getByRole('link').first().click()
   await expect(page.getByRole('region', { name: 'Zakres finansów' })).toContainText('Wszystkie okresy')
   await expect(page.getByRole('region', { name: 'Filtry listy rozliczeń' })).toContainText('Pozostałe do zapłaty')
   await expect(page.locator('.figures__item--gold .figures__value')).toBeVisible()
@@ -1152,7 +1164,7 @@ test.describe('Task 3 daily-care redesign', () => {
 
     const hero = page.locator('.today-hero')
     await expect(hero.getByText('Trwa teraz', { exact: true })).toBeVisible()
-    await expect(hero.getByRole('heading', { level: 1 })).toHaveText('10:00')
+    await expect(hero.locator('.today-hero__time')).toHaveText('10:00')
 
     const summary = page.getByRole('region', { name: 'Podsumowanie dnia' })
     await expect(summary).toContainText('Odbyte 3')
@@ -1193,7 +1205,7 @@ test.describe('Task 3 daily-care redesign', () => {
 
     const hero = page.locator('.today-hero')
     await expect(hero.getByText('Następna sesja', { exact: true })).toBeVisible()
-    await expect(hero.getByRole('heading', { level: 1 })).toHaveText('10:00')
+    await expect(hero.locator('.today-hero__time')).toHaveText('10:00')
   })
 
   test('Today keeps more than four non-completed rows visible', async ({ page }) => {
@@ -1226,7 +1238,7 @@ test.describe('Task 3 daily-care redesign', () => {
     await freezeTime(page, '2026-07-14T20:00:00')
     await login(page)
 
-    await expect(page.getByRole('heading', { level: 1, name: '2 sesji wymaga statusu' })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 2, name: '2 sesji wymaga statusu' })).toBeVisible()
     await expect(page.locator('.today-hero')).toContainText(/Zaktualizuj.*status/i)
     const visibleRows = page.getByRole('region', { name: 'Plan dnia' }).locator('.today-session')
     expect(await visibleRows.evaluateAll((rows) => rows.map((row) => row.dataset.priority))).toEqual([
@@ -1246,13 +1258,13 @@ test.describe('Task 3 daily-care redesign', () => {
     await freezeTime(page, '2026-07-14T20:00:00')
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('link', { name: 'Kalendarz' }).click()
 
     await setAgendaStatus(page, 'Status: Zaplanowana — Anna i Paweł Romanowscy, 10:00', 'Odbyta')
     await setAgendaStatus(page, 'Status: Zaplanowana — Tomasz Bąk, 14:00', 'Odbyta')
-    await navigation.getByRole('button', { name: 'Dziś' }).click()
+    await navigation.getByRole('link', { name: 'Dziś' }).click()
 
-    await expect(page.getByRole('heading', { level: 1, name: 'Dzień zakończony' })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 2, name: 'Dzień zakończony' })).toBeVisible()
     await expect(page.getByRole('region', { name: 'Podsumowanie dnia' })).toContainText('Pozostałe 0')
   })
 
@@ -1261,7 +1273,7 @@ test.describe('Task 3 daily-care redesign', () => {
     await login(page)
     await switchToTherapist(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('link', { name: 'Kalendarz' }).click()
 
     await setAgendaStatus(page, 'Status: Zaplanowana — Anna i Paweł Romanowscy, 10:00', 'Odwołana')
     await page.getByRole('region', { name: 'Plan dnia' })
@@ -1274,16 +1286,16 @@ test.describe('Task 3 daily-care redesign', () => {
     await dialog.getByRole('radio', { name: 'Odwołana', exact: true }).click()
     await dialog.getByRole('button', { name: 'Zapisz zmiany' }).click()
     await expect(dialog).toBeHidden()
-    await navigation.getByRole('button', { name: 'Dziś' }).click()
+    await navigation.getByRole('link', { name: 'Dziś' }).click()
 
-    await expect(page.getByRole('heading', { level: 1, name: 'Wolny dzień' })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 2, name: 'Wolny dzień' })).toBeVisible()
     await expect(page.getByRole('region', { name: 'Plan dnia' })).toHaveCount(0)
   })
 
   test('Calendar shows the whole active agenda, groups terminal rows, and uses a roving seven-day week', async ({ page }) => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+    await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
 
     const agenda = page.getByRole('region', { name: 'Plan dnia' })
     await expect(agenda.locator('[data-attendance="scheduled"], [data-attendance="noshow"]')).toHaveCount(4)
@@ -1329,7 +1341,7 @@ test.describe('Task 3 daily-care redesign', () => {
   test('Calendar keeps six active rows visible and exposes only canonical filter labels', async ({ page }) => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+    await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
     await page.getByLabel('Wybierz datę').fill('2026-07-17')
 
     const agenda = page.getByRole('region', { name: 'Plan dnia' })
@@ -1385,7 +1397,7 @@ test.describe('Task 3 daily-care redesign', () => {
   test('a client appointment deep-link highlights and focuses its calendar row without hiding peers', async ({ page }) => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+    await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
     await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
 
     const upcoming = page.getByRole('region', { name: 'Najbliższe spotkania' })
@@ -1404,7 +1416,7 @@ test.describe('Task 3 daily-care redesign', () => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('link', { name: 'Kalendarz' }).click()
 
     await page.getByLabel('Wybierz datę').fill('2026-06-30')
     await page.getByRole('button', { name: /^Filtry/ }).click()
@@ -1416,8 +1428,8 @@ test.describe('Task 3 daily-care redesign', () => {
       .click()
     await page.getByRole('radio', { name: 'Miesiąc' }).click()
 
-    await navigation.getByRole('button', { name: 'Klienci' }).click()
-    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('link', { name: 'Klienci' }).click()
+    await navigation.getByRole('link', { name: 'Kalendarz' }).click()
 
     await expect(page.getByRole('radio', { name: 'Miesiąc' })).toHaveAttribute('aria-checked', 'true')
     await expect(page.locator('.month-nav__label')).toContainText('czerwiec 2026')
@@ -1433,7 +1445,7 @@ test.describe('Task 3 daily-care redesign', () => {
   test('Calendar week keeps adjacent-month session metadata', async ({ page }) => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+    await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
 
     await page.getByLabel('Wybierz datę').fill('2026-07-01')
 
@@ -1447,7 +1459,7 @@ test.describe('Task 3 daily-care redesign', () => {
     await page.setViewportSize({ width: 390, height: 844 })
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
-    await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('button', { name: 'Klienci' }).click()
+    await page.getByRole('navigation', { name: 'Nawigacja dolna' }).getByRole('link', { name: 'Klienci' }).click()
 
     const search = page.getByPlaceholder('Imię, e-mail lub telefon')
     await search.fill('512384664')
@@ -1475,7 +1487,7 @@ test.describe('Task 3 daily-care redesign', () => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Klienci' }).click()
+    await navigation.getByRole('link', { name: 'Klienci' }).click()
 
     await page.getByPlaceholder('Imię, e-mail lub telefon').fill('Joanna')
     await page.getByRole('group', { name: 'Specjalistka' }).getByRole('button', { name: 'Marta' }).click()
@@ -1485,7 +1497,7 @@ test.describe('Task 3 daily-care redesign', () => {
     await expect(link.locator('xpath=ancestor::tr')).not.toHaveAttribute('tabindex')
     await link.click()
 
-    await navigation.getByRole('button', { name: 'Klienci' }).click()
+    await navigation.getByRole('link', { name: 'Klienci' }).click()
     await expect(page.getByPlaceholder('Imię, e-mail lub telefon')).toHaveValue('Joanna')
     await expect(page.getByRole('group', { name: 'Specjalistka' }).getByRole('button', { name: 'Marta' })).toHaveAttribute('aria-pressed', 'true')
     await expect(page.getByRole('group', { name: 'Status klienta' }).getByRole('button', { name: 'Aktywni' })).toHaveAttribute('aria-pressed', 'true')
@@ -1500,7 +1512,7 @@ test.describe('Task 3 daily-care redesign', () => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Klienci' }).click()
+    await navigation.getByRole('link', { name: 'Klienci' }).click()
 
     await page.getByRole('group', { name: 'Status klienta' }).getByRole('button', { name: 'Wstrzymani' }).click()
     await expect(page.getByRole('row', { name: /Anna i Paweł Romanowscy/ })).toBeVisible()
@@ -1520,8 +1532,8 @@ test.describe('Task 3 daily-care redesign', () => {
     })
     expect(savedScroll).toBeGreaterThan(0)
 
-    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
-    await navigation.getByRole('button', { name: 'Klienci' }).click()
+    await navigation.getByRole('link', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('link', { name: 'Klienci' }).click()
     await expect.poll(() => content.evaluate((element) => element.scrollTop)).toBe(savedScroll)
 
     await expect(page.getByPlaceholder('Imię, e-mail lub telefon')).toHaveValue('Stas')
@@ -1544,7 +1556,7 @@ test.describe('Task 3 daily-care redesign', () => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Klienci' }).click()
+    await navigation.getByRole('link', { name: 'Klienci' }).click()
 
     for (let index = 1; index <= 5; index += 1) {
       await addClient(page, `Testowa Osoba ${index}`)
@@ -1554,8 +1566,8 @@ test.describe('Task 3 daily-care redesign', () => {
     await pager.getByRole('button', { name: 'Następna strona' }).click()
     await expectTextStableAcrossFrames(pager, 'Strona 2 z 2')
 
-    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
-    await navigation.getByRole('button', { name: 'Klienci' }).click()
+    await navigation.getByRole('link', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('link', { name: 'Klienci' }).click()
     await expectTextStableAcrossFrames(page.getByRole('navigation', { name: 'Stronicowanie' }), 'Strona 2 z 2')
 
     await addClient(page, 'Testowa Osoba 6')
@@ -1583,7 +1595,7 @@ test.describe('Task 3 daily-care redesign', () => {
       await page.setViewportSize({ width, height: 844 })
       const navigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
       for (const label of ['Dziś', 'Kalendarz', 'Klienci']) {
-        await navigation.getByRole('button', { name: label, exact: true }).click()
+        await navigation.getByRole('link', { name: label, exact: true }).click()
         await expectNoHorizontalPageOverflow(page)
       }
     }
@@ -1592,7 +1604,7 @@ test.describe('Task 3 daily-care redesign', () => {
   test('entity-link hrefs hydrate client and highlighted calendar routes after login', async ({ page }) => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+    await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
 
     const clientHref = await page.getByRole('link', { name: 'Otwórz kartę — Joanna Madej' }).getAttribute('href')
     await page.goto(new URL(clientHref, page.url()).href)
@@ -1634,7 +1646,7 @@ test.describe('Task 4 administrative redesign', () => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    await navigation.getByRole('link', { name: 'Finanse' }).click()
 
     const scope = page.getByRole('region', { name: 'Zakres finansów' })
     await expect(scope).toContainText('Zakres: Lipiec 2026 · Cały zespół')
@@ -1664,8 +1676,8 @@ test.describe('Task 4 administrative redesign', () => {
     await expect(comparison).toContainText('Anna')
     await expect(comparison).not.toContainText('Julia')
 
-    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
-    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    await navigation.getByRole('link', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('link', { name: 'Finanse' }).click()
     await expect(scope.getByRole('button', { name: 'Anna Lewandowska' })).toHaveAttribute('aria-pressed', 'true')
     await expect(ledgerFilters.getByRole('button', { name: 'Pozostałe do zapłaty' })).toHaveAttribute('aria-pressed', 'true')
 
@@ -1678,8 +1690,8 @@ test.describe('Task 4 administrative redesign', () => {
     await pager.getByRole('button', { name: 'Następna strona' }).click()
     await expect(pager).toContainText('Strona 2')
 
-    await navigation.getByRole('button', { name: 'Kalendarz' }).click()
-    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    await navigation.getByRole('link', { name: 'Kalendarz' }).click()
+    await navigation.getByRole('link', { name: 'Finanse' }).click()
     await expect(page.locator('.month-nav__label')).toHaveText(savedMonth)
     await expect(page.getByRole('navigation', { name: 'Stronicowanie' })).toContainText('Strona 2')
   })
@@ -1687,7 +1699,7 @@ test.describe('Task 4 administrative redesign', () => {
   test('Finanse validates additive payments and Undo restores all four snapshot fields', async ({ page }) => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
-    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Finanse' }).click()
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Finanse' }).click()
 
     const row = page.locator('tr[data-session-id="demo-unpaid"]')
     await expect(row).toHaveAttribute('data-payment', 'unpaid')
@@ -1766,7 +1778,7 @@ test.describe('Task 4 administrative redesign', () => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    await navigation.getByRole('link', { name: 'Finanse' }).click()
     const row = page.locator('tr[data-session-id="demo-unpaid"]')
 
     await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
@@ -1786,7 +1798,7 @@ test.describe('Task 4 administrative redesign', () => {
     await expect(dialog).toContainText(/pozostało 211,79\s*zł/)
     await dialog.getByRole('button', { name: 'Anuluj' }).click()
 
-    await navigation.getByRole('button', { name: 'Raporty' }).click()
+    await navigation.getByRole('link', { name: 'Raporty' }).click()
     await expect(page.locator('.figures__item').filter({ hasText: 'Wpłacono' }).first()).toContainText(/,21\s*zł/)
   })
 
@@ -1794,7 +1806,7 @@ test.describe('Task 4 administrative redesign', () => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Finanse' }).click()
+    await navigation.getByRole('link', { name: 'Finanse' }).click()
     const row = page.locator('tr[data-session-id="demo-unpaid"]')
 
     await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
@@ -1811,7 +1823,7 @@ test.describe('Task 4 administrative redesign', () => {
 
     await page.getByLabel('Hasło').fill('demo')
     await page.getByRole('button', { name: 'Zaloguj się' }).click()
-    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Finanse' }).click()
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Finanse' }).click()
     await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
     dialog = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
     await dialog.getByLabel('Forma płatności').selectOption('transfer')
@@ -1828,7 +1840,7 @@ test.describe('Task 4 administrative redesign', () => {
   test('only the newest payment Undo remains actionable for one session', async ({ page }) => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
-    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Finanse' }).click()
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Finanse' }).click()
     const row = page.locator('tr[data-session-id="demo-unpaid"]')
     const book = async (amount, method) => {
       await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
@@ -1852,7 +1864,7 @@ test.describe('Task 4 administrative redesign', () => {
     await freezeTime(page, '2026-07-14T10:30:00')
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Raporty' }).click()
+    await navigation.getByRole('link', { name: 'Raporty' }).click()
 
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Raport miesięczny — lipiec 2026')
     await expect(page.getByText('Zakres raportu: Cały zespół', { exact: true })).toBeVisible()
@@ -1876,8 +1888,8 @@ test.describe('Task 4 administrative redesign', () => {
 
     await page.getByRole('button', { name: 'Poprzedni miesiąc' }).click()
     const savedHeading = await page.getByRole('heading', { level: 1 }).textContent()
-    await navigation.getByRole('button', { name: 'Finanse' }).click()
-    await navigation.getByRole('button', { name: 'Raporty' }).click()
+    await navigation.getByRole('link', { name: 'Finanse' }).click()
+    await navigation.getByRole('link', { name: 'Raporty' }).click()
     await expect(page.getByRole('heading', { level: 1 })).toHaveText(savedHeading)
     await expect(page.getByRole('group', { name: 'Specjalistka raportu' }).getByRole('button', { name: 'Anna Lewandowska' })).toHaveAttribute('aria-pressed', 'true')
 
@@ -1892,7 +1904,7 @@ test.describe('Task 4 administrative redesign', () => {
   test('Ustawienia limits the coordinator to personal calendar and integration preferences', async ({ page }) => {
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await navigation.getByRole('link', { name: 'Ustawienia' }).click()
     await page.getByRole('navigation', { name: 'Sekcje ustawień' })
       .getByRole('button', { name: 'Zespół i stawki' }).click()
 
@@ -1916,7 +1928,7 @@ test.describe('Task 4 administrative redesign', () => {
   test('Ustawienia limits the therapist to personal calendar and integration preferences', async ({ page }) => {
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await navigation.getByRole('link', { name: 'Ustawienia' }).click()
     await page.getByRole('navigation', { name: 'Sekcje ustawień' })
       .getByRole('button', { name: 'Centrum' }).click()
 
@@ -1940,7 +1952,7 @@ test.describe('Task 4 administrative redesign', () => {
   test('Ustawienia keeps ordered local section navigation on desktop and mobile', async ({ page }) => {
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await navigation.getByRole('link', { name: 'Ustawienia' }).click()
 
     const localNavigation = page.getByRole('navigation', { name: 'Sekcje ustawień' })
     await expect(localNavigation.getByRole('button')).toHaveText([
@@ -1953,8 +1965,8 @@ test.describe('Task 4 administrative redesign', () => {
     await localNavigation.getByRole('button', { name: 'Zespół i stawki' }).click()
     await expect(page.getByRole('heading', { name: 'Zespół i stawki', exact: true })).toBeFocused()
 
-    await navigation.getByRole('button', { name: 'Finanse' }).click()
-    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await navigation.getByRole('link', { name: 'Finanse' }).click()
+    await navigation.getByRole('link', { name: 'Ustawienia' }).click()
     await expect(localNavigation.getByRole('button', { name: 'Zespół i stawki' })).toHaveAttribute('aria-current', 'true')
 
     await page.setViewportSize({ width: 390, height: 844 })
@@ -1972,7 +1984,7 @@ test.describe('Task 4 administrative redesign', () => {
 
   test('Ustawienia validates local drafts and saves the whole team explicitly', async ({ page }) => {
     await login(page)
-    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Ustawienia' }).click()
 
     const account = page.getByRole('form', { name: 'Twoje konto' })
     const saveAccount = account.getByRole('button', { name: 'Zapisz konto' })
@@ -2034,7 +2046,7 @@ test.describe('Task 4 administrative redesign', () => {
 
   test('team drafts rebase pristine fields while preserving dirty fields after profile edits', async ({ page }) => {
     await login(page)
-    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Ustawienia' }).click()
     await page.getByRole('navigation', { name: 'Sekcje ustawień' }).getByRole('button', { name: 'Zespół i stawki' }).click()
     const team = page.getByRole('form', { name: 'Zespół i stawki' })
     const juliaRate = team.getByLabel('Stawka — Julia Wolanin')
@@ -2058,7 +2070,7 @@ test.describe('Task 4 administrative redesign', () => {
 
   test('preference rows are full-size switches whose five-second Undo restores the prior value', async ({ page }) => {
     await login(page)
-    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('button', { name: 'Ustawienia' }).click()
+    await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Ustawienia' }).click()
     await page.getByRole('navigation', { name: 'Sekcje ustawień' }).getByRole('button', { name: 'Kalendarz i integracje' }).click()
 
     const weekends = page.getByRole('switch', { name: 'Weekendy w kalendarzu' })
@@ -2099,15 +2111,15 @@ test.describe('Task 4 administrative redesign', () => {
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 844 })
       const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
-      await bottomNavigation.getByRole('button', { name: 'Finanse', exact: true }).click()
+      await bottomNavigation.getByRole('link', { name: 'Finanse', exact: true }).click()
       await expectNoHorizontalPageOverflow(page)
 
       await bottomNavigation.getByRole('button', { name: 'Więcej', exact: true }).click()
-      await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Raporty' }).click()
+      await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('link', { name: 'Raporty' }).click()
       await expectNoHorizontalPageOverflow(page)
 
       await bottomNavigation.getByRole('button', { name: 'Więcej', exact: true }).click()
-      await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Ustawienia' }).click()
+      await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('link', { name: 'Ustawienia' }).click()
       await expectNoHorizontalPageOverflow(page)
     }
   })
@@ -2119,15 +2131,15 @@ test.describe('Task 5 team redesign', () => {
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
 
-    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await navigation.getByRole('link', { name: 'Ustawienia' }).click()
     await page.getByRole('navigation', { name: 'Sekcje ustawień' }).getByRole('button', { name: 'Zespół i stawki' }).click()
     const settingsTeam = page.getByRole('form', { name: 'Zespół i stawki' })
     await settingsTeam.getByLabel('Limit tygodniowy — Julia Wolanin').fill('8')
     await settingsTeam.getByRole('button', { name: 'Zapisz zespół' }).click()
     await expect(settingsTeam.getByRole('status')).toHaveText('Zapisano')
 
-    await navigation.getByRole('button', { name: 'Zespół' }).click()
-    await expect(page.locator('.view-head__sub')).toContainText('2026-07-13–2026-07-19')
+    await navigation.getByRole('link', { name: 'Zespół' }).click()
+    await expect(page.locator('.view-head__sub')).toContainText('13 lipca – 19 lipca')
     await expect(page.getByRole('link', { name: /^Otwórz profil —/ })).toHaveText([
       /Anna Lewandowska/,
       /Julia Wolanin/,
@@ -2163,8 +2175,8 @@ test.describe('Task 5 team redesign', () => {
     await filters.getByRole('button', { name: 'Dostępne miejsca' }).click()
     await expect(page.getByRole('status', { name: 'Liczba specjalistek' })).toHaveText('3 specjalistki')
     await page.locator('main.content').evaluate((element) => element.scrollTo(0, 240))
-    await navigation.getByRole('button', { name: 'Raporty' }).click()
-    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await navigation.getByRole('link', { name: 'Raporty' }).click()
+    await navigation.getByRole('link', { name: 'Zespół' }).click()
     await expect(filters.getByRole('button', { name: 'Dostępne miejsca' })).toHaveAttribute('aria-pressed', 'true')
     expect(await page.locator('main.content').evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   })
@@ -2174,21 +2186,21 @@ test.describe('Task 5 team redesign', () => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await navigation.getByRole('link', { name: 'Zespół' }).click()
 
     const martaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Marta Zielińska' }) })
     await martaCard.getByRole('link', { name: 'Klienci — Marta Zielińska' }).click()
     await expect(page.getByRole('region', { name: 'Filtry klientów' })).toContainText('Specjalistka: Marta')
 
-    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await navigation.getByRole('link', { name: 'Zespół' }).click()
     await page.locator('.team-card')
       .filter({ has: page.getByRole('link', { name: 'Otwórz profil — Marta Zielińska' }) })
       .getByRole('link', { name: 'Kalendarz — Marta Zielińska' })
       .click()
-    await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+    await expect(page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
     expect(await page.locator('.agenda__row.is-highlighted').count()).toBeGreaterThanOrEqual(1)
 
-    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await navigation.getByRole('link', { name: 'Zespół' }).click()
     const juliaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Julia Wolanin' }) })
     const alert = juliaCard.getByRole('alert')
     await expect(alert).toContainText('Konflikt')
@@ -2198,7 +2210,7 @@ test.describe('Task 5 team redesign', () => {
     })
     await expect(conflictLink).toBeVisible()
     await conflictLink.click()
-    await expect(page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
+    await expect(page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
     await expect(page.locator('.agenda__row.is-highlighted')).toHaveCount(2)
     await expect(page.locator('.agenda__row.is-highlighted').first()).toBeFocused()
   })
@@ -2206,7 +2218,7 @@ test.describe('Task 5 team redesign', () => {
   test('client specialist route params cannot escape therapist role scope', async ({ page }) => {
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await navigation.getByRole('link', { name: 'Zespół' }).click()
     const juliaCard = page.locator('.team-card').filter({ has: page.getByRole('link', { name: 'Otwórz profil — Julia Wolanin' }) })
     await juliaCard.getByRole('link', { name: 'Klienci — Julia Wolanin' }).click()
     await expect(page.getByRole('region', { name: 'Filtry klientów' })).toContainText('Specjalistka: Julia')
@@ -2239,10 +2251,10 @@ test.describe('Task 5 team redesign', () => {
   test('specialist creation is canonical on Team and Settings only links back to team management', async ({ page }) => {
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Zespół' }).click()
+    await navigation.getByRole('link', { name: 'Zespół' }).click()
     await expect(page.getByRole('button', { name: 'Dodaj specjalistkę' })).toBeVisible()
 
-    await navigation.getByRole('button', { name: 'Ustawienia' }).click()
+    await navigation.getByRole('link', { name: 'Ustawienia' }).click()
     await page.getByRole('navigation', { name: 'Sekcje ustawień' }).getByRole('button', { name: 'Zespół i stawki' }).click()
     const teamSettings = page.getByRole('form', { name: 'Zespół i stawki' })
     await expect(teamSettings.getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(0)
@@ -2266,9 +2278,9 @@ test.describe('Task 5 team redesign', () => {
       for (const width of [320, 390]) {
         await page.setViewportSize({ width, height: 844 })
         await bottomNavigation.getByRole('button', { name: 'Więcej' }).click()
-        await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Zajęcia TUS' }).click()
+        await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('link', { name: 'Zajęcia TUS' }).click()
         await expectNoHorizontalPageOverflow(page)
-        const search = page.getByPlaceholder('Dziecko, rodzic lub grupa')
+        const search = page.getByPlaceholder('Dziecko, rodzic lub grupa…')
         await search.fill('Borys Cygan')
         await expectNoHorizontalPageOverflow(page)
         const assignment = page.getByRole('button', { name: 'Przypisz dziecko — Borys Cygan' })
@@ -2279,7 +2291,7 @@ test.describe('Task 5 team redesign', () => {
         await page.getByRole('dialog', { name: 'Przypisz do grupy — Borys Cygan' }).getByRole('button', { name: 'Zamknij' }).click()
 
         await bottomNavigation.getByRole('button', { name: 'Więcej' }).click()
-        await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('button', { name: 'Zespół' }).click()
+        await page.getByRole('dialog', { name: 'Nawigacja' }).getByRole('link', { name: 'Zespół' }).click()
         await page.getByRole('button', { name: /^Filtry/ }).click()
         await expectNoHorizontalPageOverflow(page)
         const filter = page.getByRole('group', { name: 'Obłożenie' }).getByRole('button', { name: 'Cały zespół' })
@@ -2305,4 +2317,85 @@ test.describe('Task 5 team redesign', () => {
       await context.close()
     }
   })
+})
+
+test('browser back/forward walk views and hash edits navigate', async ({ page }) => {
+  await login(page)
+  const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+  const clientsHeading = page.getByRole('heading', { level: 1, name: /Klienci/ })
+  const calendarHeading = page.getByRole('heading', { level: 1, name: /Kalendarz/ })
+
+  await navigation.getByRole('link', { name: 'Klienci' }).click()
+  await expect(clientsHeading).toBeVisible()
+  await navigation.getByRole('link', { name: 'Kalendarz' }).click()
+  await expect(calendarHeading).toBeVisible()
+
+  await page.goBack()
+  await expect(clientsHeading).toBeVisible()
+  await expect(page).toHaveURL(/#\/clients/)
+
+  await page.goForward()
+  await expect(calendarHeading).toBeVisible()
+  await expect(page).toHaveURL(/#\/calendar/)
+
+  // manual hash edit while the app is open navigates as well
+  await page.evaluate(() => { window.location.hash = '#/clients' })
+  await expect(clientsHeading).toBeVisible()
+})
+
+test('payments scope syncs to the URL and restores from history', async ({ page }) => {
+  await login(page)
+  const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+  await navigation.getByRole('link', { name: 'Finanse' }).click()
+  await expect(page).toHaveURL(/#\/payments\?.*ym=\d{4}-\d{2}/)
+
+  const anna = page.getByRole('group', { name: 'Specjalistka' }).getByRole('button', { name: 'Anna' })
+  await anna.click()
+  await expect(page).toHaveURL(/specialist=p\d/)
+  await expect(anna).toHaveAttribute('aria-pressed', 'true')
+
+  await navigation.getByRole('link', { name: 'Dziś' }).click()
+  await expect(page).toHaveURL(/#\/dashboard/)
+
+  await page.goBack()
+  await expect(page).toHaveURL(/#\/payments\?.*specialist=p\d/)
+  await expect(page.getByRole('heading', { level: 1, name: /Finanse/ })).toBeVisible()
+  await expect(
+    page.getByRole('group', { name: 'Specjalistka' }).getByRole('button', { name: 'Anna' })
+  ).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('dirty forms confirm before discarding — drawer and settings drafts', async ({ page }) => {
+  await login(page)
+  const newSession = page.getByRole('button', { name: 'Nowa sesja' }).first()
+
+  // a clean drawer closes without asking
+  await newSession.click()
+  const drawer = page.getByRole('dialog', { name: 'Nowa sesja' })
+  await drawer.getByRole('button', { name: 'Anuluj' }).click()
+  await expect(drawer).toBeHidden()
+
+  // a dirty drawer warns first; "Wróć" keeps editing, "Odrzuć" discards
+  await newSession.click()
+  await drawer.getByLabel('Godzina').fill('13:30')
+  await drawer.getByRole('button', { name: 'Anuluj' }).click()
+  await expect(drawer.getByRole('alert')).toContainText('Masz niezapisane zmiany')
+  await drawer.getByRole('button', { name: 'Wróć' }).click()
+  await expect(drawer).toBeVisible()
+  await drawer.getByRole('button', { name: 'Anuluj' }).click()
+  await drawer.getByRole('button', { name: 'Odrzuć' }).click()
+  await expect(drawer).toBeHidden()
+
+  // a dirty settings draft blocks navigation until confirmed
+  const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+  await navigation.getByRole('link', { name: 'Ustawienia' }).click()
+  await page.getByLabel('Imię i nazwisko').fill('Julia Wolanin-Kowalska')
+  await navigation.getByRole('link', { name: 'Kalendarz' }).click()
+  const leaveDialog = page.getByRole('alertdialog')
+  await expect(leaveDialog).toContainText('Niezapisane zmiany')
+  await leaveDialog.getByRole('button', { name: 'Kontynuuj edycję' }).click()
+  await expect(page.getByRole('heading', { level: 1, name: /Ustawienia/ })).toBeVisible()
+  await navigation.getByRole('link', { name: 'Kalendarz' }).click()
+  await leaveDialog.getByRole('button', { name: 'Odrzuć i wyjdź' }).click()
+  await expect(page.getByRole('heading', { level: 1, name: /Kalendarz/ })).toBeVisible()
 })

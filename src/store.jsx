@@ -100,6 +100,12 @@ function reducer(state, action) {
     }
     case 'DELETE_POST':
       return { ...state, posts: state.posts.filter((p) => p.id !== action.id) }
+    case 'RESTORE_POST': {
+      if (state.posts.some((p) => p.id === action.post.id)) return state
+      const posts = [...state.posts]
+      posts.splice(Math.min(action.index ?? posts.length, posts.length), 0, action.post)
+      return { ...state, posts }
+    }
     case 'UPDATE_CENTER':
       return { ...state, center: { ...state.center, ...action.patch } }
     case 'UPDATE_USER':

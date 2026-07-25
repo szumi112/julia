@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { cloneElement, isValidElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Icon } from './icons.jsx'
 import { initials, fmtNumber } from './format.js'
 import { useToasts } from './store.jsx'
@@ -29,6 +29,35 @@ export function IconBtn({ name, label, size = 19, className = '', ...rest }) {
   )
 }
 
+// Two-step discard for dirty forms: the first close attempt (backdrop, Esc,
+// Anuluj, ✕) opens an inline confirm instead of silently dropping entered
+// data. `guard` gates the drawer close, `check` answers "is dirty?" for the
+// shell's leave guard (browser back / role switch).
+export function useDiscardGuard(dirty) {
+  const [confirming, setConfirming] = useState(false)
+  const guard = useCallback(() => {
+    if (!dirty) return true
+    setConfirming(true)
+    return false
+  }, [dirty])
+  const check = useCallback(() => dirty, [dirty])
+  const hide = useCallback(() => setConfirming(false), [])
+  return { confirming, guard, check, hide }
+}
+
+export function DiscardConfirm({ onStay, onDiscard }) {
+  return (
+    <div className="form-warn drawer__discard" role="alert">
+      <Icon name="alert" size={16} />
+      <span>Masz niezapisane zmiany.</span>
+      <span className="drawer__discard-actions">
+        <Button size="sm" variant="ghost" onClick={onStay}>Wróć</Button>
+        <Button size="sm" variant="soft" onClick={onDiscard}>Odrzuć</Button>
+      </span>
+    </div>
+  )
+}
+
 export function Pill({ tone = 'ink', children, dot, onClick, className = '', ...rest }) {
   const Tag = onClick ? 'button' : 'span'
   return (
@@ -55,6 +84,8 @@ export function Chip({ on, children, swatch, ...rest }) {
 
 export function Segmented({ options, value, onChange, ariaLabel }) {
   const wrapRef = useRef(null)
+  const thumbRef = useRef(null)
+  const prevThumbRef = useRef(null)
   const [thumb, setThumb] = useState(null)
 
   useLayoutEffect(() => {
@@ -72,6 +103,27 @@ export function Segmented({ options, value, onChange, ariaLabel }) {
     return () => ro.disconnect()
   }, [value, options])
 
+  // transform-only FLIP: the layout snaps instantly, the thumb glides in from
+  // the previous rect via translate/scale
+  useLayoutEffect(() => {
+    const el = thumbRef.current
+    if (!el || !thumb) return
+    const prev = prevThumbRef.current
+    prevThumbRef.current = thumb
+    if (!prev || !motionOK()) return
+    const dx = prev.left - thumb.left
+    const dy = prev.top - thumb.top
+    const sx = thumb.width ? prev.width / thumb.width : 1
+    const sy = thumb.height ? prev.height / thumb.height : 1
+    if (!dx && !dy && sx === 1 && sy === 1) return
+    el.style.transition = 'none'
+    el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`
+    requestAnimationFrame(() => {
+      el.style.transition = ''
+      el.style.transform = ''
+    })
+  }, [thumb])
+
   // radio-style keyboard model: one tab stop, arrows move the selection
   const move = (dir) => {
     const idx = options.findIndex((o) => o.value === value)
@@ -82,7 +134,7 @@ export function Segmented({ options, value, onChange, ariaLabel }) {
 
   return (
     <div className="seg" role="radiogroup" aria-label={ariaLabel} ref={wrapRef}>
-      {thumb && <span className="seg__thumb" style={{ left: thumb.left, width: thumb.width, top: thumb.top, height: thumb.height }} />}
+      {thumb && <span className="seg__thumb" ref={thumbRef} style={{ left: thumb.left, width: thumb.width, top: thumb.top, height: thumb.height }} />}
       {options.map((o) => (
         <button
           key={o.value}
@@ -124,11 +176,15 @@ export function Field({ label, error, hint, children, className = '', span2 }) {
   }
   return (
     <div className={`field ${error ? 'has-error' : ''} ${span2 ? 'span2' : ''} ${className}`}>
-      {label && <label className="field__label" htmlFor={labelFor}>{label}</label>}
+      {/* a <label> only associates with native controls — compound children
+          (Segmented, Check, custom rows) get a plain caption instead */}
+      {label && (labelFor
+        ? <label className="field__label" htmlFor={labelFor}>{label}</label>
+        : <span className="field__label">{label}</span>)}
       {child}
       {hint && !error && <span className="field__hint" id={descId}>{hint}</span>}
       {error && (
-        <span className="field__error" id={descId}>
+        <span className="field__error" id={descId} role="alert">
           <Icon name="alert" size={13} /> {error}
         </span>
       )}
@@ -188,6 +244,7 @@ export function Avatar({ name, color = '#964d5f', size = 38 }) {
   return (
     <span
       className="avatar"
+      aria-hidden="true"
       style={{
         width: size,
         height: size,
@@ -375,6 +432,8 @@ export function SearchInput({ value, onChange, placeholder = 'Szukaj…', inputR
       <input
         ref={inputRef}
         type="search"
+        autoComplete="off"
+        spellCheck={false}
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
@@ -416,7 +475,7 @@ function ToastItem({ toast, onDismiss }) {
     }
   }
   return (
-    <div className="toast" ref={ref} role="status">
+    <div className="toast" ref={ref}>
       <Icon name={toast.icon} size={16} />
       <span className="toast__message">{toast.msg}</span>
       {toast.action && (

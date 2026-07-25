@@ -310,10 +310,11 @@ export function TusChildQuickCreate({ clients, pendingParents = [], onAdd, onCan
           <div className="form-grid">
             <Field label="Imię i nazwisko dziecka" error={errors.childName} className="span2">
               <input
+                name="tus-child-name"
+                autoComplete="off"
                 className="input"
                 value={form.childName}
                 placeholder="np. Mila Kowalska"
-                autoFocus
                 onChange={(event) => set('childName', event.target.value)}
               />
             </Field>
@@ -324,6 +325,8 @@ export function TusChildQuickCreate({ clients, pendingParents = [], onAdd, onCan
                 min="3"
                 max="12"
                 inputMode="numeric"
+                name="tus-child-age"
+                autoComplete="off"
                 value={form.age}
                 onChange={(event) => set('age', event.target.value)}
               />
@@ -371,6 +374,8 @@ export function TusChildQuickCreate({ clients, pendingParents = [], onAdd, onCan
                   <input
                     className="input parent-combo__input"
                     type="search"
+                    autoComplete="off"
+                    spellCheck={false}
                     role="combobox"
                     aria-label="Szukaj rodzica lub opiekuna"
                     aria-autocomplete="list"
@@ -425,7 +430,7 @@ export function TusChildQuickCreate({ clients, pendingParents = [], onAdd, onCan
                           type="button"
                           className={`parent-option ${index === activeParent ? 'is-active' : ''}`}
                           role="option"
-                          aria-selected="false"
+                          aria-selected={index === activeParent}
                           tabIndex={-1}
                           onMouseDown={(event) => event.preventDefault()}
                           onClick={() => {
@@ -469,14 +474,14 @@ export function TusChildQuickCreate({ clients, pendingParents = [], onAdd, onCan
                 <button type="button" className="link" onClick={() => setParentMode('existing')}>Wybierz istniejącą</button>
               </div>
               <Field label="Imię i nazwisko rodzica" error={errors.parentName}>
-                <input className="input" value={form.parentName} placeholder="np. Anna Kowalska" onChange={(event) => set('parentName', event.target.value)} />
+                <input name="tus-parent-name" autoComplete="off" className="input" value={form.parentName} placeholder="np. Anna Kowalska" onChange={(event) => set('parentName', event.target.value)} />
               </Field>
               <div className="form-grid">
                 <Field label="Telefon rodzica" error={errors.parentPhone}>
-                  <input type="tel" className="input" value={form.parentPhone} placeholder="+48 600 000 000" onChange={(event) => set('parentPhone', event.target.value)} />
+                  <input type="tel" name="tus-parent-phone" autoComplete="off" className="input" value={form.parentPhone} placeholder="+48 600 000 000" onChange={(event) => set('parentPhone', event.target.value)} />
                 </Field>
                 <Field label="E-mail rodzica (opcjonalnie)" error={errors.parentEmail}>
-                  <input type="email" className="input" value={form.parentEmail} placeholder="anna@gmail.com" onChange={(event) => set('parentEmail', event.target.value)} />
+                  <input type="email" name="tus-parent-email" autoComplete="off" spellCheck={false} className="input" value={form.parentEmail} placeholder="anna@gmail.com" onChange={(event) => set('parentEmail', event.target.value)} />
                 </Field>
               </div>
             </div>

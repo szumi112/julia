@@ -200,7 +200,7 @@ export function TusGroups() {
           inputRef={searchRef}
           value={query}
           onChange={setQuery}
-          placeholder="Dziecko, rodzic lub grupa"
+          placeholder="Dziecko, rodzic lub grupa…"
         />
       </div>
 
@@ -316,7 +316,7 @@ export function TusGroups() {
                       <Avatar name={kid.name} size={34} />
                       <span>
                         <strong>{kid.name}</strong>
-                        <small>{kid.age} l. · {kid.parentName}</small>
+                        <small>{kid.age != null ? `${kid.age} l. · ` : ''}{kid.parentName}</small>
                       </span>
                     </span>
                     <Button

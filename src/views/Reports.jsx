@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useApp, sessionsInMonth, monthStats, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
+import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { useReveal } from '../anim.js'
 import { Avatar, Button, Chip, IconBtn, Figure } from '../ui.jsx'
 import { Donut, BarFill } from '../charts.jsx'
@@ -12,7 +13,8 @@ import {
 } from '../format.js'
 
 const hoursWord = (h) => plural(h, 'godzina', 'godziny', 'godzin')
-const fmtHours = (value) => `${fmtNumber(Math.round(value))} h`
+// pl-PL decimals: "37,5 h" — one fraction digit max, integers stay clean
+const fmtHours = (value) => `${new Intl.NumberFormat('pl-PL', { maximumFractionDigits: 1 }).format(value)} h`
 const fmtRoundedNumber = (value) => fmtNumber(Math.round(value))
 
 // The written lead stays on the exact same scope and billing rules as every
@@ -41,19 +43,24 @@ function ReportLead({ ym, stats, scopeName, avg }) {
   )
 }
 
-export function Reports() {
+export function Reports({ params = {} }) {
   const { state, toast } = useApp()
   const { getViewState, patchViewState } = useShell()
   const currentYm = monthKey(new Date())
   const [initialViewState] = useState(() => {
     const saved = getViewState('reports', { ym: currentYm, specialist: null })
     return {
-      ym: typeof saved.ym === 'string' && /^\d{4}-\d{2}$/.test(saved.ym) && saved.ym <= currentYm
-        ? saved.ym
-        : currentYm,
-      specialist: state.psychologists.some((psychologist) => psychologist.id === saved.specialist)
-        ? saved.specialist
-        : null,
+      // URL params win over the registry — a shared link must reproduce its scope
+      ym: /^\d{4}-\d{2}$/.test(params.ym || '') && params.ym <= currentYm
+        ? params.ym
+        : typeof saved.ym === 'string' && /^\d{4}-\d{2}$/.test(saved.ym) && saved.ym <= currentYm
+          ? saved.ym
+          : currentYm,
+      specialist: state.psychologists.some((psychologist) => psychologist.id === params.specialist)
+        ? params.specialist
+        : state.psychologists.some((psychologist) => psychologist.id === saved.specialist)
+          ? saved.specialist
+          : null,
     }
   })
   const [ym, setYm] = useState(initialViewState.ym)
@@ -104,6 +111,12 @@ export function Reports() {
       specialist: selectedPsychologist?.id || null,
     })
   }, [patchViewState, selectedPsychologist, ym])
+
+  // month and scope live in the URL, so a report view can be shared
+  useRouteParamsSync('reports', {
+    ym: ym !== currentYm ? ym : undefined,
+    specialist: psychFilter || undefined,
+  })
 
   return (
     <div ref={ref}>
@@ -201,7 +214,7 @@ export function Reports() {
                         </span>
                       </td>
                       <td className="right num-cell">{sessions}</td>
-                      <td className="right num-cell">{Math.round(hours * 10) / 10} h</td>
+                      <td className="right num-cell">{fmtHours(hours)}</td>
                       <td className="right num-cell">{fmtMoney(revenue)}</td>
                       <td className="right num-cell" style={{ color: 'var(--sage-deep)' }}>{fmtMoney(collected)}</td>
                       <td className="right num-cell" style={{ color: outstanding > 0 ? 'var(--gold-deep)' : 'var(--ink-faint)' }}>
@@ -218,7 +231,7 @@ export function Reports() {
                     <tr className="table__total">
                       <td style={{ fontWeight: 700, fontFamily: 'var(--font-display)' }}>Całe centrum</td>
                       <td className="right num-cell" style={{ fontWeight: 700 }}>{stats.completed}</td>
-                      <td className="right num-cell" style={{ fontWeight: 700 }}>{Math.round(stats.hours * 10) / 10} h</td>
+                      <td className="right num-cell" style={{ fontWeight: 700 }}>{fmtHours(stats.hours)}</td>
                       <td className="right num-cell" style={{ fontWeight: 700 }}>{fmtMoney(stats.revenue)}</td>
                       <td className="right num-cell" style={{ fontWeight: 700, color: 'var(--sage-deep)' }}>{fmtMoney(stats.collected)}</td>
                       <td className="right num-cell" style={{ fontWeight: 700, color: 'var(--gold-deep)' }}>
@@ -240,7 +253,7 @@ export function Reports() {
                   </header>
                   <dl className="report-summary-card__metrics">
                     <div><dt>Sesje odbyte</dt><dd>{sessions}</dd></div>
-                    <div><dt>Godziny</dt><dd>{Math.round(hours * 10) / 10} h</dd></div>
+                    <div><dt>Godziny</dt><dd>{fmtHours(hours)}</dd></div>
                     <div><dt>Należne za rozliczone sesje</dt><dd>{fmtMoney(revenue)}</dd></div>
                     <div><dt>Wpłacono</dt><dd>{fmtMoney(collected)}</dd></div>
                     <div><dt>Pozostało do zapłaty</dt><dd>{outstanding > 0 ? fmtMoney(outstanding) : '—'}</dd></div>

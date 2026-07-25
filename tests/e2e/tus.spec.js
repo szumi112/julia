@@ -13,7 +13,7 @@ async function switchToTherapist(page) {
 }
 
 async function openGroup(page, name) {
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await page.getByRole('link', { name: `Otwórz grupę — ${name}` }).click()
   await expect(page.getByRole('heading', { name: new RegExp(name) })).toBeVisible()
 }
@@ -34,14 +34,14 @@ test('owner reviews TUS groups and toggles attendance', async ({ page }) => {
 
 test('group cards surface their age bands', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   const group = page.getByRole('link', { name: 'Otwórz grupę — Grupa TUS 5–6 lat' })
   await expect(group.getByText('5–6 lat', { exact: true })).toBeVisible()
 })
 
 test('TUS overview reports group and child counts', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await expect(page.locator('.view-head__sub')).toContainText('2 grupy · 9 dzieci w grupach · 2 oczekują na przydział')
 })
 
@@ -81,7 +81,7 @@ test('attendance unlocks when an open class reaches its start minute', async ({ 
 
 test('a newly created empty group has bounded month navigation', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await page.getByRole('button', { name: 'Nowa grupa' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
   await drawer.getByLabel('Nazwa grupy').fill('Grupa TUS testowa')
@@ -97,7 +97,7 @@ test('a newly created empty group has bounded month navigation', async ({ page }
 
 test('new group can add an existing child client from a searchable member picker', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await page.getByRole('button', { name: 'Nowa grupa' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
   const search = drawer.getByRole('combobox', { name: 'Szukaj dzieci' })
@@ -126,7 +126,7 @@ test('new group can add an existing child client from a searchable member picker
 test('Escape closes member search without discarding the group drawer', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await page.getByRole('button', { name: 'Nowa grupa' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
   const search = drawer.getByRole('combobox', { name: 'Szukaj dzieci' })
@@ -144,7 +144,7 @@ test('Escape closes member search without discarding the group drawer', async ({
 test('Escape closes parent search without discarding the child form', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await page.getByRole('button', { name: 'Nowa grupa' }).click()
   await page.getByRole('dialog', { name: 'Nowa grupa TUS' }).getByRole('button', { name: 'Dodaj nowe dziecko' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowe dziecko i rodzic' })
@@ -163,7 +163,7 @@ test('Escape closes parent search without discarding the child form', async ({ p
 test('parent search arrow keys select beyond the first result', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await page.getByRole('button', { name: 'Nowa grupa' }).click()
   await page.getByRole('dialog', { name: 'Nowa grupa TUS' }).getByRole('button', { name: 'Dodaj nowe dziecko' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowe dziecko i rodzic' })
@@ -179,7 +179,7 @@ test('parent search arrow keys select beyond the first result', async ({ page })
 test('parent search keeps a keyboard-active result inside the visible menu', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await page.getByRole('button', { name: 'Nowa grupa' }).click()
   await page.getByRole('dialog', { name: 'Nowa grupa TUS' }).getByRole('button', { name: 'Dodaj nowe dziecko' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowe dziecko i rodzic' })
@@ -201,7 +201,7 @@ test('parent search keeps a keyboard-active result inside the visible menu', asy
 
 test('group quick-create reuses a staged parent for linked siblings', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await page.getByRole('button', { name: 'Nowa grupa' }).click()
   let drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
 
@@ -241,17 +241,17 @@ test('group quick-create reuses a staged parent for linked siblings', async ({ p
   await expect(roster).toContainText('Mila Kowalska')
   await expect(roster).toContainText('Leo Kowalski')
   await expect(roster).toContainText('Anna Kowalska')
-  await roster.getByRole('button', { name: 'Otwórz kartę klienta: Mila Kowalska' }).click()
+  await roster.getByRole('link', { name: 'Otwórz kartę klienta: Mila Kowalska' }).click()
   await expect(page.getByRole('heading', { name: 'Mila Kowalska' })).toBeVisible()
-  await page.getByRole('button', { name: 'Anna Kowalska (rodzic)' }).click()
+  await page.getByRole('link', { name: 'Anna Kowalska (rodzic)' }).click()
   await expect(page.getByRole('heading', { name: 'Anna Kowalska' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Leo Kowalski (dziecko)' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Mila Kowalska (dziecko)' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Leo Kowalski (dziecko)' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Mila Kowalska (dziecko)' })).toBeVisible()
 })
 
 test('owner assigns a waiting child to an age group', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   const waiting = page.locator('.tus-waiting')
   await waiting.getByRole('button', { name: 'Przypisz dziecko — Borys Cygan' }).click()
   const dialog = page.getByRole('dialog', { name: 'Przypisz do grupy — Borys Cygan' })
@@ -324,7 +324,7 @@ test('owner updates TUS payment method and invoice flag', async ({ page }) => {
 test('therapist sees only led groups without payment controls', async ({ page }) => {
   await login(page)
   await switchToTherapist(page) // Marta Zielińska (p2) leads only Grupa TUS 5–6 lat
-  await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
   await expect(page.getByText('Grupa TUS 5–6 lat')).toBeVisible()
   await expect(page.getByText('Grupa TUS 4 lata')).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Nowa grupa' })).toHaveCount(0)
@@ -372,22 +372,22 @@ test('owner can add and delete a TUS class', async ({ page }) => {
 
 test('family links surface on both client records', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('link', { name: 'Otwórz kartę — Renata Gawrys' }).click()
-  await page.getByRole('button', { name: /Ignacy Borkowski \(dziecko\)/ }).click()
+  await page.getByRole('link', { name: /Ignacy Borkowski \(dziecko\)/ }).click()
   await expect(page.getByRole('heading', { name: /Ignacy Borkowski/ })).toBeVisible()
-  await expect(page.getByRole('button', { name: /Renata Gawrys \(rodzic\)/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Renata Gawrys \(rodzic\)/ })).toBeVisible()
 })
 
 test('family links support a neutral role and unlinking', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Klienci' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
   await page.locator('.id-band__actions').getByRole('button', { name: 'Edytuj' }).click()
   let drawer = page.getByRole('dialog', { name: 'Edycja klienta' })
   await drawer.getByLabel('Powiąż z klientem').selectOption({ label: 'Joanna Madej' })
   await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()
-  await expect(page.getByRole('button', { name: 'Joanna Madej (rodzina)' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Joanna Madej (rodzina)' })).toBeVisible()
 
   await page.locator('.id-band__actions').getByRole('button', { name: 'Edytuj' }).click()
   drawer = page.getByRole('dialog', { name: 'Edycja klienta' })
@@ -400,7 +400,7 @@ test('family links support a neutral role and unlinking', async ({ page }) => {
 test('payment method is recorded from the calendar payment picker', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Kalendarz' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
   const agenda = page.getByRole('region', { name: 'Plan dnia' })
   await agenda.getByRole('button', { name: /Zakończone i odwołane/ }).click()
   const unpaidRow = agenda.locator('[data-terminal="true"][data-payment="unpaid"]').first()
@@ -431,7 +431,7 @@ test('session form exposes payment method only for paid sessions', async ({ page
 
 test('google calendar demo toggle connects and disconnects', async ({ page }) => {
   await login(page)
-  await page.getByRole('navigation').getByRole('button', { name: 'Ustawienia' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Ustawienia' }).click()
   await page.getByRole('button', { name: 'Połącz (demo)' }).click()
   await expect(page.getByText('Połączono z Google Calendar (demo)')).toBeVisible()
   const disconnect = page.getByRole('button', { name: 'Rozłącz' })
@@ -443,7 +443,7 @@ test('google calendar demo toggle connects and disconnects', async ({ page }) =>
 test.describe('Task 5 TUS redesign', () => {
   test('overview separates counts, searches in ordered sections, and focuses an assigned child', async ({ page }) => {
     await login(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+    await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
 
     await expect(page.getByRole('heading', { level: 1, name: 'Grupy TUS', exact: true })).toBeVisible()
     const summary = page.locator('.view-head__sub')
@@ -470,11 +470,11 @@ test.describe('Task 5 TUS redesign', () => {
     })
     expect(savedScroll).toBeGreaterThan(0)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-    await navigation.getByRole('button', { name: 'Zespół' }).click()
-    await navigation.getByRole('button', { name: 'Zajęcia TUS' }).click()
+    await navigation.getByRole('link', { name: 'Zespół' }).click()
+    await navigation.getByRole('link', { name: 'Zajęcia TUS' }).click()
     await expect.poll(() => content.evaluate((element) => element.scrollTop)).toBe(savedScroll)
 
-    const search = page.getByPlaceholder('Dziecko, rodzic lub grupa')
+    const search = page.getByPlaceholder('Dziecko, rodzic lub grupa…')
     await search.fill('5')
     const groupHeading = page.getByRole('heading', { name: 'Grupy', exact: true })
     const peopleHeading = page.getByRole('heading', { name: 'Dzieci i rodzice', exact: true })
@@ -492,15 +492,15 @@ test.describe('Task 5 TUS redesign', () => {
   test('quick assignment orders recommendations, disables full groups, and restores coherent focus', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await login(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
-    const search = page.getByPlaceholder('Dziecko, rodzic lub grupa')
+    await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
+    const search = page.getByPlaceholder('Dziecko, rodzic lub grupa…')
     await search.fill('5')
     await page.getByRole('link', { name: 'Otwórz grupę — Grupa TUS 5–6 lat' }).click()
     await page.getByRole('button', { name: 'Edytuj grupę' }).click()
     let drawer = page.getByRole('dialog', { name: 'Edycja grupy TUS' })
     await drawer.getByLabel('Liczba miejsc').fill('5')
     await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()
-    await page.getByRole('button', { name: 'Wróć do zajęć TUS' }).click()
+    await page.getByRole('link', { name: 'Wróć do zajęć TUS' }).click()
     await expect(search).toHaveValue('5')
 
     await page.getByRole('button', { name: 'Nowa grupa' }).click()
@@ -560,8 +560,8 @@ test.describe('Task 5 TUS redesign', () => {
   test('quick assignment keeps ownership of Ctrl and Cmd K while its native modal is open', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await login(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
-    const search = page.getByPlaceholder('Dziecko, rodzic lub grupa')
+    await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
+    const search = page.getByPlaceholder('Dziecko, rodzic lub grupa…')
     await search.fill('Borys Cygan')
     const assignment = page.getByRole('button', { name: 'Przypisz dziecko — Borys Cygan' })
     await assignment.click()
@@ -589,7 +589,7 @@ test.describe('Task 5 TUS redesign', () => {
   test('group form validates integer bounds and synchronizes its readable age label', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await login(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+    await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
     await page.getByRole('button', { name: 'Nowa grupa' }).click()
     const drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
     await drawer.getByLabel('Nazwa grupy').fill('Grupa TUS walidacja')
@@ -630,12 +630,12 @@ test.describe('Task 5 TUS redesign', () => {
   test('therapist search never exposes waiting children or groups they do not lead', async ({ page }) => {
     await login(page)
     await switchToTherapist(page)
-    await page.getByRole('navigation').getByRole('button', { name: 'Zajęcia TUS' }).click()
+    await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
     await expect(page.locator('.view-head__sub')).toContainText('1 grupa')
     await expect(page.locator('.view-head__sub')).not.toContainText('oczek')
     await expect(page.getByText('Bez grupy', { exact: true })).toHaveCount(0)
 
-    const search = page.getByPlaceholder('Dziecko, rodzic lub grupa')
+    const search = page.getByPlaceholder('Dziecko, rodzic lub grupa…')
     await search.fill('Borys Cygan')
     await expect(page.getByRole('link', { name: /Borys Cygan/ })).toHaveCount(0)
     await search.fill('Antek Duda')

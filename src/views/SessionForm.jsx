@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { Button, Field, Segmented, IconBtn } from '../ui.jsx'
+import { Button, Field, Segmented, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX, motionOK } from '../anim.js'
 import { toISODate, timeToMin, fmtDayMonth, isBillable, STATUS_LABELS, PAY_LABELS, METHOD_LABELS } from '../format.js'
@@ -10,12 +10,11 @@ import { clientsForRole } from '../workspace.js'
 
 export function SessionDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
-  const { role } = useShell()
+  const { role, registerLeaveGuard } = useShell()
   const editing = opts.session || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const paidAmountRef = useRef(null)
-  const { close, shake } = useDrawerFX(drawerRef, backRef, onClose)
 
   const defaultClient = editing?.clientId || opts.clientId || ''
   const defaultPsych =
@@ -45,6 +44,10 @@ export function SessionDrawer({ opts, onClose }) {
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
   const amountTouched = useRef(!!editing)
+  const [initialForm] = useState(form)
+  const discardGuard = useDiscardGuard(JSON.stringify(form) !== JSON.stringify(initialForm))
+  const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
+  useEffect(() => registerLeaveGuard(discardGuard.check), [registerLeaveGuard, discardGuard.check])
 
   useEffect(() => {
     if (opts.focus !== 'paidAmount' || form.payment !== 'partial') return
@@ -177,13 +180,13 @@ export function SessionDrawer({ opts, onClose }) {
       dispatch({ type: 'ADD_SESSION', session: payload })
       toast('Nowa sesja dodana do kalendarza')
     }
-    close()
+    forceClose()
   }
 
   const remove = () => {
     dispatch({ type: 'DELETE_SESSION', id: editing.id })
     toast('Sesja usunięta', 'close')
-    close()
+    forceClose()
   }
 
   const client = state.clients.find((c) => c.id === form.clientId)
@@ -208,7 +211,7 @@ export function SessionDrawer({ opts, onClose }) {
           <Field label="Klient" error={errors.clientId}>
             {/* no autoFocus: it would hijack activeElement before useDrawerFX
                 records the opener, breaking focus restore on close */}
-            <select className="select" value={form.clientId} onChange={(e) => onClientChange(e.target.value)}>
+            <select name="session-client" autoComplete="off" className="select" value={form.clientId} onChange={(e) => onClientChange(e.target.value)}>
               <option value="">— wybierz klienta —</option>
               {availableClients.map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
@@ -217,7 +220,7 @@ export function SessionDrawer({ opts, onClose }) {
           </Field>
 
           <Field label="Specjalistka" error={errors.psychId}>
-            <select className="select" value={form.psychId} onChange={(e) => onPsychChange(e.target.value)}>
+            <select name="session-psych" autoComplete="off" className="select" value={form.psychId} onChange={(e) => onPsychChange(e.target.value)}>
               <option value="">— wybierz —</option>
               {availablePsychologists.map((p) => (
                 <option key={p.id} value={p.id}>{p.title} {p.name}</option>
@@ -227,13 +230,13 @@ export function SessionDrawer({ opts, onClose }) {
 
           <div className="form-grid">
             <Field label="Data" error={errors.date} hint={editing ? 'Zmiana daty przekłada sesję w kalendarzu.' : undefined}>
-              <input type="date" className="input" value={form.date} onChange={(e) => set('date', e.target.value)} />
+              <input type="date" name="session-date" autoComplete="off" className="input" value={form.date} onChange={(e) => set('date', e.target.value)} />
             </Field>
             <Field label="Godzina" error={errors.time}>
-              <input type="time" className="input" value={form.time} onChange={(e) => set('time', e.target.value)} />
+              <input type="time" name="session-time" autoComplete="off" className="input" value={form.time} onChange={(e) => set('time', e.target.value)} />
             </Field>
             <Field label="Czas trwania">
-              <select className="select" value={form.duration} onChange={(e) => set('duration', e.target.value)}>
+              <select name="session-duration" autoComplete="off" className="select" value={form.duration} onChange={(e) => set('duration', e.target.value)}>
                 <option value="50">50 minut</option>
                 <option value="60">60 minut</option>
                 <option value="80">80 minut</option>
@@ -245,10 +248,12 @@ export function SessionDrawer({ opts, onClose }) {
                 type="number"
                 min="0"
                 step="10"
-                inputMode="numeric"
+                inputMode="decimal"
+                name="session-amount"
+                autoComplete="off"
                 className="input"
                 value={form.amount}
-                placeholder="np. 220"
+                placeholder="np. 220…"
                 onChange={(e) => { amountTouched.current = true; set('amount', e.target.value) }}
               />
             </Field>
@@ -311,10 +316,12 @@ export function SessionDrawer({ opts, onClose }) {
                 type="number"
                 min="0"
                 step="10"
-                inputMode="numeric"
+                inputMode="decimal"
+                name="session-paid"
+                autoComplete="off"
                 className="input"
                 value={form.paidAmount}
-                placeholder="np. 110"
+                placeholder="np. 110…"
                 ref={paidAmountRef}
                 onChange={(e) => set('paidAmount', e.target.value)}
               />
@@ -323,6 +330,8 @@ export function SessionDrawer({ opts, onClose }) {
 
           <Field label="Zalecenia / notatka">
             <textarea
+              name="session-note"
+              autoComplete="off"
               className="textarea"
               value={form.note}
               placeholder="Zalecenia dla klienta, przebieg sesji…"
@@ -342,6 +351,10 @@ export function SessionDrawer({ opts, onClose }) {
             </div>
           )}
         </form>
+
+        {discardGuard.confirming && (
+          <DiscardConfirm onStay={discardGuard.hide} onDiscard={forceClose} />
+        )}
 
         <div className="drawer__foot">
           {editing && confirmDel ? (

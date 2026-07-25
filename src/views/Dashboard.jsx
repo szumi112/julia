@@ -1,13 +1,15 @@
-import { useRef, useState } from 'react'
+import { Fragment, useRef, useState } from 'react'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useDrawerFX } from '../anim.js'
+import { useMinuteNow } from '../clock.js'
 import { Button, Avatar, IconBtn, EmptyState } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
+import { EntityLink } from '../ux-patterns.jsx'
 import { todayWorkspace } from '../workspace.js'
 import {
-  fmtMoney, fmtWeekday, fmtDayMonth, fmtShortDate, toISODate, pad2,
-  cap, plural, timeToMin,
+  fmtMoney, fmtWeekday, fmtFullDate, toISODate, pad2,
+  isoWeek, plural, timeToMin, relDayLabel,
 } from '../format.js'
 
 // today's sessions on the day thread — the hero's working half
@@ -58,11 +60,23 @@ function TodayThread({ sessions, nowMin, currentId, nextId, onOpen }) {
     </button>
   )
 
+  // quiet captions explain why the list isn't strictly chronological
+  const GROUP_LABELS = { unresolved: 'Wymaga statusu', future: 'Jeszcze dziś', noshow: 'Nieobecności' }
+
   return (
     <div className="dash-hero__day" data-reveal>
       <div className="spine">
         <span className="spine__rule" data-spine aria-hidden="true" />
-        {visible.map(row)}
+        {visible.map((rowData, i) => {
+          const label = GROUP_LABELS[rowData.priority]
+          const showLabel = label && rowData.priority !== visible[i - 1]?.priority
+          return (
+            <Fragment key={rowData.session.id}>
+              {showLabel && <div className="today-group-label">{label}</div>}
+              {row(rowData)}
+            </Fragment>
+          )
+        })}
         {completed.length > 0 && (
           <div className="today-completed">
             <button
@@ -74,11 +88,9 @@ function TodayThread({ sessions, nowMin, currentId, nextId, onOpen }) {
             >
               Odbyte ({completed.length})
             </button>
-            {completedOpen && (
-              <div id="today-completed-sessions">
-                {completed.map((session) => row({ session, priority: 'completed', status: 'Odbyta' }))}
-              </div>
-            )}
+            <div id="today-completed-sessions">
+              {completedOpen && completed.map((session) => row({ session, priority: 'completed', status: 'Odbyta' }))}
+            </div>
           </div>
         )}
       </div>
@@ -96,13 +108,6 @@ const TODAY_SHORTCUTS = [
   { id: 'tus', label: 'Zajęcia TUS', icon: 'group' },
 ]
 
-const relDay = (iso) => {
-  const today = toISODate(new Date())
-  const y = new Date()
-  y.setDate(y.getDate() - 1)
-  return iso === today ? 'dziś' : iso === toISODate(y) ? 'wczoraj' : fmtShortDate(iso)
-}
-
 function BoardPost({ post }) {
   const { state, dispatch, toast } = useApp()
   const color = state.psychologists.find((p) => p.name === post.author)?.color
@@ -111,7 +116,7 @@ function BoardPost({ post }) {
       <Avatar name={post.author} color={color} size={32} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div className="bpost__meta">
-          <b>{post.author}</b> · {relDay(post.date)}, {post.time}
+          <b>{post.author}</b> · {relDayLabel(post.date)}, {post.time}
         </div>
         <div className="bpost__text">{post.text}</div>
       </div>
@@ -121,8 +126,14 @@ function BoardPost({ post }) {
         size={14}
         className="bpost__del"
         onClick={() => {
+          const index = state.posts.findIndex((entry) => entry.id === post.id)
           dispatch({ type: 'DELETE_POST', id: post.id })
-          toast('Wpis usunięty z tablicy', 'close')
+          toast('Wpis usunięty z tablicy', 'close', {
+            label: 'Cofnij',
+            key: `post:${post.id}`,
+            timeoutMs: 5000,
+            onClick: () => dispatch({ type: 'RESTORE_POST', post, index }),
+          })
         }}
       />
     </div>
@@ -209,10 +220,11 @@ export function BoardDrawer({ onClose }) {
 
 export function Dashboard() {
   const { state } = useApp()
-  const { navigate, openSessionForm, openClientForm, openTeamBoard, role } = useShell()
+  const { openSessionForm, openClientForm, openTeamBoard, role } = useShell()
   const ref = useReveal()
 
-  const now = new Date()
+  // minute-aligned shared clock — "Trwa teraz" / "Następna sesja" never go stale
+  const now = useMinuteNow()
   const today = toISODate(now)
   const nowMin = now.getHours() * 60 + now.getMinutes()
   const workspace = todayWorkspace(state, role, now)
@@ -237,21 +249,27 @@ export function Dashboard() {
       ? 'Wszystkie dzisiejsze sesje mają uzupełniony status.'
       : 'Kalendarz jest dziś pusty — czas na oddech.'
 
-  // the eyebrow is the whole page header: role, date, day progress
-  const eyebrow = [
-    role.id === 'therapist' && 'Mój dzień',
-    `${cap(fmtWeekday(today))}, ${fmtDayMonth(today)}`,
-    heroSession && `${daySummary.completed} z ${daySummary.total} sesji za Tobą`,
-  ].filter(Boolean).join(' · ')
+  // The masthead is the whole page header: brand, scope and the ISO week as
+  // an "issue number", then the cover date — the weekday set like a magazine
+  // cover line. The nearest session follows as the lede.
+  const scopeLabel = role.id === 'therapist' ? 'Mój dzień' : 'Pulpit dnia'
 
   return (
     <section className="today-page" role="region" aria-label="Pulpit dnia" ref={ref}>
       <header className="today-hero" data-reveal>
-        <p className="eyebrow">{eyebrow}</p>
+        <p className="eyebrow masthead__eyebrow">
+          <span translate="no">Aurelia</span> · {scopeLabel} · Tydzień {isoWeek(today)}
+        </p>
+        <h1 className="display masthead__day">{fmtWeekday(today)}</h1>
+        <p className="masthead__date">
+          {fmtFullDate(today)}
+          {heroSession && ` · ${daySummary.completed} z ${daySummary.total} sesji za Tobą`}
+        </p>
+        <hr className="today-rule today-rule--masthead" aria-hidden="true" />
         {heroSession ? (
           <>
             <p className="today-hero__state">{heroState}</p>
-            <h1 className="display today-hero__time">{heroSession.time}</h1>
+            <p className="display today-hero__time">{heroSession.time}</p>
             <p className="display today-hero__name">{heroClient?.name}</p>
             <p className="today-hero__meta">
               {heroPsych?.room || 'Gabinet do potwierdzenia'} · {heroPsych?.name}
@@ -259,7 +277,7 @@ export function Dashboard() {
           </>
         ) : (
           <>
-            <h1 className="display today-hero__title">{terminalHeading}</h1>
+            <h2 className="display today-hero__title">{terminalHeading}</h2>
             <p className="today-hero__meta">{terminalSupport}</p>
           </>
         )}
@@ -306,18 +324,29 @@ export function Dashboard() {
           {workspace.attention.slice(0, 2).map((item) => {
             const session = state.sessions.find((entry) => entry.id === item.sessionId)
             const client = session && clientOf(session.clientId)
-            const canOpenPayments = role.id !== 'therapist'
-            return (
-              <button
-                key={item.sessionId}
-                className="today-attn__row"
-                onClick={() => canOpenPayments
-                  ? navigate('payments', { allPeriods: true, unpaidOnly: true })
-                  : openSessionForm({ session })}
-              >
+            const row = (
+              <>
                 <Icon name="payments" size={15} />
                 <span><b>{client?.name || 'Klient'}</b> · zaległa płatność {fmtMoney(item.amount)}</span>
                 <Icon name="chevR" size={14} className="faint" />
+              </>
+            )
+            return role.id !== 'therapist' ? (
+              <EntityLink
+                key={item.sessionId}
+                route="payments"
+                params={{ allPeriods: true, unpaidOnly: true }}
+                className="today-attn__row"
+              >
+                {row}
+              </EntityLink>
+            ) : (
+              <button
+                key={item.sessionId}
+                className="today-attn__row"
+                onClick={() => openSessionForm({ session })}
+              >
+                {row}
               </button>
             )
           })}
@@ -327,13 +356,19 @@ export function Dashboard() {
       <hr className="today-rule" aria-hidden="true" />
       <section className="today-links" aria-label="Skróty" data-reveal>
         {shortcuts.map((shortcut) => (
-          <button
-            key={shortcut.id}
-            className="today-links__item"
-            onClick={() => shortcut.id === 'board' ? openTeamBoard() : navigate(shortcut.id)}
-          >
-            {shortcut.label}
-          </button>
+          shortcut.id === 'board' ? (
+            <button
+              key={shortcut.id}
+              className="today-links__item"
+              onClick={openTeamBoard}
+            >
+              {shortcut.label}
+            </button>
+          ) : (
+            <EntityLink key={shortcut.id} route={shortcut.id} className="today-links__item">
+              {shortcut.label}
+            </EntityLink>
+          )
         ))}
       </section>
     </section>

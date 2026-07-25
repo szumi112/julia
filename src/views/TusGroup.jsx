@@ -14,6 +14,7 @@ import {
   tusPaymentFor, tusMonthSummary,
 } from '../tus.js'
 import { kidsWord } from './Tus.jsx'
+import { EntityLink, useRouteParamsSync } from '../ux-patterns.jsx'
 
 function MethodPick({ payment, onPick }) {
   const [open, setOpen] = useState(false)
@@ -69,9 +70,11 @@ function TusPayPill({ payment, onPatch }) {
 
 export function TusGroupDetail({ params }) {
   const { state, dispatch, toast } = useApp()
-  const { navigate, role, openTusGroupForm, openTusKidForm, openTusClassForm } = useShell()
+  const { role, openTusGroupForm, openTusKidForm, openTusClassForm } = useShell()
   const ref = useReveal([params.id])
-  const [ym, setYm] = useState(monthKey(new Date()))
+  const [ym, setYm] = useState(() => (
+    /^\d{4}-\d{2}$/.test(params.ym || '') ? params.ym : monthKey(new Date())
+  ))
   const now = useMinuteNow()
   const group = state.tusGroups.find((g) => g.id === params.id)
   const centre = role.scope !== 'own'
@@ -87,13 +90,16 @@ export function TusGroupDetail({ params }) {
     return () => cancelAnimationFrame(frame)
   }, [params.focusKidId, params.id, ref])
 
+  // month lives in the URL alongside the group's own identity params
+  useRouteParamsSync('tusGroup', { id: params.id, focusKidId: params.focusKidId, ym })
+
   if (!group || !canLeadGroup(group, role)) {
     return (
       <EmptyState
         icon="group"
         title={group ? 'Ta grupa należy do innej prowadzącej' : 'Nie znaleziono grupy'}
         hint={group ? 'Widzisz tylko grupy, które prowadzisz.' : 'Być może grupa została usunięta.'}
-        action={<Button size="sm" variant="soft" onClick={() => navigate('tus')}>Wróć do zajęć TUS</Button>}
+        action={<EntityLink route="tus" className="btn btn--soft btn--sm"><span>Wróć do zajęć TUS</span></EntityLink>}
       />
     )
   }
@@ -118,9 +124,9 @@ export function TusGroupDetail({ params }) {
 
   return (
     <div ref={ref}>
-      <button className="link row" style={{ gap: 7, marginBottom: 20 }} onClick={() => navigate('tus')} data-reveal>
+      <EntityLink route="tus" className="link row" style={{ gap: 7, marginBottom: 20, width: 'fit-content' }} data-reveal>
         <Icon name="arrowL" size={16} /> Wróć do zajęć TUS
-      </button>
+      </EntityLink>
 
       <div className="id-band" data-reveal style={{ '--band-color': leaders[0]?.color || 'var(--rose-deep)' }}>
         <Avatar name={group.name.replace('Grupa ', '')} color={leaders[0]?.color} size={64} />
@@ -274,6 +280,11 @@ export function TusGroupDetail({ params }) {
               </table>
             </div>
           )}
+          {canEdit && monthClasses.some((c) => !classHasStarted(c, nowIso)) && (
+            <p className="faint" style={{ fontSize: 12.5, marginTop: 10 }}>
+              Obecność można zapisać dopiero po zakończeniu zajęć — przyszłe terminy są tylko do podglądu.
+            </p>
+          )}
         </div>
 
         {centre && roster.length > 0 && (
@@ -363,15 +374,15 @@ export function TusGroupDetail({ params }) {
                         <span className="row" style={{ gap: 10 }}>
                           <Avatar name={k.name} size={32} />
                           {k.clientId ? (
-                            <button
-                              type="button"
+                            <EntityLink
+                              route="client"
+                              params={{ id: k.clientId }}
+                              label={`Otwórz kartę klienta: ${k.name}`}
                               className="link tus-client-link"
-                              aria-label={`Otwórz kartę klienta: ${k.name}`}
-                              onClick={() => navigate('client', { id: k.clientId })}
                             >
                               <span>{k.name}</span>
                               {k.age != null ? <span className="faint">· {k.age} l.</span> : null}
-                            </button>
+                            </EntityLink>
                           ) : (
                             <span style={{ fontWeight: 600 }}>
                               {k.name}

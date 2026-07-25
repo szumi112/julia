@@ -112,7 +112,9 @@ export function CommandPalette({ onClose }) {
         return
       }
       if (e.key === 'Tab' && panelRef.current) {
-        const els = [...panelRef.current.querySelectorAll('button, input')].filter((el) => !el.disabled)
+        // single selection model: focus never leaves the input, arrows move
+        // aria-activedescendant across the options
+        const els = [...panelRef.current.querySelectorAll('input')].filter((el) => !el.disabled)
         if (!els.length) return
         const first = els[0]
         const last = els[els.length - 1]
@@ -176,6 +178,9 @@ export function CommandPalette({ onClose }) {
           <Icon name="search" size={18} />
           <input
             ref={inputRef}
+            type="search"
+            autoComplete="off"
+            spellCheck={false}
             value={query}
             placeholder="Szukaj klienta, specjalistki, widoku…"
             aria-label="Szukaj w Aurelii"
@@ -214,6 +219,7 @@ export function CommandPalette({ onClose }) {
                   role="option"
                   id={`cmd-opt-${i}`}
                   aria-selected={i === sel}
+                  tabIndex={-1}
                   onClick={() => run(item)}
                   onMouseMove={() => setSel(i)}
                 >
