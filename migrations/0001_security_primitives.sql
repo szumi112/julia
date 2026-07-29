@@ -28,6 +28,13 @@ BEGIN
   SELECT RAISE(ABORT, 'identity_collision');
 END;
 
+CREATE TRIGGER data_keys_initially_active
+BEFORE INSERT ON data_keys
+WHEN NEW.retired_at IS NOT NULL
+BEGIN
+  SELECT RAISE(ABORT, 'invalid_initial_retirement');
+END;
+
 CREATE TRIGGER data_keys_no_delete
 BEFORE DELETE ON data_keys
 BEGIN
@@ -59,6 +66,14 @@ WHEN (OLD.wrapped_key_b64 != NEW.wrapped_key_b64
   )
 BEGIN
   SELECT RAISE(ABORT, 'invalid_key_rewrap');
+END;
+
+CREATE TRIGGER data_keys_immutable_retirement
+BEFORE UPDATE ON data_keys
+WHEN OLD.retired_at IS NOT NEW.retired_at
+  AND NOT (OLD.retired_at IS NULL AND NEW.retired_at IS NOT NULL AND length(NEW.retired_at) > 0)
+BEGIN
+  SELECT RAISE(ABORT, 'immutable_retirement');
 END;
 
 CREATE TABLE audit_events (
