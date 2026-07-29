@@ -12,8 +12,8 @@ const ROLE_CAPABILITIES = Object.freeze({
 const nonempty = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
 const knownActor = (actor) => actor && typeof actor === 'object' && nonempty(actor.id)
   && ['owner', 'coordinator', 'specialist'].includes(actor.role)
-  && (actor.specialistId === null || nonempty(actor.specialistId))
-const ids = (values) => Array.isArray(values) && values.every(nonempty)
+  && (actor.role === 'specialist' ? nonempty(actor.specialistId) : actor.specialistId === null || nonempty(actor.specialistId))
+const ids = (values) => Array.isArray(values) && values.length > 0 && values.every(nonempty)
 const has = (values, value) => ids(values) && values.includes(value)
 const ownSpecialist = (actor, value) => nonempty(actor.specialistId) && actor.specialistId === value
 const clientTarget = (resource) => resource?.kind === 'client' && nonempty(resource.clientId)
@@ -27,7 +27,7 @@ export function capabilitiesForActor(actor) {
 }
 
 export function authorize(actor, capability, resource, { nowMs } = {}) {
-  if (!knownActor(actor) || !CAPABILITIES.includes(capability) || !Number.isSafeInteger(nowMs)) return false
+  if (!knownActor(actor) || !CAPABILITIES.includes(capability) || !Number.isSafeInteger(nowMs) || nowMs < 0) return false
   if (['centre.manage', 'staff.manage', 'security.audit.read'].includes(capability)) return actor.role === 'owner' && centreTarget(resource)
   if (capability === 'finance.centre.read' || capability === 'operations.health.read') return ['owner', 'coordinator'].includes(actor.role) && centreTarget(resource)
   if (capability === 'chat.general') return centreTarget(resource)

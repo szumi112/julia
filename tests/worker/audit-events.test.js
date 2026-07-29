@@ -30,6 +30,8 @@ describe('shared audit statement constructor', () => {
       { ...event, metadata: { email: 1 } }, { ...event, metadata: { version: 0 } },
       { ...event, reasonEnvelope: 'plaintext reason' }, { ...event, occurredAt: 'bad' },
       { ...event, correlationId: ' ' },
+      { ...event, action: 'data_key.rewrapped', entityType: 'data_key', entityId: 'key_fixture', metadata: { version: 2 } },
+      { ...event, reasonEnvelope: JSON.stringify({ format: 1, algorithm: 'A256GCM', dataKeyId: 'key_fixture', dataKeyVersion: 1, nonce: '', ciphertext: 'plaintext_marker' }) },
     ]
     for (const value of invalid) expect(() => auditEventStatement(env.DB, value)).toThrow(/^AUDIT_EVENT_INVALID$/)
   })

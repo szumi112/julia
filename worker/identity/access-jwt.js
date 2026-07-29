@@ -26,17 +26,15 @@ export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
     }
     const cached = byIssuer.get(issuer)
     if (cached) return cached
-    let fetchFailed = false
     const guardedFetch = async (...args) => {
       let response
-      try { response = await fetchImpl(...args) } catch { fetchFailed = true; throw remoteOutage() }
-      if (!response?.ok) { fetchFailed = true; throw remoteOutage() }
+      try { response = await fetchImpl(...args) } catch { throw remoteOutage() }
+      if (!response?.ok) throw remoteOutage()
       try {
         const body = await response.clone().json()
-        if (!body || !Array.isArray(body.keys)) { fetchFailed = true; throw remoteOutage() }
+        if (!body || !Array.isArray(body.keys) || body.keys.some((key) => !key || typeof key !== 'object' || typeof key.kty !== 'string')) throw remoteOutage()
       } catch (error) {
         if (remoteOutages.has(error)) throw error
-        fetchFailed = true
         throw remoteOutage()
       }
       return response
@@ -44,10 +42,7 @@ export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
     const remote = createRemoteJWKSet(url, { [customFetch]: guardedFetch })
     const resolver = async (...args) => {
       try { return await remote(...args) } catch (error) {
-        if (fetchFailed || remoteOutages.has(error)) {
-          fetchFailed = false
-          throw remoteOutage()
-        }
+        if (remoteOutages.has(error)) throw remoteOutage()
         throw error
       }
     }
