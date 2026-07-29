@@ -154,7 +154,8 @@ const selectExact = async (db, scope, dekVersion) => db.prepare(
    FROM data_keys WHERE scope_type = ? AND scope_id = ? AND purpose = ? AND dek_version = ?`
 ).bind(scope.type, scope.id, scope.purpose, dekVersion).first()
 
-const isDataKeyCollision = (error) => error instanceof Error && error.message.includes('identity_collision')
+const isDataKeyCollision = (error) => error instanceof Error
+  && /^(?:identity_collision|D1_ERROR:\s*identity_collision)(?::|$)/.test(error.message)
 
 export async function getOrCreateDataKey(db, keyring, scope, { id = defaultId(), dekVersion = 1, createdAt = new Date().toISOString() } = {}) {
   validateScope(scope)

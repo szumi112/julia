@@ -240,6 +240,27 @@ describe('scoped field encryption', () => {
     ), ring, rowScope(row), { id: 'key_race', createdAt: now })).resolves.toEqual(row)
   })
 
+  it.each([
+    'transport identity_collision downstream',
+    'transport: identity_collision: downstream',
+  ])('does not recover an arbitrary transport message containing the collision sentinel: %s', async (message) => {
+    const ring = await keyring()
+    const scope = { type: 'staff_directory', id: 'centre_transport_sentinel', purpose: 'identity' }
+    const row = await createWrappedDataKey(ring, { scope, id: 'key_transport_sentinel', createdAt: now })
+    const transport = new Error(message)
+    let selects = 0
+    const db = {
+      prepare: (sql) => ({ bind: () => (sql.includes('SELECT') ? {
+        first: async () => {
+          selects += 1
+          return selects === 1 ? null : row
+        },
+      } : { run: async () => { throw transport } }) }),
+    }
+    await expect(getOrCreateDataKey(db, ring, scope, { id: 'key_transport_attempt', createdAt: now })).rejects.toBe(transport)
+    expect(selects).toBe(1)
+  })
+
   it('decrypts and rewraps retired V1 rows but does not encrypt them, returning a frozen fresh-nonce CAS patch', async () => {
     const v1 = await keyring()
     const row = await createWrappedDataKey(v1, { scope: { ...scope, id: 'centre_rotate' }, id: 'key_rotate', createdAt: now })
