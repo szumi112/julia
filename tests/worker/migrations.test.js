@@ -79,7 +79,7 @@ const insertInvitation = (id, staffId, inviterId, overrides = {}) => {
     role: 'coordinator',
     status: 'pending',
     expires_at: '2026-08-01T10:00:00.000Z',
-    access_allowed_at: null,
+    access_allowed_at: now,
     email_sent_at: null,
     activated_at: null,
     revoked_at: null,
@@ -429,8 +429,8 @@ describe('foundation migrations', () => {
   it('allows only the approved invitation, outbox, scheduler, and backup transitions', async () => {
     await insertStaff('stf_graph_inviter')
     await insertStaff('stf_graph_provisioned', { role: 'coordinator', status: 'pending', access_subject: null, activated_at: null })
-    await insertInvitation('inv_graph', 'stf_graph_provisioned', 'stf_graph_inviter', { status: 'provisioning' })
-    await run("UPDATE staff_invitations SET status = 'pending', version = 2, updated_at = ? WHERE id = 'inv_graph'", later)
+    await insertInvitation('inv_graph', 'stf_graph_provisioned', 'stf_graph_inviter', { status: 'provisioning', access_allowed_at: null })
+    await run("UPDATE staff_invitations SET status = 'pending', access_allowed_at = ?, version = 2, updated_at = ? WHERE id = 'inv_graph'", later, later)
     await run("UPDATE staff_invitations SET status = 'activated', activated_at = ?, version = 3, updated_at = ? WHERE id = 'inv_graph'", later, later)
     await expect(run("UPDATE staff_invitations SET status = 'revoked', activated_at = NULL, revoked_at = ?, version = 4, updated_at = ? WHERE id = 'inv_graph'", later, later))
       .rejects.toThrow(/invalid_invitation_transition/)
@@ -462,8 +462,22 @@ describe('foundation migrations', () => {
       .rejects.toThrow()
     await expect(insertStaff('stf_empty_specialist', { role: 'specialist', specialist_id: '' }))
       .rejects.toThrow()
-    await expect(run("INSERT INTO idempotency_records (actor_id, operation, idempotency_key, request_hash, resource_type, resource_id, response_envelope, created_at, expires_at) VALUES ('actor_empty', 'backup', 'empty', '', '', '', '{}', ?, '2026-08-01T10:00:00.000Z')", now))
-      .rejects.toThrow()
+    const idempotencyFacts = {
+      request_hash: 'hash',
+      resource_type: 'backup',
+      resource_id: 'backup_id',
+    }
+    for (const field of Object.keys(idempotencyFacts)) {
+      const facts = { ...idempotencyFacts, [field]: '' }
+      await expect(run(
+        `INSERT INTO idempotency_records
+         (actor_id, operation, idempotency_key, request_hash, resource_type, resource_id,
+          response_envelope, created_at, expires_at)
+         VALUES (?, 'backup', ?, ?, ?, ?, '{}', ?, '2026-08-01T10:00:00.000Z')`,
+        `actor_empty_${field}`, `empty_${field}`, facts.request_hash, facts.resource_type,
+        facts.resource_id, now
+      )).rejects.toThrow()
+    }
     await expect(run("INSERT INTO outbox_jobs (id, type, aggregate_type, aggregate_id, payload_envelope, idempotency_key, status, attempt_count, max_attempts, scheduled_at, lease_owner, lease_expires_at, created_at, updated_at) VALUES ('job_empty_lease', 'backup.export', 'backup', 'bkp', '{}', 'empty_lease', 'processing', 0, 1, ?, '', ?, ?, ?)", now, later, now, now))
       .rejects.toThrow()
     await expect(run("INSERT INTO scheduler_runs (id, scheduled_for, started_at, status, attempt_count, lease_owner, lease_expires_at, claimed_jobs, succeeded_jobs, failed_jobs) VALUES ('sch_empty_lease', '2026-07-29T12:00:00.000Z', ?, 'running', 1, '', '2026-07-29T12:15:00.000Z', 0, 0, 0)", now))
@@ -490,5 +504,52 @@ describe('foundation migrations', () => {
         later, now, now
       )).rejects.toThrow()
     }
+  })
+
+  it('requires invitation access facts and only allows provisioning through pending', async () => {
+    await insertStaff('stf_invitation_graph_inviter')
+    await insertStaff('stf_invitation_graph_target', { role: 'coordinator', status: 'pending', access_subject: null, activated_at: null })
+    await insertStaff('stf_invitation_pending_missing', { role: 'coordinator', status: 'pending', access_subject: null, activated_at: null })
+    await insertStaff('stf_invitation_activated_missing', { role: 'coordinator', status: 'pending', access_subject: null, activated_at: null })
+    await insertInvitation('inv_provisioning_graph', 'stf_invitation_graph_target', 'stf_invitation_graph_inviter', { status: 'provisioning', access_allowed_at: null })
+    await expect(run("UPDATE staff_invitations SET status = 'activated', access_allowed_at = ?, activated_at = ?, version = 2, updated_at = ? WHERE id = 'inv_provisioning_graph'", later, later, later))
+      .rejects.toThrow(/invalid_invitation_transition/)
+    await expect(run("UPDATE staff_invitations SET status = 'pending', version = 2, updated_at = ? WHERE id = 'inv_provisioning_graph'", later))
+      .rejects.toThrow()
+    await run("UPDATE staff_invitations SET status = 'pending', access_allowed_at = ?, version = 2, updated_at = ? WHERE id = 'inv_provisioning_graph'", later, later)
+    await expect(insertInvitation('inv_pending_missing', 'stf_invitation_pending_missing', 'stf_invitation_graph_inviter', { access_allowed_at: null }))
+      .rejects.toThrow()
+    await expect(insertInvitation('inv_activated_missing', 'stf_invitation_activated_missing', 'stf_invitation_graph_inviter', { status: 'activated', access_allowed_at: null, activated_at: later }))
+      .rejects.toThrow()
+  })
+
+  it('rejects empty provider and incomplete-backup opaque references independently', async () => {
+    await run("INSERT INTO outbox_jobs (id, type, aggregate_type, aggregate_id, payload_envelope, idempotency_key, status, attempt_count, max_attempts, scheduled_at, created_at, updated_at) VALUES ('job_optional_refs', 'backup.export', 'backup', 'bkp', '{}', 'optional_refs', 'queued', 0, 1, ?, ?, ?)", now, now, now)
+    await expect(run("INSERT INTO outbox_attempts (id, job_id, attempt_number, started_at, provider_reference) VALUES ('attempt_empty_provider', 'job_optional_refs', 1, ?, '')", now))
+      .rejects.toThrow()
+    await expect(run("INSERT INTO delivery_attempts (id, outbox_job_id, provider, provider_reference, status, attempted_at) VALUES ('delivery_empty_provider', 'job_optional_refs', 'email', '', 'accepted', ?)", now))
+      .rejects.toThrow()
+    for (const [index, field] of ['export_bookmark', 'object_key', 'manifest_key', 'wrapped_ssec_key_b64', 'wrap_nonce_b64', 'object_etag'].entries()) {
+      const day = String(1 + index).padStart(2, '0')
+      await expect(run(
+        `INSERT INTO backup_runs
+         (id, local_day, local_month, retention_class, status, version, ${field}, created_at, updated_at)
+         VALUES (?, ?, '2026-08', 'daily', 'failed', 1, '', ?, ?)`,
+        `bkp_incomplete_${field}`, `2026-08-${day}`, now, now
+      )).rejects.toThrow()
+    }
+  })
+
+  it('permits action reopen and failed-backup cleanup but not failed retry', async () => {
+    await run("INSERT INTO operational_actions (id, fingerprint, kind, severity, status, entity_type, entity_id, details_envelope, version, created_at, updated_at) VALUES ('act_reopen', 'action_reopen', 'backup_failed', 'warning', 'open', 'backup', 'bkp', '{}', 1, ?, ?)", now, now)
+    await run("UPDATE operational_actions SET status = 'resolved', resolved_at = ?, version = 2, updated_at = ? WHERE id = 'act_reopen' AND version = 1", later, later)
+    const reopened = await run("UPDATE operational_actions SET status = 'open', resolved_at = NULL, version = 3, updated_at = ? WHERE id = 'act_reopen' AND version = 2", later)
+    expect(reopened.meta.changes).toBe(1)
+    await insertBackup('bkp_failed_cleanup', { local_day: '2026-08-10', local_month: '2026-08', status: 'failed' })
+    const pruned = await run("UPDATE backup_runs SET status = 'pruned', version = 2, updated_at = ? WHERE id = 'bkp_failed_cleanup' AND version = 1", later)
+    expect(pruned.meta.changes).toBe(1)
+    await insertBackup('bkp_failed_retry', { local_day: '2026-08-11', local_month: '2026-08', status: 'failed' })
+    await expect(run("UPDATE backup_runs SET status = 'queued', version = 2, updated_at = ? WHERE id = 'bkp_failed_retry'", later))
+      .rejects.toThrow(/invalid_backup_transition/)
   })
 })

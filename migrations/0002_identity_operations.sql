@@ -88,7 +88,7 @@ CREATE TABLE staff_invitations (
   status TEXT NOT NULL CHECK (status IN ('provisioning', 'pending', 'activated', 'revoked', 'expired')),
   inviter_id TEXT NOT NULL REFERENCES staff_users(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   expires_at TEXT NOT NULL,
-  access_allowed_at TEXT,
+  access_allowed_at TEXT CHECK (access_allowed_at IS NULL OR length(access_allowed_at) > 0),
   email_sent_at TEXT,
   activated_at TEXT,
   revoked_at TEXT,
@@ -99,6 +99,11 @@ CREATE TABLE staff_invitations (
     (status = 'activated' AND activated_at IS NOT NULL AND revoked_at IS NULL)
     OR (status = 'revoked' AND revoked_at IS NOT NULL AND activated_at IS NULL)
     OR (status NOT IN ('activated', 'revoked') AND activated_at IS NULL AND revoked_at IS NULL)
+  ),
+  CHECK (
+    (status = 'provisioning' AND access_allowed_at IS NULL)
+    OR (status IN ('pending', 'activated') AND access_allowed_at IS NOT NULL AND length(access_allowed_at) > 0)
+    OR status IN ('revoked', 'expired')
   )
 );
 
@@ -165,7 +170,7 @@ CREATE TRIGGER staff_invitations_valid_transition
 BEFORE UPDATE OF status ON staff_invitations
 WHEN NOT (
   NEW.status = OLD.status
-  OR (OLD.status = 'provisioning' AND NEW.status IN ('pending', 'activated', 'revoked', 'expired'))
+  OR (OLD.status = 'provisioning' AND NEW.status IN ('pending', 'revoked', 'expired'))
   OR (OLD.status = 'pending' AND NEW.status IN ('activated', 'revoked', 'expired'))
 )
 BEGIN
@@ -294,7 +299,7 @@ CREATE TABLE outbox_attempts (
   completed_at TEXT,
   result TEXT CHECK (result IN ('succeeded', 'retry', 'dead')),
   error_code TEXT,
-  provider_reference TEXT,
+  provider_reference TEXT CHECK (provider_reference IS NULL OR length(provider_reference) > 0),
   UNIQUE (job_id, attempt_number),
   CHECK (
     (completed_at IS NULL AND result IS NULL)
@@ -340,7 +345,7 @@ CREATE TABLE delivery_attempts (
   id TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0),
   outbox_job_id TEXT NOT NULL REFERENCES outbox_jobs(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   provider TEXT NOT NULL CHECK (length(provider) > 0),
-  provider_reference TEXT,
+  provider_reference TEXT CHECK (provider_reference IS NULL OR length(provider_reference) > 0),
   status TEXT NOT NULL CHECK (status IN ('accepted', 'failed')),
   error_code TEXT,
   attempted_at TEXT NOT NULL
@@ -494,13 +499,13 @@ CREATE TABLE backup_runs (
   retention_class TEXT NOT NULL CHECK (retention_class IN ('daily', 'monthly')),
   status TEXT NOT NULL CHECK (status IN ('queued', 'exporting', 'stored', 'failed', 'restore_verified', 'pruned')),
   version INTEGER NOT NULL DEFAULT 1 CHECK (typeof(version) = 'integer' AND version >= 1),
-  export_bookmark TEXT,
-  object_key TEXT,
-  manifest_key TEXT,
+  export_bookmark TEXT CHECK (export_bookmark IS NULL OR length(export_bookmark) > 0),
+  object_key TEXT CHECK (object_key IS NULL OR length(object_key) > 0),
+  manifest_key TEXT CHECK (manifest_key IS NULL OR length(manifest_key) > 0),
   ssec_key_version INTEGER CHECK (ssec_key_version IS NULL OR (typeof(ssec_key_version) = 'integer' AND ssec_key_version >= 1)),
-  wrapped_ssec_key_b64 TEXT,
-  wrap_nonce_b64 TEXT,
-  object_etag TEXT,
+  wrapped_ssec_key_b64 TEXT CHECK (wrapped_ssec_key_b64 IS NULL OR length(wrapped_ssec_key_b64) > 0),
+  wrap_nonce_b64 TEXT CHECK (wrap_nonce_b64 IS NULL OR length(wrap_nonce_b64) > 0),
+  object_etag TEXT CHECK (object_etag IS NULL OR length(object_etag) > 0),
   object_size INTEGER CHECK (object_size IS NULL OR (typeof(object_size) = 'integer' AND object_size >= 0)),
   started_at TEXT,
   completed_at TEXT,
@@ -605,6 +610,7 @@ WHEN NOT (
   OR (OLD.status = 'exporting' AND NEW.status IN ('stored', 'failed'))
   OR (OLD.status = 'stored' AND NEW.status IN ('restore_verified', 'pruned'))
   OR (OLD.status = 'restore_verified' AND NEW.status = 'pruned')
+  OR (OLD.status = 'failed' AND NEW.status = 'pruned')
 )
 BEGIN
   SELECT RAISE(ABORT, 'invalid_backup_transition');
