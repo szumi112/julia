@@ -1,20 +1,9 @@
 import { z } from 'zod'
+import { decodeBase64Url, encodeBase64Url } from './security/encoding.js'
 
 const BASE64_URL_KEY = /^[A-Za-z0-9_-]{43}$/
 const VERSION = /^[1-9]\d*$/
 const TEAM_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
-
-const decodeBase64Url = (value) => {
-  const normalized = value.replaceAll('-', '+').replaceAll('_', '/')
-  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=')
-  const decoded = atob(padded)
-  return Uint8Array.from(decoded, (character) => character.charCodeAt(0))
-}
-
-const encodeBase64Url = (value) => btoa(String.fromCharCode(...value))
-  .replaceAll('+', '-')
-  .replaceAll('/', '_')
-  .replaceAll('=', '')
 
 const key = z.string().refine((value) => {
   if (!BASE64_URL_KEY.test(value)) return false
