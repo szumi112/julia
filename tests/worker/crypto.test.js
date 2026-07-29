@@ -222,7 +222,7 @@ describe('scoped field encryption', () => {
       { run: () => { throw transport } },
       { first: () => row },
     ), ring, rowScope(row), { id: 'key_transport', createdAt: now })).rejects.toBe(transport)
-    const collision = new Error('identity_collision')
+    const collision = new Error('identity_collision: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')
     await expect(getOrCreateDataKey(mockDb(
       { first: () => null },
       { run: () => { throw collision } },
@@ -238,11 +238,19 @@ describe('scoped field encryption', () => {
       { run: () => { throw collision } },
       { first: () => row },
     ), ring, rowScope(row), { id: 'key_race', createdAt: now })).resolves.toEqual(row)
+    const wrappedCollision = new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT')
+    await expect(getOrCreateDataKey(mockDb(
+      { first: () => null },
+      { run: () => { throw wrappedCollision } },
+      { first: () => row },
+    ), ring, rowScope(row), { id: 'key_wrapped_race', createdAt: now })).resolves.toEqual(row)
   })
 
   it.each([
     'transport identity_collision downstream',
     'transport: identity_collision: downstream',
+    'identity_collision: transport downstream',
+    'D1_ERROR: identity_collision: transport downstream',
   ])('does not recover an arbitrary transport message containing the collision sentinel: %s', async (message) => {
     const ring = await keyring()
     const scope = { type: 'staff_directory', id: 'centre_transport_sentinel', purpose: 'identity' }

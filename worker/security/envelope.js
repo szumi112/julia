@@ -155,7 +155,7 @@ const selectExact = async (db, scope, dekVersion) => db.prepare(
 ).bind(scope.type, scope.id, scope.purpose, dekVersion).first()
 
 const isDataKeyCollision = (error) => error instanceof Error
-  && /^(?:identity_collision|D1_ERROR:\s*identity_collision)(?::|$)/.test(error.message)
+  && /^(?:D1_ERROR:\s*)?identity_collision: SQLITE_CONSTRAINT(?: \(extended: SQLITE_CONSTRAINT_TRIGGER\))?$/.test(error.message)
 
 export async function getOrCreateDataKey(db, keyring, scope, { id = defaultId(), dekVersion = 1, createdAt = new Date().toISOString() } = {}) {
   validateScope(scope)
