@@ -257,6 +257,10 @@ describe('foundation migrations', () => {
     await expect(run("UPDATE OR REPLACE staff_users SET email_lookup = 'stf_replace_victim_lookup', version = 2, updated_at = ? WHERE id = 'stf_replace_source'", later))
       .rejects.toThrow(/identity_collision/)
     expect(await one("SELECT id FROM staff_users WHERE id = 'stf_replace_victim'")).toEqual({ id: 'stf_replace_victim' })
+    await expect(run("UPDATE OR REPLACE staff_users SET email_lookup = 'stf_owner_one_lookup', version = 2, updated_at = ? WHERE id = 'stf_replace_source'", later))
+      .rejects.toThrow(/identity_collision/)
+    expect(await one("SELECT id, role, status FROM staff_users WHERE id = 'stf_owner_one'"))
+      .toEqual({ id: 'stf_owner_one', role: 'owner', status: 'active' })
     await expect(run("UPDATE OR REPLACE staff_users SET status = 'disabled', disabled_at = ?, version = 3, updated_at = ? WHERE id = 'stf_owner_one'", later, later))
       .rejects.toThrow(/last_active_owner/)
   })
@@ -312,6 +316,11 @@ describe('foundation migrations', () => {
     await expect(run("UPDATE OR REPLACE outbox_jobs SET idempotency_key = 'key_history', updated_at = ? WHERE id = 'job_replace_source'", later))
       .rejects.toThrow(/identity_collision/)
     expect(await one("SELECT id FROM outbox_jobs WHERE id = 'job_history'")).toEqual({ id: 'job_history' })
+    await run("INSERT INTO outbox_jobs (id, type, aggregate_type, aggregate_id, payload_envelope, idempotency_key, status, attempt_count, max_attempts, scheduled_at, created_at, updated_at) VALUES ('job_replace_victim', 'backup.export', 'backup', 'bkp', '{}', 'key_replace_victim', 'queued', 0, 1, ?, ?, ?)", now, now, now)
+    await expect(run("UPDATE OR REPLACE outbox_jobs SET id = 'job_replace_victim', type = 'new-type', idempotency_key = 'new-key', updated_at = ? WHERE id = 'job_replace_source'", later))
+      .rejects.toThrow(/immutable_outbox_identity/)
+    expect(await one("SELECT id FROM outbox_jobs WHERE id = 'job_replace_victim'"))
+      .toEqual({ id: 'job_replace_victim' })
     await run(
       `INSERT INTO outbox_attempts (id, job_id, attempt_number, started_at)
        VALUES ('attempt_history', 'job_history', 1, ?)`, now
@@ -459,7 +468,27 @@ describe('foundation migrations', () => {
       .rejects.toThrow()
     await expect(run("INSERT INTO scheduler_runs (id, scheduled_for, started_at, status, attempt_count, lease_owner, lease_expires_at, claimed_jobs, succeeded_jobs, failed_jobs) VALUES ('sch_empty_lease', '2026-07-29T12:00:00.000Z', ?, 'running', 1, '', '2026-07-29T12:15:00.000Z', 0, 0, 0)", now))
       .rejects.toThrow()
-    await expect(run("INSERT INTO backup_runs (id, local_day, local_month, retention_class, status, version, export_bookmark, object_key, manifest_key, ssec_key_version, wrapped_ssec_key_b64, wrap_nonce_b64, object_etag, object_size, completed_at, expires_at, created_at, updated_at) VALUES ('bkp_empty_facts', '2026-07-21', '2026-07', 'daily', 'stored', 1, '', '', '', 1, '', '', '', 0, ?, '2026-09-01T00:00:00.000Z', ?, ?)", later, now, now))
-      .rejects.toThrow()
+    const storedFacts = {
+      export_bookmark: 'bookmark',
+      object_key: 'object',
+      manifest_key: 'manifest',
+      wrapped_ssec_key_b64: 'wrapped',
+      wrap_nonce_b64: 'nonce',
+      object_etag: 'etag',
+    }
+    for (const [index, field] of Object.keys(storedFacts).entries()) {
+      const facts = { ...storedFacts, [field]: '' }
+      const day = String(10 + index).padStart(2, '0')
+      await expect(run(
+        `INSERT INTO backup_runs
+         (id, local_day, local_month, retention_class, status, version, export_bookmark, object_key,
+          manifest_key, ssec_key_version, wrapped_ssec_key_b64, wrap_nonce_b64, object_etag,
+          object_size, completed_at, expires_at, created_at, updated_at)
+         VALUES (?, ?, '2026-07', 'daily', 'stored', 1, ?, ?, ?, 1, ?, ?, ?, 0, ?, '2026-09-01T00:00:00.000Z', ?, ?)`,
+        `bkp_empty_${field}`, `2026-07-${day}`, facts.export_bookmark, facts.object_key,
+        facts.manifest_key, facts.wrapped_ssec_key_b64, facts.wrap_nonce_b64, facts.object_etag,
+        later, now, now
+      )).rejects.toThrow()
+    }
   })
 })

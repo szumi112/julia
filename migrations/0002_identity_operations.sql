@@ -251,6 +251,20 @@ BEGIN
   SELECT RAISE(ABORT, 'no_routine_delete');
 END;
 
+CREATE TRIGGER outbox_jobs_immutable_identity
+BEFORE UPDATE ON outbox_jobs
+WHEN OLD.id != NEW.id
+  OR OLD.type != NEW.type
+  OR OLD.aggregate_type != NEW.aggregate_type
+  OR OLD.aggregate_id != NEW.aggregate_id
+  OR OLD.payload_envelope != NEW.payload_envelope
+  OR OLD.idempotency_key != NEW.idempotency_key
+  OR OLD.max_attempts != NEW.max_attempts
+  OR OLD.created_at != NEW.created_at
+BEGIN
+  SELECT RAISE(ABORT, 'immutable_outbox_identity');
+END;
+
 CREATE TRIGGER outbox_jobs_update_identity_collision
 BEFORE UPDATE ON outbox_jobs
 WHEN EXISTS (
