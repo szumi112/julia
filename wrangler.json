@@ -1,0 +1,50 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bearwithme-panel",
+  "main": "./worker/index.js",
+  "compatibility_date": "2026-07-29",
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bearwithme-panel-local",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "preview_database_id": "bearwithme-panel-local",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ARCHIVE",
+      "bucket_name": "bearwithme-panel-local",
+      "jurisdiction": "eu"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "vars": {
+    "APP_ENV": "development",
+    "APP_ORIGIN": "http://127.0.0.1:5174",
+    "DATA_MODE": "fictional",
+    "ACCESS_AUD": "local-access-audience",
+    "ACCESS_HEALTH_SERVICE_TOKEN_ID": "local-health-service",
+    "ACCESS_TEAM_DOMAIN": "https://local.cloudflareaccess.com",
+    "ACTIVE_DATA_KEK_VERSION": "1",
+    "ACTIVE_LOOKUP_KEY_VERSION": "1",
+    "ACTIVE_BACKUP_KEK_VERSION": "1"
+  },
+  "secrets": {
+    "required": [
+      "BWM_BACKUP_KEK_V1",
+      "BWM_DATA_KEK_V1",
+      "BWM_LOOKUP_HMAC_V1"
+    ]
+  }
+}

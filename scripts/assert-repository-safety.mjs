@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const RUNTIME_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdn.jsdelivr.net']
+const TEXT_ASSET_EXTENSIONS = new Set(['.css', '.html', '.js', '.json', '.mjs'])
 const SECRET_NAMES = [
   'BWM_BACKUP_KEK_V1',
   'BWM_DATA_KEK_V1',
@@ -117,6 +118,11 @@ const assertNoRuntimeHosts = (contents, path) => {
   }
 }
 
+const isTextAsset = (path) => {
+  const extension = path.slice(path.lastIndexOf('.')).toLowerCase()
+  return TEXT_ASSET_EXTENSIONS.has(extension)
+}
+
 export const assertTrackedFiles = (paths) => {
   const forbidden = paths.filter((path) => {
     const components = path.split(/[\\/]/)
@@ -180,16 +186,23 @@ export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) =
     throw new Error('configPath must resolve to the sole .wrangler/deploy/config.json')
   }
   const deployConfig = parseJson(deployConfigPath)
+  const deployKeys = Object.keys(deployConfig || {})
+  const acceptedDeployShape = deployKeys.length === 1 && deployKeys[0] === 'configPath'
+  const pluginDeployShape = deployKeys.length === 2
+    && deployKeys.includes('configPath')
+    && deployKeys.includes('auxiliaryWorkers')
+    && Array.isArray(deployConfig.auxiliaryWorkers)
+    && deployConfig.auxiliaryWorkers.length === 0
   if (
     !deployConfig
     || typeof deployConfig !== 'object'
     || Array.isArray(deployConfig)
-    || Object.keys(deployConfig).length !== 1
+    || (!acceptedDeployShape && !pluginDeployShape)
     || typeof deployConfig.configPath !== 'string'
     || deployConfig.configPath.length === 0
     || isAbsolute(deployConfig.configPath)
   ) {
-    throw new Error('Deploy config must contain only a relative configPath')
+    throw new Error('Deploy config must contain only a relative configPath and optional empty auxiliaryWorkers')
   }
 
   const workerConfigPath = resolveRegularInside({
@@ -226,6 +239,7 @@ export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) =
   for (const browserFile of browserFiles) {
     const contents = readFileSync(browserFile, 'utf8')
     assertNoRuntimeHosts(contents, relativePath(projectRoot, browserFile))
+    if (!isTextAsset(browserFile)) continue
     for (const binding of BACKEND_BINDINGS) {
       if (new RegExp(`\\b${binding}\\b`).test(contents)) {
         throw new Error(`Backend binding found in browser asset: ${binding} (${relativePath(projectRoot, browserFile)})`)

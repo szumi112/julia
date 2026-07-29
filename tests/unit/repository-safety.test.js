@@ -30,7 +30,7 @@ const deployFixture = (t, options = {}) => {
     main: 'worker.js',
     assets: { directory: 'assets' },
   }
-  write(root, '.wrangler/deploy/config.json', JSON.stringify({ configPath }))
+  write(root, '.wrangler/deploy/config.json', JSON.stringify({ configPath, auxiliaryWorkers: [] }))
   write(root, 'dist/app/wrangler.generated.json', JSON.stringify(workerConfig))
   write(root, 'dist/app/worker.js', options.worker || 'const DB = env.DB')
   write(root, 'dist/app/assets/index.html', options.html || '<script src="/assets/app.js"></script>')
@@ -87,6 +87,37 @@ test('runtime HTML rejects external fonts and CDN scripts', () => {
 test('deploy inspection follows structured config into the browser asset directory', (t) => {
   const root = deployFixture(t)
   assert.doesNotThrow(() => inspectDeployArtifact({ root, secretValues: {} }))
+})
+
+test('deploy inspection permits only the plugin auxiliaryWorkers shape', (t) => {
+  const legacyRoot = deployFixture(t)
+  write(legacyRoot, '.wrangler/deploy/config.json', JSON.stringify({
+    configPath: '../../dist/app/wrangler.generated.json',
+  }))
+  assert.doesNotThrow(() => inspectDeployArtifact({ root: legacyRoot, secretValues: {} }))
+
+  const nonemptyRoot = deployFixture(t)
+  write(nonemptyRoot, '.wrangler/deploy/config.json', JSON.stringify({
+    configPath: '../../dist/app/wrangler.generated.json',
+    auxiliaryWorkers: ['not-allowed'],
+  }))
+  assert.throws(() => inspectDeployArtifact({ root: nonemptyRoot, secretValues: {} }), /auxiliaryWorkers/)
+
+  const prerenderRoot = deployFixture(t)
+  write(prerenderRoot, '.wrangler/deploy/config.json', JSON.stringify({
+    configPath: '../../dist/app/wrangler.generated.json',
+    auxiliaryWorkers: [],
+    prerenderWorkerConfigPath: '../../dist/app/prerender.json',
+  }))
+  assert.throws(() => inspectDeployArtifact({ root: prerenderRoot, secretValues: {} }), /Deploy config/)
+
+  const unknownRoot = deployFixture(t)
+  write(unknownRoot, '.wrangler/deploy/config.json', JSON.stringify({
+    configPath: '../../dist/app/wrangler.generated.json',
+    auxiliaryWorkers: [],
+    unexpected: true,
+  }))
+  assert.throws(() => inspectDeployArtifact({ root: unknownRoot, secretValues: {} }), /Deploy config/)
 })
 
 test('deploy inspection rejects an escaped generated Worker config', (t) => {
