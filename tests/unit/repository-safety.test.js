@@ -49,7 +49,10 @@ test('tracked confidential files and test reports are rejected', () => {
     '.dev.vars.local',
     'config/.env',
     'config/.envrc',
+    'config/.env/secret',
     'nested/.dev.vars.backup',
+    'config/.dev.vars/key',
+    'sample.xlsx/contents',
     'playwright-report/index.html',
     'test-results/trace.zip',
     'foo/playwright-report/index.html',
@@ -99,6 +102,18 @@ test('deploy inspection rejects an escaped generated Worker config', (t) => {
     configPath: relative(join(root, '.wrangler/deploy'), escapedConfig),
   }))
   assert.throws(() => inspectDeployArtifact({ root, secretValues: {} }), /project root|dist\/app/)
+})
+
+test('deploy inspection rejects an external symlink redirect even when it points back into dist/app', (t) => {
+  const root = deployFixture(t)
+  const externalRoot = makeFixture(t)
+  symlinkSync(join(root, 'dist/app'), join(externalRoot, 'returning-app'))
+  const redirectedConfig = join(externalRoot, 'returning-app/wrangler.generated.json')
+  write(root, '.wrangler/deploy/config.json', JSON.stringify({
+    configPath: relative(join(root, '.wrangler/deploy'), redirectedConfig),
+  }))
+
+  assert.throws(() => inspectDeployArtifact({ root, secretValues: {} }), /project root/)
 })
 
 test('deploy inspection rejects an escaped Worker main and assets directory', (t) => {

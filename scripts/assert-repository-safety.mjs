@@ -46,14 +46,7 @@ const isInside = (root, path) => {
 }
 
 const assertNoSymlinkComponents = (root, path) => {
-  let resolvedPath = resolve(path)
-  if (!isInside(root, resolvedPath)) {
-    try {
-      resolvedPath = realpathSync(resolvedPath)
-    } catch {
-      throw new Error(`Path must remain inside project root: ${path}`)
-    }
-  }
+  const resolvedPath = resolve(path)
   if (!isInside(root, resolvedPath)) throw new Error(`Path must remain inside project root: ${path}`)
   let current = root
   for (const component of relative(root, resolvedPath).split(sep).filter(Boolean)) {
@@ -125,13 +118,16 @@ const assertNoRuntimeHosts = (contents, path) => {
 }
 
 export const assertTrackedFiles = (paths) => {
-  const forbidden = paths.filter((path) =>
-    path.split(/[\\/]/).at(-1).endsWith('.xlsx')
-    || path.split(/[\\/]/).at(-1).startsWith('.env')
-    || path.split(/[\\/]/).at(-1).startsWith('.dev.vars')
-    || path.split(/[\\/]/).includes('playwright-report')
-    || path.split(/[\\/]/).includes('test-results')
-  )
+  const forbidden = paths.filter((path) => {
+    const components = path.split(/[\\/]/)
+    return components.some((component) =>
+      component.endsWith('.xlsx')
+      || component.startsWith('.env')
+      || component.startsWith('.dev.vars')
+      || component === 'playwright-report'
+      || component === 'test-results'
+    )
+  })
   if (forbidden.length) throw new Error(`Forbidden tracked files: ${forbidden.join(', ')}`)
 }
 
@@ -148,6 +144,7 @@ export const assertDirectDependencyPins = (packageJson) => {
 export const assertRuntimeIndex = (html) => assertNoRuntimeHosts(html, 'index.html')
 
 export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) => {
+  const lexicalProjectRoot = resolve(root)
   const projectRoot = realpathSync(root)
   const appRoot = resolve(projectRoot, 'dist/app')
   assertNoSymlinkComponents(projectRoot, appRoot)
@@ -169,9 +166,14 @@ export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) =
   assertNoSymlinkComponents(projectRoot, soleDeployConfigPath)
   requirePathType(soleDeployConfigPath, 'file')
   const resolvedSoleDeployConfigPath = realpathSync(soleDeployConfigPath)
-  const deployConfigPath = configPath
-    ? (isAbsolute(configPath) ? configPath : resolve(projectRoot, configPath))
-    : soleDeployConfigPath
+  let deployConfigPath = soleDeployConfigPath
+  if (configPath) {
+    const suppliedConfigPath = resolve(lexicalProjectRoot, configPath)
+    if (!isInside(lexicalProjectRoot, suppliedConfigPath)) {
+      throw new Error(`Path must remain inside project root: ${configPath}`)
+    }
+    deployConfigPath = join(projectRoot, relative(lexicalProjectRoot, suppliedConfigPath))
+  }
   assertNoSymlinkComponents(projectRoot, deployConfigPath)
   requirePathType(deployConfigPath, 'file')
   if (realpathSync(deployConfigPath) !== resolvedSoleDeployConfigPath) {
