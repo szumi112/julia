@@ -5,3 +5,11 @@ dist
 .superpowers
 AGENTS.md 
 CLAUDE.md
+.artifacts
+.dev.vars*
+.env*
+.wrangler
+coverage
+playwright-report
+test-results
+*.xlsx
