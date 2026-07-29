@@ -4,20 +4,25 @@ Guidance for AI coding agents working in this repository.
 
 ## Project overview
 
-**Aurelia — Centrum Psychoterapii** (package name `aurelia-panel`, repo `julia`) is a
-clickable UI prototype of a management panel for a small psychotherapy centre:
-clients, sessions, calendar, finances, monthly reports, and TUS (group social-skills
-classes for kids). It is a **demo with no backend** — all data lives in React memory
-and a page refresh resets the state. There is intentionally **zero `localStorage`**
+**Bear with me — panel centrum** (package name `bearwithme-panel`, repo `julia`) is a
+clickable UI prototype of a management panel for **Bear with me — Centrum
+Psychologiczno-Edukacyjne**, a real children's and teens' psychology centre in Jelenia
+Góra (bearwithme.pl): clients, sessions, calendar, finances, monthly reports, and TUS
+(group social-skills classes). It replaces the spreadsheet the centre keeps its
+sessions in. It is a **demo with no backend** — all data lives in React memory and a
+page refresh resets the state. There is intentionally **zero `localStorage`**
 (original task requirement).
+
+The centre name, team, service catalogue (`src/services.js`) and TUS offer mirror the
+public site; every client, child and session is fictional. Keep it that way.
 
 Key facts:
 
 - Single-page app: React 18 + Vite 6, plain JSX (no TypeScript).
 - The entire UI, and all user-facing strings, are in **Polish** (`<html lang="pl">`).
 - Login is fake: any non-empty e-mail and password works.
-- Demo data is deterministic — seeded PRNG generates ~190 sessions, 19+ clients,
-  4 psychologists and TUS groups relative to "today", so the demo always looks live.
+- Demo data is deterministic — seeded PRNG generates ~190 sessions, 21 clients,
+  4 specialists and 3 TUS groups relative to "today", so the demo always looks live.
 - GSAP and three.js are loaded from a CDN (jsdelivr, `<script defer>` in
   `index.html`) and used via `window.gsap` / `window.THREE`. **The app needs an
   internet connection to run as designed.**
@@ -58,7 +63,8 @@ src/
   store.jsx           AppProvider: useReducer with all app state + actions,
                       separate Toast context, derived-data selectors
   data.js             seeded mock-data generator + INITIAL_STATE (pure)
-  format.js           Polish-locale formatting, dates, billing rules (pure)
+  format.js           Polish-locale formatting, dates, ages, billing rules (pure)
+  services.js         the centre's service catalogue from the published cennik (pure)
   workspace.js        domain logic: role scoping, conflicts, payments, families (pure)
   tus.js              TUS (kids' group classes) domain logic (pure)
   routing.js          hash mini-router: routeHref / routeFromHash (pure)
@@ -118,13 +124,22 @@ tusKids, tusClasses, tusPayments, prefs`.
 - **Domain model**:
   - Session `status`: `scheduled | completed | cancelled | noshow`;
     `payment`: `paid | unpaid | partial` (+ `paidAmount`, `method`).
+  - Session `service` is an id from `services.js` (the published cennik). Picking one
+    in `SessionForm` restates `duration` and `amount`; the standard 50-minute
+    `zajecia` bills at the specialist's own `rate`, every other position at its fixed
+    catalogue price (`amountFor`). Dense lists badge only non-standard services
+    (`serviceBadge`) so exceptional bookings stand out.
   - Billing rule (in `format.js`): completed **and** no-show sessions are billable,
     cancelled are not. `collectedOf` / `outstandingOf` / `billableSummary` derive
     money from that rule.
-  - Clients can be linked into families (`familyId`, `familyRole` `'rodzic'|'dziecko'`);
-    `dissolveLoneFamilies` clears links that would leave a one-member family.
-  - TUS money (monthly group fees) is **intentionally separate** from session
-    billing — nothing in `tus.js` feeds `isBillable`/`monthStats`.
+  - Clients are children and teenagers with an `age` (adults — parents attending
+    consultations — carry `age: null`); contact details on a child's record belong to
+    the parent/guardian. Clients can be linked into families (`familyId`, `familyRole`
+    `'rodzic'|'dziecko'`); `dissolveLoneFamilies` clears links that would leave a
+    one-member family.
+  - TUS money (monthly group fees, `TUS_FEE` = 340 zł) is **intentionally separate**
+    from session billing — nothing in `tus.js` feeds `isBillable`/`monthStats`.
+    Groups list youngest-first via `sortTusGroups`, not alphabetically.
 - **Dates and money**: dates are ISO strings (`YYYY-MM-DD`), month keys `YYYY-MM`;
   formatting goes through `Intl` with the `pl-PL` locale in `format.js`. Payment
   entry math uses integer cents to avoid float errors (`paymentEntryFor` in
@@ -145,12 +160,19 @@ tusKids, tusClasses, tusPayments, prefs`.
 - Modules are plain ESM (`.js` / `.jsx`), function components, hooks, named exports.
 - **Keep domain logic pure and JSX-free.** Any logic worth testing lives in a `.js`
   module with no React/DOM imports (`format.js`, `workspace.js`, `tus.js`,
-  `routing.js`, `view-state.js`, `pagination.js`) so `node --test` can import it —
+  `services.js`, `routing.js`, `view-state.js`, `pagination.js`) so `node --test` can import it —
   the Node runner cannot parse JSX. This is a deliberate, documented convention
   (see `tus.js` header and `docs/superpowers/specs/2026-07-11-list-pagination-design.md`).
-- Styling: single `styles.css` with CSS custom-property design tokens (quiet
-  editorial palette — porcelain paper, plum-ink, a single berry accent, sage
-  for data/success, brass for the logotype mark; Fraunces + Hanken Grotesk).
+- Styling: single `styles.css` with CSS custom-property design tokens carrying the
+  bearwithme.pl brand on quiet editorial paper — `--coral*` (#ed5a39, the accent:
+  links, focus, primary actions), `--pink*` (#e88aac), `--amber*` (#ed9936,
+  attention), `--sky*` (#b2d9ea, TUS and group work), `--sage*` (paid/attended),
+  `--error` (a crimson pushed off coral's hue), `--ink*` (indigo #351b69 family).
+  Fonts: `--font-brand` Alata (wordmark), `--font-display` Fraunces (cover lines),
+  `--font-ui` Heebo. **Never hardcode palette hex in CSS or JSX** — the one
+  exception is `BearMark` in `icons.jsx`, a logotype that keeps its colours on any
+  surface. `Pill` tone names match the token families (`coral`, `pink`, `amber`,
+  `sky`, `sage`, `error`, `ink`).
   The Dashboard opens with a "cover date" masthead (`.masthead__*`) — brand
   eyebrow + ISO week, weekday as a large italic Fraunces cover line; other
   views keep the classic `.view-head` until their refresh turn. Deep palette
@@ -168,9 +190,9 @@ tusKids, tusClasses, tusPayments, prefs`.
 ## Testing instructions
 
 - **Unit** (`npm test`): `tests/unit/*.test.js`, one suite per pure module
-  (`format`, `workspace`, `tus`, `routing`, `view-state`, `pagination`). Import the
-  module under test from `../../src/…`, use `node:test` + `node:assert/strict`,
-  build tiny fixture objects inline. Currently 79 tests.
+  (`format`, `workspace`, `tus`, `services`, `routing`, `view-state`, `pagination`).
+  Import the module under test from `../../src/…`, use `node:test` +
+  `node:assert/strict`, build tiny fixture objects inline. Currently 85 tests.
 - **E2E** (`npm run test:e2e`): Playwright specs in `tests/e2e/` drive the real UI
   through role-based, Polish-language locators (`getByRole('button', { name:
 'Zaloguj się' })`, `getByLabel('Hasło')`). Each spec logs in through the login
@@ -187,8 +209,9 @@ tusKids, tusClasses, tusPayments, prefs`.
 - GSAP and three.js come from a public CDN pinned by version
   (`gsap@3.12.5`, `three@0.152.2`) without SRI hashes — a deliberate trade-off for
   a prototype; be aware before reusing this pattern elsewhere.
-- All client/patient data is fictional, generated mock data — keep it that way;
-  do not add real personal data.
+- All client/patient data is fictional, generated mock data — keep it that way; do
+  not add real personal data. The centre's own public details (address, phone,
+  team, cennik) come from bearwithme.pl and are fine to keep accurate.
 - `npm run deploy` publishes whatever is in `dist/` to the public GitHub Pages
   site — check the content before deploying.
 
