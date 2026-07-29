@@ -251,6 +251,9 @@ describe('scoped field encryption', () => {
     'transport: identity_collision: downstream',
     'identity_collision: transport downstream',
     'D1_ERROR: identity_collision: transport downstream',
+    'D1_ERROR:identity_collision: SQLITE_CONSTRAINT',
+    'D1_ERROR:\tidentity_collision: SQLITE_CONSTRAINT',
+    'D1_ERROR:\nidentity_collision: SQLITE_CONSTRAINT',
   ])('does not recover an arbitrary transport message containing the collision sentinel: %s', async (message) => {
     const ring = await keyring()
     const scope = { type: 'staff_directory', id: 'centre_transport_sentinel', purpose: 'identity' }
