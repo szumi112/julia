@@ -57,6 +57,10 @@ test('tracked confidential files and test reports are rejected', () => {
     'test-results/trace.zip',
     'foo/playwright-report/index.html',
     'foo/test-results/trace.zip',
+    'dist/index.html',
+    'nested/dist/asset.js',
+    '.wrangler/deploy/config.json',
+    'nested/.wrangler/state.json',
   ]) {
     assert.throws(() => assertTrackedFiles([path]), /Forbidden tracked files/)
   }
@@ -193,6 +197,16 @@ test('backend binding names cannot appear in browser files but may appear in Wor
 
   const rejectedRoot = deployFixture(t, { browser: 'const DB = "backend binding"' })
   assert.throws(() => inspectDeployArtifact({ root: rejectedRoot, secretValues: {} }), /backend binding/i)
+})
+
+test('deploy inspection scans textual assets regardless of extension but ignores binary bytes', (t) => {
+  const textualRoot = deployFixture(t)
+  write(textualRoot, 'dist/app/assets/logo.svg', '<svg><!-- DB --></svg>')
+  assert.throws(() => inspectDeployArtifact({ root: textualRoot, secretValues: {} }), /backend binding/i)
+
+  const binaryRoot = deployFixture(t)
+  write(binaryRoot, 'dist/app/assets/font.woff2', Buffer.from([0x44, 0x42, 0x00, 0xff]))
+  assert.doesNotThrow(() => inspectDeployArtifact({ root: binaryRoot, secretValues: {} }))
 })
 
 test('deploy inspection redacts supplied secret values while naming the variable and file', (t) => {

@@ -1,11 +1,12 @@
 import { Hono } from 'hono'
-import { apiError } from './http/errors.js'
-import { safeLog } from './logging/safe-log.js'
+import { AppError, apiError } from './http/errors.js'
+import { isCorrelationId, safeLog } from './logging/safe-log.js'
 
 export function createApp(deps = {}) {
   const app = new Hono()
   app.use('/api/*', async (c, next) => {
-    const correlationId = c.req.header('x-correlation-id') || crypto.randomUUID()
+    const requestedCorrelationId = c.req.header('x-correlation-id')
+    const correlationId = isCorrelationId(requestedCorrelationId) ? requestedCorrelationId : crypto.randomUUID()
     c.set('correlationId', correlationId)
     await next()
     c.header('cache-control', 'no-store')
@@ -17,14 +18,15 @@ export function createApp(deps = {}) {
   app.notFound((c) => apiError('NOT_FOUND', 404, c.get('correlationId') || crypto.randomUUID()))
   app.onError((error, c) => {
     const log = deps.safeLog || safeLog
+    const appError = error instanceof AppError ? error : new AppError('INTERNAL_ERROR', 500)
     log('error', {
       event: 'request.failed',
       correlationId: c.get('correlationId'),
-      errorCode: error.code || 'INTERNAL_ERROR',
+      errorCode: appError.code,
     })
     return apiError(
-      error.code || 'INTERNAL_ERROR',
-      error.status || 500,
+      appError.code,
+      appError.status,
       c.get('correlationId') || crypto.randomUUID()
     )
   })

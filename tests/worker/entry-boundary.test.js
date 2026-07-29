@@ -34,4 +34,12 @@ describe('Worker entry boundary', () => {
 
     expect(response.status).toBe(200)
   })
+
+  it('rejects malformed configuration before scheduling work', () => {
+    expect(() => worker.scheduled(
+      {},
+      { ...valid, ACTIVE_DATA_KEK_VERSION: '01' },
+      { waitUntil() {} }
+    )).toThrow()
+  })
 })

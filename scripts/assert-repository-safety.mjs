@@ -4,7 +4,6 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const RUNTIME_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdn.jsdelivr.net']
-const TEXT_ASSET_EXTENSIONS = new Set(['.css', '.html', '.js', '.json', '.mjs'])
 const SECRET_NAMES = [
   'BWM_BACKUP_KEK_V1',
   'BWM_DATA_KEK_V1',
@@ -112,15 +111,20 @@ const walkRegularFiles = (path) => {
 }
 
 const assertNoRuntimeHosts = (contents, path) => {
-  const normalized = contents.toLowerCase()
+  const normalized = Buffer.from(contents).toString('utf8').toLowerCase()
   for (const host of RUNTIME_HOSTS) {
     if (normalized.includes(host)) throw new Error(`Runtime dependency remains in ${path}: ${host}`)
   }
 }
 
-const isTextAsset = (path) => {
-  const extension = path.slice(path.lastIndexOf('.')).toLowerCase()
-  return TEXT_ASSET_EXTENSIONS.has(extension)
+const readTextAsset = (path) => {
+  const contents = readFileSync(path)
+  if (contents.includes(0)) return null
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(contents)
+  } catch {
+    return null
+  }
 }
 
 export const assertTrackedFiles = (paths) => {
@@ -130,6 +134,8 @@ export const assertTrackedFiles = (paths) => {
       component.endsWith('.xlsx')
       || component.startsWith('.env')
       || component.startsWith('.dev.vars')
+      || component === 'dist'
+      || component === '.wrangler'
       || component === 'playwright-report'
       || component === 'test-results'
     )
@@ -237,9 +243,10 @@ export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) =
   const browserFiles = walkRegularFiles(assetsPath)
 
   for (const browserFile of browserFiles) {
-    const contents = readFileSync(browserFile, 'utf8')
-    assertNoRuntimeHosts(contents, relativePath(projectRoot, browserFile))
-    if (!isTextAsset(browserFile)) continue
+    const bytes = readFileSync(browserFile)
+    assertNoRuntimeHosts(bytes, relativePath(projectRoot, browserFile))
+    const contents = readTextAsset(browserFile)
+    if (contents == null) continue
     for (const binding of BACKEND_BINDINGS) {
       if (new RegExp(`\\b${binding}\\b`).test(contents)) {
         throw new Error(`Backend binding found in browser asset: ${binding} (${relativePath(projectRoot, browserFile)})`)
