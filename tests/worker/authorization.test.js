@@ -76,6 +76,17 @@ describe('authorization matrix', () => {
     for (const [actor, capability, resource] of malformed) expect(authorize(actor, capability, resource, { nowMs: NOW_MS })).toBe(false)
   })
 
+  it('treats malformed specialists as entirely unauthenticated policy inputs', () => {
+    for (const specialistId of [null, '', ' ']) {
+      const actor = { id: 'stf_bad_spec', role: 'specialist', specialistId }
+      expect(capabilitiesForActor(actor)).toEqual([])
+      expect(authorize(actor, 'chat.general', centre, { nowMs: NOW_MS })).toBe(false)
+      expect(authorize(actor, 'chat.direct', { kind: 'conversation', conversationId: 'con_1', participantStaffIds: ['stf_bad_spec'] }, { nowMs: NOW_MS })).toBe(false)
+    }
+    for (const actor of [ACTORS.owner, ACTORS.coordinator]) expect(authorize(actor, 'tus.manage', { kind: 'tus_group', groupId: 'tus_1', leaderSpecialistIds: [] }, { nowMs: NOW_MS })).toBe(false)
+    expect(authorize(ACTORS.owner, 'staff.manage', centre, { nowMs: -1 })).toBe(false)
+  })
+
   it.each([
     [ACTORS.owner, 'centre.manage', centre, true],
     [ACTORS.coordinator, 'centre.manage', centre, false],

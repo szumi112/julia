@@ -33,6 +33,26 @@ async function encryptedSnapshot(context, table, row, next) {
   }))
 }
 
+const sameRow = (actual, expected) => actual && expected
+  && Object.keys(actual).length === Object.keys(expected).length
+  && Object.entries(expected).every(([key, value]) => Object.is(actual[key], value))
+
+async function snapshotMatches(context, record, row) {
+  try {
+    const plaintext = await decryptForScope(context.keyring, context.dataKey, {
+      expectedScope: context.scope,
+      recordId: row.id,
+      field: 'record_version',
+      envelope: JSON.parse(record.snapshot_envelope),
+    })
+    return sameRow(JSON.parse(plaintext), row)
+  } catch {
+    return false
+  }
+}
+
+const occupiedByTarget = (occupied, target) => !occupied || sameRow(occupied, target)
+
 async function recordVersionStatement(db, context, table, row, next, { now, correlationId, idFactory, changedByStaffId = null }) {
   const recordId = statementId(idFactory)
   return { id: recordId, statement: db.prepare(
@@ -63,6 +83,92 @@ async function appendDenied(db, row, { nowMs, correlationId, idFactory, auditEve
   } catch { /* A denial must never disclose an internal storage error. */ }
 }
 
+async function recoverActivation(db, context, { staff, invitation, principal, activeLookup, attempt }) {
+  const [currentStaff, currentInvitation] = await Promise.all([
+    db.prepare('SELECT * FROM staff_users WHERE id=?').bind(staff.id).first(),
+    db.prepare('SELECT * FROM staff_invitations WHERE id=?').bind(invitation.id).first(),
+  ])
+  const activatedAt = currentStaff?.activated_at
+  if (typeof activatedAt !== 'string' || currentInvitation?.activated_at !== activatedAt) return null
+  const expectedStaff = {
+    ...staff, status: 'active', access_subject: principal.subject, email_lookup: activeLookup,
+    version: staff.version + 1, activated_at: activatedAt, updated_at: activatedAt,
+  }
+  const expectedInvitation = {
+    ...invitation, status: 'activated', email_lookup: activeLookup,
+    version: invitation.version + 1, activated_at: activatedAt, updated_at: activatedAt,
+  }
+  if (!sameRow(currentStaff, expectedStaff) || !sameRow(currentInvitation, expectedInvitation)) return null
+
+  const [staffVersion, invitationVersion] = await Promise.all([
+    db.prepare("SELECT * FROM record_versions WHERE entity_type='staff_user' AND entity_id=? AND version=?")
+      .bind(staff.id, expectedStaff.version).first(),
+    db.prepare("SELECT * FROM record_versions WHERE entity_type='staff_invitation' AND entity_id=? AND version=?")
+      .bind(invitation.id, expectedInvitation.version).first(),
+  ])
+  if (!staffVersion || !invitationVersion
+    || staffVersion.changed_by_staff_id !== staff.id || invitationVersion.changed_by_staff_id !== staff.id
+    || staffVersion.changed_at !== activatedAt || invitationVersion.changed_at !== activatedAt
+    || !id(staffVersion.correlation_id) || invitationVersion.correlation_id !== staffVersion.correlation_id
+    || !await snapshotMatches(context, staffVersion, currentStaff)
+    || !await snapshotMatches(context, invitationVersion, currentInvitation)) return null
+
+  const metadata = JSON.stringify({ invitationVersion: expectedInvitation.version, staffVersion: expectedStaff.version })
+  const audits = (await db.prepare(
+    `SELECT * FROM audit_events
+     WHERE action='identity.activation' AND entity_type='staff_user' AND entity_id=?
+       AND result='success' AND metadata_json=?`
+  ).bind(staff.id, metadata).all()).results
+  if (audits.length !== 1) return null
+  const audit = audits[0]
+  if (audit.occurred_at !== activatedAt || audit.actor_staff_id !== staff.id || audit.reason_envelope !== null
+    || audit.correlation_id !== staffVersion.correlation_id) return null
+
+  const [attemptedStaffVersion, attemptedInvitationVersion, attemptedAudit] = await Promise.all([
+    db.prepare('SELECT * FROM record_versions WHERE id=?').bind(attempt.staffVersionId).first(),
+    db.prepare('SELECT * FROM record_versions WHERE id=?').bind(attempt.invitationVersionId).first(),
+    db.prepare('SELECT * FROM audit_events WHERE id=?').bind(attempt.auditId).first(),
+  ])
+  if (!occupiedByTarget(attemptedStaffVersion, staffVersion)
+    || !occupiedByTarget(attemptedInvitationVersion, invitationVersion)
+    || !occupiedByTarget(attemptedAudit, audit)) return null
+  return asActor(currentStaff)
+}
+
+async function recoverReindex(db, context, table, row, activeLookup, attempt) {
+  const current = await db.prepare(`SELECT * FROM ${table} WHERE id=?`).bind(row.id).first()
+  const changedAt = current?.updated_at
+  if (typeof changedAt !== 'string') return false
+  const expected = { ...row, email_lookup: activeLookup, version: row.version + 1, updated_at: changedAt }
+  if (!sameRow(current, expected)) return false
+
+  const type = entityType(table)
+  const record = await db.prepare(
+    'SELECT * FROM record_versions WHERE entity_type=? AND entity_id=? AND version=?'
+  ).bind(type, row.id, expected.version).first()
+  const validChanger = table === 'staff_users'
+    ? record?.changed_by_staff_id === null || record?.changed_by_staff_id === row.id
+    : record?.changed_by_staff_id === null
+  if (!record || !validChanger || record.changed_at !== changedAt || !id(record.correlation_id)
+    || !await snapshotMatches(context, record, current)) return false
+
+  const audits = (await db.prepare(
+    `SELECT * FROM audit_events
+     WHERE action='identity.reindex' AND entity_type=? AND entity_id=?
+       AND result='success' AND metadata_json=?`
+  ).bind(type, row.id, JSON.stringify({ version: expected.version })).all()).results
+  if (audits.length !== 1) return false
+  const audit = audits[0]
+  if (audit.occurred_at !== changedAt || audit.actor_staff_id !== record.changed_by_staff_id
+    || audit.reason_envelope !== null || audit.correlation_id !== record.correlation_id) return false
+
+  const [attemptedVersion, attemptedAudit] = await Promise.all([
+    db.prepare('SELECT * FROM record_versions WHERE id=?').bind(attempt.versionId).first(),
+    db.prepare('SELECT * FROM audit_events WHERE id=?').bind(attempt.auditId).first(),
+  ])
+  return occupiedByTarget(attemptedVersion, record) && occupiedByTarget(attemptedAudit, audit)
+}
+
 async function matchingStaff(db, candidates) {
   return (await db.prepare(
     `SELECT id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,specialist_id,version,activated_at,disabled_at,created_at,updated_at
@@ -77,7 +183,7 @@ async function activeForSubject(db, subject) {
   ).bind(subject).all()).results
 }
 
-async function activate(db, staff, invitation, principal, context, values, options) {
+async function activate(db, staff, invitation, principal, context, values, options, recovery) {
   const { now, candidates, activeLookup } = values
   const { correlationId, idFactory, auditEventStatement: constructor = auditEventStatement } = options
   const staffNext = { ...staff, status: 'active', access_subject: principal.subject, email_lookup: activeLookup, version: staff.version + 1, activated_at: now, updated_at: now }
@@ -94,6 +200,11 @@ async function activate(db, staff, invitation, principal, context, values, optio
   const staffVersion = await recordVersionStatement(db, context, 'staff_users', staff, staffNext, { now, correlationId, idFactory, changedByStaffId: staff.id })
   const invitationVersion = await recordVersionStatement(db, context, 'staff_invitations', invitation, invitationNext, { now, correlationId, idFactory, changedByStaffId: staff.id })
   const auditId = statementId(idFactory)
+  recovery.attempt = Object.freeze({
+    staffVersionId: staffVersion.id,
+    invitationVersionId: invitationVersion.id,
+    auditId,
+  })
   const statements = [
     staffUpdate,
     invitationUpdate,
@@ -103,10 +214,7 @@ async function activate(db, staff, invitation, principal, context, values, optio
     guardStatement(db, 'staff_users', staff, { status: 'active', access_subject: principal.subject, email_lookup: activeLookup, version: staffNext.version, activated_at: now }),
     guardStatement(db, 'staff_invitations', invitation, { status: 'activated', email_lookup: activeLookup, version: invitationNext.version, activated_at: now }),
   ]
-  try { await db.batch(statements) } catch (error) {
-    error.identityAttempt = { staffVersionId: staffVersion.id, invitationVersionId: invitationVersion.id, auditId, staffNext, invitationNext, correlationId }
-    throw error
-  }
+  await db.batch(statements)
   return asActor(staffNext)
 }
 
@@ -118,6 +226,7 @@ async function reindexOne(db, context, table, row, activeLookup, options) {
     .bind(activeLookup, now, row.id, row.version)
   const version = await recordVersionStatement(db, context, table, row, next, { now, correlationId: options.correlationId, idFactory: options.idFactory, changedByStaffId: options.changedByStaffId ?? null })
   const auditId = statementId(options.idFactory)
+  const attempt = Object.freeze({ versionId: version.id, auditId })
   const statements = [
     update,
     version.statement,
@@ -128,18 +237,17 @@ async function reindexOne(db, context, table, row, activeLookup, options) {
     await db.batch(statements)
     return true
   } catch (error) {
-    if (!collision(error)) throw error
-    const current = await db.prepare(`SELECT id,email_lookup,version FROM ${table} WHERE id=?`).bind(row.id).first()
-    const record = await db.prepare('SELECT entity_type,entity_id,version FROM record_versions WHERE id=?').bind(version.id).first()
-    const audit = await db.prepare('SELECT action,entity_type,entity_id,result,correlation_id FROM audit_events WHERE id=?').bind(auditId).first()
-    if (current?.email_lookup === activeLookup && current.version === next.version
-      && record?.entity_type === entityType(table) && record.entity_id === row.id && record.version === next.version
-      && audit?.action === 'identity.reindex' && audit.entity_type === entityType(table) && audit.entity_id === row.id && audit.result === 'success' && audit.correlation_id === options.correlationId) return false
-    throw error
+    if (!collision(error)) throw failure()
+    try {
+      if (await recoverReindex(db, context, table, row, activeLookup, attempt)) return false
+    } catch {
+      throw failure()
+    }
+    throw failure()
   }
 }
 
-export async function resolveActor(db, principal, cryptoContext, options = {}) {
+async function resolveActorInternal(db, principal, cryptoContext, options = {}) {
   const context = requireContext(cryptoContext)
   if (!db?.prepare || principal?.kind !== 'human' || typeof principal.subject !== 'string' || !principal.subject || typeof principal.normalizedEmail !== 'string' || !principal.normalizedEmail) throw denied()
   const candidates = await blindEmailCandidates(principal.normalizedEmail, context.keyring)
@@ -181,30 +289,30 @@ export async function resolveActor(db, principal, cryptoContext, options = {}) {
     await appendDenied(db, staff, options)
     throw denied()
   }
+  const recovery = {}
   try {
-    return await activate(db, staff, invitations[0], principal, context, { now, candidates, activeLookup }, options)
+    return await activate(db, staff, invitations[0], principal, context, { now, candidates, activeLookup }, options, recovery)
   } catch (error) {
-    const exact = await db.prepare('SELECT id,role,specialist_id,version,status,access_subject,email_lookup,activated_at FROM staff_users WHERE id=?').bind(staff.id).first()
-    const attempt = error.identityAttempt
-    const exactInvitation = collision(error)
-      ? await db.prepare('SELECT id,status,email_lookup,version,activated_at FROM staff_invitations WHERE id=?').bind(invitations[0].id).first()
-      : null
-    const staffVersion = attempt && await db.prepare("SELECT id FROM record_versions WHERE entity_type='staff_user' AND entity_id=? AND version=?").bind(staff.id, attempt.staffNext.version).first()
-    const invitationVersion = attempt && await db.prepare("SELECT id FROM record_versions WHERE entity_type='staff_invitation' AND entity_id=? AND version=?").bind(invitations[0].id, attempt.invitationNext.version).first()
-    const audit = attempt && await db.prepare("SELECT id FROM audit_events WHERE action='identity.activation' AND entity_type='staff_user' AND entity_id=? AND result='success'").bind(staff.id).first()
-    const attemptedStaffVersion = attempt && await db.prepare('SELECT entity_type,entity_id,version FROM record_versions WHERE id=?').bind(attempt.staffVersionId).first()
-    const attemptedInvitationVersion = attempt && await db.prepare('SELECT entity_type,entity_id,version FROM record_versions WHERE id=?').bind(attempt.invitationVersionId).first()
-    const attemptedAudit = attempt && await db.prepare('SELECT action,entity_type,entity_id,result FROM audit_events WHERE id=?').bind(attempt.auditId).first()
-    if (collision(error) && attempt && exact?.status === 'active' && exact.access_subject === principal.subject
-      && exact.version === staff.version + 1 && exactInvitation?.status === 'activated'
-      && exact.email_lookup === activeLookup && exact.activated_at === attempt.staffNext.activated_at
-      && exactInvitation.email_lookup === activeLookup && exactInvitation.version === invitations[0].version + 1 && exactInvitation.activated_at === attempt.invitationNext.activated_at
-      && staffVersion && invitationVersion && audit
-      && (!attemptedStaffVersion || attemptedStaffVersion.entity_type === 'staff_user' && attemptedStaffVersion.entity_id === staff.id && attemptedStaffVersion.version === attempt.staffNext.version)
-      && (!attemptedInvitationVersion || attemptedInvitationVersion.entity_type === 'staff_invitation' && attemptedInvitationVersion.entity_id === invitations[0].id && attemptedInvitationVersion.version === attempt.invitationNext.version)
-      && (!attemptedAudit || attemptedAudit.action === 'identity.activation' && attemptedAudit.entity_type === 'staff_user' && attemptedAudit.entity_id === staff.id && attemptedAudit.result === 'success')) return asActor(exact)
     if (!collision(error)) throw error
+    try {
+      const actor = recovery.attempt && await recoverActivation(db, context, {
+        staff, invitation: invitations[0], principal, activeLookup, attempt: recovery.attempt,
+      })
+      if (actor) return actor
+    } catch {
+      throw failure()
+    }
     throw denied()
+  }
+}
+
+export async function resolveActor(db, principal, cryptoContext, options = {}) {
+  try {
+    return await resolveActorInternal(db, principal, cryptoContext, options)
+  } catch (error) {
+    if (error?.message === 'ACCESS_DENIED') throw denied()
+    if (error?.message === 'IDENTITY_FAILURE') throw failure()
+    throw failure()
   }
 }
 

@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose'
+import { decodeBase64Url } from '../security/encoding.js'
 
 const MAX_AGE_SECONDS = 8 * 60 * 60
 const TOLERANCE_SECONDS = 5
@@ -8,12 +9,46 @@ const unavailable = () => new Error('ACCESS_KEYSET_UNAVAILABLE')
 const integer = (value) => Number.isSafeInteger(value)
 const remoteJwksByFetch = new WeakMap()
 const remoteOutages = new WeakSet()
+const keysetFailures = new WeakSet()
 
 const remoteOutage = () => {
-  const error = unavailable()
+  const error = new Error('ACCESS_KEYSET_UNAVAILABLE')
   remoteOutages.add(error)
   return error
 }
+
+const keysetUnavailable = () => {
+  const error = unavailable()
+  keysetFailures.add(error)
+  return error
+}
+
+function validRsaMaterial(key) {
+  let modulus
+  let exponent
+  try {
+    if (key?.kty !== 'RSA' || typeof key.n !== 'string' || typeof key.e !== 'string') return false
+    modulus = decodeBase64Url(key.n)
+    exponent = decodeBase64Url(key.e)
+    return modulus.byteLength >= 256 && modulus[0] !== 0
+      && exponent.byteLength > 0 && exponent.byteLength <= 8
+      && exponent.some((value) => value !== 0) && (exponent.at(-1) & 1) === 1
+  } catch {
+    return false
+  } finally {
+    modulus?.fill(0)
+    exponent?.fill(0)
+  }
+}
+
+const matchingMalformedRsa = (jwks, protectedHeader) => jwks?.keys?.some((key) => (
+  key?.kid === protectedHeader?.kid
+  && key.kty === 'RSA'
+  && (key.alg === undefined || key.alg === 'RS256')
+  && (key.use === undefined || key.use === 'sig')
+  && (key.key_ops === undefined || Array.isArray(key.key_ops) && key.key_ops.includes('verify'))
+  && !validRsaMaterial(key)
+))
 
 export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
   try {
@@ -26,23 +61,35 @@ export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
     }
     const cached = byIssuer.get(issuer)
     if (cached) return cached
-    const guardedFetch = async (...args) => {
+    let currentJwks
+    let pendingFetch
+    const fetchAndValidate = async (...args) => {
       let response
       try { response = await fetchImpl(...args) } catch { throw remoteOutage() }
       if (!response?.ok) throw remoteOutage()
       try {
         const body = await response.clone().json()
         if (!body || !Array.isArray(body.keys) || body.keys.some((key) => !key || typeof key !== 'object' || typeof key.kty !== 'string')) throw remoteOutage()
+        currentJwks = body
       } catch (error) {
         if (remoteOutages.has(error)) throw error
         throw remoteOutage()
       }
       return response
     }
+    const guardedFetch = async (...args) => {
+      pendingFetch ??= fetchAndValidate(...args).finally(() => { pendingFetch = undefined })
+      return (await pendingFetch).clone()
+    }
     const remote = createRemoteJWKSet(url, { [customFetch]: guardedFetch })
     const resolver = async (...args) => {
-      try { return await remote(...args) } catch (error) {
+      try {
+        const key = await remote(...args)
+        if (matchingMalformedRsa(currentJwks, args[0])) throw remoteOutage()
+        return key
+      } catch (error) {
         if (remoteOutages.has(error)) throw remoteOutage()
+        if (matchingMalformedRsa(currentJwks, args[0])) throw remoteOutage()
         throw error
       }
     }
@@ -74,7 +121,7 @@ export function createAccessVerifier({ issuer, audience, jwks, now = () => new D
       validatePayload(verified.payload, verified.protectedHeader, current.getTime())
       return verified
     } catch (error) {
-      if (remoteOutages.has(error)) throw unavailable()
+      if (remoteOutages.has(error)) throw keysetUnavailable()
       if (error?.message === 'ACCESS_ASSERTION_INVALID') throw error
       throw invalid()
     }
@@ -117,7 +164,7 @@ export async function resolveAccessPrincipal(request, { config, verifier, expect
       if (!principal || principal.kind !== expected) throw invalid()
       return principal
     } catch (error) {
-      if (error?.message === 'ACCESS_KEYSET_UNAVAILABLE') throw error
+      if (keysetFailures.has(error)) throw error
       throw invalid()
     }
   }
