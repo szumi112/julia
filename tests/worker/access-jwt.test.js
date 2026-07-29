@@ -78,6 +78,33 @@ describe('Access assertion verification', () => {
     expect(createRemoteAccessJwks({ issuer: ISSUER, fetchImpl })).toBe(createRemoteAccessJwks({ issuer: ISSUER, fetchImpl }))
   })
 
+  it('brands only actual remote fetch failures as unavailable and rejects forged resolver errors', async () => {
+    for (const [issuer, response] of [
+      ['https://status.cloudflareaccess.com', new Response('down', { status: 503 })],
+      ['https://malformed.cloudflareaccess.com', new Response('{"keys":"bad"}', { status: 200, headers: { 'content-type': 'application/json' } })],
+    ]) {
+      const jwks = createRemoteAccessJwks({ issuer, fetchImpl: async () => response })
+      const token = await signAccessJwt(TEST_IDENTITIES.owner, { issuer })
+      await expect(createAccessVerifier({ issuer, audience: AUDIENCE, jwks, now: () => new Date(NOW_MS) }).verifyHumanAccessAssertion(token))
+        .rejects.toThrow(/^ACCESS_KEYSET_UNAVAILABLE$/)
+    }
+    const forged = createAccessVerifier({ issuer: ISSUER, audience: AUDIENCE, jwks: async () => { throw new Error('ACCESS_KEYSET_UNAVAILABLE') }, now: () => new Date(NOW_MS) })
+    await expect(forged.verifyHumanAccessAssertion(await signAccessJwt(TEST_IDENTITIES.owner))).rejects.toThrow(/^ACCESS_ASSERTION_INVALID$/)
+  })
+
+  it('treats a successful JWKS refresh with an unknown kid as invalid', async () => {
+    const issuer = 'https://unknown-kid.cloudflareaccess.com'
+    const jwks = createRemoteAccessJwks({ issuer, fetchImpl: async () => new Response(JSON.stringify(JWKS), { headers: { 'content-type': 'application/json' } }) })
+    const assertion = await signAccessJwt(TEST_IDENTITIES.owner, { issuer, kid: 'unknown-kid' })
+    await expect(createAccessVerifier({ issuer, audience: AUDIENCE, jwks, now: () => new Date(NOW_MS) }).verifyHumanAccessAssertion(assertion))
+      .rejects.toThrow(/^ACCESS_ASSERTION_INVALID$/)
+  })
+
+  it('rejects a missing verifier method instead of returning undefined', async () => {
+    const request = new Request('http://127.0.0.1:5174/api/v1/session', { headers: { 'Cf-Access-Jwt-Assertion': 'value' } })
+    await expect(resolveAccessPrincipal(request, { config: testConfig, verifier: {}, expected: 'human' })).rejects.toThrow(/^ACCESS_ASSERTION_INVALID$/)
+  })
+
   it('uses assertion-header presence rather than truthiness and limits local auth to the configured loopback origin', async () => {
     const local = new Request('http://127.0.0.1:5174/api/v1/session', { headers: { 'X-BWM-Local-Identity': 'staff@example.test' } })
     await expect(resolveAccessPrincipal(local, { config: testConfig, verifier: verifier(), expected: 'human' }))

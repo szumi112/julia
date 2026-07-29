@@ -61,6 +61,21 @@ describe('authorization matrix', () => {
     for (const [actor, capability, resource] of cases) expect(authorize(actor, capability, resource, { nowMs: NOW_MS })).toBe(false)
   })
 
+  it('rejects empty, whitespace, missing, and unbound identifiers for every role', () => {
+    const malformed = [
+      [ACTORS.owner, 'centre.manage', { kind: 'centre', centreId: ' ' }],
+      [ACTORS.coordinator, 'chat.general', { kind: 'centre' }],
+      [ACTORS.specialist, 'chat.direct', { kind: 'conversation', conversationId: '', participantStaffIds: ['stf_spec'] }],
+      [ACTORS.specialist, 'chat.direct', { kind: 'conversation', conversationId: ' ', participantStaffIds: [] }],
+      [ACTORS.specialist, 'tus.manage', { kind: 'tus_group', groupId: 'tus', leaderSpecialistIds: [] }],
+      [ACTORS.specialist, 'tus.manage', { kind: 'tus_group', groupId: 'tus', leaderSpecialistIds: [' '] }],
+      [ACTORS.specialist, 'appointment.manage', { kind: 'appointment', appointmentId: ' ', specialistId: 'sp_spec' }],
+      [{ id: 'stf_spec', role: 'specialist', specialistId: ' ' }, 'appointment.manage', { kind: 'appointment', appointmentId: 'apt', specialistId: 'sp_spec' }],
+      [{ id: ' ', role: 'owner', specialistId: null }, 'staff.manage', centre],
+    ]
+    for (const [actor, capability, resource] of malformed) expect(authorize(actor, capability, resource, { nowMs: NOW_MS })).toBe(false)
+  })
+
   it.each([
     [ACTORS.owner, 'centre.manage', centre, true],
     [ACTORS.coordinator, 'centre.manage', centre, false],

@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { blindEmailIndex, encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
+import { blindEmailIndex, decryptForScope, encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { reindexEmailLookupsBatch, resolveActor, verifyNoOldEmailLookups } from '../../worker/identity/staff.js'
 import { NOW_MS, TEST_IDENTITIES } from './fixtures.js'
 
@@ -47,6 +47,11 @@ describe('D1-authoritative staff resolution', () => {
       .resolves.toEqual({ id: 'stf_pending', role: 'owner', specialistId: null, version: 2 })
     expect(await env.DB.prepare("SELECT status, access_subject, version FROM staff_users WHERE id = 'stf_pending'").first()).toEqual({ status: 'active', access_subject: TEST_IDENTITIES.owner.sub, version: 2 })
     expect(await env.DB.prepare("SELECT status, version FROM staff_invitations WHERE id = 'inv_pending'").first()).toEqual({ status: 'activated', version: 2 })
+    const snapshot = await env.DB.prepare("SELECT snapshot_envelope FROM record_versions WHERE entity_id='stf_pending'").first()
+    const full = JSON.parse(await decryptForScope(context.keyring, context.dataKey, { expectedScope: scope, recordId: 'stf_pending', field: 'record_version', envelope: JSON.parse(snapshot.snapshot_envelope) }))
+    expect(full).toMatchObject({ id: 'stf_pending', status: 'active', access_subject: TEST_IDENTITIES.owner.sub, version: 2, activated_at: instant, updated_at: instant })
+    expect(JSON.stringify(snapshot)).not.toContain(TEST_IDENTITIES.owner.email)
+    expect(JSON.stringify(snapshot)).not.toContain(TEST_IDENTITIES.owner.sub)
   })
 
   it('denies exact expiry and rolls all mutations back when invitation compare-and-set loses', async () => {
@@ -84,6 +89,14 @@ describe('D1-authoritative staff resolution', () => {
     expect((await env.DB.prepare("SELECT count(*) AS count FROM audit_events WHERE action='identity.denied' AND entity_id='stf_disabled'").first()).count).toBe(1)
   })
 
+  it('audits the exact subject-bound actor when its JWT email no longer matches a lookup', async () => {
+    const context = await cryptoContext()
+    await seedPending(context, { staffId: 'stf_subject_only', invitationId: 'inv_subject_only', email: 'subject-only@example.test' })
+    await resolveActor(env.DB, { kind: 'human', subject: 'access-subject-only', normalizedEmail: 'subject-only@example.test' }, context, { nowMs: NOW_MS, correlationId: 'corr_subject_activate', idFactory: ids('subject_activate') })
+    await expect(resolveActor(env.DB, { kind: 'human', subject: 'access-subject-only', normalizedEmail: 'wrong-email@example.test' }, context, { nowMs: NOW_MS, correlationId: 'corr_subject_wrong', idFactory: ids('subject_wrong') })).rejects.toThrow(/^ACCESS_DENIED$/)
+    expect((await env.DB.prepare("SELECT count(*) AS count FROM audit_events WHERE action='identity.denied' AND entity_id='stf_subject_only'").first()).count).toBe(1)
+  })
+
   it('uses the final batch guard to roll back a zero-row invitation CAS after staff CAS', async () => {
     const context = await cryptoContext()
     await seedPending(context, { staffId: 'stf_guard', invitationId: 'inv_guard', email: 'guard@example.test' })
@@ -109,6 +122,17 @@ describe('D1-authoritative staff resolution', () => {
     expect(JSON.stringify(history.results)).not.toContain('rotate@example.test')
     expect(JSON.stringify(history.results)).not.toContain('access-rotate')
     expect(JSON.stringify(history.results)).not.toContain(expected)
+  })
+
+  it('lazily reindexes an exact active actor under V2 without changing its Access subject', async () => {
+    const v1 = await cryptoContext()
+    const v2 = await cryptoContextV2()
+    await seedPending(v1, { staffId: 'stf_lazy', invitationId: 'inv_lazy', email: 'lazy@example.test', lookupVersion: 1 })
+    await resolveActor(env.DB, { kind: 'human', subject: 'access-lazy', normalizedEmail: 'lazy@example.test' }, v1, { nowMs: NOW_MS, correlationId: 'corr_lazy_activate', idFactory: ids('lazy_activate') })
+    await expect(resolveActor(env.DB, { kind: 'human', subject: 'access-lazy', normalizedEmail: 'lazy@example.test' }, v2, { nowMs: NOW_MS, correlationId: 'corr_lazy_reindex', idFactory: ids('lazy_reindex') }))
+      .resolves.toEqual({ id: 'stf_lazy', role: 'owner', specialistId: null, version: 3 })
+    expect(await env.DB.prepare("SELECT email_lookup,access_subject,version FROM staff_users WHERE id='stf_lazy'").first())
+      .toEqual({ email_lookup: await blindEmailIndex('lazy@example.test', v2.keyring), access_subject: 'access-lazy', version: 3 })
   })
 
   it('reindexes bounded staff and terminal invitations then verifies no retained old index remains', async () => {

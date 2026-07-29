@@ -1,4 +1,5 @@
 import { auditEventStatement } from '../audit/events.js'
+import { isD1IdentityCollision } from '../db/errors.js'
 import { blindEmailCandidates, blindEmailIndex, decryptForScope, encryptForScope } from '../security/envelope.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -18,7 +19,7 @@ const statementId = (factory) => {
   return value
 }
 const entityType = (table) => table === 'staff_users' ? 'staff_user' : 'staff_invitation'
-const collision = (error) => /^(?:identity_collision: SQLITE_CONSTRAINT(?: \(extended: SQLITE_CONSTRAINT_TRIGGER\))?|D1_ERROR: identity_collision: SQLITE_CONSTRAINT(?: \(extended: SQLITE_CONSTRAINT_TRIGGER\))?)$/.test(error?.message ?? '')
+const collision = isD1IdentityCollision
 
 function requireContext(context) {
   if (!context?.keyring || !context?.dataKey || !context?.scope) throw failure()
@@ -56,7 +57,7 @@ async function appendDenied(db, row, { nowMs, correlationId, idFactory, auditEve
   try {
     await constructor(db, {
       id: statementId(idFactory), occurredAt: now, actorStaffId: row.id, action: 'identity.denied',
-      entityType: 'staff_user', entityId: row.id, result: 'denied', correlationId, metadata: { version: row.version },
+      entityType: 'staff_user', entityId: row.id, result: 'denied', correlationId, metadata: { version: row.version }, reasonEnvelope: null,
     }).run()
   } catch { /* A denial must never disclose an internal storage error. */ }
 }
@@ -94,7 +95,7 @@ async function activate(db, staff, invitation, principal, context, values, optio
     invitationUpdate,
     await recordVersionStatement(db, context, 'staff_users', staff, staffNext, { now, correlationId, idFactory, changedByStaffId: staff.id }),
     await recordVersionStatement(db, context, 'staff_invitations', invitation, invitationNext, { now, correlationId, idFactory, changedByStaffId: staff.id }),
-    constructor(db, { id: statementId(idFactory), occurredAt: now, actorStaffId: staff.id, action: 'identity.activation', entityType: 'staff_user', entityId: staff.id, result: 'success', correlationId, metadata: { staffVersion: staffNext.version, invitationVersion: invitationNext.version } }),
+    constructor(db, { id: statementId(idFactory), occurredAt: now, actorStaffId: staff.id, action: 'identity.activation', entityType: 'staff_user', entityId: staff.id, result: 'success', correlationId, metadata: { staffVersion: staffNext.version, invitationVersion: invitationNext.version }, reasonEnvelope: null }),
     guardStatement(db, 'staff_users', staff, { status: 'active', access_subject: principal.subject, email_lookup: activeLookup, version: staffNext.version, activated_at: now }),
     guardStatement(db, 'staff_invitations', invitation, { status: 'activated', email_lookup: activeLookup, version: invitationNext.version, activated_at: now }),
   ]
@@ -111,7 +112,7 @@ async function reindexOne(db, context, table, row, activeLookup, options) {
   const statements = [
     update,
     await recordVersionStatement(db, context, table, row, next, { now, correlationId: options.correlationId, idFactory: options.idFactory, changedByStaffId: options.changedByStaffId ?? null }),
-    (options.auditEventStatement ?? auditEventStatement)(db, { id: statementId(options.idFactory), occurredAt: now, actorStaffId: options.changedByStaffId ?? null, action: 'identity.reindex', entityType: entityType(table), entityId: row.id, result: 'success', correlationId: options.correlationId, metadata: { version: next.version } }),
+    (options.auditEventStatement ?? auditEventStatement)(db, { id: statementId(options.idFactory), occurredAt: now, actorStaffId: options.changedByStaffId ?? null, action: 'identity.reindex', entityType: entityType(table), entityId: row.id, result: 'success', correlationId: options.correlationId, metadata: { version: next.version }, reasonEnvelope: null }),
     guardStatement(db, table, row, { email_lookup: activeLookup, version: next.version }),
   ]
   try {
@@ -120,7 +121,7 @@ async function reindexOne(db, context, table, row, activeLookup, options) {
   } catch (error) {
     if (!collision(error)) throw error
     const current = await db.prepare(`SELECT id,email_lookup,version FROM ${table} WHERE id=?`).bind(row.id).first()
-    if (current?.email_lookup === activeLookup && current.version >= next.version) return false
+    if (current?.email_lookup === activeLookup && current.version === next.version) return false
     throw error
   }
 }
@@ -132,7 +133,8 @@ export async function resolveActor(db, principal, cryptoContext, options = {}) {
   const now = iso(options.nowMs)
   const [rows, boundRows] = await Promise.all([matchingStaff(db, candidates), activeForSubject(db, principal.subject)])
   if (rows.length !== 1 || boundRows.some((row) => row.id !== rows[0]?.id)) {
-    if (rows.length === 1) await appendDenied(db, rows[0], options)
+    const identified = rows.length === 1 ? rows[0] : boundRows.length === 1 ? boundRows[0] : null
+    if (identified) await appendDenied(db, identified, options)
     throw denied()
   }
   const staff = rows[0]
@@ -170,8 +172,13 @@ export async function resolveActor(db, principal, cryptoContext, options = {}) {
     return await activate(db, staff, invitations[0], principal, context, { now, candidates, activeLookup }, options)
   } catch (error) {
     const exact = await db.prepare('SELECT id,role,specialist_id,version,status,access_subject FROM staff_users WHERE id=?').bind(staff.id).first()
-    if (exact?.status === 'active' && exact.access_subject === principal.subject) return asActor(exact)
-    if (!collision(error)) await appendDenied(db, staff, options)
+    const exactInvitation = collision(error)
+      ? await db.prepare('SELECT id,status,email_lookup,version,activated_at FROM staff_invitations WHERE id=?').bind(invitations[0].id).first()
+      : null
+    if (collision(error) && exact?.status === 'active' && exact.access_subject === principal.subject
+      && exact.version === staff.version + 1 && exactInvitation?.status === 'activated'
+      && exactInvitation.email_lookup === activeLookup && exactInvitation.version === invitations[0].version + 1) return asActor(exact)
+    if (!collision(error)) throw error
     throw denied()
   }
 }

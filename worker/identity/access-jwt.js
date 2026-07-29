@@ -7,6 +7,13 @@ const invalid = () => new Error('ACCESS_ASSERTION_INVALID')
 const unavailable = () => new Error('ACCESS_KEYSET_UNAVAILABLE')
 const integer = (value) => Number.isSafeInteger(value)
 const remoteJwksByFetch = new WeakMap()
+const remoteOutages = new WeakSet()
+
+const remoteOutage = () => {
+  const error = unavailable()
+  remoteOutages.add(error)
+  return error
+}
 
 export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
   try {
@@ -19,11 +26,31 @@ export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
     }
     const cached = byIssuer.get(issuer)
     if (cached) return cached
+    let fetchFailed = false
     const guardedFetch = async (...args) => {
-      try { return await fetchImpl(...args) } catch { throw unavailable() }
+      let response
+      try { response = await fetchImpl(...args) } catch { fetchFailed = true; throw remoteOutage() }
+      if (!response?.ok) { fetchFailed = true; throw remoteOutage() }
+      try {
+        const body = await response.clone().json()
+        if (!body || !Array.isArray(body.keys)) { fetchFailed = true; throw remoteOutage() }
+      } catch (error) {
+        if (remoteOutages.has(error)) throw error
+        fetchFailed = true
+        throw remoteOutage()
+      }
+      return response
     }
     const remote = createRemoteJWKSet(url, { [customFetch]: guardedFetch })
-    const resolver = async (...args) => remote(...args)
+    const resolver = async (...args) => {
+      try { return await remote(...args) } catch (error) {
+        if (fetchFailed || remoteOutages.has(error)) {
+          fetchFailed = false
+          throw remoteOutage()
+        }
+        throw error
+      }
+    }
     byIssuer.set(issuer, resolver)
     return resolver
   } catch {
@@ -52,7 +79,8 @@ export function createAccessVerifier({ issuer, audience, jwks, now = () => new D
       validatePayload(verified.payload, verified.protectedHeader, current.getTime())
       return verified
     } catch (error) {
-      if (error?.message === 'ACCESS_ASSERTION_INVALID' || error?.message === 'ACCESS_KEYSET_UNAVAILABLE') throw error
+      if (remoteOutages.has(error)) throw unavailable()
+      if (error?.message === 'ACCESS_ASSERTION_INVALID') throw error
       throw invalid()
     }
   }
@@ -87,9 +115,16 @@ export async function resolveAccessPrincipal(request, { config, verifier, expect
   if (!(request instanceof Request) || !['human', 'service'].includes(expected)) throw invalid()
   const assertion = request.headers.get('Cf-Access-Jwt-Assertion')
   if (assertion !== null) {
-    return expected === 'human'
-      ? verifier?.verifyHumanAccessAssertion(assertion)
-      : verifier?.verifyServiceAccessAssertion(assertion, config)
+    const method = expected === 'human' ? verifier?.verifyHumanAccessAssertion : verifier?.verifyServiceAccessAssertion
+    if (typeof method !== 'function') throw invalid()
+    try {
+      const principal = expected === 'human' ? await method.call(verifier, assertion) : await method.call(verifier, assertion, config)
+      if (!principal || principal.kind !== expected) throw invalid()
+      return principal
+    } catch (error) {
+      if (error?.message === 'ACCESS_KEYSET_UNAVAILABLE') throw error
+      throw invalid()
+    }
   }
   if (expected === 'human') return localIdentity(request, config)
   throw invalid()

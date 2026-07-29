@@ -9,7 +9,7 @@ const ROLE_CAPABILITIES = Object.freeze({
   coordinator: Object.freeze(['appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general', 'client.operational.read', 'finance.centre.read', 'operations.health.read', 'payment.manage', 'tus.manage']),
   specialist: Object.freeze(['appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general', 'client.operational.read', 'clinical.read', 'payment.manage', 'tus.manage']),
 })
-const nonempty = (value) => typeof value === 'string' && value.length > 0
+const nonempty = (value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
 const knownActor = (actor) => actor && typeof actor === 'object' && nonempty(actor.id)
   && ['owner', 'coordinator', 'specialist'].includes(actor.role)
   && (actor.specialistId === null || nonempty(actor.specialistId))
@@ -31,7 +31,7 @@ export function authorize(actor, capability, resource, { nowMs } = {}) {
   if (['centre.manage', 'staff.manage', 'security.audit.read'].includes(capability)) return actor.role === 'owner' && centreTarget(resource)
   if (capability === 'finance.centre.read' || capability === 'operations.health.read') return ['owner', 'coordinator'].includes(actor.role) && centreTarget(resource)
   if (capability === 'chat.general') return centreTarget(resource)
-  if (capability === 'chat.direct') return resource?.kind === 'conversation' && typeof resource.conversationId === 'string' && has(resource.participantStaffIds, actor.id)
+  if (capability === 'chat.direct') return resource?.kind === 'conversation' && nonempty(resource.conversationId) && has(resource.participantStaffIds, actor.id)
   if (capability === 'client.operational.read') return actor.role !== 'specialist'
     ? ['owner', 'coordinator'].includes(actor.role) && clientTarget(resource) : activeAssignment(actor, resource)
   if (['appointment.manage', 'appointment.charge.read', 'payment.manage'].includes(capability)) {
