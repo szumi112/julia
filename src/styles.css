@@ -99,6 +99,35 @@
   --z-toast: 100;
 }
 
+.protected-app {
+  align-content: center;
+  background: var(--paper);
+  color: var(--ink);
+  display: grid;
+  justify-items: center;
+  min-height: 100vh;
+  padding: var(--s6);
+  text-align: center;
+}
+
+.protected-app__brand {
+  color: var(--coral-deep);
+  font-family: var(--font-brand);
+  font-size: 1.125rem;
+  margin: 0;
+}
+
+.protected-app h1 {
+  font-family: var(--font-display);
+  font-size: 2rem;
+  margin: var(--s2) 0 0;
+}
+
+.protected-app p:last-child {
+  color: var(--ink-soft);
+  margin: var(--s2) 0 0;
+}
+
 * { box-sizing: border-box; }
 
 html, body { height: 100%; }

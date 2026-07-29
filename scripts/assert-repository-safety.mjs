@@ -32,13 +32,34 @@ const BACKEND_BINDINGS = [
   'DB',
   'SCW_SECRET_KEY',
 ]
-const EXACT_SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+const SEMVER_NUMBER = '(?:0|[1-9]\\d*)'
+const SEMVER_PRERELEASE = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)'
+const EXACT_SEMVER = new RegExp(
+  `^${SEMVER_NUMBER}\\.${SEMVER_NUMBER}\\.${SEMVER_NUMBER}(?:-${SEMVER_PRERELEASE}(?:\\.${SEMVER_PRERELEASE})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`
+)
 
 const relativePath = (root, path) => relative(root, path).split(sep).join('/')
 
 const isInside = (root, path) => {
   const pathFromRoot = relative(root, path)
   return pathFromRoot === '' || (!pathFromRoot.startsWith(`..${sep}`) && pathFromRoot !== '..' && !isAbsolute(pathFromRoot))
+}
+
+const assertNoSymlinkComponents = (root, path) => {
+  let resolvedPath = resolve(path)
+  if (!isInside(root, resolvedPath)) {
+    try {
+      resolvedPath = realpathSync(resolvedPath)
+    } catch {
+      throw new Error(`Path must remain inside project root: ${path}`)
+    }
+  }
+  if (!isInside(root, resolvedPath)) throw new Error(`Path must remain inside project root: ${path}`)
+  let current = root
+  for (const component of relative(root, resolvedPath).split(sep).filter(Boolean)) {
+    current = join(current, component)
+    if (lstatSync(current).isSymbolicLink()) throw new Error(`Symlink is not allowed: ${current}`)
+  }
 }
 
 const requirePathType = (path, type) => {
@@ -63,11 +84,12 @@ const parseJson = (path) => {
   }
 }
 
-const resolveRegularInside = ({ base, value, appRoot, type, field }) => {
+const resolveRegularInside = ({ base, value, projectRoot, appRoot, type, field }) => {
   if (typeof value !== 'string' || value.length === 0 || isAbsolute(value)) {
     throw new Error(`${field} must be a relative path`)
   }
   const candidate = resolve(base, value)
+  assertNoSymlinkComponents(projectRoot, candidate)
   requirePathType(candidate, type)
   const resolved = realpathSync(candidate)
   if (!isInside(appRoot, resolved)) throw new Error(`${field} must resolve inside dist/app`)
@@ -96,22 +118,19 @@ const walkRegularFiles = (path) => {
 }
 
 const assertNoRuntimeHosts = (contents, path) => {
+  const normalized = contents.toLowerCase()
   for (const host of RUNTIME_HOSTS) {
-    if (contents.includes(host)) throw new Error(`Runtime dependency remains in ${path}: ${host}`)
+    if (normalized.includes(host)) throw new Error(`Runtime dependency remains in ${path}: ${host}`)
   }
 }
 
 export const assertTrackedFiles = (paths) => {
   const forbidden = paths.filter((path) =>
-    path.endsWith('.xlsx')
-    || path === '.env'
-    || path.startsWith('.env.')
-    || path === '.dev.vars'
-    || path.startsWith('.dev.vars.')
-    || path === 'playwright-report'
-    || path.startsWith('playwright-report/')
-    || path === 'test-results'
-    || path.startsWith('test-results/')
+    path.split(/[\\/]/).at(-1).endsWith('.xlsx')
+    || path.split(/[\\/]/).at(-1).startsWith('.env')
+    || path.split(/[\\/]/).at(-1).startsWith('.dev.vars')
+    || path.split(/[\\/]/).includes('playwright-report')
+    || path.split(/[\\/]/).includes('test-results')
   )
   if (forbidden.length) throw new Error(`Forbidden tracked files: ${forbidden.join(', ')}`)
 }
@@ -131,20 +150,33 @@ export const assertRuntimeIndex = (html) => assertNoRuntimeHosts(html, 'index.ht
 export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) => {
   const projectRoot = realpathSync(root)
   const appRoot = resolve(projectRoot, 'dist/app')
+  assertNoSymlinkComponents(projectRoot, appRoot)
   requirePathType(appRoot, 'directory')
   const resolvedAppRoot = realpathSync(appRoot)
+  if (!isInside(projectRoot, resolvedAppRoot)) throw new Error('dist/app must remain inside project root')
   const deployRoot = join(projectRoot, '.wrangler/deploy')
+  assertNoSymlinkComponents(projectRoot, deployRoot)
   requirePathType(deployRoot, 'directory')
+  const resolvedDeployRoot = realpathSync(deployRoot)
+  if (!isInside(projectRoot, resolvedDeployRoot)) throw new Error('.wrangler/deploy must remain inside project root')
 
   const deployEntries = readdirSync(deployRoot, { withFileTypes: true })
   if (deployEntries.length !== 1 || deployEntries[0]?.name !== 'config.json' || !deployEntries[0].isFile()) {
     throw new Error(`Unexpected file under .wrangler/deploy: ${deployEntries.map((entry) => entry.name).join(', ')}`)
   }
 
+  const soleDeployConfigPath = join(deployRoot, 'config.json')
+  assertNoSymlinkComponents(projectRoot, soleDeployConfigPath)
+  requirePathType(soleDeployConfigPath, 'file')
+  const resolvedSoleDeployConfigPath = realpathSync(soleDeployConfigPath)
   const deployConfigPath = configPath
     ? (isAbsolute(configPath) ? configPath : resolve(projectRoot, configPath))
-    : join(deployRoot, 'config.json')
+    : soleDeployConfigPath
+  assertNoSymlinkComponents(projectRoot, deployConfigPath)
   requirePathType(deployConfigPath, 'file')
+  if (realpathSync(deployConfigPath) !== resolvedSoleDeployConfigPath) {
+    throw new Error('configPath must resolve to the sole .wrangler/deploy/config.json')
+  }
   const deployConfig = parseJson(deployConfigPath)
   if (
     !deployConfig
@@ -161,6 +193,7 @@ export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) =
   const workerConfigPath = resolveRegularInside({
     base: dirname(deployConfigPath),
     value: deployConfig.configPath,
+    projectRoot,
     appRoot: resolvedAppRoot,
     type: 'file',
     field: 'configPath',
@@ -172,6 +205,7 @@ export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) =
   const workerPath = resolveRegularInside({
     base: dirname(workerConfigPath),
     value: workerConfig.main,
+    projectRoot,
     appRoot: resolvedAppRoot,
     type: 'file',
     field: 'main',
@@ -179,6 +213,7 @@ export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) =
   const assetsPath = resolveRegularInside({
     base: dirname(workerConfigPath),
     value: workerConfig.assets?.directory,
+    projectRoot,
     appRoot: resolvedAppRoot,
     type: 'directory',
     field: 'assets.directory',
