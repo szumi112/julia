@@ -41,14 +41,23 @@ function validRsaMaterial(key) {
   }
 }
 
-const matchingMalformedRsa = (jwks, protectedHeader) => jwks?.keys?.some((key) => (
-  key?.kid === protectedHeader?.kid
-  && key.kty === 'RSA'
-  && (key.alg === undefined || key.alg === 'RS256')
-  && (key.use === undefined || key.use === 'sig')
-  && (key.key_ops === undefined || Array.isArray(key.key_ops) && key.key_ops.includes('verify'))
-  && !validRsaMaterial(key)
-))
+function potentiallyMatchingMalformedMember(key, protectedHeader) {
+  if (typeof key.kid !== 'string' || !key.kid) return true
+  if (key.kid !== protectedHeader?.kid) return false
+  if ((Object.hasOwn(key, 'alg') && typeof key.alg !== 'string')
+    || (Object.hasOwn(key, 'use') && typeof key.use !== 'string')
+    || (Object.hasOwn(key, 'key_ops')
+      && (!Array.isArray(key.key_ops) || key.key_ops.some((operation) => typeof operation !== 'string')))) return true
+  if ((key.alg !== undefined && key.alg !== 'RS256')
+    || (key.use !== undefined && key.use !== 'sig')
+    || (key.key_ops !== undefined && !key.key_ops.includes('verify'))
+    || key.kty !== 'RSA') return false
+  return !validRsaMaterial(key)
+}
+
+const potentiallyMatchingMalformedKey = (jwks, protectedHeader) => (
+  jwks?.keys?.some((key) => potentiallyMatchingMalformedMember(key, protectedHeader))
+)
 
 export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
   try {
@@ -69,7 +78,8 @@ export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
       if (!response?.ok) throw remoteOutage()
       try {
         const body = await response.clone().json()
-        if (!body || !Array.isArray(body.keys) || body.keys.some((key) => !key || typeof key !== 'object' || typeof key.kty !== 'string')) throw remoteOutage()
+        if (!body || !Array.isArray(body.keys)
+          || body.keys.some((key) => !key || typeof key !== 'object' || Array.isArray(key) || typeof key.kty !== 'string' || !key.kty)) throw remoteOutage()
         currentJwks = body
       } catch (error) {
         if (remoteOutages.has(error)) throw error
@@ -85,11 +95,11 @@ export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
     const resolver = async (...args) => {
       try {
         const key = await remote(...args)
-        if (matchingMalformedRsa(currentJwks, args[0])) throw remoteOutage()
+        if (potentiallyMatchingMalformedKey(currentJwks, args[0])) throw remoteOutage()
         return key
       } catch (error) {
         if (remoteOutages.has(error)) throw remoteOutage()
-        if (matchingMalformedRsa(currentJwks, args[0])) throw remoteOutage()
+        if (potentiallyMatchingMalformedKey(currentJwks, args[0])) throw remoteOutage()
         throw error
       }
     }

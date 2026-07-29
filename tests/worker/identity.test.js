@@ -22,9 +22,11 @@ const deferred = () => {
 const blockedBatchDb = ({ freezeError = false } = {}) => {
   const entered = deferred()
   const release = deferred()
+  const failed = deferred()
   return {
     entered: entered.promise,
     release: release.resolve,
+    failed: failed.promise,
     db: {
       prepare: env.DB.prepare.bind(env.DB),
       batch: async (statements) => {
@@ -33,6 +35,7 @@ const blockedBatchDb = ({ freezeError = false } = {}) => {
         try {
           return await env.DB.batch(statements)
         } catch (error) {
+          failed.resolve(error)
           if (freezeError) Object.freeze(error)
           throw error
         }
@@ -135,15 +138,27 @@ describe('D1-authoritative staff resolution', () => {
     const context = await cryptoContext()
     await seedPending(context, { staffId: 'stf_subject_race', invitationId: 'inv_subject_race', email: 'subject-race@example.test' })
     const firstGate = blockedBatchDb()
+    const secondCommitted = deferred()
+    const secondDb = {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: async (statements) => {
+        const result = await env.DB.batch(statements)
+        secondCommitted.resolve()
+        return result
+      },
+    }
     const options = (prefix) => ({ nowMs: NOW_MS, correlationId: `corr_${prefix}`, idFactory: ids(prefix) })
     const first = resolveActor(firstGate.db, { kind: 'human', subject: 'access-subject-one', normalizedEmail: 'subject-race@example.test' }, context, options('subject_one'))
+    const loserExpectation = expect(first).rejects.toThrow(/^ACCESS_DENIED$/)
     await firstGate.entered
-    const second = resolveActor(env.DB, { kind: 'human', subject: 'access-subject-two', normalizedEmail: 'subject-race@example.test' }, context, options('subject_two'))
-    const settledPromise = Promise.allSettled([first, second])
+    const second = resolveActor(secondDb, { kind: 'human', subject: 'access-subject-two', normalizedEmail: 'subject-race@example.test' }, context, options('subject_two'))
+    await secondCommitted.promise
+    await expect(second).resolves.toEqual({ id: 'stf_subject_race', role: 'owner', specialistId: null, version: 2 })
     firstGate.release()
-    const settled = await settledPromise
-    expect(settled.filter((entry) => entry.status === 'fulfilled')).toHaveLength(1)
-    expect(settled.filter((entry) => entry.status === 'rejected').map((entry) => entry.reason.message)).toEqual(['ACCESS_DENIED'])
+    const staleCollision = await firstGate.failed
+    expect(staleCollision).toBeInstanceOf(Error)
+    expect(staleCollision.message).toContain('identity_collision')
+    await loserExpectation
     expect((await env.DB.prepare("SELECT count(*) AS count FROM audit_events WHERE action='identity.activation' AND entity_id='stf_subject_race'").first()).count).toBe(1)
     expect((await env.DB.prepare("SELECT count(*) AS count FROM record_versions WHERE entity_id IN ('stf_subject_race','inv_subject_race')").first()).count).toBe(2)
   })

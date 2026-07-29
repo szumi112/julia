@@ -3,6 +3,7 @@ import { decodeBase64Url } from '../security/encoding.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const MAX_REASON_PLAINTEXT_BYTES = 2048
 const descriptors = new WeakMap()
 const fields = ['id', 'occurredAt', 'actorStaffId', 'action', 'entityType', 'entityId', 'result', 'correlationId', 'metadata', 'reasonEnvelope']
 const schemas = Object.freeze({
@@ -81,10 +82,17 @@ export function auditEventStatement(db, event) {
 
 export async function encryptAuditReason(input = {}) {
   const keys = ['keyring', 'dataKey', 'expectedScope', 'auditEventId', 'plaintext']
-  if (!exactObject(input, keys) || !validId(input.auditEventId) || typeof input.plaintext !== 'string'
-    || input.plaintext.length < 1 || input.plaintext.length > 2048) throw new Error('AUDIT_EVENT_INVALID')
+  if (!exactObject(input, keys) || !validId(input.auditEventId) || typeof input.plaintext !== 'string') throw new Error('AUDIT_EVENT_INVALID')
   const { keyring, dataKey, expectedScope, auditEventId, plaintext } = input
-  return JSON.stringify(await encryptForScope(keyring, dataKey, {
-    expectedScope, recordId: auditEventId, field: 'reason', plaintext,
-  }))
+  const encoded = new TextEncoder().encode(plaintext)
+  try {
+    if (encoded.byteLength < 1 || encoded.byteLength > MAX_REASON_PLAINTEXT_BYTES) throw new Error('AUDIT_EVENT_INVALID')
+    const serialized = JSON.stringify(await encryptForScope(keyring, dataKey, {
+      expectedScope, recordId: auditEventId, field: 'reason', plaintext,
+    }))
+    if (!validReasonEnvelope(serialized)) throw new Error('AUDIT_EVENT_INVALID')
+    return serialized
+  } finally {
+    encoded.fill(0)
+  }
 }

@@ -114,6 +114,53 @@ describe('Access assertion verification', () => {
       .rejects.toThrow(/^ACCESS_ASSERTION_INVALID$/)
   })
 
+  it.each([
+    ['numeric alg', { alg: 256 }],
+    ['object use', { use: { value: 'sig' } }],
+    ['scalar key_ops', { key_ops: 'verify' }],
+    ['non-string key_ops member', { key_ops: ['verify', 1] }],
+    ['numeric kid', { kid: 7 }],
+    ['empty kid', { kid: '' }],
+    ['numeric RSA modulus', { n: 7 }],
+  ])('brands a potentially matching member with %s as unavailable', async (label, override) => {
+    const issuer = `https://${label.replaceAll(/[^a-z]+/g, '-')}.cloudflareaccess.com`
+    const malformed = { keys: [{ ...JWKS.keys[0], ...override }] }
+    const remote = createRemoteAccessJwks({
+      issuer,
+      fetchImpl: async () => new Response(JSON.stringify(malformed), { headers: { 'content-type': 'application/json' } }),
+    })
+    const check = createAccessVerifier({ issuer, audience: AUDIENCE, jwks: remote, now: () => new Date(NOW_MS) })
+    await expect(check.verifyHumanAccessAssertion(await signAccessJwt(TEST_IDENTITIES.owner, { issuer })))
+      .rejects.toThrow(/^ACCESS_KEYSET_UNAVAILABLE$/)
+  })
+
+  it.each([
+    ['different kid', { ...JWKS.keys[0], kid: 'other-valid-kid' }],
+    ['different algorithm', { ...JWKS.keys[0], alg: 'RS384' }],
+    ['encryption use', { ...JWKS.keys[0], alg: undefined, use: 'enc' }],
+    ['non-verification operation', { ...JWKS.keys[0], alg: undefined, use: undefined, key_ops: ['encrypt'] }],
+  ])('keeps a syntactically valid member with %s on the no-match path', async (label, member) => {
+    const issuer = `https://no-match-${label.replaceAll(' ', '-')}.cloudflareaccess.com`
+    const remote = createRemoteAccessJwks({
+      issuer,
+      fetchImpl: async () => new Response(JSON.stringify({ keys: [member] }), { headers: { 'content-type': 'application/json' } }),
+    })
+    const check = createAccessVerifier({ issuer, audience: AUDIENCE, jwks: remote, now: () => new Date(NOW_MS) })
+    await expect(check.verifyHumanAccessAssertion(await signAccessJwt(TEST_IDENTITIES.owner, { issuer })))
+      .rejects.toThrow(/^ACCESS_ASSERTION_INVALID$/)
+  })
+
+  it('accepts a structurally valid matching Access RSA member', async () => {
+    const issuer = 'https://valid-access-rsa.cloudflareaccess.com'
+    const remote = createRemoteAccessJwks({
+      issuer,
+      fetchImpl: async () => new Response(JSON.stringify(JWKS), { headers: { 'content-type': 'application/json' } }),
+    })
+    const check = createAccessVerifier({ issuer, audience: AUDIENCE, jwks: remote, now: () => new Date(NOW_MS) })
+    await expect(check.verifyHumanAccessAssertion(await signAccessJwt(TEST_IDENTITIES.owner, { issuer })))
+      .resolves.toMatchObject({ kind: 'human' })
+  })
+
   it('rejects a missing verifier method instead of returning undefined', async () => {
     const request = new Request('http://127.0.0.1:5174/api/v1/session', { headers: { 'Cf-Access-Jwt-Assertion': 'value' } })
     await expect(resolveAccessPrincipal(request, { config: testConfig, verifier: {}, expected: 'human' })).rejects.toThrow(/^ACCESS_ASSERTION_INVALID$/)

@@ -166,6 +166,61 @@ describe('shared audit statement constructor', () => {
     ]) await expect(encryptAuditReason(input)).rejects.toThrow(/^AUDIT_EVENT_INVALID$/)
   })
 
+  it('bounds reason plaintext by UTF-8 bytes and returns a consumer-valid maximum', async () => {
+    const id = 'aud_reason_multibyte'
+    const { keyring, dataKey, scope } = await reasonFixture(id)
+    const maximum = `${'\u0800'.repeat(682)}ab`
+    const reason = await encryptAuditReason({
+      keyring, dataKey, expectedScope: scope, auditEventId: id, plaintext: maximum,
+    })
+    expect(reason.length).toBeLessThanOrEqual(8192)
+    expect(() => auditEventStatement(env.DB, {
+      ...event, id, action: 'authorization.denied', result: 'denied',
+      metadata: { version: 2 }, reasonEnvelope: reason,
+    })).not.toThrow()
+    await expect(encryptAuditReason({
+      keyring, dataKey, expectedScope: scope, auditEventId: 'aud_reason_over', plaintext: `${maximum}c`,
+    })).rejects.toThrow(/^AUDIT_EVENT_INVALID$/)
+  })
+
+  it('zeroes temporary UTF-8 copies before returning or rejecting', async () => {
+    const id = 'aud_reason_zeroed'
+    const { keyring, dataKey, scope } = await reasonFixture(id)
+    const cleared = []
+    const fill = Uint8Array.prototype.fill
+    const spy = vi.spyOn(Uint8Array.prototype, 'fill').mockImplementation(function (...args) {
+      const result = fill.apply(this, args)
+      if ([17, 2049].includes(this.byteLength) && args[0] === 0) cleared.push({ byteLength: this.byteLength, bytes: [...this] })
+      return result
+    })
+    try {
+      await encryptAuditReason({
+        keyring, dataKey, expectedScope: scope, auditEventId: id, plaintext: 'x'.repeat(17),
+      })
+      await expect(encryptAuditReason({
+        keyring, dataKey, expectedScope: scope, auditEventId: id, plaintext: 'x'.repeat(2049),
+      })).rejects.toThrow(/^AUDIT_EVENT_INVALID$/)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(cleared.filter(({ byteLength }) => byteLength === 17)).toHaveLength(2)
+    expect(cleared.filter(({ byteLength }) => byteLength === 2049)).toHaveLength(1)
+    for (const { bytes } of cleared) expect(bytes).toEqual(new Array(bytes.length).fill(0))
+  })
+
+  it('keeps a 2048-byte ASCII reason within the consumer envelope cap', async () => {
+    const id = 'aud_reason_ascii'
+    const { keyring, dataKey, scope } = await reasonFixture(id)
+    const reason = await encryptAuditReason({
+      keyring, dataKey, expectedScope: scope, auditEventId: id, plaintext: 'x'.repeat(2048),
+    })
+    expect(reason.length).toBeLessThanOrEqual(8192)
+    expect(() => auditEventStatement(env.DB, {
+      ...event, id, action: 'authorization.denied', result: 'denied',
+      metadata: { version: 2 }, reasonEnvelope: reason,
+    })).not.toThrow()
+  })
+
   it('creates a canonical scoped envelope and rejects wrong-scope and tampered use', async () => {
     const id = 'aud_reason_envelope'
     const { keyring, dataKey, scope, reason } = await reasonFixture(id)
