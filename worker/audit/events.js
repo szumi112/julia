@@ -96,3 +96,19 @@ export async function encryptAuditReason(input = {}) {
     encoded.fill(0)
   }
 }
+
+export async function enforceAuditRateLimit(db, { actorId, action, limit, since } = {}) {
+  if (!db?.prepare || !validId(actorId) || !Object.hasOwn(schemas, action)
+    || !Number.isSafeInteger(limit) || limit < 1 || limit > 10_000 || !validInstant(since)) {
+    throw new Error('AUDIT_EVENT_INVALID')
+  }
+  const row = await db.prepare(
+    `SELECT count(*) AS count
+     FROM audit_events
+     WHERE actor_staff_id=? AND action=? AND occurred_at>=?`
+  ).bind(actorId, action, since).first()
+  const count = row?.count
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error('AUDIT_EVENT_INVALID')
+  if (count >= limit) throw new Error('RATE_LIMITED')
+  return count
+}

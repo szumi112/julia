@@ -25,14 +25,17 @@ describe('Worker entry boundary', () => {
     )).toThrow()
   })
 
-  it('serves health only after accepting runtime configuration', async () => {
+  it('requires a service assertion after accepting runtime configuration', async () => {
     const response = await worker.fetch(
       new Request('https://example.test/api/v1/health/live'),
       valid,
       { waitUntil() {} }
     )
 
-    expect(response.status).toBe(200)
+    expect(response.status).toBe(401)
+    expect(await response.json()).toMatchObject({
+      error: { code: 'ACCESS_ASSERTION_INVALID' },
+    })
   })
 
   it('rejects malformed configuration before scheduling work', () => {

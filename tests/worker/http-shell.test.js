@@ -2,9 +2,30 @@ import { describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../worker/app.js'
 import { safeLog } from '../../worker/logging/safe-log.js'
 
+const deps = (overrides = {}) => ({
+  config: {
+    appEnv: 'staging',
+    appOrigin: 'https://panel.bearwithme.pl',
+    dataMode: 'fictional',
+  },
+  resolveAccessPrincipal: vi.fn(async () => ({
+    kind: 'human',
+    subject: 'access-shell',
+    normalizedEmail: 'shell@example.test',
+  })),
+  resolveActor: vi.fn(async () => ({
+    id: 'stf_shell',
+    role: 'owner',
+    specialistId: null,
+    version: 1,
+  })),
+  cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+  ...overrides,
+})
+
 describe('API shell', () => {
-  it('returns a stable envelope and correlation id for unknown API routes', async () => {
-    const response = await createApp().request('/api/v1/not-present')
+  it('returns a stable envelope and correlation id for authenticated unknown API routes', async () => {
+    const response = await createApp(deps()).request('/api/v1/not-present')
 
     expect(response.status).toBe(404)
     expect(await response.json()).toMatchObject({
@@ -22,7 +43,7 @@ describe('API shell', () => {
 
   it('regenerates an untrusted correlation id and keeps arbitrary error codes generic', async () => {
     const log = vi.fn()
-    const app = createApp({ safeLog: log })
+    const app = createApp(deps({ safeLog: log }))
     app.get('/api/v1/test-error', () => {
       const error = new Error('provider failure')
       error.code = 'PROVIDER_SECRET_FAILURE'
@@ -40,11 +61,15 @@ describe('API shell', () => {
     expect(body.error).toMatchObject({ code: 'INTERNAL_ERROR' })
     expect(response.headers.get('x-correlation-id')).toMatch(/^[0-9a-f-]{36}$/)
     expect(JSON.stringify(body)).not.toContain('parent@example.test')
-    expect(log).toHaveBeenCalledWith('error', {
+    expect(log).toHaveBeenCalledWith('error', expect.objectContaining({
       event: 'request.failed',
       correlationId: response.headers.get('x-correlation-id'),
       errorCode: 'INTERNAL_ERROR',
-    })
+      method: 'GET',
+      result: 'failure',
+      routeId: 'unmatched',
+      status: 500,
+    }))
   })
 })
 
