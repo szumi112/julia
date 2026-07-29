@@ -19,6 +19,7 @@ const scope = { type: 'staff_directory', id: 'centre_1', purpose: 'identity' }
 const now = '2026-07-29T10:00:00.000Z'
 const rowKeys = ['created_at', 'dek_version', 'id', 'kek_version', 'purpose', 'retired_at', 'scope_id', 'scope_type', 'wrap_nonce_b64', 'wrapped_key_b64']
 const envelopeKeys = ['algorithm', 'ciphertext', 'dataKeyId', 'dataKeyVersion', 'format', 'nonce']
+const rowScope = (row) => ({ type: row.scope_type, id: row.scope_id, purpose: row.purpose })
 
 const keyring = (overrides = {}, settings = config) => createKeyring({
   BWM_DATA_KEK_V1: secret(1),
@@ -42,6 +43,16 @@ describe('canonical base64url encoding', () => {
     expect(encodeBase64Url(source.subarray(1, 4))).toBe('AAEC')
     expect(decodeBase64Url('')).toEqual(new Uint8Array())
     expect(decodeBase64Url('AAEC')).toEqual(new Uint8Array([0, 1, 2]))
+  })
+
+  it('encodes ArrayBuffers and every selected ArrayBufferView byte range', () => {
+    expect(encodeBase64Url(new Uint8Array([0, 1, 2]).buffer)).toBe('AAEC')
+    const source = new Uint8Array([9, 0, 1, 2, 8]).buffer
+    expect(encodeBase64Url(new DataView(source, 1, 3))).toBe('AAEC')
+    expect(encodeBase64Url(new Int8Array(source, 1, 3))).toBe('AAEC')
+    const words = new Uint16Array([0x0100, 0x0302, 0x0504])
+    expect(encodeBase64Url(new Uint16Array(words.buffer, 2, 1))).toBe('AgM')
+    expect(() => encodeBase64Url('AAEC')).toThrow(/^INVALID_BASE64URL$/)
   })
 
   it.each(['A', 'AA=', 'AA ', ' AA', 'AA\n', 'AA+', 'AA/', 'AA*', 'AĀ', 'AB', 'AAB'])('rejects non-canonical form %j', (value) => {
@@ -77,6 +88,15 @@ describe('keyring', () => {
   it('rejects missing active versions', async () => {
     await expect(keyring({ BWM_DATA_KEK_V1: undefined }, config)).rejects.toThrow('KEYRING_INVALID:BWM_DATA_KEK_V1')
   })
+
+  it.each([undefined, null, {}, 1])('rejects present malformed historical bindings of type %s', async (value) => {
+    await expect(createKeyring({
+      BWM_DATA_KEK_V1: secret(1),
+      BWM_LOOKUP_HMAC_V1: secret(2),
+      BWM_BACKUP_KEK_V1: secret(3),
+      BWM_DATA_KEK_V2: value,
+    }, config)).rejects.toThrow('KEYRING_INVALID:BWM_DATA_KEK_V2')
+  })
 })
 
 describe('scoped field encryption', () => {
@@ -100,6 +120,14 @@ describe('scoped field encryption', () => {
       { recordId: 'stf_2', field: 'email' },
       { recordId: 'stf_1', field: 'display_name' },
     ]) await cryptoFailure(decryptForScope(ring, dataKey, { expectedScope: scope, envelope, ...input }))
+  })
+
+  it.each([
+    { ...scope, type: new String('staff_directory') },
+    { ...scope, id: 42 },
+    { ...scope, purpose: new String('identity') },
+  ])('rejects non-primitive scope components', async (badScope) => {
+    await cryptoFailure(createWrappedDataKey(await keyring(), { scope: badScope, id: 'key_scope_type', createdAt: now }))
   })
 
   it('uses fresh nonce material and collapses row, wrap, envelope, scope, and UTF-8 failures', async () => {
@@ -139,13 +167,30 @@ describe('scoped field encryption', () => {
     await cryptoFailure(loadDataKey(env.DB, { envelope, expectedScope: { ...scope, purpose: 'other_purpose' } }))
   })
 
+  it('rejects noncanonical persisted timestamps on creation, decrypt, and rewrap', async () => {
+    const legacy = await keyring()
+    const ring = await keyring({ BWM_DATA_KEK_V2: secret(4) }, { ...config, activeDataKekVersion: 2 })
+    await cryptoFailure(createWrappedDataKey(ring, { scope, id: 'key_bad_created', createdAt: '2026-07-29 10:00:00Z' }))
+    const original = await createWrappedDataKey(legacy, { scope, id: 'key_bad_retired', createdAt: now })
+    const envelope = await encryptForScope(legacy, original, { expectedScope: scope, recordId: 'stf_dates', field: 'email', plaintext: 'dates@example.test' })
+    for (const retired_at of ['', 'not-a-date', '2026-07-29T10:00:00Z', '2026-02-30T10:00:00.000Z']) {
+      const row = { ...original, retired_at }
+      await cryptoFailure(decryptForScope(legacy, row, { expectedScope: scope, recordId: 'stf_dates', field: 'email', envelope }))
+      await cryptoFailure(rewrapDataKey(ring, row, { targetKekVersion: 2 }))
+    }
+  })
+
   it('rejects unsafe AAD components and missing historical KEKs without exposing source details', async () => {
     const v1 = await keyring()
     await cryptoFailure(createWrappedDataKey(v1, { scope: { ...scope, purpose: 'identity\nother' }, id: 'key_bad_scope', createdAt: now }))
     await cryptoFailure(createWrappedDataKey(v1, { scope, id: 'key_bad_version', dekVersion: Number.MAX_SAFE_INTEGER + 1, createdAt: now }))
     const row = await createWrappedDataKey(v1, { scope: { ...scope, id: 'centre_historical' }, id: 'key_historical', createdAt: now })
     const envelope = await encryptForScope(v1, row, { expectedScope: { ...scope, id: 'centre_historical' }, recordId: 'stf_history', field: 'email', plaintext: 'history@example.test' })
-    const v2Only = await keyring({ BWM_DATA_KEK_V1: undefined, BWM_DATA_KEK_V2: secret(4) }, { ...config, activeDataKekVersion: 2 })
+    const v2Only = await createKeyring({
+      BWM_DATA_KEK_V2: secret(4),
+      BWM_LOOKUP_HMAC_V1: secret(2),
+      BWM_BACKUP_KEK_V1: secret(3),
+    }, { ...config, activeDataKekVersion: 2 })
     await cryptoFailure(decryptForScope(v2Only, row, { expectedScope: { ...scope, id: 'centre_historical' }, recordId: 'stf_history', field: 'email', envelope }))
   })
 
@@ -158,7 +203,41 @@ describe('scoped field encryption', () => {
     ])
     expect(one.id).toBe(two.id)
     await getOrCreateDataKey(env.DB, ring, { ...scope, id: 'centre_collision' }, { id: 'key_collision', createdAt: now })
-    await expect(getOrCreateDataKey(env.DB, ring, { ...scope, id: 'centre_other' }, { id: 'key_collision', createdAt: now })).rejects.toThrow()
+    await expect(getOrCreateDataKey(env.DB, ring, { ...scope, id: 'centre_other' }, { id: 'key_collision', createdAt: now })).rejects.toThrow('identity_collision')
+  })
+
+  it('validates existing and collision winners and only recovers recognized exact races', async () => {
+    const ring = await keyring()
+    const row = await createWrappedDataKey(ring, { scope: { ...scope, id: 'centre_mock' }, id: 'key_mock', createdAt: now })
+    const mockDb = (...responses) => ({
+      prepare: () => ({ bind: () => ({
+        first: async () => responses.shift().first(),
+        run: async () => responses.shift().run(),
+      }) }),
+    })
+    await cryptoFailure(getOrCreateDataKey(mockDb({ first: () => ({ ...row, created_at: 'bad' }) }), ring, rowScope(row), { id: 'key_unused', createdAt: now }))
+    const transport = new Error('transport down')
+    await expect(getOrCreateDataKey(mockDb(
+      { first: () => null },
+      { run: () => { throw transport } },
+      { first: () => row },
+    ), ring, rowScope(row), { id: 'key_transport', createdAt: now })).rejects.toBe(transport)
+    const collision = new Error('identity_collision')
+    await expect(getOrCreateDataKey(mockDb(
+      { first: () => null },
+      { run: () => { throw collision } },
+      { first: () => { throw new Error('recovery failure') } },
+    ), ring, rowScope(row), { id: 'key_recovery', createdAt: now })).rejects.toBe(collision)
+    await cryptoFailure(getOrCreateDataKey(mockDb(
+      { first: () => null },
+      { run: () => { throw collision } },
+      { first: () => ({ ...row, retired_at: 'bad' }) },
+    ), ring, rowScope(row), { id: 'key_bad_winner', createdAt: now }))
+    await expect(getOrCreateDataKey(mockDb(
+      { first: () => null },
+      { run: () => { throw collision } },
+      { first: () => row },
+    ), ring, rowScope(row), { id: 'key_race', createdAt: now })).resolves.toEqual(row)
   })
 
   it('decrypts and rewraps retired V1 rows but does not encrypt them, returning a frozen fresh-nonce CAS patch', async () => {
@@ -196,6 +275,29 @@ describe('scoped field encryption', () => {
       expect(JSON.stringify({ row, envelope, calls })).not.toContain('no-log@example.test')
       expect((await env.ARCHIVE.list()).objects).toEqual([])
     } finally { console.log = original }
+  })
+
+  it('zeroes the generated DEK when nonce generation fails', async () => {
+    const ring = await keyring()
+    const original = crypto.getRandomValues.bind(crypto)
+    let calls = 0
+    let dek
+    const random = vi.spyOn(crypto, 'getRandomValues').mockImplementation((value) => {
+      calls += 1
+      if (calls === 1) {
+        dek = value
+        value.fill(7)
+        return value
+      }
+      throw new Error('random failure')
+    })
+    try {
+      await cryptoFailure(createWrappedDataKey(ring, { scope, id: 'key_random_failure', createdAt: now }))
+      expect([...dek]).toEqual(new Array(32).fill(0))
+    } finally {
+      random.mockRestore()
+      void original
+    }
   })
 
   it('collapses fatal UTF-8 decode failures after authenticated decryption', async () => {

@@ -40,6 +40,21 @@ describe('CSRF tokens', () => {
     await invalid(verifyCsrfToken(token, { ...input, keyring, nowMs: nowMs - 1_000 }))
   })
 
+  it('rejects CR/LF-bound subjects and origins without allowing newline cross-binding', async () => {
+    const keyring = await ring()
+    for (const binding of [
+      { subject: 'a\nb', origin: 'c' },
+      { subject: 'a\rb', origin: 'c' },
+      { subject: 'a', origin: 'b\nc' },
+      { subject: 'a', origin: 'b\rc' },
+    ]) await invalid(issueCsrfToken({ ...binding, keyring, nowMs }))
+    const token = await issueCsrfToken({ subject: 'a', origin: 'b', keyring, nowMs })
+    for (const binding of [
+      { subject: 'a\nb', origin: 'c' },
+      { subject: 'a', origin: 'b\nc' },
+    ]) await invalid(verifyCsrfToken(token, { ...binding, keyring, nowMs }))
+  })
+
   it('reports only correctly signed exact-expiry tokens as expired', async () => {
     const keyring = await ring()
     const token = await issueCsrfToken({ ...input, keyring, nowMs, ttlSeconds: 1 })

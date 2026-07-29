@@ -21,7 +21,8 @@ const encoded = (value, length) => {
 }
 
 const messageFor = (subject, origin, expires, nonce) => {
-  if (typeof subject !== 'string' || !subject || typeof origin !== 'string' || !origin) invalid()
+  if (typeof subject !== 'string' || !subject || /[\r\n]/.test(subject)
+    || typeof origin !== 'string' || !origin || /[\r\n]/.test(origin)) invalid()
   return new TextEncoder().encode(['bwm:csrf:v1', subject, origin, expires, nonce].join('\n'))
 }
 

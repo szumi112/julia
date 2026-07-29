@@ -3,8 +3,10 @@ const invalid = () => {
 }
 
 export function encodeBase64Url(bytes) {
-  if (!(bytes instanceof Uint8Array)) invalid()
-  const view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  let view
+  if (bytes instanceof ArrayBuffer) view = new Uint8Array(bytes)
+  else if (ArrayBuffer.isView(bytes)) view = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  else invalid()
   let binary = ''
   const chunkSize = 0x8000
   for (let offset = 0; offset < view.length; offset += chunkSize) {
@@ -27,6 +29,9 @@ export function decodeBase64Url(value) {
   }
   const decoded = new Uint8Array(binary.length)
   for (let index = 0; index < binary.length; index += 1) decoded[index] = binary.charCodeAt(index)
-  if (encodeBase64Url(decoded) !== value) invalid()
+  if (encodeBase64Url(decoded) !== value) {
+    decoded.fill(0)
+    invalid()
+  }
   return decoded
 }

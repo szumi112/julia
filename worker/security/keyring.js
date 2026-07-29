@@ -25,8 +25,7 @@ export async function createKeyring(env, config) {
     if (!reserved) continue
     const [prefix, kind] = reserved
     const suffix = binding.slice(prefix.length)
-    if (!VERSION.test(suffix) || !Number.isSafeInteger(Number(suffix))) fail(binding)
-    if (value === undefined) continue
+    if (!VERSION.test(suffix) || !Number.isSafeInteger(Number(suffix)) || typeof value !== 'string') fail(binding)
     let raw
     try {
       raw = decodeBase64Url(value)

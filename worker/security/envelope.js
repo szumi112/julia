@@ -4,6 +4,7 @@ const NAME = /^[a-z][a-z0-9_]{0,63}$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const ROW_KEYS = ['id', 'scope_type', 'scope_id', 'purpose', 'dek_version', 'wrapped_key_b64', 'wrap_nonce_b64', 'kek_version', 'created_at', 'retired_at']
 const ENVELOPE_KEYS = ['format', 'algorithm', 'dataKeyId', 'dataKeyVersion', 'nonce', 'ciphertext']
+const UTC_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 const cryptoFailure = () => new Error('CRYPTO_FAILURE')
 const fail = () => { throw cryptoFailure() }
@@ -14,6 +15,7 @@ const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.
 const validateScope = (scope) => {
   if (!scope || typeof scope !== 'object' || Array.isArray(scope)
     || Object.keys(scope).length !== 3 || !['type', 'id', 'purpose'].every((key) => Object.hasOwn(scope, key))
+    || typeof scope.type !== 'string' || typeof scope.id !== 'string' || typeof scope.purpose !== 'string'
     || !NAME.test(scope.type) || !ID.test(scope.id) || !NAME.test(scope.purpose)) fail()
   return scope
 }
@@ -22,6 +24,9 @@ const validateId = (value) => {
   if (typeof value !== 'string' || !ID.test(value)) fail()
   return value
 }
+
+const canonicalInstant = (value) => typeof value === 'string' && UTC_INSTANT.test(value)
+  && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value
 
 const bytes = (value, length, minimum = false) => {
   let decoded
@@ -50,7 +55,7 @@ const validateRow = (row, expectedScope) => {
   const scope = validateScope(scopeFromRow(row))
   const expected = validateScope(expectedScope)
   if (!sameScope(scope, expected) || !validateId(row.id) || !positive(row.dek_version) || !positive(row.kek_version)
-    || typeof row.created_at !== 'string' || !row.created_at || (row.retired_at !== null && typeof row.retired_at !== 'string')) fail()
+    || !canonicalInstant(row.created_at) || (row.retired_at !== null && !canonicalInstant(row.retired_at))) fail()
   const wrapped = bytes(row.wrapped_key_b64, 48)
   const nonce = bytes(row.wrap_nonce_b64, 12)
   wrapped.fill(0)
@@ -109,13 +114,15 @@ export async function createWrappedDataKey(keyring, { scope, id, dekVersion = 1,
   try {
     validateScope(scope)
     validateId(id)
-    if (!positive(dekVersion) || typeof createdAt !== 'string' || !createdAt) fail()
+    if (!positive(dekVersion) || !canonicalInstant(createdAt)) fail()
     const kekVersion = keyring?.activeDataKekVersion
     const kek = keyring?.getDataKek?.(kekVersion)
     if (!positive(kekVersion) || !kek) fail()
-    const rawDek = crypto.getRandomValues(new Uint8Array(32))
-    const nonce = crypto.getRandomValues(new Uint8Array(12))
+    let rawDek
+    let nonce
     try {
+      rawDek = crypto.getRandomValues(new Uint8Array(32))
+      nonce = crypto.getRandomValues(new Uint8Array(12))
       const wrapped = new Uint8Array(await crypto.subtle.encrypt(aesParams(nonce, keyAad(scope, dekVersion)), kek, rawDek))
       try {
         if (wrapped.byteLength !== 48) fail()
@@ -133,8 +140,8 @@ export async function createWrappedDataKey(keyring, { scope, id, dekVersion = 1,
         }
       } finally { wrapped.fill(0) }
     } finally {
-      rawDek.fill(0)
-      nonce.fill(0)
+      rawDek?.fill(0)
+      nonce?.fill(0)
     }
   } catch (error) {
     if (error?.message === 'CRYPTO_FAILURE') throw error
@@ -147,11 +154,16 @@ const selectExact = async (db, scope, dekVersion) => db.prepare(
    FROM data_keys WHERE scope_type = ? AND scope_id = ? AND purpose = ? AND dek_version = ?`
 ).bind(scope.type, scope.id, scope.purpose, dekVersion).first()
 
+const isDataKeyCollision = (error) => error instanceof Error && error.message.includes('identity_collision')
+
 export async function getOrCreateDataKey(db, keyring, scope, { id = defaultId(), dekVersion = 1, createdAt = new Date().toISOString() } = {}) {
   validateScope(scope)
   if (!positive(dekVersion)) fail()
   const existing = await selectExact(db, scope, dekVersion)
-  if (existing) return existing
+  if (existing) {
+    validateRow(existing, scope)
+    return existing
+  }
   const row = await createWrappedDataKey(keyring, { scope, id, dekVersion, createdAt })
   try {
     await db.prepare(
@@ -160,8 +172,17 @@ export async function getOrCreateDataKey(db, keyring, scope, { id = defaultId(),
     ).bind(row.id, row.scope_type, row.scope_id, row.purpose, row.dek_version, row.wrapped_key_b64, row.wrap_nonce_b64, row.kek_version, row.created_at, row.retired_at).run()
     return row
   } catch (error) {
-    const winner = await selectExact(db, scope, dekVersion)
-    if (winner) return winner
+    if (!isDataKeyCollision(error)) throw error
+    let winner
+    try {
+      winner = await selectExact(db, scope, dekVersion)
+    } catch {
+      throw error
+    }
+    if (winner) {
+      validateRow(winner, scope)
+      return winner
+    }
     throw error
   }
 }
@@ -243,8 +264,9 @@ export async function rewrapDataKey(keyring, dataKey, { targetKekVersion } = {})
     const target = keyring?.getDataKek?.(targetKekVersion)
     if (!target) fail()
     const raw = await unwrapDataKeyBytes(keyring, dataKey, scope)
-    const nonce = crypto.getRandomValues(new Uint8Array(12))
+    let nonce
     try {
+      nonce = crypto.getRandomValues(new Uint8Array(12))
       const wrapped = new Uint8Array(await crypto.subtle.encrypt(aesParams(nonce, keyAad(scope, dataKey.dek_version)), target, raw))
       try {
         if (wrapped.byteLength !== 48) fail()
@@ -254,7 +276,7 @@ export async function rewrapDataKey(keyring, dataKey, { targetKekVersion } = {})
       } finally { wrapped.fill(0) }
     } finally {
       raw.fill(0)
-      nonce.fill(0)
+      nonce?.fill(0)
     }
   } catch (error) {
     if (error?.message === 'CRYPTO_FAILURE') throw error

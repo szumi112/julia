@@ -7,11 +7,14 @@ const TEAM_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 
 const key = z.string().refine((value) => {
   if (!BASE64_URL_KEY.test(value)) return false
+  let decoded
   try {
-    const decoded = decodeBase64Url(value)
+    decoded = decodeBase64Url(value)
     return decoded.byteLength === 32 && encodeBase64Url(decoded) === value
   } catch {
     return false
+  } finally {
+    decoded?.fill(0)
   }
 }, 'must be a canonical base64url-encoded 32-byte key')
 
