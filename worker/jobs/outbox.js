@@ -5,13 +5,29 @@ const delays = [60_000, 300_000, 900_000, 3_600_000, 21_600_000, 21_600_000, 21_
 export const retryDelayMs = (attempt) => delays[attempt - 1] ?? null
 const iso = (value) => new Date(value).toISOString()
 
-export async function enqueueOutboxStatement(db, cryptoContext, { id, type, aggregateType, aggregateId, payload, idempotencyKey, scheduledAt, nowMs, maxAttempts = 8 }) {
+export async function enqueueOutboxStatement(db, cryptoContext, {
+  id,
+  type,
+  aggregateType,
+  aggregateId,
+  payload,
+  idempotencyKey,
+  scheduledAt,
+  nowMs,
+  maxAttempts = 8,
+  onlyIfPreviousStatementChanged = false,
+}) {
   if (!OUTBOX_TYPES.includes(type)) throw new Error('OUTBOX_INVALID')
   const envelope = JSON.stringify(await encryptForScope(cryptoContext.keyring, cryptoContext.dataKey, { expectedScope: cryptoContext.scope, recordId: id, field: 'job_payload', plaintext: JSON.stringify(payload) }))
   const now = iso(nowMs)
+  const values = onlyIfPreviousStatementChanged
+    ? "SELECT ?,?,?,?,?,?,'queued',0,?,?,?,? WHERE changes()=1"
+    : "VALUES (?,?,?,?,?,?,'queued',0,?,?,?,?)"
   return db.prepare(
-    `INSERT INTO outbox_jobs (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,attempt_count,max_attempts,scheduled_at,created_at,updated_at)
-     VALUES (?,?,?,?,?,?, 'queued',0,?,?,?,?)`
+    `INSERT INTO outbox_jobs
+     (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+      attempt_count,max_attempts,scheduled_at,created_at,updated_at)
+     ${values}`
   ).bind(id, type, aggregateType, aggregateId, envelope, idempotencyKey, maxAttempts, scheduledAt, now, now)
 }
 
