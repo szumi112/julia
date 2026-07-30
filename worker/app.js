@@ -18,6 +18,7 @@ import {
 import { resolveActor as resolveStaffActor } from './identity/staff.js'
 import { isCorrelationId, safeLog } from './logging/safe-log.js'
 import { getSession } from './routes/session.js'
+import { getStaff, postDeactivation, postInvitation } from './routes/staff.js'
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
 import { loadDataKey } from './security/envelope.js'
 import { createKeyring } from './security/keyring.js'
@@ -28,6 +29,9 @@ const keyrings = new WeakMap()
 const SESSION_ALLOW = 'GET, HEAD, OPTIONS'
 const HEALTH_ALLOW = 'GET, HEAD'
 const HEALTH_PATH = '/api/v1/health/live'
+const STAFF_PATH = '/api/v1/staff'
+const STAFF_INVITATIONS_PATH = '/api/v1/staff/invitations'
+const STAFF_ID = /^\/api\/v1\/staff\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/deactivation$/
 
 const routeFor = (request) => {
   const url = new URL(request.url)
@@ -37,6 +41,9 @@ const routeFor = (request) => {
   if (url.pathname === '/api/v1/session') {
     return { id: 'session', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
   }
+  if (url.search === '' && url.pathname === STAFF_PATH) return { id: 'staff.list', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
+  if (url.search === '' && url.pathname === STAFF_INVITATIONS_PATH) return { id: 'staff.invitations', expected: 'human', methods: ['POST', 'OPTIONS'] }
+  if (url.search === '' && STAFF_ID.test(url.pathname)) return { id: 'staff.deactivation', expected: 'human', methods: ['POST', 'OPTIONS'] }
   return { id: 'unmatched', expected: 'human', methods: null }
 }
 
@@ -215,6 +222,33 @@ export function createApp(deps = {}) {
     status: 204,
     headers: { Allow: SESSION_ALLOW },
   }))
+  app.get('/api/v1/staff', async (c) => {
+    if (c.get('routeId') !== 'staff.list') throw new AppError('NOT_FOUND')
+    const result = await (deps.getStaff ?? getStaff)({ db: c.env?.DB ?? deps.db, cryptoContext: c.get('cryptoContext'), actor: c.get('actor'), nowMs: c.get('nowMs'), correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory })
+    return c.req.method === 'HEAD' ? new Response(null, { status: 200 }) : c.json(result)
+  })
+  app.post('/api/v1/staff/invitations', async (c) => {
+    if (c.get('routeId') !== 'staff.invitations') throw new AppError('NOT_FOUND')
+    const result = await (deps.postInvitation ?? postInvitation)({ db: c.env?.DB ?? deps.db, cryptoContext: c.get('cryptoContext'), actor: c.get('actor'), nowMs: c.get('nowMs'), correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory, request: c.req.raw, body: c.get('jsonBody'), config: runtimeConfig(c, deps) })
+    return c.json(result, 201)
+  })
+  app.post('/api/v1/staff/:staffId/deactivation', async (c) => {
+    if (c.get('routeId') !== 'staff.deactivation') throw new AppError('NOT_FOUND')
+    const result = await (deps.postDeactivation ?? postDeactivation)({ db: c.env?.DB ?? deps.db, cryptoContext: c.get('cryptoContext'), actor: c.get('actor'), nowMs: c.get('nowMs'), correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory, request: c.req.raw, body: c.get('jsonBody'), staffId: c.req.param('staffId'), config: runtimeConfig(c, deps) })
+    return c.json(result)
+  })
+  app.options('/api/v1/staff', (c) => {
+    if (c.get('routeId') !== 'staff.list') throw new AppError('NOT_FOUND')
+    return new Response(null, { status: 204, headers: { Allow: 'GET, HEAD, OPTIONS' } })
+  })
+  app.options('/api/v1/staff/invitations', (c) => {
+    if (c.get('routeId') !== 'staff.invitations') throw new AppError('NOT_FOUND')
+    return new Response(null, { status: 204, headers: { Allow: 'OPTIONS, POST' } })
+  })
+  app.options('/api/v1/staff/:staffId/deactivation', (c) => {
+    if (c.get('routeId') !== 'staff.deactivation') throw new AppError('NOT_FOUND')
+    return new Response(null, { status: 204, headers: { Allow: 'OPTIONS, POST' } })
+  })
   app.notFound((c) => {
     const correlationId = c.get('correlationId') || crypto.randomUUID()
     c.set('errorCode', 'NOT_FOUND')
@@ -223,7 +257,7 @@ export function createApp(deps = {}) {
   app.onError((error, c) => {
     const mapped = publicError(error)
     const headers = mapped.code === 'METHOD_NOT_ALLOWED'
-      ? { Allow: c.get('routeId') === 'health.live' ? HEALTH_ALLOW : c.get('routeId') === 'session' ? SESSION_ALLOW : 'GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE' }
+      ? { Allow: c.get('routeId') === 'health.live' ? HEALTH_ALLOW : c.get('routeId') === 'session' ? SESSION_ALLOW : c.get('routeId') === 'staff.list' ? 'GET, HEAD, OPTIONS' : c.get('routeId') === 'staff.invitations' || c.get('routeId') === 'staff.deactivation' ? 'OPTIONS, POST' : 'GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE' }
       : mapped.code === 'ACCESS_KEYSET_UNAVAILABLE' ? { 'Retry-After': '5' }
         : undefined
     return apiError(mapped, c.get('correlationId') || crypto.randomUUID(), headers)

@@ -12,6 +12,12 @@ const schemas = Object.freeze({
   'identity.reindex': Object.freeze({ entityTypes: ['staff_user', 'staff_invitation'], result: 'success', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: Object.freeze({ oldKekVersion: 'version', newKekVersion: 'version' }), reasonPolicy: 'null' }),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'encrypted' }),
+  'staff.invited': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
+  'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
+  'staff.invitation.expired': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
+  'staff.access.reconciled': Object.freeze({ entityTypes: ['access_group'], result: 'success', metadata: Object.freeze({ desiredGeneration: 'version', appliedGeneration: 'version', invitationCount: 'count' }), reasonPolicy: 'null' }),
+  'staff.bootstrap': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
+  'staff.invitation.email_accepted': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ invitationVersion: 'version' }), reasonPolicy: 'null' }),
 })
 
 const own = (object, key) => Object.hasOwn(object, key)

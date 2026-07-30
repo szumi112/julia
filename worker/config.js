@@ -4,6 +4,10 @@ import { decodeBase64Url, encodeBase64Url } from './security/encoding.js'
 const BASE64_URL_KEY = /^[A-Za-z0-9_-]{43}$/
 const VERSION = /^[1-9]\d*$/
 const TEAM_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const saneName = (value) => typeof value === 'string' && value === value.trim() && value.length > 0 && value.length <= 120 && !/[\u0000-\u001f\u007f]/.test(value)
+const canonicalEmail = (value) => typeof value === 'string' && value === value.trim()
+  && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value) && value.length <= 254
 
 const key = z.string().refine((value) => {
   if (!BASE64_URL_KEY.test(value)) return false
@@ -98,4 +102,18 @@ export function loadConfig(env) {
     activeBackupKekVersion: backupVersion,
     localAuth: value.APP_ENV === 'development',
   }
+}
+
+export function loadAccessProviderConfig(env, config) {
+  if (config?.appEnv === 'development') throw new Error('PROVIDER_DISABLED')
+  const value = { accountId: env?.CF_ACCOUNT_ID, groupId: env?.CF_ACCESS_GROUP_ID, groupName: env?.CF_ACCESS_GROUP_NAME, token: env?.CF_ACCESS_GROUP_TOKEN }
+  if (!PROVIDER_ID.test(value.accountId ?? '') || !PROVIDER_ID.test(value.groupId ?? '') || !saneName(value.groupName) || typeof value.token !== 'string' || !value.token.trim()) throw new Error('PROVIDER_CONFIG_INVALID')
+  return Object.freeze(value)
+}
+
+export function loadEmailProviderConfig(env, config) {
+  if (config?.appEnv === 'development') throw new Error('PROVIDER_DISABLED')
+  const value = { projectId: env?.SCW_PROJECT_ID, fromEmail: env?.SCW_FROM_EMAIL, fromName: env?.SCW_FROM_NAME, secret: env?.SCW_SECRET_KEY }
+  if (!PROVIDER_ID.test(value.projectId ?? '') || !canonicalEmail(value.fromEmail) || !saneName(value.fromName) || typeof value.secret !== 'string' || !value.secret.trim()) throw new Error('PROVIDER_CONFIG_INVALID')
+  return Object.freeze(value)
 }

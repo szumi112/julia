@@ -1,6 +1,7 @@
 const STATUS_BY_CODE = Object.freeze({
   INVALID_CONTENT_LENGTH: 400,
   INVALID_JSON: 400,
+  VALIDATION_FAILED: 400,
   ACCESS_ASSERTION_INVALID: 401,
   ACCESS_DENIED: 403,
   FORBIDDEN: 403,
@@ -11,6 +12,8 @@ const STATUS_BY_CODE = Object.freeze({
   NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
   IDEMPOTENCY_CONFLICT: 409,
+  STAFF_INVITATION_CONFLICT: 409,
+  LAST_ACTIVE_OWNER: 409,
   VERSION_CONFLICT: 409,
   PAYLOAD_TOO_LARGE: 413,
   UNSUPPORTED_MEDIA_TYPE: 415,
@@ -47,7 +50,7 @@ export class AppError extends Error {
 export function publicError(error) {
   if (error instanceof AppError) return error
   if (error instanceof Error && EXACT_INTERNAL_MESSAGES.has(error.message)) {
-    return new AppError(error.message)
+    return new AppError(error.message, error.details)
   }
   return new AppError('INTERNAL_ERROR')
 }
