@@ -1,8 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { realpathSync } from 'node:fs'
+import { readdirSync, realpathSync } from 'node:fs'
 import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { runAppE2E } from '../../scripts/run-app-e2e.mjs'
 
@@ -13,6 +14,13 @@ const READY_URL = 'http://127.0.0.1:5174/api/v1/session'
 const OWNERSHIP_MARKER = Buffer.from('BWM_APP_E2E_OWNERSHIP=', 'ascii')
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const runnerTemporaryRoots = () => readdirSync(realpathSync(tmpdir()), {
+  withFileTypes: true,
+})
+  .filter((entry) => entry.isDirectory() && entry.name.startsWith('bwm-app-e2e-'))
+  .map((entry) => entry.name)
+  .sort()
 
 const ownershipMarkerSnapshot = () => {
   const snapshot = spawnSync(
@@ -91,6 +99,28 @@ const assertRunnerResourcesAbsent = async () => {
   })
 }
 
+const waitForRunnerResourcesAbsent = async () => {
+  let failure = null
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await assertRunnerResourcesAbsent()
+      return
+    } catch (error) {
+      failure = error
+    }
+    await delay(50)
+  }
+  throw failure ?? new Error('runner resources remain observable')
+}
+
+const killOwnedGroups = (ownershipToken) => {
+  if (!ownershipToken) return
+  const groups = ownershipMarkerSnapshot().get(ownershipToken) ?? new Set()
+  for (const groupId of groups) {
+    try { process.kill(-groupId, 'SIGKILL') } catch { /* Already absent. */ }
+  }
+}
+
 const waitForSession = async (childExited) => {
   const deadline = Date.now() + 30_000
   while (Date.now() < deadline) {
@@ -144,6 +174,103 @@ test('default runner exposes the exact seeded owner through one shared local D1'
   })
   assert.deepEqual(result, { code: 'APP_E2E_READY', ok: true })
   await assertRunnerResourcesAbsent()
+})
+
+test('default private Vite transforms the real browser entry from its isolated root', {
+  skip: !SUPPORTED,
+  timeout: 60_000,
+}, async (t) => {
+  await assertRunnerResourcesAbsent()
+  const temporaryRootsBefore = runnerTemporaryRoots()
+  let ownershipToken = null
+  t.after(async () => {
+    killOwnedGroups(ownershipToken)
+    await waitForRunnerResourcesAbsent()
+    assert.deepEqual(runnerTemporaryRoots(), temporaryRootsBefore)
+  })
+
+  let probe = null
+  const result = await runAppE2E({
+    argv: [],
+    env: {
+      HTTPS_PROXY: 'http://must-not-reach-child.invalid',
+      SENTINEL_PARENT_SECRET: 'must-not-reach-browser-module',
+    },
+    deps: {
+      maxReadinessAttempts: 120,
+      onReady: async () => {
+        const ownership = ownershipMarkerSnapshot()
+        assert.equal(ownership.size, 1)
+        ownershipToken = ownership.keys().next().value
+        const groups = ownership.get(ownershipToken)
+        assert.equal(groups.size, 1)
+        const groupId = groups.values().next().value
+        try {
+          const indexResponse = await fetch('http://127.0.0.1:5174/', {
+            cache: 'no-store',
+            headers: { Connection: 'close' },
+            redirect: 'manual',
+            signal: AbortSignal.timeout(2_000),
+          })
+          const indexBody = await indexResponse.text()
+          const modulePath = [...indexBody.matchAll(
+            /<script type="module" src="([^"]+)"><\/script>/g,
+          )]
+            .map((match) => match[1])
+            .find((path) => path.endsWith('/src/main.jsx')) ?? ''
+          const moduleResponse = modulePath
+            ? await fetch(new URL(modulePath, READY_URL), {
+                cache: 'no-store',
+                headers: { Connection: 'close' },
+                redirect: 'manual',
+                signal: AbortSignal.timeout(2_000),
+              })
+            : null
+          const moduleBody = moduleResponse ? await moduleResponse.text() : ''
+          probe = Object.freeze({
+            browserPath: modulePath.startsWith('/@fs/')
+              && modulePath.endsWith('/src/main.jsx'),
+            indexStatus: indexResponse.status,
+            javascript: /javascript/i.test(
+              moduleResponse?.headers.get('content-type') ?? '',
+            ),
+            leakedParentSecret: moduleBody.includes('must-not-reach-browser-module'),
+            moduleStatus: moduleResponse?.status ?? null,
+            pluginError: /Failed to resolve import|vite:import-analysis/.test(moduleBody),
+            transformed: moduleBody.includes('jsxDEV'),
+            transportFailed: false,
+          })
+        } catch {
+          probe = Object.freeze({
+            browserPath: false,
+            indexStatus: null,
+            javascript: false,
+            leakedParentSecret: false,
+            moduleStatus: null,
+            pluginError: false,
+            transformed: false,
+            transportFailed: true,
+          })
+        } finally {
+          process.kill(-groupId, 'SIGTERM')
+        }
+      },
+    },
+  })
+
+  assert.deepEqual(probe, {
+    browserPath: true,
+    indexStatus: 200,
+    javascript: true,
+    leakedParentSecret: false,
+    moduleStatus: 200,
+    pluginError: false,
+    transformed: true,
+    transportFailed: false,
+  })
+  assert.deepEqual(result, { code: 'APP_E2E_RUNTIME_FAILED', ok: false })
+  await waitForRunnerResourcesAbsent()
+  assert.deepEqual(runnerTemporaryRoots(), temporaryRootsBefore)
 })
 
 test('default runner reports a natural post-ready Vite exit after complete cleanup', {

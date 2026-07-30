@@ -44,6 +44,8 @@ const NODE_EXECUTABLE = realpathSync(process.execPath)
 const WRANGLER_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/wrangler/bin/wrangler.js'))
 const VITE_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/vite/bin/vite.js'))
 const SEED_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'scripts/seed-local.mjs'))
+const REACT_PACKAGE_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/react'))
+const REACT_DOM_PACKAGE_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/react-dom'))
 const PS_EXECUTABLE = realpathSync('/bin/ps')
 const REACT_PLUGIN_URL = pathToFileURL(
   realpathSync(join(PROJECT_ROOT, 'node_modules/@vitejs/plugin-react/dist/index.js')),
@@ -269,6 +271,13 @@ export default defineConfig({
     }),
   ],
   publicDir: false,
+  resolve: {
+    alias: {
+      react: ${JSON.stringify(REACT_PACKAGE_PATH)},
+      'react-dom': ${JSON.stringify(REACT_DOM_PACKAGE_PATH)},
+    },
+    dedupe: ['react', 'react-dom'],
+  },
   root: ${JSON.stringify(root)},
   server: {
     fs: {
