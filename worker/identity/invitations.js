@@ -10,12 +10,12 @@ import {
 } from '../db/unit-of-work.js'
 import { blindEmailCandidates, blindEmailIndex, decryptForScope, encryptForScope } from '../security/envelope.js'
 import { enqueueOutboxStatement } from '../jobs/outbox.js'
+import { normalizeCanonicalEmail } from './canonical-email.js'
 import { authorize } from './policy.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
-const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
 const CENTRE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 const INVITATION_RATE_LIMIT = 5
 const HOUR_MS = 60 * 60 * 1000
@@ -42,8 +42,8 @@ export function validateInvitationInput(input, { dataMode } = {}) {
   const displayName = input.displayName.normalize('NFC').trim()
   if (!displayName || new TextEncoder().encode(displayName).byteLength > 120) validation('displayName')
   if (typeof input.email !== 'string') validation('email')
-  const email = input.email.trim().toLowerCase()
-  if (!EMAIL.test(email) || new TextEncoder().encode(email).byteLength > 254 || (dataMode === 'fictional' && !email.endsWith('@example.test'))) validation('email')
+  const email = normalizeCanonicalEmail(input.email, { fictional: dataMode === 'fictional' })
+  if (email === null) validation('email')
   if (!roles.has(input.role)) validation('role')
   return Object.freeze({ displayName, email, role: input.role })
 }

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   closeSync,
@@ -44,6 +44,7 @@ const NODE_EXECUTABLE = realpathSync(process.execPath)
 const WRANGLER_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/wrangler/bin/wrangler.js'))
 const VITE_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/vite/bin/vite.js'))
 const SEED_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'scripts/seed-local.mjs'))
+const PS_EXECUTABLE = realpathSync('/bin/ps')
 const REACT_PLUGIN_URL = pathToFileURL(
   realpathSync(join(PROJECT_ROOT, 'node_modules/@vitejs/plugin-react/dist/index.js')),
 ).href
@@ -62,6 +63,8 @@ const DEFAULT_ATTEMPTS = 120
 const MAX_READINESS_BODY_BYTES = 16 * 1024
 const CHILD_DEADLINE_MS = 30_000
 const CHILD_KILL_GRACE_MS = 500
+const OWNERSHIP_STABILITY_SCANS = 8
+const OWNERSHIP_STABLE_PASSES = 2
 const FETCH_DEADLINE_MS = 2_000
 const MAX_CHILD_OUTPUT_BYTES = 64 * 1024
 const MAX_ARTIFACT_FILES = 10_000
@@ -69,6 +72,8 @@ const MAX_ARTIFACT_DIRECTORIES = 10_000
 const MAX_ARTIFACT_DEPTH = 32
 const MAX_ARTIFACT_FILE_BYTES = 64 * 1024 * 1024
 const MAX_ARTIFACT_TOTAL_BYTES = 512 * 1024 * 1024
+const OWNERSHIP_ENV = 'BWM_APP_E2E_OWNERSHIP'
+const OWNERSHIP_TOKEN = /^[a-f0-9]{48}$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const BASE64URL = /^[A-Za-z0-9_-]+$/
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux'])
@@ -458,6 +463,116 @@ const processGroupExists = (groupId) => {
   }
 }
 
+const markerProcessGroups = (ownershipToken) => {
+  if (!OWNERSHIP_TOKEN.test(ownershipToken)) fail('APP_E2E_SHUTDOWN_FAILED')
+  const snapshot = spawnSync(
+    PS_EXECUTABLE,
+    ['eww', '-axo', 'pid=,ppid=,pgid=,command='],
+    {
+      env: { LANG: 'C', LC_ALL: 'C' },
+      maxBuffer: 16 * 1024 * 1024,
+      shell: false,
+      timeout: 250,
+    },
+  )
+  const stdout = snapshot.stdout
+  const stderr = snapshot.stderr
+  const marker = Buffer.from(`${OWNERSHIP_ENV}=${ownershipToken}`, 'ascii')
+  try {
+    if (snapshot.error
+      || snapshot.signal !== null
+      || snapshot.status !== 0
+      || !(stdout instanceof Buffer)
+      || !(stderr instanceof Buffer)
+      || stderr.byteLength !== 0) fail('APP_E2E_SHUTDOWN_FAILED')
+    const groups = new Set()
+    let offset = 0
+    while (offset < stdout.byteLength) {
+      const index = stdout.indexOf(marker, offset)
+      if (index < 0) break
+      const before = index > 0 ? stdout[index - 1] : 0x0a
+      const afterIndex = index + marker.byteLength
+      const after = afterIndex < stdout.byteLength ? stdout[afterIndex] : 0x0a
+      if ((before === 0x20 || before === 0x09)
+        && (after === 0x20 || after === 0x09 || after === 0x0a)) {
+        const lineStart = stdout.lastIndexOf(0x0a, index - 1) + 1
+        const prefix = stdout.subarray(
+          lineStart,
+          Math.min(index, lineStart + 96),
+        ).toString('ascii')
+        const match = prefix.match(/^\s*([1-9]\d*)\s+(0|[1-9]\d*)\s+([1-9]\d*)\s+/)
+        if (!match) fail('APP_E2E_SHUTDOWN_FAILED')
+        const groupId = Number(match[3])
+        if (!Number.isSafeInteger(groupId) || groupId <= 0) {
+          fail('APP_E2E_SHUTDOWN_FAILED')
+        }
+        groups.add(groupId)
+      }
+      offset = index + marker.byteLength
+    }
+    return groups
+  } finally {
+    marker.fill(0)
+    stdout?.fill?.(0)
+    stderr?.fill?.(0)
+  }
+}
+
+const processTreeGroups = (rootPid, ownershipToken) => {
+  const snapshot = spawnSync(
+    PS_EXECUTABLE,
+    ['-axo', 'pid=,ppid=,pgid='],
+    {
+      encoding: 'utf8',
+      env: { LANG: 'C', LC_ALL: 'C' },
+      maxBuffer: 1024 * 1024,
+      shell: false,
+      timeout: 250,
+    },
+  )
+  if (snapshot.error
+    || snapshot.signal !== null
+    || snapshot.status !== 0
+    || snapshot.stderr !== ''
+    || typeof snapshot.stdout !== 'string') {
+    fail('APP_E2E_SHUTDOWN_FAILED')
+  }
+  const rows = []
+  const seen = new Set()
+  for (const line of snapshot.stdout.split('\n')) {
+    if (!line.trim()) continue
+    const match = line.match(/^\s*([1-9]\d*)\s+(0|[1-9]\d*)\s+([1-9]\d*)\s*$/)
+    if (!match) fail('APP_E2E_SHUTDOWN_FAILED')
+    const row = {
+      pid: Number(match[1]),
+      ppid: Number(match[2]),
+      groupId: Number(match[3]),
+    }
+    if (!Number.isSafeInteger(row.pid)
+      || !Number.isSafeInteger(row.ppid)
+      || !Number.isSafeInteger(row.groupId)
+      || seen.has(row.pid)) fail('APP_E2E_SHUTDOWN_FAILED')
+    seen.add(row.pid)
+    rows.push(row)
+  }
+  const root = rows.find(({ pid }) => pid === rootPid)
+  if (root && root.groupId !== rootPid) fail('APP_E2E_SHUTDOWN_FAILED')
+  const descendants = new Set([rootPid])
+  const groups = new Set([rootPid])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const row of rows) {
+      if (descendants.has(row.pid) || !descendants.has(row.ppid)) continue
+      descendants.add(row.pid)
+      groups.add(row.groupId)
+      changed = true
+    }
+  }
+  for (const groupId of markerProcessGroups(ownershipToken)) groups.add(groupId)
+  return Object.freeze([...groups].sort((left, right) => left - right))
+}
+
 const signalProcessGroup = (child, signal) => {
   if (!child || !Number.isSafeInteger(child.pid) || child.pid <= 0) {
     fail('APP_E2E_SHUTDOWN_FAILED')
@@ -500,29 +615,56 @@ const validChildInvocation = (input) => ownObject(input)
   && input.cwd === realpathSync(input.cwd)
   && ownObject(input.env)
   && Object.values(input.env).every((value) => typeof value === 'string')
+  && !Object.hasOwn(input.env, OWNERSHIP_ENV)
   && input.shell === false
 
 export const runBoundedAppChild = (input, {
+  clearTimeoutImpl = clearTimeout,
   deadlineMs = CHILD_DEADLINE_MS,
+  groupExistsImpl = processGroupExists,
   onRetainedChunk = () => {},
   onSettled = () => {},
   onSpawn = () => {},
+  ownedGroupsImpl = processTreeGroups,
+  setTimeoutImpl = setTimeout,
+  signalGroupImpl = (groupId, signal) => {
+    try {
+      process.kill(-groupId, signal)
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw error
+    }
+  },
   sleep = defaultSleep,
   spawnImpl = spawn,
 } = {}) => new Promise((resolveResult, rejectResult) => {
   if (!validChildInvocation(input)
     || !Number.isSafeInteger(deadlineMs)
     || deadlineMs < 1
-    || deadlineMs > 120_000) {
+    || deadlineMs > 120_000
+    || typeof clearTimeoutImpl !== 'function'
+    || typeof groupExistsImpl !== 'function'
+    || typeof onRetainedChunk !== 'function'
+    || typeof onSettled !== 'function'
+    || typeof onSpawn !== 'function'
+    || typeof ownedGroupsImpl !== 'function'
+    || typeof setTimeoutImpl !== 'function'
+    || typeof signalGroupImpl !== 'function'
+    || typeof sleep !== 'function'
+    || typeof spawnImpl !== 'function') {
     rejectResult(new Error('APP_E2E_CHILD_INPUT_INVALID'))
     return
   }
   let child
+  let ownershipToken
   try {
+    ownershipToken = randomBytes(24).toString('hex')
     child = spawnImpl(input.command, input.args, {
       cwd: input.cwd,
       detached: true,
-      env: input.env,
+      env: {
+        ...input.env,
+        [OWNERSHIP_ENV]: ownershipToken,
+      },
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
@@ -530,12 +672,203 @@ export const runBoundedAppChild = (input, {
     rejectResult(new Error('APP_E2E_CHILD_FAILED'))
     return
   }
-  let handleSpawnError = () => {}
-  child?.once?.('error', () => handleSpawnError())
-  if (!child?.stdout?.on || !child?.stderr?.on
-    || !Number.isSafeInteger(child.pid) || child.pid <= 0) {
-    try { child?.kill?.('SIGKILL') } catch { /* Fixed status only. */ }
-    rejectResult(new Error('APP_E2E_CHILD_FAILED'))
+  let pendingSpawnError = false
+  let handleSpawnError = () => {
+    pendingSpawnError = true
+  }
+  const childErrorListener = () => handleSpawnError()
+  let childPid = null
+  try { childPid = child?.pid } catch { /* Invalid spawn result. */ }
+  const validPid = Number.isSafeInteger(childPid) && childPid > 0
+  const ownedGroups = new Set(validPid ? [childPid] : [])
+  let ownershipUnproven = false
+  const trackOwnedGroups = () => {
+    if (!validPid) return
+    let groups
+    try {
+      groups = ownedGroupsImpl(childPid, ownershipToken)
+    } catch {
+      ownershipUnproven = true
+      return
+    }
+    if (!Array.isArray(groups)
+      || !groups.includes(childPid)
+      || groups.some((groupId) => (
+        !Number.isSafeInteger(groupId) || groupId <= 0
+      ))) {
+      ownershipUnproven = true
+      return
+    }
+    for (const groupId of groups) ownedGroups.add(groupId)
+  }
+  const signalOwnedGroups = (signal, shouldStop = () => false) => {
+    for (const groupId of ownedGroups) {
+      if (shouldStop()) return
+      try { signalGroupImpl(groupId, signal) } catch { /* Absence is proved below. */ }
+    }
+  }
+  const ownedGroupsAreAbsent = () => (
+    [...ownedGroups].every((groupId) => !groupExistsImpl(groupId))
+  )
+  const boundedChildSleep = (milliseconds) => new Promise((resolveSleep, rejectSleep) => {
+    let completed = false
+    const fallback = setTimeout(() => {
+      if (completed) return
+      completed = true
+      resolveSleep()
+    }, milliseconds + 25)
+    const complete = (callback, value) => {
+      if (completed) return
+      completed = true
+      clearTimeout(fallback)
+      callback(value)
+    }
+    try {
+      Promise.resolve(sleep(milliseconds)).then(
+        () => complete(resolveSleep),
+        (error) => complete(rejectSleep, error),
+      )
+    } catch (error) {
+      complete(rejectSleep, error)
+    }
+  })
+  const waitForOwnedGroupsAbsence = () => waitForAppE2ECondition(
+    ownedGroupsAreAbsent,
+    { sleep: boundedChildSleep },
+  )
+  const forceTrackedGroupsAbsent = async () => {
+    signalOwnedGroups('SIGKILL')
+    try {
+      return await waitForOwnedGroupsAbsence()
+    } catch {
+      return false
+    }
+  }
+  const failUnprovenOwnership = async (observedLiveGroup) => {
+    await forceTrackedGroupsAbsent()
+    return Object.freeze({ observedLiveGroup, proven: false })
+  }
+  const proveOwnedGroupsAbsent = async ({ graceful }) => {
+    let observedLiveGroup = false
+    let stablePasses = 0
+    for (let scan = 0; scan < OWNERSHIP_STABILITY_SCANS; scan += 1) {
+      trackOwnedGroups()
+      if (ownershipUnproven) {
+        return failUnprovenOwnership(observedLiveGroup)
+      }
+      if (ownedGroupsAreAbsent()) {
+        stablePasses += 1
+        if (stablePasses >= OWNERSHIP_STABLE_PASSES) {
+          return Object.freeze({ observedLiveGroup, proven: true })
+        }
+      } else {
+        observedLiveGroup = true
+        stablePasses = 0
+        if (graceful) {
+          signalOwnedGroups('SIGTERM')
+          if (!(await waitForOwnedGroupsAbsence())) {
+            trackOwnedGroups()
+            if (ownershipUnproven) {
+              return failUnprovenOwnership(observedLiveGroup)
+            }
+            signalOwnedGroups('SIGKILL')
+            if (!(await waitForOwnedGroupsAbsence())) {
+              return Object.freeze({ observedLiveGroup, proven: false })
+            }
+          }
+        } else {
+          signalOwnedGroups('SIGKILL')
+          if (!(await waitForOwnedGroupsAbsence())) {
+            return Object.freeze({ observedLiveGroup, proven: false })
+          }
+        }
+      }
+      await boundedChildSleep(25)
+    }
+    return Object.freeze({ observedLiveGroup, proven: false })
+  }
+  let validChildInterface = false
+  try {
+    const canManageErrorListener = typeof child?.once === 'function'
+      && typeof child?.removeListener === 'function'
+    if (canManageErrorListener) child.once('error', childErrorListener)
+    validChildInterface = canManageErrorListener
+      && typeof child?.stdout?.on === 'function'
+      && typeof child?.stdout?.removeListener === 'function'
+      && typeof child?.stderr?.on === 'function'
+      && typeof child?.stderr?.removeListener === 'function'
+  } catch {
+    validChildInterface = false
+  }
+  const removeChildErrorListener = () => {
+    try {
+      if (typeof child?.removeListener === 'function') {
+        child.removeListener('error', childErrorListener)
+      }
+    } catch {
+      // Listener cleanup cannot change the fixed settlement result.
+    }
+  }
+  const clearChildTimer = (timer) => {
+    try { clearTimeoutImpl(timer) } catch { /* Fixed result only. */ }
+  }
+  if (!validChildInterface || !validPid) {
+    let finalizing = false
+    let cleanupTimer = null
+    let cleanupTimerSet = false
+    const finalizeInvalidChild = () => {
+      if (finalizing) return
+      finalizing = true
+      if (cleanupTimerSet) {
+        const timer = cleanupTimer
+        cleanupTimerSet = false
+        cleanupTimer = null
+        clearChildTimer(timer)
+      }
+      removeChildErrorListener()
+      void (async () => {
+        let orphaned = false
+        if (validPid) {
+          try {
+            const cleanup = await proveOwnedGroupsAbsent({ graceful: false })
+            orphaned = !cleanup.proven
+          } catch {
+            await forceTrackedGroupsAbsent()
+            orphaned = true
+          }
+        }
+        try { onSettled(child) } catch { /* Fixed status only. */ }
+        rejectResult(new Error(
+          orphaned ? 'APP_E2E_CHILD_ORPHANED' : 'APP_E2E_CHILD_FAILED',
+        ))
+      })()
+    }
+    handleSpawnError = finalizeInvalidChild
+    if (validPid) {
+      trackOwnedGroups()
+      if (!finalizing) signalOwnedGroups('SIGTERM', () => finalizing)
+    } else {
+      try {
+        if (typeof child?.kill === 'function') child.kill('SIGKILL')
+      } catch { /* Fixed status only. */ }
+    }
+    if (finalizing) return
+    if (pendingSpawnError) {
+      finalizeInvalidChild()
+      return
+    }
+    try {
+      const timer = setTimeoutImpl(finalizeInvalidChild, CHILD_KILL_GRACE_MS)
+      cleanupTimer = timer
+      cleanupTimerSet = true
+      if (finalizing) {
+        cleanupTimerSet = false
+        cleanupTimer = null
+        clearChildTimer(timer)
+      }
+    } catch {
+      finalizeInvalidChild()
+    }
     return
   }
   let failure = null
@@ -545,13 +878,79 @@ export const runBoundedAppChild = (input, {
   const stdout = []
   const stderr = []
   let killTimer = null
+  let killTimerSet = false
+  let deadline = null
+  let deadlineSet = false
+  let terminalListener = null
+  const removeRetainedListeners = () => {
+    removeChildErrorListener()
+    try { child.stdout.removeListener('data', stdoutListener) } catch { /* Fixed result only. */ }
+    try { child.stderr.removeListener('data', stderrListener) } catch { /* Fixed result only. */ }
+    try {
+      if (terminalListener) child.removeListener('close', terminalListener)
+    } catch { /* Fixed result only. */ }
+  }
+  const finalize = ({ code, signal, terminal }) => {
+    if (settled) return
+    settled = true
+    if (deadlineSet) {
+      const timer = deadline
+      deadlineSet = false
+      deadline = null
+      clearChildTimer(timer)
+    }
+    if (killTimerSet) {
+      const timer = killTimer
+      killTimerSet = false
+      killTimer = null
+      clearChildTimer(timer)
+    }
+    removeRetainedListeners()
+    void (async () => {
+      let orphaned = false
+      try {
+        const cleanup = await proveOwnedGroupsAbsent({ graceful: terminal })
+        orphaned = !cleanup.proven || (terminal && cleanup.observedLiveGroup)
+      } catch {
+        await forceTrackedGroupsAbsent()
+        orphaned = true
+      }
+      try { onSettled(child) } catch { /* Fixed status only. */ }
+      if (orphaned || failure || !Number.isInteger(code) || signal !== null) {
+        rejectResult(new Error(
+          orphaned ? 'APP_E2E_CHILD_ORPHANED' : (failure ?? 'APP_E2E_CHILD_FAILED'),
+        ))
+        return
+      }
+      resolveResult(Object.freeze({
+        code,
+        stderr: Buffer.concat(stderr).toString('utf8'),
+        stdout: Buffer.concat(stdout).toString('utf8'),
+      }))
+    })()
+  }
   const terminate = (code) => {
-    if (failure) return
+    if (failure || settled) return
     failure = code
-    try { signalProcessGroup(child, 'SIGTERM') } catch { /* Escalation follows. */ }
-    killTimer = setTimeout(() => {
-      try { signalProcessGroup(child, 'SIGKILL') } catch { /* Close settles the result. */ }
-    }, CHILD_KILL_GRACE_MS)
+    trackOwnedGroups()
+    if (settled) return
+    signalOwnedGroups('SIGTERM', () => settled)
+    if (settled) return
+    try {
+      const timer = setTimeoutImpl(
+        () => finalize({ code: null, signal: null, terminal: false }),
+        CHILD_KILL_GRACE_MS,
+      )
+      killTimer = timer
+      killTimerSet = true
+      if (settled) {
+        killTimerSet = false
+        killTimer = null
+        clearChildTimer(timer)
+      }
+    } catch {
+      finalize({ code: null, signal: null, terminal: false })
+    }
   }
   const collect = (target, chunk, stream) => {
     if (failure) return
@@ -566,37 +965,47 @@ export const runBoundedAppChild = (input, {
       return
     }
     target.push(chunk)
-    onRetainedChunk(chunk, stream)
-  }
-  child.stdout.on('data', (chunk) => collect(stdout, chunk, 'stdout'))
-  child.stderr.on('data', (chunk) => collect(stderr, chunk, 'stderr'))
-  const deadline = setTimeout(
-    () => terminate('APP_E2E_CHILD_DEADLINE'),
-    deadlineMs,
-  )
-  handleSpawnError = () => terminate('APP_E2E_CHILD_FAILED')
-  child.once('close', async (code, signal) => {
-    if (settled) return
-    settled = true
-    clearTimeout(deadline)
-    if (killTimer) clearTimeout(killTimer)
-    let orphaned = false
     try {
-      orphaned = !(await removeOrphanedGroup(child.pid, { sleep }))
+      onRetainedChunk(chunk, stream)
     } catch {
-      orphaned = true
+      terminate('APP_E2E_CHILD_FAILED')
     }
-    try { onSettled(child) } catch { /* Fixed status only. */ }
-    if (orphaned || failure || !Number.isInteger(code) || signal !== null) {
-      rejectResult(new Error(orphaned ? 'APP_E2E_CHILD_ORPHANED' : (failure ?? 'APP_E2E_CHILD_FAILED')))
-      return
+  }
+  const stdoutListener = (chunk) => collect(stdout, chunk, 'stdout')
+  const stderrListener = (chunk) => collect(stderr, chunk, 'stderr')
+  handleSpawnError = () => terminate('APP_E2E_CHILD_FAILED')
+  if (pendingSpawnError) {
+    terminate('APP_E2E_CHILD_FAILED')
+    return
+  }
+  terminalListener = (code, signal) => finalize({ code, signal, terminal: true })
+  try {
+    child.once('close', terminalListener)
+    if (settled || failure) return
+    child.stdout.on('data', stdoutListener)
+    if (settled || failure) return
+    child.stderr.on('data', stderrListener)
+    if (settled || failure) return
+  } catch {
+    terminate('APP_E2E_CHILD_FAILED')
+    return
+  }
+  try {
+    const timer = setTimeoutImpl(
+      () => terminate('APP_E2E_CHILD_DEADLINE'),
+      deadlineMs,
+    )
+    deadline = timer
+    deadlineSet = true
+    if (settled || failure) {
+      deadlineSet = false
+      deadline = null
+      clearChildTimer(timer)
     }
-    resolveResult(Object.freeze({
-      code,
-      stderr: Buffer.concat(stderr).toString('utf8'),
-      stdout: Buffer.concat(stdout).toString('utf8'),
-    }))
-  })
+  } catch {
+    terminate('APP_E2E_CHILD_FAILED')
+  }
+  if (settled || failure) return
   try {
     onSpawn(child)
   } catch {

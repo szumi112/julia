@@ -1,3 +1,5 @@
+import { acceptCanonicalEmail } from '../identity/canonical-email.js'
+
 const ENDPOINT = 'https://api.scaleway.com/transactional-email/v1alpha1/regions/fr-par/emails'
 const MAX_RESPONSE_BYTES = 64 * 1024
 const REQUEST_TIMEOUT_MS = 10_000
@@ -5,7 +7,6 @@ const MAX_JSON_DEPTH = 64
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
-const EMAIL = /^[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)+$/u
 const OPTIONAL_STRINGS = Object.freeze([
   'message_id',
   'project_id',
@@ -39,15 +40,6 @@ const int32 = (value) => Number.isInteger(value)
   && value >= -2_147_483_648 && value <= 2_147_483_647
 const canonicalInstant = (value) => typeof value === 'string' && INSTANT.test(value)
   && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value
-const canonicalEmail = (value) => typeof value === 'string'
-  && value === value.trim()
-  && value === value.toLowerCase()
-  && value === value.normalize('NFC')
-  && utf8Bytes(value) <= 254
-  && EMAIL.test(value)
-  && !value.startsWith('.')
-  && !value.includes('..')
-  && !value.includes('.@')
 const saneName = (value) => typeof value === 'string'
   && value === value.trim()
   && value.length > 0
@@ -143,12 +135,11 @@ function validateInput(input) {
     || input.secret.length < 1
     || /\s/u.test(input.secret)
     || !UUID.test(input.projectId ?? '')
-    || !canonicalEmail(input.fromEmail)
+    || !acceptCanonicalEmail(input.fromEmail)
     || !saneName(input.fromName)
     || !exactProtectedOrigin(input.appOrigin)
     || !ID.test(input.jobId ?? '')
-    || !canonicalEmail(input.recipient)
-    || !input.recipient.endsWith('@example.test')
+    || !acceptCanonicalEmail(input.recipient, { fictional: true })
     || !canonicalInstant(input.expiresAt)) {
     fail('EMAIL_PROVIDER_CONFIG_INVALID')
   }
@@ -384,7 +375,10 @@ function validatedProviderId(parsed) {
 
 async function sendAndValidate(input, request, signal) {
   const response = await input.fetch(ENDPOINT, { ...request, signal })
-  if (!response || !Number.isInteger(response.status)
+  if (!response
+    || response.redirected !== false
+    || response.url !== ENDPOINT
+    || !Number.isInteger(response.status)
     || response.status < 100 || response.status > 599) throw new Error('invalid_response')
   if (response.status !== 200) {
     try {
@@ -422,6 +416,7 @@ export async function sendInvitationEmail(input = {}) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    redirect: 'error',
   }
   const controller = new AbortController()
   let timeout

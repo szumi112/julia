@@ -278,11 +278,11 @@ describe('staff invitation input', () => {
   it.each(['coordinator', 'owner', 'specialist'])('accepts and normalizes the %s role', (role) => {
     expect(validateInvitationInput({
       displayName: '  Z\u0307aneta Testowa  ',
-      email: '  PERSON@EXAMPLE.TEST  ',
+      email: '  Z\u0307ANETA@EXAMPLE.TEST  ',
       role,
     }, { dataMode: 'fictional' })).toEqual({
       displayName: '\u017baneta Testowa',
-      email: 'person@example.test',
+      email: '\u017caneta@example.test',
       role,
     })
   })
@@ -309,9 +309,94 @@ describe('staff invitation input', () => {
       expect(Object.keys(error.details)).toEqual(['field'])
     }
   })
+
+  it.each([
+    ['a NUL control character', 'anna\u0000@example.test'],
+    ['an outer newline control character', '\nanna@example.test'],
+    ['an invisible format character', 'anna\u200b@example.test'],
+    ['a quoted local part', '"anna"@example.test'],
+    ['a leading local-part dot', '.anna@example.test'],
+    ['a trailing local-part dot', 'anna.@example.test'],
+    ['consecutive local-part dots', 'anna..test@example.test'],
+    ['a leading domain-label hyphen', 'anna@-example.test'],
+    ['a trailing domain-label hyphen', 'anna@example-.test'],
+    ['consecutive domain dots', 'anna@example..test'],
+    ['an invalid domain-label underscore', 'anna@exam_ple.test'],
+    ['internal whitespace', 'anna test@example.test'],
+  ])('rejects %s with only the email field detail', (_label, email) => {
+    try {
+      validateInvitationInput({
+        displayName: 'Anna Testowa',
+        email,
+        role: 'coordinator',
+      }, { dataMode: 'fictional' })
+      throw new Error('expected validation failure')
+    } catch (error) {
+      expect(error).toMatchObject({
+        message: 'VALIDATION_FAILED',
+        details: { field: 'email' },
+      })
+      expect(Object.keys(error.details)).toEqual(['field'])
+      expect(error.message).not.toContain(email)
+    }
+  })
 })
 
 describe('staff invitation creation', () => {
+  it('rejects sender-invalid emails before cryptography, ID generation, or writes', async () => {
+    const context = await cryptoContext()
+    let cryptoCalls = 0
+    let idCalls = 0
+    const guardedContext = {
+      ...context,
+      keyring: {
+        ...context.keyring,
+        getDataKek(...args) {
+          cryptoCalls += 1
+          return context.keyring.getDataKek(...args)
+        },
+        getLookupHmac(...args) {
+          cryptoCalls += 1
+          return context.keyring.getLookupHmac(...args)
+        },
+      },
+    }
+    const invalidEmails = [
+      'anna\u0000@example.test',
+      '\nanna@example.test',
+      'anna\u200b@example.test',
+      '"anna"@example.test',
+      '.anna@example.test',
+      'anna.@example.test',
+      'anna..test@example.test',
+      'anna@-example.test',
+      'anna@example-.test',
+      'anna@example..test',
+      'anna@exam_ple.test',
+      'anna test@example.test',
+    ]
+    const before = await mutationFacts()
+    for (const [index, email] of invalidEmails.entries()) {
+      await expect(invite(guardedContext, {
+        displayName: 'Anna Testowa',
+        email,
+        role: 'coordinator',
+      }, {
+        idempotencyKey: `invalid-email-${index}-key`,
+        idFactory() {
+          idCalls += 1
+          return `invalid_email_${idCalls}`
+        },
+      })).rejects.toMatchObject({
+        message: 'VALIDATION_FAILED',
+        details: { field: 'email' },
+      })
+    }
+    expect(cryptoCalls).toBe(0)
+    expect(idCalls).toBe(0)
+    expect(await mutationFacts()).toEqual(before)
+  })
+
   it.each([
     ['coordinator', null],
     ['owner', null],

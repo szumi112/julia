@@ -18,9 +18,19 @@ const valid = Object.freeze({
   expiresAt: '2027-01-15T10:05:09.123Z',
 })
 
-const response = (body, status = 200) => new Response(status === 204 ? null : body, {
-  status,
-  headers: { 'Content-Type': 'application/json' },
+const response = (body, status = 200) => {
+  const result = new Response(status === 204 ? null : body, {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  })
+  Object.defineProperty(result, 'url', { value: ENDPOINT })
+  return result
+}
+
+const responseAtEndpoint = (overrides = {}) => ({
+  redirected: false,
+  url: ENDPOINT,
+  ...overrides,
 })
 
 const acceptedBody = (email = { id: PROVIDER_ID }) => JSON.stringify({ emails: [email] })
@@ -73,8 +83,9 @@ describe('Scaleway invitation email provider request', () => {
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(fetch.mock.calls[0][0]).toBe(ENDPOINT)
     const init = fetch.mock.calls[0][1]
-    expect(Object.keys(init)).toEqual(['method', 'headers', 'body', 'signal'])
+    expect(Object.keys(init)).toEqual(['method', 'headers', 'body', 'redirect', 'signal'])
     expect(init.method).toBe('POST')
+    expect(init.redirect).toBe('error')
     expect(init.signal).toBeInstanceOf(AbortSignal)
     expect(init.headers).toEqual({
       'X-Auth-Token': valid.secret,
@@ -139,6 +150,15 @@ describe('Scaleway invitation email provider request', () => {
     ['a noncanonical project UUID', { projectId: 'project_1' }],
     ['a noncanonical recipient', { recipient: 'Anna@example.test' }],
     ['a non-fictional recipient', { recipient: 'anna@example.com' }],
+    ['a control-bearing recipient', { recipient: 'anna\u0000@example.test' }],
+    ['an outer newline-bearing recipient', { recipient: '\nanna@example.test' }],
+    ['a quoted recipient local part', { recipient: '"anna"@example.test' }],
+    ['a leading-dot recipient local part', { recipient: '.anna@example.test' }],
+    ['a trailing-dot recipient local part', { recipient: 'anna.@example.test' }],
+    ['consecutive recipient local dots', { recipient: 'anna..x@example.test' }],
+    ['a leading-hyphen recipient domain label', { recipient: 'anna@-example.test' }],
+    ['a trailing-hyphen recipient domain label', { recipient: 'anna@example-.test' }],
+    ['consecutive recipient domain dots', { recipient: 'anna@example..test' }],
     ['a path-bearing app origin', { appOrigin: 'https://panel.bearwithme.pl/login' }],
     ['a noncanonical expiry', { expiresAt: '2027-01-15T10:05:09Z' }],
     ['a control-bearing sender name', { fromName: 'Bear\nwith me' }],
@@ -156,6 +176,64 @@ describe('Scaleway invitation email provider request', () => {
 })
 
 describe('Scaleway invitation email provider response', () => {
+  it.each([
+    ['a redirected response', true, ENDPOINT, 0],
+    [
+      'a response from another endpoint',
+      false,
+      `https://redirect.invalid/${valid.secret}/${valid.recipient}`,
+      1,
+    ],
+    ['a synthetic response without a provable URL', false, undefined, 0],
+  ])('rejects %s before status or body parsing', async (
+    _label,
+    redirected,
+    url,
+    expectedUrlReads,
+  ) => {
+    let urlReads = 0
+    let statusReads = 0
+    let bodyReads = 0
+    const candidate = { redirected }
+    if (url !== undefined) {
+      Object.defineProperty(candidate, 'url', {
+        get() {
+          urlReads += 1
+          return url
+        },
+      })
+    }
+    Object.defineProperties(candidate, {
+      status: {
+        get() {
+          statusReads += 1
+          return 200
+        },
+      },
+      body: {
+        get() {
+          bodyReads += 1
+          throw new Error(`${valid.secret} ${valid.recipient} private response body`)
+        },
+      },
+    })
+
+    const error = await rejected({
+      ...valid,
+      fetch: async () => candidate,
+    }, {
+      code: 'EMAIL_DELIVERY_AMBIGUOUS',
+      retryable: false,
+      ambiguous: true,
+    })
+
+    expect(urlReads).toBe(expectedUrlReads)
+    expect(statusReads).toBe(0)
+    expect(bodyReads).toBe(0)
+    if (url) expect(error.message).not.toContain(url)
+    expect(error.message).not.toContain('private response body')
+  })
+
   it.each([
     'message_id',
     'project_id',
@@ -220,7 +298,7 @@ describe('Scaleway invitation email provider response', () => {
     })
     await rejected({
       ...valid,
-      fetch: async () => ({ status, body: stream }),
+      fetch: async () => responseAtEndpoint({ status, body: stream }),
     }, { code, retryable, ambiguous })
     await Promise.resolve()
     expect(cancellations).toBe(1)
@@ -230,6 +308,8 @@ describe('Scaleway invitation email provider response', () => {
     ['network rejection', async () => { throw new Error(`${valid.secret} ${valid.recipient}`) }],
     ['missing response', async () => undefined],
     ['response body read rejection', async () => ({
+      redirected: false,
+      url: ENDPOINT,
       status: 200,
       body: new ReadableStream({
         pull(controller) {
@@ -291,7 +371,7 @@ describe('Scaleway invitation email provider response', () => {
       }
       const pending = sendInvitationEmail({
         ...valid,
-        fetch: async () => ({
+        fetch: async () => responseAtEndpoint({
           status: 200,
           body: { getReader: () => reader },
         }),
@@ -323,10 +403,10 @@ describe('Scaleway invitation email provider response', () => {
       const pending = sendInvitationEmail({
         ...valid,
         fetch: async () => new Promise((resolve) => {
-          setTimeout(() => resolve({
+          setTimeout(() => resolve(responseAtEndpoint({
             status: 200,
             body: { getReader: () => reader },
-          }), 11_000)
+          })), 11_000)
         }),
       })
       const error = pending.catch((caught) => caught)
@@ -360,7 +440,7 @@ describe('Scaleway invitation email provider response', () => {
       const pending = sendInvitationEmail({
         ...valid,
         fetch: async () => new Promise((resolve) => {
-          setTimeout(() => resolve({ status: 500, body: stream }), 11_000)
+          setTimeout(() => resolve(responseAtEndpoint({ status: 500, body: stream })), 11_000)
         }),
       })
       const error = pending.catch((caught) => caught)
@@ -440,7 +520,7 @@ describe('Scaleway invitation email provider response', () => {
     })
     await rejected({
       ...valid,
-      fetch: async () => ({ status: 200, body: stream }),
+      fetch: async () => responseAtEndpoint({ status: 200, body: stream }),
     }, {
       code: 'EMAIL_DELIVERY_AMBIGUOUS',
       retryable: false,
@@ -463,7 +543,7 @@ describe('Scaleway invitation email provider response', () => {
     })
     await rejected({
       ...valid,
-      fetch: async () => ({ status: 200, body: stream }),
+      fetch: async () => responseAtEndpoint({ status: 200, body: stream }),
     }, {
       code: 'EMAIL_DELIVERY_AMBIGUOUS',
       retryable: false,
@@ -486,7 +566,7 @@ describe('Scaleway invitation email provider response', () => {
     }
     await rejected({
       ...valid,
-      fetch: async () => ({
+      fetch: async () => responseAtEndpoint({
         status: 200,
         body: { getReader: () => reader },
       }),

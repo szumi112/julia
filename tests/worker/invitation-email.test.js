@@ -398,8 +398,14 @@ describe('authoritative invitation email dispatch', () => {
 
   it.each([
     ['a leading-dot local part', '.recipient@example.test'],
+    ['a trailing-dot local part', 'recipient.@example.test'],
     ['consecutive local-part dots', 'recipient..x@example.test'],
     ['a control-bearing local part', 'recipient\u0001@example.test'],
+    ['an outer newline control', '\nnewline-recipient@example.test'],
+    ['a quoted local part', '"recipient"@example.test'],
+    ['a leading-hyphen domain label', 'recipient@-example.test'],
+    ['a trailing-hyphen domain label', 'recipient@example-.test'],
+    ['consecutive domain dots', 'recipient@example..test'],
   ])('rejects %s before provider I/O', async (_label, email) => {
     const value = await fixture({ email })
     const provider = vi.fn()

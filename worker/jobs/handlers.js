@@ -1,4 +1,5 @@
 import { loadEmailProviderConfig } from '../config.js'
+import { acceptCanonicalEmail } from '../identity/canonical-email.js'
 import { decodeBase64Url, encodeBase64Url } from '../security/encoding.js'
 import { blindEmailCandidates, decryptForScope } from '../security/envelope.js'
 import { sendInvitationEmail } from '../providers/scaleway-email.js'
@@ -14,7 +15,6 @@ import { decryptOutboxPayload, validProcessingJob } from './outbox.js'
 const iso = (nowMs) => new Date(nowMs).toISOString()
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
-const EMAIL = /^[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)+$/u
 const PROVIDER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const PROVIDER_RUNWAY_MS = 11_000
 const randomId = () => crypto.randomUUID().replaceAll('-', '')
@@ -110,19 +110,7 @@ const emailFor = (context, row) => decryptForScope(
     envelope: JSON.parse(row.email_envelope),
   },
 )
-const canonicalRecipient = (value) => {
-  if (typeof value !== 'string') return null
-  const normalized = value.normalize('NFC').trim().toLowerCase()
-  return value === normalized
-    && new TextEncoder().encode(value).byteLength <= 254
-    && EMAIL.test(value)
-    && !value.startsWith('.')
-    && !value.includes('..')
-    && !value.includes('.@')
-    && value.endsWith('@example.test')
-    ? value
-    : null
-}
+const canonicalRecipient = (value) => acceptCanonicalEmail(value, { fictional: true })
 const fixedProviderFailure = (error) => {
   if ((typeof error !== 'object' || error === null) && typeof error !== 'function') {
     return { result: 'dead' }
