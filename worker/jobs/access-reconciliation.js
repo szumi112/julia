@@ -20,6 +20,7 @@ const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const EMAIL = /^[^@\s]+@example\.test$/
 const LEASE_MS = 60_000
 const PROVIDER_TIMEOUT_MS = 15_000
+const PROVIDER_RUNWAY_MS = (PROVIDER_TIMEOUT_MS * 3) + 1_000
 const DOMAIN_SEPARATOR = 'bwm:access-desired-set:v1\n'
 const textEncoder = new TextEncoder()
 
@@ -121,7 +122,7 @@ async function completeDesiredMembership(db, cryptoContext, nowMs) {
   try {
     [staffResult, invitationResult] = await db.batch([
       db.prepare(
-        `SELECT id,email_lookup,email_envelope,status
+        `SELECT id,email_lookup,email_envelope,status,version
          FROM staff_users
          WHERE status IN ('active','pending')
          ORDER BY id`
@@ -142,10 +143,12 @@ async function completeDesiredMembership(db, cryptoContext, nowMs) {
   const staffRows = staffResult.results
   const invitationRows = invitationResult.results
   for (const row of staffRows) {
-    if (!exactD1Row(row, ['id', 'email_lookup', 'email_envelope', 'status'])
+    if (!exactD1Row(row, ['id', 'email_lookup', 'email_envelope', 'status', 'version'])
       || !STAFF_ID.test(row.id ?? '')
       || !LOOKUP.test(row.email_lookup ?? '')
-      || !['active', 'pending'].includes(row.status)) directoryError()
+      || !['active', 'pending'].includes(row.status)
+      || !Number.isSafeInteger(row.version)
+      || row.version < 1) directoryError()
   }
   const invitationsByStaff = new Map()
   for (const row of invitationRows) {
@@ -166,6 +169,7 @@ async function completeDesiredMembership(db, cryptoContext, nowMs) {
   }
   const emails = []
   const lookups = []
+  const includedPendingInvitations = []
   const provisioningInvitations = []
   const identities = new Map()
   const lookupOwners = new Map()
@@ -188,6 +192,17 @@ async function completeDesiredMembership(db, cryptoContext, nowMs) {
         || invitationEmail !== staffEmail
         || invitation.email_lookup !== staff.email_lookup) directoryError()
       await validateLookup(cryptoContext, invitationEmail, invitation.email_lookup)
+      includedPendingInvitations.push(Object.freeze({
+        emailLookup: invitation.email_lookup,
+        expiresAt: invitation.expires_at,
+        id: invitation.id,
+        staffEmailLookup: staff.email_lookup,
+        staffId: staff.id,
+        staffStatus: staff.status,
+        staffVersion: staff.version,
+        status: invitation.status,
+        version: invitation.version,
+      }))
       if (invitation.status === 'provisioning') {
         provisioningInvitations.push(Object.freeze({
           id: invitation.id,
@@ -209,10 +224,12 @@ async function completeDesiredMembership(db, cryptoContext, nowMs) {
     lookups.push(staff.email_lookup)
   }
   emails.sort()
+  includedPendingInvitations.sort((left, right) => left.id.localeCompare(right.id))
   provisioningInvitations.sort((left, right) => left.id.localeCompare(right.id))
   return {
     emails: [...new Set(emails)],
     fingerprint: await accessDesiredFingerprint(lookups),
+    includedPendingInvitations,
     provisioningInvitations,
   }
 }
@@ -337,11 +354,19 @@ export async function acquireAccessReconcileLease({
 }
 
 function ownedLease(row, lease, now) {
-  return row.value.owner === lease.owner
+  return row.version === lease.version
+    && row.value_json === lease.valueJson
+    && row.value.owner === lease.owner
     && row.value.nonce === lease.nonce
     && row.value.expiresAt === lease.expiresAt
     && row.value.expiresAt > now
 }
+
+const membershipCurrentAt = (membership, now) => (
+  membership.includedPendingInvitations.every(
+    (invitation) => invitation.expiresAt > now,
+  )
+)
 
 async function releaseLease(db, lease, nowMs) {
   const now = iso(nowMs)
@@ -432,7 +457,10 @@ async function invitationRow(db, invitation) {
      WHERE id=?`
   ).bind(invitation.id).first()
   if (!row || row.id !== invitation.id || row.staff_id !== invitation.staffId
-    || row.status !== 'provisioning' || row.version !== invitation.version) stateError()
+    || row.email_lookup !== invitation.emailLookup
+    || row.status !== invitation.status
+    || row.expires_at !== invitation.expiresAt
+    || row.version !== invitation.version) stateError()
   return row
 }
 
@@ -479,7 +507,8 @@ async function publishApplied({
   })
   const releasedValue = JSON.stringify({ expiresAt: null, nonce: null, owner: null })
   const invitationChanges = []
-  for (const invitation of membership.provisioningInvitations) {
+  for (const invitation of membership.includedPendingInvitations
+    .filter((candidate) => candidate.status === 'provisioning')) {
     const current = await invitationRow(db, invitation)
     const next = {
       ...current,
@@ -500,6 +529,7 @@ async function publishApplied({
     const jobId = idFrom(idFactory)
     invitationChanges.push({
       current,
+      invitation,
       next,
       version,
       jobId,
@@ -536,7 +566,9 @@ async function publishApplied({
   const guardNowMs = nowFactory()
   const guardNow = iso(guardNowMs)
   if (leaseState.value.expiresAt <= guardNow
-    || invitationChanges.some((change) => change.current.expires_at <= guardNow)) {
+    || membership.includedPendingInvitations.some(
+      (invitation) => invitation.expiresAt <= guardNow,
+    )) {
     return false
   }
   const uow = createUnitOfWork(db, {
@@ -580,7 +612,7 @@ async function publishApplied({
            AND email_lookup=?
            AND EXISTS (
              SELECT 1 FROM staff_users
-             WHERE id=? AND status='pending' AND email_lookup=?
+             WHERE id=? AND status=? AND version=? AND email_lookup=?
            )
            AND EXISTS (
              SELECT 1 FROM system_state
@@ -599,8 +631,10 @@ async function publishApplied({
         change.current.version,
         guardNow,
         change.current.email_lookup,
-        change.current.staff_id,
-        change.current.email_lookup,
+        change.invitation.staffId,
+        change.invitation.staffStatus,
+        change.invitation.staffVersion,
+        change.invitation.staffEmailLookup,
         desiredState.value_json,
         desiredState.version,
         leaseState.value_json,
@@ -672,6 +706,29 @@ async function publishApplied({
     change.next.id,
     change.jobKey,
   ])
+  const membershipPredicates = membership.includedPendingInvitations.map(() => (
+    `AND EXISTS (
+       SELECT 1 FROM staff_invitations
+       WHERE id=? AND staff_id=? AND email_lookup=? AND status='pending'
+         AND version=? AND expires_at=? AND expires_at>?
+     )
+     AND EXISTS (
+       SELECT 1 FROM staff_users
+       WHERE id=? AND email_lookup=? AND status=? AND version=?
+     )`
+  )).join('\n')
+  const membershipBindings = membership.includedPendingInvitations.flatMap((invitation) => [
+    invitation.id,
+    invitation.staffId,
+    invitation.emailLookup,
+    invitation.status === 'provisioning' ? invitation.version + 1 : invitation.version,
+    invitation.expiresAt,
+    guardNow,
+    invitation.staffId,
+    invitation.staffEmailLookup,
+    invitation.staffStatus,
+    invitation.staffVersion,
+  ])
   uow.guard(operationGuard(
     db,
     `access_publish_${auditId}`,
@@ -695,7 +752,8 @@ async function publishApplied({
          AND result='success' AND reason_envelope IS NULL
          AND correlation_id=? AND metadata_json=?
      )
-     ${invitationPredicates}`,
+     ${invitationPredicates}
+     ${membershipPredicates}`,
     [
       releasedValue,
       leaseState.version + 1,
@@ -712,6 +770,7 @@ async function publishApplied({
         invitationCount: invitationChanges.length,
       }),
       ...invitationBindings,
+      ...membershipBindings,
     ],
   ))
   try {
@@ -759,37 +818,52 @@ export async function handleAccessReconcile(input) {
   if (!lease) return { result: 'retry' }
   let currentStates
   let membership
+  const refreshNowMs = observedNowMs()
   try {
     currentStates = await allStates(input.db)
     membership = await completeDesiredMembership(
       input.db,
       input.cryptoContext,
-      input.nowMs,
+      refreshNowMs,
     )
   } catch (error) {
-    await releaseLease(input.db, lease, input.nowMs)
+    await releaseLease(input.db, lease, refreshNowMs)
     throw error
+  }
+  const providerFenceLease = await state(input.db, 'access.reconcile.lease')
+  const providerFenceNowMs = observedNowMs()
+  const providerFenceNow = iso(providerFenceNowMs)
+  if (!ownedLease(providerFenceLease, lease, providerFenceNow)) {
+    return { result: 'retry' }
+  }
+  if (!membershipCurrentAt(membership, providerFenceNow)) {
+    await releaseLease(input.db, lease, providerFenceNowMs)
+    return { result: 'retry' }
   }
   const generation = currentStates.desired.value.generation
   const applied = currentStates.applied.value
   if (input.payload.generation > generation) {
-    await releaseLease(input.db, lease, input.nowMs)
+    await releaseLease(input.db, lease, providerFenceNowMs)
     stateError()
   }
   if (input.payload.generation < generation) {
     if (input.payload.generation <= applied.generation) {
-      return await releaseLease(input.db, lease, input.nowMs)
+      return await releaseLease(input.db, lease, providerFenceNowMs)
         ? { result: 'succeeded' }
         : { result: 'retry' }
     }
-    return await releaseObsolete(input.db, lease, currentStates.desired, input.nowMs)
+    return await releaseObsolete(input.db, lease, currentStates.desired, providerFenceNowMs)
       ? { result: 'succeeded' }
       : { result: 'retry' }
   }
   if (applied.generation === generation && applied.fingerprint === membership.fingerprint) {
-    return await releaseLease(input.db, lease, input.nowMs)
+    return await releaseLease(input.db, lease, providerFenceNowMs)
       ? { result: 'succeeded' }
       : { result: 'retry' }
+  }
+  if (Date.parse(lease.expiresAt) - providerFenceNowMs < PROVIDER_RUNWAY_MS) {
+    await releaseLease(input.db, lease, providerFenceNowMs)
+    return { result: 'retry' }
   }
   const providers = ownObject(input.providers) ? input.providers : {}
   const reconcile = providers.reconcileAccessGroup ?? reconcileAccessGroup

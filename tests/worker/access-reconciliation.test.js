@@ -30,6 +30,11 @@ const correlationSequence = () => {
   return () => `00000000-0000-4000-8000-${String(++count).padStart(12, '0')}`
 }
 
+const clockSequence = (...values) => {
+  let index = 0
+  return () => values[Math.min(index++, values.length - 1)]
+}
+
 async function context() {
   serial += 1
   const keyring = await createKeyring(env, {
@@ -211,7 +216,8 @@ const reconcileInput = (cryptoContext, payload, overrides = {}) => {
   return {
     db: overrides.db ?? env.DB,
     cryptoContext,
-    config: { appEnv: 'development' },
+    config: overrides.config ?? { appEnv: 'development' },
+    bindings: overrides.bindings,
     payload,
     nowMs: overrides.nowMs ?? NOW_MS,
     providers: overrides.providers ?? {
@@ -308,6 +314,7 @@ describe('authoritative Access desired membership', () => {
       email_lookup: lookup,
       email_envelope: await encryptedField(cryptoContext, id, 'email', email),
       status: 'active',
+      version: 1,
     })))
     const db = {
       prepare: vi.fn((sql) => ({ sql })),
@@ -611,6 +618,295 @@ describe('guarded Access reconciliation publication', () => {
     ).first()).value_json)).toEqual({ expiresAt: null, nonce: null, owner: null })
   })
 
+  it('refreshes expired membership before treating a generation as already applied', async () => {
+    const fixture = await provisioningFixture()
+    const expiresAt = new Date(NOW_MS + 30_000).toISOString()
+    await env.DB.prepare(
+      `UPDATE staff_invitations
+       SET expires_at=?,version=version+1,updated_at=?
+       WHERE id=? AND status='provisioning' AND version=1`
+    ).bind(expiresAt, NOW, fixture.invitation.id).run()
+    const desired = await handlers.desiredAccessMembership(
+      env.DB,
+      fixture.cryptoContext,
+      NOW_MS,
+    )
+    await setState('access.applied_generation', {
+      fingerprint: desired.fingerprint,
+      generation: 1,
+    })
+    const provider = vi.fn()
+
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      {
+        providers: { reconcileAccessGroup: provider },
+        nowFactory: () => NOW_MS + 30_000,
+      },
+    ))).resolves.toEqual({ result: 'retry' })
+
+    expect(provider).not.toHaveBeenCalled()
+    expect(JSON.parse((await env.DB.prepare(
+      "SELECT value_json FROM system_state WHERE key='access.applied_generation'"
+    ).first()).value_json)).toEqual({
+      fingerprint: desired.fingerprint,
+      generation: 1,
+    })
+  })
+
+  it('rejects an already-pending invitation that expires at the publication guard', async () => {
+    const fixture = await provisioningFixture()
+    const expiresAt = new Date(NOW_MS + 30_000).toISOString()
+    await env.DB.prepare(
+      `UPDATE staff_invitations
+       SET status='pending',access_allowed_at=?,expires_at=?,version=version+1,updated_at=?
+       WHERE id=? AND status='provisioning' AND version=1`
+    ).bind(NOW, expiresAt, NOW, fixture.invitation.id).run()
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      {
+        providers: { reconcileAccessGroup: provider },
+        nowFactory: clockSequence(
+          NOW_MS,
+          NOW_MS,
+          NOW_MS,
+          NOW_MS + 30_000,
+        ),
+      },
+    ))).resolves.toEqual({ result: 'retry' })
+
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(JSON.parse((await env.DB.prepare(
+      "SELECT value_json FROM system_state WHERE key='access.applied_generation'"
+    ).first()).value_json)).toEqual({ fingerprint: EMPTY_FINGERPRINT, generation: 0 })
+    expect(await env.DB.prepare('SELECT status,version FROM staff_invitations WHERE id=?')
+      .bind(fixture.invitation.id).first()).toEqual({ status: 'pending', version: 2 })
+  })
+
+  it('mechanically rejects an already-pending invitation changed before publication', async () => {
+    const fixture = await provisioningFixture()
+    await env.DB.prepare(
+      `UPDATE staff_invitations
+       SET status='pending',access_allowed_at=?,version=version+1,updated_at=?
+       WHERE id=? AND status='provisioning' AND version=1`
+    ).bind(NOW, NOW, fixture.invitation.id).run()
+    const before = {
+      audits: (await env.DB.prepare(
+        `SELECT count(*) AS count FROM audit_events
+         WHERE action='staff.access.reconciled' AND actor_staff_id=?`
+      ).bind(fixture.owner.id).first()).count,
+      jobs: (await env.DB.prepare(
+        `SELECT count(*) AS count FROM outbox_jobs
+         WHERE type='staff.invitation.email' AND aggregate_id=?`
+      ).bind(fixture.invitation.id).first()).count,
+      versions: (await env.DB.prepare(
+        `SELECT count(*) AS count FROM record_versions
+         WHERE entity_type='staff_invitation' AND entity_id=?`
+      ).bind(fixture.invitation.id).first()).count,
+    }
+    let batches = 0
+    const db = {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: vi.fn(async (statements) => {
+        batches += 1
+        if (batches === 4) {
+          await env.DB.prepare(
+            `UPDATE staff_invitations
+             SET status='revoked',revoked_at=?,version=version+1,updated_at=?
+             WHERE id=? AND status='pending' AND version=2`
+          ).bind(NOW, NOW, fixture.invitation.id).run()
+        }
+        return env.DB.batch(statements)
+      }),
+    }
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      {
+        db,
+        providers: { reconcileAccessGroup: provider },
+      },
+    ))).resolves.toEqual({ result: 'retry' })
+
+    expect(batches).toBe(4)
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(JSON.parse((await env.DB.prepare(
+      "SELECT value_json FROM system_state WHERE key='access.applied_generation'"
+    ).first()).value_json)).toEqual({ fingerprint: EMPTY_FINGERPRINT, generation: 0 })
+    expect(await env.DB.prepare('SELECT status,version FROM staff_invitations WHERE id=?')
+      .bind(fixture.invitation.id).first()).toEqual({ status: 'revoked', version: 3 })
+    expect((await env.DB.prepare(
+      `SELECT count(*) AS count FROM audit_events
+       WHERE action='staff.access.reconciled' AND actor_staff_id=?`
+    ).bind(fixture.owner.id).first()).count).toBe(before.audits)
+    expect((await env.DB.prepare(
+      `SELECT count(*) AS count FROM outbox_jobs
+       WHERE type='staff.invitation.email' AND aggregate_id=?`
+    ).bind(fixture.invitation.id).first()).count).toBe(before.jobs)
+    expect((await env.DB.prepare(
+      `SELECT count(*) AS count FROM record_versions
+       WHERE entity_type='staff_invitation' AND entity_id=?`
+    ).bind(fixture.invitation.id).first()).count).toBe(before.versions)
+  })
+
+  it('starts provider I/O with the exact required 46 second lease runway', async () => {
+    const fixture = await provisioningFixture()
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      {
+        providers: { reconcileAccessGroup: provider },
+        nowFactory: () => NOW_MS + 14_000,
+      },
+    ))).resolves.toEqual({ result: 'succeeded' })
+
+    expect(provider).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not call the provider with one millisecond less than the required lease runway', async () => {
+    const fixture = await provisioningFixture()
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      {
+        providers: { reconcileAccessGroup: provider },
+        nowFactory: () => NOW_MS + 14_001,
+      },
+    ))).resolves.toEqual({ result: 'retry' })
+
+    expect(provider).not.toHaveBeenCalled()
+    expect(JSON.parse((await env.DB.prepare(
+      "SELECT value_json FROM system_state WHERE key='access.reconcile.lease'"
+    ).first()).value_json)).toEqual({ expiresAt: null, nonce: null, owner: null })
+  })
+
+  it('samples provider runway after the final lease read completes', async () => {
+    const fixture = await provisioningFixture()
+    let leaseReads = 0
+    let providerFenceLeaseRead = false
+    const db = {
+      prepare(sql) {
+        const statement = env.DB.prepare(sql)
+        if (!sql.includes('SELECT key,value_json,version FROM system_state WHERE key=?')) {
+          return statement
+        }
+        return {
+          bind(...bindings) {
+            const bound = statement.bind(...bindings)
+            return {
+              async first() {
+                const row = await bound.first()
+                if (bindings[0] === 'access.reconcile.lease') {
+                  leaseReads += 1
+                  if (leaseReads === 4) providerFenceLeaseRead = true
+                }
+                return row
+              },
+            }
+          },
+        }
+      },
+      batch: env.DB.batch.bind(env.DB),
+    }
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      {
+        db,
+        providers: { reconcileAccessGroup: provider },
+        nowFactory: () => providerFenceLeaseRead ? NOW_MS + 14_001 : NOW_MS,
+      },
+    ))).resolves.toEqual({ result: 'retry' })
+
+    expect(providerFenceLeaseRead).toBe(true)
+    expect(provider).not.toHaveBeenCalled()
+  })
+
+  it('does not call the provider after losing its nonce during the initial snapshot', async () => {
+    const fixture = await provisioningFixture()
+    let batches = 0
+    const db = {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: vi.fn(async (statements) => {
+        const results = await env.DB.batch(statements)
+        batches += 1
+        if (batches === 2) {
+          await setState('access.reconcile.lease', {
+            expiresAt: new Date(NOW_MS + 120_000).toISOString(),
+            nonce: 'replacement_pre_provider_nonce',
+            owner: 'replacement_pre_provider_owner',
+          })
+        }
+        return results
+      }),
+    }
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      {
+        db,
+        providers: { reconcileAccessGroup: provider },
+      },
+    ))).resolves.toEqual({ result: 'retry' })
+
+    expect(provider).not.toHaveBeenCalled()
+    expect(JSON.parse((await env.DB.prepare(
+      "SELECT value_json FROM system_state WHERE key='access.reconcile.lease'"
+    ).first()).value_json)).toMatchObject({
+      nonce: 'replacement_pre_provider_nonce',
+      owner: 'replacement_pre_provider_owner',
+    })
+  })
+
+  it('does not call the provider after its lease revision changes with the same value', async () => {
+    const fixture = await provisioningFixture()
+    let batches = 0
+    const db = {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: vi.fn(async (statements) => {
+        const results = await env.DB.batch(statements)
+        batches += 1
+        if (batches === 2) {
+          await env.DB.prepare(
+            `UPDATE system_state
+             SET version=version+1,updated_at=?
+             WHERE key='access.reconcile.lease'`
+          ).bind(NOW).run()
+        }
+        return results
+      }),
+    }
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      {
+        db,
+        providers: { reconcileAccessGroup: provider },
+      },
+    ))).resolves.toEqual({ result: 'retry' })
+
+    expect(provider).not.toHaveBeenCalled()
+    expect(JSON.parse((await env.DB.prepare(
+      "SELECT value_json FROM system_state WHERE key='access.applied_generation'"
+    ).first()).value_json)).toEqual({ fingerprint: EMPTY_FINGERPRINT, generation: 0 })
+  })
+
   it('proves a newer ordinary job and releases obsolete work without publishing', async () => {
     const fixture = await provisioningFixture()
     const provider = vi.fn(async () => {
@@ -691,7 +987,7 @@ describe('guarded Access reconciliation publication', () => {
       .bind(fixture.invitation.id).first()).toEqual({ status: 'provisioning', version: 1 })
   })
 
-  it('uses the real post-provider clock when production omits a time factory', async () => {
+  it('uses the real pre-provider clock when production omits a time factory', async () => {
     const fixture = await provisioningFixture()
     const provider = vi.fn().mockResolvedValue({ emails: [] })
     const input = reconcileInput(
@@ -706,7 +1002,7 @@ describe('guarded Access reconciliation publication', () => {
     } finally {
       clock.mockRestore()
     }
-    expect(provider).toHaveBeenCalledTimes(1)
+    expect(provider).not.toHaveBeenCalled()
     expect(JSON.parse((await env.DB.prepare(
       "SELECT value_json FROM system_state WHERE key='access.applied_generation'"
     ).first()).value_json)).toEqual({ fingerprint: EMPTY_FINGERPRINT, generation: 0 })
@@ -862,8 +1158,10 @@ describe('guarded Access reconciliation publication', () => {
       "SELECT count(*) AS count FROM outbox_jobs WHERE type='staff.invitation.email' AND aggregate_id IN (?,?)"
     ).bind(fixture.invitation.id, secondInvitation.id).first()).count).toBe(2)
     const audit = await env.DB.prepare(
-      "SELECT metadata_json FROM audit_events WHERE action='staff.access.reconciled' ORDER BY occurred_at DESC,id DESC LIMIT 1"
-    ).first()
+      `SELECT metadata_json FROM audit_events
+       WHERE action='staff.access.reconciled' AND actor_staff_id=?
+       ORDER BY occurred_at DESC,id DESC LIMIT 1`
+    ).bind(fixture.owner.id).first()
     expect(JSON.parse(audit.metadata_json).invitationCount).toBe(2)
   })
 
@@ -1032,6 +1330,127 @@ describe('guarded Access reconciliation publication', () => {
     expect((await env.DB.prepare(
       "SELECT count(*) AS count FROM record_versions WHERE entity_type='staff_invitation' AND entity_id=?"
     ).bind(fixture.invitation.id).first()).count).toBe(before.versions)
+  })
+
+  it('cancels stale provider mutation A before newer run B publishes', async () => {
+    vi.useFakeTimers()
+    try {
+      const fixture = await provisioningFixture()
+      const bindings = {
+        CF_ACCOUNT_ID: 'a'.repeat(32),
+        CF_ACCESS_GROUP_ID: '11111111-1111-4111-8111-111111111111',
+        CF_ACCESS_GROUP_NAME: 'Bear with me Staff',
+        CF_ACCESS_GROUP_TOKEN: 'provider-secret',
+      }
+      const groupResult = (emails) => ({
+        id: bindings.CF_ACCESS_GROUP_ID,
+        name: bindings.CF_ACCESS_GROUP_NAME,
+        include: emails.map((email) => ({ email: { email } })),
+        require: [{ email_domain: { domain: 'example.test' } }],
+        exclude: [{ email: { email: 'blocked@example.test' } }],
+      })
+      const ok = (emails) => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, result: groupResult(emails) }),
+      })
+      let providerEmails = []
+      let putCount = 0
+      let signalAStarted
+      const aStarted = new Promise((resolve) => {
+        signalAStarted = resolve
+      })
+      let aCancelled = false
+      const fetch = vi.fn(async (_url, init) => {
+        if (init.method === 'GET') return ok(providerEmails)
+        putCount += 1
+        const desired = JSON.parse(init.body).include
+          .map((rule) => rule.email.email)
+        if (putCount > 1) {
+          providerEmails = desired
+          return ok(providerEmails)
+        }
+        signalAStarted()
+        return new Promise((resolve, reject) => {
+          const mutation = setTimeout(() => {
+            providerEmails = desired
+            resolve(ok(providerEmails))
+          }, 20_000)
+          init.signal.addEventListener('abort', () => {
+            aCancelled = true
+            clearTimeout(mutation)
+            reject(Object.assign(new Error('late A aborted'), { name: 'AbortError' }))
+          }, { once: true })
+        })
+      })
+
+      const runA = handlers.handleAccessReconcile(reconcileInput(
+        fixture.cryptoContext,
+        { actorId: fixture.owner.id, generation: 1 },
+        {
+          bindings,
+          config: { appEnv: 'staging' },
+          providers: { fetch },
+        },
+      ))
+      const expectedA = expect(runA).rejects.toMatchObject({
+        message: 'ACCESS_PROVIDER_TIMEOUT',
+        retryable: true,
+      })
+      await aStarted
+      await vi.advanceTimersByTimeAsync(15_000)
+      await expectedA
+
+      const desired = await env.DB.prepare(
+        "SELECT value_json,version FROM system_state WHERE key='access.desired_generation'"
+      ).first()
+      await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE staff_invitations
+           SET status='revoked',revoked_at=?,version=version+1,updated_at=?
+           WHERE id=? AND status='provisioning' AND version=1`
+        ).bind(NOW, NOW, fixture.invitation.id),
+        env.DB.prepare(
+          `UPDATE staff_users
+           SET status='disabled',disabled_at=?,version=version+1,updated_at=?
+           WHERE id=? AND status='pending' AND version=1`
+        ).bind(NOW, NOW, fixture.staff.id),
+        env.DB.prepare(
+          `UPDATE system_state
+           SET value_json=?,version=version+1,updated_at=?
+           WHERE key='access.desired_generation' AND value_json=? AND version=?`
+        ).bind(JSON.stringify({ generation: 2 }), NOW, desired.value_json, desired.version),
+      ])
+
+      await expect(handlers.handleAccessReconcile(reconcileInput(
+        fixture.cryptoContext,
+        { actorId: fixture.owner.id, generation: 2 },
+        {
+          bindings,
+          config: { appEnv: 'staging' },
+          providers: { fetch },
+        },
+      ))).resolves.toEqual({ result: 'succeeded' })
+      await vi.advanceTimersByTimeAsync(5_001)
+
+      const latestMembership = await handlers.desiredAccessMembership(
+        env.DB,
+        fixture.cryptoContext,
+        NOW_MS,
+      )
+      expect(aCancelled).toBe(true)
+      expect(providerEmails).toEqual([`publication-owner-${serial}@example.test`])
+      expect(JSON.parse((await env.DB.prepare(
+        "SELECT value_json FROM system_state WHERE key='access.applied_generation'"
+      ).first()).value_json)).toEqual({
+        fingerprint: latestMembership.fingerprint,
+        generation: 2,
+      })
+      expect(await env.DB.prepare('SELECT status,version FROM staff_invitations WHERE id=?')
+        .bind(fixture.invitation.id).first()).toEqual({ status: 'revoked', version: 2 })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('rolls back the entire publication when its final mechanical guard fails', async () => {

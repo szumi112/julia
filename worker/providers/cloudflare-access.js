@@ -162,6 +162,19 @@ async function responseBodyJson(response, controller) {
       const reader = response.body.getReader()
       const chunks = []
       let length = 0
+      let cancelled = false
+      const cancel = async () => {
+        if (cancelled || typeof reader.cancel !== 'function') return
+        cancelled = true
+        try {
+          await Promise.race([
+            Promise.resolve().then(() => reader.cancel()),
+            aborted,
+          ])
+        } catch {
+          // Cancellation is best-effort; its transport details are never public.
+        }
+      }
       try {
         while (true) {
           const part = await Promise.race([reader.read(), aborted])
@@ -171,15 +184,13 @@ async function responseBodyJson(response, controller) {
           if (part.done) break
           if (!(part.value instanceof Uint8Array)) fail('ACCESS_PROVIDER_RESPONSE_INVALID')
           length += part.value.byteLength
-          if (length > MAX_RESPONSE_BYTES) {
-            void reader.cancel()
-            fail('ACCESS_PROVIDER_RESPONSE_INVALID')
-          }
+          if (length > MAX_RESPONSE_BYTES) fail('ACCESS_PROVIDER_RESPONSE_INVALID')
           chunks.push(part.value)
         }
       } catch (error) {
-        void reader.cancel()
-        throw error
+        await cancel()
+        if (controller.signal.aborted || providerErrors.has(error)) throw error
+        fail('ACCESS_PROVIDER_NETWORK', true)
       }
       const bytes = new Uint8Array(length)
       let offset = 0

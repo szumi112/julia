@@ -33,6 +33,27 @@ const input = (fetch, overrides = {}) => ({
   ...overrides,
 })
 
+const rejectingCancel = (reason) => {
+  let handled = false
+  const unhandled = []
+  const cancel = vi.fn(() => {
+    setTimeout(() => {
+      if (!handled) unhandled.push(reason)
+    }, 0)
+    return {
+      then(_resolve, reject) {
+        handled = true
+        reject(reason)
+      },
+    }
+  })
+  return {
+    cancel,
+    handled: () => handled,
+    unhandled,
+  }
+}
+
 describe('Cloudflare Access provider', () => {
   it('uses exact GET/PUT/GET requests and emits one deterministic controlled body', async () => {
     const desired = [
@@ -369,6 +390,72 @@ describe('Cloudflare Access provider', () => {
     })
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(pulls).toBeLessThan(chunks.length)
+  })
+
+  it('classifies a streaming read rejection as a sanitized retryable network error', async () => {
+    const raw = new Error(`stream reset ${TOKEN} anna@example.test`)
+    const cancellation = rejectingCancel(
+      new Error(`cancel failed ${TOKEN} zoe@example.test`),
+    )
+    const reader = {
+      read: vi.fn().mockRejectedValue(raw),
+      cancel: cancellation.cancel,
+    }
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { getReader: () => reader },
+    })
+    let error
+    try {
+      await reconcileAccessGroup(input(fetch))
+    } catch (caught) {
+      error = caught
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(error).toMatchObject({
+      message: 'ACCESS_PROVIDER_NETWORK',
+      retryable: true,
+    })
+    expect(error.message).not.toContain(TOKEN)
+    expect(error.message).not.toContain('anna@example.test')
+    expect(cancellation.cancel).toHaveBeenCalledTimes(1)
+    expect(cancellation.handled()).toBe(true)
+    expect(cancellation.unhandled).toEqual([])
+  })
+
+  it('swallows a rejecting cancel while reporting an oversized stream with a fixed code', async () => {
+    const cancellation = rejectingCancel(
+      new Error(`cancel leaked ${TOKEN} anna@example.test`),
+    )
+    const reader = {
+      read: vi.fn().mockResolvedValue({
+        done: false,
+        value: new Uint8Array(65_537),
+      }),
+      cancel: cancellation.cancel,
+    }
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: { getReader: () => reader },
+    })
+    let error
+    try {
+      await reconcileAccessGroup(input(fetch))
+    } catch (caught) {
+      error = caught
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(error).toMatchObject({
+      message: 'ACCESS_PROVIDER_RESPONSE_INVALID',
+      retryable: false,
+    })
+    expect(error.message).not.toContain(TOKEN)
+    expect(error.message).not.toContain('anna@example.test')
+    expect(cancellation.cancel).toHaveBeenCalledTimes(1)
+    expect(cancellation.handled()).toBe(true)
+    expect(cancellation.unhandled).toEqual([])
   })
 
   it.each([
