@@ -75,10 +75,13 @@ export async function applyDataKeyRewrap(db, patchInput, {
      (id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,reason_envelope,correlation_id,metadata_json)
      SELECT id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,reason_envelope,correlation_id,metadata_json
      FROM audit_events
-     WHERE id=? AND NOT EXISTS (
-       SELECT 1 FROM data_keys
-       WHERE id=? AND scope_type=? AND scope_id=? AND purpose=? AND dek_version=?
-         AND wrapped_key_b64=? AND wrap_nonce_b64=? AND kek_version=?
+     WHERE id=? AND NOT (
+       changes()=1
+       AND EXISTS (
+         SELECT 1 FROM data_keys
+         WHERE id=? AND scope_type=? AND scope_id=? AND purpose=? AND dek_version=?
+           AND wrapped_key_b64=? AND wrap_nonce_b64=? AND kek_version=?
+       )
      )`
   ).bind(
     auditId, where.id, where.scope_type, where.scope_id, where.purpose, where.dek_version,
@@ -89,7 +92,7 @@ export async function applyDataKeyRewrap(db, patchInput, {
     actorId: actorStaffId,
     correlationId,
   })
-  uow.domain(update).audit(audit).guard(guard)
+  uow.audit(audit).domain(update).guard(guard)
   try {
     await uow.commit()
   } catch (error) {

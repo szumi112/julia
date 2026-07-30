@@ -29,6 +29,29 @@ const appDeps = (overrides = {}) => ({
   ...overrides,
 })
 
+const mutationApp = (deps) => {
+  const app = createApp(deps)
+  app.post('/api/v1/test-mutation', (c) => c.json({ data: c.get('jsonBody') }))
+  return app
+}
+
+const noCors = (response) => {
+  for (const header of [
+    'access-control-allow-origin', 'access-control-allow-credentials',
+    'access-control-allow-methods', 'access-control-allow-headers',
+    'access-control-max-age', 'access-control-expose-headers',
+  ]) expect(response.headers.has(header)).toBe(false)
+}
+
+const hasSecurityHeaders = (response) => {
+  expect(response.headers.get('cache-control')).toBe('no-store')
+  expect(response.headers.get('content-security-policy')).toBe("default-src 'none'")
+  expect(response.headers.get('referrer-policy')).toBe('no-referrer')
+  expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+  expect(response.headers.get('x-correlation-id')).toMatch(/^[0-9a-f-]{36}$/)
+  noCors(response)
+}
+
 describe('HTTP security primitives', () => {
   it.each([
     [undefined, null],
@@ -65,30 +88,67 @@ describe('HTTP security primitives', () => {
   })
 
   it('maps malformed UTF-8 and JSON to one stable parser error', async () => {
-    for (const body of [new Uint8Array([0xff]), new TextEncoder().encode('{')]) {
+    for (const body of [
+      new Uint8Array(),
+      new Uint8Array([0xff]),
+      new TextEncoder().encode('{'),
+    ]) {
       await expect(readJsonBodyOnce(new Request('https://example.test', {
         method: 'POST',
         body,
       }))).rejects.toThrow(/^INVALID_JSON$/)
     }
   })
+
+  it('counts multibyte UTF-8 bytes at the exact boundary', async () => {
+    const exact = `"${'\u0800'.repeat(21_844)}xy"`
+    expect(new TextEncoder().encode(exact)).toHaveLength(65_536)
+    await expect(readJsonBodyOnce(new Request('https://example.test', {
+      method: 'POST',
+      body: exact,
+    }))).resolves.toBe(`${'\u0800'.repeat(21_844)}xy`)
+    const over = `"${'\u0800'.repeat(21_845)}"`
+    expect(new TextEncoder().encode(over).byteLength).toBeGreaterThan(65_536)
+    await expect(readJsonBodyOnce(new Request('https://example.test', {
+      method: 'POST',
+      body: over,
+    }))).rejects.toThrow(/^PAYLOAD_TOO_LARGE$/)
+  })
+
+  it('cancels a no-length multi-chunk stream on overflow and consumes it', async () => {
+    let cancelled = false
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(40_000).fill(0x20))
+        controller.enqueue(new Uint8Array(30_000).fill(0x20))
+      },
+      cancel() { cancelled = true },
+    })
+    const request = new Request('https://example.test', { method: 'POST', body: stream })
+    await expect(readJsonBodyOnce(request)).rejects.toThrow(/^PAYLOAD_TOO_LARGE$/)
+    expect(cancelled).toBe(true)
+    expect(request.bodyUsed).toBe(true)
+  })
 })
 
 describe('hardened API lifecycle', () => {
-  it('rejects unsupported methods before Access or identity', async () => {
-    const deps = appDeps()
-    const response = await createApp(deps).request('/api/v1/session', {
-      method: 'TRACE',
-      headers: { 'x-correlation-id': correlationId },
-    })
-    expect(response.status).toBe(405)
-    expect(deps.resolveAccessPrincipal).not.toHaveBeenCalled()
-    expect(deps.resolveActor).not.toHaveBeenCalled()
-  })
+  it.each(['TRACE', 'PROPFIND'])(
+    'rejects unsupported method %s before Access or identity',
+    async (method) => {
+      const deps = appDeps()
+      const response = await createApp(deps).request('/api/v1/session', {
+        method,
+        headers: { 'x-correlation-id': correlationId },
+      })
+      expect(response.status).toBe(405)
+      expect(deps.resolveAccessPrincipal).not.toHaveBeenCalled()
+      expect(deps.resolveActor).not.toHaveBeenCalled()
+    }
+  )
 
   it('rejects cheap mutation checks before Access and CSRF before actor resolution', async () => {
     const badOrigin = appDeps()
-    const first = await createApp(badOrigin).request('/api/v1/session', {
+    const first = await mutationApp(badOrigin).request('/api/v1/test-mutation', {
       method: 'POST',
       headers: { origin: 'https://evil.example', 'content-type': 'application/json' },
       body: '{}',
@@ -97,7 +157,7 @@ describe('hardened API lifecycle', () => {
     expect(badOrigin.resolveAccessPrincipal).not.toHaveBeenCalled()
 
     const badCsrf = appDeps({ verifyCsrfToken: vi.fn(async () => { throw new Error('CSRF_INVALID') }) })
-    const second = await createApp(badCsrf).request('/api/v1/session', {
+    const second = await mutationApp(badCsrf).request('/api/v1/test-mutation', {
       method: 'POST',
       headers: {
         origin: config.appOrigin,
@@ -122,6 +182,77 @@ describe('hardened API lifecycle', () => {
     expect(await response.json()).toEqual({ data: { status: 'ok' } })
     expect(deps.resolveAccessPrincipal).toHaveBeenCalledWith(expect.any(Request), expect.objectContaining({ expected: 'service' }))
     expect(deps.resolveActor).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '/api/v1/health/live?x=parent@example.test',
+    '/api/v1/%68ealth/live',
+    '/api/v1/health%2Flive',
+  ])('rejects health-like raw variant %s before every identity dependency', async (path) => {
+    const deps = appDeps({
+      resolveAccessPrincipal: vi.fn(async () => { throw new Error('ACCESS_TRAP') }),
+      resolveActor: vi.fn(async () => { throw new Error('DB_TRAP') }),
+      createKeyring: vi.fn(async () => { throw new Error('KEYRING_TRAP') }),
+    })
+    const response = await createApp(deps).request(path)
+    expect(response.status).toBe(404)
+    expect(await response.json()).toMatchObject({ error: { code: 'NOT_FOUND' } })
+    expect(deps.resolveAccessPrincipal).not.toHaveBeenCalled()
+    expect(deps.resolveActor).not.toHaveBeenCalled()
+    expect(deps.createKeyring).not.toHaveBeenCalled()
+  })
+
+  it('uses only the service verifier for exact health HEAD and strips its body', async () => {
+    const deps = appDeps({
+      resolveActor: vi.fn(async () => { throw new Error('DB_TRAP') }),
+      createKeyring: vi.fn(async () => { throw new Error('KEYRING_TRAP') }),
+    })
+    const response = await createApp(deps).request('/api/v1/health/live', { method: 'HEAD' })
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('')
+    expect(deps.resolveAccessPrincipal).toHaveBeenCalledWith(
+      expect.any(Request),
+      expect.objectContaining({ expected: 'service' }),
+    )
+    expect(deps.resolveActor).not.toHaveBeenCalled()
+    expect(deps.createKeyring).not.toHaveBeenCalled()
+  })
+
+  it('rejects human/service principal confusion before D1 on both route kinds', async () => {
+    const humanOnHealth = appDeps({
+      resolveAccessPrincipal: vi.fn(async () => principal),
+    })
+    const health = await createApp(humanOnHealth).request('/api/v1/health/live')
+    expect(health.status).toBe(401)
+    expect(humanOnHealth.resolveActor).not.toHaveBeenCalled()
+
+    const serviceOnSession = appDeps({
+      resolveAccessPrincipal: vi.fn(async () => ({
+        kind: 'service',
+        serviceName: 'health-service',
+      })),
+    })
+    const session = await createApp(serviceOnSession).request('/api/v1/session')
+    expect(session.status).toBe(401)
+    expect(serviceOnSession.resolveActor).not.toHaveBeenCalled()
+  })
+
+  it('rejects endpoint-disallowed session mutations before all dependencies', async () => {
+    const deps = appDeps()
+    const response = await createApp(deps).request('/api/v1/session', {
+      method: 'POST',
+      headers: {
+        origin: config.appOrigin,
+        'content-type': 'application/json',
+        'x-csrf-token': 'valid',
+      },
+      body: '{}',
+    })
+    expect(response.status).toBe(405)
+    expect(deps.resolveAccessPrincipal).not.toHaveBeenCalled()
+    expect(deps.verifyCsrfToken).not.toHaveBeenCalled()
+    expect(deps.resolveActor).not.toHaveBeenCalled()
+    expect(deps.session).not.toHaveBeenCalled()
   })
 
   it('authenticates unknown v1 routes as human and emits no CORS permission headers', async () => {
@@ -191,6 +322,75 @@ describe('hardened API lifecycle', () => {
     expect(deps.readJsonBodyOnce).toHaveBeenCalledOnce()
   })
 
+  it.each([
+    [{}, 'ORIGIN_INVALID'],
+    [{ origin: `${config.appOrigin}/` }, 'ORIGIN_INVALID'],
+    [{ origin: config.appOrigin, 'sec-fetch-site': 'same-site', 'content-type': 'application/json' }, 'FETCH_METADATA_INVALID'],
+    [{ origin: config.appOrigin, 'sec-fetch-site': 'none', 'content-type': 'application/json' }, 'FETCH_METADATA_INVALID'],
+    [{ origin: config.appOrigin, 'content-type': 'application/problem+json' }, 'UNSUPPORTED_MEDIA_TYPE'],
+    [{ origin: config.appOrigin, 'content-type': 'application/json; charset=utf-8; charset=utf-8' }, 'UNSUPPORTED_MEDIA_TYPE'],
+    [{ origin: config.appOrigin, 'content-type': 'application/json; profile=x' }, 'UNSUPPORTED_MEDIA_TYPE'],
+    [{ origin: config.appOrigin, 'content-type': 'application/json', 'content-encoding': 'gzip' }, 'UNSUPPORTED_MEDIA_TYPE'],
+  ])('rejects malformed mutation metadata before Access: %j', async (headers, code) => {
+    const deps = appDeps()
+    const response = await mutationApp(deps).request('/api/v1/test-mutation', {
+      method: 'POST',
+      headers,
+      body: '{}',
+    })
+    expect(await response.json()).toMatchObject({ error: { code } })
+    expect(deps.resolveAccessPrincipal).not.toHaveBeenCalled()
+    expect(deps.resolveActor).not.toHaveBeenCalled()
+    hasSecurityHeaders(response)
+  })
+
+  it('rejects declared oversize before pulling the body and actual oversize despite a small declaration', async () => {
+    const readBody = vi.fn(async () => { throw new Error('BODY_READ_TRAP') })
+    const declared = new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode('{}'))
+        controller.close()
+      },
+    })
+    const deps = appDeps({ readJsonBodyOnce: readBody })
+    const early = await mutationApp(deps).request(new Request(
+      `${config.appOrigin}/api/v1/test-mutation`,
+      {
+        method: 'POST',
+        headers: {
+          origin: config.appOrigin,
+          'content-type': 'application/json',
+          'content-length': '65537',
+          'x-csrf-token': 'valid',
+        },
+        body: declared,
+      }
+    ))
+    expect(early.status).toBe(413)
+    expect(readBody).not.toHaveBeenCalled()
+
+    const actual = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(65_537).fill(0x20))
+        controller.close()
+      },
+    })
+    const late = await mutationApp(appDeps()).request(new Request(
+      `${config.appOrigin}/api/v1/test-mutation`,
+      {
+        method: 'POST',
+        headers: {
+          origin: config.appOrigin,
+          'content-type': 'application/json',
+          'content-length': '10',
+          'x-csrf-token': 'valid',
+        },
+        body: actual,
+      }
+    ))
+    expect(late.status).toBe(413)
+  })
+
   it('serves only authenticated human OPTIONS for registered human routes', async () => {
     const deps = appDeps()
     const response = await createApp(deps).request('/api/v1/session', {
@@ -201,6 +401,65 @@ describe('hardened API lifecycle', () => {
     expect(response.headers.get('allow')).toBe('GET, HEAD, OPTIONS')
     expect(deps.verifyCsrfToken).not.toHaveBeenCalled()
     expect(deps.resolveActor).toHaveBeenCalledOnce()
+  })
+
+  it('rejects health OPTIONS before Access and authenticates unknown OPTIONS before 404', async () => {
+    const healthDeps = appDeps()
+    const health = await createApp(healthDeps).request('/api/v1/health/live', {
+      method: 'OPTIONS',
+    })
+    expect(health.status).toBe(405)
+    expect(healthDeps.resolveAccessPrincipal).not.toHaveBeenCalled()
+
+    const unknownDeps = appDeps()
+    const unknown = await createApp(unknownDeps).request('/api/v1/unknown', {
+      method: 'OPTIONS',
+      headers: { origin: config.appOrigin },
+    })
+    expect(unknown.status).toBe(404)
+    expect(unknownDeps.resolveAccessPrincipal).toHaveBeenCalledWith(
+      expect.any(Request),
+      expect.objectContaining({ expected: 'human' }),
+    )
+    expect(unknownDeps.resolveActor).toHaveBeenCalledOnce()
+  })
+
+  it('keeps fixed headers, no CORS, and one sanitized log across response classes', async () => {
+    const cases = [
+      async () => {
+        const deps = appDeps()
+        return { deps, response: await createApp(deps).request('/api/v1/health/live') }
+      },
+      async () => {
+        const deps = appDeps()
+        return { deps, response: await createApp(deps).request('/api/v1/session') }
+      },
+      async () => {
+        const deps = appDeps()
+        return { deps, response: await createApp(deps).request('/api/v1/session', { method: 'OPTIONS' }) }
+      },
+      async () => {
+        const deps = appDeps()
+        return { deps, response: await createApp(deps).request('/api/v1/missing?email=parent@example.test') }
+      },
+      async () => {
+        const deps = appDeps()
+        return {
+          deps,
+          response: await mutationApp(deps).request('/api/v1/test-mutation', {
+            method: 'POST',
+            headers: { origin: 'https://evil.example', 'content-type': 'application/json' },
+            body: '{"email":"parent@example.test"}',
+          }),
+        }
+      },
+    ]
+    for (const run of cases) {
+      const { deps, response } = await run()
+      hasSecurityHeaders(response)
+      expect(deps.safeLog).toHaveBeenCalledOnce()
+      expect(JSON.stringify(deps.safeLog.mock.calls)).not.toContain('parent@example.test')
+    }
   })
 })
 

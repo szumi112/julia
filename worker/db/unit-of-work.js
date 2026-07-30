@@ -44,6 +44,7 @@ export function createUnitOfWork(db, context) {
         || descriptor.result !== (context.mode === 'mutation' ? 'success' : 'denied')) fail()
       audits += 1
     } else {
+      if (auditDescriptorFor(statement)) fail()
       nonAudit += 1
     }
     statements.push(statement)
@@ -58,7 +59,8 @@ export function createUnitOfWork(db, context) {
     idempotency: (statement) => add('idempotency', statement),
     guard(statement) {
       open()
-      if (context.mode !== 'mutation' || guard || !prepared(statement)) fail()
+      if (context.mode !== 'mutation' || guard || !prepared(statement)
+        || auditDescriptorFor(statement)) fail()
       guard = statement
       return api
     },

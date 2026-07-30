@@ -27,15 +27,23 @@ const verifiers = new WeakMap()
 const keyrings = new WeakMap()
 const SESSION_ALLOW = 'GET, HEAD, OPTIONS'
 const HEALTH_ALLOW = 'GET, HEAD'
+const HEALTH_PATH = '/api/v1/health/live'
 
 const routeFor = (request) => {
   const url = new URL(request.url)
-  const healthPath = url.pathname === '/api/v1/health/live' && url.search === ''
-  const exactHealth = healthPath && ['GET', 'HEAD'].includes(request.method)
-  if (exactHealth) return { id: 'health.live', expected: 'service', allow: HEALTH_ALLOW, healthPath }
-  if (healthPath) return { id: 'health.live', expected: 'service', allow: HEALTH_ALLOW, healthPath }
-  if (url.pathname === '/api/v1/session') return { id: 'session', expected: 'human', allow: SESSION_ALLOW, healthPath }
-  return { id: 'unmatched', expected: 'human', allow: null, healthPath }
+  let decodedPath = null
+  try { decodedPath = decodeURIComponent(url.pathname) } catch { /* Malformed paths stay unmatched. */ }
+  const healthLike = url.pathname === HEALTH_PATH || decodedPath === HEALTH_PATH
+  if (healthLike && (url.pathname !== HEALTH_PATH || url.search !== '')) {
+    return { id: 'unmatched', invalidHealth: true, expected: null, methods: [] }
+  }
+  if (url.pathname === HEALTH_PATH) {
+    return { id: 'health.live', expected: 'service', methods: ['GET', 'HEAD'] }
+  }
+  if (url.pathname === '/api/v1/session') {
+    return { id: 'session', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
+  }
+  return { id: 'unmatched', expected: 'human', methods: null }
 }
 
 const runtimeConfig = (c, deps) => deps.config ?? loadConfig(c.env)
@@ -110,7 +118,8 @@ export function createApp(deps = {}) {
     c.set('routeId', 'unmatched')
     await next()
     c.res = applyApiSecurityHeaders(c.res, correlationId)
-    const mapped = c.error ? publicError(c.error) : null
+    const mapped = c.error ? publicError(c.error)
+      : c.get('errorCode') ? new AppError(c.get('errorCode')) : null
     const actor = c.get('actor')
     const log = deps.safeLog ?? safeLog
     log(c.res.status >= 500 ? 'error' : c.res.status >= 400 ? 'warn' : 'info', {
@@ -132,7 +141,8 @@ export function createApp(deps = {}) {
     const route = routeFor(request)
     c.set('routeId', route.id)
     if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
-    if (route.healthPath && !['GET', 'HEAD'].includes(method)) throw new AppError('METHOD_NOT_ALLOWED')
+    if (route.invalidHealth) throw new AppError('NOT_FOUND')
+    if (route.methods && !route.methods.includes(method)) throw new AppError('METHOD_NOT_ALLOWED')
 
     const config = runtimeConfig(c, deps)
     const requestNowMs = route.expected === 'human' || isMutationMethod(method) ? nowMs(deps) : null
@@ -209,12 +219,9 @@ export function createApp(deps = {}) {
     status: 204,
     headers: { Allow: SESSION_ALLOW },
   }))
-  app.on(['POST', 'PUT', 'PATCH', 'DELETE'], '/api/v1/session', () => {
-    throw new AppError('METHOD_NOT_ALLOWED')
-  })
-
   app.notFound((c) => {
     const correlationId = c.get('correlationId') || crypto.randomUUID()
+    c.set('errorCode', 'NOT_FOUND')
     return apiError(new AppError('NOT_FOUND'), correlationId)
   })
   app.onError((error, c) => {

@@ -25,13 +25,24 @@ const deps = (overrides = {}) => ({
 
 describe('API shell', () => {
   it('returns a stable envelope and correlation id for authenticated unknown API routes', async () => {
-    const response = await createApp(deps()).request('/api/v1/not-present')
+    const log = vi.fn()
+    const response = await createApp(deps({ safeLog: log })).request(
+      '/api/v1/not-present?marker=parent@example.test'
+    )
 
     expect(response.status).toBe(404)
     expect(await response.json()).toMatchObject({
       error: { code: 'NOT_FOUND' },
     })
     expect(response.headers.get('x-correlation-id')).toMatch(/^[0-9a-f-]{36}$/)
+    expect(log).toHaveBeenCalledOnce()
+    expect(log).toHaveBeenCalledWith('warn', expect.objectContaining({
+      event: 'request.failed',
+      errorCode: 'NOT_FOUND',
+      routeId: 'unmatched',
+      status: 404,
+    }))
+    expect(JSON.stringify(log.mock.calls)).not.toContain('parent@example.test')
   })
 
   it('never lets the API route fall through to the SPA', async () => {

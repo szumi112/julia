@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
-import { auditEventStatement } from '../../worker/audit/events.js'
+import { auditEventStatement, enforceAuditRateLimit } from '../../worker/audit/events.js'
 import {
   createIdempotencyStatement,
   createUnitOfWork,
@@ -8,7 +8,11 @@ import {
   recoverIdempotencyAfterCollision,
 } from '../../worker/db/unit-of-work.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { getOrCreateDataKey } from '../../worker/security/envelope.js'
+import { encodeBase64Url } from '../../worker/security/encoding.js'
+import {
+  encryptForScope,
+  getOrCreateDataKey,
+} from '../../worker/security/envelope.js'
 
 const now = '2027-01-15T08:00:00.000Z'
 const correlationId = '11111111-1111-4111-8111-111111111111'
@@ -26,6 +30,22 @@ const audit = (db, id = 'aud_uow', result = 'success') => auditEventStatement(db
   metadata: result === 'success' ? { oldKekVersion: 1, newKekVersion: 2 } : { version: 1 },
   reasonEnvelope: null,
 })
+
+async function seedActor(id, lookup = `lookup_${id}`) {
+  if (await env.DB.prepare('SELECT id FROM staff_users WHERE id=?').bind(id).first()) return
+  await env.DB.prepare(
+    `INSERT INTO staff_users
+     (id,email_lookup,email_envelope,display_name_envelope,role,status,version,created_at,updated_at)
+     VALUES (?,?,'{}','{}','owner','pending',1,?,?)`
+  ).bind(id, lookup, now, now).run()
+}
+
+const guardFor = (db, auditId, predicate, ...bindings) => db.prepare(
+  `INSERT INTO audit_events
+   (id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,reason_envelope,correlation_id,metadata_json)
+   SELECT id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,reason_envelope,correlation_id,metadata_json
+   FROM audit_events WHERE id=? AND NOT (${predicate})`
+).bind(auditId, ...bindings)
 
 describe('guarded unit of work', () => {
   it('preserves service order, moves one guard last, and commits once', async () => {
@@ -78,6 +98,201 @@ describe('guarded unit of work', () => {
     denial.audit(audit(db, 'aud_denial', 'denied'))
     await denial.commit()
     expect(batchCalls).toBe(1)
+  })
+
+  it.each(['domain', 'version', 'outbox', 'idempotency', 'guard'])(
+    'rejects a tagged audit statement smuggled through %s before D1',
+    async (channel) => {
+      let batchCalls = 0
+      const db = {
+        prepare: env.DB.prepare.bind(env.DB),
+        batch: async () => { batchCalls += 1 },
+      }
+      const uow = createUnitOfWork(db, { mode: 'mutation', actorId: 'stf_uow', correlationId })
+      const tagged = audit(db, `aud_smuggled_${channel}`)
+      expect(() => uow[channel](tagged)).toThrow(/^UNIT_OF_WORK_INVALID$/)
+      expect(batchCalls).toBe(0)
+    }
+  )
+
+  it('rejects two primary audits and multiple guards before D1', async () => {
+    let batchCalls = 0
+    const db = {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: async () => { batchCalls += 1 },
+    }
+    const twoAudits = createUnitOfWork(db, {
+      mode: 'mutation', actorId: 'stf_uow', correlationId,
+    })
+    twoAudits.domain(db.prepare('SELECT 1'))
+    twoAudits.audit(audit(db, 'aud_uow_first'))
+    twoAudits.audit(audit(db, 'aud_uow_second'))
+    twoAudits.guard(db.prepare('SELECT 2'))
+    await expect(twoAudits.commit()).rejects.toThrow(/^UNIT_OF_WORK_INVALID$/)
+
+    const guards = createUnitOfWork(db, {
+      mode: 'mutation', actorId: 'stf_uow', correlationId,
+    })
+    guards.domain(db.prepare('SELECT 1'))
+    guards.audit(audit(db, 'aud_uow_guards'))
+    guards.guard(db.prepare('SELECT 2'))
+    expect(() => guards.guard(db.prepare('SELECT 3'))).toThrow(/^UNIT_OF_WORK_INVALID$/)
+    expect(batchCalls).toBe(0)
+  })
+
+  it('commits every channel together through a real audit-sourced D1 guard', async () => {
+    await seedActor('stf_uow')
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS task6_uow_commit (id TEXT PRIMARY KEY, channel TEXT NOT NULL)'
+    ).run()
+    const auditId = 'aud_uow_real_commit'
+    const uow = createUnitOfWork(env.DB, { mode: 'mutation', actorId: 'stf_uow', correlationId })
+    uow.domain(env.DB.prepare("INSERT INTO task6_uow_commit VALUES ('domain','domain')"))
+    uow.version(env.DB.prepare("INSERT INTO task6_uow_commit VALUES ('version','version')"))
+    uow.audit(audit(env.DB, auditId))
+    uow.outbox(env.DB.prepare("INSERT INTO task6_uow_commit VALUES ('outbox','outbox')"))
+    uow.idempotency(env.DB.prepare("INSERT INTO task6_uow_commit VALUES ('idempotency','idempotency')"))
+    uow.guard(guardFor(
+      env.DB,
+      auditId,
+      "(SELECT count(*) FROM task6_uow_commit WHERE id IN ('domain','version','outbox','idempotency'))=4",
+    ))
+    await uow.commit()
+    expect((await env.DB.prepare('SELECT count(*) AS count FROM task6_uow_commit').first()).count).toBe(4)
+    expect(await env.DB.prepare('SELECT id FROM audit_events WHERE id=?').bind(auditId).first())
+      .toEqual({ id: auditId })
+  })
+
+  it('rolls back ordinary constraint failures and audit-sourced zero/missing postconditions', async () => {
+    await seedActor('stf_uow')
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS task6_uow_rollback (id TEXT PRIMARY KEY, value TEXT NOT NULL)'
+    ).run()
+    await env.DB.prepare("INSERT INTO task6_uow_rollback VALUES ('occupied','fixed')").run()
+
+    const ordinaryAudit = 'aud_uow_ordinary_rollback'
+    const ordinary = createUnitOfWork(env.DB, {
+      mode: 'mutation', actorId: 'stf_uow', correlationId,
+    })
+    ordinary.domain(env.DB.prepare("INSERT INTO task6_uow_rollback VALUES ('ordinary_partial','partial')"))
+    ordinary.version(env.DB.prepare("INSERT INTO task6_uow_rollback VALUES ('occupied','collision')"))
+    ordinary.audit(audit(env.DB, ordinaryAudit))
+    ordinary.guard(guardFor(env.DB, ordinaryAudit, '1=1'))
+    await expect(ordinary.commit()).rejects.toThrow()
+    expect(await env.DB.prepare("SELECT id FROM task6_uow_rollback WHERE id='ordinary_partial'").first()).toBeNull()
+    expect(await env.DB.prepare('SELECT id FROM audit_events WHERE id=?').bind(ordinaryAudit).first()).toBeNull()
+
+    await env.DB.prepare("INSERT INTO task6_uow_rollback VALUES ('cas_target','old')").run()
+    const zeroAudit = 'aud_uow_zero_rollback'
+    const zero = createUnitOfWork(env.DB, {
+      mode: 'mutation', actorId: 'stf_uow', correlationId,
+    })
+    zero.domain(env.DB.prepare(
+      "UPDATE task6_uow_rollback SET value='new' WHERE id='cas_target' AND value='wrong'"
+    ))
+    zero.audit(audit(env.DB, zeroAudit))
+    zero.guard(guardFor(
+      env.DB,
+      zeroAudit,
+      "EXISTS (SELECT 1 FROM task6_uow_rollback WHERE id='cas_target' AND value='new')",
+    ))
+    await expect(zero.commit()).rejects.toThrow()
+    expect(await env.DB.prepare("SELECT value FROM task6_uow_rollback WHERE id='cas_target'").first())
+      .toEqual({ value: 'old' })
+    expect(await env.DB.prepare('SELECT id FROM audit_events WHERE id=?').bind(zeroAudit).first()).toBeNull()
+
+    const missingAudit = 'aud_uow_missing_rollback'
+    const missing = createUnitOfWork(env.DB, {
+      mode: 'mutation', actorId: 'stf_uow', correlationId,
+    })
+    missing.domain(env.DB.prepare("INSERT INTO task6_uow_rollback VALUES ('other_partial','partial')"))
+    missing.audit(audit(env.DB, missingAudit))
+    missing.guard(guardFor(
+      env.DB,
+      missingAudit,
+      "EXISTS (SELECT 1 FROM task6_uow_rollback WHERE id='expected_missing')",
+    ))
+    await expect(missing.commit()).rejects.toThrow()
+    expect(await env.DB.prepare("SELECT id FROM task6_uow_rollback WHERE id='other_partial'").first()).toBeNull()
+    expect(await env.DB.prepare('SELECT id FROM audit_events WHERE id=?').bind(missingAudit).first()).toBeNull()
+  })
+
+  it('commits one real denial audit and no non-audit state', async () => {
+    await seedActor('stf_uow')
+    const auditId = 'aud_uow_real_denial'
+    const denial = createUnitOfWork(env.DB, {
+      mode: 'denial', actorId: 'stf_uow', correlationId,
+    })
+    denial.audit(audit(env.DB, auditId, 'denied'))
+    await denial.commit()
+    expect(await env.DB.prepare('SELECT result FROM audit_events WHERE id=?').bind(auditId).first())
+      .toEqual({ result: 'denied' })
+  })
+
+  it('enforces the concurrent audit rate limit in the final guard', async () => {
+    const actorId = 'stf_uow_rate'
+    await seedActor(actorId)
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS task6_rate_domain (id TEXT PRIMARY KEY)'
+    ).run()
+    const since = '2027-01-15T07:00:00.000Z'
+    for (let index = 0; index < 4; index += 1) {
+      await auditEventStatement(env.DB, {
+        id: `aud_rate_seed_${index}`,
+        occurredAt: `2027-01-15T07:0${index}:00.000Z`,
+        actorStaffId: actorId,
+        action: 'data_key.rewrapped',
+        entityType: 'data_key',
+        entityId: `key_rate_seed_${index}`,
+        result: 'success',
+        correlationId,
+        metadata: { oldKekVersion: 1, newKekVersion: 2 },
+        reasonEnvelope: null,
+      }).run()
+    }
+    await expect(enforceAuditRateLimit(env.DB, {
+      actorId, action: 'data_key.rewrapped', limit: 5, since,
+    })).resolves.toBe(4)
+
+    const attempt = async (suffix) => {
+      const auditId = `aud_rate_${suffix}`
+      const uow = createUnitOfWork(env.DB, { mode: 'mutation', actorId, correlationId })
+      uow.audit(auditEventStatement(env.DB, {
+        id: auditId,
+        occurredAt: '2027-01-15T08:00:00.000Z',
+        actorStaffId: actorId,
+        action: 'data_key.rewrapped',
+        entityType: 'data_key',
+        entityId: `key_rate_${suffix}`,
+        result: 'success',
+        correlationId,
+        metadata: { oldKekVersion: 1, newKekVersion: 2 },
+        reasonEnvelope: null,
+      }))
+      uow.domain(env.DB.prepare('INSERT INTO task6_rate_domain (id) VALUES (?)').bind(suffix))
+      uow.guard(guardFor(
+        env.DB,
+        auditId,
+        `EXISTS (SELECT 1 FROM task6_rate_domain WHERE id=?)
+         AND (SELECT count(*) FROM audit_events
+              WHERE actor_staff_id=? AND action='data_key.rewrapped' AND occurred_at>=?)<=5`,
+        suffix,
+        actorId,
+        since,
+      ))
+      await uow.commit()
+      return suffix
+    }
+    const settled = await Promise.allSettled([attempt('one'), attempt('two')])
+    expect(settled.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+    expect(settled.filter(({ status }) => status === 'rejected')).toHaveLength(1)
+    expect((await env.DB.prepare(
+      "SELECT count(*) AS count FROM audit_events WHERE actor_staff_id=? AND action='data_key.rewrapped' AND occurred_at>=?"
+    ).bind(actorId, since).first()).count).toBe(5)
+    expect((await env.DB.prepare('SELECT count(*) AS count FROM task6_rate_domain').first()).count).toBe(1)
+    await expect(enforceAuditRateLimit(env.DB, {
+      actorId, action: 'data_key.rewrapped', limit: 5, since,
+    })).rejects.toThrow(/^RATE_LIMITED$/)
   })
 
   it('uses encrypted authoritative idempotency digests and responses', async () => {
@@ -143,5 +358,240 @@ describe('guarded unit of work', () => {
     }
     const collision = new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT')
     await expect(recoverIdempotencyAfterCollision(env.DB, cryptoContext, input, collision)).rejects.toBe(collision)
+  })
+
+  it('keeps expired tuples authoritative and rejects tampered or swapped-scope envelopes', async () => {
+    const keyring = await createKeyring(env, {
+      activeDataKekVersion: 1,
+      activeLookupKeyVersion: 1,
+      activeBackupKekVersion: 1,
+    })
+    const dataKey = await getOrCreateDataKey(env.DB, keyring, scope, {
+      id: 'key_uow_expired',
+      createdAt: now,
+    })
+    const cryptoContext = { keyring, dataKey }
+    const input = {
+      actorId: 'stf_uow_expired',
+      operation: 'staff.invite',
+      idempotencyKey: 'idem-expired-1234',
+      requestDigest: 'expired digest',
+      expectedScope: scope,
+    }
+    await (await createIdempotencyStatement(env.DB, cryptoContext, {
+      ...input,
+      resourceType: 'staff_user',
+      resourceId: 'stf_expired',
+      response: { status: 201, body: { data: { id: 'stf_expired' } } },
+      createdAt: '2027-01-14T06:00:00.000Z',
+      expiresAt: '2027-01-14T07:00:00.000Z',
+    })).run()
+    await expect(inspectIdempotency(env.DB, cryptoContext, input)).resolves.toEqual({
+      status: 201,
+      body: { data: { id: 'stf_expired' } },
+    })
+    await expect(inspectIdempotency(env.DB, cryptoContext, {
+      ...input,
+      requestDigest: 'different expired digest',
+    })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+    await expect(inspectIdempotency(env.DB, cryptoContext, {
+      ...input,
+      expectedScope: { ...scope, id: 'centre_swapped' },
+    })).rejects.toThrow(/^CRYPTO_FAILURE$/)
+
+    await env.DB.prepare(
+      `INSERT INTO idempotency_records
+       (actor_id,operation,idempotency_key,request_hash,resource_type,resource_id,response_envelope,created_at,expires_at)
+       VALUES ('stf_uow_tampered','staff.invite','idem-tampered-123','{}','staff_user','stf_tampered','{}',?,?)`
+    ).bind(now, '2027-01-16T08:00:00.000Z').run()
+    await expect(inspectIdempotency(env.DB, cryptoContext, {
+      actorId: 'stf_uow_tampered',
+      operation: 'staff.invite',
+      idempotencyKey: 'idem-tampered-123',
+      requestDigest: 'tampered',
+      expectedScope: scope,
+    })).rejects.toThrow(/^CRYPTO_FAILURE$/)
+  })
+
+  it('fails generically on a valid request envelope with a tampered response or missing data key', async () => {
+    const keyring = await createKeyring(env, {
+      activeDataKekVersion: 1,
+      activeLookupKeyVersion: 1,
+      activeBackupKekVersion: 1,
+    })
+    const dataKey = await getOrCreateDataKey(env.DB, keyring, scope, {
+      id: 'key_uow_response_tamper',
+      createdAt: now,
+    })
+    const input = {
+      actorId: 'stf_uow_response_tamper',
+      operation: 'staff.invite',
+      idempotencyKey: 'idem-response-tamper',
+      requestDigest: 'valid request digest',
+      expectedScope: scope,
+    }
+    const tuple = new TextEncoder().encode(
+      ['bwm:idempotency:record:v1', input.actorId, input.operation, input.idempotencyKey].join('\n')
+    )
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', tuple))
+    const recordId = `idem_${encodeBase64Url(digest)}`
+    tuple.fill(0)
+    digest.fill(0)
+    const requestHash = JSON.stringify(await encryptForScope(keyring, dataKey, {
+      expectedScope: scope,
+      recordId,
+      field: 'idempotency_request_hash',
+      plaintext: input.requestDigest,
+    }))
+    await env.DB.prepare(
+      `INSERT INTO idempotency_records
+       (actor_id,operation,idempotency_key,request_hash,resource_type,resource_id,response_envelope,created_at,expires_at)
+       VALUES (?,?,?,?,? ,?,'{}',?,?)`
+    ).bind(
+      input.actorId,
+      input.operation,
+      input.idempotencyKey,
+      requestHash,
+      'staff_user',
+      'stf_response_tamper',
+      now,
+      '2027-01-16T08:00:00.000Z',
+    ).run()
+    await expect(inspectIdempotency(env.DB, { keyring, dataKey }, input))
+      .rejects.toThrow(/^CRYPTO_FAILURE$/)
+    const missingKeyInput = {
+      actorId: 'stf_uow_missing_key',
+      operation: 'staff.invite',
+      idempotencyKey: 'idem-missing-key-123',
+      requestDigest: 'missing key digest',
+      expectedScope: scope,
+    }
+    await (await createIdempotencyStatement(env.DB, { keyring, dataKey }, {
+      ...missingKeyInput,
+      resourceType: 'staff_user',
+      resourceId: 'stf_missing_key',
+      response: { status: 201, body: { data: { id: 'stf_missing_key' } } },
+      createdAt: now,
+      expiresAt: '2027-01-16T08:00:00.000Z',
+    })).run()
+    await expect(inspectIdempotency(env.DB, {
+      keyring,
+      dataKey: { ...dataKey, id: 'key_missing' },
+    }, missingKeyInput)).rejects.toThrow(/^CRYPTO_FAILURE$/)
+  })
+
+  it.each([
+    ['same', false],
+    ['different', true],
+  ])('resolves barrier-controlled concurrent %s-request idempotency with one mutation', async (race, shouldConflict) => {
+    const actorId = `stf_idem_${race}`
+    await seedActor(actorId)
+    const keyring = await createKeyring(env, {
+      activeDataKekVersion: 1,
+      activeLookupKeyVersion: 1,
+      activeBackupKekVersion: 1,
+    })
+    const dataKey = await getOrCreateDataKey(env.DB, keyring, scope, {
+      id: `key_idem_${race}`,
+      createdAt: now,
+    })
+    const cryptoContext = { keyring, dataKey }
+    for (const table of ['domain', 'version', 'outbox']) {
+      await env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS task6_idem_${race}_${table} (id TEXT PRIMARY KEY, value TEXT NOT NULL)`
+      ).run()
+    }
+    let waiting = 0
+    let release
+    const barrierPromise = new Promise((resolve) => { release = resolve })
+    const barrier = async () => {
+      waiting += 1
+      if (waiting === 2) release()
+      await barrierPromise
+    }
+    const operation = `task6.${race}`
+    const idempotencyKey = `idem-race-${race}-1234`
+    const execute = async (suffix, requestDigest) => {
+      const inspectInput = {
+        actorId, operation, idempotencyKey, requestDigest, expectedScope: scope,
+      }
+      const replay = await inspectIdempotency(env.DB, cryptoContext, inspectInput)
+      if (replay) return replay
+      await barrier()
+      const response = { status: 201, body: { data: { winner: suffix } } }
+      const auditId = `aud_idem_${race}_${suffix}`
+      const uow = createUnitOfWork(env.DB, { mode: 'mutation', actorId, correlationId })
+      uow.audit(auditEventStatement(env.DB, {
+        id: auditId,
+        occurredAt: now,
+        actorStaffId: actorId,
+        action: 'data_key.rewrapped',
+        entityType: 'data_key',
+        entityId: `key_idem_${race}`,
+        result: 'success',
+        correlationId,
+        metadata: { oldKekVersion: 1, newKekVersion: 2 },
+        reasonEnvelope: null,
+      }))
+      uow.idempotency(await createIdempotencyStatement(env.DB, cryptoContext, {
+        ...inspectInput,
+        resourceType: 'staff_user',
+        resourceId: `stf_idem_resource_${race}`,
+        response,
+        createdAt: now,
+        expiresAt: '2027-01-16T08:00:00.000Z',
+      }))
+      uow.domain(env.DB.prepare(
+        `INSERT INTO task6_idem_${race}_domain (id,value) VALUES ('resource',?)`
+      ).bind(suffix))
+      uow.version(env.DB.prepare(
+        `INSERT INTO task6_idem_${race}_version (id,value) VALUES ('resource',?)`
+      ).bind(suffix))
+      uow.outbox(env.DB.prepare(
+        `INSERT INTO task6_idem_${race}_outbox (id,value) VALUES ('resource',?)`
+      ).bind(suffix))
+      uow.guard(guardFor(
+        env.DB,
+        auditId,
+        `EXISTS (SELECT 1 FROM task6_idem_${race}_domain WHERE id='resource')
+         AND EXISTS (SELECT 1 FROM task6_idem_${race}_version WHERE id='resource')
+         AND EXISTS (SELECT 1 FROM task6_idem_${race}_outbox WHERE id='resource')
+         AND EXISTS (SELECT 1 FROM idempotency_records
+                     WHERE actor_id=? AND operation=? AND idempotency_key=?)`,
+        actorId,
+        operation,
+        idempotencyKey,
+      ))
+      try {
+        await uow.commit()
+        return response
+      } catch (error) {
+        return recoverIdempotencyAfterCollision(env.DB, cryptoContext, inspectInput, error)
+      }
+    }
+    const digests = shouldConflict ? ['digest one', 'digest two'] : ['same digest', 'same digest']
+    const settled = await Promise.allSettled([
+      execute('one', digests[0]),
+      execute('two', digests[1]),
+    ])
+    expect(settled.filter(({ status }) => status === 'fulfilled')).toHaveLength(shouldConflict ? 1 : 2)
+    expect(settled.filter(({ status }) => status === 'rejected')).toHaveLength(shouldConflict ? 1 : 0)
+    if (shouldConflict) {
+      expect(settled.find(({ status }) => status === 'rejected').reason)
+        .toMatchObject({ message: 'IDEMPOTENCY_CONFLICT' })
+    } else {
+      expect(settled[0].value).toEqual(settled[1].value)
+    }
+    for (const table of ['domain', 'version', 'outbox']) {
+      expect((await env.DB.prepare(
+        `SELECT count(*) AS count FROM task6_idem_${race}_${table}`
+      ).first()).count).toBe(1)
+    }
+    expect((await env.DB.prepare(
+      "SELECT count(*) AS count FROM audit_events WHERE actor_staff_id=? AND action='data_key.rewrapped'"
+    ).bind(actorId).first()).count).toBe(1)
+    expect((await env.DB.prepare(
+      'SELECT count(*) AS count FROM idempotency_records WHERE actor_id=? AND operation=? AND idempotency_key=?'
+    ).bind(actorId, operation, idempotencyKey).first()).count).toBe(1)
   })
 })
