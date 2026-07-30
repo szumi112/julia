@@ -45,4 +45,19 @@ describe('Worker entry boundary', () => {
       { waitUntil() {} }
     )).toThrow()
   })
+
+  it('keeps scheduled handling as a no-op after configuration validation', () => {
+    let waitUntilCalls = 0
+    const db = new Proxy({}, {
+      get() {
+        throw new Error('scheduled handler touched D1')
+      },
+    })
+    expect(worker.scheduled(
+      {},
+      { ...valid, DB: db },
+      { waitUntil() { waitUntilCalls += 1 } }
+    )).toBeUndefined()
+    expect(waitUntilCalls).toBe(0)
+  })
 })

@@ -1,5 +1,6 @@
 import { auditDescriptorFor, enforceAuditRateLimit } from '../audit/events.js'
 import { isD1IdentityCollision, isD1RateLimitGuardFailure } from './errors.js'
+import { outboxStatementDescriptorFor } from '../jobs/outbox.js'
 import { isCorrelationId } from '../logging/safe-log.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
 import { encodeBase64Url } from '../security/encoding.js'
@@ -89,6 +90,8 @@ export function createUnitOfWork(db, context) {
   const add = (kind, statement) => {
     open()
     if (!prepared(statement)) fail()
+    const outboxDescriptor = outboxStatementDescriptorFor(statement)
+    if (outboxDescriptor && kind !== 'outbox') fail()
     if (context.mode === 'denial' && kind !== 'audit') fail()
     if (kind === 'audit') {
       const descriptor = auditDescriptorFor(statement)

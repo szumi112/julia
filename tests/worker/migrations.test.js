@@ -185,6 +185,15 @@ describe('foundation migrations', () => {
     )).toEqual({ count: 0 })
   })
 
+  it('exposes a distinct non-persisting mechanical outbox guard sentinel', async () => {
+    await expect(run(
+      "INSERT INTO outbox_operation_guard_failures (operation_id) VALUES ('claim_guard_failure')"
+    )).rejects.toThrow(/outbox_operation_guard_failed/)
+    expect(await one(
+      'SELECT count(*) AS count FROM outbox_operation_guard_failures'
+    )).toEqual({ count: 0 })
+  })
+
   it('enforces text identifiers, integer affinity, and foreign keys', async () => {
     await expect(run(
       `INSERT INTO data_keys (id, scope_type, scope_id, purpose, dek_version, wrapped_key_b64, wrap_nonce_b64, kek_version, created_at)

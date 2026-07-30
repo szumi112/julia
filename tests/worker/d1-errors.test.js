@@ -6,6 +6,7 @@ import {
   isD1LastActiveOwner,
   isD1RateLimitGuardFailure,
 } from '../../worker/db/errors.js'
+import * as d1Errors from '../../worker/db/errors.js'
 
 it('classifies only exact D1 identity and last-owner errors', () => {
   expect(isD1IdentityCollision(new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT'))).toBe(true)
@@ -16,6 +17,19 @@ it('classifies only exact D1 identity and last-owner errors', () => {
     new Error('D1_ERROR: rate_limit_guard_failed: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')
   )).toBe(true)
   expect(isD1RateLimitGuardFailure(new Error('transport rate_limit_guard_failed downstream'))).toBe(false)
+  expect(typeof d1Errors.isD1OutboxOperationGuardFailure).toBe('function')
+  expect(d1Errors.isD1OutboxOperationGuardFailure(
+    new Error('D1_ERROR: outbox_operation_guard_failed: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')
+  )).toBe(true)
+  expect(d1Errors.isD1OutboxOperationGuardFailure(
+    new Error('outbox_operation_guard_failed: SQLITE_CONSTRAINT')
+  )).toBe(true)
+  expect(d1Errors.isD1OutboxOperationGuardFailure(
+    new Error('transport outbox_operation_guard_failed downstream')
+  )).toBe(false)
+  expect(d1Errors.isD1OutboxOperationGuardFailure(
+    new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT')
+  )).toBe(false)
   expect(classifyOwnerTransitionError(new Error('last_active_owner: SQLITE_CONSTRAINT'))).toBe('LAST_ACTIVE_OWNER')
   expect(classifyOwnerTransitionError(new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT'))).toBeNull()
   expect(classifyOwnerTransitionError(new Error('unknown'))).toBeNull()
