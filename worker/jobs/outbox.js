@@ -51,6 +51,16 @@ const OUTBOX_JOB_ROW_KEYS = Object.freeze([
   'created_at',
   'updated_at',
 ])
+const OUTBOX_ATTEMPT_ROW_KEYS = Object.freeze([
+  'id',
+  'job_id',
+  'attempt_number',
+  'started_at',
+  'completed_at',
+  'result',
+  'error_code',
+  'provider_reference',
+])
 
 const invalid = () => { throw new Error('OUTBOX_INVALID') }
 const invalidState = () => { throw new Error('OUTBOX_STATE_INVALID') }
@@ -1473,4 +1483,361 @@ export async function processOutboxBatch(input = {}) {
     if (finalized) completed.push({ id: claim.id, result: outcome.result })
   }
   return completed
+}
+
+const targetInvalid = () => {
+  throw new Error('OUTBOX_TARGET_INVALID')
+}
+
+function validateTargetProcessorInput(input) {
+  const required = [
+    'db',
+    'cryptoContext',
+    'jobId',
+    'nowMs',
+    'idFactory',
+    'leaseOwnerFactory',
+    'dispatch',
+  ]
+  const optional = [
+    'bindings',
+    'config',
+    'correlationIdFactory',
+    'leaseNonceFactory',
+    'nowFactory',
+  ]
+  if (!ownObject(input)
+    || !required.every((key) => Object.hasOwn(input, key))
+    || Object.keys(input).some((key) => !required.includes(key) && !optional.includes(key))
+    || !input.db?.prepare
+    || !input.db?.batch
+    || !validStaffCryptoContext(input.cryptoContext)
+    || !validId(input.jobId)
+    || !Number.isSafeInteger(input.nowMs)
+    || input.nowMs < 0
+    || typeof input.idFactory !== 'function'
+    || typeof input.leaseOwnerFactory !== 'function'
+    || typeof input.dispatch !== 'function'
+    || (input.leaseNonceFactory !== undefined
+      && typeof input.leaseNonceFactory !== 'function')
+    || (input.correlationIdFactory !== undefined
+      && typeof input.correlationIdFactory !== 'function')
+    || (input.nowFactory !== undefined && typeof input.nowFactory !== 'function')) {
+    targetInvalid()
+  }
+}
+
+const validAccessTarget = (row) => ownObject(row)
+  && exactKeys(row, OUTBOX_JOB_ROW_KEYS)
+  && validId(row.id)
+  && row.type === 'staff.access.reconcile'
+  && row.aggregate_type === 'access_group'
+  && row.aggregate_id === 'centre_1'
+  && /^staff\.access\.reconcile:(?:0|[1-9]\d*)$/.test(row.idempotency_key ?? '')
+  && Number.isSafeInteger(Number(row.idempotency_key.slice('staff.access.reconcile:'.length)))
+  && Number.isSafeInteger(row.attempt_count)
+  && row.attempt_count >= 0
+  && row.max_attempts === MAX_ATTEMPTS
+  && validInstant(row.scheduled_at)
+  && validInstant(row.created_at)
+  && validInstant(row.updated_at)
+  && row.created_at <= row.updated_at
+  && validEnvelope(row.payload_envelope)
+
+const targetGeneration = (row) => {
+  const raw = row.idempotency_key.slice('staff.access.reconcile:'.length)
+  const generation = Number(raw)
+  if (!Number.isSafeInteger(generation) || generation < 0 || String(generation) !== raw) {
+    targetInvalid()
+  }
+  return generation
+}
+
+const retryDueAt = (attempt) => {
+  if (attempt.error_code === 'OUTBOX_LEASE_EXPIRED') {
+    return attempt.completed_at
+  }
+  if (attempt.error_code !== 'OUTBOX_HANDLER_RETRY') targetInvalid()
+  const delay = retryDelayMs(attempt.attempt_number)
+  if (delay === null) targetInvalid()
+  return instantFromMs(Date.parse(attempt.completed_at) + delay)
+}
+
+const completedTargetAttempt = (attempt, row, number, notBefore) => {
+  if (!exactKeys(attempt, OUTBOX_ATTEMPT_ROW_KEYS)
+    || !validId(attempt.id)
+    || attempt.job_id !== row.id
+    || attempt.attempt_number !== number
+    || !validInstant(attempt.started_at)
+    || !validInstant(attempt.completed_at)
+    || attempt.started_at < row.created_at
+    || attempt.started_at < notBefore
+    || attempt.completed_at < attempt.started_at
+    || attempt.result !== 'retry'
+    || !['OUTBOX_HANDLER_RETRY', 'OUTBOX_LEASE_EXPIRED'].includes(attempt.error_code)
+    || attempt.provider_reference !== null) targetInvalid()
+  return retryDueAt(attempt)
+}
+
+async function validateAccessTargetEvidence(db, cryptoContext, row) {
+  if (!validAccessTarget(row)) targetInvalid()
+  const generation = targetGeneration(row)
+  let payload
+  try {
+    payload = await decryptOutboxPayload(cryptoContext, row)
+  } catch {
+    targetInvalid()
+  }
+  if (!exactKeys(payload, ['actorId', 'generation'])
+    || payload.generation !== generation) targetInvalid()
+  const [actor, desired, attemptResult] = await Promise.all([
+    db.prepare('SELECT id FROM staff_users WHERE id=?').bind(payload.actorId).first(),
+    db.prepare(
+      `SELECT key,value_json,version,updated_at
+       FROM system_state WHERE key='access.desired_generation'`
+    ).first(),
+    db.prepare(
+      `SELECT id,job_id,attempt_number,started_at,completed_at,result,error_code,
+              provider_reference
+       FROM outbox_attempts WHERE job_id=? ORDER BY attempt_number,id`
+    ).bind(row.id).all(),
+  ])
+  if (!exactKeys(actor, ['id']) || actor.id !== payload.actorId
+    || !exactKeys(desired, ['key', 'value_json', 'version', 'updated_at'])
+    || desired.key !== 'access.desired_generation'
+    || desired.value_json !== JSON.stringify({ generation })
+    || !Number.isSafeInteger(desired.version)
+    || desired.version < 1
+    || !validInstant(desired.updated_at)
+    || !Array.isArray(attemptResult?.results)
+    || attemptResult.results.length !== row.attempt_count
+    || row.attempt_count > 7) targetInvalid()
+
+  const attempts = attemptResult.results
+  let notBefore = row.created_at
+  const completedCount = row.status === 'processing'
+    ? row.attempt_count - 1
+    : row.attempt_count
+  if (!['queued', 'processing'].includes(row.status)
+    || completedCount < 0) targetInvalid()
+  for (let index = 0; index < completedCount; index += 1) {
+    notBefore = completedTargetAttempt(attempts[index], row, index + 1, notBefore)
+  }
+
+  if (row.status === 'queued') {
+    if (row.lease_owner !== null || row.lease_expires_at !== null) targetInvalid()
+    if (row.attempt_count === 0) {
+      if (row.last_error_code !== null
+        || row.scheduled_at !== row.created_at
+        || row.updated_at !== row.created_at) targetInvalid()
+    } else {
+      const last = attempts.at(-1)
+      if (row.last_error_code !== last.error_code
+        || row.scheduled_at !== notBefore
+        || row.updated_at !== last.completed_at) targetInvalid()
+    }
+    return Object.freeze({ generation, payload })
+  }
+
+  if (!validProcessingJob(row)
+    || row.attempt_count < 1
+    || row.last_error_code !== (completedCount === 0
+      ? null
+      : attempts[completedCount - 1].error_code)) targetInvalid()
+  const open = attempts.at(-1)
+  if (!exactKeys(open, OUTBOX_ATTEMPT_ROW_KEYS)
+    || !validId(open.id)
+    || open.job_id !== row.id
+    || open.attempt_number !== row.attempt_count
+    || !validInstant(open.started_at)
+    || open.started_at < notBefore
+    || open.started_at !== row.updated_at
+    || open.completed_at !== null
+    || open.result !== null
+    || open.error_code !== null
+    || open.provider_reference !== null
+    || row.scheduled_at > open.started_at
+    || row.lease_expires_at !== instantFromMs(Date.parse(open.started_at) + LEASE_MS)) {
+    targetInvalid()
+  }
+  return Object.freeze({ generation, payload })
+}
+
+async function claimTargetJob(db, row, input, nowMs) {
+  const now = instantFromMs(nowMs)
+  const expiry = instantFromMs(nowMs + LEASE_MS)
+  if (!validAccessTarget(row)
+    || row.status !== 'queued'
+    || row.scheduled_at > now
+    || row.attempt_count >= row.max_attempts
+    || row.lease_owner !== null
+    || row.lease_expires_at !== null) targetInvalid()
+  const leaseOwner = idFrom(input.leaseOwnerFactory)
+  const attemptId = idFrom(input.idFactory)
+  const attemptNumber = row.attempt_count + 1
+  try {
+    await db.batch([
+      db.prepare(
+        `UPDATE outbox_jobs
+         SET status='processing',lease_owner=?,lease_expires_at=?,
+             attempt_count=attempt_count+1,updated_at=?
+         WHERE id=? AND type='staff.access.reconcile'
+           AND aggregate_type='access_group' AND aggregate_id='centre_1'
+           AND idempotency_key=? AND status='queued'
+           AND attempt_count=? AND max_attempts=8
+           AND scheduled_at=? AND scheduled_at<=?
+           AND lease_owner IS NULL AND lease_expires_at IS NULL`
+      ).bind(
+        leaseOwner,
+        expiry,
+        now,
+        row.id,
+        row.idempotency_key,
+        row.attempt_count,
+        row.scheduled_at,
+        now,
+      ),
+      db.prepare(
+        `INSERT INTO outbox_attempts
+         (id,job_id,attempt_number,started_at)
+         SELECT ?,?,?,? WHERE changes()=1`
+      ).bind(attemptId, row.id, attemptNumber, now),
+      operationGuard(
+        db,
+        `target_claim_${row.id}`,
+        `changes()=1
+         AND EXISTS (
+           SELECT 1 FROM outbox_jobs
+           WHERE id=? AND type='staff.access.reconcile'
+             AND aggregate_type='access_group' AND aggregate_id='centre_1'
+             AND idempotency_key=? AND status='processing'
+             AND attempt_count=? AND lease_owner=? AND lease_expires_at=?
+             AND updated_at=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_attempts
+           WHERE id=? AND job_id=? AND attempt_number=? AND started_at=?
+             AND completed_at IS NULL AND result IS NULL
+         )
+         AND (
+           SELECT count(*) FROM outbox_attempts
+           WHERE job_id=? AND completed_at IS NULL
+         )=1`,
+        [
+          row.id,
+          row.idempotency_key,
+          attemptNumber,
+          leaseOwner,
+          expiry,
+          now,
+          attemptId,
+          row.id,
+          attemptNumber,
+          now,
+          row.id,
+        ],
+      ),
+    ])
+  } catch (error) {
+    if (isD1OutboxOperationGuardFailure(error)) return null
+    throw error
+  }
+  return {
+    ...row,
+    attempt_count: attemptNumber,
+    attemptId,
+    attemptNumber,
+    lease_expires_at: expiry,
+    lease_owner: leaseOwner,
+    leaseOwner,
+    status: 'processing',
+    updated_at: now,
+  }
+}
+
+export async function processOutboxJobById(input = {}) {
+  validateTargetProcessorInput(input)
+  const nowFactory = input.nowFactory ?? Date.now
+  const currentMs = () => {
+    const value = nowFactory()
+    if (!Number.isSafeInteger(value) || value < 0) targetInvalid()
+    return Math.max(input.nowMs, value)
+  }
+  let row = await input.db.prepare('SELECT * FROM outbox_jobs WHERE id=?')
+    .bind(input.jobId).first()
+  await validateAccessTargetEvidence(input.db, input.cryptoContext, row)
+  const initialNow = instantFromMs(input.nowMs)
+  if (row.status === 'processing') {
+    if (row.lease_expires_at > initialNow) {
+      return Object.freeze({ jobId: row.id, result: 'busy' })
+    }
+    await reapOne(
+      input.db,
+      input.cryptoContext,
+      row,
+      initialNow,
+      input.idFactory,
+    )
+    row = await input.db.prepare('SELECT * FROM outbox_jobs WHERE id=?')
+      .bind(input.jobId).first()
+    await validateAccessTargetEvidence(input.db, input.cryptoContext, row)
+  }
+  if (row.status !== 'queued') targetInvalid()
+  if (row.scheduled_at > initialNow) {
+    return Object.freeze({ jobId: row.id, result: 'retry' })
+  }
+  const claim = await claimTargetJob(input.db, row, input, input.nowMs)
+  if (!claim) {
+    const current = await input.db.prepare('SELECT * FROM outbox_jobs WHERE id=?')
+      .bind(input.jobId).first()
+    await validateAccessTargetEvidence(input.db, input.cryptoContext, current)
+    if (current.status === 'processing' && current.lease_expires_at > initialNow) {
+      return Object.freeze({ jobId: current.id, result: 'busy' })
+    }
+    return Object.freeze({ jobId: row.id, result: 'retry' })
+  }
+  const dispatchNowMs = currentMs()
+  const currentClaim = await currentOwnedClaim(input.db, claim, dispatchNowMs)
+  if (!currentClaim) {
+    return Object.freeze({ jobId: row.id, result: 'retry' })
+  }
+  let outcome
+  try {
+    outcome = normalizedOutcome(await input.dispatch({
+      bindings: input.bindings,
+      config: input.config,
+      correlationIdFactory: input.correlationIdFactory,
+      cryptoContext: input.cryptoContext,
+      db: input.db,
+      idFactory: input.idFactory,
+      job: currentClaim,
+      leaseNonceFactory: input.leaseNonceFactory,
+      leaseOwnerFactory: input.leaseOwnerFactory,
+      nowFactory: currentMs,
+      nowMs: dispatchNowMs,
+    }))
+  } catch (error) {
+    outcome = thrownOutcome(error)
+  }
+  if (outcome.result === 'email-accepted') {
+    outcome = {
+      errorCode: 'OUTBOX_HANDLER_FAILURE',
+      providerReference: null,
+      result: 'dead',
+    }
+  }
+  const finalized = await finalizeOutboxJob(input.db, input.cryptoContext, {
+    attemptNumber: claim.attemptNumber,
+    errorCode: outcome.errorCode,
+    idFactory: input.idFactory,
+    jobId: claim.id,
+    leaseOwner: claim.leaseOwner,
+    nowMs: currentMs(),
+    providerReference: outcome.providerReference,
+    result: outcome.result,
+  })
+  return Object.freeze({
+    jobId: row.id,
+    result: finalized ? outcome.result : 'retry',
+  })
 }

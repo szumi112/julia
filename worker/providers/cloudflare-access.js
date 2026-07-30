@@ -214,6 +214,7 @@ async function responseBodyJson(response, controller) {
 async function request(input, validated, method, body) {
   const controller = new validated.AbortControllerImpl()
   const timer = validated.setTimeoutImpl(() => controller.abort(), validated.timeoutMs)
+  const requestEndpoint = endpoint(input)
   let fetchAbortListener
   const fetchAborted = new Promise((_, reject) => {
     fetchAbortListener = () => reject(new Error('ACCESS_PROVIDER_FETCH_ABORTED'))
@@ -224,7 +225,7 @@ async function request(input, validated, method, body) {
   try {
     try {
       response = await Promise.race([
-        Promise.resolve().then(() => input.fetch(endpoint(input), {
+        Promise.resolve().then(() => input.fetch(requestEndpoint, {
           method,
           headers: method === 'PUT'
             ? {
@@ -233,6 +234,7 @@ async function request(input, validated, method, body) {
               }
             : { Authorization: `Bearer ${input.token}` },
           ...(body === undefined ? {} : { body }),
+          redirect: 'error',
           signal: controller.signal,
         })),
         fetchAborted,
@@ -242,7 +244,10 @@ async function request(input, validated, method, body) {
         controller.signal.removeEventListener('abort', fetchAbortListener)
       }
     }
-    if (!response || typeof response.ok !== 'boolean'
+    if (!response
+      || response.redirected !== false
+      || response.url !== requestEndpoint
+      || typeof response.ok !== 'boolean'
       || !Number.isInteger(response.status)
       || response.status < 100
       || response.status > 599
@@ -283,7 +288,7 @@ export async function reconcileAccessGroup(input = {}) {
   if (!sameRules(verified.include, include)
     || !sameRules(verified.require, current.require)
     || !sameRules(verified.exclude, current.exclude)) {
-    fail('ACCESS_PROVIDER_VERIFICATION_MISMATCH')
+    fail('ACCESS_PROVIDER_VERIFICATION_MISMATCH', true)
   }
   return Object.freeze({ reconciled: true })
 }

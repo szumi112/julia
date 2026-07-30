@@ -354,12 +354,16 @@ export async function acquireAccessReconcileLease({
 }
 
 function ownedLease(row, lease, now) {
+  return sameLeaseFence(row, lease)
+    && row.value.expiresAt > now
+}
+
+function sameLeaseFence(row, lease) {
   return row.version === lease.version
     && row.value_json === lease.valueJson
     && row.value.owner === lease.owner
     && row.value.nonce === lease.nonce
     && row.value.expiresAt === lease.expiresAt
-    && row.value.expiresAt > now
 }
 
 const membershipCurrentAt = (membership, now) => (
@@ -371,16 +375,15 @@ const membershipCurrentAt = (membership, now) => (
 async function releaseLease(db, lease, nowMs) {
   const now = iso(nowMs)
   const current = await state(db, 'access.reconcile.lease')
-  if (!ownedLease(current, lease, now)) return false
+  if (!sameLeaseFence(current, lease)) return false
   const released = JSON.stringify({ expiresAt: null, nonce: null, owner: null })
   try {
     await db.batch([
       db.prepare(
         `UPDATE system_state
          SET value_json=?,version=version+1,updated_at=?
-         WHERE key='access.reconcile.lease' AND version=? AND value_json=?
-           AND json_extract(value_json,'$.expiresAt')>?`
-      ).bind(released, now, current.version, current.value_json, now),
+         WHERE key='access.reconcile.lease' AND version=? AND value_json=?`
+      ).bind(released, now, current.version, current.value_json),
       operationGuard(
         db,
         `access_lease_release_${lease.nonce}`,
@@ -834,6 +837,9 @@ export async function handleAccessReconcile(input) {
   const providerFenceNowMs = observedNowMs()
   const providerFenceNow = iso(providerFenceNowMs)
   if (!ownedLease(providerFenceLease, lease, providerFenceNow)) {
+    if (lease.expiresAt <= providerFenceNow) {
+      await releaseLease(input.db, lease, providerFenceNowMs)
+    }
     return { result: 'retry' }
   }
   if (!membershipCurrentAt(membership, providerFenceNow)) {
@@ -886,7 +892,12 @@ export async function handleAccessReconcile(input) {
   const finalNowMs = observedNowMs()
   const finalNow = iso(finalNowMs)
   const finalLease = await state(input.db, 'access.reconcile.lease')
-  if (!ownedLease(finalLease, lease, finalNow)) return { result: 'retry' }
+  if (!ownedLease(finalLease, lease, finalNow)) {
+    if (lease.expiresAt <= finalNow) {
+      await releaseLease(input.db, lease, finalNowMs)
+    }
+    return { result: 'retry' }
+  }
   const finalStates = await allStates(input.db)
   const finalMembership = await completeDesiredMembership(
     input.db,
@@ -922,5 +933,10 @@ export async function handleAccessReconcile(input) {
     nowFactory: observedNowMs,
     idFactory: input.idFactory,
   })
-  return published ? { result: 'succeeded' } : { result: 'retry' }
+  if (published) return { result: 'succeeded' }
+  const cleanupNowMs = observedNowMs()
+  if (lease.expiresAt <= iso(cleanupNowMs)) {
+    await releaseLease(input.db, lease, cleanupNowMs)
+  }
+  return { result: 'retry' }
 }

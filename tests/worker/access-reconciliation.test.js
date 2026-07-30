@@ -1349,9 +1349,11 @@ describe('guarded Access reconciliation publication', () => {
         require: [{ email_domain: { domain: 'example.test' } }],
         exclude: [{ email: { email: 'blocked@example.test' } }],
       })
-      const ok = (emails) => ({
+      const ok = (emails, url) => ({
         ok: true,
+        redirected: false,
         status: 200,
+        url,
         json: async () => ({ success: true, result: groupResult(emails) }),
       })
       let providerEmails = []
@@ -1361,20 +1363,20 @@ describe('guarded Access reconciliation publication', () => {
         signalAStarted = resolve
       })
       let aCancelled = false
-      const fetch = vi.fn(async (_url, init) => {
-        if (init.method === 'GET') return ok(providerEmails)
+      const fetch = vi.fn(async (url, init) => {
+        if (init.method === 'GET') return ok(providerEmails, url)
         putCount += 1
         const desired = JSON.parse(init.body).include
           .map((rule) => rule.email.email)
         if (putCount > 1) {
           providerEmails = desired
-          return ok(providerEmails)
+          return ok(providerEmails, url)
         }
         signalAStarted()
         return new Promise((resolve, reject) => {
           const mutation = setTimeout(() => {
             providerEmails = desired
-            resolve(ok(providerEmails))
+            resolve(ok(providerEmails, url))
           }, 20_000)
           init.signal.addEventListener('abort', () => {
             aCancelled = true

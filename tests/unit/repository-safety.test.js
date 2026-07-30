@@ -1,6 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import {
@@ -78,6 +86,17 @@ test('only exact direct dependency versions are accepted', () => {
   ]) {
     assert.throws(() => assertDirectDependencyPins({ dependencies: { example: version } }), /must use an exact semver version/)
   }
+})
+
+test('package keeps the complete script regression suite addressable', () => {
+  const packageJson = JSON.parse(readFileSync(
+    new URL('../../package.json', import.meta.url),
+    'utf8',
+  ))
+  assert.equal(
+    packageJson.scripts?.['test:scripts'],
+    'node --test --test-concurrency=1 tests/scripts/*.test.js',
+  )
 })
 
 test('runtime HTML rejects external fonts and CDN scripts', () => {
@@ -222,6 +241,25 @@ test('deploy inspection redacts supplied secret values while naming the variable
   assert.ok(error)
   assert.match(error.message, /BWM_DATA_KEK_V1/)
   assert.match(error.message, /dist\/app\/assets\/app\.js/)
+  assert.doesNotMatch(error.message, new RegExp(secret))
+})
+
+test('deploy inspection scans the offline D1 bootstrap token without exposing its value', (t) => {
+  const secret = 'offline-d1-bootstrap-token-must-not-ship'
+  const root = deployFixture(t, { worker: `const accidental = '${secret}'` })
+  let error
+  try {
+    inspectDeployArtifact({
+      root,
+      secretValues: { CF_D1_BOOTSTRAP_TOKEN: secret },
+    })
+  } catch (caught) {
+    error = caught
+  }
+
+  assert.ok(error)
+  assert.match(error.message, /CF_D1_BOOTSTRAP_TOKEN/)
+  assert.match(error.message, /dist\/app\/worker\.js/)
   assert.doesNotMatch(error.message, new RegExp(secret))
 })
 

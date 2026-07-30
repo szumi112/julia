@@ -16,11 +16,20 @@ const group = (overrides = {}) => ({
   ...overrides,
 })
 
-const ok = (result) => ({
+const ok = (result, overrides = {}) => ({
   ok: true,
+  redirected: false,
   status: 200,
+  url: URL,
   json: async () => ({ success: true, result }),
+  ...overrides,
 })
+
+const responseAtEndpoint = (body) => {
+  const response = new Response(body)
+  Object.defineProperty(response, 'url', { value: URL })
+  return response
+}
 
 const input = (fetch, overrides = {}) => ({
   fetch,
@@ -78,6 +87,7 @@ describe('Cloudflare Access provider', () => {
     ])
     for (const [, init] of fetch.mock.calls) {
       expect(init.headers.Authorization).toBe(`Bearer ${TOKEN}`)
+      expect(init.redirect).toBe('error')
       expect(init.signal).toBeInstanceOf(AbortSignal)
     }
     expect(fetch.mock.calls[0][1].headers).toEqual({ Authorization: `Bearer ${TOKEN}` })
@@ -92,6 +102,56 @@ describe('Cloudflare Access provider', () => {
       require: [{ email_domain: { domain: 'example.test' } }],
       exclude: [{ email: { email: 'blocked@example.test' } }],
     }))
+  })
+
+  it.each([
+    ['initial GET with a wrong URL', 0, 'wrong URL'],
+    ['initial GET marked redirected', 0, 'redirected'],
+    ['PUT with a wrong URL', 1, 'wrong URL'],
+    ['PUT marked redirected', 1, 'redirected'],
+    ['final GET with a wrong URL', 2, 'wrong URL'],
+    ['final GET marked redirected', 2, 'redirected'],
+  ])('rejects response provenance for %s', async (_case, stageIndex, failureKind) => {
+    const desired = [
+      { email: { email: 'anna@example.test' } },
+      { email: { email: 'zoe@example.test' } },
+    ]
+    const hostileJson = vi.fn(async () => ({
+      success: true,
+      result: group({ include: stageIndex === 0 ? [] : desired }),
+    }))
+    const responses = [
+      ok(group()),
+      ok(group({ include: desired })),
+      ok(group({ include: desired })),
+    ]
+    responses[stageIndex] = {
+      ok: true,
+      redirected: failureKind === 'redirected',
+      status: 200,
+      url: failureKind === 'wrong URL'
+        ? `https://redirect.invalid/${TOKEN}/anna@example.test`
+        : URL,
+      json: hostileJson,
+    }
+    const fetch = vi.fn()
+    for (const response of responses) fetch.mockResolvedValueOnce(response)
+
+    let error
+    try {
+      await reconcileAccessGroup(input(fetch))
+    } catch (caught) {
+      error = caught
+    }
+
+    expect(error).toMatchObject({
+      message: 'ACCESS_PROVIDER_RESPONSE_INVALID',
+      retryable: false,
+    })
+    expect(error.message).not.toContain(TOKEN)
+    expect(error.message).not.toContain('anna@example.test')
+    expect(fetch).toHaveBeenCalledTimes(stageIndex + 1)
+    expect(hostileJson).not.toHaveBeenCalled()
   })
 
   it('produces byte-identical PUT bodies for the same logical set', async () => {
@@ -175,7 +235,9 @@ describe('Cloudflare Access provider', () => {
   ])('rejects %s before PUT', async (_label, responseBody) => {
     const fetch = vi.fn().mockResolvedValue({
       ok: true,
+      redirected: false,
       status: 200,
+      url: URL,
       json: async () => responseBody,
     })
     await expect(reconcileAccessGroup(input(fetch))).rejects.toMatchObject({
@@ -225,7 +287,7 @@ describe('Cloudflare Access provider', () => {
       .mockResolvedValueOnce(ok(verified))
     await expect(reconcileAccessGroup(input(fetch))).rejects.toMatchObject({
       message: 'ACCESS_PROVIDER_VERIFICATION_MISMATCH',
-      retryable: false,
+      retryable: true,
     })
     expect(fetch).toHaveBeenCalledTimes(3)
   })
@@ -242,7 +304,13 @@ describe('Cloudflare Access provider', () => {
     const json = vi.fn(() => {
       throw new Error(`secret body ${TOKEN} anna@example.test`)
     })
-    const fetch = vi.fn().mockResolvedValue({ ok: false, status, json })
+    const fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      redirected: false,
+      status,
+      url: URL,
+      json,
+    })
     let error
     try {
       await reconcileAccessGroup(input(fetch))
@@ -260,7 +328,12 @@ describe('Cloudflare Access provider', () => {
     [{ ok: false, status: 200 }, 'ACCESS_PROVIDER_RESPONSE_INVALID'],
   ])('rejects an inconsistent transport shape before reading its body', async (transport, code) => {
     const json = vi.fn()
-    const fetch = vi.fn().mockResolvedValue({ ...transport, json })
+    const fetch = vi.fn().mockResolvedValue({
+      redirected: false,
+      url: URL,
+      ...transport,
+      json,
+    })
     await expect(reconcileAccessGroup(input(fetch))).rejects.toMatchObject({
       message: code,
       retryable: false,
@@ -341,7 +414,7 @@ describe('Cloudflare Access provider', () => {
       success: true,
       result: group(),
     }))
-    const fetch = vi.fn(async () => new Response(new ReadableStream({
+    const fetch = vi.fn(async () => responseAtEndpoint(new ReadableStream({
       pull(controller) {
         if (timeoutActive) {
           fireTimeout()
@@ -374,7 +447,7 @@ describe('Cloudflare Access provider', () => {
       chunks.push(encoded.slice(offset, offset + 1024))
     }
     let pulls = 0
-    const fetch = vi.fn(async () => new Response(new ReadableStream({
+    const fetch = vi.fn(async () => responseAtEndpoint(new ReadableStream({
       pull(controller) {
         if (pulls >= chunks.length) {
           controller.close()
@@ -403,7 +476,9 @@ describe('Cloudflare Access provider', () => {
     }
     const fetch = vi.fn().mockResolvedValue({
       ok: true,
+      redirected: false,
       status: 200,
+      url: URL,
       body: { getReader: () => reader },
     })
     let error
@@ -437,7 +512,9 @@ describe('Cloudflare Access provider', () => {
     }
     const fetch = vi.fn().mockResolvedValue({
       ok: true,
+      redirected: false,
       status: 200,
+      url: URL,
       body: { getReader: () => reader },
     })
     let error

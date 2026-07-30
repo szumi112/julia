@@ -16,6 +16,7 @@
     "deploy": "npm run deploy:demo",
     "deploy:demo": "npm run build:demo && gh-pages -d dist/demo",
     "test": "node --test tests/unit/**/*.test.js",
+    "test:scripts": "node --test --test-concurrency=1 tests/scripts/*.test.js",
     "test:worker": "vitest run --config vitest.worker.config.js",
     "test:e2e": "playwright test",
     "test:e2e:app": "playwright test --config playwright.app.config.js",
