@@ -8,8 +8,10 @@ import {
   getOrCreateDataKey,
 } from '../../worker/security/envelope.js'
 import {
+  deactivateStaff,
   expireInvitation,
   inviteStaff,
+  listStaff,
   specialistIdFor,
   validateInvitationInput,
 } from '../../worker/identity/invitations.js'
@@ -43,6 +45,7 @@ async function cryptoContext(options = {}) {
     id: `key_invitation_${serial}`,
     createdAt: now,
   })
+  const ownerEmail = `owner-${serial}@example.test`
   await env.DB.prepare(
     `INSERT INTO staff_users
      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
@@ -50,9 +53,9 @@ async function cryptoContext(options = {}) {
      VALUES (?,?,?,?,?,'active',?,?,1,?,?,?)`
   ).bind(
     owner.id,
-    `owner_lookup_${serial}`,
-    '{}',
-    '{}',
+    await blindEmailIndex(ownerEmail, keyring),
+    await encryptedField({ keyring, dataKey }, owner.id, 'email', ownerEmail),
+    await encryptedField({ keyring, dataKey }, owner.id, 'display_name', 'Owner Testowy'),
     'owner',
     `owner_subject_${serial}`,
     null,
@@ -85,6 +88,25 @@ const expire = (context, invitationId, options = {}) => expireInvitation({
   idFactory: options.idFactory ?? ids(`expiry_${serial}`),
 })
 
+const deactivate = (context, staffId, version, options = {}) => deactivateStaff({
+  db: options.db ?? env.DB,
+  cryptoContext: context,
+  actor: options.actor ?? context.owner,
+  staffId,
+  version,
+  idempotencyKey: options.idempotencyKey ?? `deactivate-key-${serial}`,
+  correlationId: options.correlationId ?? '55555555-5555-4555-8555-555555555555',
+  nowMs: options.nowMs ?? NOW_MS,
+  idFactory: options.idFactory ?? ids(`deactivate_${serial}`),
+})
+
+const list = (context, options = {}) => listStaff({
+  db: options.db ?? env.DB,
+  cryptoContext: context,
+  actor: options.actor ?? context.owner,
+  nowMs: options.nowMs ?? NOW_MS,
+})
+
 async function encryptedField(context, recordId, field, plaintext) {
   return JSON.stringify(await encryptForScope(context.keyring, context.dataKey, {
     expectedScope: scope,
@@ -101,8 +123,12 @@ async function seedStaff(context, {
   role = 'coordinator',
   status = 'pending',
   version = 1,
+  lookupVersion,
+  accessSubject = status === 'active' ? `subject_${id}` : null,
+  activatedAt = status === 'active' ? now : null,
+  disabledAt = status === 'disabled' ? now : null,
 }) {
-  const lookup = await blindEmailIndex(email, context.keyring)
+  const lookup = await blindEmailIndex(email, context.keyring, lookupVersion)
   await env.DB.prepare(
     `INSERT INTO staff_users
      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
@@ -115,11 +141,11 @@ async function seedStaff(context, {
     await encryptedField(context, id, 'display_name', displayName),
     role,
     status,
-    status === 'active' ? `subject_${id}` : null,
+    accessSubject,
     role === 'specialist' ? specialistIdFor(id) : null,
     version,
-    status === 'active' ? now : null,
-    status === 'disabled' ? now : null,
+    activatedAt,
+    disabledAt,
     now,
     now,
   ).run()
@@ -134,6 +160,10 @@ async function seedInvitation(context, {
   role = 'coordinator',
   status = 'expired',
   lookupVersion,
+  version = 1,
+  expiresAt = now,
+  createdAt = now,
+  emailSentAt = null,
 }) {
   const lookup = await blindEmailIndex(email, context.keyring, lookupVersion)
   await env.DB.prepare(
@@ -150,15 +180,16 @@ async function seedInvitation(context, {
     role,
     status,
     context.owner.id,
-    now,
+    expiresAt,
     ['pending', 'activated'].includes(status) ? now : null,
-    null,
+    emailSentAt,
     status === 'activated' ? now : null,
     status === 'revoked' ? now : null,
-    1,
-    now,
+    version,
+    createdAt,
     now,
   ).run()
+  return env.DB.prepare('SELECT * FROM staff_invitations WHERE id=?').bind(id).first()
 }
 
 async function decryptEnvelope(context, recordId, field, serialized) {
@@ -175,7 +206,7 @@ async function mutationFacts() {
     env.DB.prepare('SELECT count(*) AS count FROM staff_users').first(),
     env.DB.prepare('SELECT count(*) AS count FROM staff_invitations').first(),
     env.DB.prepare('SELECT count(*) AS count FROM record_versions').first(),
-    env.DB.prepare("SELECT count(*) AS count FROM audit_events WHERE action IN ('staff.invited','staff.invitation.expired','authorization.denied')").first(),
+    env.DB.prepare("SELECT count(*) AS count FROM audit_events WHERE action IN ('staff.invited','staff.deactivated','staff.invitation.expired','authorization.denied')").first(),
     env.DB.prepare('SELECT count(*) AS count FROM idempotency_records').first(),
     env.DB.prepare('SELECT count(*) AS count FROM outbox_jobs').first(),
     env.DB.prepare("SELECT value_json,version FROM system_state WHERE key='access.desired_generation'").first(),
@@ -199,6 +230,20 @@ function mutationDelta(before, after) {
 }
 
 const generationOf = (facts) => JSON.parse(facts.desired.value_json).generation
+
+async function retainOnlyActiveOwners(retainedIds) {
+  const rows = (await env.DB.prepare(
+    "SELECT id FROM staff_users WHERE role='owner' AND status='active' ORDER BY id"
+  ).all()).results
+  for (const row of rows) {
+    if (retainedIds.includes(row.id)) continue
+    await env.DB.prepare(
+      `UPDATE staff_users
+       SET status='disabled',disabled_at=?,version=version+1,updated_at=?
+       WHERE id=? AND role='owner' AND status='active'`
+    ).bind(now, now, row.id).run()
+  }
+}
 
 function batchBarrier() {
   let waiting = 0
@@ -478,14 +523,14 @@ describe('staff invitation creation', () => {
     ]) expect(raw).not.toContain(plaintext)
   })
 
-  it.each(['active', 'disabled', 'pending'])('conflicts on an exact retained %s staff identity', async (status) => {
+  it('conflicts on an exact retained active staff identity', async () => {
     const context = await cryptoContext()
-    const email = `retained-${status}@example.test`
+    const email = 'retained-active@example.test'
     await seedStaff(context, {
-      id: `stf_retained_${status}`,
+      id: 'stf_retained_active',
       email,
-      status,
-      role: status === 'active' ? 'owner' : 'coordinator',
+      status: 'active',
+      role: 'coordinator',
     })
     const before = await mutationFacts()
     await expect(invite(context, {
@@ -493,12 +538,38 @@ describe('staff invitation creation', () => {
       email,
       role: 'specialist',
     }, {
-      idempotencyKey: `retained-${status}-key`,
+      idempotencyKey: 'retained-active-key',
     })).rejects.toThrow(/^STAFF_INVITATION_CONFLICT$/)
     expect(await mutationFacts()).toEqual(before)
   })
 
-  it('searches retained invitation candidates from every lookup-key version before writing', async () => {
+  it('conflicts on a pending retained row with an unexpired open invitation', async () => {
+    const context = await cryptoContext()
+    const email = 'retained-open@example.test'
+    const staff = await seedStaff(context, {
+      id: 'stf_retained_open',
+      email,
+      status: 'pending',
+    })
+    await seedInvitation(context, {
+      id: 'inv_retained_open',
+      staffId: staff.id,
+      email,
+      status: 'provisioning',
+      expiresAt: new Date(NOW_MS + 1).toISOString(),
+    })
+    const before = await mutationFacts()
+    await expect(invite(context, {
+      displayName: 'Nadal Otwarta',
+      email,
+      role: 'specialist',
+    }, {
+      idempotencyKey: 'retained-open-key',
+    })).rejects.toThrow(/^STAFF_INVITATION_CONFLICT$/)
+    expect(await mutationFacts()).toEqual(before)
+  })
+
+  it('searches retained invitation candidates from every lookup-key version and reuses the linked row', async () => {
     const bindings = {
       ...env,
       BWM_LOOKUP_HMAC_V2: 'CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk',
@@ -515,15 +586,22 @@ describe('staff invitation creation', () => {
       email: 'retained-invitation@example.test',
       lookupVersion: 1,
     })
-    const before = await mutationFacts()
-    await expect(invite(context, {
+    const result = await invite(context, {
       displayName: 'Retained Match',
       email: 'retained-invitation@example.test',
       role: 'owner',
     }, {
       idempotencyKey: 'retained-invitation-key',
-    })).rejects.toThrow(/^STAFF_INVITATION_CONFLICT$/)
-    expect(await mutationFacts()).toEqual(before)
+      idFactory: ids('retained_invitation'),
+    })
+    expect(result.data.staff).toMatchObject({
+      id: 'stf_retained_invitation',
+      displayName: 'Retained Match',
+      email: 'retained-invitation@example.test',
+      role: 'owner',
+      status: 'pending',
+      version: 2,
+    })
   })
 
   it('replays only the same canonical idempotent request and conflicts on a changed body', async () => {
@@ -964,5 +1042,869 @@ describe('staff invitation expiry', () => {
       jobs: 0,
     })
     expect((await mutationFacts()).desired).toEqual(before.desired)
+  })
+})
+
+describe('retained staff reinvitation', () => {
+  it.each([
+    ['owner', 'coordinator', 'disabled', null],
+    ['owner', 'specialist', 'pending', 'expired'],
+    ['coordinator', 'owner', 'pending', 'revoked'],
+    ['coordinator', 'specialist', 'disabled', null],
+    ['specialist', 'owner', 'pending', 'expired'],
+    ['specialist', 'coordinator', 'pending', 'revoked'],
+  ])('reuses the immutable row for %s to %s with %s history', async (
+    initialRole,
+    nextRole,
+    status,
+    invitationStatus,
+  ) => {
+    const context = await cryptoContext()
+    const email = `${initialRole}-${nextRole}-${invitationStatus ?? status}@example.test`
+    const retained = await seedStaff(context, {
+      id: `stf_${initialRole}_${nextRole}_${invitationStatus ?? status}`,
+      email,
+      displayName: 'Stara Nazwa',
+      role: initialRole,
+      status,
+      version: 3,
+      accessSubject: status === 'disabled'
+        ? `retained_subject_${initialRole}_${nextRole}`
+        : null,
+      activatedAt: status === 'disabled' ? new Date(NOW_MS - DAY_MS).toISOString() : null,
+    })
+    if (invitationStatus) {
+      await seedInvitation(context, {
+        id: `inv_old_${initialRole}_${nextRole}`,
+        staffId: retained.id,
+        email,
+        role: initialRole,
+        status: invitationStatus,
+        version: 2,
+      })
+    }
+    const before = await mutationFacts()
+    const result = await invite(context, {
+      displayName: 'Nowa Nazwa',
+      email: `  ${email.toUpperCase()}  `,
+      role: nextRole,
+    }, {
+      idempotencyKey: `reuse-${initialRole}-${nextRole}-${invitationStatus ?? status}`,
+      idFactory: ids(`reuse_${initialRole}_${nextRole}_${invitationStatus ?? status}`),
+    })
+
+    expect(result.data.staff).toEqual({
+      id: retained.id,
+      displayName: 'Nowa Nazwa',
+      email,
+      role: nextRole,
+      status: 'pending',
+      version: 4,
+      specialistId: nextRole === 'specialist' ? specialistIdFor(retained.id) : null,
+    })
+    expect(result.data.invitation).toMatchObject({
+      status: 'provisioning',
+      version: 1,
+      emailSentAt: null,
+    })
+    const stored = await env.DB.prepare('SELECT * FROM staff_users WHERE id=?').bind(retained.id).first()
+    expect(stored).toMatchObject({
+      id: retained.id,
+      role: nextRole,
+      status: 'pending',
+      access_subject: null,
+      specialist_id: nextRole === 'specialist' ? specialistIdFor(retained.id) : null,
+      version: 4,
+      activated_at: null,
+      disabled_at: null,
+      created_at: retained.created_at,
+      updated_at: now,
+    })
+    expect(await decryptEnvelope(context, stored.id, 'email', stored.email_envelope)).toBe(email)
+    expect(await decryptEnvelope(context, stored.id, 'display_name', stored.display_name_envelope)).toBe('Nowa Nazwa')
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 1,
+      versions: 2,
+      audits: 1,
+      idempotency: 1,
+      jobs: 2,
+    })
+    const staffHistory = await env.DB.prepare(
+      "SELECT * FROM record_versions WHERE entity_type='staff_user' AND entity_id=? AND version=4"
+    ).bind(retained.id).first()
+    expect(JSON.parse(await decryptEnvelope(
+      context,
+      retained.id,
+      'record_version',
+      staffHistory.snapshot_envelope,
+    ))).toEqual(stored)
+  })
+
+  it('expires a wall-clock-expired open invitation inside one reinvite mutation with exact histories', async () => {
+    const context = await cryptoContext()
+    const email = 'expired-open-reuse@example.test'
+    const retained = await seedStaff(context, {
+      id: 'stf_expired_open_reuse',
+      email,
+      role: 'coordinator',
+      status: 'pending',
+      version: 2,
+    })
+    const oldInvitation = await seedInvitation(context, {
+      id: 'inv_expired_open_reuse',
+      staffId: retained.id,
+      email,
+      role: 'coordinator',
+      status: 'provisioning',
+      version: 3,
+      expiresAt: now,
+    })
+    const before = await mutationFacts()
+    const result = await invite(context, {
+      displayName: 'Ponowiona Osoba',
+      email,
+      role: 'specialist',
+    }, {
+      idempotencyKey: 'expired-open-reuse-key',
+      idFactory: ids('expired_open_reuse'),
+    })
+
+    const [storedStaff, storedOld, storedNew] = await Promise.all([
+      env.DB.prepare('SELECT * FROM staff_users WHERE id=?').bind(retained.id).first(),
+      env.DB.prepare('SELECT * FROM staff_invitations WHERE id=?').bind(oldInvitation.id).first(),
+      env.DB.prepare('SELECT * FROM staff_invitations WHERE id=?').bind(result.data.invitation.id).first(),
+    ])
+    expect(storedStaff).toMatchObject({ status: 'pending', role: 'specialist', version: 3 })
+    expect(storedOld).toMatchObject({
+      id: oldInvitation.id,
+      status: 'expired',
+      version: 4,
+      updated_at: now,
+    })
+    expect(storedNew).toMatchObject({
+      id: result.data.invitation.id,
+      staff_id: retained.id,
+      status: 'provisioning',
+      version: 1,
+    })
+    const histories = (await env.DB.prepare(
+      `SELECT * FROM record_versions
+       WHERE (entity_type='staff_user' AND entity_id=? AND version=3)
+          OR (entity_type='staff_invitation' AND entity_id=? AND version=4)
+          OR (entity_type='staff_invitation' AND entity_id=? AND version=1)
+       ORDER BY entity_id`
+    ).bind(retained.id, oldInvitation.id, storedNew.id).all()).results
+    expect(histories).toHaveLength(3)
+    for (const history of histories) {
+      const row = history.entity_id === retained.id
+        ? storedStaff
+        : history.entity_id === oldInvitation.id ? storedOld : storedNew
+      expect(JSON.parse(await decryptEnvelope(
+        context,
+        history.entity_id,
+        'record_version',
+        history.snapshot_envelope,
+      ))).toEqual(row)
+      expect(history).toMatchObject({
+        changed_by_staff_id: context.owner.id,
+        changed_at: now,
+        correlation_id: '11111111-1111-4111-8111-111111111111',
+      })
+    }
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 1,
+      versions: 3,
+      audits: 1,
+      idempotency: 1,
+      jobs: 2,
+    })
+    expect((await env.DB.prepare(
+      "SELECT count(*) AS count FROM audit_events WHERE action='staff.invited' AND entity_id=?"
+    ).bind(storedNew.id).first()).count).toBe(1)
+    expect((await env.DB.prepare(
+      "SELECT count(*) AS count FROM audit_events WHERE action='staff.invitation.expired' AND entity_id=?"
+    ).bind(oldInvitation.id).first()).count).toBe(0)
+    expect(generationOf(await mutationFacts())).toBe(generationOf(before) + 1)
+  })
+
+  it('fails closed when retained exact candidates resolve to more than one logical staff row', async () => {
+    const bindings = {
+      ...env,
+      BWM_LOOKUP_HMAC_V2: 'CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk',
+    }
+    const context = await cryptoContext({ bindings, activeLookupKeyVersion: 2 })
+    const email = 'ambiguous-retained@example.test'
+    await seedStaff(context, {
+      id: 'stf_ambiguous_old',
+      email,
+      status: 'disabled',
+      lookupVersion: 1,
+    })
+    await seedStaff(context, {
+      id: 'stf_ambiguous_current',
+      email,
+      status: 'disabled',
+      lookupVersion: 2,
+    })
+    const before = await mutationFacts()
+    await expect(invite(context, {
+      displayName: 'Niejednoznaczna Osoba',
+      email,
+      role: 'owner',
+    }, {
+      idempotencyKey: 'ambiguous-retained-key',
+    })).rejects.toThrow(/^STAFF_INVITATION_CONFLICT$/)
+    expect(await mutationFacts()).toEqual(before)
+  })
+
+  it('has one winner for concurrent different-key reinvitations and leaves no loser state', async () => {
+    const context = await cryptoContext()
+    const retained = await seedStaff(context, {
+      id: 'stf_concurrent_reuse',
+      email: 'concurrent-reuse@example.test',
+      status: 'disabled',
+      role: 'coordinator',
+    })
+    const before = await mutationFacts()
+    const barrier = batchBarrier()
+    const settled = await Promise.allSettled([
+      invite(context, {
+        displayName: 'Pierwsza Próba',
+        email: 'concurrent-reuse@example.test',
+        role: 'owner',
+      }, {
+        db: barrier.db,
+        idempotencyKey: 'concurrent-reuse-one',
+        idFactory: ids('concurrent_reuse_one'),
+      }),
+      invite(context, {
+        displayName: 'Druga Próba',
+        email: 'concurrent-reuse@example.test',
+        role: 'specialist',
+      }, {
+        db: barrier.db,
+        idempotencyKey: 'concurrent-reuse-two',
+        idFactory: ids('concurrent_reuse_two'),
+      }),
+    ])
+    expect(settled.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+    expect(settled.find(({ status }) => status === 'rejected').reason)
+      .toMatchObject({ message: 'STAFF_INVITATION_CONFLICT' })
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 1,
+      versions: 2,
+      audits: 1,
+      idempotency: 1,
+      jobs: 2,
+    })
+    expect((await env.DB.prepare(
+      "SELECT count(*) AS count FROM staff_invitations WHERE staff_id=? AND status IN ('provisioning','pending')"
+    ).bind(retained.id).first()).count).toBe(1)
+  })
+
+  it('replays only an exact retained-row request and conflicts on a changed body', async () => {
+    const context = await cryptoContext()
+    await seedStaff(context, {
+      id: 'stf_reuse_replay',
+      email: 'reuse-replay@example.test',
+      status: 'disabled',
+    })
+    const before = await mutationFacts()
+    const input = {
+      displayName: 'Powtórzona Osoba',
+      email: 'reuse-replay@example.test',
+      role: 'owner',
+    }
+    const options = {
+      idempotencyKey: 'reuse-replay-key',
+      idFactory: ids('reuse_replay'),
+    }
+    const first = await invite(context, input, options)
+    await expect(invite(context, input, options)).resolves.toEqual(first)
+    await expect(invite(context, {
+      ...input,
+      role: 'specialist',
+    }, options)).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 1,
+      versions: 2,
+      audits: 1,
+      idempotency: 1,
+      jobs: 2,
+    })
+  })
+
+  it('applies the audited rolling rate limit to retained-row reinvitations', async () => {
+    const context = await cryptoContext()
+    for (let index = 1; index <= 6; index += 1) {
+      await seedStaff(context, {
+        id: `stf_reuse_limit_${index}`,
+        email: `reuse-limit-${index}@example.test`,
+        status: 'disabled',
+      })
+    }
+    const before = await mutationFacts()
+    for (let index = 1; index <= 5; index += 1) {
+      await invite(context, {
+        displayName: `Ponowienie ${index}`,
+        email: `reuse-limit-${index}@example.test`,
+        role: 'coordinator',
+      }, {
+        idempotencyKey: `reuse-limit-key-${index}`,
+        idFactory: ids(`reuse_limit_${index}`),
+      })
+    }
+    await expect(invite(context, {
+      displayName: 'Ponowienie 6',
+      email: 'reuse-limit-6@example.test',
+      role: 'coordinator',
+    }, {
+      idempotencyKey: 'reuse-limit-key-6',
+      idFactory: ids('reuse_limit_6'),
+    })).rejects.toThrow(/^RATE_LIMITED$/)
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 5,
+      versions: 10,
+      audits: 6,
+      idempotency: 5,
+      jobs: 10,
+    })
+    expect(await env.DB.prepare(
+      "SELECT status,version FROM staff_users WHERE id='stf_reuse_limit_6'"
+    ).first()).toEqual({ status: 'disabled', version: 1 })
+  })
+
+  it('rolls back every retained-row write when the final generation guard fails', async () => {
+    const context = await cryptoContext()
+    const retained = await seedStaff(context, {
+      id: 'stf_reuse_guard',
+      email: 'reuse-guard@example.test',
+      role: 'specialist',
+      status: 'disabled',
+      version: 4,
+    })
+    const before = await mutationFacts()
+    await expect(invite(context, {
+      displayName: 'Guard Ponowienia',
+      email: 'reuse-guard@example.test',
+      role: 'owner',
+    }, {
+      db: failedGenerationCasDb(),
+      idempotencyKey: 'reuse-guard-key',
+      idFactory: ids('reuse_guard'),
+    })).rejects.toThrow(/rate_limit_guard_failed/)
+    expect(await mutationFacts()).toEqual(before)
+    expect(await env.DB.prepare(
+      'SELECT role,status,version FROM staff_users WHERE id=?'
+    ).bind(retained.id).first()).toEqual({
+      role: 'specialist',
+      status: 'disabled',
+      version: 4,
+    })
+  })
+})
+
+describe('staff deactivation', () => {
+  it('authorizes only a currently active owner before target identity decryption', async () => {
+    const context = await cryptoContext()
+    const target = await seedStaff(context, {
+      id: 'stf_deactivate_authorization',
+      email: 'deactivate-authorization@example.test',
+      status: 'active',
+    })
+    const disabledOwner = await seedStaff(context, {
+      id: 'stf_deactivate_disabled_owner',
+      email: 'deactivate-disabled-owner@example.test',
+      role: 'owner',
+      status: 'disabled',
+    })
+    const before = await mutationFacts()
+    for (const actor of [
+      { id: 'stf_deactivate_coordinator', role: 'coordinator', specialistId: null, version: 1 },
+      { id: 'stf_deactivate_specialist', role: 'specialist', specialistId: 'sp_deactivate_specialist', version: 1 },
+      { id: disabledOwner.id, role: 'owner', specialistId: null, version: disabledOwner.version },
+    ]) {
+      await expect(deactivate(context, target.id, target.version, {
+        actor,
+        idempotencyKey: `deactivate-denied-${actor.role}-${actor.id}`,
+      })).rejects.toThrow(/^FORBIDDEN$/)
+    }
+    expect(await mutationFacts()).toEqual(before)
+  })
+
+  it('atomically disables staff without an open invitation and appends exact evidence', async () => {
+    const context = await cryptoContext()
+    const target = await seedStaff(context, {
+      id: 'stf_deactivate_active',
+      email: 'deactivate-active@example.test',
+      displayName: 'Aktywna Osoba',
+      role: 'coordinator',
+      status: 'active',
+      version: 3,
+    })
+    const before = await mutationFacts()
+    const generation = generationOf(before) + 1
+    const result = await deactivate(context, target.id, target.version, {
+      idempotencyKey: 'deactivate-active-key',
+      idFactory: ids('deactivate_active'),
+    })
+    expect(result).toEqual({
+      data: {
+        staff: {
+          id: target.id,
+          displayName: 'Aktywna Osoba',
+          email: 'deactivate-active@example.test',
+          role: 'coordinator',
+          status: 'disabled',
+          version: 4,
+          specialistId: null,
+        },
+      },
+    })
+    const stored = await env.DB.prepare('SELECT * FROM staff_users WHERE id=?').bind(target.id).first()
+    expect(stored).toMatchObject({
+      status: 'disabled',
+      disabled_at: now,
+      version: 4,
+      updated_at: now,
+    })
+    const history = await env.DB.prepare(
+      "SELECT * FROM record_versions WHERE entity_type='staff_user' AND entity_id=? AND version=4"
+    ).bind(target.id).first()
+    expect(JSON.parse(await decryptEnvelope(
+      context,
+      target.id,
+      'record_version',
+      history.snapshot_envelope,
+    ))).toEqual(stored)
+    expect(await env.DB.prepare(
+      "SELECT action,entity_type,entity_id,result,metadata_json FROM audit_events WHERE action='staff.deactivated' AND entity_id=?"
+    ).bind(target.id).first()).toEqual({
+      action: 'staff.deactivated',
+      entity_type: 'staff_user',
+      entity_id: target.id,
+      result: 'success',
+      metadata_json: JSON.stringify({ desiredGeneration: generation, staffVersion: 4 }),
+    })
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 0,
+      versions: 1,
+      audits: 1,
+      idempotency: 1,
+      jobs: 1,
+    })
+  })
+
+  it('revokes and versions the one open invitation in the same deactivation batch', async () => {
+    const context = await cryptoContext()
+    const created = await invite(context, {
+      displayName: 'Oczekująca Osoba',
+      email: 'deactivate-open@example.test',
+      role: 'specialist',
+    }, {
+      idempotencyKey: 'deactivate-open-create',
+      idFactory: ids('deactivate_open_create'),
+    })
+    const before = await mutationFacts()
+    const result = await deactivate(context, created.data.staff.id, created.data.staff.version, {
+      idempotencyKey: 'deactivate-open-key',
+      idFactory: ids('deactivate_open'),
+    })
+    expect(result.data.staff).toMatchObject({
+      id: created.data.staff.id,
+      status: 'disabled',
+      version: 2,
+    })
+    const invitation = await env.DB.prepare(
+      'SELECT * FROM staff_invitations WHERE id=?'
+    ).bind(created.data.invitation.id).first()
+    expect(invitation).toMatchObject({
+      status: 'revoked',
+      revoked_at: now,
+      version: 2,
+      updated_at: now,
+    })
+    const history = await env.DB.prepare(
+      "SELECT * FROM record_versions WHERE entity_type='staff_invitation' AND entity_id=? AND version=2"
+    ).bind(invitation.id).first()
+    expect(JSON.parse(await decryptEnvelope(
+      context,
+      invitation.id,
+      'record_version',
+      history.snapshot_envelope,
+    ))).toEqual(invitation)
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 0,
+      versions: 2,
+      audits: 1,
+      idempotency: 1,
+      jobs: 1,
+    })
+  })
+
+  it('replays an exact deactivation and conflicts on a changed body', async () => {
+    const context = await cryptoContext()
+    const target = await seedStaff(context, {
+      id: 'stf_deactivate_replay',
+      email: 'deactivate-replay@example.test',
+      status: 'active',
+      version: 2,
+    })
+    const before = await mutationFacts()
+    const options = {
+      idempotencyKey: 'deactivate-replay-key',
+      idFactory: ids('deactivate_replay'),
+    }
+    const first = await deactivate(context, target.id, 2, options)
+    await expect(deactivate(context, target.id, 2, options)).resolves.toEqual(first)
+    await expect(deactivate(context, target.id, 3, options))
+      .rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 0,
+      versions: 1,
+      audits: 1,
+      idempotency: 1,
+      jobs: 1,
+    })
+  })
+
+  it('returns only allow-listed stale-version detail and hides missing staff facts', async () => {
+    const context = await cryptoContext()
+    const target = await seedStaff(context, {
+      id: 'stf_deactivate_stale',
+      email: 'deactivate-stale@example.test',
+      status: 'active',
+      version: 4,
+    })
+    const before = await mutationFacts()
+    try {
+      await deactivate(context, target.id, 3, { idempotencyKey: 'deactivate-stale-key' })
+      throw new Error('expected stale version failure')
+    } catch (error) {
+      expect(error).toMatchObject({
+        message: 'VERSION_CONFLICT',
+        details: { currentVersion: 4 },
+      })
+      expect(Object.keys(error.details)).toEqual(['currentVersion'])
+    }
+    await expect(deactivate(context, 'stf_missing_opaque', 1, {
+      idempotencyKey: 'deactivate-missing-key',
+    })).rejects.toThrow(/^NOT_FOUND$/)
+    await expect(deactivate(context, 'not-canonical', 1, {
+      idempotencyKey: 'deactivate-path-key',
+    })).rejects.toThrow(/^NOT_FOUND$/)
+    try {
+      await deactivate(context, target.id, 0, {
+        idempotencyKey: 'deactivate-version-key',
+      })
+      throw new Error('expected version validation failure')
+    } catch (error) {
+      expect(error).toMatchObject({
+        message: 'VALIDATION_FAILED',
+        details: { field: 'version' },
+      })
+      expect(Object.keys(error.details)).toEqual(['field'])
+    }
+    expect(await mutationFacts()).toEqual(before)
+  })
+
+  it('preserves an unrelated identity collision without idempotency recovery', async () => {
+    const context = await cryptoContext()
+    const created = await invite(context, {
+      displayName: 'Źródło Kolizji',
+      email: 'deactivate-collision-source@example.test',
+      role: 'coordinator',
+    }, {
+      idempotencyKey: 'deactivate-collision-source',
+      idFactory: ids('deactivate_collision_source'),
+    })
+    const collision = await env.DB.prepare(
+      "SELECT id FROM record_versions WHERE entity_type='staff_user' AND entity_id=?"
+    ).bind(created.data.staff.id).first()
+    const target = await seedStaff(context, {
+      id: 'stf_deactivate_collision',
+      email: 'deactivate-collision@example.test',
+      status: 'active',
+    })
+    const before = await mutationFacts()
+    await expect(deactivate(context, target.id, target.version, {
+      idempotencyKey: 'deactivate-collision-key',
+      idFactory: () => collision.id,
+    })).rejects.toThrow(/identity_collision/)
+    expect(await mutationFacts()).toEqual(before)
+    expect(await env.DB.prepare(
+      'SELECT status,version FROM staff_users WHERE id=?'
+    ).bind(target.id).first()).toEqual({ status: 'active', version: 1 })
+  })
+
+  it('rolls back all deactivation writes when the final generation guard fails', async () => {
+    const context = await cryptoContext()
+    const target = await seedStaff(context, {
+      id: 'stf_deactivate_guard',
+      email: 'deactivate-guard@example.test',
+      status: 'active',
+    })
+    const before = await mutationFacts()
+    await expect(deactivate(context, target.id, target.version, {
+      db: failedGenerationCasDb(),
+      idempotencyKey: 'deactivate-guard-key',
+      idFactory: ids('deactivate_guard'),
+    })).rejects.toThrow()
+    expect(await mutationFacts()).toEqual(before)
+    expect(await env.DB.prepare(
+      'SELECT status,version FROM staff_users WHERE id=?'
+    ).bind(target.id).first()).toEqual({ status: 'active', version: 1 })
+  })
+
+  it('maps only the exact last-active-owner sentinel and leaves every row unchanged', async () => {
+    const context = await cryptoContext()
+    await retainOnlyActiveOwners([context.owner.id])
+    const before = await mutationFacts()
+    await expect(deactivate(context, context.owner.id, context.owner.version, {
+      idempotencyKey: 'deactivate-last-owner',
+      idFactory: ids('deactivate_last_owner'),
+    })).rejects.toThrow(/^LAST_ACTIVE_OWNER$/)
+    expect(await mutationFacts()).toEqual(before)
+    expect(await env.DB.prepare(
+      'SELECT status,version FROM staff_users WHERE id=?'
+    ).bind(context.owner.id).first()).toEqual({ status: 'active', version: 1 })
+  })
+
+  it('preserves one active owner under forced concurrent last-owner attempts', async () => {
+    const context = await cryptoContext()
+    const second = await seedStaff(context, {
+      id: 'stf_second_owner',
+      email: 'second-owner@example.test',
+      role: 'owner',
+      status: 'active',
+    })
+    const secondActor = {
+      id: second.id,
+      role: 'owner',
+      specialistId: null,
+      version: second.version,
+    }
+    await retainOnlyActiveOwners([context.owner.id, second.id])
+    const before = await mutationFacts()
+    const barrier = batchBarrier()
+    const settled = await Promise.allSettled([
+      deactivate(context, second.id, second.version, {
+        db: barrier.db,
+        actor: context.owner,
+        idempotencyKey: 'concurrent-owner-one',
+        correlationId: '66666666-6666-4666-8666-666666666666',
+        idFactory: ids('concurrent_owner_one'),
+      }),
+      deactivate(context, context.owner.id, context.owner.version, {
+        db: barrier.db,
+        actor: secondActor,
+        idempotencyKey: 'concurrent-owner-two',
+        correlationId: '77777777-7777-4777-8777-777777777777',
+        idFactory: ids('concurrent_owner_two'),
+      }),
+    ])
+    expect(settled.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+    expect(settled.find(({ status }) => status === 'rejected').reason)
+      .toMatchObject({ message: 'LAST_ACTIVE_OWNER' })
+    expect((await env.DB.prepare(
+      "SELECT count(*) AS count FROM staff_users WHERE role='owner' AND status='active'"
+    ).first()).count).toBe(1)
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 0,
+      versions: 1,
+      audits: 1,
+      idempotency: 1,
+      jobs: 1,
+    })
+  })
+})
+
+describe('staff lifecycle generation and listing', () => {
+  it('uses three increasing generations and ordinary reconcile keys for A-B-A', async () => {
+    const context = await cryptoContext()
+    const before = await mutationFacts()
+    const first = await invite(context, {
+      displayName: 'A B A',
+      email: 'a-b-a@example.test',
+      role: 'coordinator',
+    }, {
+      idempotencyKey: 'a-b-a-invite-key',
+      idFactory: ids('a_b_a_invite'),
+    })
+    const disabled = await deactivate(context, first.data.staff.id, first.data.staff.version, {
+      idempotencyKey: 'a-b-a-disable-key',
+      idFactory: ids('a_b_a_disable'),
+    })
+    const repeated = await invite(context, {
+      displayName: 'A B A',
+      email: 'a-b-a@example.test',
+      role: 'coordinator',
+    }, {
+      idempotencyKey: 'a-b-a-reinvite-key',
+      idFactory: ids('a_b_a_reinvite'),
+    })
+    expect(disabled.data.staff.status).toBe('disabled')
+    expect(repeated.data.staff).toMatchObject({
+      id: first.data.staff.id,
+      status: 'pending',
+      version: 3,
+    })
+    const generations = [
+      generationOf(before) + 1,
+      generationOf(before) + 2,
+      generationOf(before) + 3,
+    ]
+    expect(generationOf(await mutationFacts())).toBe(generations[2])
+    expect((await env.DB.prepare(
+      `SELECT idempotency_key FROM outbox_jobs
+       WHERE type='staff.access.reconcile' AND idempotency_key IN (?,?,?)
+       ORDER BY idempotency_key`
+    ).bind(...generations.map((generation) => `staff.access.reconcile:${generation}`)).all()).results)
+      .toEqual(generations.map((generation) => ({
+        idempotency_key: `staff.access.reconcile:${generation}`,
+      })))
+  })
+
+  it('authorizes a current active owner before decrypting staff-list identities', async () => {
+    const context = await cryptoContext()
+    const disabledOwner = await seedStaff(context, {
+      id: 'stf_disabled_list_owner',
+      email: 'disabled-list-owner@example.test',
+      role: 'owner',
+      status: 'disabled',
+    })
+    const before = await mutationFacts()
+    for (const actor of [
+      { id: 'stf_list_coordinator', role: 'coordinator', specialistId: null, version: 1 },
+      { id: 'stf_list_specialist', role: 'specialist', specialistId: 'sp_list_specialist', version: 1 },
+      { id: disabledOwner.id, role: 'owner', specialistId: null, version: disabledOwner.version },
+    ]) {
+      await expect(list(context, { actor })).rejects.toThrow(/^FORBIDDEN$/)
+    }
+    expect(await mutationFacts()).toEqual(before)
+  })
+
+  it('sorts with the exact Polish collator and opaque-id tie breaker', async () => {
+    const context = await cryptoContext()
+    for (const row of [
+      { id: 'stf_sort_z', displayName: 'Żaneta', email: 'sort-z@example.test' },
+      { id: 'stf_sort_a', displayName: 'Ądam', email: 'sort-a@example.test' },
+      { id: 'stf_sort_10', displayName: 'Zofia 10', email: 'sort-10@example.test' },
+      { id: 'stf_sort_2', displayName: 'Zofia 2', email: 'sort-2@example.test' },
+      { id: 'stf_tie_b', displayName: 'ewa', email: 'tie-b@example.test' },
+      { id: 'stf_tie_a', displayName: 'Ewa', email: 'tie-a@example.test' },
+    ]) {
+      await seedStaff(context, {
+        ...row,
+        status: 'disabled',
+      })
+    }
+    const result = await list(context)
+    const selectedIds = new Set([
+      context.owner.id,
+      'stf_sort_z',
+      'stf_sort_a',
+      'stf_sort_10',
+      'stf_sort_2',
+      'stf_tie_b',
+      'stf_tie_a',
+    ])
+    expect(result.data.staff
+      .filter(({ id }) => selectedIds.has(id))
+      .map(({ id, displayName }) => ({ id, displayName }))).toEqual([
+      { id: 'stf_sort_a', displayName: 'Ądam' },
+      { id: 'stf_tie_a', displayName: 'Ewa' },
+      { id: 'stf_tie_b', displayName: 'ewa' },
+      { id: context.owner.id, displayName: 'Owner Testowy' },
+      { id: 'stf_sort_2', displayName: 'Zofia 2' },
+      { id: 'stf_sort_10', displayName: 'Zofia 10' },
+      { id: 'stf_sort_z', displayName: 'Żaneta' },
+    ])
+  })
+
+  it('returns the exact public shape with only the current open invitation and no retained secrets', async () => {
+    const context = await cryptoContext()
+    const target = await seedStaff(context, {
+      id: 'stf_list_shape',
+      email: 'list-shape@example.test',
+      displayName: 'Lista Kształt',
+      role: 'specialist',
+      status: 'pending',
+      version: 5,
+    })
+    await seedInvitation(context, {
+      id: 'inv_terminal_secret',
+      staffId: target.id,
+      email: 'old-list-shape@example.test',
+      displayName: 'Stara Tajna Nazwa',
+      role: 'coordinator',
+      status: 'revoked',
+      version: 7,
+      createdAt: new Date(NOW_MS - DAY_MS).toISOString(),
+    })
+    const open = await seedInvitation(context, {
+      id: 'inv_list_open',
+      staffId: target.id,
+      email: 'list-shape@example.test',
+      displayName: 'Lista Kształt',
+      role: 'specialist',
+      status: 'pending',
+      version: 3,
+      expiresAt: new Date(NOW_MS + DAY_MS).toISOString(),
+      emailSentAt: now,
+    })
+    const result = await list(context)
+    const row = result.data.staff.find(({ id }) => id === target.id)
+    expect(row).toEqual({
+      id: target.id,
+      displayName: 'Lista Kształt',
+      email: 'list-shape@example.test',
+      role: 'specialist',
+      status: 'pending',
+      version: 5,
+      specialistId: specialistIdFor(target.id),
+      invitation: {
+        id: open.id,
+        status: 'pending',
+        expiresAt: new Date(NOW_MS + DAY_MS).toISOString(),
+        emailSentAt: now,
+        version: 3,
+      },
+    })
+    expect(Object.keys(row)).toEqual([
+      'id',
+      'displayName',
+      'email',
+      'role',
+      'status',
+      'version',
+      'specialistId',
+      'invitation',
+    ])
+    expect(Object.keys(row.invitation)).toEqual([
+      'id',
+      'status',
+      'expiresAt',
+      'emailSentAt',
+      'version',
+    ])
+    const serialized = JSON.stringify(result)
+    for (const secret of [
+      target.email_lookup,
+      target.email_envelope,
+      target.display_name_envelope,
+      'inv_terminal_secret',
+      'old-list-shape@example.test',
+      'Stara Tajna Nazwa',
+    ]) expect(serialized).not.toContain(secret)
   })
 })

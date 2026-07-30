@@ -13,6 +13,7 @@ import { enqueueOutboxStatement } from '../jobs/outbox.js'
 import { authorize } from './policy.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
 const CENTRE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
@@ -64,9 +65,6 @@ async function versionRecord(db, context, row, entityType, changedBy, now, corre
       .bind(id, entityType, row.id, row.version, await envelope(context, row.id, 'record_version', JSON.stringify(row)), changedBy, now, correlationId),
   }
 }
-async function versionStatement(...args) {
-  return (await versionRecord(...args)).statement
-}
 async function state(db, key) {
   const row = await db.prepare('SELECT key,value_json,version FROM system_state WHERE key=?').bind(key).first()
   if (!row || !Number.isSafeInteger(row.version) || row.version < 1) throw new Error('INTERNAL_ERROR')
@@ -83,23 +81,66 @@ async function desiredGenerationStatement(db, now, idFactory) {
       .bind(JSON.stringify({ generation }), now, current.key, current.version),
   }
 }
-async function matchingIdentities(db, context, email) {
+async function matchingIdentityRows(db, context, email) {
   const candidates = await blindEmailCandidates(email, context.keyring)
   const placeholders = candidates.map(() => '?').join(',')
   const [staff, invitations] = await Promise.all([
-    db.prepare(`SELECT id,email_envelope FROM staff_users WHERE email_lookup IN (${placeholders})`)
+    db.prepare(`SELECT * FROM staff_users WHERE email_lookup IN (${placeholders})`)
       .bind(...candidates).all(),
-    db.prepare(`SELECT id,email_envelope FROM staff_invitations WHERE email_lookup IN (${placeholders})`)
+    db.prepare(`SELECT id,staff_id,email_envelope FROM staff_invitations WHERE email_lookup IN (${placeholders})`)
       .bind(...candidates).all(),
   ])
-  let exact = false
-  for (const row of [...staff.results, ...invitations.results]) {
+  const exactStaffIds = new Set()
+  for (const row of staff.results) {
     try {
       const value = await decryptForScope(context.keyring, context.dataKey, { expectedScope: context.scope, recordId: row.id, field: 'email', envelope: JSON.parse(row.email_envelope) })
-      if (value === email) exact = true
+      if (value === email) exactStaffIds.add(row.id)
     } catch { throw new Error('CRYPTO_FAILURE') }
   }
-  return exact
+  for (const row of invitations.results) {
+    try {
+      const value = await decryptForScope(context.keyring, context.dataKey, { expectedScope: context.scope, recordId: row.id, field: 'email', envelope: JSON.parse(row.email_envelope) })
+      if (value === email) exactStaffIds.add(row.staff_id)
+    } catch { throw new Error('CRYPTO_FAILURE') }
+  }
+  const rowsById = new Map(staff.results.map((row) => [row.id, row]))
+  const missingIds = [...exactStaffIds].filter((id) => !rowsById.has(id))
+  if (missingIds.length) {
+    const linked = (await db.prepare(
+      `SELECT * FROM staff_users WHERE id IN (${missingIds.map(() => '?').join(',')})`
+    ).bind(...missingIds).all()).results
+    for (const row of linked) rowsById.set(row.id, row)
+  }
+  if ([...exactStaffIds].some((id) => !rowsById.has(id))) throw new Error('INTERNAL_ERROR')
+  return [...exactStaffIds].map((id) => rowsById.get(id))
+}
+
+async function retainedIdentity(db, context, email, now) {
+  const matches = await matchingIdentityRows(db, context, email)
+  if (matches.length > 1) throw new Error('STAFF_INVITATION_CONFLICT')
+  const staff = matches[0] ?? null
+  if (!staff) return { staff: null, expiredOpen: null }
+  const invitations = (await db.prepare(
+    'SELECT * FROM staff_invitations WHERE staff_id=? ORDER BY created_at,id'
+  ).bind(staff.id).all()).results
+  const open = invitations.filter(({ status }) => ['provisioning', 'pending'].includes(status))
+  if (staff.status === 'active' || open.length > 1) {
+    throw new Error('STAFF_INVITATION_CONFLICT')
+  }
+  if (open.length === 1 && open[0].expires_at > now) {
+    throw new Error('STAFF_INVITATION_CONFLICT')
+  }
+  const expiredOpen = open[0] ?? null
+  if (staff.status === 'disabled' && !expiredOpen) return { staff, expiredOpen: null }
+  const terminalPreActivation = invitations.length > 0 && invitations.every((invitation) => (
+    ['expired', 'revoked'].includes(invitation.status)
+      || invitation.id === expiredOpen?.id
+  ))
+  if (staff.status !== 'pending' || !terminalPreActivation
+    || (expiredOpen && expiredOpen.expires_at > now)) {
+    throw new Error('STAFF_INVITATION_CONFLICT')
+  }
+  return { staff, expiredOpen }
 }
 
 async function activeOwner(db, actor, nowMs) {
@@ -139,20 +180,25 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
   }
   const replay = await inspectIdempotency(db, cryptoContext, idem)
   if (replay) return replay.body
-  if (await matchingIdentities(db, cryptoContext, request.email)) {
-    throw new Error('STAFF_INVITATION_CONFLICT')
-  }
-
   const now = iso(nowMs)
+  const retained = await retainedIdentity(db, cryptoContext, request.email, now)
+  const reused = retained.staff
   const expiresAt = iso(nowMs + 7 * DAY_MS)
-  const staffId = prefixedIdFrom('stf', idFactory)
+  const staffId = reused?.id ?? prefixedIdFrom('stf', idFactory)
   const invitationId = prefixedIdFrom('inv', idFactory)
   const lookup = await blindEmailIndex(request.email, cryptoContext.keyring)
   const staff = {
-    id: staffId, email_lookup: lookup, email_envelope: await envelope(cryptoContext, staffId, 'email', request.email),
+    ...(reused ?? {}),
+    id: staffId,
+    email_lookup: lookup,
+    email_envelope: await envelope(cryptoContext, staffId, 'email', request.email),
     display_name_envelope: await envelope(cryptoContext, staffId, 'display_name', request.displayName), role: request.role,
     status: 'pending', access_subject: null, specialist_id: request.role === 'specialist' ? specialistIdFor(staffId) : null,
-    version: 1, activated_at: null, disabled_at: null, created_at: now, updated_at: now,
+    version: reused ? reused.version + 1 : 1,
+    activated_at: null,
+    disabled_at: null,
+    created_at: reused?.created_at ?? now,
+    updated_at: now,
   }
   const invitation = {
     id: invitationId,
@@ -172,6 +218,14 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     created_at: now,
     updated_at: now,
   }
+  const expiredOpen = retained.expiredOpen
+    ? {
+        ...retained.expiredOpen,
+        status: 'expired',
+        version: retained.expiredOpen.version + 1,
+        updated_at: now,
+      }
+    : null
   const desired = await desiredGenerationStatement(db, now, idFactory)
   const body = {
     data: {
@@ -185,6 +239,18 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
   const invitationVersion = await versionRecord(
     db, cryptoContext, invitation, 'staff_invitation', owner.id, now, correlationId, idFactory,
   )
+  const expiredOpenVersion = expiredOpen
+    ? await versionRecord(
+        db,
+        cryptoContext,
+        expiredOpen,
+        'staff_invitation',
+        owner.id,
+        now,
+        correlationId,
+        idFactory,
+      )
+    : null
   const auditId = idFrom(idFactory)
   const reconcileId = idFrom(idFactory)
   const expiryJobId = idFrom(idFactory)
@@ -230,14 +296,67 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     actorId: owner.id,
     correlationId,
   })
-  uow.domain(
-    db.prepare('INSERT INTO staff_users (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,specialist_id,version,activated_at,disabled_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(...Object.values(plain(staff, ['id', 'email_lookup', 'email_envelope', 'display_name_envelope', 'role', 'status', 'access_subject', 'specialist_id', 'version', 'activated_at', 'disabled_at', 'created_at', 'updated_at'])))
-  )
-  uow.domain(
-    db.prepare('INSERT INTO staff_invitations (id,staff_id,email_lookup,email_envelope,display_name_envelope,role,status,inviter_id,expires_at,access_allowed_at,email_sent_at,activated_at,revoked_at,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .bind(...Object.values(plain(invitation, ['id', 'staff_id', 'email_lookup', 'email_envelope', 'display_name_envelope', 'role', 'status', 'inviter_id', 'expires_at', 'access_allowed_at', 'email_sent_at', 'activated_at', 'revoked_at', 'version', 'created_at', 'updated_at'])))
-  )
+  if (expiredOpen) {
+    uow.domain(
+      db.prepare(
+        `UPDATE staff_invitations
+         SET status='expired',version=version+1,updated_at=?
+         WHERE id=? AND staff_id=? AND version=?
+           AND status IN ('provisioning','pending') AND expires_at<=?`
+      ).bind(
+        now,
+        expiredOpen.id,
+        expiredOpen.staff_id,
+        retained.expiredOpen.version,
+        now,
+      )
+    )
+    uow.version(expiredOpenVersion.statement)
+  }
+  if (reused) {
+    uow.domain(
+      db.prepare(
+        `UPDATE staff_users
+         SET email_lookup=?,email_envelope=?,display_name_envelope=?,role=?,
+             status='pending',access_subject=NULL,specialist_id=?,
+             activated_at=NULL,disabled_at=NULL,version=version+1,updated_at=?
+         WHERE id=? AND version=? AND status=?`
+      ).bind(
+        staff.email_lookup,
+        staff.email_envelope,
+        staff.display_name_envelope,
+        staff.role,
+        staff.specialist_id,
+        now,
+        reused.id,
+        reused.version,
+        reused.status,
+      )
+    )
+    uow.domain(
+      db.prepare(
+        `INSERT INTO staff_invitations
+         (id,staff_id,email_lookup,email_envelope,display_name_envelope,role,status,
+          inviter_id,expires_at,access_allowed_at,email_sent_at,activated_at,revoked_at,
+          version,created_at,updated_at)
+         SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE changes()=1`
+      ).bind(...Object.values(plain(invitation, [
+        'id', 'staff_id', 'email_lookup', 'email_envelope', 'display_name_envelope',
+        'role', 'status', 'inviter_id', 'expires_at', 'access_allowed_at',
+        'email_sent_at', 'activated_at', 'revoked_at', 'version', 'created_at',
+        'updated_at',
+      ])))
+    )
+  } else {
+    uow.domain(
+      db.prepare('INSERT INTO staff_users (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,specialist_id,version,activated_at,disabled_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .bind(...Object.values(plain(staff, ['id', 'email_lookup', 'email_envelope', 'display_name_envelope', 'role', 'status', 'access_subject', 'specialist_id', 'version', 'activated_at', 'disabled_at', 'created_at', 'updated_at'])))
+    )
+    uow.domain(
+      db.prepare('INSERT INTO staff_invitations (id,staff_id,email_lookup,email_envelope,display_name_envelope,role,status,inviter_id,expires_at,access_allowed_at,email_sent_at,activated_at,revoked_at,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .bind(...Object.values(plain(invitation, ['id', 'staff_id', 'email_lookup', 'email_envelope', 'display_name_envelope', 'role', 'status', 'inviter_id', 'expires_at', 'access_allowed_at', 'email_sent_at', 'activated_at', 'revoked_at', 'version', 'created_at', 'updated_at'])))
+    )
+  }
   uow.version(staffVersion.statement)
   uow.version(invitationVersion.statement)
   uow.domain(desired.statement)
@@ -271,6 +390,27 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     createdAt: now,
     expiresAt: iso(nowMs + DAY_MS),
   }))
+  const expiredOpenPostcondition = expiredOpen
+    ? `AND EXISTS (
+        SELECT 1 FROM staff_invitations
+        WHERE id=? AND staff_id=? AND status='expired' AND version=? AND updated_at=?
+      )
+      AND EXISTS (
+        SELECT 1 FROM record_versions
+        WHERE id=? AND entity_type='staff_invitation' AND entity_id=? AND version=?
+      )`
+    : ''
+  const expiredOpenBindings = expiredOpen
+    ? [
+        expiredOpen.id,
+        expiredOpen.staff_id,
+        expiredOpen.version,
+        now,
+        expiredOpenVersion.id,
+        expiredOpen.id,
+        expiredOpen.version,
+      ]
+    : []
   uow.guard(rateLimitGuardStatement(db, {
     auditId,
     actorId: owner.id,
@@ -279,7 +419,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     since: iso(nowMs - HOUR_MS),
     postconditionSql: `EXISTS (
         SELECT 1 FROM staff_users
-        WHERE id=? AND role=? AND status='pending' AND version=1
+        WHERE id=? AND email_lookup=? AND role=? AND status='pending' AND version=?
       )
       AND EXISTS (
         SELECT 1 FROM staff_invitations
@@ -287,7 +427,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       )
       AND EXISTS (
         SELECT 1 FROM record_versions
-        WHERE id=? AND entity_type='staff_user' AND entity_id=? AND version=1
+        WHERE id=? AND entity_type='staff_user' AND entity_id=? AND version=?
       )
       AND EXISTS (
         SELECT 1 FROM record_versions
@@ -309,15 +449,18 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
         SELECT 1 FROM idempotency_records
         WHERE actor_id=? AND operation='staff.invite' AND idempotency_key=?
           AND resource_type='staff_invitation' AND resource_id=?
-      )`,
+      )${expiredOpen ? `\n      ${expiredOpenPostcondition}` : ''}`,
     postconditionBindings: [
       staffId,
+      staff.email_lookup,
       staff.role,
+      staff.version,
       invitationId,
       staffId,
       expiresAt,
       staffVersion.id,
       staffId,
+      staff.version,
       invitationVersion.id,
       invitationId,
       JSON.stringify({ generation: desired.generation }),
@@ -330,6 +473,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       owner.id,
       idempotencyKey,
       invitationId,
+      ...expiredOpenBindings,
     ],
   }))
   try {
@@ -344,15 +488,35 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     return body
   } catch (error) {
     if (isD1IdentityCollision(error)) {
-      const recovered = await recoverIdempotencyAfterCollision(db, cryptoContext, idem, error)
-      return recovered.body
+      try {
+        const recovered = await recoverIdempotencyAfterCollision(db, cryptoContext, idem, error)
+        return recovered.body
+      } catch (recoveryError) {
+        if (recoveryError !== error) throw recoveryError
+        const current = await matchingIdentityRows(db, cryptoContext, request.email)
+        const reuseChanged = reused && current.some((row) => (
+          row.id === reused.id && row.version !== reused.version
+        ))
+        if ((!reused && current.length > 0) || reuseChanged || current.length > 1) {
+          throw new Error('STAFF_INVITATION_CONFLICT')
+        }
+      }
     }
     throw error
   }
 }
 
-export async function listStaff({ db, cryptoContext } = {}) {
-  const rows = (await db.prepare('SELECT * FROM staff_users').all()).results
+export async function listStaff({ db, cryptoContext, actor, nowMs } = {}) {
+  if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
+    || !cryptoContext?.scope || !Number.isSafeInteger(nowMs) || nowMs < 0) {
+    throw new Error('VALIDATION_FAILED')
+  }
+  await activeOwner(db, actor, nowMs)
+  const rows = (await db.prepare(
+    `SELECT id,email_lookup,email_envelope,display_name_envelope,role,status,
+            access_subject,specialist_id,version,activated_at,disabled_at,created_at,updated_at
+     FROM staff_users`
+  ).all()).results
   const collator = new Intl.Collator('pl-PL', { sensitivity: 'base', numeric: true })
   const staff = []
   for (const row of rows) {
@@ -368,31 +532,231 @@ export async function listStaff({ db, cryptoContext } = {}) {
 }
 
 export async function deactivateStaff({ db, cryptoContext, actor, staffId, version, idempotencyKey, correlationId, nowMs, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
-  if (!db?.prepare || actor?.role !== 'owner') throw new Error('FORBIDDEN')
-  if (!validId(staffId)) throw new Error('NOT_FOUND')
+  if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
+    || !cryptoContext?.scope || !validId(correlationId) || !Number.isSafeInteger(nowMs)
+    || nowMs < 0 || !IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) {
+    throw new Error('VALIDATION_FAILED')
+  }
+  const owner = await activeOwner(db, actor, nowMs)
+  if (!STAFF_ID.test(staffId ?? '')) throw new Error('NOT_FOUND')
   if (!Number.isSafeInteger(version) || version < 1) validation('version')
-  if (!validId(idempotencyKey)) throw new Error('VALIDATION_FAILED')
-  const requestDigest = JSON.stringify({ version }); const idem = { actorId: actor.id, operation: 'staff.deactivate', idempotencyKey, requestDigest, expectedScope: cryptoContext.scope }
-  const replay = await inspectIdempotency(db, cryptoContext, idem); if (replay) return replay.body
-  const row = await db.prepare('SELECT * FROM staff_users WHERE id=?').bind(staffId).first(); if (!row) throw new Error('NOT_FOUND')
-  if (row.version !== version) { const error = new Error('VERSION_CONFLICT'); error.details = { currentVersion: row.version }; throw error }
-  const now = iso(nowMs); const staff = { ...row, status: 'disabled', disabled_at: now, version: row.version + 1, updated_at: now }
-  const desired = await desiredGenerationStatement(db, now, idFactory)
-  const invitation = await db.prepare("SELECT * FROM staff_invitations WHERE staff_id=? AND status IN ('provisioning','pending')").bind(staffId).first()
+  const requestDigest = JSON.stringify({ version })
+  const idem = {
+    actorId: owner.id,
+    operation: 'staff.deactivate',
+    idempotencyKey,
+    requestDigest,
+    expectedScope: cryptoContext.scope,
+  }
+  const replay = await inspectIdempotency(db, cryptoContext, idem)
+  if (replay) return replay.body
+  const row = await db.prepare('SELECT * FROM staff_users WHERE id=?').bind(staffId).first()
+  if (!row) throw new Error('NOT_FOUND')
+  if (row.version !== version) {
+    const error = new Error('VERSION_CONFLICT')
+    error.details = { currentVersion: row.version }
+    throw error
+  }
+  const invitations = (await db.prepare(
+    "SELECT * FROM staff_invitations WHERE staff_id=? AND status IN ('provisioning','pending')"
+  ).bind(staffId).all()).results
+  if (invitations.length > 1) throw new Error('INTERNAL_ERROR')
+  const invitation = invitations[0] ?? null
   const [email, displayName] = await Promise.all([
     decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, { expectedScope: cryptoContext.scope, recordId: row.id, field: 'email', envelope: JSON.parse(row.email_envelope) }),
     decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, { expectedScope: cryptoContext.scope, recordId: row.id, field: 'display_name', envelope: JSON.parse(row.display_name_envelope) }),
   ])
+  const now = iso(nowMs)
+  const staff = {
+    ...row,
+    status: 'disabled',
+    disabled_at: now,
+    version: row.version + 1,
+    updated_at: now,
+  }
+  const revokedInvitation = invitation
+    ? {
+        ...invitation,
+        status: 'revoked',
+        revoked_at: now,
+        version: invitation.version + 1,
+        updated_at: now,
+      }
+    : null
   const body = { data: { staff: publicStaff({ ...staff, displayName, email }) } }
-  const statements = [
-    db.prepare("UPDATE staff_users SET status='disabled',disabled_at=?,version=version+1,updated_at=? WHERE id=? AND version=?").bind(now, now, staffId, version),
-    await versionStatement(db, cryptoContext, staff, 'staff_user', actor.id, now, correlationId, idFactory), desired.statement,
-    auditEventStatement(db, { id: idFrom(idFactory), occurredAt: now, actorStaffId: actor.id, action: 'staff.deactivated', entityType: 'staff_user', entityId: staffId, result: 'success', correlationId, metadata: { staffVersion: staff.version, desiredGeneration: desired.generation }, reasonEnvelope: null }),
-    await enqueueOutboxStatement(db, cryptoContext, { id: idFrom(idFactory), type: 'staff.access.reconcile', aggregateType: 'access_group', aggregateId: 'centre_1', payload: { generation: desired.generation, actorId: actor.id }, idempotencyKey: `staff.access.reconcile:${desired.generation}`, scheduledAt: now, nowMs }),
-    await createIdempotencyStatement(db, cryptoContext, { ...idem, resourceType: 'staff_user', resourceId: staffId, response: { status: 200, body }, createdAt: now, expiresAt: iso(nowMs + 86_400_000) }),
-  ]
-  if (invitation) statements.splice(1, 0, db.prepare("UPDATE staff_invitations SET status='revoked',revoked_at=?,version=version+1,updated_at=? WHERE id=? AND version=?").bind(now, now, invitation.id, invitation.version))
-  try { await db.batch(statements); return body } catch (error) { if (isD1LastActiveOwner(error)) throw new Error('LAST_ACTIVE_OWNER'); throw error }
+  const staffVersion = await versionRecord(
+    db, cryptoContext, staff, 'staff_user', owner.id, now, correlationId, idFactory,
+  )
+  const invitationVersion = revokedInvitation
+    ? await versionRecord(
+        db,
+        cryptoContext,
+        revokedInvitation,
+        'staff_invitation',
+        owner.id,
+        now,
+        correlationId,
+        idFactory,
+      )
+    : null
+  const desired = await desiredGenerationStatement(db, now, idFactory)
+  const auditId = idFrom(idFactory)
+  const reconcileId = idFrom(idFactory)
+  const reconcileKey = `staff.access.reconcile:${desired.generation}`
+  const uow = createUnitOfWork(db, {
+    mode: 'mutation',
+    actorId: owner.id,
+    correlationId,
+  })
+  uow.domain(
+    db.prepare(
+      `UPDATE staff_users
+       SET status='disabled',disabled_at=?,version=version+1,updated_at=?
+       WHERE id=? AND version=?`
+    ).bind(now, now, staffId, version)
+  )
+  if (revokedInvitation) {
+    uow.domain(
+      db.prepare(
+        `UPDATE staff_invitations
+         SET status='revoked',revoked_at=?,version=version+1,updated_at=?
+         WHERE id=? AND staff_id=? AND version=? AND status IN ('provisioning','pending')`
+      ).bind(
+        now,
+        now,
+        revokedInvitation.id,
+        staffId,
+        invitation.version,
+      )
+    )
+  }
+  uow.version(staffVersion.statement)
+  if (invitationVersion) uow.version(invitationVersion.statement)
+  uow.domain(desired.statement)
+  uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
+    id: reconcileId,
+    type: 'staff.access.reconcile',
+    aggregateType: 'access_group',
+    aggregateId: 'centre_1',
+    payload: { generation: desired.generation, actorId: owner.id },
+    idempotencyKey: reconcileKey,
+    scheduledAt: now,
+    nowMs,
+    onlyIfPreviousStatementChanged: true,
+  }))
+  uow.audit(auditEventStatement(db, {
+    id: auditId,
+    occurredAt: now,
+    actorStaffId: owner.id,
+    action: 'staff.deactivated',
+    entityType: 'staff_user',
+    entityId: staffId,
+    result: 'success',
+    correlationId,
+    metadata: {
+      staffVersion: staff.version,
+      desiredGeneration: desired.generation,
+    },
+    reasonEnvelope: null,
+  }))
+  uow.idempotency(await createIdempotencyStatement(db, cryptoContext, {
+    ...idem,
+    resourceType: 'staff_user',
+    resourceId: staffId,
+    response: { status: 200, body },
+    createdAt: now,
+    expiresAt: iso(nowMs + DAY_MS),
+  }))
+  const invitationPostcondition = revokedInvitation
+    ? `AND EXISTS (
+        SELECT 1 FROM staff_invitations
+        WHERE id=? AND staff_id=? AND status='revoked' AND revoked_at=?
+          AND version=? AND updated_at=?
+      )
+      AND EXISTS (
+        SELECT 1 FROM record_versions
+        WHERE id=? AND entity_type='staff_invitation' AND entity_id=? AND version=?
+      )`
+    : ''
+  const invitationBindings = revokedInvitation
+    ? [
+        revokedInvitation.id,
+        staffId,
+        now,
+        revokedInvitation.version,
+        now,
+        invitationVersion.id,
+        revokedInvitation.id,
+        revokedInvitation.version,
+      ]
+    : []
+  uow.guard(
+    db.prepare(
+      `INSERT INTO audit_events
+       (id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
+        reason_envelope,correlation_id,metadata_json)
+       SELECT id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
+              reason_envelope,correlation_id,metadata_json
+       FROM audit_events
+       WHERE id=? AND NOT (
+         EXISTS (
+           SELECT 1 FROM staff_users
+           WHERE id=? AND status='disabled' AND disabled_at=? AND version=? AND updated_at=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM record_versions
+           WHERE id=? AND entity_type='staff_user' AND entity_id=? AND version=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM system_state
+           WHERE key='access.desired_generation' AND value_json=? AND version=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_jobs
+           WHERE id=? AND type='staff.access.reconcile' AND idempotency_key=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM idempotency_records
+           WHERE actor_id=? AND operation='staff.deactivate' AND idempotency_key=?
+             AND resource_type='staff_user' AND resource_id=?
+         )
+         ${invitationPostcondition}
+       )`
+    ).bind(
+      auditId,
+      staffId,
+      now,
+      staff.version,
+      now,
+      staffVersion.id,
+      staffId,
+      staff.version,
+      JSON.stringify({ generation: desired.generation }),
+      desired.priorVersion + 1,
+      reconcileId,
+      reconcileKey,
+      owner.id,
+      idempotencyKey,
+      staffId,
+      ...invitationBindings,
+    )
+  )
+  try {
+    await uow.commit()
+    return body
+  } catch (error) {
+    if (isD1LastActiveOwner(error)) throw new Error('LAST_ACTIVE_OWNER')
+    if (isD1IdentityCollision(error)) {
+      const recovered = await recoverIdempotencyAfterCollision(
+        db,
+        cryptoContext,
+        idem,
+        error,
+      )
+      return recovered.body
+    }
+    throw error
+  }
 }
 
 export async function expireInvitation({ db, cryptoContext, actorId, invitationId, correlationId, nowMs, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
