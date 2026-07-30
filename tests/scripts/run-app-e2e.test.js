@@ -8,12 +8,14 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { createServer } from 'node:net'
-import {
+import { createConnection, createServer } from 'node:net'
+import * as appE2ERunner from '../../scripts/run-app-e2e.mjs'
+
+const {
   assertReadySession,
   runBoundedAppChild,
   runAppE2E,
-} from '../../scripts/run-app-e2e.mjs'
+} = appE2ERunner
 import { CAPABILITIES } from '../../worker/identity/policy.js'
 
 const CSP = "default-src 'none'"
@@ -51,6 +53,183 @@ const fakeHarnessDeps = () => ({
   prepareHarness: async (path) => fakeHarness(path),
   scanHarnessArtifacts: async () => true,
 })
+
+const managedRunnerFixture = ({
+  firstProbeExitCode = null,
+  listenerFailure = false,
+  malformedChild = false,
+  malformedOnce = false,
+  missingKill = false,
+  naturalCodeBeforeStop = null,
+  naturalCodeOnStop = null,
+  outputFailureAfterSecondProbe = false,
+  outputFailureBeforeReady = false,
+  outputFailureOnFirstProbe = false,
+  ownershipFailure = false,
+  persistentGroup = false,
+  readinessFailure = false,
+  registrationFailure = null,
+  removalFailure = null,
+  terminalDelayMs = 0,
+  terminalErrorOnStop = false,
+} = {}) => {
+  const child = new EventEmitter()
+  child.pid = 999_999_999
+  child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter()
+  if (malformedChild) child.stderr = null
+  child.kill = () => true
+  if (registrationFailure === 'exit' || registrationFailure === 'close') {
+    const once = child.once.bind(child)
+    child.once = (event, listener) => {
+      if (event === registrationFailure) {
+        throw new Error('raw registration failure with secret-value')
+      }
+      return once(event, listener)
+    }
+  }
+  if (registrationFailure === 'stdout') {
+    child.stdout.on = () => {
+      throw new Error('raw registration failure with secret-value')
+    }
+  }
+  if (registrationFailure === 'stderr') {
+    child.stderr.on = () => {
+      throw new Error('raw registration failure with secret-value')
+    }
+  }
+  if (removalFailure === 'stdout') {
+    child.stdout.removeListener = () => {
+      throw new Error('raw removal failure with secret-value')
+    }
+  }
+  if (malformedOnce) child.once = null
+  if (missingKill) child.kill = null
+  const calls = []
+  const removed = []
+  const signals = new EventEmitter()
+  let groupAlive = true
+  let listenerChecks = 0
+  let portChecks = 0
+  const finishNaturally = (code = 2) => {
+    groupAlive = false
+    child.emit('exit', code, null)
+  }
+  return {
+    child,
+    calls,
+    deps: {
+      ...fakeHarnessDeps(),
+      assertListenerOwner: async () => {
+        listenerChecks += 1
+        if (listenerChecks === 1 && Number.isInteger(firstProbeExitCode)) {
+          groupAlive = false
+          child.emit('exit', firstProbeExitCode, null)
+          return null
+        }
+        if (listenerChecks === 1 && outputFailureOnFirstProbe) {
+          child.stdout.emit('data', Buffer.alloc(65_537))
+        }
+        if (listenerChecks === 2 && Number.isInteger(naturalCodeBeforeStop)) {
+          groupAlive = false
+          child.emit('exit', naturalCodeBeforeStop, null)
+        }
+        if (listenerChecks === 2 && outputFailureBeforeReady) {
+          child.stdout.emit('data', Buffer.alloc(65_537))
+        }
+        if (listenerChecks === 2 && outputFailureAfterSecondProbe) {
+          queueMicrotask(() => {
+            queueMicrotask(() => {
+              queueMicrotask(() => {
+                calls.push('queued-output')
+                child.stdout.emit('data', Buffer.alloc(65_537))
+              })
+            })
+          })
+        }
+        return 'owned-listener'
+      },
+      assertPortAvailable: async () => {
+        portChecks += 1
+        calls.push(`port:${portChecks}`)
+        if (listenerFailure && portChecks === 3) {
+          throw new Error('raw listener failure with secret-value')
+        }
+      },
+      fetch: async () => {
+        if (readinessFailure) throw new Error('fixed fixture readiness failure')
+        return readyResponse()
+      },
+      makePersistenceDirectory: async () => '/tmp/bwm-managed-runner',
+      prepareHarness: async (path) => ({
+        ...fakeHarness(path),
+        viteRoot: {
+          fence: {},
+          path: process.cwd(),
+        },
+      }),
+      managedChildDeps: {
+        groupExistsImpl: () => groupAlive,
+        ownedGroupsImpl: (pid) => {
+          if (ownershipFailure) {
+            throw new Error('raw ownership failure with secret-value')
+          }
+          return [pid]
+        },
+        signalGroupImpl: (_groupId, signal) => {
+          calls.push(`signal:${signal}`)
+          if (persistentGroup) return
+          if (!groupAlive) return
+          if (Number.isInteger(naturalCodeOnStop)) {
+            child.emit('exit', naturalCodeOnStop, null)
+          }
+          if (terminalErrorOnStop) {
+            child.emit('error', new Error('raw child failure with secret-value'))
+          }
+          groupAlive = false
+          if (terminalDelayMs > 0) {
+            setTimeout(() => child.emit('exit', null, signal), terminalDelayMs)
+          } else {
+            queueMicrotask(() => child.emit('exit', null, signal))
+          }
+        },
+        sleep: terminalDelayMs > 0
+          ? (milliseconds) => new Promise((resolve) => {
+            setTimeout(resolve, Math.min(milliseconds, 1))
+          })
+          : async () => {},
+        spawnImpl: (_command, _args, options) => {
+          calls.push('spawn')
+          const markerNames = Object.keys(options.env).filter((name) => (
+            name.startsWith('BWM_APP_E2E_')
+          ))
+          assert.deepEqual(markerNames, ['BWM_APP_E2E_OWNERSHIP'])
+          assert.match(options.env.BWM_APP_E2E_OWNERSHIP, /^[a-f0-9]{48}$/)
+          return child
+        },
+      },
+      now: () => NOW_MS,
+      randomKey: (() => {
+        let byte = 1
+        return () => key(byte++)
+      })(),
+      removePersistenceDirectory: async (path) => removed.push(path),
+      runChild: async (input) => ({
+        code: 0,
+        stderr: '',
+        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
+          ? 'SEED_LOCAL_COMPLETE\n'
+          : '',
+      }),
+      signals,
+    },
+    finishNaturally,
+    groupAlive: () => groupAlive,
+    portChecks: () => portChecks,
+    removed,
+    signals,
+  }
+}
 
 const readyResponse = (overrides = {}) => {
   const response = new Response(overrides.rawBody ?? JSON.stringify({
@@ -273,7 +452,7 @@ test('runner applies migrations, seeds, then starts exact loopback Vite with one
   assert.equal(fetch.init.redirect, 'manual')
   assert.equal(fetch.init.signal instanceof AbortSignal, true)
   assert.equal(calls.filter(({ kind }) => kind === 'owner').length, 2)
-  assert.equal(calls.filter(({ kind }) => kind === 'port').length, 2)
+  assert.equal(calls.filter(({ kind }) => kind === 'port').length, 3)
   assert.deepEqual(calls.filter(({ kind }) => kind === 'remove'), [
     { kind: 'remove', path: '/tmp/bwm-runner-owned' },
   ])
@@ -397,6 +576,277 @@ test('runner reports a natural Vite exit after readiness as a runtime failure', 
   assert.equal(signals.listenerCount('SIGINT'), 0)
   assert.equal(signals.listenerCount('SIGTERM'), 0)
 })
+
+for (const [label, configure, expected] of [
+  [
+    'exitAfterReady',
+    (fixture) => {
+      fixture.deps.exitAfterReady = true
+    },
+    { code: 'APP_E2E_READY', ok: true },
+  ],
+  [
+    'natural post-ready exit',
+    (fixture) => {
+      fixture.deps.onReady = () => {
+        queueMicrotask(() => fixture.finishNaturally(2))
+      }
+    },
+    { code: 'APP_E2E_RUNTIME_FAILED', ok: false },
+  ],
+  [
+    'SIGINT',
+    (fixture) => {
+      fixture.deps.onReady = () => {
+        queueMicrotask(() => fixture.signals.emit('SIGINT'))
+      }
+    },
+    { code: 'APP_E2E_INTERRUPTED', ok: false },
+  ],
+]) {
+  test(`production managed runner ${label} proves process and port absence`, {
+    timeout: 1_000,
+  }, async () => {
+    assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+    assert.equal(typeof appE2ERunner.waitForManagedAppE2EChild, 'function')
+    const fixture = managedRunnerFixture()
+    configure(fixture)
+
+    const result = await runAppE2E({
+      argv: [],
+      env: {},
+      deps: fixture.deps,
+    })
+
+    assert.deepEqual(result, expected)
+    assert.equal(fixture.groupAlive(), false)
+    assert.equal(fixture.portChecks(), 3)
+    assert.deepEqual(fixture.removed, ['/tmp/bwm-managed-runner'])
+    assert.equal(fixture.child.listenerCount('error'), 0)
+    assert.equal(fixture.child.listenerCount('exit'), 0)
+    assert.equal(fixture.child.listenerCount('close'), 0)
+    assert.equal(fixture.child.stdout.listenerCount('data'), 0)
+    assert.equal(fixture.child.stderr.listenerCount('data'), 0)
+    assert.equal(fixture.signals.listenerCount('SIGINT'), 0)
+    assert.equal(fixture.signals.listenerCount('SIGTERM'), 0)
+  })
+}
+
+test('production managed runner never reports ready after a managed stop error', async () => {
+  assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+  const fixture = managedRunnerFixture({ terminalErrorOnStop: true })
+  fixture.deps.exitAfterReady = true
+
+  const result = await runAppE2E({
+    argv: [],
+    env: {},
+    deps: fixture.deps,
+  })
+
+  assert.deepEqual(result, { code: 'APP_E2E_RUNTIME_FAILED', ok: false })
+  assert.equal(JSON.stringify(result).includes('secret-value'), false)
+  assert.equal(fixture.groupAlive(), false)
+  assert.equal(fixture.portChecks(), 3)
+  assert.deepEqual(fixture.removed, ['/tmp/bwm-managed-runner'])
+})
+
+test('production managed runner never reports ready after a racing nonzero exit', async () => {
+  assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+  const fixture = managedRunnerFixture({ naturalCodeOnStop: 2 })
+  fixture.deps.exitAfterReady = true
+
+  const result = await runAppE2E({
+    argv: [],
+    env: {},
+    deps: fixture.deps,
+  })
+
+  assert.deepEqual(result, { code: 'APP_E2E_RUNTIME_FAILED', ok: false })
+  assert.equal(fixture.groupAlive(), false)
+  assert.equal(fixture.portChecks(), 3)
+  assert.deepEqual(fixture.removed, ['/tmp/bwm-managed-runner'])
+})
+
+test('production managed runner classifies an exit during the second readiness ownership check as pre-ready', async () => {
+  assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+  const fixture = managedRunnerFixture({ naturalCodeBeforeStop: 0 })
+  let readyCalls = 0
+  fixture.deps.maxReadinessAttempts = 1
+  fixture.deps.onReady = () => {
+    readyCalls += 1
+    fixture.calls.push('ready')
+  }
+
+  const result = await runAppE2E({
+    argv: [],
+    env: {},
+    deps: fixture.deps,
+  })
+
+  assert.deepEqual(result, { code: 'APP_E2E_CHILD_EXITED', ok: false })
+  assert.equal(readyCalls, 0)
+  assert.equal(fixture.groupAlive(), false)
+  assert.equal(fixture.portChecks(), 3)
+  assert.deepEqual(fixture.removed, ['/tmp/bwm-managed-runner'])
+})
+
+test('production managed runner classifies output overflow during the second ownership check as pre-ready', async () => {
+  assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+  const fixture = managedRunnerFixture({ outputFailureBeforeReady: true })
+  let readyCalls = 0
+  fixture.deps.maxReadinessAttempts = 1
+  fixture.deps.onReady = () => {
+    readyCalls += 1
+  }
+
+  const result = await runAppE2E({
+    argv: [],
+    env: {},
+    deps: fixture.deps,
+  })
+
+  assert.deepEqual(result, { code: 'APP_E2E_START_FAILED', ok: false })
+  assert.equal(readyCalls, 0)
+  assert.equal(fixture.groupAlive(), false)
+  assert.equal(fixture.portChecks(), 3)
+  assert.deepEqual(fixture.removed, ['/tmp/bwm-managed-runner'])
+})
+
+test('production managed runner does not yield after a clean shutdown-latch probe', async () => {
+  assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+  const fixture = managedRunnerFixture({ outputFailureAfterSecondProbe: true })
+  let readyCalls = 0
+  fixture.deps.maxReadinessAttempts = 1
+  fixture.deps.onReady = () => {
+    readyCalls += 1
+    fixture.calls.push('ready')
+  }
+
+  const result = await runAppE2E({
+    argv: [],
+    env: {},
+    deps: fixture.deps,
+  })
+
+  assert.deepEqual(result, { code: 'APP_E2E_RUNTIME_FAILED', ok: false })
+  assert.equal(readyCalls, 1)
+  assert.ok(fixture.calls.indexOf('ready') < fixture.calls.indexOf('queued-output'))
+  assert.equal(fixture.groupAlive(), false)
+  assert.equal(fixture.portChecks(), 3)
+  assert.deepEqual(fixture.removed, ['/tmp/bwm-managed-runner'])
+})
+
+test('production managed runner classifies an exit during a failed first ownership check as pre-ready', async () => {
+  assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+  const fixture = managedRunnerFixture({ firstProbeExitCode: 0 })
+  let readyCalls = 0
+  fixture.deps.maxReadinessAttempts = 1
+  fixture.deps.onReady = () => {
+    readyCalls += 1
+  }
+
+  const result = await runAppE2E({
+    argv: [],
+    env: {},
+    deps: fixture.deps,
+  })
+
+  assert.deepEqual(result, { code: 'APP_E2E_CHILD_EXITED', ok: false })
+  assert.equal(readyCalls, 0)
+  assert.equal(fixture.groupAlive(), false)
+  assert.equal(fixture.portChecks(), 3)
+  assert.deepEqual(fixture.removed, ['/tmp/bwm-managed-runner'])
+})
+
+test('production managed runner classifies output failure before a failed readiness fetch as pre-ready', async () => {
+  assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+  const fixture = managedRunnerFixture({
+    outputFailureOnFirstProbe: true,
+    readinessFailure: true,
+    terminalDelayMs: 5,
+  })
+  let readyCalls = 0
+  fixture.deps.maxReadinessAttempts = 1
+  fixture.deps.onReady = () => {
+    readyCalls += 1
+  }
+
+  const result = await runAppE2E({
+    argv: [],
+    env: {},
+    deps: fixture.deps,
+  })
+
+  assert.deepEqual(result, { code: 'APP_E2E_START_FAILED', ok: false })
+  assert.equal(readyCalls, 0)
+  assert.equal(fixture.groupAlive(), false)
+  assert.equal(fixture.portChecks(), 3)
+  assert.deepEqual(fixture.removed, ['/tmp/bwm-managed-runner'])
+})
+
+for (const boundary of ['exit', 'close', 'stdout', 'stderr']) {
+  test(`production managed runner classifies ${boundary} registration failure as startup failure`, async () => {
+    assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+    const fixture = managedRunnerFixture({ registrationFailure: boundary })
+
+    const result = await runAppE2E({
+      argv: [],
+      env: {},
+      deps: fixture.deps,
+    })
+
+    assert.deepEqual(result, { code: 'APP_E2E_START_FAILED', ok: false })
+    assert.equal(JSON.stringify(result).includes('secret-value'), false)
+    assert.equal(fixture.groupAlive(), false)
+    assert.equal(fixture.portChecks(), 3)
+    assert.deepEqual(fixture.removed, ['/tmp/bwm-managed-runner'])
+    assert.equal(fixture.child.listenerCount('error'), 0)
+    assert.equal(fixture.child.listenerCount('exit'), 0)
+    assert.equal(fixture.child.listenerCount('close'), 0)
+  })
+}
+
+for (const [label, fixtureOptions] of [
+  ['listener absence proof fails', { listenerFailure: true }],
+  ['ownership absence proof fails', { ownershipFailure: true }],
+  [
+    'a malformed positive-PID child remains observable',
+    { malformedChild: true, persistentGroup: true },
+  ],
+  [
+    'a positive-PID child has no callable once method',
+    { malformedOnce: true, persistentGroup: true },
+  ],
+  [
+    'a positive-PID child has no callable kill method',
+    { missingKill: true, persistentGroup: true },
+  ],
+  [
+    'a managed listener removal callback fails',
+    { removalFailure: 'stdout' },
+  ],
+]) {
+  test(`production managed runner preserves its harness when ${label}`, {
+    timeout: 1_000,
+  }, async () => {
+    assert.equal(typeof appE2ERunner.startManagedAppE2EChild, 'function')
+    assert.equal(typeof appE2ERunner.waitForManagedAppE2EChild, 'function')
+    const fixture = managedRunnerFixture(fixtureOptions)
+    fixture.deps.exitAfterReady = true
+
+    const result = await runAppE2E({
+      argv: [],
+      env: {},
+      deps: fixture.deps,
+    })
+
+    assert.deepEqual(result, { code: 'APP_E2E_SHUTDOWN_FAILED', ok: false })
+    assert.equal(JSON.stringify(result).includes('secret-value'), false)
+    assert.deepEqual(fixture.removed, [])
+    assert.equal(fixture.signals.listenerCount('SIGINT'), 0)
+    assert.equal(fixture.signals.listenerCount('SIGTERM'), 0)
+  })
+}
 
 test('runner forwards only the first termination signal and cleans up an owned directory', async () => {
   const calls = []
@@ -654,6 +1104,55 @@ test('runner refuses an occupied fixed port before migration or seed mutation', 
     'port',
     'remove:/tmp/bwm-occupied-owned',
   ])
+})
+
+test('fixed port proof destroys a held loopback connection and settles boundedly', {
+  skip: process.platform !== 'darwin' && process.platform !== 'linux',
+  timeout: 1_000,
+}, async () => {
+  assert.equal(typeof appE2ERunner.probeAppE2EPort, 'function')
+  let socket = null
+  try {
+    const result = await appE2ERunner.probeAppE2EPort({
+      onListening: () => new Promise((resolve, reject) => {
+        socket = createConnection({
+          host: '127.0.0.1',
+          port: 5174,
+        })
+        socket.once('connect', resolve)
+        socket.once('error', () => reject(new Error('loopback probe connection failed')))
+      }),
+    })
+    assert.equal(result, true)
+  } finally {
+    socket?.destroy()
+  }
+})
+
+test('fixed port proof bounds a stalled listening callback and releases the port', {
+  skip: process.platform !== 'darwin' && process.platform !== 'linux',
+  timeout: 1_000,
+}, async () => {
+  await assert.rejects(
+    appE2ERunner.probeAppE2EPort({ onListening: null }),
+    /^Error: APP_E2E_PORT_OCCUPIED$/,
+  )
+  await assert.rejects(
+    appE2ERunner.probeAppE2EPort({
+      onListening: () => new Promise(() => {}),
+    }),
+    /^Error: APP_E2E_PORT_OCCUPIED$/,
+  )
+  const server = createServer()
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen({
+      exclusive: true,
+      host: '127.0.0.1',
+      port: 5174,
+    }, resolve)
+  })
+  await new Promise((resolve) => server.close(resolve))
 })
 
 test('default port preflight rejects an IPv6 loopback listener before mutation', {

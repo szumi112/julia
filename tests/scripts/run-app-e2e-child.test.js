@@ -7,16 +7,19 @@ import {
   readFileSync,
   rmSync,
 } from 'node:fs'
+import { createConnection } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import {
+import * as appE2ERunner from '../../scripts/run-app-e2e.mjs'
+
+const {
   parseDarwinListenerSnapshot,
   parseLinuxListenerTables,
   runBoundedAppChild,
   stopAppE2EChild,
   validateLinuxListenerOwnership,
   waitForAppE2ECondition,
-} from '../../scripts/run-app-e2e.mjs'
+} = appE2ERunner
 
 const invocation = () => ({
   args: ['--version'],
@@ -34,6 +37,55 @@ const processAbsent = (pid) => {
     return error?.code === 'ESRCH'
   }
 }
+
+const hardBound = (promise, milliseconds = 5_000) => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error('test hard timeout')), milliseconds)
+  Promise.resolve(promise).then(
+    (value) => {
+      clearTimeout(timer)
+      resolve(value)
+    },
+    (error) => {
+      clearTimeout(timer)
+      reject(error)
+    },
+  )
+})
+
+const waitForLine = (stream, predicate) => new Promise((resolve, reject) => {
+  let buffered = ''
+  const onData = (chunk) => {
+    buffered += chunk.toString('utf8')
+    const line = buffered.split('\n').find(predicate)
+    if (!line) return
+    cleanup()
+    resolve(line)
+  }
+  const onEnd = () => {
+    cleanup()
+    reject(new Error('fixture ended before expected line'))
+  }
+  const cleanup = () => {
+    stream.removeListener('data', onData)
+    stream.removeListener('end', onEnd)
+  }
+  stream.on('data', onData)
+  stream.once('end', onEnd)
+})
+
+const loopbackConnectable = (port) => new Promise((resolve) => {
+  const socket = createConnection({
+    host: '127.0.0.1',
+    port,
+  })
+  const finish = (value) => {
+    socket.destroy()
+    resolve(value)
+  }
+  socket.setTimeout(250, () => finish(false))
+  socket.once('connect', () => finish(true))
+  socket.once('error', () => finish(false))
+})
 
 const fakeClock = () => {
   let nextId = 1
@@ -1167,6 +1219,541 @@ test('orderly stop kills an inherited descendant after the group leader closes',
     )
   } finally {
     try { process.kill(-leader.pid, 'SIGKILL') } catch { /* Already absent. */ }
+  }
+})
+
+test('managed child creates a fresh caller-independent ownership marker', async () => {
+  const { startManagedAppE2EChild, waitForManagedAppE2EChild } = appE2ERunner
+  assert.equal(typeof startManagedAppE2EChild, 'function')
+  assert.equal(typeof waitForManagedAppE2EChild, 'function')
+  assert.throws(
+    () => startManagedAppE2EChild({
+      ...invocation(),
+      env: {
+        BWM_APP_E2E_OWNERSHIP: '0'.repeat(48),
+      },
+    }),
+    /^Error: APP_E2E_CHILD_INPUT_INVALID$/,
+  )
+  const spawnedEnvironments = []
+  const children = [fakeChild(), fakeChild()]
+  const completions = children.map((child) => {
+    const managed = startManagedAppE2EChild(invocation(), {
+      groupExistsImpl: () => false,
+      ownedGroupsImpl: (pid, ownershipToken) => {
+        assert.equal(pid, child.pid)
+        assert.match(ownershipToken, /^[a-f0-9]{48}$/)
+        return [pid]
+      },
+      sleep: async () => {},
+      spawnImpl: (_command, _args, options) => {
+        spawnedEnvironments.push(options.env)
+        return child
+      },
+    })
+    assert.equal(managed, child)
+    const completion = waitForManagedAppE2EChild(child)
+    child.emit('exit', 0, null)
+    return completion
+  })
+
+  assert.deepEqual(await Promise.all(completions), [
+    { code: 0, error: null, signal: null },
+    { code: 0, error: null, signal: null },
+  ])
+  const markerKeys = spawnedEnvironments.map((environment) => (
+    Object.keys(environment).filter((name) => name.startsWith('BWM_APP_E2E_'))
+  ))
+  assert.deepEqual(markerKeys, [
+    ['BWM_APP_E2E_OWNERSHIP'],
+    ['BWM_APP_E2E_OWNERSHIP'],
+  ])
+  const markers = spawnedEnvironments.map((environment) => (
+    environment.BWM_APP_E2E_OWNERSHIP
+  ))
+  assert.match(markers[0], /^[a-f0-9]{48}$/)
+  assert.match(markers[1], /^[a-f0-9]{48}$/)
+  assert.notEqual(markers[0], markers[1])
+  assert.equal(Object.hasOwn(invocation().env, 'BWM_APP_E2E_OWNERSHIP'), false)
+  for (const child of children) {
+    assert.equal(child.listenerCount('error'), 0)
+    assert.equal(child.listenerCount('exit'), 0)
+    assert.equal(child.listenerCount('close'), 0)
+    assert.equal(child.stdout.listenerCount('data'), 0)
+    assert.equal(child.stderr.listenerCount('data'), 0)
+  }
+})
+
+for (const [label, ownedGroupsImpl, groupExistsImpl] of [
+  [
+    'ownership snapshot callback throws',
+    () => {
+      throw new Error('raw ownership failure with secret-value')
+    },
+    () => false,
+  ],
+  [
+    'owned group persists after TERM and KILL',
+    (pid) => [pid],
+    () => true,
+  ],
+]) {
+  test(`managed child fails closed when ${label} without waiting for close`, async () => {
+    const { startManagedAppE2EChild, waitForManagedAppE2EChild } = appE2ERunner
+    assert.equal(typeof startManagedAppE2EChild, 'function')
+    assert.equal(typeof waitForManagedAppE2EChild, 'function')
+    const child = fakeChild()
+    const signals = []
+    startManagedAppE2EChild(invocation(), {
+      groupExistsImpl,
+      ownedGroupsImpl,
+      signalGroupImpl: (groupId, signal) => {
+        signals.push([groupId, signal])
+      },
+      sleep: async () => {},
+      spawnImpl: () => child,
+    })
+    const completion = waitForManagedAppE2EChild(child)
+
+    child.emit('exit', 0, null)
+    const error = await hardBound(completion.catch((failure) => failure), 500)
+
+    assert.equal(error instanceof Error, true)
+    assert.equal(error.message, 'APP_E2E_SHUTDOWN_FAILED')
+    assert.equal(error.message.includes('secret-value'), false)
+    assert.ok(signals.some(([, signal]) => signal === 'SIGKILL'))
+    assert.equal(child.listenerCount('error'), 0)
+    assert.equal(child.listenerCount('exit'), 0)
+    assert.equal(child.listenerCount('close'), 0)
+    assert.equal(child.stdout.listenerCount('data'), 0)
+    assert.equal(child.stderr.listenerCount('data'), 0)
+  })
+}
+
+test('managed child fails closed when its signal callback throws after termination', async () => {
+  const { startManagedAppE2EChild } = appE2ERunner
+  assert.equal(typeof startManagedAppE2EChild, 'function')
+  const child = fakeChild()
+  let groupAlive = true
+  startManagedAppE2EChild(invocation(), {
+    groupExistsImpl: () => groupAlive,
+    ownedGroupsImpl: (pid) => [pid],
+    signalGroupImpl: () => {
+      groupAlive = false
+      throw new Error('raw signal failure with secret-value')
+    },
+    sleep: async () => {},
+    spawnImpl: () => child,
+  })
+
+  const error = await hardBound(
+    stopAppE2EChild(child, 'SIGTERM').catch((failure) => failure),
+    500,
+  )
+
+  assert.equal(error instanceof Error, true)
+  assert.equal(error.message, 'APP_E2E_SHUTDOWN_FAILED')
+  assert.equal(error.message.includes('secret-value'), false)
+  assert.equal(groupAlive, false)
+  assert.equal(child.listenerCount('error'), 0)
+  assert.equal(child.listenerCount('exit'), 0)
+  assert.equal(child.listenerCount('close'), 0)
+  assert.equal(child.stdout.listenerCount('data'), 0)
+  assert.equal(child.stderr.listenerCount('data'), 0)
+})
+
+test('managed child rejects a malformed terminal tuple only after bounded cleanup', async () => {
+  const { startManagedAppE2EChild, waitForManagedAppE2EChild } = appE2ERunner
+  assert.equal(typeof startManagedAppE2EChild, 'function')
+  assert.equal(typeof waitForManagedAppE2EChild, 'function')
+  const child = fakeChild()
+  const signals = []
+  let groupAlive = true
+  startManagedAppE2EChild(invocation(), {
+    groupExistsImpl: () => groupAlive,
+    ownedGroupsImpl: (pid) => [pid],
+    signalGroupImpl: (_groupId, signal) => {
+      signals.push(signal)
+      groupAlive = false
+    },
+    sleep: async () => {},
+    spawnImpl: () => child,
+  })
+  const completion = waitForManagedAppE2EChild(child)
+
+  child.emit('exit', 'raw-secret-exit-code', null)
+  const error = await hardBound(completion.catch((failure) => failure), 500)
+
+  assert.equal(error instanceof Error, true)
+  assert.equal(error.message, 'APP_E2E_SHUTDOWN_FAILED')
+  assert.equal(error.message.includes('raw-secret-exit-code'), false)
+  assert.deepEqual(signals, ['SIGTERM'])
+  assert.equal(groupAlive, false)
+  assert.equal(child.listenerCount('error'), 0)
+  assert.equal(child.listenerCount('exit'), 0)
+  assert.equal(child.listenerCount('close'), 0)
+  assert.equal(child.stdout.listenerCount('data'), 0)
+  assert.equal(child.stderr.listenerCount('data'), 0)
+})
+
+test('managed child invalid stop signal kills its group before fixed rejection', async () => {
+  const { startManagedAppE2EChild } = appE2ERunner
+  assert.equal(typeof startManagedAppE2EChild, 'function')
+  const child = fakeChild()
+  const signals = []
+  let groupAlive = true
+  startManagedAppE2EChild(invocation(), {
+    groupExistsImpl: () => groupAlive,
+    ownedGroupsImpl: (pid) => [pid],
+    signalGroupImpl: (_groupId, signal) => {
+      signals.push(signal)
+      if (signal === 'SIGKILL') {
+        groupAlive = false
+        queueMicrotask(() => child.emit('exit', null, 'SIGKILL'))
+      }
+    },
+    sleep: async () => {},
+    spawnImpl: () => child,
+  })
+
+  const error = await hardBound(
+    stopAppE2EChild(child, 'SIGKILL').catch((failure) => failure),
+    500,
+  )
+
+  assert.equal(error instanceof Error, true)
+  assert.equal(error.message, 'APP_E2E_SHUTDOWN_FAILED')
+  assert.deepEqual(signals, ['SIGKILL'])
+  assert.equal(groupAlive, false)
+  assert.equal(child.listenerCount('error'), 0)
+  assert.equal(child.listenerCount('exit'), 0)
+  assert.equal(child.listenerCount('close'), 0)
+  assert.equal(child.stdout.listenerCount('data'), 0)
+  assert.equal(child.stderr.listenerCount('data'), 0)
+})
+
+test('managed malformed positive-PID child proves group absence before stop settles', async () => {
+  const { startManagedAppE2EChild } = appE2ERunner
+  assert.equal(typeof startManagedAppE2EChild, 'function')
+  const child = fakeChild()
+  child.stderr = null
+  const signals = []
+  let groupAlive = true
+  const managed = startManagedAppE2EChild(invocation(), {
+    groupExistsImpl: () => groupAlive,
+    ownedGroupsImpl: (pid) => [pid],
+    signalGroupImpl: (_groupId, signal) => {
+      signals.push(signal)
+      if (signal === 'SIGKILL') groupAlive = false
+    },
+    sleep: async () => {},
+    spawnImpl: () => child,
+  })
+
+  assert.equal(managed, child)
+  assert.deepEqual(await hardBound(stopAppE2EChild(child), 500), {
+    code: null,
+    error: 'APP_E2E_CHILD_FAILED',
+    signal: null,
+  })
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
+  assert.equal(groupAlive, false)
+  assert.equal(child.listenerCount('error'), 0)
+})
+
+test('managed child does not depend on an extensible spawn result for cleanup state', async () => {
+  const { startManagedAppE2EChild, waitForManagedAppE2EChild } = appE2ERunner
+  assert.equal(typeof startManagedAppE2EChild, 'function')
+  assert.equal(typeof waitForManagedAppE2EChild, 'function')
+  const child = fakeChild()
+  Object.preventExtensions(child)
+  let groupAlive = true
+  const managed = startManagedAppE2EChild(invocation(), {
+    groupExistsImpl: () => groupAlive,
+    ownedGroupsImpl: (pid) => [pid],
+    signalGroupImpl: () => {
+      groupAlive = false
+    },
+    sleep: async () => {},
+    spawnImpl: () => child,
+  })
+  const completion = waitForManagedAppE2EChild(child)
+
+  groupAlive = false
+  child.emit('exit', 0, null)
+
+  assert.equal(managed, child)
+  assert.deepEqual(await hardBound(completion, 500), {
+    code: 0,
+    error: null,
+    signal: null,
+  })
+  assert.equal(child.listenerCount('error'), 0)
+  assert.equal(child.listenerCount('exit'), 0)
+  assert.equal(child.listenerCount('close'), 0)
+})
+
+for (const boundary of ['exit listener', 'stdout listener']) {
+  test(`managed child settles once when ${boundary} registration emits exit`, async () => {
+    const { startManagedAppE2EChild, waitForManagedAppE2EChild } = appE2ERunner
+    assert.equal(typeof startManagedAppE2EChild, 'function')
+    assert.equal(typeof waitForManagedAppE2EChild, 'function')
+    const child = fakeChild()
+    let emitted = false
+    let groupAlive = true
+    if (boundary === 'exit listener') {
+      const once = child.once.bind(child)
+      child.once = (event, listener) => {
+        const result = once(event, listener)
+        if (event === 'exit' && !emitted) {
+          emitted = true
+          groupAlive = false
+          child.emit('exit', 0, null)
+        }
+        return result
+      }
+    } else {
+      const on = child.stdout.on.bind(child.stdout)
+      child.stdout.on = (event, listener) => {
+        const result = on(event, listener)
+        if (event === 'data' && !emitted) {
+          emitted = true
+          groupAlive = false
+          child.emit('exit', 0, null)
+        }
+        return result
+      }
+    }
+    const managed = startManagedAppE2EChild(invocation(), {
+      groupExistsImpl: () => groupAlive,
+      ownedGroupsImpl: (pid) => [pid],
+      signalGroupImpl: () => {
+        groupAlive = false
+      },
+      sleep: async () => {},
+      spawnImpl: () => child,
+    })
+
+    assert.equal(managed, child)
+    assert.deepEqual(await hardBound(waitForManagedAppE2EChild(child), 500), {
+      code: 0,
+      error: null,
+      signal: null,
+    })
+    assert.equal(child.listenerCount('error'), 0)
+    assert.equal(child.listenerCount('exit'), 0)
+    assert.equal(child.listenerCount('close'), 0)
+    assert.equal(child.stdout.listenerCount('data'), 0)
+    assert.equal(child.stderr.listenerCount('data'), 0)
+  })
+}
+
+for (const boundary of ['close listener', 'stdout listener']) {
+  test(`managed child fails closed when ${boundary} removal throws`, async () => {
+    const { startManagedAppE2EChild } = appE2ERunner
+    assert.equal(typeof startManagedAppE2EChild, 'function')
+    const child = fakeChild()
+    if (boundary === 'close listener') {
+      const removeListener = child.removeListener.bind(child)
+      child.removeListener = (event, listener) => {
+        if (event === 'close') {
+          throw new Error('raw removal failure with secret-value')
+        }
+        return removeListener(event, listener)
+      }
+    } else {
+      child.stdout.removeListener = () => {
+        throw new Error('raw removal failure with secret-value')
+      }
+    }
+    let groupAlive = true
+    startManagedAppE2EChild(invocation(), {
+      groupExistsImpl: () => groupAlive,
+      ownedGroupsImpl: (pid) => [pid],
+      signalGroupImpl: (_groupId, signal) => {
+        groupAlive = false
+        queueMicrotask(() => child.emit('exit', null, signal))
+      },
+      sleep: async () => {},
+      spawnImpl: () => child,
+    })
+
+    const error = await hardBound(
+      stopAppE2EChild(child).catch((failure) => failure),
+      500,
+    )
+
+    assert.equal(error instanceof Error, true)
+    assert.equal(error.message, 'APP_E2E_SHUTDOWN_FAILED')
+    assert.equal(error.message.includes('secret-value'), false)
+    assert.equal(groupAlive, false)
+  })
+}
+
+test('managed child latches shutdown before a removal callback emits exit', async () => {
+  const { startManagedAppE2EChild } = appE2ERunner
+  assert.equal(typeof startManagedAppE2EChild, 'function')
+  const child = fakeChild()
+  const removeListener = child.stdout.removeListener.bind(child.stdout)
+  let emitted = false
+  let groupAlive = true
+  let snapshots = 0
+  child.stdout.removeListener = (event, listener) => {
+    const result = removeListener(event, listener)
+    if (!emitted) {
+      emitted = true
+      groupAlive = false
+      child.emit('exit', 0, null)
+    }
+    return result
+  }
+  startManagedAppE2EChild(invocation(), {
+    groupExistsImpl: () => groupAlive,
+    ownedGroupsImpl: (pid) => {
+      snapshots += 1
+      return [pid]
+    },
+    signalGroupImpl: () => {
+      groupAlive = false
+    },
+    sleep: async () => {},
+    spawnImpl: () => child,
+  })
+
+  assert.deepEqual(await hardBound(stopAppE2EChild(child), 500), {
+    code: 0,
+    error: null,
+    signal: null,
+  })
+  assert.equal(snapshots, 2)
+  assert.equal(child.listenerCount('error'), 0)
+  assert.equal(child.listenerCount('exit'), 0)
+  assert.equal(child.listenerCount('close'), 0)
+})
+
+test('managed child settles after leader exit and removes a detached stderr holder', {
+  skip: process.platform !== 'darwin' && process.platform !== 'linux',
+  timeout: 10_000,
+}, async () => {
+  const { startManagedAppE2EChild, waitForManagedAppE2EChild } = appE2ERunner
+  assert.equal(typeof startManagedAppE2EChild, 'function')
+  assert.equal(typeof waitForManagedAppE2EChild, 'function')
+  const descendantSource = [
+    "process.on('SIGTERM', () => {})",
+    "process.stderr.write('held')",
+    'setInterval(() => {}, 1000)',
+  ].join(';')
+  const leaderSource = `
+    const { spawn } = require('node:child_process')
+    setTimeout(() => {
+      const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantSource)}], {
+        detached: true,
+        env: process.env,
+        stdio: ['ignore', 'ignore', 'inherit'],
+      })
+      process.stdout.write('DESC ' + child.pid + '\\n', () => process.exit(0))
+    }, 50)
+  `
+  const child = startManagedAppE2EChild({
+    args: ['-e', leaderSource],
+    command: process.execPath,
+    cwd: process.cwd(),
+    env: {},
+    shell: false,
+  })
+  let descendantPid = null
+  try {
+    const descendantLine = waitForLine(child.stdout, (line) => line.startsWith('DESC '))
+    const completion = waitForManagedAppE2EChild(child)
+    descendantPid = Number((await hardBound(descendantLine)).slice(5))
+    assert.equal(Number.isSafeInteger(descendantPid), true)
+
+    assert.deepEqual(await hardBound(completion), {
+      code: 0,
+      error: null,
+      signal: null,
+    })
+    assert.equal(processAbsent(descendantPid), true)
+    assert.equal(child.listenerCount('error'), 0)
+    assert.equal(child.listenerCount('exit'), 0)
+    assert.equal(child.listenerCount('close'), 0)
+    assert.equal(child.stdout.listenerCount('data'), 0)
+    assert.equal(child.stderr.listenerCount('data'), 0)
+  } finally {
+    try { process.kill(-child.pid, 'SIGKILL') } catch { /* Already absent. */ }
+    if (descendantPid) {
+      try { process.kill(-descendantPid, 'SIGKILL') } catch { /* Already absent. */ }
+    }
+  }
+})
+
+test('managed stop removes a detached same-port handoff before reporting success', {
+  skip: process.platform !== 'darwin' && process.platform !== 'linux',
+  timeout: 10_000,
+}, async () => {
+  const { startManagedAppE2EChild } = appE2ERunner
+  assert.equal(typeof startManagedAppE2EChild, 'function')
+  const descendantSource = [
+    "const { createServer } = require('node:net')",
+    'const port = Number(process.argv[1])',
+    'const server = createServer(() => {})',
+    "process.on('SIGTERM', () => {})",
+    "server.listen(port, '127.0.0.1', () => { process.send('ready'); process.disconnect() })",
+  ].join(';')
+  const leaderSource = `
+    const { spawn } = require('node:child_process')
+    const { createServer } = require('node:net')
+    const server = createServer(() => {})
+    let stopping = false
+    process.on('SIGTERM', () => {
+      if (stopping) return
+      stopping = true
+      server.close(() => {
+        const child = spawn(process.execPath, ['-e', ${JSON.stringify(descendantSource)}, String(server.address()?.port ?? port)], {
+          detached: true,
+          env: process.env,
+          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        })
+        child.once('message', () => {
+          process.stdout.write('DESC ' + child.pid + '\\n', () => process.exit(0))
+        })
+      })
+    })
+    let port
+    server.listen(0, '127.0.0.1', () => {
+      port = server.address().port
+      process.stdout.write('READY ' + port + '\\n')
+    })
+  `
+  const child = startManagedAppE2EChild({
+    args: ['-e', leaderSource],
+    command: process.execPath,
+    cwd: process.cwd(),
+    env: {},
+    shell: false,
+  })
+  let descendantPid = null
+  let port = null
+  try {
+    const readyLine = await hardBound(
+      waitForLine(child.stdout, (line) => line.startsWith('READY ')),
+    )
+    port = Number(readyLine.slice(6))
+    assert.equal(Number.isSafeInteger(port), true)
+    assert.equal(await loopbackConnectable(port), true)
+    const descendantLine = waitForLine(child.stdout, (line) => line.startsWith('DESC '))
+
+    const result = await hardBound(stopAppE2EChild(child, 'SIGTERM'))
+    descendantPid = Number((await hardBound(descendantLine)).slice(5))
+
+    assert.deepEqual(result, { code: 0, error: null, signal: null })
+    assert.equal(await loopbackConnectable(port), false)
+    assert.equal(processAbsent(descendantPid), true)
+  } finally {
+    try { process.kill(-child.pid, 'SIGKILL') } catch { /* Already absent. */ }
+    if (descendantPid) {
+      try { process.kill(-descendantPid, 'SIGKILL') } catch { /* Already absent. */ }
+    }
   }
 })
 

@@ -20,7 +20,7 @@ import {
 } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { createServer } from 'node:net'
-import { tmpdir } from 'node:os'
+import { constants as osConstants, tmpdir } from 'node:os'
 import { Readable } from 'node:stream'
 import {
   dirname,
@@ -66,6 +66,7 @@ const CHILD_KILL_GRACE_MS = 500
 const OWNERSHIP_STABILITY_SCANS = 8
 const OWNERSHIP_STABLE_PASSES = 2
 const FETCH_DEADLINE_MS = 2_000
+const PORT_PROBE_DEADLINE_MS = 500
 const MAX_CHILD_OUTPUT_BYTES = 64 * 1024
 const MAX_ARTIFACT_FILES = 10_000
 const MAX_ARTIFACT_DIRECTORIES = 10_000
@@ -74,6 +75,7 @@ const MAX_ARTIFACT_FILE_BYTES = 64 * 1024 * 1024
 const MAX_ARTIFACT_TOTAL_BYTES = 512 * 1024 * 1024
 const OWNERSHIP_ENV = 'BWM_APP_E2E_OWNERSHIP'
 const OWNERSHIP_TOKEN = /^[a-f0-9]{48}$/
+const PROCESS_SIGNALS = new Set(Object.keys(osConstants.signals))
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const BASE64URL = /^[A-Za-z0-9_-]+$/
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux'])
@@ -102,7 +104,7 @@ const PHASE = Object.freeze({
   stopping: 7,
   closed: 8,
 })
-const MANAGED_CHILD = Symbol('managedAppE2EChild')
+const MANAGED_CHILDREN = new WeakMap()
 const CHILD_EXIT_PROMISES = new WeakMap()
 
 const fail = (code) => {
@@ -618,6 +620,144 @@ const validChildInvocation = (input) => ownObject(input)
   && !Object.hasOwn(input.env, OWNERSHIP_ENV)
   && input.shell === false
 
+const validManagedTerminal = (code, signal) => (
+  (Number.isSafeInteger(code) && code >= 0 && signal === null)
+  || (code === null
+    && typeof signal === 'string'
+    && PROCESS_SIGNALS.has(signal))
+)
+
+const createOwnedGroupSupervisor = ({
+  failOnSignalError = false,
+  groupExistsImpl,
+  ownedGroupsImpl,
+  ownershipToken,
+  rootPid,
+  signalGroupImpl,
+  sleep,
+}) => {
+  const ownedGroups = new Set([rootPid])
+  let ownershipUnproven = false
+  const trackOwnedGroups = () => {
+    let groups
+    try {
+      groups = ownedGroupsImpl(rootPid, ownershipToken)
+    } catch {
+      ownershipUnproven = true
+      return
+    }
+    if (!Array.isArray(groups)
+      || !groups.includes(rootPid)
+      || groups.some((groupId) => (
+        !Number.isSafeInteger(groupId) || groupId <= 0
+      ))) {
+      ownershipUnproven = true
+      return
+    }
+    for (const groupId of groups) ownedGroups.add(groupId)
+  }
+  const signalOwnedGroups = (signal, shouldStop = () => false) => {
+    for (const groupId of ownedGroups) {
+      if (shouldStop()) return
+      try {
+        signalGroupImpl(groupId, signal)
+      } catch {
+        if (failOnSignalError) ownershipUnproven = true
+      }
+    }
+  }
+  const ownedGroupsAreAbsent = () => (
+    [...ownedGroups].every((groupId) => !groupExistsImpl(groupId))
+  )
+  const boundedChildSleep = (milliseconds) => new Promise((resolveSleep, rejectSleep) => {
+    let completed = false
+    const fallback = setTimeout(() => {
+      if (completed) return
+      completed = true
+      resolveSleep()
+    }, milliseconds + 25)
+    const complete = (callback, value) => {
+      if (completed) return
+      completed = true
+      clearTimeout(fallback)
+      callback(value)
+    }
+    try {
+      Promise.resolve(sleep(milliseconds)).then(
+        () => complete(resolveSleep),
+        (error) => complete(rejectSleep, error),
+      )
+    } catch (error) {
+      complete(rejectSleep, error)
+    }
+  })
+  const waitForOwnedGroupsAbsence = () => waitForAppE2ECondition(
+    ownedGroupsAreAbsent,
+    { sleep: boundedChildSleep },
+  )
+  const forceTrackedGroupsAbsent = async () => {
+    signalOwnedGroups('SIGKILL')
+    try {
+      return await waitForOwnedGroupsAbsence()
+    } catch {
+      return false
+    }
+  }
+  const failUnprovenOwnership = async (observedLiveGroup) => {
+    await forceTrackedGroupsAbsent()
+    return Object.freeze({ observedLiveGroup, proven: false })
+  }
+  const proveOwnedGroupsAbsent = async ({
+    graceful,
+    initialSignal = 'SIGTERM',
+  }) => {
+    let observedLiveGroup = false
+    let stablePasses = 0
+    for (let scan = 0; scan < OWNERSHIP_STABILITY_SCANS; scan += 1) {
+      trackOwnedGroups()
+      if (ownershipUnproven) {
+        return failUnprovenOwnership(observedLiveGroup)
+      }
+      if (ownedGroupsAreAbsent()) {
+        stablePasses += 1
+        if (stablePasses >= OWNERSHIP_STABLE_PASSES) {
+          return Object.freeze({ observedLiveGroup, proven: true })
+        }
+      } else {
+        observedLiveGroup = true
+        stablePasses = 0
+        if (graceful) {
+          signalOwnedGroups(initialSignal)
+          if (!(await waitForOwnedGroupsAbsence())) {
+            trackOwnedGroups()
+            if (ownershipUnproven) {
+              return failUnprovenOwnership(observedLiveGroup)
+            }
+            signalOwnedGroups('SIGKILL')
+            if (!(await waitForOwnedGroupsAbsence())) {
+              return Object.freeze({ observedLiveGroup, proven: false })
+            }
+          }
+        } else {
+          signalOwnedGroups('SIGKILL')
+          if (!(await waitForOwnedGroupsAbsence())) {
+            return Object.freeze({ observedLiveGroup, proven: false })
+          }
+        }
+      }
+      await boundedChildSleep(25)
+    }
+    return Object.freeze({ observedLiveGroup, proven: false })
+  }
+  return Object.freeze({
+    boundedSleep: boundedChildSleep,
+    forceTrackedGroupsAbsent,
+    proveOwnedGroupsAbsent,
+    signalOwnedGroups,
+    trackOwnedGroups,
+  })
+}
+
 export const runBoundedAppChild = (input, {
   clearTimeoutImpl = clearTimeout,
   deadlineMs = CHILD_DEADLINE_MS,
@@ -680,113 +820,24 @@ export const runBoundedAppChild = (input, {
   let childPid = null
   try { childPid = child?.pid } catch { /* Invalid spawn result. */ }
   const validPid = Number.isSafeInteger(childPid) && childPid > 0
-  const ownedGroups = new Set(validPid ? [childPid] : [])
-  let ownershipUnproven = false
-  const trackOwnedGroups = () => {
-    if (!validPid) return
-    let groups
-    try {
-      groups = ownedGroupsImpl(childPid, ownershipToken)
-    } catch {
-      ownershipUnproven = true
-      return
-    }
-    if (!Array.isArray(groups)
-      || !groups.includes(childPid)
-      || groups.some((groupId) => (
-        !Number.isSafeInteger(groupId) || groupId <= 0
-      ))) {
-      ownershipUnproven = true
-      return
-    }
-    for (const groupId of groups) ownedGroups.add(groupId)
-  }
-  const signalOwnedGroups = (signal, shouldStop = () => false) => {
-    for (const groupId of ownedGroups) {
-      if (shouldStop()) return
-      try { signalGroupImpl(groupId, signal) } catch { /* Absence is proved below. */ }
-    }
-  }
-  const ownedGroupsAreAbsent = () => (
-    [...ownedGroups].every((groupId) => !groupExistsImpl(groupId))
+  const ownershipSupervisor = validPid
+    ? createOwnedGroupSupervisor({
+      groupExistsImpl,
+      ownedGroupsImpl,
+      ownershipToken,
+      rootPid: childPid,
+      signalGroupImpl,
+      sleep,
+    })
+    : null
+  const forceTrackedGroupsAbsent = () => ownershipSupervisor.forceTrackedGroupsAbsent()
+  const proveOwnedGroupsAbsent = (options) => (
+    ownershipSupervisor.proveOwnedGroupsAbsent(options)
   )
-  const boundedChildSleep = (milliseconds) => new Promise((resolveSleep, rejectSleep) => {
-    let completed = false
-    const fallback = setTimeout(() => {
-      if (completed) return
-      completed = true
-      resolveSleep()
-    }, milliseconds + 25)
-    const complete = (callback, value) => {
-      if (completed) return
-      completed = true
-      clearTimeout(fallback)
-      callback(value)
-    }
-    try {
-      Promise.resolve(sleep(milliseconds)).then(
-        () => complete(resolveSleep),
-        (error) => complete(rejectSleep, error),
-      )
-    } catch (error) {
-      complete(rejectSleep, error)
-    }
-  })
-  const waitForOwnedGroupsAbsence = () => waitForAppE2ECondition(
-    ownedGroupsAreAbsent,
-    { sleep: boundedChildSleep },
+  const signalOwnedGroups = (signal, shouldStop) => (
+    ownershipSupervisor.signalOwnedGroups(signal, shouldStop)
   )
-  const forceTrackedGroupsAbsent = async () => {
-    signalOwnedGroups('SIGKILL')
-    try {
-      return await waitForOwnedGroupsAbsence()
-    } catch {
-      return false
-    }
-  }
-  const failUnprovenOwnership = async (observedLiveGroup) => {
-    await forceTrackedGroupsAbsent()
-    return Object.freeze({ observedLiveGroup, proven: false })
-  }
-  const proveOwnedGroupsAbsent = async ({ graceful }) => {
-    let observedLiveGroup = false
-    let stablePasses = 0
-    for (let scan = 0; scan < OWNERSHIP_STABILITY_SCANS; scan += 1) {
-      trackOwnedGroups()
-      if (ownershipUnproven) {
-        return failUnprovenOwnership(observedLiveGroup)
-      }
-      if (ownedGroupsAreAbsent()) {
-        stablePasses += 1
-        if (stablePasses >= OWNERSHIP_STABLE_PASSES) {
-          return Object.freeze({ observedLiveGroup, proven: true })
-        }
-      } else {
-        observedLiveGroup = true
-        stablePasses = 0
-        if (graceful) {
-          signalOwnedGroups('SIGTERM')
-          if (!(await waitForOwnedGroupsAbsence())) {
-            trackOwnedGroups()
-            if (ownershipUnproven) {
-              return failUnprovenOwnership(observedLiveGroup)
-            }
-            signalOwnedGroups('SIGKILL')
-            if (!(await waitForOwnedGroupsAbsence())) {
-              return Object.freeze({ observedLiveGroup, proven: false })
-            }
-          }
-        } else {
-          signalOwnedGroups('SIGKILL')
-          if (!(await waitForOwnedGroupsAbsence())) {
-            return Object.freeze({ observedLiveGroup, proven: false })
-          }
-        }
-      }
-      await boundedChildSleep(25)
-    }
-    return Object.freeze({ observedLiveGroup, proven: false })
-  }
+  const trackOwnedGroups = () => ownershipSupervisor.trackOwnedGroups()
   let validChildInterface = false
   try {
     const canManageErrorListener = typeof child?.once === 'function'
@@ -1014,8 +1065,8 @@ export const runBoundedAppChild = (input, {
 })
 
 const waitForExit = (child) => {
-  const managed = child?.[MANAGED_CHILD]
-  if (managed?.closePromise) return managed.closePromise
+  const managed = MANAGED_CHILDREN.get(child)
+  if (managed?.exitPromise) return managed.exitPromise
   const existing = CHILD_EXIT_PROMISES.get(child)
   if (existing) return existing
   const promise = new Promise((resolveExit) => {
@@ -1033,37 +1084,269 @@ const waitForExit = (child) => {
   return promise
 }
 
-const defaultStartChild = (input) => {
-  if (!validChildInvocation(input)) fail('APP_E2E_CHILD_INPUT_INVALID')
-  const child = spawn(input.command, input.args, {
-    cwd: input.cwd,
-    detached: true,
-    env: input.env,
-    shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let handleSpawnError = () => {}
-  child?.once?.('error', () => handleSpawnError())
-  if (!child?.stdout?.on || !child?.stderr?.on
-    || !Number.isSafeInteger(child.pid) || child.pid <= 0) {
+export const startManagedAppE2EChild = (input, {
+  groupExistsImpl = processGroupExists,
+  ownedGroupsImpl = processTreeGroups,
+  signalGroupImpl = (groupId, signal) => {
+    try {
+      process.kill(-groupId, signal)
+    } catch (error) {
+      if (error?.code !== 'ESRCH') throw error
+    }
+  },
+  sleep = defaultSleep,
+  spawnImpl = spawn,
+} = {}) => {
+  if (!validChildInvocation(input)
+    || typeof groupExistsImpl !== 'function'
+    || typeof ownedGroupsImpl !== 'function'
+    || typeof signalGroupImpl !== 'function'
+    || typeof sleep !== 'function'
+    || typeof spawnImpl !== 'function') {
+    fail('APP_E2E_CHILD_INPUT_INVALID')
+  }
+  let child
+  let ownershipToken
+  try {
+    ownershipToken = randomBytes(24).toString('hex')
+    child = spawnImpl(input.command, input.args, {
+      cwd: input.cwd,
+      detached: true,
+      env: {
+        ...input.env,
+        [OWNERSHIP_ENV]: ownershipToken,
+      },
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch {
     fail('APP_E2E_CHILD_FAILED')
   }
-  let resolveClose
+  let pendingSpawnError = false
+  let handleSpawnError = () => {
+    pendingSpawnError = true
+  }
+  const errorListener = () => handleSpawnError()
+  let childPid = null
+  try { childPid = child?.pid } catch { /* Invalid spawn result. */ }
+  const validPid = Number.isSafeInteger(childPid) && childPid > 0
+  let validChildInterface = false
+  try {
+    const canManageListeners = typeof child?.once === 'function'
+      && typeof child?.removeListener === 'function'
+    if (canManageListeners) child.once('error', errorListener)
+    validChildInterface = canManageListeners
+      && typeof child?.kill === 'function'
+      && typeof child?.stdout?.on === 'function'
+      && typeof child?.stdout?.removeListener === 'function'
+      && typeof child?.stderr?.on === 'function'
+      && typeof child?.stderr?.removeListener === 'function'
+      && validPid
+  } catch {
+    validChildInterface = false
+  }
+  if (!validChildInterface) {
+    try { child?.removeListener?.('error', errorListener) } catch { /* Fixed result only. */ }
+    if (!validPid) {
+      try { child?.kill?.('SIGKILL') } catch { /* No owned PID can be proved. */ }
+      fail('APP_E2E_CHILD_FAILED')
+    }
+    const invalidSupervisor = createOwnedGroupSupervisor({
+      failOnSignalError: true,
+      groupExistsImpl,
+      ownedGroupsImpl,
+      ownershipToken,
+      rootPid: childPid,
+      signalGroupImpl,
+      sleep,
+    })
+    const invalidResult = Object.freeze({
+      code: null,
+      error: 'APP_E2E_CHILD_FAILED',
+      signal: null,
+    })
+    const cleanupPromise = Promise.resolve().then(async () => {
+      let proof
+      try {
+        proof = await invalidSupervisor.proveOwnedGroupsAbsent({
+          graceful: true,
+        })
+      } catch {
+        await invalidSupervisor.forceTrackedGroupsAbsent()
+        fail('APP_E2E_SHUTDOWN_FAILED')
+      }
+      if (!proof.proven) fail('APP_E2E_SHUTDOWN_FAILED')
+      return invalidResult
+    })
+    const exitPromise = cleanupPromise.then(() => {
+      fail('APP_E2E_CHILD_FAILED')
+    })
+    void cleanupPromise.catch(() => {})
+    void exitPromise.catch(() => {})
+    MANAGED_CHILDREN.set(child, Object.freeze({
+      exitPromise,
+      requestStop: () => cleanupPromise,
+      shutdownStarted: () => true,
+      terminalObserved: () => true,
+      terminalFollowedStop: () => false,
+    }))
+    return child
+  }
+
+  const ownershipSupervisor = createOwnedGroupSupervisor({
+    failOnSignalError: true,
+    groupExistsImpl,
+    ownedGroupsImpl,
+    ownershipToken,
+    rootPid: child.pid,
+    signalGroupImpl,
+    sleep,
+  })
+  let rejectExit
+  let resolveExit
+  let listenerCleanupFailed = false
   let settled = false
+  let shutdownMustFail = false
+  let shutdownPromise = null
+  let stopRequested = false
+  let terminal = null
+  let terminalObserved = false
+  let terminalFollowedStop = false
   let outputFailure = null
   let stdoutBytes = 0
   let stderrBytes = 0
-  let killTimer = null
-  const closePromise = new Promise((resolveChildClose) => {
-    resolveClose = resolveChildClose
+  const exitPromise = new Promise((resolveChildExit, rejectChildExit) => {
+    rejectExit = rejectChildExit
+    resolveExit = resolveChildExit
   })
+  void exitPromise.catch(() => {})
+  const removePipeListeners = () => {
+    try {
+      child.stdout.removeListener('data', stdoutListener)
+    } catch {
+      listenerCleanupFailed = true
+    }
+    try {
+      child.stderr.removeListener('data', stderrListener)
+    } catch {
+      listenerCleanupFailed = true
+    }
+    try {
+      child.stdout.resume?.()
+    } catch {
+      listenerCleanupFailed = true
+    }
+    try {
+      child.stderr.resume?.()
+    } catch {
+      listenerCleanupFailed = true
+    }
+  }
+  const removeListeners = () => {
+    try {
+      child.removeListener('error', errorListener)
+    } catch {
+      listenerCleanupFailed = true
+    }
+    try {
+      child.removeListener('exit', exitListener)
+    } catch {
+      listenerCleanupFailed = true
+    }
+    try {
+      child.removeListener('close', closeListener)
+    } catch {
+      listenerCleanupFailed = true
+    }
+    removePipeListeners()
+  }
+  const settleFailure = () => {
+    if (settled) return
+    settled = true
+    removeListeners()
+    rejectExit(new Error('APP_E2E_SHUTDOWN_FAILED'))
+  }
+  const settleExit = () => {
+    if (settled) return
+    if (!terminal) {
+      settleFailure()
+      return
+    }
+    removeListeners()
+    if (listenerCleanupFailed) {
+      settled = true
+      rejectExit(new Error('APP_E2E_SHUTDOWN_FAILED'))
+      return
+    }
+    settled = true
+    resolveExit(Object.freeze({
+      code: terminal.code,
+      error: outputFailure ?? terminal.error,
+      signal: terminal.signal,
+    }))
+  }
+  const beginShutdown = (initialSignal = 'SIGTERM') => {
+    if (shutdownPromise) return exitPromise
+    shutdownPromise = Promise.resolve().then(async () => {
+      let proof
+      try {
+        proof = await ownershipSupervisor.proveOwnedGroupsAbsent({
+          graceful: true,
+          initialSignal,
+        })
+      } catch {
+        await ownershipSupervisor.forceTrackedGroupsAbsent()
+        settleFailure()
+        return
+      }
+      if (!proof.proven) {
+        settleFailure()
+        return
+      }
+      if (!terminalObserved) {
+        let observed = false
+        try {
+          observed = await waitForAppE2ECondition(
+            () => terminalObserved,
+            { sleep: ownershipSupervisor.boundedSleep },
+          )
+        } catch {
+          observed = false
+        }
+        if (!observed) {
+          settleFailure()
+          return
+        }
+      }
+      if (shutdownMustFail) {
+        settleFailure()
+        return
+      }
+      settleExit()
+    })
+    removePipeListeners()
+    void shutdownPromise.catch(() => settleFailure())
+    return exitPromise
+  }
+  const observeTerminal = (code, signal, error = null) => {
+    if (terminalObserved || settled) return
+    terminalObserved = true
+    if (error === null && !validManagedTerminal(code, signal)) {
+      shutdownMustFail = true
+      beginShutdown('SIGTERM')
+      return
+    }
+    terminalFollowedStop = stopRequested
+    terminal = Object.freeze({ code, error, signal })
+    beginShutdown('SIGTERM')
+  }
+  const exitListener = (code, signal) => observeTerminal(code, signal)
+  const closeListener = (code, signal) => observeTerminal(code, signal)
+  handleSpawnError = () => observeTerminal(null, null, 'APP_E2E_CHILD_FAILED')
   const terminateOutput = () => {
-    if (outputFailure) return
+    if (outputFailure || settled) return
     outputFailure = 'APP_E2E_CHILD_OUTPUT_INVALID'
-    try { signalProcessGroup(child, 'SIGTERM') } catch { /* Escalation follows. */ }
-    killTimer = setTimeout(() => {
-      try { signalProcessGroup(child, 'SIGKILL') } catch { /* Close proves shutdown. */ }
-    }, CHILD_KILL_GRACE_MS)
+    beginShutdown('SIGTERM')
   }
   const drain = (chunk, stream) => {
     if (outputFailure) return
@@ -1077,28 +1360,53 @@ const defaultStartChild = (input) => {
       terminateOutput()
     }
   }
-  child.stdout.on('data', (chunk) => drain(chunk, 'stdout'))
-  child.stderr.on('data', (chunk) => drain(chunk, 'stderr'))
-  handleSpawnError = () => {
-    outputFailure ??= 'APP_E2E_CHILD_FAILED'
+  const stdoutListener = (chunk) => drain(chunk, 'stdout')
+  const stderrListener = (chunk) => drain(chunk, 'stderr')
+  try {
+    child.once('exit', exitListener)
+    child.once('close', closeListener)
+    child.stdout.on('data', stdoutListener)
+    child.stderr.on('data', stderrListener)
+  } catch {
+    terminalObserved = true
+    terminal = Object.freeze({
+      code: null,
+      error: 'APP_E2E_CHILD_FAILED',
+      signal: null,
+    })
+    beginShutdown('SIGTERM')
   }
-  child.once('close', (code, signal) => {
-    if (settled) return
-    settled = true
-    if (killTimer) clearTimeout(killTimer)
-    resolveClose(Object.freeze({
-      code,
-      error: outputFailure,
-      signal,
-    }))
-  })
-  Object.defineProperty(child, MANAGED_CHILD, {
-    value: Object.freeze({ closePromise }),
-  })
+  if (pendingSpawnError) handleSpawnError()
+  const requestStop = (signal = 'SIGTERM') => {
+    if (signal !== 'SIGINT' && signal !== 'SIGTERM') {
+      if (settled) return Promise.reject(new Error('APP_E2E_SHUTDOWN_FAILED'))
+      shutdownMustFail = true
+      stopRequested = true
+      beginShutdown('SIGKILL')
+      return exitPromise
+    }
+    stopRequested = true
+    return beginShutdown(signal)
+  }
+  MANAGED_CHILDREN.set(child, Object.freeze({
+    exitPromise,
+    requestStop,
+    shutdownStarted: () => shutdownPromise !== null,
+    terminalObserved: () => terminalObserved,
+    terminalFollowedStop: () => terminalFollowedStop,
+  }))
   return child
 }
 
+export const waitForManagedAppE2EChild = (child) => {
+  const managed = MANAGED_CHILDREN.get(child)
+  if (!managed?.exitPromise) fail('APP_E2E_CHILD_INPUT_INVALID')
+  return managed.exitPromise
+}
+
 export const stopAppE2EChild = async (child, signal = 'SIGTERM') => {
+  const managed = MANAGED_CHILDREN.get(child)
+  if (managed?.requestStop) return managed.requestStop(signal)
   const close = waitForExit(child)
   let closeResult = null
   close.then((result) => {
@@ -1382,18 +1690,63 @@ const assertNoPlatformListener = async (harness) => {
   }
 }
 
-const defaultAssertPortAvailable = async (harness) => {
-  await assertNoPlatformListener(harness)
+export const probeAppE2EPort = (options = {}) => {
+  if (!ownObject(options)
+    || !exactKeys(options, Object.hasOwn(options, 'onListening')
+      ? ['onListening']
+      : [])
+    || (Object.hasOwn(options, 'onListening')
+      && typeof options.onListening !== 'function')) {
+    return Promise.reject(new Error('APP_E2E_PORT_OCCUPIED'))
+  }
+  const onListening = options.onListening ?? (() => {})
   return new Promise((resolvePort, rejectPort) => {
-    const server = createServer()
+    let server
+    try {
+      server = createServer()
+    } catch {
+      rejectPort(new Error('APP_E2E_PORT_OCCUPIED'))
+      return
+    }
     let settled = false
+    let timer = null
+    const sockets = new Set()
+    const destroySockets = () => {
+      for (const socket of sockets) {
+        try { socket.destroy() } catch { /* Fixed status below. */ }
+      }
+      sockets.clear()
+    }
+    const removeListeners = () => {
+      try { server.removeListener('connection', onConnection) } catch { /* Fixed result only. */ }
+      try { server.removeListener('error', reject) } catch { /* Fixed result only. */ }
+    }
+    const clearDeadline = () => {
+      if (!timer) return
+      clearTimeout(timer)
+      timer = null
+    }
     const reject = () => {
       if (settled) return
       settled = true
+      clearDeadline()
+      destroySockets()
+      removeListeners()
       try { server.close() } catch { /* Fixed status only. */ }
       rejectPort(new Error('APP_E2E_PORT_OCCUPIED'))
     }
+    const onConnection = (socket) => {
+      sockets.add(socket)
+      try {
+        socket.once('close', () => sockets.delete(socket))
+        socket.destroy()
+      } catch {
+        reject()
+      }
+    }
     server.once('error', reject)
+    server.on('connection', onConnection)
+    timer = setTimeout(reject, PORT_PROBE_DEADLINE_MS)
     server.listen({ exclusive: true, host: HOST, port: PORT }, () => {
       const address = server.address()
       if (!address
@@ -1403,17 +1756,35 @@ const defaultAssertPortAvailable = async (harness) => {
         reject()
         return
       }
-      server.close((error) => {
-        if (settled) return
-        if (error) {
-          reject()
-          return
-        }
-        settled = true
-        resolvePort(true)
-      })
+      Promise.resolve().then(onListening).then(
+        () => {
+          if (settled) return
+          destroySockets()
+          try {
+            server.close((error) => {
+              if (settled) return
+              if (error) {
+                reject()
+                return
+              }
+              settled = true
+              clearDeadline()
+              removeListeners()
+              resolvePort(true)
+            })
+          } catch {
+            reject()
+          }
+        },
+        reject,
+      )
     })
   })
+}
+
+const defaultAssertPortAvailable = async (harness) => {
+  await assertNoPlatformListener(harness)
+  return probeAppE2EPort()
 }
 
 export const parseLinuxListenerTables = (tcp, tcp6) => {
@@ -1724,7 +2095,9 @@ export async function runAppE2E({
   const scanHarnessArtifacts = deps.scanHarnessArtifacts ?? defaultScanHarnessArtifacts
   const signals = deps.signals ?? process
   const sleep = deps.sleep ?? defaultSleep
-  const startChild = deps.startChild ?? defaultStartChild
+  const startChild = deps.startChild ?? (
+    (input) => startManagedAppE2EChild(input, deps.managedChildDeps)
+  )
   const externalArtifactSnapshot = deps.externalArtifactSnapshot
     ?? defaultExternalArtifactSnapshot
   const stopChild = deps.stopChild ?? (
@@ -1762,12 +2135,18 @@ export async function runAppE2E({
   let preserveHarness = false
   let vite = null
   let viteClosed = true
+  let vitePortReleased = true
   const advance = (next) => {
     if (!Number.isSafeInteger(next) || next <= phase) fail('APP_E2E_STATE_INVALID')
     phase = next
   }
   const requestStop = (child, signal) => {
     if (!child) return
+    const managed = MANAGED_CHILDREN.get(child)
+    if (managed?.requestStop) {
+      void managed.requestStop(signal).catch(() => {})
+      return
+    }
     if (deps.startChild && child === vite) {
       try { child.kill(signal) } catch { preserveHarness = true }
       return
@@ -1935,18 +2314,69 @@ export async function runAppE2E({
     } catch {
       outcome('APP_E2E_START_FAILED')
     }
+    const managedVite = MANAGED_CHILDREN.has(vite)
     if (!vite
-      || typeof vite.once !== 'function'
-      || typeof vite.kill !== 'function'
       || !Number.isSafeInteger(vite.pid)
-      || vite.pid <= 0) outcome('APP_E2E_START_FAILED')
+      || vite.pid <= 0
+      || (!managedVite
+        && (typeof vite.once !== 'function'
+          || typeof vite.kill !== 'function'))) outcome('APP_E2E_START_FAILED')
     activeChild = vite
     viteClosed = false
+    vitePortReleased = false
     let childExitValue = null
-    const childExit = waitForExit(vite).then((value) => {
-      childExitValue = value
-      return value
-    })
+    const childExit = waitForExit(vite).then(
+      (value) => {
+        childExitValue = Object.freeze({
+          childFailed: MANAGED_CHILDREN.has(vite) && value?.error !== null,
+          shutdownFailed: false,
+          startupFailed: false,
+          value,
+        })
+        return childExitValue
+      },
+      (error) => {
+        const startupFailed = error?.message === 'APP_E2E_CHILD_FAILED'
+        childExitValue = Object.freeze({
+          childFailed: false,
+          shutdownFailed: !startupFailed,
+          startupFailed,
+          value: null,
+        })
+        return childExitValue
+      },
+    )
+    const classifyViteExit = async (exit, failureCode) => {
+      activeChild = null
+      if (exit.shutdownFailed) {
+        preserveHarness = true
+        outcome('APP_E2E_SHUTDOWN_FAILED')
+      }
+      if (exit.startupFailed) {
+        viteClosed = true
+        outcome('APP_E2E_START_FAILED')
+      }
+      if (exit.childFailed) {
+        viteClosed = true
+        outcome(failureCode === 'APP_E2E_CHILD_EXITED'
+          ? 'APP_E2E_START_FAILED'
+          : 'APP_E2E_RUNTIME_FAILED')
+      }
+      if (!MANAGED_CHILDREN.has(vite) && processGroupExists(vite.pid)) {
+        await removeOrphanedGroup(vite.pid)
+        preserveHarness = true
+        outcome('APP_E2E_SHUTDOWN_FAILED')
+      }
+      viteClosed = true
+      outcome(forwardedSignal ? 'APP_E2E_INTERRUPTED' : failureCode)
+    }
+    const classifyManagedShutdownIfStarted = () => {
+      const managed = MANAGED_CHILDREN.get(vite)
+      if (managed?.shutdownStarted?.() !== true) return null
+      return childExit.then((exit) => (
+        classifyViteExit(exit, 'APP_E2E_CHILD_EXITED')
+      ))
+    }
     if (forwardedSignal) {
       requestStop(vite, forwardedSignal)
       outcome('APP_E2E_INTERRUPTED')
@@ -1954,7 +2384,10 @@ export async function runAppE2E({
 
     advance(PHASE.readiness)
     let ready = false
+    let managedShutdown = null
     for (let attempt = 0; attempt < maxAttempts && !forwardedSignal; attempt += 1) {
+      managedShutdown = classifyManagedShutdownIfStarted()
+      if (managedShutdown) await managedShutdown
       let listenerBefore = null
       try {
         listenerBefore = await assertListenerOwner(vite, harness)
@@ -1964,6 +2397,8 @@ export async function runAppE2E({
       } catch {
         listenerBefore = null
       }
+      managedShutdown = classifyManagedShutdownIfStarted()
+      if (managedShutdown) await managedShutdown
       if (forwardedSignal) break
       let raced
       if (childExitValue) {
@@ -1984,26 +2419,24 @@ export async function runAppE2E({
           childExit.then((exit) => ({ exit, kind: 'exit' })),
         ])
       }
+      managedShutdown = classifyManagedShutdownIfStarted()
+      if (managedShutdown) await managedShutdown
       if (raced.kind === 'exit') {
-        activeChild = null
-        viteClosed = true
-        if (processGroupExists(vite.pid)) {
-          await removeOrphanedGroup(vite.pid)
-          preserveHarness = true
-          outcome('APP_E2E_SHUTDOWN_FAILED')
-        }
-        outcome(forwardedSignal ? 'APP_E2E_INTERRUPTED' : 'APP_E2E_CHILD_EXITED')
+        await classifyViteExit(raced.exit, 'APP_E2E_CHILD_EXITED')
       }
       if (raced.kind === 'session') {
+        let listenerAfter = null
         try {
-          const listenerAfter = await assertListenerOwner(vite, harness)
-          if (!childExitValue
-            && listenerAfter === listenerBefore) {
-            ready = true
-            break
-          }
+          listenerAfter = await assertListenerOwner(vite, harness)
         } catch {
           // A valid response from a foreign listener is never readiness.
+        }
+        managedShutdown = classifyManagedShutdownIfStarted()
+        if (managedShutdown) await managedShutdown
+        if (!childExitValue
+          && listenerAfter === listenerBefore) {
+          ready = true
+          break
         }
       }
       if (attempt + 1 < maxAttempts && !forwardedSignal) {
@@ -2011,41 +2444,55 @@ export async function runAppE2E({
           sleep(250).then(() => ({ kind: 'slept' }), () => ({ kind: 'failed' })),
           childExit.then((exit) => ({ exit, kind: 'exit' })),
         ])
+        managedShutdown = classifyManagedShutdownIfStarted()
+        if (managedShutdown) await managedShutdown
         if (slept.kind === 'exit') {
-          activeChild = null
-          viteClosed = true
-          outcome(forwardedSignal ? 'APP_E2E_INTERRUPTED' : 'APP_E2E_CHILD_EXITED')
+          await classifyViteExit(slept.exit, 'APP_E2E_CHILD_EXITED')
         }
         if (slept.kind === 'failed') break
       }
     }
+    managedShutdown = classifyManagedShutdownIfStarted()
+    if (managedShutdown) await managedShutdown
     if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
     if (!ready) outcome('APP_E2E_READINESS_FAILED')
     advance(PHASE.ready)
 
     if (deps.exitAfterReady) {
       advance(PHASE.stopping)
+      let stopResult
       try {
-        await stopChild(vite, 'SIGTERM')
+        stopResult = await stopChild(vite, 'SIGTERM')
+        if (!MANAGED_CHILDREN.has(vite) && processGroupExists(vite.pid)) {
+          await removeOrphanedGroup(vite.pid)
+          fail('APP_E2E_SHUTDOWN_FAILED')
+        }
         activeChild = null
         viteClosed = true
       } catch {
         preserveHarness = true
         outcome('APP_E2E_SHUTDOWN_FAILED')
       }
+      if (MANAGED_CHILDREN.has(vite)) {
+        const managed = MANAGED_CHILDREN.get(vite)
+        const cleanManagedStop = exactKeys(stopResult, ['code', 'error', 'signal'])
+          && stopResult.error === null
+          && managed.terminalFollowedStop()
+          && (((stopResult.code === 0
+            || stopResult.code === 137
+            || stopResult.code === 143)
+            && stopResult.signal === null)
+            || (stopResult.code === null
+              && (stopResult.signal === 'SIGKILL'
+                || stopResult.signal === 'SIGTERM')))
+        if (!cleanManagedStop) outcome('APP_E2E_RUNTIME_FAILED')
+      }
       outcome('APP_E2E_READY', true)
     }
 
     if (typeof deps.onReady === 'function') await deps.onReady()
     const runtimeExit = await childExit
-    activeChild = null
-    viteClosed = true
-    if (processGroupExists(vite.pid)) {
-      await removeOrphanedGroup(vite.pid)
-      preserveHarness = true
-      outcome('APP_E2E_SHUTDOWN_FAILED')
-    }
-    outcome(forwardedSignal ? 'APP_E2E_INTERRUPTED' : 'APP_E2E_RUNTIME_FAILED')
+    await classifyViteExit(runtimeExit, 'APP_E2E_RUNTIME_FAILED')
   } catch (error) {
     final = error instanceof RunnerOutcome
       ? Object.freeze({ code: error.code, ok: error.ok })
@@ -2062,7 +2509,20 @@ export async function runAppE2E({
         final = Object.freeze({ code: 'APP_E2E_SHUTDOWN_FAILED', ok: false })
       }
     }
-    if (ownedPath && !preserveHarness && viteClosed && activeChild === null) {
+    if (vite && viteClosed) {
+      try {
+        await assertPortAvailable(harness)
+        vitePortReleased = true
+      } catch {
+        preserveHarness = true
+        final = Object.freeze({ code: 'APP_E2E_SHUTDOWN_FAILED', ok: false })
+      }
+    }
+    if (ownedPath
+      && !preserveHarness
+      && viteClosed
+      && vitePortReleased
+      && activeChild === null) {
       let integrityFailure = null
       if (harness) {
         try {

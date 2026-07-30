@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { runAppE2E } from '../../scripts/run-app-e2e.mjs'
 
@@ -9,8 +10,86 @@ const SUPPORTED = process.platform === 'darwin' || process.platform === 'linux'
 const PROJECT_ROOT = realpathSync(fileURLToPath(new URL('../..', import.meta.url)))
 const RUNNER_PATH = realpathSync(fileURLToPath(new URL('../../scripts/run-app-e2e.mjs', import.meta.url)))
 const READY_URL = 'http://127.0.0.1:5174/api/v1/session'
+const OWNERSHIP_MARKER = Buffer.from('BWM_APP_E2E_OWNERSHIP=', 'ascii')
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const ownershipMarkerSnapshot = () => {
+  const snapshot = spawnSync(
+    realpathSync('/bin/ps'),
+    ['eww', '-axo', 'pid=,ppid=,pgid=,command='],
+    {
+      env: { LANG: 'C', LC_ALL: 'C' },
+      maxBuffer: 16 * 1024 * 1024,
+      shell: false,
+      timeout: 500,
+    },
+  )
+  const stdout = snapshot.stdout
+  const stderr = snapshot.stderr
+  try {
+    assert.equal(
+      snapshot.error === undefined
+        && snapshot.signal === null
+        && snapshot.status === 0
+        && stdout instanceof Buffer
+        && stderr instanceof Buffer
+        && stderr.byteLength === 0,
+      true,
+      'ownership process snapshot failed',
+    )
+    const ownership = new Map()
+    let offset = 0
+    while (offset < stdout.byteLength) {
+      const index = stdout.indexOf(OWNERSHIP_MARKER, offset)
+      if (index < 0) break
+      const tokenStart = index + OWNERSHIP_MARKER.byteLength
+      const tokenEnd = tokenStart + 48
+      const token = stdout.subarray(tokenStart, tokenEnd).toString('ascii')
+      const before = index > 0 ? stdout[index - 1] : 0x0a
+      const after = tokenEnd < stdout.byteLength ? stdout[tokenEnd] : 0x0a
+      if ((before !== 0x20 && before !== 0x09)
+        || (after !== 0x20 && after !== 0x09 && after !== 0x0a)
+        || !/^[a-f0-9]{48}$/.test(token)) {
+        offset = tokenEnd
+        continue
+      }
+      const lineStart = stdout.lastIndexOf(0x0a, index - 1) + 1
+      const prefix = stdout.subarray(
+        lineStart,
+        Math.min(index, lineStart + 96),
+      ).toString('ascii')
+      const match = prefix.match(/^\s*[1-9]\d*\s+(?:0|[1-9]\d*)\s+([1-9]\d*)\s+/)
+      assert.notEqual(match, null, 'ownership process snapshot was malformed')
+      const groups = ownership.get(token) ?? new Set()
+      groups.add(Number(match[1]))
+      ownership.set(token, groups)
+      offset = tokenEnd
+    }
+    return ownership
+  } finally {
+    stdout?.fill?.(0)
+    stderr?.fill?.(0)
+  }
+}
+
+const assertRunnerResourcesAbsent = async () => {
+  assert.equal(ownershipMarkerSnapshot().size, 0)
+  await new Promise((resolve, reject) => {
+    const server = createServer()
+    server.once('error', () => reject(new Error('runner port remains occupied')))
+    server.listen({
+      exclusive: true,
+      host: '127.0.0.1',
+      port: 5174,
+    }, () => {
+      server.close((error) => {
+        if (error) reject(new Error('runner port release failed'))
+        else resolve()
+      })
+    })
+  })
+}
 
 const waitForSession = async (childExited) => {
   const deadline = Date.now() + 30_000
@@ -50,6 +129,7 @@ test('default runner exposes the exact seeded owner through one shared local D1'
   skip: !SUPPORTED,
   timeout: 60_000,
 }, async () => {
+  await assertRunnerResourcesAbsent()
   const result = await runAppE2E({
     argv: [],
     env: {
@@ -63,6 +143,43 @@ test('default runner exposes the exact seeded owner through one shared local D1'
     },
   })
   assert.deepEqual(result, { code: 'APP_E2E_READY', ok: true })
+  await assertRunnerResourcesAbsent()
+})
+
+test('default runner reports a natural post-ready Vite exit after complete cleanup', {
+  skip: !SUPPORTED,
+  timeout: 60_000,
+}, async () => {
+  await assertRunnerResourcesAbsent()
+  let stoppedGroup = null
+  let stoppedToken = null
+  try {
+    const result = await runAppE2E({
+      argv: [],
+      env: {},
+      deps: {
+        maxReadinessAttempts: 120,
+        onReady: () => {
+          const ownership = ownershipMarkerSnapshot()
+          assert.equal(ownership.size, 1)
+          stoppedToken = ownership.keys().next().value
+          const groups = ownership.get(stoppedToken)
+          assert.equal(groups.size, 1)
+          stoppedGroup = groups.values().next().value
+          process.kill(-stoppedGroup, 'SIGTERM')
+        },
+      },
+    })
+    assert.deepEqual(result, { code: 'APP_E2E_RUNTIME_FAILED', ok: false })
+    await assertRunnerResourcesAbsent()
+  } finally {
+    if (stoppedToken) {
+      const groups = ownershipMarkerSnapshot().get(stoppedToken) ?? new Set()
+      for (const groupId of groups) {
+        try { process.kill(-groupId, 'SIGKILL') } catch { /* Already absent. */ }
+      }
+    }
+  }
 })
 
 test('runner CLI reports readiness once, stays live, and reports its terminal signal result', {
@@ -110,6 +227,7 @@ test('runner CLI reports readiness once, stays live, and reports its terminal si
     assert.equal(stdout, 'APP_E2E_READY\nAPP_E2E_INTERRUPTED\n')
     assert.equal(stderr, '')
     assert.doesNotMatch(`${stdout}\n${stderr}`, /must-not-reach/)
+    await assertRunnerResourcesAbsent()
   } finally {
     if (!exit) {
       child.kill('SIGTERM')
