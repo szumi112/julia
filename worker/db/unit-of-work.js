@@ -1,5 +1,5 @@
 import { auditDescriptorFor, enforceAuditRateLimit } from '../audit/events.js'
-import { isD1IdentityCollision } from './errors.js'
+import { isD1IdentityCollision, isD1RateLimitGuardFailure } from './errors.js'
 import { isCorrelationId } from '../logging/safe-log.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
 import { encodeBase64Url } from '../security/encoding.js'
@@ -20,6 +20,55 @@ const prepared = (value) => value && typeof value === 'object'
 const exactKeys = (value, keys) => Object.keys(value).length === keys.length
   && keys.every((key) => Object.hasOwn(value, key))
 const units = new WeakMap()
+const rateLimitGuards = new WeakMap()
+
+const validGuardBinding = (value) => value === null || typeof value === 'string'
+  || (typeof value === 'number' && Number.isFinite(value))
+
+export function rateLimitGuardStatement(db, input = {}) {
+  if (!db?.prepare || !ownObject(input)
+    || !exactKeys(input, [
+      'auditId', 'actorId', 'action', 'limit', 'since',
+      'postconditionSql', 'postconditionBindings',
+    ])
+    || !validId(input.auditId) || !validId(input.actorId)
+    || !OPERATION.test(input.action ?? '')
+    || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 10_000
+    || !validInstant(input.since)
+    || typeof input.postconditionSql !== 'string'
+    || input.postconditionSql.length < 1 || input.postconditionSql.length > 4096
+    || input.postconditionSql !== input.postconditionSql.trim()
+    || /;|--|\/\*|\*\//.test(input.postconditionSql)
+    || !Array.isArray(input.postconditionBindings)
+    || input.postconditionBindings.length > 32
+    || !input.postconditionBindings.every(validGuardBinding)) fail()
+  const statement = db.prepare(
+    `INSERT INTO rate_limit_guard_failures (audit_id)
+     SELECT id
+     FROM audit_events
+     WHERE id=?
+       AND NOT (
+         (${input.postconditionSql})
+         AND (SELECT count(*) FROM audit_events
+              WHERE actor_staff_id=? AND action=? AND occurred_at>=?)<=?
+       )`
+  ).bind(
+    input.auditId,
+    ...input.postconditionBindings,
+    input.actorId,
+    input.action,
+    input.since,
+    input.limit,
+  )
+  rateLimitGuards.set(statement, Object.freeze({
+    auditId: input.auditId,
+    actorId: input.actorId,
+    action: input.action,
+    limit: input.limit,
+    since: input.since,
+  }))
+  return statement
+}
 
 export function createUnitOfWork(db, context) {
   if (!db?.batch || !ownObject(context)
@@ -49,7 +98,7 @@ export function createUnitOfWork(db, context) {
       primaryAudit = descriptor
       audits += 1
     } else {
-      if (auditDescriptorFor(statement)) fail()
+      if (auditDescriptorFor(statement) || rateLimitGuards.has(statement)) fail()
       nonAudit += 1
     }
     statements.push(statement)
@@ -78,8 +127,24 @@ export function createUnitOfWork(db, context) {
       return db.batch(guard ? [...statements, guard] : statements)
     },
   }
-  units.set(api, { db, context: Object.freeze({ ...context }), primaryAudit: () => primaryAudit })
+  units.set(api, {
+    db,
+    context: Object.freeze({ ...context }),
+    primaryAudit: () => primaryAudit,
+    rateLimitGuard: () => rateLimitGuards.get(guard) ?? null,
+  })
   return Object.freeze(api)
+}
+
+export function isRateLimitDenialDescriptor(descriptor, context) {
+  return ownObject(descriptor) && ownObject(context)
+    && validId(context.actorId) && isCorrelationId(context.correlationId)
+    && descriptor.action === 'authorization.denied'
+    && descriptor.entityType === 'staff_user'
+    && descriptor.entityId === context.actorId
+    && descriptor.actorStaffId === context.actorId
+    && descriptor.correlationId === context.correlationId
+    && descriptor.result === 'denied'
 }
 
 async function commitRateLimitDenial(db, input) {
@@ -100,6 +165,8 @@ async function commitRateLimitDenial(db, input) {
 export async function commitRateLimitedMutation(db, uow, input = {}) {
   const unit = units.get(uow)
   const denial = auditDescriptorFor(input.denialAudit)
+  const rateLimitGuard = unit?.rateLimitGuard()
+  const primaryAudit = unit?.primaryAudit()
   if (!db?.prepare || !db?.batch || !uow || typeof uow.commit !== 'function'
     || !ownObject(input)
     || !exactKeys(input, [
@@ -108,10 +175,13 @@ export async function commitRateLimitedMutation(db, uow, input = {}) {
     || !unit || unit.db !== db || unit.context.mode !== 'mutation'
     || unit.context.actorId !== input.actorId
     || unit.context.correlationId !== input.correlationId
-    || unit.primaryAudit()?.action !== input.action
-    || denial?.actorStaffId !== input.actorId
-    || denial?.correlationId !== input.correlationId
-    || denial?.result !== 'denied') fail()
+    || primaryAudit?.action !== input.action
+    || rateLimitGuard?.auditId !== primaryAudit?.id
+    || rateLimitGuard?.actorId !== input.actorId
+    || rateLimitGuard?.action !== input.action
+    || rateLimitGuard?.limit !== input.limit
+    || rateLimitGuard?.since !== input.since
+    || !isRateLimitDenialDescriptor(denial, input)) fail()
   try {
     await enforceAuditRateLimit(db, input)
   } catch (error) {
@@ -121,7 +191,7 @@ export async function commitRateLimitedMutation(db, uow, input = {}) {
   try {
     return await uow.commit()
   } catch (originalError) {
-    if (!isD1IdentityCollision(originalError)) throw originalError
+    if (!isD1RateLimitGuardFailure(originalError)) throw originalError
     try {
       await enforceAuditRateLimit(db, input)
     } catch (rateError) {

@@ -176,6 +176,15 @@ describe('foundation migrations', () => {
       .rejects.toThrow(/identity_collision/)
   })
 
+  it('exposes a dedicated non-persisting rate-limit guard failure sentinel', async () => {
+    await expect(run(
+      "INSERT INTO rate_limit_guard_failures (audit_id) VALUES ('aud_guard_failure')"
+    )).rejects.toThrow(/rate_limit_guard_failed/)
+    expect(await one(
+      "SELECT count(*) AS count FROM rate_limit_guard_failures"
+    )).toEqual({ count: 0 })
+  })
+
   it('enforces text identifiers, integer affinity, and foreign keys', async () => {
     await expect(run(
       `INSERT INTO data_keys (id, scope_type, scope_id, purpose, dek_version, wrapped_key_b64, wrap_nonce_b64, kek_version, created_at)

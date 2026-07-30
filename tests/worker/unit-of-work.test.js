@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   auditEventStatement,
   encryptAuditReason,
@@ -10,6 +10,8 @@ import {
   createIdempotencyStatement,
   createUnitOfWork,
   inspectIdempotency,
+  isRateLimitDenialDescriptor,
+  rateLimitGuardStatement,
   recoverIdempotencyAfterCollision,
 } from '../../worker/db/unit-of-work.js'
 import { createKeyring } from '../../worker/security/keyring.js'
@@ -51,6 +53,15 @@ const guardFor = (db, auditId, predicate, ...bindings) => db.prepare(
    SELECT id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,reason_envelope,correlation_id,metadata_json
    FROM audit_events WHERE id=? AND NOT (${predicate})`
 ).bind(auditId, ...bindings)
+
+const encryptedReasonEnvelope = JSON.stringify({
+  format: 1,
+  algorithm: 'A256GCM',
+  dataKeyId: 'key_rate_reason',
+  dataKeyVersion: 1,
+  nonce: 'AAAAAAAAAAAAAAAA',
+  ciphertext: 'AAAAAAAAAAAAAAAAAAAAAA',
+})
 
 describe('guarded unit of work', () => {
   it('preserves service order, moves one guard last, and commits once', async () => {
@@ -234,6 +245,114 @@ describe('guarded unit of work', () => {
       .toEqual({ result: 'denied' })
   })
 
+  it.each([
+    ['action', { action: 'identity.denied' }],
+    ['entity type', { entityType: 'data_key' }],
+    ['entity id', { entityId: 'stf_other' }],
+    ['actor id', { actorStaffId: 'stf_other' }],
+    ['correlation id', { correlationId: '22222222-2222-4222-8222-222222222222' }],
+    ['result', { result: 'success' }],
+  ])('rejects an independently mismatched rate denial descriptor: %s', (_field, patch) => {
+    const descriptor = {
+      action: 'authorization.denied',
+      entityType: 'staff_user',
+      entityId: 'stf_rate_descriptor',
+      actorStaffId: 'stf_rate_descriptor',
+      correlationId,
+      result: 'denied',
+      ...patch,
+    }
+    expect(isRateLimitDenialDescriptor(descriptor, {
+      actorId: 'stf_rate_descriptor',
+      correlationId,
+    })).toBe(false)
+  })
+
+  it('accepts only the exact rate denial descriptor', () => {
+    expect(isRateLimitDenialDescriptor({
+      action: 'authorization.denied',
+      entityType: 'staff_user',
+      entityId: 'stf_rate_descriptor',
+      actorStaffId: 'stf_rate_descriptor',
+      correlationId,
+      result: 'denied',
+    }, {
+      actorId: 'stf_rate_descriptor',
+      correlationId,
+    })).toBe(true)
+  })
+
+  it.each([
+    ['identity denial', {
+      action: 'identity.denied',
+      entityId: 'stf_rate_binding',
+      reasonEnvelope: null,
+    }],
+    ['another staff entity', {
+      action: 'authorization.denied',
+      entityId: 'stf_rate_binding_other',
+      reasonEnvelope: encryptedReasonEnvelope,
+    }],
+  ])('rejects a tagged %s before any D1 call', async (_label, denialInput) => {
+    const actorId = 'stf_rate_binding'
+    const requestCorrelationId = '33333333-3333-4333-8333-333333333333'
+    await seedActor(actorId)
+    await seedActor('stf_rate_binding_other')
+    const prepare = vi.fn((sql) => env.DB.prepare(sql))
+    const batch = vi.fn((statements) => env.DB.batch(statements))
+    const db = { prepare, batch }
+    const auditId = `aud_rate_binding_${denialInput.action.replace('.', '_')}`
+    const uow = createUnitOfWork(db, {
+      mode: 'mutation', actorId, correlationId: requestCorrelationId,
+    })
+    uow.domain(db.prepare('SELECT 1'))
+    uow.audit(auditEventStatement(db, {
+      id: auditId,
+      occurredAt: now,
+      actorStaffId: actorId,
+      action: 'data_key.rewrapped',
+      entityType: 'data_key',
+      entityId: `key_${auditId}`,
+      result: 'success',
+      correlationId: requestCorrelationId,
+      metadata: { oldKekVersion: 1, newKekVersion: 2 },
+      reasonEnvelope: null,
+    }))
+    uow.guard(rateLimitGuardStatement(db, {
+      auditId,
+      actorId,
+      action: 'data_key.rewrapped',
+      limit: 5,
+      since: '2027-01-15T07:00:00.000Z',
+      postconditionSql: '1=1',
+      postconditionBindings: [],
+    }))
+    const denialAudit = auditEventStatement(db, {
+      id: `${auditId}_denied`,
+      occurredAt: now,
+      actorStaffId: actorId,
+      action: denialInput.action,
+      entityType: 'staff_user',
+      entityId: denialInput.entityId,
+      result: 'denied',
+      correlationId: requestCorrelationId,
+      metadata: { version: 1 },
+      reasonEnvelope: denialInput.reasonEnvelope,
+    })
+    prepare.mockClear()
+    batch.mockClear()
+    await expect(commitRateLimitedMutation(db, uow, {
+      actorId,
+      action: 'data_key.rewrapped',
+      limit: 5,
+      since: '2027-01-15T07:00:00.000Z',
+      correlationId: requestCorrelationId,
+      denialAudit,
+    })).rejects.toThrow(/^UNIT_OF_WORK_INVALID$/)
+    expect(prepare).not.toHaveBeenCalled()
+    expect(batch).not.toHaveBeenCalled()
+  })
+
   it('enforces the concurrent audit rate limit in the final guard', async () => {
     const actorId = 'stf_uow_rate'
     await seedActor(actorId)
@@ -287,16 +406,15 @@ describe('guarded unit of work', () => {
         reasonEnvelope: null,
       }))
       uow.domain(env.DB.prepare('INSERT INTO task6_rate_domain (id) VALUES (?)').bind(suffix))
-      uow.guard(guardFor(
-        env.DB,
+      uow.guard(rateLimitGuardStatement(env.DB, {
         auditId,
-        `EXISTS (SELECT 1 FROM task6_rate_domain WHERE id=?)
-         AND (SELECT count(*) FROM audit_events
-              WHERE actor_staff_id=? AND action='data_key.rewrapped' AND occurred_at>=?)<=5`,
-        suffix,
         actorId,
+        action: 'data_key.rewrapped',
+        limit: 5,
         since,
-      ))
+        postconditionSql: 'EXISTS (SELECT 1 FROM task6_rate_domain WHERE id=?)',
+        postconditionBindings: [suffix],
+      }))
       const denialAudit = auditEventStatement(env.DB, {
         id: denialAuditId,
         occurredAt: '2027-01-15T08:00:01.000Z',
@@ -357,6 +475,159 @@ describe('guarded unit of work', () => {
     await expect(enforceAuditRateLimit(env.DB, {
       actorId, action: 'data_key.rewrapped', limit: 5, since,
     })).rejects.toThrow(/^RATE_LIMITED$/)
+  })
+
+  it('preserves an unrelated identity collision when a concurrent winner reaches the limit', async () => {
+    const actorId = 'stf_uow_rate_provenance'
+    const requestCorrelationId = '44444444-4444-4444-8444-444444444444'
+    const since = '2027-01-15T07:00:00.000Z'
+    await seedActor(actorId)
+    await seedActor('stf_uow_rate_collision')
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS task6_rate_provenance (id TEXT PRIMARY KEY)'
+    ).run()
+    for (let index = 0; index < 4; index += 1) {
+      await auditEventStatement(env.DB, {
+        id: `aud_rate_provenance_seed_${index}`,
+        occurredAt: `2027-01-15T07:0${index}:00.000Z`,
+        actorStaffId: actorId,
+        action: 'data_key.rewrapped',
+        entityType: 'data_key',
+        entityId: `key_rate_provenance_seed_${index}`,
+        result: 'success',
+        correlationId,
+        metadata: { oldKekVersion: 1, newKekVersion: 2 },
+        reasonEnvelope: null,
+      }).run()
+    }
+
+    let enterBatch
+    let releaseBatch
+    let originalCollision
+    let batchCalls = 0
+    const entered = new Promise((resolve) => { enterBatch = resolve })
+    const released = new Promise((resolve) => { releaseBatch = resolve })
+    const loserDb = {
+      prepare: env.DB.prepare.bind(env.DB),
+      async batch(statements) {
+        batchCalls += 1
+        if (batchCalls === 1) {
+          enterBatch()
+          await released
+        }
+        try {
+          return await env.DB.batch(statements)
+        } catch (error) {
+          originalCollision = error
+          throw error
+        }
+      },
+    }
+    const loserAuditId = 'aud_rate_provenance_loser'
+    const loser = createUnitOfWork(loserDb, {
+      mode: 'mutation', actorId, correlationId: requestCorrelationId,
+    })
+    loser.domain(loserDb.prepare(
+      `INSERT INTO staff_users
+       (id,email_lookup,email_envelope,display_name_envelope,role,status,version,created_at,updated_at)
+       VALUES ('stf_uow_rate_collision','collision','{}','{}','owner','pending',1,?,?)`
+    ).bind(now, now))
+    loser.domain(loserDb.prepare(
+      "INSERT INTO task6_rate_provenance (id) VALUES ('loser_post_state')"
+    ))
+    loser.audit(auditEventStatement(loserDb, {
+      id: loserAuditId,
+      occurredAt: now,
+      actorStaffId: actorId,
+      action: 'data_key.rewrapped',
+      entityType: 'data_key',
+      entityId: 'key_rate_provenance_loser',
+      result: 'success',
+      correlationId: requestCorrelationId,
+      metadata: { oldKekVersion: 1, newKekVersion: 2 },
+      reasonEnvelope: null,
+    }))
+    loser.guard(rateLimitGuardStatement(loserDb, {
+      auditId: loserAuditId,
+      actorId,
+      action: 'data_key.rewrapped',
+      limit: 5,
+      since,
+      postconditionSql: "EXISTS (SELECT 1 FROM task6_rate_provenance WHERE id='loser_post_state')",
+      postconditionBindings: [],
+    }))
+    const denialAudit = auditEventStatement(loserDb, {
+      id: 'aud_rate_provenance_denied',
+      occurredAt: now,
+      actorStaffId: actorId,
+      action: 'authorization.denied',
+      entityType: 'staff_user',
+      entityId: actorId,
+      result: 'denied',
+      correlationId: requestCorrelationId,
+      metadata: { version: 1 },
+      reasonEnvelope: encryptedReasonEnvelope,
+    })
+
+    const loserResult = commitRateLimitedMutation(loserDb, loser, {
+      actorId,
+      action: 'data_key.rewrapped',
+      limit: 5,
+      since,
+      correlationId: requestCorrelationId,
+      denialAudit,
+    }).then(
+      (value) => ({ status: 'fulfilled', value }),
+      (reason) => ({ status: 'rejected', reason }),
+    )
+    await entered
+    const winnerAuditId = 'aud_rate_provenance_winner'
+    const winner = createUnitOfWork(env.DB, {
+      mode: 'mutation',
+      actorId,
+      correlationId: '55555555-5555-4555-8555-555555555555',
+    })
+    winner.domain(env.DB.prepare(
+      "INSERT INTO task6_rate_provenance (id) VALUES ('winner_post_state')"
+    ))
+    winner.audit(auditEventStatement(env.DB, {
+      id: winnerAuditId,
+      occurredAt: now,
+      actorStaffId: actorId,
+      action: 'data_key.rewrapped',
+      entityType: 'data_key',
+      entityId: 'key_rate_provenance_winner',
+      result: 'success',
+      correlationId: '55555555-5555-4555-8555-555555555555',
+      metadata: { oldKekVersion: 1, newKekVersion: 2 },
+      reasonEnvelope: null,
+    }))
+    winner.guard(rateLimitGuardStatement(env.DB, {
+      auditId: winnerAuditId,
+      actorId,
+      action: 'data_key.rewrapped',
+      limit: 5,
+      since,
+      postconditionSql: "EXISTS (SELECT 1 FROM task6_rate_provenance WHERE id='winner_post_state')",
+      postconditionBindings: [],
+    }))
+    await winner.commit()
+    releaseBatch()
+
+    const outcome = await loserResult
+    expect(outcome.status).toBe('rejected')
+    expect(outcome.reason).toBe(originalCollision)
+    expect(outcome.reason.message).toMatch(/identity_collision/)
+    expect((await env.DB.prepare(
+      "SELECT count(*) AS count FROM audit_events WHERE actor_staff_id=? AND action='data_key.rewrapped' AND occurred_at>=?"
+    ).bind(actorId, since).first()).count).toBe(5)
+    expect(await env.DB.prepare('SELECT id FROM audit_events WHERE id=?').bind(loserAuditId).first()).toBeNull()
+    expect(await env.DB.prepare(
+      "SELECT id FROM audit_events WHERE id='aud_rate_provenance_denied'"
+    ).first()).toBeNull()
+    expect(await env.DB.prepare(
+      "SELECT id FROM task6_rate_provenance WHERE id='loser_post_state'"
+    ).first()).toBeNull()
   })
 
   it('uses encrypted authoritative idempotency digests and responses', async () => {
