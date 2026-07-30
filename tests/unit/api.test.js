@@ -102,6 +102,179 @@ test('gets and validates the session over the exact same-origin request', async 
   assert.equal(header(calls[0], 'X-BWM-Local-Identity'), null)
 })
 
+test('single-flights concurrent session reads and cleans up after success', async () => {
+  const firstBody = sessionBody()
+  const secondBody = sessionBody({
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  let releaseFirst
+  const firstResponse = new Promise((resolve) => { releaseFirst = resolve })
+  const { calls, fetchImpl } = queuedFetch(
+    () => firstResponse,
+    jsonResponse(secondBody),
+  )
+  const client = createApiClient({ fetchImpl })
+  const observed = []
+  client.subscribeSession((session) => observed.push(session))
+
+  const first = client.getSession()
+  const concurrent = client.getSession()
+
+  assert.equal(first, concurrent)
+  assert.equal(calls.length, 1)
+  releaseFirst(jsonResponse(firstBody))
+  assert.deepEqual(await Promise.all([first, concurrent]), [
+    publicSession(firstBody),
+    publicSession(firstBody),
+  ])
+  assert.deepEqual(observed, [publicSession(firstBody)])
+
+  assert.deepEqual(await client.getSession(), publicSession(secondBody))
+  assert.equal(calls.length, 2)
+  assert.deepEqual(observed, [
+    publicSession(firstBody),
+    publicSession(secondBody),
+  ])
+})
+
+test('single-flights concurrent session failures and cleans up after rejection', async () => {
+  let rejectFirst
+  const firstResponse = new Promise((resolve, reject) => { rejectFirst = reject })
+  const { calls, fetchImpl } = queuedFetch(
+    () => firstResponse,
+    jsonResponse(sessionBody()),
+  )
+  const client = createApiClient({ fetchImpl })
+  const observed = []
+  client.subscribeSession((session) => observed.push(session))
+
+  const first = client.getSession()
+  const concurrent = client.getSession()
+  const rejected = Promise.all([first, concurrent])
+
+  assert.equal(first, concurrent)
+  assert.equal(calls.length, 1)
+  rejectFirst(new Error('provider detail must stay private'))
+  await assert.rejects(rejected, {
+    code: 'NETWORK_ERROR',
+    message: 'NETWORK_ERROR',
+  })
+  assert.deepEqual(observed, [])
+
+  assert.deepEqual(await client.getSession(), publicSession())
+  assert.equal(calls.length, 2)
+  assert.deepEqual(observed, [publicSession()])
+})
+
+test('invalidates an in-flight session read when authentication is cleared', async () => {
+  const firstBody = sessionBody()
+  const secondBody = sessionBody({
+    actor: {
+      id: 'stf_coordinator_1',
+      displayName: 'Karolina Koordynatorka',
+      role: 'coordinator',
+      specialistId: null,
+    },
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const invitationResult = {
+    data: {
+      staff: staff({ status: 'pending' }),
+      invitation,
+    },
+  }
+  let releaseFirst
+  let releaseSecond
+  const firstResponse = new Promise((resolve) => { releaseFirst = resolve })
+  const secondResponse = new Promise((resolve) => { releaseSecond = resolve })
+  const { calls, fetchImpl } = queuedFetch(
+    () => firstResponse,
+    () => secondResponse,
+    jsonResponse(invitationResult, 201),
+  )
+  const client = createApiClient({
+    fetchImpl,
+    idempotencyKeyFactory: () => 'clear-race-key-0001',
+  })
+  const observed = []
+  client.subscribeSession((session) => observed.push(session))
+
+  const stale = client.getSession()
+  client.clearSession()
+  const authoritative = client.getSession()
+
+  assert.notEqual(stale, authoritative)
+  assert.equal(calls.length, 2)
+
+  releaseSecond(jsonResponse(secondBody))
+  assert.deepEqual(await authoritative, publicSession(secondBody))
+  assert.deepEqual(observed, [null, publicSession(secondBody)])
+
+  releaseFirst(jsonResponse(firstBody))
+  assert.deepEqual(await stale, publicSession(firstBody))
+  assert.deepEqual(observed, [null, publicSession(secondBody)])
+
+  assert.deepEqual(await client.inviteStaff({
+    displayName: 'Anna',
+    email: 'anna@example.test',
+    role: 'specialist',
+  }), invitationResult.data)
+  assert.equal(header(calls[2], 'X-CSRF-Token'), TOKEN_B)
+})
+
+test('contains a stale authentication denial after a newer session succeeds', async () => {
+  const authoritativeBody = sessionBody({
+    actor: {
+      id: 'stf_coordinator_1',
+      displayName: 'Karolina Koordynatorka',
+      role: 'coordinator',
+      specialistId: null,
+    },
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const invitationResult = {
+    data: {
+      staff: staff({ status: 'pending' }),
+      invitation,
+    },
+  }
+  let releaseStale
+  const staleResponse = new Promise((resolve) => { releaseStale = resolve })
+  const { calls, fetchImpl } = queuedFetch(
+    () => staleResponse,
+    jsonResponse(authoritativeBody),
+    jsonResponse(invitationResult, 201),
+  )
+  const client = createApiClient({
+    fetchImpl,
+    idempotencyKeyFactory: () => 'stale-denial-key-0001',
+  })
+  const observed = []
+  client.subscribeSession((session) => observed.push(session))
+
+  const stale = client.getSession()
+  client.clearSession()
+  assert.deepEqual(await client.getSession(), publicSession(authoritativeBody))
+  assert.deepEqual(observed, [null, publicSession(authoritativeBody)])
+
+  releaseStale(errorResponse('ACCESS_ASSERTION_INVALID', 401))
+  await assert.rejects(stale, {
+    code: 'ACCESS_ASSERTION_INVALID',
+    status: 401,
+  })
+  assert.deepEqual(observed, [null, publicSession(authoritativeBody)])
+
+  assert.deepEqual(await client.inviteStaff({
+    displayName: 'Anna',
+    email: 'anna@example.test',
+    role: 'specialist',
+  }), invitationResult.data)
+  assert.equal(header(calls[2], 'X-CSRF-Token'), TOKEN_B)
+})
+
 test('lists validated staff without mutation headers', async () => {
   const body = { data: { staff: [{ ...staff(), invitation: null }] } }
   const { calls, fetchImpl } = queuedFetch(jsonResponse(body))

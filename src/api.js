@@ -268,6 +268,8 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   }
 
   let csrfToken = null
+  let sessionRequest = null
+  let sessionGeneration = 0
   const listeners = new Set()
   const baseHeaders = () => ({
     Accept: 'application/json',
@@ -286,12 +288,15 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     }
   }
   const clearSession = () => {
+    sessionGeneration += 1
+    sessionRequest = null
     csrfToken = null
     notifySession(null)
   }
   const requestJson = async (path, init, {
     validate,
     idempotencyKey,
+    onAuthDenial = clearSession,
   } = {}) => {
     let response
     try {
@@ -327,7 +332,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       } catch {
         throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
       }
-      if (AUTH_DENIAL_CODES.has(error.code)) clearSession()
+      if (AUTH_DENIAL_CODES.has(error.code)) onAuthDenial()
       throw error
     }
     let result
@@ -339,17 +344,31 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     if (!result) throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     return result
   }
-  const getSession = async () => {
-    const accepted = await requestJson(`${API_ROOT}/session`, {
+  const getSession = () => {
+    if (sessionRequest) return sessionRequest
+    const generation = sessionGeneration
+    const request = requestJson(`${API_ROOT}/session`, {
       method: 'GET',
       credentials: 'same-origin',
       headers: baseHeaders(),
     }, {
       validate: acceptedSession,
+      onAuthDenial: () => {
+        if (sessionGeneration === generation) clearSession()
+      },
+    }).then((accepted) => {
+      if (sessionGeneration === generation) {
+        csrfToken = accepted.csrfToken
+        notifySession(accepted.session)
+      }
+      return accepted.session
     })
-    csrfToken = accepted.csrfToken
-    notifySession(accepted.session)
-    return accepted.session
+    sessionRequest = request
+    const clearRequest = () => {
+      if (sessionRequest === request) sessionRequest = null
+    }
+    void request.then(clearRequest, clearRequest)
+    return request
   }
   const listStaff = () => requestJson(`${API_ROOT}/staff`, {
     method: 'GET',
