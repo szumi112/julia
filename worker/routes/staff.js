@@ -6,16 +6,26 @@ import { deactivateStaff, inviteStaff, listStaff } from '../identity/invitations
 const centre = { kind: 'centre', centreId: 'centre_1' }
 const deny = async ({ db, actor, cryptoContext, correlationId, nowMs, idFactory }) => {
   const id = idFactory()
-  try {
-    const reasonEnvelope = await encryptAuditReason({ keyring: cryptoContext.keyring, dataKey: cryptoContext.dataKey, expectedScope: cryptoContext.scope, auditEventId: id, plaintext: 'staff.manage denied' })
-    const uow = createUnitOfWork(db, { mode: 'denial', actorId: actor.id, correlationId })
-    uow.audit(auditEventStatement(db, { id, occurredAt: new Date(nowMs).toISOString(), actorStaffId: actor.id, action: 'authorization.denied', entityType: 'staff_user', entityId: actor.id, result: 'denied', correlationId, metadata: { version: actor.version }, reasonEnvelope }))
-    await uow.commit()
-  } catch { /* A denial remains opaque if storage is unavailable. */ }
+  const reasonEnvelope = await encryptAuditReason({ keyring: cryptoContext.keyring, dataKey: cryptoContext.dataKey, expectedScope: cryptoContext.scope, auditEventId: id, plaintext: 'staff.manage denied' })
+  const uow = createUnitOfWork(db, { mode: 'denial', actorId: actor.id, correlationId })
+  uow.audit(auditEventStatement(db, { id, occurredAt: new Date(nowMs).toISOString(), actorStaffId: actor.id, action: 'authorization.denied', entityType: 'staff_user', entityId: actor.id, result: 'denied', correlationId, metadata: { version: actor.version }, reasonEnvelope }))
+  await uow.commit()
   throw new Error('FORBIDDEN')
 }
 const allowed = (actor, nowMs) => authorize(actor, 'staff.manage', centre, { nowMs })
-const idempotency = (request) => request.headers.get('Idempotency-Key')
+const validation = (field) => {
+  const error = new Error('VALIDATION_FAILED')
+  error.details = { field }
+  throw error
+}
+const deactivationBody = (body) => {
+  if (!body || typeof body !== 'object' || Array.isArray(body)
+    || Object.getPrototypeOf(body) !== Object.prototype
+    || Object.keys(body).length !== 1 || !Object.hasOwn(body, 'version')) {
+    validation('version')
+  }
+  return body
+}
 
 export async function getStaff(input) {
   if (!allowed(input.actor, input.nowMs)) return deny(input)
@@ -23,13 +33,14 @@ export async function getStaff(input) {
 }
 export async function postInvitation(input) {
   if (!allowed(input.actor, input.nowMs)) return deny(input)
-  const key = idempotency(input.request)
+  const key = input.idempotencyKey
   if (!key) throw new Error('VALIDATION_FAILED')
   return inviteStaff({ ...input, input: input.body, idempotencyKey: key, dataMode: input.config.dataMode })
 }
 export async function postDeactivation(input) {
   if (!allowed(input.actor, input.nowMs)) return deny(input)
-  const key = idempotency(input.request)
+  const key = input.idempotencyKey
   if (!key) throw new Error('VALIDATION_FAILED')
-  return deactivateStaff({ ...input, staffId: input.staffId, version: input.body?.version, idempotencyKey: key })
+  const body = deactivationBody(input.body)
+  return deactivateStaff({ ...input, staffId: input.staffId, version: body.version, idempotencyKey: key })
 }

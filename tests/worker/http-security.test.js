@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../worker/app.js'
 import { AppError, apiError, publicError } from '../../worker/http/errors.js'
-import { parseCanonicalContentLength, readJsonBodyOnce } from '../../worker/http/security.js'
+import {
+  hasDuplicateTopLevelJsonKey,
+  parseCanonicalContentLength,
+  readJsonBodyOnce,
+} from '../../worker/http/security.js'
 
 const correlationId = '11111111-1111-4111-8111-111111111111'
 const config = {
@@ -15,6 +19,7 @@ const actor = { id: 'stf_owner', role: 'owner', specialistId: 'sp_owner', versio
 const publicErrors = [
   ['INVALID_CONTENT_LENGTH', 400],
   ['INVALID_JSON', 400],
+  ['VALIDATION_FAILED', 400],
   ['ACCESS_ASSERTION_INVALID', 401],
   ['ACCESS_DENIED', 403],
   ['FORBIDDEN', 403],
@@ -25,6 +30,8 @@ const publicErrors = [
   ['NOT_FOUND', 404],
   ['METHOD_NOT_ALLOWED', 405],
   ['IDEMPOTENCY_CONFLICT', 409],
+  ['LAST_ACTIVE_OWNER', 409],
+  ['STAFF_INVITATION_CONFLICT', 409],
   ['VERSION_CONFLICT', 409],
   ['PAYLOAD_TOO_LARGE', 413],
   ['UNSUPPORTED_MEDIA_TYPE', 415],
@@ -118,6 +125,27 @@ describe('HTTP security primitives', () => {
         body,
       }))).rejects.toThrow(/^INVALID_JSON$/)
     }
+  })
+
+  it.each([
+    ['{"role":"owner","role":"specialist"}', true],
+    ['{"role":"owner","\\u0072ole":"specialist"}', true],
+    ['{"value":{"role":"owner","role":"specialist"},"text":"role,}"}', false],
+    ['[{"role":"owner"},{"role":"specialist"}]', false],
+  ])('detects semantic duplicate top-level keys in %s', (text, expected) => {
+    expect(hasDuplicateTopLevelJsonKey(text)).toBe(expected)
+  })
+
+  it('rejects duplicate top-level keys only when the route requests strict JSON objects', async () => {
+    const raw = '{"role":"owner","\\u0072ole":"specialist"}'
+    await expect(readJsonBodyOnce(new Request('https://example.test', {
+      method: 'POST',
+      body: raw,
+    }), { rejectDuplicateTopLevelKeys: true })).rejects.toThrow(/^VALIDATION_FAILED$/)
+    await expect(readJsonBodyOnce(new Request('https://example.test', {
+      method: 'POST',
+      body: raw,
+    }))).resolves.toEqual({ role: 'specialist' })
   })
 
   it('counts multibyte UTF-8 bytes at the exact boundary', async () => {
@@ -652,5 +680,15 @@ describe('closed public error map', () => {
     for (const marker of ['SELECT', 'parent@example.test', 'jwt-claim-marker']) {
       expect(serialized).not.toContain(marker)
     }
+  })
+
+  it('does not expose specialistId as a generic validation field', async () => {
+    const response = apiError(
+      new AppError('VALIDATION_FAILED', { field: 'specialistId' }),
+      correlationId,
+    )
+    expect(await response.json()).toEqual({
+      error: { code: 'VALIDATION_FAILED', correlationId },
+    })
   })
 })

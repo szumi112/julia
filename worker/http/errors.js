@@ -22,7 +22,7 @@ const STATUS_BY_CODE = Object.freeze({
   INTERNAL_ERROR: 500,
 })
 
-const DETAIL_FIELDS = new Set(['displayName', 'email', 'role', 'specialistId', 'version'])
+const DETAIL_FIELDS = new Set(['displayName', 'email', 'role', 'version'])
 const EXACT_INTERNAL_MESSAGES = new Set(Object.keys(STATUS_BY_CODE))
 
 const safeDetails = (details) => {

@@ -28,10 +28,11 @@ const verifiers = new WeakMap()
 const keyrings = new WeakMap()
 const SESSION_ALLOW = 'GET, HEAD, OPTIONS'
 const HEALTH_ALLOW = 'GET, HEAD'
+const STAFF_MUTATION_ALLOW = 'POST, OPTIONS'
 const HEALTH_PATH = '/api/v1/health/live'
 const STAFF_PATH = '/api/v1/staff'
 const STAFF_INVITATIONS_PATH = '/api/v1/staff/invitations'
-const STAFF_ID = /^\/api\/v1\/staff\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/deactivation$/
+const STAFF_ID = /^\/api\/v1\/staff\/stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}\/deactivation$/
 
 const routeFor = (request) => {
   const url = new URL(request.url)
@@ -188,7 +189,10 @@ export function createApp(deps = {}) {
     }
 
     if (isMutationMethod(method)) {
-      c.set('jsonBody', await (deps.readJsonBodyOnce ?? readJsonBodyOnce)(request))
+      c.set('jsonBody', await (deps.readJsonBodyOnce ?? readJsonBodyOnce)(request, {
+        rejectDuplicateTopLevelKeys: route.id === 'staff.invitations'
+          || route.id === 'staff.deactivation',
+      }))
     }
     await next()
   })
@@ -229,12 +233,12 @@ export function createApp(deps = {}) {
   })
   app.post('/api/v1/staff/invitations', async (c) => {
     if (c.get('routeId') !== 'staff.invitations') throw new AppError('NOT_FOUND')
-    const result = await (deps.postInvitation ?? postInvitation)({ db: c.env?.DB ?? deps.db, cryptoContext: c.get('cryptoContext'), actor: c.get('actor'), nowMs: c.get('nowMs'), correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory, request: c.req.raw, body: c.get('jsonBody'), config: runtimeConfig(c, deps) })
+    const result = await (deps.postInvitation ?? postInvitation)({ db: c.env?.DB ?? deps.db, cryptoContext: c.get('cryptoContext'), actor: c.get('actor'), nowMs: c.get('nowMs'), correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory, idempotencyKey: c.req.header('Idempotency-Key'), body: c.get('jsonBody'), config: runtimeConfig(c, deps) })
     return c.json(result, 201)
   })
   app.post('/api/v1/staff/:staffId/deactivation', async (c) => {
     if (c.get('routeId') !== 'staff.deactivation') throw new AppError('NOT_FOUND')
-    const result = await (deps.postDeactivation ?? postDeactivation)({ db: c.env?.DB ?? deps.db, cryptoContext: c.get('cryptoContext'), actor: c.get('actor'), nowMs: c.get('nowMs'), correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory, request: c.req.raw, body: c.get('jsonBody'), staffId: c.req.param('staffId'), config: runtimeConfig(c, deps) })
+    const result = await (deps.postDeactivation ?? postDeactivation)({ db: c.env?.DB ?? deps.db, cryptoContext: c.get('cryptoContext'), actor: c.get('actor'), nowMs: c.get('nowMs'), correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory, idempotencyKey: c.req.header('Idempotency-Key'), body: c.get('jsonBody'), staffId: c.req.param('staffId'), config: runtimeConfig(c, deps) })
     return c.json(result)
   })
   app.options('/api/v1/staff', (c) => {
@@ -243,11 +247,11 @@ export function createApp(deps = {}) {
   })
   app.options('/api/v1/staff/invitations', (c) => {
     if (c.get('routeId') !== 'staff.invitations') throw new AppError('NOT_FOUND')
-    return new Response(null, { status: 204, headers: { Allow: 'OPTIONS, POST' } })
+    return new Response(null, { status: 204, headers: { Allow: STAFF_MUTATION_ALLOW } })
   })
   app.options('/api/v1/staff/:staffId/deactivation', (c) => {
     if (c.get('routeId') !== 'staff.deactivation') throw new AppError('NOT_FOUND')
-    return new Response(null, { status: 204, headers: { Allow: 'OPTIONS, POST' } })
+    return new Response(null, { status: 204, headers: { Allow: STAFF_MUTATION_ALLOW } })
   })
   app.notFound((c) => {
     const correlationId = c.get('correlationId') || crypto.randomUUID()
@@ -257,7 +261,7 @@ export function createApp(deps = {}) {
   app.onError((error, c) => {
     const mapped = publicError(error)
     const headers = mapped.code === 'METHOD_NOT_ALLOWED'
-      ? { Allow: c.get('routeId') === 'health.live' ? HEALTH_ALLOW : c.get('routeId') === 'session' ? SESSION_ALLOW : c.get('routeId') === 'staff.list' ? 'GET, HEAD, OPTIONS' : c.get('routeId') === 'staff.invitations' || c.get('routeId') === 'staff.deactivation' ? 'OPTIONS, POST' : 'GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE' }
+      ? { Allow: c.get('routeId') === 'health.live' ? HEALTH_ALLOW : c.get('routeId') === 'session' ? SESSION_ALLOW : c.get('routeId') === 'staff.list' ? 'GET, HEAD, OPTIONS' : c.get('routeId') === 'staff.invitations' || c.get('routeId') === 'staff.deactivation' ? STAFF_MUTATION_ALLOW : 'GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE' }
       : mapped.code === 'ACCESS_KEYSET_UNAVAILABLE' ? { 'Retry-After': '5' }
         : undefined
     return apiError(mapped, c.get('correlationId') || crypto.randomUUID(), headers)
