@@ -570,4 +570,35 @@ describe('foundation migrations', () => {
     await expect(run("UPDATE backup_runs SET status = 'queued', version = 2, updated_at = ? WHERE id = 'bkp_failed_retry'", later))
       .rejects.toThrow(/invalid_backup_transition/)
   })
+
+  it('allows at most one immutable delivery result per outbox send intent', async () => {
+    await run(
+      `INSERT INTO outbox_jobs
+       (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+        attempt_count,max_attempts,scheduled_at,created_at,updated_at)
+       VALUES ('job_delivery_unique','staff.invitation.email','staff_invitation',
+               'inv_delivery_unique','{}','staff.invitation.email:delivery-unique',
+               'queued',0,8,?,?,?)`,
+      now,
+      now,
+      now,
+    )
+    await run(
+      `INSERT INTO delivery_attempts
+       (id,outbox_job_id,provider,provider_reference,status,error_code,attempted_at)
+       VALUES ('delivery_unique_one','job_delivery_unique','scaleway_tem',
+               '11111111-1111-4111-8111-111111111111','accepted',NULL,?)`,
+      now,
+    )
+    await expect(run(
+      `INSERT INTO delivery_attempts
+       (id,outbox_job_id,provider,provider_reference,status,error_code,attempted_at)
+       VALUES ('delivery_unique_two','job_delivery_unique','scaleway_tem',
+               '22222222-2222-4222-8222-222222222222','accepted',NULL,?)`,
+      later,
+    )).rejects.toThrow()
+    expect((await one(
+      "SELECT count(*) AS count FROM delivery_attempts WHERE outbox_job_id='job_delivery_unique'"
+    )).count).toBe(1)
+  })
 })

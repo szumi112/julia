@@ -1,3 +1,4 @@
+import { auditEventStatement } from '../audit/events.js'
 import { isD1OutboxOperationGuardFailure } from '../db/errors.js'
 import { decodeBase64Url, encodeBase64Url } from '../security/encoding.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
@@ -24,13 +25,32 @@ const INVITATION_ID = /^inv_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~:-]{7,255}$/
 const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/
+const EMAIL_LOOKUP = /^v[1-9]\d*:[A-Za-z0-9_-]{43}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const PROVIDER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MAX_ATTEMPTS = 8
 const CLAIM_LIMIT = 10
 const CLAIM_SCAN_LIMIT = 100
 const LEASE_MS = 60_000
 const MAX_PAYLOAD_BYTES = 1024
 const statementDescriptors = new WeakMap()
+const OUTBOX_JOB_ROW_KEYS = Object.freeze([
+  'id',
+  'type',
+  'aggregate_type',
+  'aggregate_id',
+  'payload_envelope',
+  'idempotency_key',
+  'status',
+  'attempt_count',
+  'max_attempts',
+  'scheduled_at',
+  'lease_owner',
+  'lease_expires_at',
+  'last_error_code',
+  'created_at',
+  'updated_at',
+])
 
 const invalid = () => { throw new Error('OUTBOX_INVALID') }
 const invalidState = () => { throw new Error('OUTBOX_STATE_INVALID') }
@@ -42,6 +62,7 @@ const exactKeys = (value, keys) => ownObject(value)
 const validId = (value) => typeof value === 'string' && ID.test(value)
 const validInstant = (value) => typeof value === 'string' && INSTANT.test(value)
   && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value
+const nullableInstant = (value) => value === null || validInstant(value)
 const instantFromMs = (value) => {
   if (!Number.isSafeInteger(value) || value < 0) invalid()
   let result
@@ -67,6 +88,9 @@ const canonicalJson = (value) => JSON.stringify(canonicalize(value))
 const validErrorCode = (value) => typeof value === 'string' && ERROR_CODE.test(value)
 const validProviderReference = (value) => value === null || validId(value)
 const isAllowedType = (value) => OUTBOX_TYPE_SET.has(value)
+const emailJobKey = (invitationId, version) => (
+  `staff.invitation.email:${invitationId}:${version}`
+)
 const validStaffCryptoContext = (value) => value?.keyring
   && ownObject(value.dataKey)
   && ownObject(value.scope)
@@ -669,6 +693,455 @@ export async function reapExpiredOutboxLeases(db, cryptoContext, input = {}) {
   return reaped
 }
 
+function validateAcceptedEmailInput(input) {
+  const required = [
+    'jobId',
+    'leaseOwner',
+    'attemptNumber',
+    'nowMs',
+    'providerId',
+    'idFactory',
+  ]
+  if (!ownObject(input)
+    || !required.every((key) => Object.hasOwn(input, key))
+    || Object.keys(input).some((key) => !required.includes(key) && key !== 'nowFactory')
+    || !validId(input.jobId)
+    || !validId(input.leaseOwner)
+    || !Number.isSafeInteger(input.attemptNumber)
+    || input.attemptNumber < 1
+    || !PROVIDER_UUID.test(input.providerId ?? '')
+    || typeof input.idFactory !== 'function'
+    || (input.nowFactory !== undefined && typeof input.nowFactory !== 'function')) invalid()
+  return {
+    now: instantFromMs(input.nowMs),
+    nowFactory: input.nowFactory ?? Date.now,
+  }
+}
+
+export async function finalizeAcceptedInvitationEmail(db, cryptoContext, input = {}) {
+  if (!db?.prepare || !db?.batch || !validStaffCryptoContext(cryptoContext)) invalid()
+  const validated = validateAcceptedEmailInput(input)
+  const job = await db.prepare('SELECT * FROM outbox_jobs WHERE id=?')
+    .bind(input.jobId).first()
+  if (!job
+    || !exactKeys(job, OUTBOX_JOB_ROW_KEYS)
+    || !validProcessingJob(job)
+    || job.type !== 'staff.invitation.email'
+    || job.aggregate_type !== 'staff_invitation'
+    || job.lease_owner !== input.leaseOwner
+    || job.attempt_count !== input.attemptNumber
+    || !validInstant(job.scheduled_at)
+    || job.scheduled_at > validated.now
+    || !validInstant(job.created_at)
+    || !validInstant(job.updated_at)
+    || job.updated_at < job.created_at
+    || (job.last_error_code !== null && !validErrorCode(job.last_error_code))
+    || job.lease_expires_at <= validated.now) return false
+  const attempt = await db.prepare(
+    `SELECT id,job_id,attempt_number,started_at,completed_at,result,error_code,
+            provider_reference
+     FROM outbox_attempts
+     WHERE job_id=? AND attempt_number=?`
+  ).bind(job.id, input.attemptNumber).first()
+  if (!exactKeys(attempt, [
+    'id',
+    'job_id',
+    'attempt_number',
+    'started_at',
+    'completed_at',
+    'result',
+    'error_code',
+    'provider_reference',
+  ])
+    || !validId(attempt.id)
+    || attempt.job_id !== job.id
+    || attempt.attempt_number !== input.attemptNumber
+    || !validInstant(attempt.started_at)
+    || attempt.completed_at !== null
+    || attempt.result !== null
+    || attempt.error_code !== null
+    || attempt.provider_reference !== null) return false
+
+  let payload
+  try {
+    payload = await decryptOutboxPayload(cryptoContext, job)
+  } catch {
+    return false
+  }
+  const actor = await db.prepare('SELECT id FROM staff_users WHERE id=?')
+    .bind(payload.actorId).first()
+  if (!exactKeys(actor, ['id']) || actor.id !== payload.actorId) return false
+  const invitation = await db.prepare('SELECT * FROM staff_invitations WHERE id=?')
+    .bind(payload.invitationId).first()
+  if (!exactKeys(invitation, [
+    'id',
+    'staff_id',
+    'email_lookup',
+    'email_envelope',
+    'display_name_envelope',
+    'role',
+    'status',
+    'inviter_id',
+    'expires_at',
+    'access_allowed_at',
+    'email_sent_at',
+    'activated_at',
+    'revoked_at',
+    'version',
+    'created_at',
+    'updated_at',
+  ])
+    || !INVITATION_ID.test(invitation.id ?? '')
+    || invitation.id !== job.aggregate_id
+    || !STAFF_ID.test(invitation.staff_id ?? '')
+    || !STAFF_ID.test(invitation.inviter_id ?? '')
+    || !EMAIL_LOOKUP.test(invitation.email_lookup ?? '')
+    || !validEnvelope(invitation.email_envelope)
+    || !validEnvelope(invitation.display_name_envelope)
+    || !['owner', 'coordinator', 'specialist'].includes(invitation.role)
+    || invitation.status !== 'pending'
+    || !validInstant(invitation.expires_at)
+    || invitation.expires_at <= validated.now
+    || !validInstant(invitation.access_allowed_at)
+    || invitation.email_sent_at !== null
+    || !nullableInstant(invitation.activated_at)
+    || !nullableInstant(invitation.revoked_at)
+    || invitation.activated_at !== null
+    || invitation.revoked_at !== null
+    || !validInstant(invitation.created_at)
+    || !validInstant(invitation.updated_at)
+    || invitation.updated_at < invitation.created_at
+    || !Number.isSafeInteger(invitation.version)
+    || invitation.version < 1
+    || invitation.version >= Number.MAX_SAFE_INTEGER
+    || job.idempotency_key !== emailJobKey(invitation.id, invitation.version)) return false
+  const staff = await db.prepare(
+    'SELECT id,email_lookup,status,version FROM staff_users WHERE id=?'
+  ).bind(invitation.staff_id).first()
+  if (!exactKeys(staff, ['id', 'email_lookup', 'status', 'version'])
+    || !STAFF_ID.test(staff.id ?? '')
+    || staff.id !== invitation.staff_id
+    || !EMAIL_LOOKUP.test(staff.email_lookup ?? '')
+    || staff.status !== 'pending'
+    || !Number.isSafeInteger(staff.version)
+    || staff.version < 1
+    || invitation.email_lookup !== staff.email_lookup) return false
+
+  const nextInvitation = {
+    ...invitation,
+    email_sent_at: validated.now,
+    version: invitation.version + 1,
+    updated_at: validated.now,
+  }
+  const deliveryId = idFrom(input.idFactory)
+  const versionId = idFrom(input.idFactory)
+  const auditId = idFrom(input.idFactory)
+  const snapshot = JSON.stringify(await encryptForScope(
+    cryptoContext.keyring,
+    cryptoContext.dataKey,
+    {
+      expectedScope: cryptoContext.scope,
+      recordId: invitation.id,
+      field: 'record_version',
+      plaintext: JSON.stringify(nextInvitation),
+    },
+  ))
+  const metadata = JSON.stringify({ invitationVersion: nextInvitation.version })
+  const observedNowMs = validated.nowFactory()
+  if (!Number.isSafeInteger(observedNowMs) || observedNowMs < 0) invalid()
+  const guardNow = instantFromMs(Math.max(input.nowMs, observedNowMs))
+  if (job.lease_expires_at <= guardNow || invitation.expires_at <= guardNow) return false
+  const statements = [
+    db.prepare(
+      `INSERT INTO delivery_attempts
+       (id,outbox_job_id,provider,provider_reference,status,error_code,attempted_at)
+       VALUES (?,?,'scaleway_tem',?,'accepted',NULL,?)`
+    ).bind(deliveryId, job.id, input.providerId, validated.now),
+    db.prepare(
+      `UPDATE staff_invitations
+       SET email_sent_at=?,version=version+1,updated_at=?
+       WHERE id=? AND staff_id=? AND email_lookup=? AND status='pending'
+         AND expires_at=? AND expires_at>? AND access_allowed_at=?
+         AND email_sent_at IS NULL AND version=?
+         AND EXISTS (
+           SELECT 1 FROM staff_users
+           WHERE id=? AND email_lookup=? AND status='pending' AND version=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM staff_users WHERE id=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_jobs
+           WHERE id=? AND type='staff.invitation.email'
+             AND aggregate_type='staff_invitation' AND aggregate_id=?
+             AND idempotency_key=?
+             AND payload_envelope=? AND status='processing' AND attempt_count=?
+             AND lease_owner=? AND lease_expires_at=? AND lease_expires_at>?
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_attempts
+           WHERE id=? AND job_id=? AND attempt_number=?
+             AND completed_at IS NULL AND result IS NULL
+             AND error_code IS NULL AND provider_reference IS NULL
+         )`
+    ).bind(
+      validated.now,
+      validated.now,
+      invitation.id,
+      invitation.staff_id,
+      invitation.email_lookup,
+      invitation.expires_at,
+      guardNow,
+      invitation.access_allowed_at,
+      invitation.version,
+      staff.id,
+      staff.email_lookup,
+      staff.version,
+      payload.actorId,
+      job.id,
+      invitation.id,
+      job.idempotency_key,
+      job.payload_envelope,
+      input.attemptNumber,
+      input.leaseOwner,
+      job.lease_expires_at,
+      guardNow,
+      attempt.id,
+      job.id,
+      input.attemptNumber,
+    ),
+    db.prepare(
+      `INSERT INTO record_versions
+       (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+        changed_at,correlation_id)
+       SELECT ?,'staff_invitation',?,?,?,?,?,? WHERE changes()=1`
+    ).bind(
+      versionId,
+      invitation.id,
+      nextInvitation.version,
+      snapshot,
+      payload.actorId,
+      validated.now,
+      job.id,
+    ),
+    auditEventStatement(db, {
+      id: auditId,
+      occurredAt: validated.now,
+      actorStaffId: payload.actorId,
+      action: 'staff.invitation.email_accepted',
+      entityType: 'staff_invitation',
+      entityId: invitation.id,
+      result: 'success',
+      correlationId: job.id,
+      metadata: { invitationVersion: nextInvitation.version },
+      reasonEnvelope: null,
+    }),
+    db.prepare(
+      `UPDATE outbox_attempts
+       SET completed_at=?,result='succeeded',error_code=NULL,provider_reference=?
+       WHERE id=? AND job_id=? AND attempt_number=?
+         AND completed_at IS NULL AND result IS NULL
+         AND error_code IS NULL AND provider_reference IS NULL
+         AND EXISTS (
+           SELECT 1 FROM staff_invitations
+           WHERE id=? AND status='pending' AND version=?
+             AND email_sent_at=? AND updated_at=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM delivery_attempts
+           WHERE id=? AND outbox_job_id=? AND provider='scaleway_tem'
+             AND provider_reference=? AND status='accepted'
+             AND error_code IS NULL AND attempted_at=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM record_versions
+           WHERE id=? AND entity_type='staff_invitation' AND entity_id=?
+             AND version=? AND snapshot_envelope=? AND changed_by_staff_id=?
+             AND changed_at=? AND correlation_id=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM audit_events
+           WHERE id=? AND actor_staff_id=?
+             AND action='staff.invitation.email_accepted'
+             AND entity_type='staff_invitation' AND entity_id=?
+             AND result='success' AND reason_envelope IS NULL
+             AND correlation_id=? AND metadata_json=?
+         )`
+    ).bind(
+      validated.now,
+      input.providerId,
+      attempt.id,
+      job.id,
+      input.attemptNumber,
+      invitation.id,
+      nextInvitation.version,
+      validated.now,
+      validated.now,
+      deliveryId,
+      job.id,
+      input.providerId,
+      validated.now,
+      versionId,
+      invitation.id,
+      nextInvitation.version,
+      snapshot,
+      payload.actorId,
+      validated.now,
+      job.id,
+      auditId,
+      payload.actorId,
+      invitation.id,
+      job.id,
+      metadata,
+    ),
+    db.prepare(
+      `UPDATE outbox_jobs
+       SET status='succeeded',lease_owner=NULL,lease_expires_at=NULL,
+           last_error_code=NULL,updated_at=?
+       WHERE id=? AND type='staff.invitation.email'
+         AND aggregate_type='staff_invitation' AND aggregate_id=?
+         AND idempotency_key=?
+         AND payload_envelope=? AND status='processing' AND attempt_count=?
+         AND lease_owner=? AND lease_expires_at=? AND lease_expires_at>?
+         AND EXISTS (
+           SELECT 1 FROM outbox_attempts
+           WHERE id=? AND job_id=? AND attempt_number=? AND completed_at=?
+             AND result='succeeded' AND error_code IS NULL
+             AND provider_reference=?
+         )`
+    ).bind(
+      validated.now,
+      job.id,
+      invitation.id,
+      job.idempotency_key,
+      job.payload_envelope,
+      input.attemptNumber,
+      input.leaseOwner,
+      job.lease_expires_at,
+      guardNow,
+      attempt.id,
+      job.id,
+      input.attemptNumber,
+      validated.now,
+      input.providerId,
+    ),
+    operationGuard(
+      db,
+      `finalize_email_${job.id}`,
+      `changes()=1
+       AND EXISTS (
+         SELECT 1 FROM outbox_jobs
+         WHERE id=? AND type='staff.invitation.email'
+           AND aggregate_type='staff_invitation' AND aggregate_id=?
+           AND idempotency_key=?
+           AND payload_envelope=? AND status='succeeded' AND attempt_count=?
+           AND lease_owner IS NULL AND lease_expires_at IS NULL
+           AND last_error_code IS NULL AND updated_at=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM outbox_attempts
+         WHERE id=? AND job_id=? AND attempt_number=? AND completed_at=?
+           AND result='succeeded' AND error_code IS NULL
+           AND provider_reference=?
+       )
+       AND (
+         SELECT count(*) FROM outbox_attempts
+         WHERE job_id=? AND completed_at IS NULL
+       )=0
+       AND EXISTS (
+         SELECT 1 FROM delivery_attempts
+         WHERE id=? AND outbox_job_id=? AND provider='scaleway_tem'
+           AND provider_reference=? AND status='accepted'
+           AND error_code IS NULL AND attempted_at=?
+       )
+       AND (
+         SELECT count(*) FROM delivery_attempts WHERE outbox_job_id=?
+       )=1
+       AND EXISTS (
+         SELECT 1 FROM staff_invitations
+         WHERE id=? AND staff_id=? AND email_lookup=? AND status='pending'
+           AND expires_at=? AND expires_at>? AND access_allowed_at=?
+           AND email_sent_at=? AND version=? AND updated_at=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM staff_users
+         WHERE id=? AND email_lookup=? AND status='pending' AND version=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM staff_users WHERE id=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM record_versions
+         WHERE id=? AND entity_type='staff_invitation' AND entity_id=?
+           AND version=? AND snapshot_envelope=? AND changed_by_staff_id=?
+           AND changed_at=? AND correlation_id=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM audit_events
+         WHERE id=? AND actor_staff_id=?
+           AND action='staff.invitation.email_accepted'
+           AND entity_type='staff_invitation' AND entity_id=?
+           AND result='success' AND reason_envelope IS NULL
+           AND correlation_id=? AND metadata_json=?
+       )`,
+      [
+        job.id,
+        invitation.id,
+        job.idempotency_key,
+        job.payload_envelope,
+        input.attemptNumber,
+        validated.now,
+        attempt.id,
+        job.id,
+        input.attemptNumber,
+        validated.now,
+        input.providerId,
+        job.id,
+        deliveryId,
+        job.id,
+        input.providerId,
+        validated.now,
+        job.id,
+        invitation.id,
+        invitation.staff_id,
+        invitation.email_lookup,
+        invitation.expires_at,
+        guardNow,
+        invitation.access_allowed_at,
+        validated.now,
+        nextInvitation.version,
+        validated.now,
+        staff.id,
+        staff.email_lookup,
+        staff.version,
+        payload.actorId,
+        versionId,
+        invitation.id,
+        nextInvitation.version,
+        snapshot,
+        payload.actorId,
+        validated.now,
+        job.id,
+        auditId,
+        payload.actorId,
+        invitation.id,
+        job.id,
+        metadata,
+      ],
+    ),
+  ]
+  try {
+    await db.batch(statements)
+    return true
+  } catch (error) {
+    if (isD1OutboxOperationGuardFailure(error)) return false
+    const current = await db.prepare('SELECT status FROM outbox_jobs WHERE id=?')
+      .bind(job.id).first()
+    if (current?.status === 'succeeded') return false
+    throw error
+  }
+}
+
 function validateFinalizeInput(input) {
   if (!exactKeys(input, [
     'jobId',
@@ -855,6 +1328,14 @@ export async function finalizeOutboxJob(db, cryptoContext, input = {}) {
 export const completeOutboxJob = finalizeOutboxJob
 
 function normalizedOutcome(outcome) {
+  if (exactKeys(outcome, ['result', 'providerId'])
+    && outcome.result === 'email-accepted'
+    && PROVIDER_UUID.test(outcome.providerId ?? '')) {
+    return Object.freeze({
+      result: 'email-accepted',
+      providerId: outcome.providerId,
+    })
+  }
   if (ownObject(outcome) && outcome.result === 'succeeded') {
     return { result: 'succeeded', errorCode: null, providerReference: null }
   }
@@ -947,9 +1428,36 @@ export async function processOutboxBatch(input = {}) {
           config: input.config,
           job: currentClaim,
           nowMs: dispatchNowMs,
+          nowFactory: currentMs,
         }))
       } catch (error) {
         outcome = thrownOutcome(error)
+      }
+    }
+    if (outcome.result === 'email-accepted'
+      && currentClaim.type === 'staff.invitation.email') {
+      let finalized = false
+      try {
+        finalized = await finalizeAcceptedInvitationEmail(input.db, input.cryptoContext, {
+          jobId: claim.id,
+          leaseOwner: claim.leaseOwner,
+          attemptNumber: claim.attemptNumber,
+          nowMs: currentMs(),
+          providerId: outcome.providerId,
+          idFactory: input.idFactory,
+          nowFactory: currentMs,
+        })
+      } catch {
+        // Accepted delivery stays unresolved for the expired-email-lease reaper.
+      }
+      if (finalized) completed.push({ id: claim.id, result: 'succeeded' })
+      continue
+    }
+    if (outcome.result === 'email-accepted') {
+      outcome = {
+        result: 'dead',
+        errorCode: 'OUTBOX_HANDLER_FAILURE',
+        providerReference: null,
       }
     }
     const finalized = await finalizeOutboxJob(input.db, input.cryptoContext, {

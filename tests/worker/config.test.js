@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { loadAccessProviderConfig, loadConfig } from '../../worker/config.js'
+import {
+  loadAccessProviderConfig,
+  loadConfig,
+  loadEmailProviderConfig,
+} from '../../worker/config.js'
 
 const valid = {
   APP_ENV: 'staging',
@@ -107,4 +111,79 @@ describe('loadAccessProviderConfig', () => {
     expect(error?.message).toBe('PROVIDER_CONFIG_INVALID')
     if (String(value)) expect(error?.message).not.toContain(String(value))
   })
+})
+
+describe('loadEmailProviderConfig', () => {
+  const email = {
+    SCW_PROJECT_ID: '11111111-1111-4111-8111-111111111111',
+    SCW_FROM_EMAIL: 'powiadomienia@example.test',
+    SCW_FROM_NAME: 'Bear with me',
+    SCW_SECRET_KEY: 'provider-secret',
+  }
+
+  it('returns one immutable isolated provider config for canonical bindings', () => {
+    const result = loadEmailProviderConfig(email, { appEnv: 'staging' })
+    expect(result).toEqual({
+      projectId: email.SCW_PROJECT_ID,
+      fromEmail: email.SCW_FROM_EMAIL,
+      fromName: email.SCW_FROM_NAME,
+      secret: email.SCW_SECRET_KEY,
+    })
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(loadConfig(valid)).not.toHaveProperty('emailProvider')
+  })
+
+  it('keeps development provider-disabled even when every binding is present', () => {
+    expect(() => loadEmailProviderConfig(email, { appEnv: 'development' }))
+      .toThrow(/^PROVIDER_DISABLED$/)
+  })
+
+  it('measures the canonical sender address limit in UTF-8 bytes', () => {
+    const withinLimit = `${'\u0105'.repeat(120)}@x.pl`
+    const overLimit = `${'\u0105'.repeat(125)}@x.pl`
+    expect(new TextEncoder().encode(withinLimit).byteLength).toBe(245)
+    expect(loadEmailProviderConfig({
+      ...email,
+      SCW_FROM_EMAIL: withinLimit,
+    }, { appEnv: 'staging' }).fromEmail).toBe(withinLimit)
+    expect(() => loadEmailProviderConfig({
+      ...email,
+      SCW_FROM_EMAIL: overLimit,
+    }, { appEnv: 'staging' })).toThrow(/^PROVIDER_CONFIG_INVALID$/)
+  })
+
+  it.each([
+    ['SCW_PROJECT_ID', '11111111111141118111111111111111'],
+    ['SCW_PROJECT_ID', '11111111-1111-4111-8111-11111111111A'],
+    ['SCW_PROJECT_ID', 'project_1'],
+    ['SCW_FROM_EMAIL', ' Powiadomienia@example.test'],
+    ['SCW_FROM_EMAIL', 'Powiadomienia@example.test'],
+    ['SCW_FROM_EMAIL', 'Bear with me <powiadomienia@example.test>'],
+    ['SCW_FROM_EMAIL', `${'a'.repeat(243)}@example.test`],
+    ['SCW_FROM_NAME', ' Bear with me'],
+    ['SCW_FROM_NAME', '\u0105'.repeat(61)],
+    ['SCW_FROM_NAME', 'Bear\nwith me'],
+    ['SCW_FROM_NAME', 'Bear\u0085with me'],
+    ['SCW_FROM_NAME', 'Bear\u009fwith me'],
+    ['SCW_SECRET_KEY', ''],
+    ['SCW_SECRET_KEY', '   '],
+    ['SCW_SECRET_KEY', 'secret value'],
+  ])('rejects malformed %s with a fixed error that does not reveal the binding', (key, value) => {
+    let error
+    try {
+      loadEmailProviderConfig({ ...email, [key]: value }, { appEnv: 'staging' })
+    } catch (caught) {
+      error = caught
+    }
+    expect(error?.message).toBe('PROVIDER_CONFIG_INVALID')
+    if (String(value)) expect(error?.message).not.toContain(String(value))
+  })
+
+  it.each([undefined, {}, { appEnv: 'test' }, { appEnv: 'production-ish' }])(
+    'fails closed for a missing or unknown application environment',
+    (config) => {
+      expect(() => loadEmailProviderConfig(email, config))
+        .toThrow(/^PROVIDER_CONFIG_INVALID$/)
+    },
+  )
 })

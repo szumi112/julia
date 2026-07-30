@@ -4,14 +4,19 @@ import { decodeBase64Url, encodeBase64Url } from './security/encoding.js'
 const BASE64_URL_KEY = /^[A-Za-z0-9_-]{43}$/
 const VERSION = /^[1-9]\d*$/
 const TEAM_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
-const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const PROVIDER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ACCESS_ACCOUNT_ID = /^[0-9a-f]{32}$/
 const ACCESS_GROUP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength
 const saneName = (value) => typeof value === 'string' && value === value.trim()
-  && value.length > 0 && new TextEncoder().encode(value).byteLength <= 120
-  && !/[\u0000-\u001f\u007f]/.test(value)
+  && value.length > 0 && utf8Bytes(value) <= 120
+  && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
 const canonicalEmail = (value) => typeof value === 'string' && value === value.trim()
-  && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value) && value.length <= 254
+  && value === value.toLowerCase()
+  && value === value.normalize('NFC')
+  && utf8Bytes(value) <= 254
+  && /^[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)+$/u.test(value)
+  && !value.startsWith('.') && !value.includes('..') && !value.includes('.@')
 
 const key = z.string().refine((value) => {
   if (!BASE64_URL_KEY.test(value)) return false
@@ -124,7 +129,13 @@ export function loadAccessProviderConfig(env, config) {
 
 export function loadEmailProviderConfig(env, config) {
   if (config?.appEnv === 'development') throw new Error('PROVIDER_DISABLED')
+  if (!['staging', 'production'].includes(config?.appEnv)) throw new Error('PROVIDER_CONFIG_INVALID')
   const value = { projectId: env?.SCW_PROJECT_ID, fromEmail: env?.SCW_FROM_EMAIL, fromName: env?.SCW_FROM_NAME, secret: env?.SCW_SECRET_KEY }
-  if (!PROVIDER_ID.test(value.projectId ?? '') || !canonicalEmail(value.fromEmail) || !saneName(value.fromName) || typeof value.secret !== 'string' || !value.secret.trim()) throw new Error('PROVIDER_CONFIG_INVALID')
+  if (!PROVIDER_UUID.test(value.projectId ?? '')
+    || !canonicalEmail(value.fromEmail)
+    || !saneName(value.fromName)
+    || typeof value.secret !== 'string'
+    || value.secret.length < 1
+    || /\s/u.test(value.secret)) throw new Error('PROVIDER_CONFIG_INVALID')
   return Object.freeze(value)
 }
