@@ -12,6 +12,26 @@ const config = {
 }
 const principal = { kind: 'human', subject: 'access-owner', normalizedEmail: 'owner@example.test' }
 const actor = { id: 'stf_owner', role: 'owner', specialistId: 'sp_owner', version: 3 }
+const publicErrors = [
+  ['INVALID_CONTENT_LENGTH', 400],
+  ['INVALID_JSON', 400],
+  ['ACCESS_ASSERTION_INVALID', 401],
+  ['ACCESS_DENIED', 403],
+  ['FORBIDDEN', 403],
+  ['ORIGIN_INVALID', 403],
+  ['FETCH_METADATA_INVALID', 403],
+  ['CSRF_INVALID', 403],
+  ['CSRF_EXPIRED', 403],
+  ['NOT_FOUND', 404],
+  ['METHOD_NOT_ALLOWED', 405],
+  ['IDEMPOTENCY_CONFLICT', 409],
+  ['VERSION_CONFLICT', 409],
+  ['PAYLOAD_TOO_LARGE', 413],
+  ['UNSUPPORTED_MEDIA_TYPE', 415],
+  ['RATE_LIMITED', 429],
+  ['ACCESS_KEYSET_UNAVAILABLE', 503],
+  ['INTERNAL_ERROR', 500],
+]
 
 const appDeps = (overrides = {}) => ({
   config,
@@ -188,18 +208,27 @@ describe('hardened API lifecycle', () => {
     '/api/v1/health/live?x=parent@example.test',
     '/api/v1/%68ealth/live',
     '/api/v1/health%2Flive',
-  ])('rejects health-like raw variant %s before every identity dependency', async (path) => {
-    const deps = appDeps({
-      resolveAccessPrincipal: vi.fn(async () => { throw new Error('ACCESS_TRAP') }),
-      resolveActor: vi.fn(async () => { throw new Error('DB_TRAP') }),
-      createKeyring: vi.fn(async () => { throw new Error('KEYRING_TRAP') }),
+  ])('treats health-like raw variant %s as an authenticated human unknown route', async (path) => {
+    const serviceDeps = appDeps({
+      resolveAccessPrincipal: vi.fn(async (_request, options) => {
+        expect(options.expected).toBe('human')
+        return { kind: 'service', serviceName: 'health-service' }
+      }),
     })
-    const response = await createApp(deps).request(path)
+    const rejected = await createApp(serviceDeps).request(path)
+    expect(rejected.status).toBe(401)
+    expect(serviceDeps.resolveAccessPrincipal).toHaveBeenCalledOnce()
+    expect(serviceDeps.resolveActor).not.toHaveBeenCalled()
+
+    const humanDeps = appDeps()
+    const response = await createApp(humanDeps).request(path)
     expect(response.status).toBe(404)
     expect(await response.json()).toMatchObject({ error: { code: 'NOT_FOUND' } })
-    expect(deps.resolveAccessPrincipal).not.toHaveBeenCalled()
-    expect(deps.resolveActor).not.toHaveBeenCalled()
-    expect(deps.createKeyring).not.toHaveBeenCalled()
+    expect(humanDeps.resolveAccessPrincipal).toHaveBeenCalledWith(
+      expect.any(Request),
+      expect.objectContaining({ expected: 'human' }),
+    )
+    expect(humanDeps.resolveActor).toHaveBeenCalledOnce()
   })
 
   it('uses only the service verifier for exact health HEAD and strips its body', async () => {
@@ -235,6 +264,34 @@ describe('hardened API lifecycle', () => {
     const session = await createApp(serviceOnSession).request('/api/v1/session')
     expect(session.status).toBe(401)
     expect(serviceOnSession.resolveActor).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['registered human OPTIONS', '/api/v1/session', { method: 'OPTIONS', headers: { origin: config.appOrigin } }],
+    ['unknown v1 route', '/api/v1/unknown', {}],
+    ['allowed mutation', '/api/v1/test-mutation', {
+      method: 'POST',
+      headers: {
+        origin: config.appOrigin,
+        'content-type': 'application/json',
+        'x-csrf-token': 'valid',
+      },
+      body: '{}',
+    }],
+  ])('rejects a service principal on %s before actor resolution', async (_label, path, init) => {
+    const deps = appDeps({
+      resolveAccessPrincipal: vi.fn(async (_request, options) => {
+        expect(options.expected).toBe('human')
+        return { kind: 'service', serviceName: 'health-service' }
+      }),
+    })
+    const app = path === '/api/v1/test-mutation' ? mutationApp(deps) : createApp(deps)
+    const response = await app.request(path, init)
+    expect(response.status).toBe(401)
+    expect(await response.json()).toMatchObject({ error: { code: 'ACCESS_ASSERTION_INVALID' } })
+    expect(deps.resolveAccessPrincipal).toHaveBeenCalledOnce()
+    expect(deps.verifyCsrfToken).not.toHaveBeenCalled()
+    expect(deps.resolveActor).not.toHaveBeenCalled()
   })
 
   it('rejects endpoint-disallowed session mutations before all dependencies', async () => {
@@ -320,6 +377,61 @@ describe('hardened API lifecycle', () => {
     expect(await response.json()).toEqual({ data: { value: 1 } })
     expect(order).toEqual(['principal', 'csrf', 'actor', 'body', 'route'])
     expect(deps.readJsonBodyOnce).toHaveBeenCalledOnce()
+  })
+
+  it('maps a body-stream read failure to sanitized INVALID_JSON after consuming the raw body', async () => {
+    const marker = 'body-stream-parent@example.test'
+    const route = vi.fn()
+    const stream = new ReadableStream({
+      pull(controller) {
+        controller.error(new Error(marker))
+      },
+    })
+    const request = new Request(`${config.appOrigin}/api/v1/test-mutation?query=${marker}`, {
+      method: 'POST',
+      headers: {
+        origin: config.appOrigin,
+        'content-type': 'application/json',
+        'x-csrf-token': 'valid',
+        'x-sensitive-marker': marker,
+      },
+      body: stream,
+    })
+    const deps = appDeps()
+    const app = createApp(deps)
+    app.post('/api/v1/test-mutation', route)
+    const response = await app.request(request)
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: { code: 'INVALID_JSON', correlationId: response.headers.get('x-correlation-id') },
+    })
+    expect(request.bodyUsed).toBe(true)
+    expect(route).not.toHaveBeenCalled()
+    expect(deps.resolveActor).toHaveBeenCalledOnce()
+    expect(deps.safeLog).toHaveBeenCalledOnce()
+    expect(JSON.stringify(deps.safeLog.mock.calls)).not.toContain(marker)
+    hasSecurityHeaders(response)
+  })
+
+  it('gives a mutation route only parsed jsonBody after final raw-stream consumption', async () => {
+    const deps = appDeps()
+    const app = createApp(deps)
+    app.post('/api/v1/test-mutation', async (c) => {
+      expect(c.req.raw.bodyUsed).toBe(true)
+      await expect(c.req.raw.text()).rejects.toThrow()
+      return c.json({ data: c.get('jsonBody') })
+    })
+    const response = await app.request('/api/v1/test-mutation', {
+      method: 'POST',
+      headers: {
+        origin: config.appOrigin,
+        'content-type': 'application/json',
+        'x-csrf-token': 'valid',
+      },
+      body: '{"value":1}',
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ data: { value: 1 } })
   })
 
   it.each([
@@ -461,29 +573,65 @@ describe('hardened API lifecycle', () => {
       expect(JSON.stringify(deps.safeLog.mock.calls)).not.toContain('parent@example.test')
     }
   })
+
+  it.each(publicErrors)(
+    'maps %s through the real app lifecycle with a safe envelope, headers, and log',
+    async (code, status) => {
+      const marker = `sensitive-${code}-parent@example.test`
+      const deps = appDeps()
+      const app = createApp(deps)
+      app.post('/api/v1/test-error', () => {
+        const error = new AppError(code, { field: 'email' })
+        error.cause = new Error(marker)
+        error.stack = marker
+        error.secret = marker
+        throw error
+      })
+      const response = await app.request(`/api/v1/test-error?query=${encodeURIComponent(marker)}`, {
+        method: 'POST',
+        headers: {
+          origin: config.appOrigin,
+          'content-type': 'application/json',
+          'x-correlation-id': correlationId,
+          'x-csrf-token': 'valid',
+          'x-sensitive-marker': marker,
+        },
+        body: JSON.stringify({ marker }),
+      })
+      expect(response.status).toBe(status)
+      const body = await response.json()
+      expect(body).toEqual({
+        error: {
+          code,
+          correlationId,
+          details: { field: 'email' },
+        },
+      })
+      hasSecurityHeaders(response)
+      expect(deps.safeLog).toHaveBeenCalledOnce()
+      expect(deps.safeLog).toHaveBeenCalledWith(
+        status >= 500 ? 'error' : 'warn',
+        expect.objectContaining({
+          correlationId,
+          errorCode: code,
+          event: 'request.failed',
+          result: 'failure',
+          routeId: 'unmatched',
+          status,
+        }),
+      )
+      const serialized = JSON.stringify({
+        body,
+        headers: Object.fromEntries(response.headers),
+        logs: deps.safeLog.mock.calls,
+      })
+      expect(serialized).not.toContain(marker)
+    },
+  )
 })
 
 describe('closed public error map', () => {
-  it.each([
-    ['INVALID_CONTENT_LENGTH', 400],
-    ['INVALID_JSON', 400],
-    ['ACCESS_ASSERTION_INVALID', 401],
-    ['ACCESS_DENIED', 403],
-    ['FORBIDDEN', 403],
-    ['ORIGIN_INVALID', 403],
-    ['FETCH_METADATA_INVALID', 403],
-    ['CSRF_INVALID', 403],
-    ['CSRF_EXPIRED', 403],
-    ['NOT_FOUND', 404],
-    ['METHOD_NOT_ALLOWED', 405],
-    ['IDEMPOTENCY_CONFLICT', 409],
-    ['VERSION_CONFLICT', 409],
-    ['PAYLOAD_TOO_LARGE', 413],
-    ['UNSUPPORTED_MEDIA_TYPE', 415],
-    ['RATE_LIMITED', 429],
-    ['ACCESS_KEYSET_UNAVAILABLE', 503],
-    ['INTERNAL_ERROR', 500],
-  ])('maps %s to %i without caller status control', async (code, status) => {
+  it.each(publicErrors)('maps %s to %i without caller status control', async (code, status) => {
     const correlation = '22222222-2222-4222-8222-222222222222'
     const response = apiError(new AppError(code, { status: 418 }), correlation)
     expect(response.status).toBe(status)

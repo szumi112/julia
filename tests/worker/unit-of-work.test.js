@@ -1,7 +1,12 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
-import { auditEventStatement, enforceAuditRateLimit } from '../../worker/audit/events.js'
 import {
+  auditEventStatement,
+  encryptAuditReason,
+  enforceAuditRateLimit,
+} from '../../worker/audit/events.js'
+import {
+  commitRateLimitedMutation,
   createIdempotencyStatement,
   createUnitOfWork,
   inspectIdempotency,
@@ -254,9 +259,21 @@ describe('guarded unit of work', () => {
       actorId, action: 'data_key.rewrapped', limit: 5, since,
     })).resolves.toBe(4)
 
-    const attempt = async (suffix) => {
+    const keyring = await createKeyring(env, {
+      activeDataKekVersion: 1,
+      activeLookupKeyVersion: 1,
+      activeBackupKekVersion: 1,
+    })
+    const dataKey = await getOrCreateDataKey(env.DB, keyring, scope, {
+      id: 'key_uow_rate_denial',
+      createdAt: now,
+    })
+    const attempt = async (suffix, requestCorrelationId) => {
       const auditId = `aud_rate_${suffix}`
-      const uow = createUnitOfWork(env.DB, { mode: 'mutation', actorId, correlationId })
+      const denialAuditId = `aud_rate_denied_${suffix}`
+      const uow = createUnitOfWork(env.DB, {
+        mode: 'mutation', actorId, correlationId: requestCorrelationId,
+      })
       uow.audit(auditEventStatement(env.DB, {
         id: auditId,
         occurredAt: '2027-01-15T08:00:00.000Z',
@@ -265,7 +282,7 @@ describe('guarded unit of work', () => {
         entityType: 'data_key',
         entityId: `key_rate_${suffix}`,
         result: 'success',
-        correlationId,
+        correlationId: requestCorrelationId,
         metadata: { oldKekVersion: 1, newKekVersion: 2 },
         reasonEnvelope: null,
       }))
@@ -280,16 +297,63 @@ describe('guarded unit of work', () => {
         actorId,
         since,
       ))
-      await uow.commit()
+      const denialAudit = auditEventStatement(env.DB, {
+        id: denialAuditId,
+        occurredAt: '2027-01-15T08:00:01.000Z',
+        actorStaffId: actorId,
+        action: 'authorization.denied',
+        entityType: 'staff_user',
+        entityId: actorId,
+        result: 'denied',
+        correlationId: requestCorrelationId,
+        metadata: { version: 1 },
+        reasonEnvelope: await encryptAuditReason({
+          keyring,
+          dataKey,
+          expectedScope: scope,
+          auditEventId: denialAuditId,
+          plaintext: 'audited endpoint rate limit',
+        }),
+      })
+      await commitRateLimitedMutation(env.DB, uow, {
+        actorId,
+        action: 'data_key.rewrapped',
+        limit: 5,
+        since,
+        correlationId: requestCorrelationId,
+        denialAudit,
+      })
       return suffix
     }
-    const settled = await Promise.allSettled([attempt('one'), attempt('two')])
+    const settled = await Promise.allSettled([
+      attempt('one', '11111111-1111-4111-8111-111111111111'),
+      attempt('two', '22222222-2222-4222-8222-222222222222'),
+    ])
     expect(settled.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
-    expect(settled.filter(({ status }) => status === 'rejected')).toHaveLength(1)
+    const [loser] = settled.filter(({ status }) => status === 'rejected')
+    expect(loser.reason).toEqual(expect.objectContaining({ message: 'RATE_LIMITED' }))
+    const winner = settled.find(({ status }) => status === 'fulfilled').value
+    const loserSuffix = winner === 'one' ? 'two' : 'one'
     expect((await env.DB.prepare(
       "SELECT count(*) AS count FROM audit_events WHERE actor_staff_id=? AND action='data_key.rewrapped' AND occurred_at>=?"
     ).bind(actorId, since).first()).count).toBe(5)
     expect((await env.DB.prepare('SELECT count(*) AS count FROM task6_rate_domain').first()).count).toBe(1)
+    expect(await env.DB.prepare('SELECT id FROM task6_rate_domain WHERE id=?').bind(loserSuffix).first()).toBeNull()
+    expect(await env.DB.prepare('SELECT id FROM audit_events WHERE id=?').bind(`aud_rate_${loserSuffix}`).first())
+      .toBeNull()
+    const denials = await env.DB.prepare(
+      `SELECT id,actor_staff_id,result,correlation_id
+       FROM audit_events
+       WHERE actor_staff_id=? AND action='authorization.denied'`
+    ).bind(actorId).all()
+    expect(denials.results).toEqual([{
+      id: `aud_rate_denied_${loserSuffix}`,
+      actor_staff_id: actorId,
+      result: 'denied',
+      correlation_id: loserSuffix === 'one'
+        ? '11111111-1111-4111-8111-111111111111'
+        : '22222222-2222-4222-8222-222222222222',
+    }])
     await expect(enforceAuditRateLimit(env.DB, {
       actorId, action: 'data_key.rewrapped', limit: 5, since,
     })).rejects.toThrow(/^RATE_LIMITED$/)

@@ -1,4 +1,4 @@
-import { auditDescriptorFor } from '../audit/events.js'
+import { auditDescriptorFor, enforceAuditRateLimit } from '../audit/events.js'
 import { isD1IdentityCollision } from './errors.js'
 import { isCorrelationId } from '../logging/safe-log.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
@@ -17,6 +17,9 @@ const validInstant = (value) => typeof value === 'string' && INSTANT.test(value)
   && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value
 const prepared = (value) => value && typeof value === 'object'
   && typeof value.bind === 'function' && typeof value.run === 'function'
+const exactKeys = (value, keys) => Object.keys(value).length === keys.length
+  && keys.every((key) => Object.hasOwn(value, key))
+const units = new WeakMap()
 
 export function createUnitOfWork(db, context) {
   if (!db?.batch || !ownObject(context)
@@ -29,6 +32,7 @@ export function createUnitOfWork(db, context) {
   let audits = 0
   let nonAudit = 0
   let committed = false
+  let primaryAudit = null
 
   const open = () => {
     if (committed) fail()
@@ -42,6 +46,7 @@ export function createUnitOfWork(db, context) {
       if (!descriptor || descriptor.actorStaffId !== context.actorId
         || descriptor.correlationId !== context.correlationId
         || descriptor.result !== (context.mode === 'mutation' ? 'success' : 'denied')) fail()
+      primaryAudit = descriptor
       audits += 1
     } else {
       if (auditDescriptorFor(statement)) fail()
@@ -73,7 +78,58 @@ export function createUnitOfWork(db, context) {
       return db.batch(guard ? [...statements, guard] : statements)
     },
   }
+  units.set(api, { db, context: Object.freeze({ ...context }), primaryAudit: () => primaryAudit })
   return Object.freeze(api)
+}
+
+async function commitRateLimitDenial(db, input) {
+  const denial = createUnitOfWork(db, {
+    mode: 'denial',
+    actorId: input.actorId,
+    correlationId: input.correlationId,
+  })
+  denial.audit(input.denialAudit)
+  try {
+    await denial.commit()
+  } catch {
+    throw new Error('INTERNAL_ERROR')
+  }
+  throw new Error('RATE_LIMITED')
+}
+
+export async function commitRateLimitedMutation(db, uow, input = {}) {
+  const unit = units.get(uow)
+  const denial = auditDescriptorFor(input.denialAudit)
+  if (!db?.prepare || !db?.batch || !uow || typeof uow.commit !== 'function'
+    || !ownObject(input)
+    || !exactKeys(input, [
+      'actorId', 'action', 'limit', 'since', 'correlationId', 'denialAudit',
+    ])
+    || !unit || unit.db !== db || unit.context.mode !== 'mutation'
+    || unit.context.actorId !== input.actorId
+    || unit.context.correlationId !== input.correlationId
+    || unit.primaryAudit()?.action !== input.action
+    || denial?.actorStaffId !== input.actorId
+    || denial?.correlationId !== input.correlationId
+    || denial?.result !== 'denied') fail()
+  try {
+    await enforceAuditRateLimit(db, input)
+  } catch (error) {
+    if (error?.message !== 'RATE_LIMITED') throw error
+    return commitRateLimitDenial(db, input)
+  }
+  try {
+    return await uow.commit()
+  } catch (originalError) {
+    if (!isD1IdentityCollision(originalError)) throw originalError
+    try {
+      await enforceAuditRateLimit(db, input)
+    } catch (rateError) {
+      if (rateError?.message === 'RATE_LIMITED') return commitRateLimitDenial(db, input)
+      throw originalError
+    }
+    throw originalError
+  }
 }
 
 const canonicalize = (value) => {

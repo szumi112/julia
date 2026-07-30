@@ -31,13 +31,7 @@ const HEALTH_PATH = '/api/v1/health/live'
 
 const routeFor = (request) => {
   const url = new URL(request.url)
-  let decodedPath = null
-  try { decodedPath = decodeURIComponent(url.pathname) } catch { /* Malformed paths stay unmatched. */ }
-  const healthLike = url.pathname === HEALTH_PATH || decodedPath === HEALTH_PATH
-  if (healthLike && (url.pathname !== HEALTH_PATH || url.search !== '')) {
-    return { id: 'unmatched', invalidHealth: true, expected: null, methods: [] }
-  }
-  if (url.pathname === HEALTH_PATH) {
+  if (url.pathname === HEALTH_PATH && url.search === '') {
     return { id: 'health.live', expected: 'service', methods: ['GET', 'HEAD'] }
   }
   if (url.pathname === '/api/v1/session') {
@@ -141,7 +135,6 @@ export function createApp(deps = {}) {
     const route = routeFor(request)
     c.set('routeId', route.id)
     if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
-    if (route.invalidHealth) throw new AppError('NOT_FOUND')
     if (route.methods && !route.methods.includes(method)) throw new AppError('METHOD_NOT_ALLOWED')
 
     const config = runtimeConfig(c, deps)
@@ -193,7 +186,10 @@ export function createApp(deps = {}) {
     await next()
   })
 
-  app.get('/api/v1/health/live', (c) => c.json({ data: { status: 'ok' } }))
+  app.get('/api/v1/health/live', (c) => {
+    if (c.get('routeId') !== 'health.live') throw new AppError('NOT_FOUND')
+    return c.json({ data: { status: 'ok' } })
+  })
   app.get('/api/v1/session', async (c) => {
     const config = runtimeConfig(c, deps)
     const result = deps.session
