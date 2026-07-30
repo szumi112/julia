@@ -174,6 +174,42 @@ export async function enqueueOutboxStatement(db, cryptoContext, input) {
   return statement
 }
 
+export async function decryptOutboxPayload(cryptoContext, job) {
+  if (!validStaffCryptoContext(cryptoContext)
+    || !ownObject(job)
+    || !validId(job.id)
+    || !isAllowedType(job.type)
+    || !TYPE.test(job.aggregate_type ?? '')
+    || !validId(job.aggregate_id)
+    || !validEnvelope(job.payload_envelope)) invalid()
+  let plaintext
+  let payload
+  try {
+    plaintext = await decryptForScope(
+      cryptoContext.keyring,
+      cryptoContext.dataKey,
+      {
+        expectedScope: cryptoContext.scope,
+        recordId: job.id,
+        field: 'job_payload',
+        envelope: JSON.parse(job.payload_envelope),
+      },
+    )
+    payload = JSON.parse(plaintext)
+    const canonical = validatePayload(
+      job.type,
+      job.aggregate_type,
+      job.aggregate_id,
+      payload,
+    )
+    if (canonical !== plaintext) invalid()
+    return JSON.parse(canonical)
+  } catch (error) {
+    if (error?.message === 'OUTBOX_INVALID') throw error
+    invalid()
+  }
+}
+
 const operationGuard = (db, operationId, predicate, bindings) => db.prepare(
   `INSERT INTO outbox_operation_guard_failures (operation_id)
    SELECT ? WHERE NOT (${predicate})`
@@ -239,7 +275,7 @@ function validQueuedJob(row, now) {
     && row.lease_expires_at === null
 }
 
-function validProcessingJob(row, { allowUnknownType = false } = {}) {
+export function validProcessingJob(row, { allowUnknownType = false } = {}) {
   return ownObject(row)
     && validId(row.id)
     && (allowUnknownType ? TYPE.test(row.type ?? '') : isAllowedType(row.type))

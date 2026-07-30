@@ -1,31 +1,44 @@
-import { auditEventStatement } from '../audit/events.js'
-import { decryptForScope, encryptForScope } from '../security/envelope.js'
-import { reconcileAccessGroup } from '../providers/cloudflare-access.js'
+import { decryptForScope } from '../security/envelope.js'
 import { sendInvitationEmail } from '../providers/scaleway-email.js'
+import { expireInvitation } from '../identity/invitations.js'
+import {
+  accessDesiredFingerprint,
+  acquireAccessReconcileLease,
+  desiredAccessMembership,
+  handleAccessReconcile as reconcileAccess,
+} from './access-reconciliation.js'
+import { decryptOutboxPayload, validProcessingJob } from './outbox.js'
 
 const iso = (nowMs) => new Date(nowMs).toISOString()
+const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const randomId = () => crypto.randomUUID().replaceAll('-', '')
+const randomCorrelationId = () => crypto.randomUUID()
+const validId = (value) => typeof value === 'string' && ID.test(value)
+const validInstant = (value) => typeof value === 'string' && INSTANT.test(value)
+  && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value
+const exactRow = (value, keys) => value !== null && typeof value === 'object'
+  && !Array.isArray(value)
+  && Object.keys(value).length === keys.length
+  && keys.every((key) => Object.hasOwn(value, key))
 const emailFor = (context, row) => decryptForScope(context.keyring, context.dataKey, {
   expectedScope: context.scope, recordId: row.id, field: 'email', envelope: JSON.parse(row.email_envelope),
 })
 
 export async function desiredAccessEmails(db, cryptoContext, nowMs) {
-  const now = iso(nowMs)
-  const rows = (await db.prepare(
-    `SELECT s.id,s.email_envelope
-     FROM staff_users s
-     LEFT JOIN staff_invitations i ON i.staff_id=s.id
-     WHERE s.status='active'
-       OR (s.status='pending' AND i.status IN ('provisioning','pending') AND i.expires_at>?)`
-  ).bind(now).all()).results
-  const emails = await Promise.all(rows.map((row) => emailFor(cryptoContext, row)))
-  return [...new Set(emails)].sort((a, b) => a.localeCompare(b))
+  return [...(await desiredAccessMembership(db, cryptoContext, nowMs)).emails]
 }
 
-export async function handleAccessReconcile({ db, cryptoContext, config, payload, nowMs, providers = {} }) {
-  const desired = await desiredAccessEmails(db, cryptoContext, nowMs)
-  const reconcile = providers.reconcileAccessGroup ?? reconcileAccessGroup
-  await reconcile({ ...config.accessProvider, emails: desired, fetch: providers.fetch ?? fetch })
-  return { result: 'succeeded' }
+export { accessDesiredFingerprint, acquireAccessReconcileLease, desiredAccessMembership }
+
+export async function handleAccessReconcile(input) {
+  return reconcileAccess({
+    ...input,
+    idFactory: input.idFactory ?? randomId,
+    leaseOwnerFactory: input.leaseOwnerFactory ?? randomId,
+    leaseNonceFactory: input.leaseNonceFactory ?? randomId,
+    correlationIdFactory: input.correlationIdFactory ?? randomCorrelationId,
+  })
 }
 
 export async function handleInvitationEmail({ db, cryptoContext, config, job, payload, nowMs, providers = {} }) {
@@ -54,26 +67,117 @@ export async function handleInvitationEmail({ db, cryptoContext, config, job, pa
   }
 }
 
-export async function handleInvitationExpiry({ db, cryptoContext, actorId, payload, correlationId, nowMs, idFactory = () => crypto.randomUUID().replaceAll('-', '') }) {
-  const invitation = await db.prepare("SELECT * FROM staff_invitations WHERE id=? AND status IN ('provisioning','pending')").bind(payload.invitationId).first()
-  const now = iso(nowMs)
-  if (!invitation || invitation.expires_at > now) return { result: 'succeeded' }
-  const staff = await db.prepare('SELECT * FROM staff_users WHERE id=?').bind(invitation.staff_id).first()
-  if (!staff) return { result: 'dead', errorCode: 'STATE_INVALID' }
-  await db.batch([
-    db.prepare("UPDATE staff_invitations SET status='expired',version=version+1,updated_at=? WHERE id=? AND version=?").bind(now, invitation.id, invitation.version),
-    auditEventStatement(db, { id: idFactory(), occurredAt: now, actorStaffId: actorId, action: 'staff.invitation.expired', entityType: 'staff_invitation', entityId: invitation.id, result: 'success', correlationId, metadata: { staffVersion: staff.version, invitationVersion: invitation.version + 1, desiredGeneration: payload.generation ?? 1 }, reasonEnvelope: null }),
-  ])
+export async function handleInvitationExpiry({
+  db,
+  cryptoContext,
+  payload,
+  nowMs,
+  idFactory = randomId,
+  correlationIdFactory = randomCorrelationId,
+}) {
+  await expireInvitation({
+    db,
+    cryptoContext,
+    actorId: payload.actorId,
+    invitationId: payload.invitationId,
+    correlationId: correlationIdFactory(),
+    nowMs,
+    idFactory,
+  })
   return { result: 'succeeded' }
 }
 
+async function authoritativeClaim(input) {
+  if (!input?.db?.prepare || !input.job
+    || !validId(input.job.id)
+    || !validId(input.job.attemptId)
+    || !validId(input.job.leaseOwner)
+    || !validId(input.job.lease_owner)
+    || !validInstant(input.job.lease_expires_at)
+    || !Number.isSafeInteger(input.job.attemptNumber)
+    || input.job.attemptNumber < 1
+    || !Number.isSafeInteger(input.job.attempt_count)
+    || input.job.attempt_count < 1
+    || !Number.isSafeInteger(input.nowMs) || input.nowMs < 0) return null
+  const now = iso(input.nowMs)
+  const row = await input.db.prepare(
+    'SELECT * FROM outbox_jobs WHERE id=?'
+  ).bind(input.job.id).first()
+  if (!exactRow(row, [
+    'id', 'type', 'aggregate_type', 'aggregate_id', 'payload_envelope',
+    'idempotency_key', 'status', 'attempt_count', 'max_attempts', 'scheduled_at',
+    'lease_owner', 'lease_expires_at', 'last_error_code', 'created_at', 'updated_at',
+  ])
+    || !validProcessingJob(row)
+    || !validId(row.id)
+    || row.id !== input.job.id
+    || !validId(row.aggregate_id)
+    || typeof row.type !== 'string'
+    || typeof row.aggregate_type !== 'string'
+    || typeof row.payload_envelope !== 'string'
+    || typeof row.idempotency_key !== 'string'
+    || !Number.isSafeInteger(row.attempt_count)
+    || row.attempt_count < 1
+    || !Number.isSafeInteger(row.max_attempts)
+    || row.max_attempts < row.attempt_count
+    || row.max_attempts > 8
+    || !validInstant(row.scheduled_at)
+    || !validId(row.lease_owner)
+    || !validInstant(row.lease_expires_at)
+    || !validInstant(row.created_at)
+    || !validInstant(row.updated_at)
+    || row.type !== input.job.type
+    || row.aggregate_type !== input.job.aggregate_type
+    || row.aggregate_id !== input.job.aggregate_id
+    || row.status !== 'processing'
+    || input.job.status !== 'processing'
+    || row.attempt_count !== input.job.attemptNumber
+    || row.attempt_count !== input.job.attempt_count
+    || row.lease_owner !== input.job.leaseOwner
+    || row.lease_owner !== input.job.lease_owner
+    || row.lease_expires_at !== input.job.lease_expires_at
+    || row.lease_expires_at <= now) return null
+  const aggregateValid = row.type === 'staff.access.reconcile'
+    ? row.aggregate_type === 'access_group' && row.aggregate_id === 'centre_1'
+    : ['staff.invitation.email', 'staff.invitation.expire'].includes(row.type)
+      && row.aggregate_type === 'staff_invitation'
+      && /^inv_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(row.aggregate_id)
+  if (!aggregateValid) return null
+  const attempt = await input.db.prepare(
+    `SELECT id,job_id,attempt_number,started_at,completed_at,result,error_code,
+            provider_reference
+     FROM outbox_attempts
+     WHERE job_id=? AND attempt_number=?`
+  ).bind(row.id, row.attempt_count).first()
+  if (!exactRow(attempt, [
+    'id', 'job_id', 'attempt_number', 'started_at', 'completed_at', 'result',
+    'error_code', 'provider_reference',
+  ])
+    || !validId(attempt.id)
+    || attempt.id !== input.job.attemptId
+    || !validId(attempt.job_id)
+    || attempt.job_id !== row.id
+    || attempt.attempt_number !== row.attempt_count
+    || !validInstant(attempt.started_at)
+    || attempt.completed_at !== null
+    || attempt.result !== null
+    || attempt.error_code !== null
+    || attempt.provider_reference !== null) return null
+  return row
+}
+
 export async function dispatchOutboxJob(input) {
-  if (!['staff.access.reconcile', 'staff.invitation.email', 'staff.invitation.expire'].includes(input.job.type)) return { result: 'dead', errorCode: 'OUTBOX_TYPE_INVALID' }
+  const current = await authoritativeClaim(input)
+  if (!current) return { result: 'retry' }
   let payload
   try {
-    payload = JSON.parse(await decryptForScope(input.cryptoContext.keyring, input.cryptoContext.dataKey, { expectedScope: input.cryptoContext.scope, recordId: input.job.id, field: 'job_payload', envelope: JSON.parse(input.job.payload_envelope) }))
+    payload = await decryptOutboxPayload(input.cryptoContext, current)
   } catch { return { result: 'dead', errorCode: 'CRYPTO_FAILURE' } }
-  if (input.job.type === 'staff.access.reconcile') return handleAccessReconcile({ ...input, payload })
-  if (input.job.type === 'staff.invitation.email') return handleInvitationEmail({ ...input, payload })
-  return handleInvitationExpiry({ ...input, payload })
+  if (current.type === 'staff.access.reconcile') {
+    return handleAccessReconcile({ ...input, job: current, payload })
+  }
+  if (current.type === 'staff.invitation.email') {
+    return handleInvitationEmail({ ...input, job: current, payload })
+  }
+  return handleInvitationExpiry({ ...input, job: current, payload })
 }
