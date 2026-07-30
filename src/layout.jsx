@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Icon, BearMark } from './icons.jsx'
-import { Avatar, Button, IconBtn, PopItem, Popover } from './ui.jsx'
+import { Avatar, Button, EmptyState, IconBtn, PopItem, Popover } from './ui.jsx'
 import { useApp, useToasts } from './store.jsx'
 import { ShellCtx } from './shell-ctx.js'
 import { DEMO_ROLES } from './data.js'
+import { shellRoleFor } from './auth-role.js'
 import { useIsCompact, useIsPhone } from './responsive.js'
 import { TodayCockpit } from './cockpit.jsx'
 import { motionOK, brandBurst } from './anim.js'
@@ -40,12 +41,21 @@ const NAV = [
   { id: 'reports', label: 'Raporty', icon: 'reports' },
 ]
 
-const ROLE_NAV = {
+const DEMO_ROLE_NAV = {
   owner: ['dashboard', 'calendar', 'clients', 'tus', 'team', 'payments', 'reports', 'settings'],
   coordinator: ['dashboard', 'calendar', 'clients', 'tus', 'payments', 'settings'],
   therapist: ['dashboard', 'calendar', 'clients', 'tus', 'settings'],
 }
-const canAccess = (routeName, role) => ROLE_NAV[role.id].includes(routeName)
+const APP_ROLE_NAV = {
+  owner: DEMO_ROLE_NAV.owner,
+  coordinator: ['dashboard', 'calendar', 'clients', 'tus', 'payments', 'reports', 'settings'],
+  therapist: ['dashboard', 'calendar', 'clients', 'tus', 'payments', 'settings'],
+}
+const EMPTY_CAPABILITIES = Object.freeze([])
+const canAccessInMode = (routeName, role, appMode) => {
+  const matrix = appMode === 'app' ? APP_ROLE_NAV : DEMO_ROLE_NAV
+  return Boolean(matrix[role.id]?.includes(routeName))
+}
 
 const routeTitle = (routeName) => {
   const navItem = NAV.find((item) => item.id === routeName)
@@ -85,6 +95,27 @@ const ACTIVE_OF = { client: 'clients', psych: 'team', tusGroup: 'tus' }
 // the handler accepts Ctrl and Cmd alike — advertise the native chord
 const META_K = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent) ? '⌘ K' : 'Ctrl K'
 
+function AppSpecialistPayments() {
+  return (
+    <div>
+      <div className="view-head">
+        <div>
+          <div className="eyebrow">Twoje finanse</div>
+          <h1 className="display view-head__title">Rozliczenia <em>specjalisty</em></h1>
+          <p className="view-head__sub">Widoczne są wyłącznie rozliczenia przypisane do tego konta.</p>
+        </div>
+      </div>
+      <section className="specialist-payments-empty" aria-label="Rozliczenia specjalisty">
+        <EmptyState
+          icon="payments"
+          title="Brak rozliczeń specjalisty"
+          hint="W środowisku testowym nie ma rozliczeń przypisanych do tego konta."
+        />
+      </section>
+    </div>
+  )
+}
+
 // Real hash links wherever the shell navigates: plain clicks go through the
 // SPA router, Cmd/Ctrl/middle clicks keep native open-in-new-tab behavior.
 function navLink(navigate, name) {
@@ -119,14 +150,15 @@ function Sidebar({
   innerRef,
   inert,
   navIds,
+  canAccessRoute,
   showTodayCard = true,
 }) {
   const { state } = useApp()
   const navRef = useRef(null)
   const pillRef = useRef(null)
   const activeId = ACTIVE_OF[route.name] || route.name
-  const items = NAV.filter((item) => canAccess(item.id, role) && (!navIds || navIds.includes(item.id)))
-  const showSettings = canAccess('settings', role) && (!navIds || navIds.includes('settings'))
+  const items = NAV.filter((item) => canAccessRoute(item.id, role) && (!navIds || navIds.includes(item.id)))
+  const showSettings = canAccessRoute('settings', role) && (!navIds || navIds.includes('settings'))
   const itemIds = items.map((item) => item.id).join(':')
 
   useLayoutEffect(() => {
@@ -201,7 +233,7 @@ function Sidebar({
   )
 }
 
-function MobileRoleControls({ role, onRoleChange, onLogout }) {
+function MobileRoleControls({ appMode, role, onRoleChange, onLogout }) {
   return (
     <div className="mobile-account">
       <div className="mobile-account__identity">
@@ -211,21 +243,23 @@ function MobileRoleControls({ role, onRoleChange, onLogout }) {
           <small>{role.label}</small>
         </span>
       </div>
-      <div className="mobile-account__roles" role="group" aria-label="Tryb demonstracyjny">
-        <div className="mobile-account__label">Tryb demonstracyjny</div>
-        {DEMO_ROLES.map((demoRole) => (
-          <button
-            key={demoRole.id}
-            type="button"
-            className={`mobile-account__role ${demoRole.id === role.id ? 'is-active' : ''}`}
-            aria-pressed={demoRole.id === role.id}
-            onClick={() => onRoleChange(demoRole.id)}
-          >
-            <Avatar name={demoRole.name} size={30} />
-            <span>{demoRole.label} · {demoRole.name}</span>
-          </button>
-        ))}
-      </div>
+      {appMode === 'demo' && (
+        <div className="mobile-account__roles" role="group" aria-label="Tryb demonstracyjny">
+          <div className="mobile-account__label">Tryb demonstracyjny</div>
+          {DEMO_ROLES.map((demoRole) => (
+            <button
+              key={demoRole.id}
+              type="button"
+              className={`mobile-account__role ${demoRole.id === role.id ? 'is-active' : ''}`}
+              aria-pressed={demoRole.id === role.id}
+              onClick={() => onRoleChange(demoRole.id)}
+            >
+              <Avatar name={demoRole.name} size={30} />
+              <span>{demoRole.label} · {demoRole.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <button type="button" className="mobile-account__logout" onClick={onLogout}>
         <Icon name="logout" size={18} />
         Wyloguj się
@@ -238,15 +272,33 @@ function MobileRoleControls({ role, onRoleChange, onLogout }) {
 // with the same GSAP choreography as the form drawers (mirrored).
 const PHONE_MENU_IDS = ['clients', 'team', 'payments', 'reports', 'settings']
 
-function MobileNavDrawer({ route, navigate, role, onRoleChange, onLogout, phone, onClose }) {
+function MobileNavDrawer({
+  appMode,
+  canAccessRoute,
+  route,
+  navigate,
+  role,
+  onRoleChange,
+  onLogout,
+  phone,
+  onClose,
+}) {
   const asideRef = useRef(null)
   const backRef = useRef(null)
   const closing = useRef(false)
 
   useEffect(() => {
-    if (!motionOK() || !asideRef.current) return
-    window.gsap.fromTo(backRef.current, { opacity: 0 }, { opacity: 1, duration: 0.2 })
-    window.gsap.fromTo(asideRef.current, { x: '-104%' }, { x: '0%', duration: 0.22, ease: 'power3.out' })
+    const gsap = window.gsap
+    const aside = asideRef.current
+    const backdrop = backRef.current
+    if (motionOK() && aside) {
+      gsap.fromTo(backdrop, { opacity: 0 }, { opacity: 1, duration: 0.2 })
+      gsap.fromTo(aside, { x: '-104%' }, { x: '0%', duration: 0.22, ease: 'power3.out' })
+    }
+    return () => {
+      gsap?.killTweensOf(backdrop)
+      gsap?.killTweensOf(aside)
+    }
   }, [])
 
   const close = useCallback(() => {
@@ -303,8 +355,10 @@ function MobileNavDrawer({ route, navigate, role, onRoleChange, onLogout, phone,
         route={route}
         navigate={(name, params) => { navigate(name, params); close() }}
         role={role}
+        canAccessRoute={canAccessRoute}
         accountControls={phone ? (
           <MobileRoleControls
+            appMode={appMode}
             role={role}
             onRoleChange={(roleId) => { onRoleChange(roleId); close() }}
             onLogout={onLogout}
@@ -394,7 +448,20 @@ function MobileTabbar({ route, navigate, onAdd, onMenu }) {
   )
 }
 
-function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, showAccountControls, onCockpitChange, onLogout, onSearch, onMenu, overlayKey }) {
+function Topbar({
+  appMode,
+  route,
+  role,
+  setDemoRole,
+  roleMenuOpen,
+  setRoleMenuOpen,
+  showAccountControls,
+  onCockpitChange,
+  onLogout,
+  onSearch,
+  onMenu,
+  overlayKey,
+}) {
   const titleRef = useRef(null)
   const title = routeTitle(route.name)
   const controlsInert = overlayKey ? '' : undefined
@@ -433,43 +500,53 @@ function Topbar({ route, role, setDemoRole, roleMenuOpen, setRoleMenuOpen, showA
           </button>
           {showAccountControls && (
             <>
-              <Popover
-                align="right"
-                ariaLabel="Tryb demonstracyjny"
-                contentRole="group"
-                open={roleMenuOpen}
-                setOpen={setRoleMenuOpen}
-                trigger={
-                  <button
-                    type="button"
-                    className="userchip userchip--button"
-                    onClick={() => setRoleMenuOpen(!roleMenuOpen)}
-                  >
-                    <Avatar name={role.name} size={37} />
-                    <span>
-                      <span className="userchip__mode">Tryb demonstracyjny</span>
-                      <span className="userchip__name">{role.name}</span>
-                      <span className="userchip__role">{role.label}</span>
-                    </span>
-                  </button>
-                }
-              >
-                <div className="popover__label">Tryb demonstracyjny</div>
-                {DEMO_ROLES.map((demoRole) => (
-                  <PopItem
-                    key={demoRole.id}
-                    role="button"
-                    on={demoRole.id === role.id}
-                    pressed
-                    onClick={() => {
-                      setDemoRole(demoRole.id)
-                      setRoleMenuOpen(false)
-                    }}
-                  >
-                    {demoRole.label} · {demoRole.name}
-                  </PopItem>
-                ))}
-              </Popover>
+              {appMode === 'app' ? (
+                <div className="userchip userchip--authenticated">
+                  <Avatar name={role.name} size={37} />
+                  <span>
+                    <span className="userchip__name">{role.name}</span>
+                    <span className="userchip__role">{role.label}</span>
+                  </span>
+                </div>
+              ) : (
+                <Popover
+                  align="right"
+                  ariaLabel="Tryb demonstracyjny"
+                  contentRole="group"
+                  open={roleMenuOpen}
+                  setOpen={setRoleMenuOpen}
+                  trigger={
+                    <button
+                      type="button"
+                      className="userchip userchip--button"
+                      onClick={() => setRoleMenuOpen(!roleMenuOpen)}
+                    >
+                      <Avatar name={role.name} size={37} />
+                      <span>
+                        <span className="userchip__mode">Tryb demonstracyjny</span>
+                        <span className="userchip__name">{role.name}</span>
+                        <span className="userchip__role">{role.label}</span>
+                      </span>
+                    </button>
+                  }
+                >
+                  <div className="popover__label">Tryb demonstracyjny</div>
+                  {DEMO_ROLES.map((demoRole) => (
+                    <PopItem
+                      key={demoRole.id}
+                      role="button"
+                      on={demoRole.id === role.id}
+                      pressed
+                      onClick={() => {
+                        setDemoRole(demoRole.id)
+                        setRoleMenuOpen(false)
+                      }}
+                    >
+                      {demoRole.label} · {demoRole.name}
+                    </PopItem>
+                  ))}
+                </Popover>
+              )}
               <IconBtn name="logout" label="Wyloguj się" onClick={onLogout} />
             </>
           )}
@@ -550,12 +627,33 @@ function LeaveConfirmDialog({ onCancel, onConfirm }) {
   )
 }
 
-export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
+export function Shell({
+  appMode = 'demo',
+  authStatus = 'authenticated',
+  onLogout,
+  session = null,
+}) {
+  const { state, dispatch } = useApp()
   const { clearToasts } = useToasts()
-  const role = DEMO_ROLES.find((demoRole) => demoRole.id === state.demoRoleId) || DEMO_ROLES[0]
+  const isApp = appMode === 'app'
+  const appRole = useMemo(
+    () => isApp ? shellRoleFor(session?.actor) : null,
+    [isApp, session?.actor]
+  )
+  const role = appRole
+    || DEMO_ROLES.find((demoRole) => demoRole.id === state.demoRoleId)
+    || DEMO_ROLES[0]
+  const actor = isApp ? session.actor : null
+  const capabilities = isApp ? session.capabilities : EMPTY_CAPABILITIES
+  const dataMode = isApp ? session.dataMode : 'fictional'
+  const canAccessRoute = useCallback(
+    (routeName, targetRole = role) => canAccessInMode(routeName, targetRole, appMode),
+    [appMode, role]
+  )
   const [route, setRoute] = useState(() => {
     const requested = routeFromHash(window.location.hash)
-    if (!requested || !VIEWS[requested.name] || !canAccess(ACTIVE_OF[requested.name] || requested.name, role)) {
+    if (!requested || !VIEWS[requested.name]
+      || !canAccessInMode(ACTIVE_OF[requested.name] || requested.name, role, appMode)) {
       return { name: 'dashboard' }
     }
     return requested
@@ -621,7 +719,7 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
       const requested = routeFromHash(window.location.hash)
       const accessible = requested
         && VIEWS[requested.name]
-        && canAccess(ACTIVE_OF[requested.name] || requested.name, currentRole)
+        && canAccessInMode(ACTIVE_OF[requested.name] || requested.name, currentRole, appMode)
       const nextRoute = accessible ? requested : { name: 'dashboard' }
       if (
         currentRoute.name === nextRoute.name
@@ -648,7 +746,7 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
     }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
-  }, [])
+  }, [appMode])
 
   useMonthSettled()
 
@@ -732,7 +830,7 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
   const navigate = useCallback((name, params) => {
     const currentRole = roleRef.current
     const currentRoute = routeRef.current
-    if (!canAccess(ACTIVE_OF[name] || name, currentRole)) return
+    if (!canAccessInMode(ACTIVE_OF[name] || name, currentRole, appMode)) return
     if (currentRoute.name === name && JSON.stringify(currentRoute.params) === JSON.stringify(params)) return
     if (leaveBlocked()) {
       setPendingLeave(() => () => requestLeave(() => navigate(name, params)))
@@ -749,9 +847,10 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
     const nextRoute = { name, params }
     routeRef.current = nextRoute
     setRoute(nextRoute)
-  }, [requestLeave])
+  }, [appMode, requestLeave])
 
   const setDemoRole = useCallback((roleId) => {
+    if (isApp) return
     const nextRole = DEMO_ROLES.find((demoRole) => demoRole.id === roleId)
     if (!nextRole) return
     const currentRole = roleRef.current
@@ -765,7 +864,9 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
     )
     const parentRoute = ACTIVE_OF[currentRoute.name]
     const candidate = parentRoute || currentRoute.name
-    const nextRoute = { name: canAccess(candidate, nextRole) ? candidate : 'dashboard' }
+    const nextRoute = {
+      name: canAccessInMode(candidate, nextRole, 'demo') ? candidate : 'dashboard',
+    }
     if (leaveBlocked()) {
       setPendingLeave(() => () => requestLeave(() => setDemoRole(roleId)))
       return
@@ -778,7 +879,7 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
     roleRef.current = nextRole
     setRoute(nextRoute)
     dispatch({ type: 'SET_DEMO_ROLE', roleId })
-  }, [clearToasts, dispatch, requestLeave])
+  }, [clearToasts, dispatch, isApp, requestLeave])
 
   useLayoutEffect(() => {
     const { scrollY } = readRouteViewState(viewRegistryRef.current, role.id, route.name, { scrollY: 0 })
@@ -809,7 +910,9 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
     viewRef.current?.focus({ preventScroll: true })
   }, [role.id, route.name, routeParamsKey])
 
-  const View = VIEWS[route.name] || Dashboard
+  const View = isApp && role.id === 'therapist' && route.name === 'payments'
+    ? AppSpecialistPayments
+    : VIEWS[route.name] || Dashboard
   const hasOverlay = overlay !== null
   const handleCockpitChange = useCallback((open) => {
     if (open) openOverlay('cockpit')
@@ -823,9 +926,13 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
   const closeNavigation = useCallback(() => closeOverlay('navigation'), [closeOverlay])
   const openNewSession = useCallback(() => openSessionForm(), [openSessionForm])
   const shellValue = useMemo(() => ({
+    actor,
+    appMode,
+    capabilities,
+    dataMode,
     role,
-    setDemoRole,
-    canAccess,
+    setDemoRole: isApp ? undefined : setDemoRole,
+    canAccess: canAccessRoute,
     route,
     navigate,
     getViewState,
@@ -842,16 +949,30 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
   }), [
     getViewState, navigate, openClientForm, openPsychForm, openSessionForm, openTeamBoard,
     openTusClassForm, openTusGroupForm, openTusKidForm, patchViewState, registerLeaveGuard,
-    resetViewState, role, route, setDemoRole,
+    actor, appMode, canAccessRoute, capabilities, dataMode, isApp, resetViewState,
+    role, route, setDemoRole,
   ])
 
   return (
     <ShellCtx.Provider value={shellValue}>
       <a className="skip-link" href="#main-content" inert={hasOverlay ? '' : undefined}>Przejdź do treści</a>
-      <div className="shell" ref={shellRef}>
-        {!isCompact && <Sidebar route={route} navigate={navigate} role={role} inert={hasOverlay ? '' : undefined} />}
+      <div
+        className="shell"
+        ref={shellRef}
+        aria-busy={isApp && authStatus === 'refreshing'}
+      >
+        {!isCompact && (
+          <Sidebar
+            route={route}
+            navigate={navigate}
+            role={role}
+            canAccessRoute={canAccessRoute}
+            inert={hasOverlay ? '' : undefined}
+          />
+        )}
         <div className="main">
           <Topbar
+            appMode={appMode}
             route={route}
             role={role}
             setDemoRole={setDemoRole}
@@ -864,6 +985,9 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
             onMenu={isCompact && !isPhone ? openNavigation : undefined}
             overlayKey={overlay}
           />
+          {isApp && dataMode === 'fictional' && (
+            <div className="environment-strip" role="status">Środowisko testowe</div>
+          )}
           <main
             id="main-content"
             className={`content ${route.name === 'dashboard' ? 'content--dashboard' : ''}`}
@@ -891,6 +1015,8 @@ export function Shell({ onLogout }) {  const { state, dispatch } = useApp()
       )}
       {isCompact && overlay === 'navigation' && (
         <MobileNavDrawer
+          appMode={appMode}
+          canAccessRoute={canAccessRoute}
           route={route}
           navigate={navigate}
           role={role}

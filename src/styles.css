@@ -99,7 +99,7 @@
   --z-toast: 100;
 }
 
-.protected-app {
+.auth-screen {
   align-content: center;
   background: var(--paper);
   color: var(--ink);
@@ -110,22 +110,22 @@
   text-align: center;
 }
 
-.protected-app__brand {
+.auth-screen__brand {
   color: var(--coral-deep);
   font-family: var(--font-brand);
   font-size: 1.125rem;
   margin: 0;
 }
 
-.protected-app h1 {
+.auth-screen h1 {
   font-family: var(--font-display);
   font-size: 2rem;
   margin: var(--s2) 0 0;
 }
 
-.protected-app p:last-child {
+.auth-screen__message {
   color: var(--ink-soft);
-  margin: var(--s2) 0 0;
+  margin: var(--s2) 0 var(--s4);
 }
 
 * { box-sizing: border-box; }
@@ -618,6 +618,38 @@ input, select, textarea { font-family: inherit; color: inherit; }
 }
 .userchip__name { font-size: 13.5px; font-weight: 600; line-height: 1.2; }
 .userchip__role { display: block; font-size: 11.5px; color: var(--ink-faint); }
+.userchip--authenticated {
+  min-width: 0;
+  max-width: min(24vw, 240px);
+}
+.userchip--authenticated > span {
+  min-width: 0;
+  overflow: hidden;
+}
+.userchip--authenticated .userchip__name,
+.userchip--authenticated .userchip__role {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (min-width: 641px) and (max-width: 1024px) {
+  .userchip--authenticated { max-width: min(22vw, 180px); }
+}
+
+.environment-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 4px 20px;
+  border-bottom: 1px solid var(--amber-mid);
+  background: var(--amber-ghost);
+  color: var(--amber-deep);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
 
 .content {
   flex: 1;
@@ -2340,6 +2372,11 @@ button.spine__row:hover { background: rgba(252, 232, 226, 0.45); }
 .empty--sm { padding: 18px 12px; gap: 8px; }
 .empty--sm .empty__icon { width: 38px; height: 38px; }
 .empty--sm .empty__title { font-size: 15px; }
+.specialist-payments-empty {
+  margin-top: 24px;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
 
 /* "?" tooltip */
 .tip {
@@ -2668,6 +2705,32 @@ button.spine__row:hover { background: rgba(252, 232, 226, 0.45); }
 .settings-section__title:focus { outline: none; }
 .settings-section__title:focus-visible { outline: 2px solid var(--coral-deep); outline-offset: 5px; border-radius: 4px; }
 .settings-mobile-nav { display: none; }
+.settings-account-identity {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.settings-account-identity > div { min-width: 0; }
+.settings-account-identity strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+}
+.settings-account-identity__label {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+.settings-account-identity p {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
 .settings-save {
   display: flex;
   align-items: center;
@@ -2736,6 +2799,8 @@ button.spine__row:hover { background: rgba(252, 232, 226, 0.45); }
   .settings-section { scroll-margin-top: 82px; }
   .settings-section + .settings-section { margin-top: 28px; }
   .settings-section__title { font-size: 21px; }
+  .settings-account-identity { grid-template-columns: minmax(0, 1fr); }
+  .settings-account-identity p { grid-column: auto; }
   .pref-row { flex-wrap: wrap; gap: 10px 20px; }
   .pref-row--switch { flex-wrap: nowrap; }
   .settings-save { justify-content: space-between; flex-wrap: wrap; }
@@ -3204,6 +3269,7 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
   }
   .topbar__crumb { display: none; }
   .userchip { display: none; }
+  .environment-strip { min-height: 26px; padding-inline: 12px; }
   .cmd-trigger { width: 44px; height: 44px; padding: 0; justify-content: center; }
   .cmd-trigger > span, .cmd-trigger kbd { display: none; }
   /* keyboard hints are meaningless on touch and overflow at 360px */

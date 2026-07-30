@@ -62,11 +62,20 @@ function PreferenceSwitch({ title, description, on, disabled, onChange }) {
 
 export function Settings({ params = {} }) {
   const { state, dispatch, toast } = useApp()
-  const { getViewState, openPsychForm, patchViewState, registerLeaveGuard, role } = useShell()
+  const {
+    actor,
+    appMode,
+    getViewState,
+    openPsychForm,
+    patchViewState,
+    registerLeaveGuard,
+    role,
+  } = useShell()
   const ref = useReveal()
   const isPhone = useIsPhone()
   const osReduce = useMediaQuery('(prefers-reduced-motion: reduce)')
   const sectionRefs = useRef({})
+  const isApp = appMode === 'app'
   const isOwner = role.id === 'owner'
   const availableSections = isOwner ? SECTIONS : PERSONAL_SECTIONS
   const defaultSection = isOwner ? 'account' : 'calendar'
@@ -83,7 +92,9 @@ export function Settings({ params = {} }) {
       : defaultSection
   })
   const [activeSection, setActiveSection] = useState(initialSection)
-  const [profile, setProfile] = useState({ name: state.user.name, email: state.user.email })
+  const [profile, setProfile] = useState(() => (
+    isApp ? { name: '', email: '' } : { name: state.user.name, email: state.user.email }
+  ))
   const [center, setCenter] = useState({ ...state.center })
   const [team, setTeam] = useState(() => teamDraftOf(psychologists))
   const teamSourceRef = useRef(teamDraftOf(psychologists))
@@ -115,17 +126,20 @@ export function Settings({ params = {} }) {
     teamSourceRef.current = nextSource
   }, [psychologists])
 
-  const profileErrors = {
-    name: profile.name.trim() ? null : 'Podaj imię i nazwisko',
-    email: !profile.email.trim()
-      ? 'Podaj adres e-mail'
-      : EMAIL.test(profile.email.trim()) ? null : 'Podaj poprawny adres e-mail',
-  }
+  const profileErrors = isApp
+    ? { name: null, email: null }
+    : {
+        name: profile.name.trim() ? null : 'Podaj imię i nazwisko',
+        email: !profile.email.trim()
+          ? 'Podaj adres e-mail'
+          : EMAIL.test(profile.email.trim()) ? null : 'Podaj poprawny adres e-mail',
+      }
   const centerErrors = {
     name: center.name.trim() ? null : 'Podaj nazwę centrum',
     email: center.email.trim() && !EMAIL.test(center.email.trim()) ? 'Podaj poprawny adres e-mail' : null,
   }
-  const profileDirty = profile.name !== state.user.name || profile.email !== state.user.email
+  const profileDirty = !isApp
+    && (profile.name !== state.user.name || profile.email !== state.user.email)
   const centerDirty = Object.keys(center).some((key) => center[key] !== state.center[key])
   const teamErrors = Object.fromEntries(psychologists.map((psychologist) => {
     const draft = team[psychologist.id] || { rate: '', weeklyCapacity: '' }
@@ -172,7 +186,7 @@ export function Settings({ params = {} }) {
 
   const saveProfile = (event) => {
     event?.preventDefault()
-    if (!profileDirty || profileErrors.name || profileErrors.email || profileStatus === 'saving') return
+    if (isApp || !profileDirty || profileErrors.name || profileErrors.email || profileStatus === 'saving') return
     const patch = { name: profile.name.trim(), email: profile.email.trim() }
     completeSave(() => {
       dispatch({ type: 'UPDATE_USER', patch })
@@ -283,42 +297,56 @@ export function Settings({ params = {} }) {
                 aria-labelledby="settings-account-title"
               >
             <h2 className="settings-section__title" id="settings-account-title" tabIndex={-1}>Twoje konto</h2>
-            <form className="card card--pad stack" aria-label="Twoje konto" onSubmit={saveProfile} noValidate>
-              <Field label="Imię i nazwisko" error={profileErrors.name}>
-                <input
-                  className="input"
-                  name="name"
-                  autoComplete="name"
-                  disabled={profileStatus === 'saving'}
-                  value={profile.name}
-                  onChange={(event) => {
-                    setProfile((current) => ({ ...current, name: event.target.value }))
-                    markDraftChanged(setProfileStatus)
-                  }}
+            {isApp ? (
+              <div className="card card--pad settings-account-identity" aria-label="Tożsamość konta">
+                <div>
+                  <span className="settings-account-identity__label">Imię i nazwisko</span>
+                  <strong>{actor.displayName}</strong>
+                </div>
+                <div>
+                  <span className="settings-account-identity__label">Rola</span>
+                  <strong>{role.label}</strong>
+                </div>
+                <p>Tożsamość jest zarządzana przez chroniony dostęp do panelu.</p>
+              </div>
+            ) : (
+              <form className="card card--pad stack" aria-label="Twoje konto" onSubmit={saveProfile} noValidate>
+                <Field label="Imię i nazwisko" error={profileErrors.name}>
+                  <input
+                    className="input"
+                    name="name"
+                    autoComplete="name"
+                    disabled={profileStatus === 'saving'}
+                    value={profile.name}
+                    onChange={(event) => {
+                      setProfile((current) => ({ ...current, name: event.target.value }))
+                      markDraftChanged(setProfileStatus)
+                    }}
+                  />
+                </Field>
+                <Field label="Adres e-mail" error={profileErrors.email}>
+                  <input
+                    className="input"
+                    type="email"
+                    name="email"
+                    autoComplete="email"
+                    spellCheck={false}
+                    disabled={profileStatus === 'saving'}
+                    value={profile.email}
+                    onChange={(event) => {
+                      setProfile((current) => ({ ...current, email: event.target.value }))
+                      markDraftChanged(setProfileStatus)
+                    }}
+                  />
+                </Field>
+                <SaveControls
+                  status={profileStatus}
+                  dirty={profileDirty}
+                  disabled={!profileDirty || Boolean(profileErrors.name || profileErrors.email) || profileStatus === 'saving'}
+                  label="Zapisz konto"
                 />
-              </Field>
-              <Field label="Adres e-mail" error={profileErrors.email}>
-                <input
-                  className="input"
-                  type="email"
-                  name="email"
-                  autoComplete="email"
-                  spellCheck={false}
-                  disabled={profileStatus === 'saving'}
-                  value={profile.email}
-                  onChange={(event) => {
-                    setProfile((current) => ({ ...current, email: event.target.value }))
-                    markDraftChanged(setProfileStatus)
-                  }}
-                />
-              </Field>
-              <SaveControls
-                status={profileStatus}
-                dirty={profileDirty}
-                disabled={!profileDirty || Boolean(profileErrors.name || profileErrors.email) || profileStatus === 'saving'}
-                label="Zapisz konto"
-              />
-            </form>
+              </form>
+            )}
               </section>
 
               <section

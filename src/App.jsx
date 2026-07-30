@@ -4,6 +4,8 @@ import { Shell } from './layout.jsx'
 import { Login } from './views/Login.jsx'
 import { ToastHost } from './ui.jsx'
 import { setReduceMotion } from './anim.js'
+import { APP_MODE } from './app-mode.js'
+import { AuthProvider, useAuth } from './auth.jsx'
 
 function MotionSync() {
   const { state } = useApp()
@@ -13,7 +15,7 @@ function MotionSync() {
   return null
 }
 
-function Root() {
+function DemoRoot() {
   const [authed, setAuthed] = useState(false)
   const { clearToasts } = useToasts()
   const setAuthenticated = (value) => {
@@ -24,7 +26,7 @@ function Root() {
     <>
       <MotionSync />
       {authed ? (
-        <Shell key="shell" onLogout={() => setAuthenticated(false)} />
+        <Shell key="shell" appMode="demo" onLogout={() => setAuthenticated(false)} />
       ) : (
         <Login key="login" onLogin={() => setAuthenticated(true)} />
       )}
@@ -34,10 +36,45 @@ function Root() {
   )
 }
 
-export default function App() {
+function DemoApp() {
   return (
     <AppProvider>
-      <Root />
+      <DemoRoot />
     </AppProvider>
   )
+}
+
+const authorityKeyFor = (session) => JSON.stringify([
+  session.actor.id,
+  session.actor.role,
+  session.actor.specialistId,
+  [...session.capabilities].sort(),
+  session.dataMode,
+])
+
+function ProtectedApp() {
+  const { logout, session, status } = useAuth()
+  return (
+    <AppProvider key={authorityKeyFor(session)}>
+      <MotionSync />
+      <Shell
+        appMode="app"
+        authStatus={status}
+        session={session}
+        onLogout={logout}
+      />
+      <ToastHost />
+      <div className="grain" aria-hidden="true" />
+    </AppProvider>
+  )
+}
+
+export default function App() {
+  return APP_MODE === 'demo'
+    ? <DemoApp />
+    : (
+      <AuthProvider>
+        <ProtectedApp />
+      </AuthProvider>
+    )
 }
