@@ -1531,6 +1531,22 @@ button.figures__item:hover .figures__value { color: var(--coral-deep); }
 
 /* ============ drawer ============ */
 
+.modal-layer {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+}
+.modal-layer::backdrop { background: transparent; }
+
 .drawer-backdrop {
   position: fixed;
   inset: 0;
@@ -2779,6 +2795,82 @@ button.spine__row:hover { background: rgba(252, 232, 226, 0.45); }
 .team-settings-row__fields .field__label { white-space: nowrap; }
 .input--capacity { width: 120px; height: 38px; }
 .settings-team-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.staff-access__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.staff-access__head > div { min-width: 0; }
+.staff-access__head .settings-section__title { margin-bottom: 3px; }
+.staff-access__head p {
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.staff-access__head .btn { flex-shrink: 0; }
+.staff-access__state {
+  min-height: 70px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+}
+.staff-access__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.staff-access-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 8px 20px;
+  padding: 17px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.staff-access-row:last-child { border-bottom: 0; }
+.staff-access-row__identity,
+.staff-access-row__details,
+.staff-access-row__invitation {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.staff-access-row__identity {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 1px;
+}
+.staff-access-row__name {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 14.5px;
+}
+.staff-access-row__email {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--ink-faint);
+  font-size: 12.5px;
+}
+.staff-access-row__details {
+  justify-content: flex-end;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.staff-access-row__invitation {
+  grid-column: 1 / -1;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding-top: 5px;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
 @media (max-width: 900px) and (min-width: 641px) {
   .settings-grid { grid-template-columns: 180px minmax(0, 1fr); gap: 20px; }
   .team-settings-row { grid-template-columns: 1fr; }
@@ -2810,6 +2902,11 @@ button.spine__row:hover { background: rgba(252, 232, 226, 0.45); }
   .team-settings-row__fields .input { width: 100%; }
   .settings-team-actions { align-items: stretch; flex-direction: column; }
   .settings-team-actions .settings-save { width: 100%; }
+  .staff-access__head { align-items: stretch; flex-direction: column; }
+  .staff-access__head .btn { align-self: flex-start; }
+  .staff-access-row { grid-template-columns: minmax(0, 1fr); gap: 9px; }
+  .staff-access-row__details { justify-content: flex-start; flex-wrap: wrap; }
+  .staff-access-row__invitation { grid-column: auto; align-items: flex-start; flex-direction: column; }
 }
 .pref-row__title { font-weight: 600; font-size: 14.5px; }
 .pref-row__desc { font-size: 13px; color: var(--ink-faint); margin-top: 2px; max-width: 48ch; }
@@ -3323,7 +3420,7 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
   .sidebar, .topbar, .toasts, .grain, .no-print,
   .cmd, .cmd-back, .drag-ghost, .burst,
   .tabbar, .cockpit, .cockpit-back,
-  .drawer, .drawer-backdrop, .popover { display: none !important; }
+  .drawer, .drawer-backdrop, .modal-layer, .popover { display: none !important; }
   .content { overflow: visible; padding: 0; }
   body { background: #fff; }
   .card { box-shadow: none; border-color: #ddd; }
@@ -3468,6 +3565,7 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
 .leave-confirm__card h2 { font-size: 24px; margin-bottom: 8px; }
 .leave-confirm__card p { color: var(--ink-soft); font-size: 14px; line-height: 1.55; }
 .leave-confirm__actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
+.staff-deactivation-confirm .leave-confirm__card { min-width: 0; overflow-wrap: anywhere; }
 .quick-dialog__head {
   padding: 20px 20px 14px;
   display: flex;

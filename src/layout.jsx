@@ -594,36 +594,48 @@ function useMonthSettled() {
 // Modal confirm for a blocked route commit (dirty form/draft). Focus lands on
 // the safe choice; Escape and backdrop cancel.
 function LeaveConfirmDialog({ onCancel, onConfirm }) {
+  const dialogRef = useRef(null)
   const cardRef = useRef(null)
   useEffect(() => {
+    const dialog = dialogRef.current
+    const opener = document.activeElement
+    dialog?.showModal()
     cardRef.current?.querySelector('button')?.focus()
-    const onKey = (e) => {
-      if (e.key === 'Escape' && !e.defaultPrevented) {
-        e.preventDefault()
-        onCancel()
-      }
+    return () => {
+      if (dialog?.open) dialog.close()
+      requestAnimationFrame(() => {
+        if (opener?.isConnected) {
+          opener.focus({ preventScroll: true })
+        }
+      })
     }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [onCancel])
+  }, [])
   return (
-    <div className="leave-confirm">
-      <div className="leave-confirm__backdrop" onClick={onCancel} />
-      <div
-        className="leave-confirm__card"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="leave-confirm-title"
-        ref={cardRef}
-      >
-        <h2 className="display" id="leave-confirm-title">Niezapisane zmiany</h2>
-        <p>Masz niezapisane zmiany. Odrzucić je i kontynuować?</p>
-        <div className="leave-confirm__actions">
-          <Button variant="ghost" onClick={onCancel}>Kontynuuj edycję</Button>
-          <Button onClick={onConfirm}>Odrzuć i wyjdź</Button>
+    <dialog
+      className="modal-layer"
+      ref={dialogRef}
+      role="alertdialog"
+      aria-labelledby="leave-confirm-title"
+      onCancel={(event) => {
+        event.preventDefault()
+        onCancel()
+      }}
+    >
+      <div className="leave-confirm">
+        <div className="leave-confirm__backdrop" onClick={onCancel} />
+        <div
+          className="leave-confirm__card"
+          ref={cardRef}
+        >
+          <h2 className="display" id="leave-confirm-title">Niezapisane zmiany</h2>
+          <p>Masz niezapisane zmiany. Odrzucić je i kontynuować?</p>
+          <div className="leave-confirm__actions">
+            <Button variant="ghost" onClick={onCancel}>Kontynuuj edycję</Button>
+            <Button onClick={onConfirm}>Odrzuć i wyjdź</Button>
+          </div>
         </div>
       </div>
-    </div>
+    </dialog>
   )
 }
 
