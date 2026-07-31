@@ -27,6 +27,45 @@ async function reasonFixture(auditEventId = 'aud_authorization_denied') {
 }
 
 describe('shared audit statement constructor', () => {
+  it('accepts only the exact operational action resolution audit schema', async () => {
+    const resolved = {
+      ...event,
+      id: 'aud_operational_action_resolved',
+      action: 'operational_action.resolved',
+      entityType: 'operational_action',
+      entityId: 'opa_resolved',
+      result: 'success',
+      metadata: { actionVersion: 2 },
+      reasonEnvelope: null,
+    }
+    await auditEventStatement(env.DB, resolved).run()
+    expect(await env.DB.prepare(
+      "SELECT entity_type,result,reason_envelope,metadata_json FROM audit_events WHERE id='aud_operational_action_resolved'"
+    ).first()).toEqual({
+      entity_type: 'operational_action',
+      result: 'success',
+      reason_envelope: null,
+      metadata_json: '{"actionVersion":2}',
+    })
+
+    const invalid = [
+      { entityType: 'staff_user' },
+      { result: 'denied' },
+      { reasonEnvelope: 'not-null' },
+      { metadata: { actionVersion: 0 } },
+      { metadata: { actionVersion: 1.5 } },
+      { metadata: { actionVersion: '2' } },
+      { metadata: {} },
+      { metadata: { actionVersion: 2, extra: 1 } },
+      { metadata: { version: 2 } },
+    ]
+    for (const [index, changes] of invalid.entries()) expect(() => auditEventStatement(env.DB, {
+      ...resolved,
+      ...changes,
+      id: `aud_operational_action_resolved_invalid_${index}`,
+    })).toThrow(/^AUDIT_EVENT_INVALID$/)
+  })
+
   it('returns a tagged prepared statement with a frozen non-sensitive descriptor', async () => {
     const statement = auditEventStatement(env.DB, event)
     expect(auditDescriptorFor(statement)).toEqual({

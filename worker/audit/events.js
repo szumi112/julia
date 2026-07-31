@@ -12,6 +12,7 @@ const schemas = Object.freeze({
   'identity.reindex': Object.freeze({ entityTypes: ['staff_user', 'staff_invitation'], result: 'success', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: Object.freeze({ oldKekVersion: 'version', newKekVersion: 'version' }), reasonPolicy: 'null' }),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'encrypted' }),
+  'operational_action.resolved': Object.freeze({ entityTypes: ['operational_action'], result: 'success', metadata: Object.freeze({ actionVersion: 'version' }), reasonPolicy: 'null' }),
   'staff.invited': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
   'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
   'staff.invitation.expired': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),

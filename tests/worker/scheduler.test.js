@@ -321,6 +321,27 @@ describe('scheduled coordinator claim and fencing', () => {
       failed_jobs: 0,
       error_code: null,
     })
+    const health = await env.DB.prepare(
+      "SELECT key,value_json,version,updated_at FROM system_state WHERE key='health.snapshot'"
+    ).first()
+    expect(health).toMatchObject({
+      key: 'health.snapshot',
+      version: 1,
+      updated_at: nowIso(scheduledTime),
+    })
+    const snapshot = JSON.parse(health.value_json)
+    expect(snapshot.generatedAt).toBe(nowIso(scheduledTime))
+    expect(snapshot.checks.map(({ id }) => id)).toEqual([
+      'outbox.processing',
+      'backup.freshness',
+      'access.reconciliation',
+      'scheduler.runs',
+    ])
+    expect(snapshot.checks.find(({ id }) => id === 'scheduler.runs')).toMatchObject({
+      status: 'ok',
+      lastSuccessAt: nowIso(scheduledTime),
+      detailCode: 'SCHEDULER_HEALTHY',
+    })
   })
 
   it('skips the exact successful instant without loading crypto, backup, or dispatch work', async () => {
@@ -1698,8 +1719,9 @@ describe('crash and reply-loss convergence', () => {
         },
         async batch({ sql, execute }) {
           const backupBatch = sql.length === 3 && sql[0].includes('INSERT INTO backup_runs')
-          const completionBatch = sql.length === 2
-            && sql[0].includes("status='succeeded'")
+          const completionBatch = sql.some((text) => text.includes('UPDATE scheduler_runs')
+            && text.includes("status='succeeded'"))
+            && sql.some((text) => text.includes("'health.snapshot'"))
           const failureBatch = sql.length === 2 && sql[0].includes("status='failed'")
           if (tripped && failureBatch) throw new Error('failure transition refused')
           if (!tripped && backupBatch && stage === 'before_backup_batch') {

@@ -11,6 +11,7 @@ import { safeLog as writeSafeLog } from '../logging/safe-log.js'
 import { decodeBase64Url } from '../security/encoding.js'
 import { createKeyring as buildKeyring } from '../security/keyring.js'
 import { backupDue as calculateBackupDue, partsInWarsaw } from './clock.js'
+import { publishScheduledOperationalState } from './health.js'
 
 const IDENTITY_SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const SCHEDULER_LEASE_MS = 900_000
@@ -689,52 +690,6 @@ function validateOutcomes(value) {
   return { claimedJobs: value.length, succeededJobs, failedJobs }
 }
 
-async function closeScheduler(db, scheduledFor, owned, counts, now) {
-  const current = observation(now)
-  const statements = [
-    db.prepare(
-      `UPDATE scheduler_runs
-       SET status='succeeded',completed_at=?,claimed_jobs=?,succeeded_jobs=?,
-           failed_jobs=?,error_code=NULL
-       WHERE id=? AND scheduled_for=? AND status='running' AND attempt_count=?
-         AND lease_owner=? AND lease_expires_at=? AND lease_expires_at>?`
-    ).bind(
-      current.instant,
-      counts.claimedJobs,
-      counts.succeededJobs,
-      counts.failedJobs,
-      owned.runId,
-      scheduledFor,
-      owned.attemptCount,
-      owned.leaseOwner,
-      owned.leaseExpiresAt,
-      current.instant,
-    ),
-    operationGuard(
-      db,
-      `scheduler_close_${owned.runId}_${owned.attemptCount}`,
-      `changes()=1 AND EXISTS (
-         SELECT 1 FROM scheduler_runs
-         WHERE id=? AND scheduled_for=? AND status='succeeded' AND attempt_count=?
-           AND lease_owner=? AND lease_expires_at=? AND completed_at=?
-           AND claimed_jobs=? AND succeeded_jobs=? AND failed_jobs=? AND error_code IS NULL
-       )`,
-      [
-        owned.runId,
-        scheduledFor,
-        owned.attemptCount,
-        owned.leaseOwner,
-        owned.leaseExpiresAt,
-        current.instant,
-        counts.claimedJobs,
-        counts.succeededJobs,
-        counts.failedJobs,
-      ],
-    ),
-  ]
-  await db.batch(statements)
-}
-
 async function failScheduler(db, scheduledFor, owned, counts, now) {
   const current = observation(now)
   const statements = [
@@ -878,7 +833,20 @@ export async function runScheduled(input) {
     counts = validateOutcomes(outcomes)
 
     await ownershipCheckpoint(validated.db, validated.scheduledFor, owned, deps.now)
-    await closeScheduler(validated.db, validated.scheduledFor, owned, counts, deps.now)
+    await publishScheduledOperationalState({
+      db: validated.db,
+      cryptoContext,
+      run: {
+        id: owned.runId,
+        scheduledFor: validated.scheduledFor,
+        attemptCount: owned.attemptCount,
+        leaseOwner: owned.leaseOwner,
+        leaseExpiresAt: owned.leaseExpiresAt,
+        ...counts,
+      },
+      idFactory: deps.idFactory,
+      now: deps.now,
+    })
     await emitLog(deps.safeLog, 'info', logFields('scheduler.completed', 'completed', owned, counts))
     return {
       status: 'succeeded',
