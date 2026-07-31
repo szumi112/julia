@@ -17,6 +17,10 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const PROVIDER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const PROVIDER_RUNWAY_MS = 11_000
+const DORMANT_OUTBOX_RESULT = Object.freeze({
+  result: 'dormant',
+  errorCode: 'OUTBOX_HANDLER_DORMANT',
+})
 const randomId = () => crypto.randomUUID().replaceAll('-', '')
 const randomCorrelationId = () => crypto.randomUUID()
 const validId = (value) => typeof value === 'string' && ID.test(value)
@@ -356,6 +360,9 @@ async function authoritativeClaim(input) {
     || row.lease_expires_at <= now) return null
   const aggregateValid = row.type === 'staff.access.reconcile'
     ? row.aggregate_type === 'access_group' && row.aggregate_id === 'centre_1'
+    : row.type === 'backup.create'
+      ? row.aggregate_type === 'backup_run'
+        && /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(row.aggregate_id)
     : ['staff.invitation.email', 'staff.invitation.expire'].includes(row.type)
       && row.aggregate_type === 'staff_invitation'
       && /^inv_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(row.aggregate_id)
@@ -386,6 +393,7 @@ async function authoritativeClaim(input) {
 export async function dispatchOutboxJob(input) {
   const current = await authoritativeClaim(input)
   if (!current) return { result: 'retry' }
+  if (current.type === 'backup.create') return DORMANT_OUTBOX_RESULT
   let payload
   try {
     payload = await decryptOutboxPayload(input.cryptoContext, current)

@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import { createUnitOfWork } from '../../worker/db/unit-of-work.js'
+import { dispatchOutboxJob } from '../../worker/jobs/handlers.js'
 import * as outbox from '../../worker/jobs/outbox.js'
 import {
   decryptForScope,
@@ -114,6 +115,76 @@ const settle = async (id) => {
   ).bind(NOW, id).run()
 }
 
+const backupInput = ({
+  id,
+  backupId,
+  localDay = '2026-07-31',
+  ...overrides
+}) => ({
+  id,
+  type: 'backup.create',
+  aggregateType: 'backup_run',
+  aggregateId: backupId,
+  payload: { backupId },
+  idempotencyKey: `backup.create:${localDay}:${backupId}`,
+  scheduledAt: NOW,
+  nowMs: NOW_MS,
+  ...overrides,
+})
+
+async function enqueueBackup(cryptoContext, input) {
+  const statement = await outbox.enqueueOutboxStatement(
+    env.DB,
+    cryptoContext,
+    backupInput(input),
+  )
+  await statement.run()
+  return backupInput(input)
+}
+
+async function seedBackupBacklog(cryptoContext, prefix, count, scheduledAt) {
+  const statements = await Promise.all(Array.from({ length: count }, async (_, index) => {
+    const suffix = String(index).padStart(3, '0')
+    const id = `job_backup_${prefix}_${suffix}`
+    const backupId = `bkp_${prefix}_${suffix}`
+    const payloadEnvelope = JSON.stringify(await encryptForScope(
+      cryptoContext.keyring,
+      cryptoContext.dataKey,
+      {
+        expectedScope: SCOPE,
+        recordId: id,
+        field: 'job_payload',
+        plaintext: `{"backupId":"${backupId}"}`,
+      },
+    ))
+    return env.DB.prepare(
+      `INSERT INTO outbox_jobs
+       (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+        attempt_count,max_attempts,scheduled_at,created_at,updated_at)
+       VALUES (?,'backup.create','backup_run',?,?,?,'queued',0,8,?,?,?)`
+    ).bind(
+      id,
+      backupId,
+      payloadEnvelope,
+      `backup.create:2026-07-31:${backupId}`,
+      scheduledAt,
+      NOW,
+      NOW,
+    )
+  }))
+  await env.DB.batch(statements)
+  return statements.map((_, index) => `job_backup_${prefix}_${String(index).padStart(3, '0')}`)
+}
+
+const backupStates = async (prefix) => (await env.DB.prepare(
+  'SELECT * FROM outbox_jobs WHERE id LIKE ? ORDER BY id'
+).bind(`job_backup_${prefix}_%`).all()).results
+
+const parkPrefix = (prefix) => env.DB.prepare(
+  `UPDATE outbox_jobs SET scheduled_at='2099-01-01T00:00:00.000Z'
+   WHERE id LIKE ? AND status='queued'`
+).bind(`${prefix}%`).run()
+
 describe('durable outbox enqueue', () => {
   it('uses the fixed retry schedule and dead-letters after attempt eight', () => {
     expect([1, 2, 3, 4, 5, 6, 7].map(outbox.retryDelayMs)).toEqual([
@@ -149,6 +220,104 @@ describe('durable outbox enqueue', () => {
       envelope: JSON.parse(row.payload_envelope),
     })).resolves.toBe('{"actorId":"stf_owner_enqueue","invitationId":"inv_enqueue_secret"}')
     await park(input.id)
+  })
+
+  it('recognizes and encrypts the exact dormant backup payload without retaining its key', async () => {
+    const cryptoContext = await context()
+    const input = await enqueueBackup(cryptoContext, {
+      id: 'job_backup_enqueue_secret',
+      backupId: 'bkp_enqueue_secret',
+    })
+    const row = await job(input.id)
+
+    expect(outbox.OUTBOX_TYPES).toContain('backup.create')
+    expect(row).toMatchObject({
+      id: input.id,
+      type: 'backup.create',
+      aggregate_type: 'backup_run',
+      aggregate_id: input.aggregateId,
+      idempotency_key: 'backup.create:2026-07-31:bkp_enqueue_secret',
+      status: 'queued',
+      attempt_count: 0,
+      max_attempts: 8,
+    })
+    expect(JSON.stringify(row)).not.toContain('backupId')
+    await expect(decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE,
+      recordId: input.id,
+      field: 'job_payload',
+      envelope: JSON.parse(row.payload_envelope),
+    })).resolves.toBe('{"backupId":"bkp_enqueue_secret"}')
+    await expect(outbox.decryptOutboxPayload(cryptoContext, row))
+      .resolves.toEqual({ backupId: 'bkp_enqueue_secret' })
+    await park(input.id)
+  })
+
+  it('rejects every malformed backup shape and per-run key before D1', async () => {
+    const cryptoContext = await context()
+    const valid = backupInput({
+      id: 'job_backup_validation',
+      backupId: 'bkp_validation',
+    })
+    const cases = [
+      { ...valid, aggregateId: 'bkp_' },
+      { ...valid, aggregateId: 'run_validation', payload: { backupId: 'run_validation' },
+        idempotencyKey: 'backup.create:2026-07-31:run_validation' },
+      { ...valid, aggregateType: 'backup' },
+      { ...valid, payload: { backupId: 'bkp_other' } },
+      { ...valid, payload: {} },
+      { ...valid, payload: { id: 'bkp_validation' } },
+      { ...valid, payload: { backupId: 'bkp_validation', actorId: 'stf_owner_backup' } },
+      { ...valid, payload: {
+        actorId: 'stf_owner_backup',
+        invitationId: 'inv_backup_validation',
+      } },
+      { ...valid, payload: { actorId: 'stf_owner_backup', generation: 1 } },
+      { ...valid, idempotencyKey: 'backup.create:2026-7-31:bkp_validation' },
+      { ...valid, idempotencyKey: 'backup.create:2026-02-30:bkp_validation' },
+      { ...valid, idempotencyKey: 'backup.create:2026-07-31T00:00:00Z:bkp_validation' },
+      { ...valid, idempotencyKey: 'backup.create:2026-07-31:bkp_other' },
+      { ...valid, idempotencyKey: 'backup.create:2026-07-31:bkp_validation:extra' },
+      { ...valid, scheduledAt: new Date(NOW_MS + 1).toISOString() },
+    ]
+    const unreachableDb = {
+      prepare() { throw new Error('D1_REACHED') },
+    }
+    for (const input of cases) {
+      await expect(outbox.enqueueOutboxStatement(unreachableDb, cryptoContext, input))
+        .rejects.toThrow(/^OUTBOX_INVALID$/)
+    }
+  })
+
+  it('accepts a distinct immutable idempotency key for each valid backup run', async () => {
+    const cryptoContext = await context()
+    const first = await enqueueBackup(cryptoContext, {
+      id: 'job_backup_per_run_first',
+      backupId: 'bkp_per_run_first',
+    })
+    const second = await enqueueBackup(cryptoContext, {
+      id: 'job_backup_per_run_second',
+      backupId: 'bkp_per_run_second',
+    })
+    const rows = (await env.DB.prepare(
+      `SELECT id,aggregate_id,idempotency_key FROM outbox_jobs
+       WHERE id IN (?,?) ORDER BY id`
+    ).bind(first.id, second.id).all()).results
+
+    expect(rows).toEqual([
+      {
+        id: first.id,
+        aggregate_id: 'bkp_per_run_first',
+        idempotency_key: 'backup.create:2026-07-31:bkp_per_run_first',
+      },
+      {
+        id: second.id,
+        aggregate_id: 'bkp_per_run_second',
+        idempotency_key: 'backup.create:2026-07-31:bkp_per_run_second',
+      },
+    ])
+    await park(first.id)
+    await park(second.id)
   })
 
   it('rejects extra fields, noncanonical facts, oversized payloads, and unsupported types before D1', async () => {
@@ -208,6 +377,81 @@ describe('durable outbox enqueue', () => {
 })
 
 describe('durable outbox claims', () => {
+  it('excludes a due dormant backup from ordinary claims without mutating it', async () => {
+    const cryptoContext = await context()
+    const [backupId] = await seedBackupBacklog(
+      cryptoContext,
+      'claim_excluded',
+      1,
+      new Date(NOW_MS - 1).toISOString(),
+    )
+    const ordinary = await enqueue(cryptoContext, {
+      id: 'job_backup_claim_ordinary',
+      invitationId: 'inv_backup_claim_ordinary',
+      idempotencyKey: 'staff.invitation.expire:backup-claim-ordinary',
+    })
+    const claimed = await claim({
+      idFactory: sequence('attempt_backup_claim'),
+      leaseOwnerFactory: sequence('lease_backup_claim'),
+    })
+    const backupAfter = await job(backupId)
+    const backupAttempts = await attempts(backupId)
+    for (const row of claimed) await settle(row.id)
+    await park(backupId)
+    await park(ordinary.id)
+
+    expect(claimed.map(({ id }) => id)).toEqual([ordinary.id])
+    expect(backupAfter).toMatchObject({
+      status: 'queued',
+      attempt_count: 0,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error_code: null,
+    })
+    expect(backupAttempts).toEqual([])
+  })
+
+  it('does not let one hundred earlier dormant backups starve ten ordinary claims', async () => {
+    const cryptoContext = await context()
+    const backupIds = await seedBackupBacklog(
+      cryptoContext,
+      'claim_backlog',
+      100,
+      new Date(NOW_MS - 1).toISOString(),
+    )
+    const ordinaryIds = []
+    for (let index = 0; index < 10; index += 1) {
+      const suffix = String(index).padStart(2, '0')
+      const input = await enqueue(cryptoContext, {
+        id: `job_backup_backlog_ordinary_${suffix}`,
+        invitationId: `inv_backup_backlog_ordinary_${suffix}`,
+        idempotencyKey: `staff.invitation.expire:backup-backlog-${suffix}`,
+      })
+      ordinaryIds.push(input.id)
+    }
+    const claimed = await claim({
+      idFactory: sequence('attempt_backup_backlog'),
+      leaseOwnerFactory: sequence('lease_backup_backlog'),
+    })
+    const dormantAfter = await backupStates('claim_backlog')
+    const dormantAttemptCount = (await env.DB.prepare(
+      `SELECT count(*) AS count FROM outbox_attempts
+       WHERE job_id LIKE 'job_backup_claim_backlog_%'`
+    ).first()).count
+    for (const row of claimed) await settle(row.id)
+    await parkPrefix('job_backup_claim_backlog_')
+    await parkPrefix('job_backup_backlog_ordinary_')
+
+    expect(claimed.map(({ id }) => id)).toEqual(ordinaryIds)
+    expect(dormantAfter).toHaveLength(backupIds.length)
+    expect(dormantAfter.every((row) => row.status === 'queued'
+      && row.attempt_count === 0
+      && row.lease_owner === null
+      && row.lease_expires_at === null
+      && row.last_error_code === null)).toBe(true)
+    expect(dormantAttemptCount).toBe(0)
+  })
+
   it('claims in stable order, caps at ten, and gives every attempt a fresh fencing token', async () => {
     const cryptoContext = await context()
     const ids = [
@@ -385,6 +629,39 @@ describe('durable outbox claims', () => {
 })
 
 describe('durable outbox expired-lease reaping', () => {
+  it('does not reap or mutate an expired dormant backup claim', async () => {
+    const cryptoContext = await context()
+    const input = await enqueueBackup(cryptoContext, {
+      id: 'job_backup_reap_dormant',
+      backupId: 'bkp_reap_dormant',
+    })
+    await env.DB.prepare(
+      `UPDATE outbox_jobs
+       SET status='processing',attempt_count=1,lease_owner=?,lease_expires_at=?,updated_at=?
+       WHERE id=?`
+    ).bind('lease_backup_reap', NOW, NOW, input.id).run()
+    await env.DB.prepare(
+      `INSERT INTO outbox_attempts (id,job_id,attempt_number,started_at)
+       VALUES (?,?,1,?)`
+    ).bind('attempt_backup_reap', input.id, new Date(NOW_MS - 60_000).toISOString()).run()
+    const beforeJob = await job(input.id)
+    const beforeAttempts = await attempts(input.id)
+
+    const reaped = await outbox.reapExpiredOutboxLeases(env.DB, cryptoContext, {
+      nowMs: NOW_MS,
+      idFactory: sequence('action_backup_reap'),
+    })
+    const afterJob = await job(input.id)
+    const afterAttempts = await attempts(input.id)
+    if (afterJob.status === 'processing') await settle(input.id)
+    else await park(input.id)
+
+    expect(reaped).toEqual([])
+    expect(afterJob).toEqual(beforeJob)
+    expect(afterAttempts).toEqual(beforeAttempts)
+    expect(await actions(input.id)).toEqual([])
+  })
+
   it('dead-letters an ambiguous email attempt and opens one encrypted critical action', async () => {
     const cryptoContext = await context()
     await enqueue(cryptoContext, {
@@ -856,6 +1133,54 @@ describe('durable outbox finalization', () => {
 })
 
 describe('generic outbox processor', () => {
+  it('processes ordinary work behind a dormant backlog without dispatching or mutating backups', async () => {
+    const cryptoContext = await context()
+    await seedBackupBacklog(
+      cryptoContext,
+      'processor_dormant',
+      100,
+      new Date(NOW_MS - 1).toISOString(),
+    )
+    const ordinaryIds = []
+    for (let index = 0; index < 2; index += 1) {
+      const input = await enqueue(cryptoContext, {
+        id: `job_backup_processor_ordinary_${index}`,
+        invitationId: `inv_backup_processor_ordinary_${index}`,
+        idempotencyKey: `staff.invitation.expire:backup-processor-${index}`,
+      })
+      ordinaryIds.push(input.id)
+    }
+    const before = await backupStates('processor_dormant')
+    const dispatchedTypes = []
+    const completed = await outbox.processOutboxBatch({
+      db: env.DB,
+      cryptoContext,
+      config: {},
+      nowMs: NOW_MS,
+      idFactory: sequence('processor_backup_dormant_id'),
+      leaseOwnerFactory: sequence('processor_backup_dormant_lease'),
+      dispatch: async ({ job: current }) => {
+        dispatchedTypes.push(current.type)
+        return { result: 'succeeded' }
+      },
+    })
+    const after = await backupStates('processor_dormant')
+    const dormantAttemptCount = (await env.DB.prepare(
+      `SELECT count(*) AS count FROM outbox_attempts
+       WHERE job_id LIKE 'job_backup_processor_dormant_%'`
+    ).first()).count
+    await parkPrefix('job_backup_processor_dormant_')
+    await parkPrefix('job_backup_processor_ordinary_')
+
+    expect(completed).toEqual(ordinaryIds.map((id) => ({ id, result: 'succeeded' })))
+    expect(dispatchedTypes).toEqual([
+      'staff.invitation.expire',
+      'staff.invitation.expire',
+    ])
+    expect(after).toEqual(before)
+    expect(dormantAttemptCount).toBe(0)
+  })
+
   it('finishes expired-lease D1 work before dispatching the reclaimed job', async () => {
     const cryptoContext = await context()
     await enqueue(cryptoContext, {
@@ -1034,5 +1359,114 @@ describe('generic outbox processor', () => {
       last_error_code: 'OUTBOX_TYPE_INVALID',
     })
     expect(await actions(id)).toHaveLength(1)
+  })
+
+  it('returns a frozen dormant sentinel for an authoritative backup claim before decryption', async () => {
+    const cryptoContext = await context()
+    const malformedId = 'job_backup_direct_malformed'
+    const malformedEnvelope = JSON.stringify(await encryptForScope(
+      cryptoContext.keyring,
+      cryptoContext.dataKey,
+      {
+        expectedScope: SCOPE,
+        recordId: malformedId,
+        field: 'job_payload',
+        plaintext: '{"backupId":"bkp_direct_malformed"}',
+      },
+    ))
+    const leaseExpiry = new Date(NOW_MS + 60_000).toISOString()
+    await env.DB.prepare(
+      `INSERT INTO outbox_jobs
+       (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+        attempt_count,max_attempts,scheduled_at,lease_owner,lease_expires_at,created_at,updated_at)
+       VALUES (?,'backup.create','backup_run',?,?,
+         'backup.create:2026-07-31:bkp_direct_malformed','processing',1,7,?,?,?,?,?)`
+    ).bind(
+      malformedId,
+      'bkp_direct_malformed',
+      malformedEnvelope,
+      NOW,
+      'lease_backup_direct_malformed',
+      leaseExpiry,
+      NOW,
+      NOW,
+    ).run()
+    await env.DB.prepare(
+      `INSERT INTO outbox_attempts (id,job_id,attempt_number,started_at)
+       VALUES (?,?,1,?)`
+    ).bind('attempt_backup_direct_malformed', malformedId, NOW).run()
+    const malformed = await job(malformedId)
+    const malformedResult = await dispatchOutboxJob({
+      db: env.DB,
+      cryptoContext: { ...cryptoContext, dataKey: Object.freeze({}) },
+      config: {},
+      job: {
+        ...malformed,
+        attemptId: 'attempt_backup_direct_malformed',
+        attemptNumber: 1,
+        leaseOwner: 'lease_backup_direct_malformed',
+      },
+      nowMs: NOW_MS,
+    })
+    const malformedAfter = await job(malformedId)
+    await settle(malformedId)
+
+    expect(malformedResult).toEqual({ result: 'retry' })
+    expect(malformedAfter).toEqual(malformed)
+
+    const input = await enqueueBackup(cryptoContext, {
+      id: 'job_backup_direct_dispatch',
+      backupId: 'bkp_direct_dispatch',
+    })
+    await env.DB.prepare(
+      `UPDATE outbox_jobs
+       SET status='processing',attempt_count=1,lease_owner=?,lease_expires_at=?,updated_at=?
+       WHERE id=?`
+    ).bind('lease_backup_direct', leaseExpiry, NOW, input.id).run()
+    await env.DB.prepare(
+      `INSERT INTO outbox_attempts (id,job_id,attempt_number,started_at)
+       VALUES (?,?,1,?)`
+    ).bind('attempt_backup_direct', input.id, NOW).run()
+    const processing = await job(input.id)
+    const claim = {
+      ...processing,
+      attemptId: 'attempt_backup_direct',
+      attemptNumber: 1,
+      leaseOwner: 'lease_backup_direct',
+    }
+    const beforeJob = await job(input.id)
+    const beforeAttempts = await attempts(input.id)
+    const beforeBackups = (await env.DB.prepare(
+      'SELECT count(*) AS count FROM backup_runs'
+    ).first()).count
+    let providerCalls = 0
+
+    const result = await dispatchOutboxJob({
+      db: env.DB,
+      cryptoContext: { ...cryptoContext, dataKey: Object.freeze({}) },
+      config: {},
+      job: claim,
+      nowMs: NOW_MS,
+      providers: {
+        reconcileAccessGroup: async () => { providerCalls += 1 },
+        sendInvitationEmail: async () => { providerCalls += 1 },
+      },
+    })
+    const afterJob = await job(input.id)
+    const afterAttempts = await attempts(input.id)
+    const afterBackups = (await env.DB.prepare(
+      'SELECT count(*) AS count FROM backup_runs'
+    ).first()).count
+    await settle(input.id)
+
+    expect(result).toEqual({
+      result: 'dormant',
+      errorCode: 'OUTBOX_HANDLER_DORMANT',
+    })
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(providerCalls).toBe(0)
+    expect(afterJob).toEqual(beforeJob)
+    expect(afterAttempts).toEqual(beforeAttempts)
+    expect(afterBackups).toBe(beforeBackups)
   })
 })

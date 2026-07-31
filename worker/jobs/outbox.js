@@ -7,9 +7,16 @@ export const OUTBOX_TYPES = Object.freeze([
   'staff.access.reconcile',
   'staff.invitation.email',
   'staff.invitation.expire',
+  'backup.create',
 ])
 
 const OUTBOX_TYPE_SET = new Set(OUTBOX_TYPES)
+const ORDINARY_OUTBOX_TYPE_SET = new Set([
+  'staff.access.reconcile',
+  'staff.invitation.email',
+  'staff.invitation.expire',
+])
+const DORMANT_OUTBOX_TYPE = 'backup.create'
 const RETRY_DELAYS = Object.freeze([
   60_000,
   300_000,
@@ -22,6 +29,8 @@ const RETRY_DELAYS = Object.freeze([
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const INVITATION_ID = /^inv_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const LOCAL_DAY = /^\d{4}-\d{2}-\d{2}$/
 const TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~:-]{7,255}$/
 const ERROR_CODE = /^[A-Z][A-Z0-9_]{0,63}$/
@@ -98,6 +107,20 @@ const canonicalJson = (value) => JSON.stringify(canonicalize(value))
 const validErrorCode = (value) => typeof value === 'string' && ERROR_CODE.test(value)
 const validProviderReference = (value) => value === null || validId(value)
 const isAllowedType = (value) => OUTBOX_TYPE_SET.has(value)
+const isOrdinaryRunnableType = (value) => ORDINARY_OUTBOX_TYPE_SET.has(value)
+const validLocalDay = (value) => typeof value === 'string' && LOCAL_DAY.test(value)
+  && validInstant(`${value}T00:00:00.000Z`)
+const validBackupKey = (value, backupId) => {
+  if (typeof value !== 'string') return false
+  const prefix = `${DORMANT_OUTBOX_TYPE}:`
+  const localDay = value.slice(prefix.length, prefix.length + 10)
+  return validLocalDay(localDay) && value === `${prefix}${localDay}:${backupId}`
+}
+const validBackupRowFacts = (row) => row.type !== DORMANT_OUTBOX_TYPE
+  || (row.aggregate_type === 'backup_run'
+    && BACKUP_ID.test(row.aggregate_id ?? '')
+    && validBackupKey(row.idempotency_key, row.aggregate_id)
+    && row.max_attempts === MAX_ATTEMPTS)
 const emailJobKey = (invitationId, version) => (
   `staff.invitation.email:${invitationId}:${version}`
 )
@@ -123,6 +146,11 @@ function validatePayload(type, aggregateType, aggregateId, payload) {
       || !exactKeys(payload, ['actorId', 'generation'])
       || !STAFF_ID.test(payload.actorId ?? '')
       || !Number.isSafeInteger(payload.generation) || payload.generation < 0) invalid()
+  } else if (type === DORMANT_OUTBOX_TYPE) {
+    if (aggregateType !== 'backup_run'
+      || !BACKUP_ID.test(aggregateId ?? '')
+      || !exactKeys(payload, ['backupId'])
+      || payload.backupId !== aggregateId) invalid()
   } else {
     if (aggregateType !== 'staff_invitation' || !INVITATION_ID.test(aggregateId ?? '')
       || !exactKeys(payload, ['actorId', 'invitationId'])
@@ -157,9 +185,12 @@ function validateEnqueueInput(input) {
     || !validInstant(input.scheduledAt)) invalid()
   const maxAttempts = input.maxAttempts ?? MAX_ATTEMPTS
   const conditional = input.onlyIfPreviousStatementChanged ?? false
-  if (maxAttempts !== MAX_ATTEMPTS || typeof conditional !== 'boolean'
-    || (conditional && input.type !== 'staff.access.reconcile')) invalid()
   const now = instantFromMs(input.nowMs)
+  if (maxAttempts !== MAX_ATTEMPTS || typeof conditional !== 'boolean'
+    || (conditional && input.type !== 'staff.access.reconcile')
+    || (input.type === DORMANT_OUTBOX_TYPE
+      && (!validBackupKey(input.idempotencyKey, input.aggregateId)
+        || input.scheduledAt !== now))) invalid()
   return {
     maxAttempts,
     conditional,
@@ -215,6 +246,7 @@ export async function decryptOutboxPayload(cryptoContext, job) {
     || !isAllowedType(job.type)
     || !TYPE.test(job.aggregate_type ?? '')
     || !validId(job.aggregate_id)
+    || !validBackupRowFacts(job)
     || !validEnvelope(job.payload_envelope)) invalid()
   let plaintext
   let payload
@@ -315,6 +347,7 @@ export function validProcessingJob(row, { allowUnknownType = false } = {}) {
     && (allowUnknownType ? TYPE.test(row.type ?? '') : isAllowedType(row.type))
     && TYPE.test(row.aggregate_type ?? '')
     && validId(row.aggregate_id)
+    && validBackupRowFacts(row)
     && validEnvelope(row.payload_envelope)
     && IDEMPOTENCY_KEY.test(row.idempotency_key ?? '')
     && row.status === 'processing'
@@ -347,10 +380,10 @@ export async function claimDueJobs(db, input = {}) {
   const rows = (await db.prepare(
     `SELECT *
      FROM outbox_jobs
-     WHERE status='queued' AND scheduled_at<=? AND attempt_count<max_attempts
+     WHERE status='queued' AND type<>? AND scheduled_at<=? AND attempt_count<max_attempts
      ORDER BY scheduled_at,id
      LIMIT ?`
-  ).bind(validated.now, CLAIM_SCAN_LIMIT).all()).results
+  ).bind(DORMANT_OUTBOX_TYPE, validated.now, CLAIM_SCAN_LIMIT).all()).results
   const claimed = []
   const leaseOwners = new Set()
   for (const row of rows) {
@@ -692,9 +725,9 @@ export async function reapExpiredOutboxLeases(db, cryptoContext, input = {}) {
   const rows = (await db.prepare(
     `SELECT *
      FROM outbox_jobs
-     WHERE status='processing' AND lease_expires_at<=?
+     WHERE status='processing' AND type<>? AND lease_expires_at<=?
      ORDER BY lease_expires_at,id`
-  ).bind(now).all()).results
+  ).bind(DORMANT_OUTBOX_TYPE, now).all()).results
   const reaped = []
   for (const row of rows) {
     const result = await reapOne(db, cryptoContext, row, now, input.idFactory)
@@ -1423,6 +1456,7 @@ export async function processOutboxBatch(input = {}) {
     const dispatchNowMs = currentMs()
     const currentClaim = await currentOwnedClaim(input.db, claim, dispatchNowMs)
     if (!currentClaim) continue
+    if (isAllowedType(currentClaim.type) && !isOrdinaryRunnableType(currentClaim.type)) continue
     let outcome
     if (!isAllowedType(currentClaim.type)) {
       outcome = {
