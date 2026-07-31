@@ -6,6 +6,10 @@ const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CSRF_TOKEN = /^v1\.([1-9]\d*)\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const OUTBOX_TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
+const AUDIT_CURSOR = /^v1\.([1-9]\d*)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const INVALID_TEXT = /[\p{Cc}\p{Cf}]/u
 
 const SERVER_STATUS = Object.freeze({
@@ -58,6 +62,69 @@ const ROLES = new Set(['owner', 'coordinator', 'specialist'])
 const STAFF_STATUSES = new Set(['active', 'disabled', 'pending'])
 const INVITATION_STATUSES = new Set(['pending', 'provisioning'])
 const ENVIRONMENTS = new Set(['development', 'staging', 'production'])
+const DENIAL_CAPABILITIES = new Set([
+  'operations.health.read',
+  'security.audit.read',
+  'staff.manage',
+])
+const ORDINARY_OUTBOX_TYPES = new Set([
+  'staff.access.reconcile',
+  'staff.invitation.email',
+  'staff.invitation.expire',
+])
+const OUTBOX_FAILURE_CODES = new Set([
+  'OUTBOX_HANDLER_FAILURE',
+  'OUTBOX_HANDLER_RETRY',
+  'OUTBOX_LEASE_EXPIRED',
+  'EMAIL_DELIVERY_AMBIGUOUS',
+])
+const HEALTH_CHECKS = Object.freeze([
+  Object.freeze({
+    id: 'outbox.processing',
+    label: 'Kolejka zadań',
+    pairs: new Set(['ok:OUTBOX_HEALTHY', 'critical:OUTBOX_DEAD']),
+  }),
+  Object.freeze({
+    id: 'backup.freshness',
+    label: 'Kopie zapasowe',
+    pairs: new Set([
+      'ok:BACKUP_NOT_DUE',
+      'ok:BACKUP_FRESH',
+      'warning:BACKUP_PENDING',
+      'critical:BACKUP_FAILED',
+      'critical:BACKUP_STALE',
+    ]),
+  }),
+  Object.freeze({
+    id: 'access.reconciliation',
+    label: 'Synchronizacja dostępu',
+    pairs: new Set(['ok:ACCESS_CURRENT', 'critical:ACCESS_RECONCILIATION_LAG']),
+  }),
+  Object.freeze({
+    id: 'scheduler.runs',
+    label: 'Zadania cykliczne',
+    pairs: new Set([
+      'ok:SCHEDULER_HEALTHY',
+      'warning:SCHEDULER_STARTING',
+      'critical:SCHEDULER_STALE',
+    ]),
+  }),
+])
+const AUDIT_SCHEMAS = Object.freeze({
+  'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' } }),
+  'backup.pruned': Object.freeze({ entityTypes: ['backup_run'], result: 'success', metadata: { backupVersion: 'version' }, system: true }),
+  'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: { newKekVersion: 'version', oldKekVersion: 'version' } }),
+  'identity.activation': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { invitationVersion: 'version', staffVersion: 'version' } }),
+  'identity.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' } }),
+  'identity.reindex': Object.freeze({ entityTypes: ['staff_invitation', 'staff_user'], result: 'success', metadata: { version: 'version' } }),
+  'operational_action.resolved': Object.freeze({ entityTypes: ['operational_action'], result: 'success', metadata: { actionVersion: 'version' } }),
+  'staff.access.reconciled': Object.freeze({ entityTypes: ['access_group'], result: 'success', metadata: { appliedGeneration: 'version', desiredGeneration: 'version', invitationCount: 'count' } }),
+  'staff.bootstrap': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+  'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', staffVersion: 'version' } }),
+  'staff.invitation.email_accepted': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: { invitationVersion: 'version' } }),
+  'staff.invitation.expired': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+  'staff.invited': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+})
 
 const plainObject = (value) => value !== null && typeof value === 'object'
   && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
@@ -70,22 +137,72 @@ const validIso = (value) => {
   const parsed = new Date(value)
   return Number.isFinite(parsed.valueOf()) && parsed.toISOString() === value
 }
+const validInstant = (value) => typeof value === 'string' && INSTANT.test(value)
+  && validIso(value)
+const positive = (value) => Number.isSafeInteger(value) && value > 0
+const safeCount = (value) => Number.isSafeInteger(value) && value >= 0
+const exactObject = (value, keys) => {
+  if (!plainObject(value)) return false
+  const ownKeys = Reflect.ownKeys(value)
+  return ownKeys.length === keys.length
+    && ownKeys.every((key) => typeof key === 'string' && keys.includes(key))
+}
+const captureExactObject = (value, keys) => {
+  if (!exactObject(value, keys)) return null
+  const captured = {}
+  for (const key of keys) captured[key] = value[key]
+  return captured
+}
+const captureArray = (value, maximum) => {
+  if (!Array.isArray(value)) return null
+  const length = value.length
+  if (!Number.isSafeInteger(length) || length < 0 || length > maximum) return null
+  const captured = new Array(length)
+  for (let index = 0; index < length; index += 1) captured[index] = value[index]
+  return captured
+}
+const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+const canonicalBase64Url = (value) => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]+$/.test(value)
+    || value.length % 4 === 1) return false
+  const remainder = value.length % 4
+  if (remainder === 0) return true
+  const tail = BASE64URL_ALPHABET.indexOf(value.at(-1))
+  return remainder === 2 ? (tail & 15) === 0 : (tail & 3) === 0
+}
+const validCursor = (value) => {
+  if (typeof value !== 'string' || value.length > 1024) return false
+  const match = AUDIT_CURSOR.exec(value)
+  if (!match || !canonicalBase64Url(match[2]) || !canonicalBase64Url(match[3])) return false
+  const version = Number(match[1])
+  return positive(version) && String(version) === match[1]
+}
 const safeCode = (code) => Object.hasOwn(SERVER_STATUS, code) || CLIENT_CODES.has(code)
   ? code
   : 'INTERNAL_ERROR'
 
 const safeDetails = (details) => {
-  if (!plainObject(details)) return undefined
-  const result = {}
-  if (DETAIL_FIELDS.has(details.field)) result.field = details.field
-  if (Number.isSafeInteger(details.currentVersion) && details.currentVersion >= 0) {
-    result.currentVersion = details.currentVersion
+  try {
+    if (!plainObject(details)) return undefined
+    const captured = {}
+    for (const key of ['field', 'currentVersion', 'limit', 'retryAfterSeconds']) {
+      if (Object.hasOwn(details, key)) captured[key] = details[key]
+    }
+    const result = {}
+    if (DETAIL_FIELDS.has(captured.field)) result.field = captured.field
+    if (Number.isSafeInteger(captured.currentVersion) && captured.currentVersion >= 0) {
+      result.currentVersion = captured.currentVersion
+    }
+    if (Number.isSafeInteger(captured.limit) && captured.limit >= 0) {
+      result.limit = captured.limit
+    }
+    if (Number.isSafeInteger(captured.retryAfterSeconds) && captured.retryAfterSeconds >= 0) {
+      result.retryAfterSeconds = captured.retryAfterSeconds
+    }
+    return Object.keys(result).length > 0 ? result : undefined
+  } catch {
+    return undefined
   }
-  if (Number.isSafeInteger(details.limit) && details.limit >= 0) result.limit = details.limit
-  if (Number.isSafeInteger(details.retryAfterSeconds) && details.retryAfterSeconds >= 0) {
-    result.retryAfterSeconds = details.retryAfterSeconds
-  }
-  return Object.keys(result).length > 0 ? result : undefined
 }
 
 export class ApiError extends Error {
@@ -219,6 +336,215 @@ const acceptedDeactivationResult = (payload) => {
   return staff ? Object.freeze({ staff }) : null
 }
 
+const acceptedHealth = (payload) => {
+  const outer = captureExactObject(payload, ['data'])
+  const data = outer && captureExactObject(outer.data, ['generatedAt', 'checks'])
+  const values = data && captureArray(data.checks, HEALTH_CHECKS.length)
+  if (!data || !validInstant(data.generatedAt)
+    || !values || values.length !== HEALTH_CHECKS.length) return null
+  const checks = []
+  for (let index = 0; index < HEALTH_CHECKS.length; index += 1) {
+    const value = captureExactObject(values[index], [
+      'id', 'label', 'status', 'lastSuccessAt', 'detailCode',
+    ])
+    const expected = HEALTH_CHECKS[index]
+    if (!value || value.id !== expected.id || value.label !== expected.label
+      || !expected.pairs.has(`${value.status}:${value.detailCode}`)
+      || (value.lastSuccessAt !== null
+        && (!validInstant(value.lastSuccessAt)
+          || value.lastSuccessAt > data.generatedAt))) return null
+    checks.push(Object.freeze({
+      id: value.id,
+      label: value.label,
+      status: value.status,
+      lastSuccessAt: value.lastSuccessAt,
+      detailCode: value.detailCode,
+    }))
+  }
+  return Object.freeze({
+    generatedAt: data.generatedAt,
+    checks: Object.freeze(checks),
+  })
+}
+
+const acceptedActionDetails = (action) => {
+  let keys
+  if (action.kind === 'access_reconciliation_lag') {
+    keys = ['appliedGeneration', 'desiredGeneration', 'errorCode']
+  } else if (action.kind === 'authorization_denial_spike') {
+    keys = ['actorId', 'capability', 'count', 'errorCode', 'threshold']
+  } else if (action.kind === 'backup_failed') {
+    keys = ['backupId', 'errorCode']
+  } else if (action.kind === 'backup_stale') {
+    keys = ['errorCode', 'thresholdHours']
+  } else if (action.kind === 'outbox_job_failed') {
+    keys = ['errorCode', 'jobId', 'outboxType']
+  } else if (action.kind === 'scheduler_stale') {
+    keys = ['errorCode', 'schedulerRunId', 'thresholdMinutes']
+  } else return null
+  const details = captureExactObject(action.details, keys)
+  if (!details) return null
+  if (action.kind === 'access_reconciliation_lag') {
+    if (action.severity !== 'critical' || action.entityType !== 'access_group'
+      || action.entityId !== 'centre_1'
+      || !safeCount(details.appliedGeneration) || !safeCount(details.desiredGeneration)
+      || details.appliedGeneration >= details.desiredGeneration
+      || details.errorCode !== 'ACCESS_RECONCILIATION_LAG') return null
+  } else if (action.kind === 'authorization_denial_spike') {
+    if (action.severity !== 'warning' || action.entityType !== 'staff_user'
+      || !validId(action.entityId)
+      || details.actorId !== action.entityId || !DENIAL_CAPABILITIES.has(details.capability)
+      || !safeCount(details.count) || details.count < 10
+      || details.errorCode !== 'AUTHORIZATION_DENIAL_SPIKE' || details.threshold !== 10) return null
+  } else if (action.kind === 'backup_failed') {
+    if (action.severity !== 'critical' || action.entityType !== 'backup_run'
+      || !BACKUP_ID.test(action.entityId)
+      || details.backupId !== action.entityId || details.errorCode !== 'BACKUP_FAILED') return null
+  } else if (action.kind === 'backup_stale') {
+    if (action.severity !== 'critical' || action.entityType !== 'centre'
+      || action.entityId !== 'centre_1'
+      || details.errorCode !== 'BACKUP_STALE' || details.thresholdHours !== 36) return null
+  } else if (action.kind === 'outbox_job_failed') {
+    if (action.severity !== 'critical' || action.entityType !== 'outbox_job'
+      || !validId(action.entityId)
+      || details.jobId !== action.entityId) return null
+    const known = ORDINARY_OUTBOX_TYPES.has(details.outboxType)
+      && OUTBOX_FAILURE_CODES.has(details.errorCode)
+    const unknown = !ORDINARY_OUTBOX_TYPES.has(details.outboxType)
+      && details.outboxType !== 'backup.create'
+      && OUTBOX_TYPE.test(details.outboxType ?? '')
+      && details.errorCode === 'OUTBOX_TYPE_INVALID'
+    if (!known && !unknown) return null
+  } else if (action.kind === 'scheduler_stale') {
+    if (action.severity !== 'critical' || action.entityType !== 'scheduler_run'
+      || !validId(action.entityId)
+      || details.errorCode !== 'SCHEDULER_STALE'
+      || details.schedulerRunId !== action.entityId || details.thresholdMinutes !== 15) return null
+  } else return null
+  return Object.freeze({ ...details })
+}
+
+const acceptedActions = (payload) => {
+  const outer = captureExactObject(payload, ['data'])
+  const data = outer && captureExactObject(outer.data, ['actions', 'truncated'])
+  const values = data && captureArray(data.actions, 100)
+  if (!data || !values || typeof data.truncated !== 'boolean'
+    || (data.truncated && values.length < 100)) return null
+  const actions = []
+  const ids = new Set()
+  let previous = null
+  for (const raw of values) {
+    const value = captureExactObject(raw, [
+      'id', 'kind', 'severity', 'entityType', 'entityId', 'details', 'version',
+      'createdAt', 'updatedAt',
+    ])
+    if (!value || !validId(value.id) || !validId(value.entityId) || value.version !== 1
+      || !validInstant(value.createdAt) || value.updatedAt !== value.createdAt
+      || ids.has(value.id)
+      || (previous && (previous.createdAt < value.createdAt
+        || (previous.createdAt === value.createdAt && previous.id <= value.id)))) return null
+    const details = acceptedActionDetails(value)
+    if (!details) return null
+    ids.add(value.id)
+    previous = value
+    actions.push(Object.freeze({
+      id: value.id,
+      kind: value.kind,
+      severity: value.severity,
+      entityType: value.entityType,
+      entityId: value.entityId,
+      details,
+      version: value.version,
+      createdAt: value.createdAt,
+      updatedAt: value.updatedAt,
+    }))
+  }
+  return Object.freeze({
+    actions: Object.freeze(actions),
+    truncated: data.truncated,
+  })
+}
+
+const acceptedResolution = (payload, actionId, version) => {
+  const outer = captureExactObject(payload, ['data'])
+  const data = outer && captureExactObject(outer.data, ['action'])
+  const value = data && captureExactObject(data.action, [
+    'id', 'status', 'version', 'resolvedAt', 'updatedAt',
+  ])
+  if (!value || value.id !== actionId || value.status !== 'resolved'
+    || value.version !== version + 1 || !validInstant(value.resolvedAt)
+    || value.updatedAt !== value.resolvedAt) return null
+  return Object.freeze({
+    action: Object.freeze({
+      id: value.id,
+      status: value.status,
+      version: value.version,
+      resolvedAt: value.resolvedAt,
+      updatedAt: value.updatedAt,
+    }),
+  })
+}
+
+const acceptedAuditMetadata = (value, schema) => {
+  const keys = Object.keys(schema.metadata)
+  const metadata = captureExactObject(value, keys)
+  if (!metadata) return null
+  for (const key of keys) {
+    const accepted = schema.metadata[key] === 'count'
+      ? safeCount(metadata[key])
+      : positive(metadata[key])
+    if (!accepted) return null
+  }
+  return Object.freeze(metadata)
+}
+
+const acceptedAudit = (payload, limit) => {
+  const outer = captureExactObject(payload, ['data'])
+  const data = outer && captureExactObject(outer.data, ['events', 'nextCursor'])
+  const values = data && captureArray(data.events, limit)
+  if (!data || !values
+    || (data.nextCursor !== null && !validCursor(data.nextCursor))
+    || (values.length < limit && data.nextCursor !== null)) return null
+  const events = []
+  const ids = new Set()
+  let previous = null
+  for (const raw of values) {
+    const value = captureExactObject(raw, [
+      'id', 'occurredAt', 'actorStaffId', 'action', 'entityType', 'entityId',
+      'result', 'correlationId', 'metadata',
+    ])
+    if (!value) return null
+    const schema = AUDIT_SCHEMAS[value.action]
+    if (!validId(value.id) || !validInstant(value.occurredAt)
+      || (value.actorStaffId !== null && !validId(value.actorStaffId))
+      || !schema || !schema.entityTypes.includes(value.entityType)
+      || !validId(value.entityId) || value.result !== schema.result
+      || !validId(value.correlationId) || ids.has(value.id)
+      || (previous && (previous.occurredAt < value.occurredAt
+        || (previous.occurredAt === value.occurredAt && previous.id <= value.id)))) return null
+    if (schema.system && (value.actorStaffId !== null || !BACKUP_ID.test(value.entityId))) return null
+    const metadata = acceptedAuditMetadata(value.metadata, schema)
+    if (!metadata) return null
+    ids.add(value.id)
+    previous = value
+    events.push(Object.freeze({
+      id: value.id,
+      occurredAt: value.occurredAt,
+      actorStaffId: value.actorStaffId,
+      action: value.action,
+      entityType: value.entityType,
+      entityId: value.entityId,
+      result: value.result,
+      correlationId: value.correlationId,
+      metadata,
+    }))
+  }
+  return Object.freeze({
+    events: Object.freeze(events),
+    nextCursor: data.nextCursor,
+  })
+}
+
 const acceptedInviteInput = (input) => plainObject(input)
   && Object.keys(input).length === 3
   && Object.hasOwn(input, 'displayName')
@@ -240,14 +566,25 @@ const idempotencyOptions = (options) => {
 }
 
 const serverError = (payload, status, idempotencyKey) => {
-  const value = plainObject(payload) && plainObject(payload.error) ? payload.error : null
-  if (!value || !Object.hasOwn(SERVER_STATUS, value.code) || SERVER_STATUS[value.code] !== status) {
+  if (!plainObject(payload) || !Object.hasOwn(payload, 'error')) {
     return clientError('INVALID_RESPONSE', { status, idempotencyKey })
   }
-  return new ApiError(value.code, {
+  const value = payload.error
+  if (!plainObject(value) || !Object.hasOwn(value, 'code')) {
+    return clientError('INVALID_RESPONSE', { status, idempotencyKey })
+  }
+  const captured = { code: value.code }
+  for (const key of ['details', 'correlationId']) {
+    if (Object.hasOwn(value, key)) captured[key] = value[key]
+  }
+  if (!Object.hasOwn(SERVER_STATUS, captured.code)
+    || SERVER_STATUS[captured.code] !== status) {
+    return clientError('INVALID_RESPONSE', { status, idempotencyKey })
+  }
+  return new ApiError(captured.code, {
     status,
-    details: value.details,
-    correlationId: value.correlationId,
+    details: captured.details,
+    correlationId: captured.correlationId,
     idempotencyKey: status >= 500 ? idempotencyKey : undefined,
   })
 }
@@ -377,6 +714,51 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   }, {
     validate: acceptedStaffList,
   })
+  const getOperationsHealth = () => requestJson(`${API_ROOT}/operations/health`, {
+    method: 'GET',
+    credentials: 'same-origin',
+    headers: baseHeaders(),
+  }, {
+    validate: acceptedHealth,
+  })
+  const getOperationalActions = () => requestJson(`${API_ROOT}/operations/actions`, {
+    method: 'GET',
+    credentials: 'same-origin',
+    headers: baseHeaders(),
+  }, {
+    validate: acceptedActions,
+  })
+  const getSecurityAudit = (options = {}) => {
+    let cursor
+    let limit
+    try {
+      if (!plainObject(options)) throw new Error('invalid')
+      const keys = Reflect.ownKeys(options)
+      if (keys.some((key) => key !== 'cursor' && key !== 'limit')
+        || keys.length > 2) throw new Error('invalid')
+      cursor = keys.includes('cursor') ? options.cursor : undefined
+      limit = keys.includes('limit') ? options.limit : undefined
+      if ((cursor !== undefined && !validCursor(cursor))
+        || (limit !== undefined
+          && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100))) {
+        throw new Error('invalid')
+      }
+    } catch {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    const query = new URLSearchParams()
+    if (cursor !== undefined) query.append('cursor', cursor)
+    if (limit !== undefined) query.append('limit', String(limit))
+    const suffix = query.size > 0 ? `?${query}` : ''
+    const requestedLimit = limit ?? 50
+    return requestJson(`${API_ROOT}/security/audit${suffix}`, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: baseHeaders(),
+    }, {
+      validate: (payload) => acceptedAudit(payload, requestedLimit),
+    })
+  }
   const createIdempotencyKey = () => {
     let value
     try {
@@ -456,6 +838,25 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       idempotencyKey,
     )
   }
+  const resolveOperationalAction = (actionId, version, options) => {
+    let idempotencyKey
+    try {
+      const acceptedOptions = captureExactObject(options, ['idempotencyKey'])
+      if (typeof actionId !== 'string' || !ID.test(actionId)
+        || !positive(version) || version >= Number.MAX_SAFE_INTEGER
+        || !acceptedOptions) throw new Error('invalid')
+      idempotencyKey = acceptedOptions.idempotencyKey
+      if (!acceptedKey(idempotencyKey)) throw new Error('invalid')
+    } catch {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    return mutation(
+      `${API_ROOT}/operations/actions/${actionId}/resolution`,
+      JSON.stringify({ version }),
+      (payload) => acceptedResolution(payload, actionId, version),
+      idempotencyKey,
+    )
+  }
   const subscribeSession = (listener) => {
     if (typeof listener !== 'function') throw clientError('CLIENT_INPUT_INVALID')
     listeners.add(listener)
@@ -467,8 +868,12 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   return Object.freeze({
     getSession,
     listStaff,
+    getOperationsHealth,
+    getOperationalActions,
+    getSecurityAudit,
     inviteStaff,
     deactivateStaff,
+    resolveOperationalAction,
     createIdempotencyKey,
     clearSession,
     subscribeSession,
