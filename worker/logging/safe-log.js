@@ -11,7 +11,18 @@ const INTERNAL_NAME = /^[a-z][a-z0-9_]{0,63}$/
 const EVENT = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const RESULTS = new Set(['success', 'failure', 'skipped', 'started', 'completed'])
 const METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE', 'TRACE', 'CONNECT'])
-const ROUTES = new Set(['health.live', 'session', 'unmatched'])
+const ROUTES = new Set([
+  'health.live',
+  'operations.action-resolution',
+  'operations.actions',
+  'operations.health',
+  'security.audit',
+  'session',
+  'staff.deactivation',
+  'staff.invitations',
+  'staff.list',
+  'unmatched',
+])
 
 export const isCorrelationId = (value) => typeof value === 'string' && UUID.test(value)
 

@@ -17,6 +17,12 @@ import {
 } from './identity/access-jwt.js'
 import { resolveActor as resolveStaffActor } from './identity/staff.js'
 import { isCorrelationId, safeLog } from './logging/safe-log.js'
+import {
+  getOperationalHealth,
+  listOpenOperationalActions,
+  listSecurityAudit,
+  resolveOperationalAction,
+} from './routes/operations.js'
 import { getSession } from './routes/session.js'
 import { getStaff, postDeactivation, postInvitation } from './routes/staff.js'
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
@@ -29,10 +35,20 @@ const keyrings = new WeakMap()
 const SESSION_ALLOW = 'GET, HEAD, OPTIONS'
 const HEALTH_ALLOW = 'GET, HEAD'
 const STAFF_MUTATION_ALLOW = 'POST, OPTIONS'
+const OPERATIONS_READ_ALLOW = 'GET, HEAD, OPTIONS'
+const OPERATIONS_MUTATION_ALLOW = 'POST, OPTIONS'
 const HEALTH_PATH = '/api/v1/health/live'
 const STAFF_PATH = '/api/v1/staff'
 const STAFF_INVITATIONS_PATH = '/api/v1/staff/invitations'
 const STAFF_ID = /^\/api\/v1\/staff\/stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}\/deactivation$/
+const ACTION_RESOLUTION_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/resolution$/
+const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
+const OPERATION_SERVICES = Object.freeze({
+  getOperationalHealth,
+  listOpenOperationalActions,
+  listSecurityAudit,
+  resolveOperationalAction,
+})
 
 const routeFor = (request) => {
   const url = new URL(request.url)
@@ -45,6 +61,19 @@ const routeFor = (request) => {
   if (url.search === '' && url.pathname === STAFF_PATH) return { id: 'staff.list', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
   if (url.search === '' && url.pathname === STAFF_INVITATIONS_PATH) return { id: 'staff.invitations', expected: 'human', methods: ['POST', 'OPTIONS'] }
   if (url.search === '' && STAFF_ID.test(url.pathname)) return { id: 'staff.deactivation', expected: 'human', methods: ['POST', 'OPTIONS'] }
+  if (url.search === '' && url.pathname === '/api/v1/operations/health') {
+    return { id: 'operations.health', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'], allow: OPERATIONS_READ_ALLOW, service: 'getOperationalHealth' }
+  }
+  if (url.search === '' && url.pathname === '/api/v1/operations/actions') {
+    return { id: 'operations.actions', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'], allow: OPERATIONS_READ_ALLOW, service: 'listOpenOperationalActions' }
+  }
+  if (url.pathname === '/api/v1/security/audit') {
+    return { id: 'security.audit', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'], allow: OPERATIONS_READ_ALLOW, service: 'listSecurityAudit' }
+  }
+  const resolution = url.search === '' ? ACTION_RESOLUTION_PATH.exec(url.pathname) : null
+  if (resolution) {
+    return { id: 'operations.action-resolution', expected: 'human', methods: ['POST', 'OPTIONS'], allow: OPERATIONS_MUTATION_ALLOW, service: 'resolveOperationalAction', actionId: resolution[1] }
+  }
   return { id: 'unmatched', expected: 'human', methods: null }
 }
 
@@ -109,6 +138,20 @@ const nowMs = (deps) => {
 
 const idFactory = () => crypto.randomUUID().replaceAll('-', '')
 
+const validateResolutionIdempotency = (request) => {
+  const value = request.headers.get('Idempotency-Key')
+  if (typeof value !== 'string' || !IDEMPOTENCY_KEY.test(value)) {
+    throw new AppError('VALIDATION_FAILED')
+  }
+}
+
+const readResponse = (c, result) => {
+  const response = c.json(result)
+  return c.req.method === 'HEAD'
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response
+}
+
 export function createApp(deps = {}) {
   const app = new Hono()
 
@@ -142,13 +185,18 @@ export function createApp(deps = {}) {
     const method = request.method
     const route = routeFor(request)
     c.set('routeId', route.id)
+    c.set('routeAllow', route.allow)
+    c.set('routeActionId', route.actionId)
     if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
     if (route.methods && !route.methods.includes(method)) throw new AppError('METHOD_NOT_ALLOWED')
 
     const config = runtimeConfig(c, deps)
     const requestNowMs = route.expected === 'human' || isMutationMethod(method) ? nowMs(deps) : null
     c.set('nowMs', requestNowMs)
-    if (isMutationMethod(method)) validateMutationMetadata(request, config)
+    if (isMutationMethod(method)) {
+      validateMutationMetadata(request, config)
+      if (route.id === 'operations.action-resolution') validateResolutionIdempotency(request)
+    }
     else if (method === 'OPTIONS') validateOptionsOrigin(request, config)
 
     const verifier = deps.accessVerifier ?? (deps.resolveAccessPrincipal ? null : runtimeVerifier(config, deps))
@@ -171,6 +219,14 @@ export function createApp(deps = {}) {
       })
     }
 
+    if (route.service && method !== 'OPTIONS') {
+      const service = Object.hasOwn(deps, route.service)
+        ? deps[route.service]
+        : OPERATION_SERVICES[route.service]
+      if (typeof service !== 'function') throw new Error('OPERATIONS_INVALID')
+      c.set('operationService', service)
+    }
+
     if (route.expected === 'human') {
       const cryptoContext = await identityCryptoContext(c, config, deps)
       const actor = await (deps.resolveActor ?? resolveStaffActor)(
@@ -191,7 +247,8 @@ export function createApp(deps = {}) {
     if (isMutationMethod(method)) {
       c.set('jsonBody', await (deps.readJsonBodyOnce ?? readJsonBodyOnce)(request, {
         rejectDuplicateTopLevelKeys: route.id === 'staff.invitations'
-          || route.id === 'staff.deactivation',
+          || route.id === 'staff.deactivation'
+          || route.id === 'operations.action-resolution',
       }))
     }
     await next()
@@ -253,6 +310,74 @@ export function createApp(deps = {}) {
     if (c.get('routeId') !== 'staff.deactivation') throw new AppError('NOT_FOUND')
     return new Response(null, { status: 204, headers: { Allow: STAFF_MUTATION_ALLOW } })
   })
+  app.get('/api/v1/operations/health', async (c) => {
+    if (c.get('routeId') !== 'operations.health') throw new AppError('NOT_FOUND')
+    const result = await c.get('operationService')({
+      db: c.env?.DB ?? deps.db,
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/operations/actions', async (c) => {
+    if (c.get('routeId') !== 'operations.actions') throw new AppError('NOT_FOUND')
+    const result = await c.get('operationService')({
+      db: c.env?.DB ?? deps.db,
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/operations/actions/:actionId/resolution', async (c) => {
+    if (c.get('routeId') !== 'operations.action-resolution') throw new AppError('NOT_FOUND')
+    const result = await c.get('operationService')({
+      db: c.env?.DB ?? deps.db,
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+      actionId: c.get('routeActionId'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      body: c.get('jsonBody'),
+    })
+    return c.json(result)
+  })
+  app.get('/api/v1/security/audit', async (c) => {
+    if (c.get('routeId') !== 'security.audit') throw new AppError('NOT_FOUND')
+    const result = await c.get('operationService')({
+      db: c.env?.DB ?? deps.db,
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+      query: new URL(c.req.url).searchParams,
+    })
+    return readResponse(c, result)
+  })
+  for (const path of [
+    '/api/v1/operations/health',
+    '/api/v1/operations/actions',
+    '/api/v1/security/audit',
+  ]) {
+    app.options(path, (c) => {
+      if (!['operations.health', 'operations.actions', 'security.audit'].includes(c.get('routeId'))) {
+        throw new AppError('NOT_FOUND')
+      }
+      return new Response(null, { status: 204, headers: { Allow: OPERATIONS_READ_ALLOW } })
+    })
+  }
+  app.options('/api/v1/operations/actions/:actionId/resolution', (c) => {
+    if (c.get('routeId') !== 'operations.action-resolution') throw new AppError('NOT_FOUND')
+    return new Response(null, { status: 204, headers: { Allow: OPERATIONS_MUTATION_ALLOW } })
+  })
   app.notFound((c) => {
     const correlationId = c.get('correlationId') || crypto.randomUUID()
     c.set('errorCode', 'NOT_FOUND')
@@ -261,7 +386,7 @@ export function createApp(deps = {}) {
   app.onError((error, c) => {
     const mapped = publicError(error)
     const headers = mapped.code === 'METHOD_NOT_ALLOWED'
-      ? { Allow: c.get('routeId') === 'health.live' ? HEALTH_ALLOW : c.get('routeId') === 'session' ? SESSION_ALLOW : c.get('routeId') === 'staff.list' ? 'GET, HEAD, OPTIONS' : c.get('routeId') === 'staff.invitations' || c.get('routeId') === 'staff.deactivation' ? STAFF_MUTATION_ALLOW : 'GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE' }
+      ? { Allow: c.get('routeAllow') ?? (c.get('routeId') === 'health.live' ? HEALTH_ALLOW : c.get('routeId') === 'session' ? SESSION_ALLOW : c.get('routeId') === 'staff.list' ? 'GET, HEAD, OPTIONS' : c.get('routeId') === 'staff.invitations' || c.get('routeId') === 'staff.deactivation' ? STAFF_MUTATION_ALLOW : 'GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE') }
       : mapped.code === 'ACCESS_KEYSET_UNAVAILABLE' ? { 'Retry-After': '5' }
         : undefined
     return apiError(mapped, c.get('correlationId') || crypto.randomUUID(), headers)
