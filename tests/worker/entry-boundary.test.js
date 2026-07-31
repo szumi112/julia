@@ -1,5 +1,8 @@
+import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import worker from '../../worker/index.js'
+import { getOrCreateDataKey } from '../../worker/security/envelope.js'
+import { createKeyring } from '../../worker/security/keyring.js'
 
 const valid = {
   APP_ENV: 'development',
@@ -39,25 +42,50 @@ describe('Worker entry boundary', () => {
   })
 
   it('rejects malformed configuration before scheduling work', () => {
+    let waitUntilCalls = 0
     expect(() => worker.scheduled(
       {},
       { ...valid, ACTIVE_DATA_KEK_VERSION: '01' },
-      { waitUntil() {} }
+      { waitUntil() { waitUntilCalls += 1 } }
     )).toThrow()
+    expect(waitUntilCalls).toBe(0)
   })
 
-  it('keeps scheduled handling as a no-op after configuration validation', () => {
-    let waitUntilCalls = 0
-    const db = new Proxy({}, {
-      get() {
-        throw new Error('scheduled handler touched D1')
-      },
+  it('validates configuration first and gives one promise ownership of scheduled completion', async () => {
+    const scheduledTime = Date.parse('2038-01-15T00:00:00.000Z')
+    const runtimeEnv = { ...env, ...valid, DB: env.DB }
+    const keyring = await createKeyring(runtimeEnv, {
+      activeDataKekVersion: 1,
+      activeLookupKeyVersion: 1,
+      activeBackupKekVersion: 1,
     })
+    await getOrCreateDataKey(
+      env.DB,
+      keyring,
+      { type: 'staff_directory', id: 'centre_1', purpose: 'identity' },
+      {
+        id: 'key_entry_scheduler',
+        createdAt: '2038-01-15T00:00:00.000Z',
+      },
+    )
+    const promises = []
+
     expect(worker.scheduled(
-      {},
-      { ...valid, DB: db },
-      { waitUntil() { waitUntilCalls += 1 } }
+      { scheduledTime },
+      runtimeEnv,
+      { waitUntil(promise) { promises.push(promise) } }
     )).toBeUndefined()
-    expect(waitUntilCalls).toBe(0)
+    expect(promises).toHaveLength(1)
+
+    await expect(promises[0]).resolves.toMatchObject({
+      status: 'succeeded',
+      reason: null,
+    })
+    expect(await env.DB.prepare(
+      'SELECT scheduled_for,status FROM scheduler_runs WHERE scheduled_for=?'
+    ).bind('2038-01-15T00:00:00.000Z').first()).toEqual({
+      scheduled_for: '2038-01-15T00:00:00.000Z',
+      status: 'succeeded',
+    })
   })
 })

@@ -1,6 +1,7 @@
 const ALLOWED = new Set([
-  'actorId', 'correlationId', 'durationMs', 'entityId', 'entityType',
-  'errorCode', 'event', 'jobId', 'method', 'result', 'routeId', 'status',
+  'actorId', 'attemptCount', 'claimedJobs', 'correlationId', 'durationMs',
+  'entityId', 'entityType', 'errorCode', 'event', 'failedJobs', 'jobId',
+  'method', 'result', 'routeId', 'runId', 'status', 'succeededJobs',
 ])
 const LEVELS = new Set(['debug', 'info', 'warn', 'error'])
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -19,8 +20,12 @@ const isOpaqueId = (value) => typeof value === 'string' && OPAQUE_ID.test(value)
 const isSafeValue = (key, value) => {
   if (value == null || typeof value === 'object') return false
   if (key === 'correlationId') return isCorrelationId(value)
+  if (key === 'attemptCount') return Number.isSafeInteger(value) && value >= 0
+  if (key === 'claimedJobs' || key === 'succeededJobs' || key === 'failedJobs') {
+    return Number.isSafeInteger(value) && value >= 0 && value <= 10
+  }
   if (key === 'durationMs') return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 86_400_000
-  if (key === 'actorId' || key === 'entityId' || key === 'jobId') return isOpaqueId(value)
+  if (key === 'actorId' || key === 'entityId' || key === 'jobId' || key === 'runId') return isOpaqueId(value)
   if (key === 'errorCode') return typeof value === 'string' && INTERNAL_CODE.test(value)
   if (key === 'event') return typeof value === 'string' && EVENT.test(value) && value.length <= 64
   if (key === 'entityType') return typeof value === 'string' && INTERNAL_NAME.test(value)

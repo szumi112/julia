@@ -1133,6 +1133,107 @@ describe('durable outbox finalization', () => {
 })
 
 describe('generic outbox processor', () => {
+  it('rejects a non-function beforeDispatch hook before claiming work', async () => {
+    const cryptoContext = await context()
+
+    await expect(outbox.processOutboxBatch({
+      db: env.DB,
+      cryptoContext,
+      config: {},
+      nowMs: NOW_MS,
+      idFactory: sequence('processor_invalid_hook_id'),
+      leaseOwnerFactory: sequence('processor_invalid_hook_lease'),
+      beforeDispatch: 'not-a-function',
+      dispatch: async () => ({ result: 'succeeded' }),
+    })).rejects.toThrow(/^OUTBOX_INVALID$/)
+  })
+
+  it('propagates beforeDispatch rejection with the claimed job and attempt left open', async () => {
+    const cryptoContext = await context()
+    const input = await enqueue(cryptoContext, {
+      id: 'job_processor_before_dispatch_reject',
+      invitationId: 'inv_processor_before_dispatch_reject',
+      idempotencyKey: 'staff.invitation.expire:processor-before-dispatch-reject',
+    })
+    const error = new Error('scheduler ownership lost')
+    let dispatches = 0
+
+    await expect(outbox.processOutboxBatch({
+      db: env.DB,
+      cryptoContext,
+      config: {},
+      nowMs: NOW_MS,
+      idFactory: sequence('processor_reject_hook_id'),
+      leaseOwnerFactory: sequence('processor_reject_hook_lease'),
+      beforeDispatch: async () => { throw error },
+      dispatch: async () => {
+        dispatches += 1
+        return { result: 'succeeded' }
+      },
+    })).rejects.toBe(error)
+
+    expect(dispatches).toBe(0)
+    expect(await job(input.id)).toMatchObject({
+      status: 'processing',
+      attempt_count: 1,
+      last_error_code: null,
+    })
+    expect(await attempts(input.id)).toEqual([
+      expect.objectContaining({
+        attempt_number: 1,
+        completed_at: null,
+        result: null,
+        error_code: null,
+        provider_reference: null,
+      }),
+    ])
+    expect(await actions(input.id)).toEqual([])
+    expect((await env.DB.prepare(
+      'SELECT id FROM delivery_attempts WHERE outbox_job_id=?'
+    ).bind(input.id).all()).results).toEqual([])
+    await settle(input.id)
+  })
+
+  it('preserves ordinary completion when beforeDispatch resolves', async () => {
+    const cryptoContext = await context()
+    const input = await enqueue(cryptoContext, {
+      id: 'job_processor_before_dispatch_success',
+      invitationId: 'inv_processor_before_dispatch_success',
+      idempotencyKey: 'staff.invitation.expire:processor-before-dispatch-success',
+    })
+    const order = []
+
+    const completed = await outbox.processOutboxBatch({
+      db: env.DB,
+      cryptoContext,
+      config: {},
+      nowMs: NOW_MS,
+      idFactory: sequence('processor_success_hook_id'),
+      leaseOwnerFactory: sequence('processor_success_hook_lease'),
+      beforeDispatch: async () => { order.push('beforeDispatch') },
+      dispatch: async () => {
+        order.push('dispatch')
+        return { result: 'succeeded' }
+      },
+    })
+
+    expect(order).toEqual(['beforeDispatch', 'dispatch'])
+    expect(completed).toEqual([{ id: input.id, result: 'succeeded' }])
+    expect(await job(input.id)).toMatchObject({
+      status: 'succeeded',
+      attempt_count: 1,
+      last_error_code: null,
+    })
+    expect(await attempts(input.id)).toEqual([
+      expect.objectContaining({
+        attempt_number: 1,
+        result: 'succeeded',
+        error_code: null,
+      }),
+    ])
+    expect(await actions(input.id)).toEqual([])
+  })
+
   it('processes ordinary work behind a dormant backlog without dispatching or mutating backups', async () => {
     const cryptoContext = await context()
     await seedBackupBacklog(
@@ -1344,6 +1445,7 @@ describe('generic outbox processor', () => {
       NOW,
     ).run()
     let calls = 0
+    let hookCalls = 0
     await outbox.processOutboxBatch({
       db: env.DB,
       cryptoContext,
@@ -1351,8 +1453,13 @@ describe('generic outbox processor', () => {
       nowMs: NOW_MS,
       idFactory: sequence('processor_unknown_id'),
       leaseOwnerFactory: sequence('processor_unknown_lease'),
+      beforeDispatch: async () => {
+        hookCalls += 1
+        throw new Error('unknown jobs do not cross the dispatch fence')
+      },
       dispatch: async () => { calls += 1 },
     })
+    expect(hookCalls).toBe(0)
     expect(calls).toBe(0)
     expect(await job(id)).toMatchObject({
       status: 'dead',

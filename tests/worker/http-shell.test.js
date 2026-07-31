@@ -140,4 +140,70 @@ describe('safeLog', () => {
     safeLog('log', { event: 'request.completed' })
     expect(output).not.toHaveBeenCalled()
   })
+
+  it('keeps validated scheduler identity and counters', () => {
+    const output = vi.spyOn(console, 'info').mockImplementation(() => {})
+    safeLog('info', {
+      event: 'scheduler.completed',
+      result: 'completed',
+      runId: 'scheduler_run_42',
+      attemptCount: 2,
+      claimedJobs: 10,
+      succeededJobs: 7,
+      failedJobs: 3,
+    })
+
+    expect(output).toHaveBeenCalledWith(JSON.stringify({
+      event: 'scheduler.completed',
+      result: 'completed',
+      runId: 'scheduler_run_42',
+      attemptCount: 2,
+      claimedJobs: 10,
+      succeededJobs: 7,
+      failedJobs: 3,
+    }))
+  })
+
+  it.each([
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+    ['string', '1'],
+    ['object', { count: 1 }],
+    ['oversized job count', 11],
+  ])('drops %s scheduler job counters', (_label, value) => {
+    const output = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    safeLog('warn', {
+      event: 'scheduler.failed',
+      result: 'failure',
+      claimedJobs: value,
+      succeededJobs: value,
+      failedJobs: value,
+    })
+
+    expect(output).toHaveBeenCalledWith(JSON.stringify({
+      event: 'scheduler.failed',
+      result: 'failure',
+    }))
+  })
+
+  it.each([
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+    ['string', '1'],
+    ['object', { count: 1 }],
+  ])('drops %s scheduler attempt counts', (_label, attemptCount) => {
+    const output = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    safeLog('warn', {
+      event: 'scheduler.failed',
+      result: 'failure',
+      attemptCount,
+    })
+
+    expect(output).toHaveBeenCalledWith(JSON.stringify({
+      event: 'scheduler.failed',
+      result: 'failure',
+    }))
+  })
 })

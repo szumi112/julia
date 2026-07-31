@@ -1427,6 +1427,7 @@ async function currentOwnedClaim(db, claim, nowMs) {
 }
 
 export async function processOutboxBatch(input = {}) {
+  const beforeDispatch = input?.beforeDispatch
   if (!ownObject(input)
     || !input.db?.prepare || !input.db?.batch
     || !validStaffCryptoContext(input.cryptoContext)
@@ -1434,6 +1435,7 @@ export async function processOutboxBatch(input = {}) {
     || typeof input.idFactory !== 'function'
     || typeof input.leaseOwnerFactory !== 'function'
     || typeof input.dispatch !== 'function'
+    || (beforeDispatch !== undefined && typeof beforeDispatch !== 'function')
     || (input.nowFactory !== undefined && typeof input.nowFactory !== 'function')) invalid()
   const nowFactory = input.nowFactory ?? Date.now
   const currentMs = () => {
@@ -1457,6 +1459,7 @@ export async function processOutboxBatch(input = {}) {
     const currentClaim = await currentOwnedClaim(input.db, claim, dispatchNowMs)
     if (!currentClaim) continue
     if (isAllowedType(currentClaim.type) && !isOrdinaryRunnableType(currentClaim.type)) continue
+    if (isOrdinaryRunnableType(currentClaim.type) && beforeDispatch) await beforeDispatch()
     let outcome
     if (!isAllowedType(currentClaim.type)) {
       outcome = {
