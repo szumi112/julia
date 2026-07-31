@@ -9,6 +9,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react(), ...(demo ? [] : [cloudflare()])],
     base: basePathFor(mode),
     build: { outDir: demo ? 'dist/demo' : 'dist/app', emptyOutDir: true },
+    esbuild: demo ? undefined : { minifyIdentifiers: false },
     server: { host: '127.0.0.1', port: demo ? 5173 : 5174 },
   }
 })
