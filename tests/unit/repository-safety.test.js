@@ -218,6 +218,16 @@ test('backend binding names cannot appear in browser files but may appear in Wor
   assert.throws(() => inspectDeployArtifact({ root: rejectedRoot, secretValues: {} }), /backend binding/i)
 })
 
+test('backup provider account and database bindings stay out of browser artifacts', (t) => {
+  for (const binding of ['CF_ACCOUNT_ID', 'CF_D1_DATABASE_ID']) {
+    const allowedRoot = deployFixture(t, { worker: `const value = env.${binding}` })
+    assert.doesNotThrow(() => inspectDeployArtifact({ root: allowedRoot, secretValues: {} }))
+
+    const rejectedRoot = deployFixture(t, { browser: `const value = '${binding}'` })
+    assert.throws(() => inspectDeployArtifact({ root: rejectedRoot, secretValues: {} }), /backend binding/i)
+  }
+})
+
 test('deploy inspection scans textual assets regardless of extension but ignores binary bytes', (t) => {
   const textualRoot = deployFixture(t)
   write(textualRoot, 'dist/app/assets/logo.svg', '<svg><!-- DB --></svg>')
@@ -260,6 +270,24 @@ test('deploy inspection scans the offline D1 bootstrap token without exposing it
   assert.ok(error)
   assert.match(error.message, /CF_D1_BOOTSTRAP_TOKEN/)
   assert.match(error.message, /dist\/app\/worker\.js/)
+  assert.doesNotMatch(error.message, new RegExp(secret))
+})
+
+test('deploy inspection redacts an injected D1 export token value', (t) => {
+  const secret = 'd1-export-token-value-must-not-ship'
+  const root = deployFixture(t, { worker: `const accidental = '${secret}'` })
+  let error
+  try {
+    inspectDeployArtifact({
+      root,
+      secretValues: { CF_D1_EXPORT_TOKEN: secret },
+    })
+  } catch (caught) {
+    error = caught
+  }
+
+  assert.ok(error)
+  assert.match(error.message, /CF_D1_EXPORT_TOKEN/)
   assert.doesNotMatch(error.message, new RegExp(secret))
 })
 

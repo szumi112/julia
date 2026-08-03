@@ -7,6 +7,19 @@ const TEAM_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 const PROVIDER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ACCESS_ACCOUNT_ID = /^[0-9a-f]{32}$/
 const ACCESS_GROUP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const BACKUP_ACCOUNT_ID = /^[0-9a-f]{32}$/
+const BACKUP_DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const BACKUP_KEK_PREFIX = 'BWM_BACKUP_KEK_V'
+const BACKUP_TOKEN_PLACEHOLDERS = new Set([
+  'change-me',
+  'changeme',
+  'example',
+  'placeholder',
+  'replace-me',
+  'replaceme',
+  'todo',
+  'your-token-here',
+])
 const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength
 const saneName = (value) => typeof value === 'string' && value === value.trim()
   && value.length > 0 && utf8Bytes(value) <= 120
@@ -99,7 +112,7 @@ export function loadConfig(env) {
   key.parse(env[`BWM_LOOKUP_HMAC_V${lookupVersion}`])
   key.parse(env[`BWM_BACKUP_KEK_V${backupVersion}`])
 
-  return {
+  return Object.freeze({
     appEnv: value.APP_ENV,
     dataMode: value.DATA_MODE,
     appOrigin: value.APP_ORIGIN,
@@ -110,6 +123,130 @@ export function loadConfig(env) {
     activeLookupKeyVersion: lookupVersion,
     activeBackupKekVersion: backupVersion,
     localAuth: value.APP_ENV === 'development',
+  })
+}
+
+const strictConfigSnapshot = (config) => {
+  if (config == null || typeof config !== 'object' || Object.getPrototypeOf(config) !== Object.prototype) throw new Error()
+  const values = new Map()
+  for (const name of Reflect.ownKeys(config)) {
+    if (typeof name !== 'string') throw new Error()
+    const descriptor = Object.getOwnPropertyDescriptor(config, name)
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new Error()
+    values.set(name, descriptor.value)
+  }
+  return values
+}
+
+const requiredEnvValues = (env, activeVersion) => {
+  if (env == null || typeof env !== 'object') throw new Error()
+  const names = Reflect.ownKeys(env)
+  const stringNames = new Set()
+  for (const name of names) {
+    if (typeof name !== 'string') continue
+    stringNames.add(name)
+    if (name.startsWith(BACKUP_KEK_PREFIX)) {
+      const suffix = name.slice(BACKUP_KEK_PREFIX.length)
+      if (!VERSION.test(suffix) || !Number.isSafeInteger(Number(suffix))) throw new Error()
+    }
+  }
+
+  const activeKeyName = `${BACKUP_KEK_PREFIX}${activeVersion}`
+  const requiredNames = [
+    'CF_ACCOUNT_ID',
+    'CF_D1_DATABASE_ID',
+    'CF_D1_EXPORT_TOKEN',
+    'ARCHIVE',
+    activeKeyName,
+  ]
+  const values = {}
+  for (const name of requiredNames) {
+    if (!stringNames.has(name)) throw new Error()
+    const descriptor = Object.getOwnPropertyDescriptor(env, name)
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw new Error()
+    values[name] = descriptor.value
+  }
+  return values
+}
+
+const hasArchiveCapability = (archive, name) => {
+  for (const candidate of archive) {
+    const descriptor = Object.getOwnPropertyDescriptor(candidate, name)
+    if (descriptor) return Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function'
+  }
+  return false
+}
+
+const archivePrototypeChain = (archive) => {
+  const chain = []
+  const seen = new Set()
+  let current = archive
+  while (current != null) {
+    if (chain.length === 32 || seen.has(current)) return null
+    seen.add(current)
+    chain.push(current)
+    current = Object.getPrototypeOf(current)
+  }
+  return chain
+}
+
+const isCanonicalBackupKey = (value) => {
+  if (typeof value !== 'string' || !BASE64_URL_KEY.test(value)) return false
+  let decoded
+  try {
+    decoded = decodeBase64Url(value)
+    return decoded.byteLength === 32 && encodeBase64Url(decoded) === value
+  } catch {
+    return false
+  } finally {
+    decoded?.fill(0)
+  }
+}
+
+const isBackupExportToken = (value) => {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 4096) return false
+  return value === value.trim()
+    && !/[\s\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
+    && utf8Bytes(value) <= 4096
+    && !BACKUP_TOKEN_PLACEHOLDERS.has(value.replaceAll('_', '-').toLowerCase())
+}
+
+export function loadBackupProviderConfig(env, config) {
+  const disabled = Symbol('backup provider disabled')
+  try {
+    const configValues = strictConfigSnapshot(config)
+    const appEnv = configValues.get('appEnv')
+    if (appEnv === 'development') throw disabled
+    if (appEnv !== 'staging' && appEnv !== 'production') throw new Error()
+
+    const activeVersion = configValues.get('activeBackupKekVersion')
+    if (!Number.isSafeInteger(activeVersion) || activeVersion < 1) throw new Error()
+    const values = requiredEnvValues(env, activeVersion)
+    const accountId = values.CF_ACCOUNT_ID
+    const databaseId = values.CF_D1_DATABASE_ID
+    const token = values.CF_D1_EXPORT_TOKEN
+    const archive = values.ARCHIVE
+    const activeKey = values[`${BACKUP_KEK_PREFIX}${activeVersion}`]
+    const archiveChain = archive != null && typeof archive === 'object'
+      ? archivePrototypeChain(archive)
+      : null
+    const archiveCapabilities = archiveChain == null
+      ? []
+      : ['delete', 'get', 'list', 'put'].map((name) => hasArchiveCapability(archiveChain, name))
+
+    if (typeof accountId !== 'string'
+      || !BACKUP_ACCOUNT_ID.test(accountId) || accountId === '0'.repeat(32)
+      || typeof databaseId !== 'string'
+      || !BACKUP_DATABASE_ID.test(databaseId)
+      || databaseId === '00000000-0000-0000-0000-000000000000'
+      || databaseId === '00000000-0000-0000-0000-000000000001'
+      || !isBackupExportToken(token)
+      || !archiveCapabilities.every(Boolean)
+      || !isCanonicalBackupKey(activeKey)) throw new Error()
+
+    return Object.freeze({ accountId, databaseId, token })
+  } catch (error) {
+    throw new Error(error === disabled ? 'BACKUP_PROVIDER_DISABLED' : 'BACKUP_CONFIG_INVALID')
   }
 }
 

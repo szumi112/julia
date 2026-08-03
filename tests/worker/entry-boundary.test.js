@@ -62,6 +62,16 @@ describe('Worker entry boundary', () => {
     })
   })
 
+  it('does not require backup provider bindings for authenticated fetch handling', async () => {
+    const response = await worker.fetch(
+      new Request('https://example.test/api/v1/health/live'),
+      valid,
+      { waitUntil() {} }
+    )
+
+    expect(response.status).toBe(401)
+  })
+
   it('rejects malformed configuration before scheduling work', () => {
     let waitUntilCalls = 0
     expect(() => worker.scheduled(
