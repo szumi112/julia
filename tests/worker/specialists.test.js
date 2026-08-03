@@ -99,6 +99,21 @@ const deactivate = (cryptoContext, staffId, version, options = {}) => deactivate
   idFactory: options.idFactory ?? ids(`specialist_deactivate_${serial}`),
 })
 
+const activate = (cryptoContext, email, options = {}) => resolveActor(
+  options.db ?? env.DB,
+  {
+    kind: 'human',
+    subject: options.subject ?? `access_specialist_${serial}`,
+    normalizedEmail: email,
+  },
+  cryptoContext,
+  {
+    nowMs: options.nowMs ?? NOW_MS,
+    correlationId: options.correlationId ?? ACTIVATION_CORRELATION,
+    idFactory: options.idFactory ?? ids(`specialist_activation_${serial}`),
+  },
+)
+
 const decryptSnapshot = (cryptoContext, recordId, serialized) => decryptForScope(
   cryptoContext.keyring,
   cryptoContext.dataKey,
@@ -127,6 +142,67 @@ async function profileFacts(specialistId) {
      WHERE entity_type='specialist' AND entity_id=? ORDER BY version`
   ).bind(specialistId).all()).results
   return { profile, versions }
+}
+
+async function lifecycleState() {
+  const tables = [
+    ['staff', 'SELECT * FROM staff_users ORDER BY id'],
+    ['profiles', 'SELECT * FROM specialists ORDER BY id'],
+    ['invitations', 'SELECT * FROM staff_invitations ORDER BY id'],
+    ['versions', 'SELECT * FROM record_versions ORDER BY id'],
+    ['audits', 'SELECT * FROM audit_events ORDER BY id'],
+    ['outbox', 'SELECT * FROM outbox_jobs ORDER BY id'],
+    [
+      'idempotency',
+      'SELECT * FROM idempotency_records ORDER BY actor_id,operation,idempotency_key',
+    ],
+    ['state', 'SELECT * FROM system_state ORDER BY key'],
+  ]
+  const rows = await Promise.all(tables.map(async ([name, sql]) => [
+    name,
+    (await env.DB.prepare(sql).all()).results,
+  ]))
+  return Object.fromEntries(rows)
+}
+
+const observeBatchDb = (capture) => ({
+  prepare: env.DB.prepare.bind(env.DB),
+  batch(statements) {
+    capture(statements.length)
+    throw new Error('INJECTED_STATEMENT_FAILURE')
+  },
+})
+
+const failBatchAtDb = (failureIndex) => ({
+  prepare: env.DB.prepare.bind(env.DB),
+  batch(statements) {
+    return env.DB.batch(statements.map((statement, index) => index === failureIndex
+      ? env.DB.prepare('INSERT INTO missing_specialist_failure_table VALUES (1)')
+      : statement))
+  },
+})
+
+async function pendingPractitioner(cryptoContext, prefix) {
+  const email = `${prefix}-${serial}@example.test`
+  const created = await invite(cryptoContext, {
+    displayName: 'Rollback Practitioner',
+    email,
+    role: 'specialist',
+  }, {
+    idempotencyKey: `${prefix}-invite-${serial}`,
+    idFactory: ids(`${prefix}_invite_${serial}`),
+  })
+  await publishInvitation(created.data.invitation.id)
+  return { created, email }
+}
+
+async function activePractitioner(cryptoContext, prefix) {
+  const pending = await pendingPractitioner(cryptoContext, prefix)
+  const active = await activate(cryptoContext, pending.email, {
+    subject: `${prefix}_subject_${serial}`,
+    idFactory: ids(`${prefix}_activation_${serial}`),
+  })
+  return { ...pending, active }
 }
 
 describe('retained specialist lifecycle', () => {
@@ -455,6 +531,86 @@ describe('retained specialist lifecycle', () => {
         audit_count: 0,
         outbox_count: 0,
       })
+    }
+  })
+
+  it('rolls back practitioner activation at every injected batch statement failure', async () => {
+    const cryptoContext = await context()
+    const { email } = await pendingPractitioner(cryptoContext, 'rollback_activation')
+    const before = await lifecycleState()
+    let batchLength = 0
+    await expect(activate(cryptoContext, email, {
+      db: observeBatchDb((length) => { batchLength = length }),
+      subject: `rollback_activation_subject_${serial}`,
+      idFactory: ids(`rollback_activation_observe_${serial}`),
+    })).rejects.toThrow()
+    expect(batchLength).toBeGreaterThan(0)
+    expect(await lifecycleState()).toEqual(before)
+
+    for (let failureIndex = 0; failureIndex < batchLength; failureIndex += 1) {
+      await expect(activate(cryptoContext, email, {
+        db: failBatchAtDb(failureIndex),
+        subject: `rollback_activation_subject_${serial}`,
+        idFactory: ids(`rollback_activation_${serial}_${failureIndex}`),
+      })).rejects.toThrow()
+      expect(await lifecycleState()).toEqual(before)
+    }
+  })
+
+  it('rolls back practitioner deactivation at every injected batch statement failure', async () => {
+    const cryptoContext = await context()
+    const { active } = await activePractitioner(cryptoContext, 'rollback_deactivation')
+    const before = await lifecycleState()
+    let batchLength = 0
+    await expect(deactivate(cryptoContext, active.id, active.version, {
+      db: observeBatchDb((length) => { batchLength = length }),
+      idempotencyKey: `rollback-deactivation-observe-${serial}`,
+      idFactory: ids(`rollback_deactivation_observe_${serial}`),
+    })).rejects.toThrow()
+    expect(batchLength).toBeGreaterThan(0)
+    expect(await lifecycleState()).toEqual(before)
+
+    for (let failureIndex = 0; failureIndex < batchLength; failureIndex += 1) {
+      await expect(deactivate(cryptoContext, active.id, active.version, {
+        db: failBatchAtDb(failureIndex),
+        idempotencyKey: `rollback-deactivation-${serial}-${failureIndex}`,
+        idFactory: ids(`rollback_deactivation_${serial}_${failureIndex}`),
+      })).rejects.toThrow()
+      expect(await lifecycleState()).toEqual(before)
+    }
+  })
+
+  it('rolls back retained-profile reinvite at every injected batch statement failure', async () => {
+    const cryptoContext = await context()
+    const { active, email } = await activePractitioner(cryptoContext, 'rollback_reinvite')
+    await deactivate(cryptoContext, active.id, active.version, {
+      idempotencyKey: `rollback-reinvite-disable-${serial}`,
+      idFactory: ids(`rollback_reinvite_disable_${serial}`),
+    })
+    const before = await lifecycleState()
+    const input = {
+      displayName: 'Rollback Retained Practitioner',
+      email,
+      role: 'owner',
+    }
+    let batchLength = 0
+    await expect(invite(cryptoContext, input, {
+      db: observeBatchDb((length) => { batchLength = length }),
+      idempotencyKey: `rollback-reinvite-observe-${serial}`,
+      correlationId: REINVITE_CORRELATION,
+      idFactory: ids(`rollback_reinvite_observe_${serial}`),
+    })).rejects.toThrow()
+    expect(batchLength).toBeGreaterThan(0)
+    expect(await lifecycleState()).toEqual(before)
+
+    for (let failureIndex = 0; failureIndex < batchLength; failureIndex += 1) {
+      await expect(invite(cryptoContext, input, {
+        db: failBatchAtDb(failureIndex),
+        idempotencyKey: `rollback-reinvite-${serial}-${failureIndex}`,
+        correlationId: REINVITE_CORRELATION,
+        idFactory: ids(`rollback_reinvite_${serial}_${failureIndex}`),
+      })).rejects.toThrow()
+      expect(await lifecycleState()).toEqual(before)
     }
   })
 })

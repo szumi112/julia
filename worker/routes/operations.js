@@ -846,6 +846,7 @@ async function parseAuditQuery(input) {
 
 function auditMetadata(schema, text) {
   const metadata = parseCanonicalJson(text)
+  if (!plainObject(metadata)) invalidState()
   const keys = Object.keys(metadata)
   const schemaKeys = Object.keys(schema.metadata)
   const legacyKeys = Object.keys(schema.legacyMetadata ?? {})

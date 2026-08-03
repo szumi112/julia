@@ -510,6 +510,18 @@ const AUDIT_FACTS = Object.freeze([
   Object.freeze({ action: 'core_directory.upgrade.advanced', entityType: 'system_state', entityId: 'core_directory_specialist_backfill_v1', result: 'success', metadata: { createdCount: 0, processedCount: 1, stateVersion: 2 }, actorStaffId: null }),
 ])
 
+const IDENTITY_AUDIT_ACTIONS = new Set([
+  'identity.activation',
+  'staff.bootstrap',
+  'staff.deactivated',
+  'staff.invitation.expired',
+  'staff.invited',
+])
+
+const IDENTITY_AUDIT_CASES = AUDIT_FACTS
+  .filter(({ action }) => IDENTITY_AUDIT_ACTIONS.has(action))
+  .map((fact) => [fact.action, fact])
+
 async function auditRow(context, fact, index = 0, changes = {}) {
   const id = changes.id ?? `audit_event_${String(index).padStart(3, '0')}`
   return {
@@ -2050,36 +2062,93 @@ describe('operations route services', () => {
     expect(serialized).not.toContain('display_name')
   })
 
-  it('normalizes every exact Phase 1 identity audit shape without rewriting stored rows', async () => {
-    const context = await cryptoContext()
-    const actor = await seedActiveActor({ id: 'stf_audit_legacy_registry' })
-    const facts = AUDIT_FACTS.filter(({ action }) => [
-      'identity.activation',
-      'staff.bootstrap',
-      'staff.deactivated',
-      'staff.invitation.expired',
-      'staff.invited',
-    ].includes(action)).map((fact) => {
-      const { specialistVersion: ignored, ...metadata } = fact.metadata
-      return { ...fact, metadata }
-    })
-    const rows = await Promise.all(facts.map((fact, index) => auditRow(context, fact, index)))
-    const stored = rows.map(({ metadata_json }) => metadata_json)
-    const db = facade(env.DB, {
-      all: (sql) => sql.includes('FROM audit_events') ? { results: rows } : undefined,
-    })
+  it.each(IDENTITY_AUDIT_CASES)(
+    'accepts the exact new identity audit shape for %s',
+    async (action, fact) => {
+      const context = await cryptoContext()
+      const actor = await seedActiveActor({
+        id: `stf_audit_new_${action.replaceAll('.', '_')}`,
+      })
+      const row = await auditRow(context, fact)
+      const db = facade(env.DB, {
+        all: (sql) => sql.includes('FROM audit_events')
+          ? { results: [row] }
+          : undefined,
+      })
 
-    const result = await listSecurityAudit(commonInput(actor, context, {
-      db,
-      query: new URLSearchParams(),
-    }))
+      const result = await listSecurityAudit(commonInput(actor, context, {
+        db,
+        query: new URLSearchParams(),
+      }))
 
-    expect(result.data.events.map(({ metadata }) => metadata)).toEqual(facts.map((fact) => ({
-      ...fact.metadata,
-      specialistVersion: null,
-    })))
-    expect(rows.map(({ metadata_json }) => metadata_json)).toEqual(stored)
-  })
+      expect(result.data.events[0].metadata).toEqual(fact.metadata)
+    },
+  )
+
+  it.each(IDENTITY_AUDIT_CASES)(
+    'normalizes the exact Phase 1 identity audit shape for %s without rewriting it',
+    async (action, fact) => {
+      const context = await cryptoContext()
+      const actor = await seedActiveActor({
+        id: `stf_audit_legacy_${action.replaceAll('.', '_')}`,
+      })
+      const metadata = { ...fact.metadata }
+      delete metadata.specialistVersion
+      const legacyFact = { ...fact, metadata }
+      const row = await auditRow(context, legacyFact)
+      const stored = row.metadata_json
+      const db = facade(env.DB, {
+        all: (sql) => sql.includes('FROM audit_events')
+          ? { results: [row] }
+          : undefined,
+      })
+
+      const result = await listSecurityAudit(commonInput(actor, context, {
+        db,
+        query: new URLSearchParams(),
+      }))
+
+      expect(result.data.events[0].metadata).toEqual({
+        ...metadata,
+        specialistVersion: null,
+      })
+      expect(row.metadata_json).toBe(stored)
+    },
+  )
+
+  it.each(IDENTITY_AUDIT_CASES)(
+    'rejects mixed and extra-key identity audit shapes for %s',
+    async (action, fact) => {
+      const context = await cryptoContext()
+      const actor = await seedActiveActor({
+        id: `stf_audit_malformed_${action.replaceAll('.', '_')}`,
+      })
+      const legacyMetadata = { ...fact.metadata }
+      delete legacyMetadata.specialistVersion
+      const mixedMetadata = { ...fact.metadata }
+      delete mixedMetadata[Object.keys(legacyMetadata)[0]]
+      const malformed = [
+        mixedMetadata,
+        { ...legacyMetadata, unexpected: 1 },
+        { ...fact.metadata, unexpected: 1 },
+      ]
+
+      for (const metadata of malformed) {
+        const row = await auditRow(context, fact, 0, {
+          metadata_json: canonicalJson(metadata),
+        })
+        const db = facade(env.DB, {
+          all: (sql) => sql.includes('FROM audit_events')
+            ? { results: [row] }
+            : undefined,
+        })
+        await expect(listSecurityAudit(commonInput(actor, context, {
+          db,
+          query: new URLSearchParams(),
+        }))).rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+      }
+    },
+  )
 
   it('authorizes and revalidates before parsing audit query values', async () => {
     const context = await cryptoContext()
@@ -2100,6 +2169,8 @@ describe('operations route services', () => {
     ['unknown action', { action: 'future.event' }],
     ['wrong entity', { entity_type: 'wrong' }],
     ['wrong result', { result: 'failure' }],
+    ['canonical null metadata', { metadata_json: 'null' }],
+    ['canonical primitive metadata', { metadata_json: '1' }],
     ['noncanonical metadata', { metadata_json: '{"version":1, "extra":0}' }],
     ['string metadata version', { metadata_json: '{"version":"1"}' }],
     ['unexpected reason', { reason_envelope: '{}' }],

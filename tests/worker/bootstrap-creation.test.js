@@ -73,6 +73,23 @@ const LEGACY_IDENTITY_AUDITS = Object.freeze({
   }),
 })
 
+const IDENTITY_AUDIT_CASES = Object.entries(LEGACY_IDENTITY_AUDITS).map(
+  ([action, fixture], index) => [
+    action,
+    fixture,
+    index % 2 === 0 ? index + 1 : null,
+  ],
+)
+
+const withSpecialistVersion = (metadata, specialistVersion) => ({
+  ...metadata,
+  specialistVersion,
+})
+
+const canonicalMetadataJson = (metadata) => JSON.stringify(Object.fromEntries(
+  Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right)),
+))
+
 const auditRow = (
   action,
   entityType,
@@ -94,11 +111,12 @@ const auditRow = (
   result: 'success',
   reason_envelope: null,
   correlation_id: `corr_${action.replaceAll('.', '_')}`,
-  metadata_json: JSON.stringify(metadata),
+  metadata_json: canonicalMetadataJson(metadata),
 })
 
-it('normalizes every exact Phase 1 identity audit shape without mutating the row', () => {
-  for (const [action, fixture] of Object.entries(LEGACY_IDENTITY_AUDITS)) {
+it.each(IDENTITY_AUDIT_CASES)(
+  'normalizes the exact Phase 1 identity audit shape for %s without mutating it',
+  (action, fixture) => {
     const row = auditRow(action, fixture.entity_type, fixture.metadata)
     const before = structuredClone(row)
     expect(normalizeBootstrapAuditEvent(row)).toEqual({
@@ -106,17 +124,45 @@ it('normalizes every exact Phase 1 identity audit shape without mutating the row
       metadata: { ...fixture.metadata, specialistVersion: null },
     })
     expect(row).toEqual(before)
-  }
-})
+  },
+)
 
-it('accepts exact new identity and null-actor system audit shapes only', () => {
-  const identity = auditRow(
-    'identity.activation',
-    'staff_user',
-    { invitationVersion: 2, specialistVersion: 3, staffVersion: 2 },
-  )
-  expect(normalizeBootstrapAuditEvent(identity).metadata.specialistVersion).toBe(3)
+it.each(IDENTITY_AUDIT_CASES)(
+  'accepts the exact new identity audit shape for %s',
+  (action, fixture, specialistVersion) => {
+    const metadata = withSpecialistVersion(fixture.metadata, specialistVersion)
+    const row = auditRow(action, fixture.entity_type, metadata)
+    const before = structuredClone(row)
+    expect(normalizeBootstrapAuditEvent(row)).toEqual({ ...row, metadata })
+    expect(row).toEqual(before)
+  },
+)
 
+it.each(IDENTITY_AUDIT_CASES)(
+  'rejects mixed and extra-key identity audit shapes for %s',
+  (action, fixture, specialistVersion) => {
+    const newMetadata = withSpecialistVersion(
+      fixture.metadata,
+      specialistVersion,
+    )
+    const mixed = { ...newMetadata }
+    delete mixed[Object.keys(fixture.metadata)[0]]
+    const malformed = [
+      mixed,
+      { ...fixture.metadata, unexpected: 1 },
+      { ...newMetadata, unexpected: 1 },
+    ]
+    for (const metadata of malformed) {
+      expect(() => normalizeBootstrapAuditEvent(auditRow(
+        action,
+        fixture.entity_type,
+        metadata,
+      ))).toThrowError('BOOTSTRAP_STATE_REFUSED')
+    }
+  },
+)
+
+it('accepts null-actor system audit shapes only', () => {
   const systemRows = [
     auditRow(
       'specialist.backfilled',
@@ -133,15 +179,6 @@ it('accepts exact new identity and null-actor system audit shapes only', () => {
   ]
   for (const row of systemRows) expect(normalizeBootstrapAuditEvent(row)).toBeTruthy()
 
-  expect(() => normalizeBootstrapAuditEvent({
-    ...identity,
-    metadata_json: JSON.stringify({
-      invitationVersion: 2,
-      specialistVersion: null,
-      staffVersion: 2,
-      unexpected: 1,
-    }),
-  })).toThrowError('BOOTSTRAP_STATE_REFUSED')
   expect(() => normalizeBootstrapAuditEvent({
     ...systemRows[0],
     actor_staff_id: 'stf_actor',

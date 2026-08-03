@@ -981,6 +981,18 @@ const AUDIT_FACTS = [
   { action: 'core_directory.upgrade.advanced', entityType: 'system_state', entityId: 'core_directory_specialist_backfill_v1', result: 'success', metadata: { createdCount: 0, processedCount: 1, stateVersion: 2 }, actorStaffId: null },
 ]
 
+const IDENTITY_AUDIT_ACTIONS = new Set([
+  'identity.activation',
+  'staff.bootstrap',
+  'staff.deactivated',
+  'staff.invitation.expired',
+  'staff.invited',
+])
+
+const IDENTITY_AUDIT_FACTS = AUDIT_FACTS.filter(
+  ({ action }) => IDENTITY_AUDIT_ACTIONS.has(action),
+)
+
 const auditBody = (facts = AUDIT_FACTS, nextCursor = null) => ({
   data: {
     events: facts.map((fact, index) => ({
@@ -1290,29 +1302,65 @@ test('security audit projects and deeply freezes all fifteen exact registry acti
   assertDeepFrozen(result)
 })
 
-test('security audit normalizes every exact Phase 1 identity action to a null specialist version', async () => {
-  const facts = AUDIT_FACTS.filter(({ action }) => [
-    'identity.activation',
-    'staff.bootstrap',
-    'staff.deactivated',
-    'staff.invitation.expired',
-    'staff.invited',
-  ].includes(action)).map((fact) => {
-    const { specialistVersion: ignored, ...metadata } = fact.metadata
-    return { ...structuredClone(fact), metadata }
-  })
-  const body = auditBody(facts)
-  const rawMetadata = body.data.events.map(({ metadata }) => structuredClone(metadata))
-  const { fetchImpl } = queuedFetch(jsonResponse(body))
+test('security audit accepts every exact new identity metadata shape', async (t) => {
+  for (const fact of IDENTITY_AUDIT_FACTS) {
+    await t.test(fact.action, async () => {
+      const body = auditBody([fact])
+      const { fetchImpl } = queuedFetch(jsonResponse(body))
 
-  const result = await createApiClient({ fetchImpl }).getSecurityAudit()
+      const result = await createApiClient({ fetchImpl }).getSecurityAudit()
 
-  assert.deepEqual(result.events.map(({ metadata }) => metadata), facts.map((fact) => ({
-    ...fact.metadata,
-    specialistVersion: null,
-  })))
-  assert.deepEqual(body.data.events.map(({ metadata }) => metadata), rawMetadata)
-  assertDeepFrozen(result)
+      assert.deepEqual(result.events[0].metadata, fact.metadata)
+      assertDeepFrozen(result)
+    })
+  }
+})
+
+test('security audit normalizes every exact Phase 1 identity shape without mutating it', async (t) => {
+  for (const fact of IDENTITY_AUDIT_FACTS) {
+    await t.test(fact.action, async () => {
+      const legacyFact = structuredClone(fact)
+      delete legacyFact.metadata.specialistVersion
+      const body = auditBody([legacyFact])
+      const rawMetadata = structuredClone(body.data.events[0].metadata)
+      const { fetchImpl } = queuedFetch(jsonResponse(body))
+
+      const result = await createApiClient({ fetchImpl }).getSecurityAudit()
+
+      assert.deepEqual(result.events[0].metadata, {
+        ...legacyFact.metadata,
+        specialistVersion: null,
+      })
+      assert.deepEqual(body.data.events[0].metadata, rawMetadata)
+      assertDeepFrozen(result)
+    })
+  }
+})
+
+test('security audit rejects every mixed and extra-key identity metadata shape', async (t) => {
+  for (const fact of IDENTITY_AUDIT_FACTS) {
+    await t.test(fact.action, async () => {
+      const legacyMetadata = structuredClone(fact.metadata)
+      delete legacyMetadata.specialistVersion
+      const mixedMetadata = structuredClone(fact.metadata)
+      delete mixedMetadata[Object.keys(legacyMetadata)[0]]
+      const malformed = [
+        mixedMetadata,
+        { ...legacyMetadata, unexpected: 1 },
+        { ...fact.metadata, unexpected: 1 },
+      ]
+
+      for (const metadata of malformed) {
+        const malformedFact = structuredClone(fact)
+        malformedFact.metadata = metadata
+        const { fetchImpl } = queuedFetch(jsonResponse(auditBody([malformedFact])))
+        await assert.rejects(
+          createApiClient({ fetchImpl }).getSecurityAudit(),
+          assertInvalidResponse,
+        )
+      }
+    })
+  }
 })
 
 test('security audit accepts a valid cursor only on an exactly full page', async () => {

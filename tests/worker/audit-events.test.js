@@ -138,9 +138,15 @@ describe('shared audit statement constructor', () => {
   })
 
   it.each([
-    ['specialist.backfilled', 'specialist', 'sp_backfilled', { specialistVersion: 1, stateVersion: 2 }],
-    ['core_directory.upgrade.advanced', 'system_state', 'core_directory_specialist_backfill_v1', { createdCount: 0, processedCount: 1, stateVersion: 2 }],
-  ])('accepts only a null actor for system action %s', async (action, entityType, entityId, metadata) => {
+    ['specialist.backfilled', 'specialist', 'sp_backfilled', 'stf_backfilled', { specialistVersion: 1, stateVersion: 2 }],
+    ['core_directory.upgrade.advanced', 'system_state', 'core_directory_specialist_backfill_v1', 'core_directory_specialist_backfill_v2', { createdCount: 0, processedCount: 1, stateVersion: 2 }],
+  ])('accepts only the exact entity and a null actor for system action %s', async (
+    action,
+    entityType,
+    entityId,
+    malformedEntityId,
+    metadata,
+  ) => {
     const id = `aud_${action.replaceAll('.', '_')}`
     await auditEventStatement(env.DB, {
       ...event,
@@ -161,6 +167,15 @@ describe('shared audit statement constructor', () => {
       actorStaffId: 'stf_actor',
       entityType,
       entityId,
+      metadata,
+    })).toThrow(/^AUDIT_EVENT_INVALID$/)
+    expect(() => auditEventStatement(env.DB, {
+      ...event,
+      id: `${id}_entity_mismatch`,
+      action,
+      actorStaffId: null,
+      entityType,
+      entityId: malformedEntityId,
       metadata,
     })).toThrow(/^AUDIT_EVENT_INVALID$/)
   })
