@@ -293,6 +293,58 @@ describe('foundation migrations', () => {
     ])
   })
 
+  it('rejects a specialist ID with bytes after an embedded NUL', async () => {
+    await insertStaff('stf_nul_specialist', { role: 'coordinator' })
+
+    await expect(run(
+      `INSERT INTO specialists
+       (id,staff_user_id,status,created_at,updated_at)
+       VALUES (?,'stf_nul_specialist','active',?,?)`,
+      'sp_a\0!',
+      now,
+      now,
+    )).rejects.toThrow()
+  })
+
+  it('rejects a client ID with bytes after an embedded NUL', async () => {
+    await expect(run(
+      `INSERT INTO clients
+       (id,identity_envelope,status,created_at,updated_at)
+       VALUES (?,'{}','active',?,?)`,
+      'cl_a\0!',
+      now,
+      now,
+    )).rejects.toThrow()
+  })
+
+  it('rejects an assignment ID with bytes after an embedded NUL', async () => {
+    await insertStaff('stf_nul_assignment', { role: 'coordinator' })
+    await run(
+      `INSERT INTO specialists
+       (id,staff_user_id,status,created_at,updated_at)
+       VALUES ('sp_nul_assignment','stf_nul_assignment','active',?,?)`,
+      now,
+      now,
+    )
+    await run(
+      `INSERT INTO clients
+       (id,identity_envelope,status,created_at,updated_at)
+       VALUES ('cl_nul_assignment','{}','active',?,?)`,
+      now,
+      now,
+    )
+
+    await expect(run(
+      `INSERT INTO client_assignments
+       (id,client_id,specialist_id,starts_at,assigned_by_staff_id,created_at,updated_at)
+       VALUES (?,'cl_nul_assignment','sp_nul_assignment',?,'stf_nul_assignment',?,?)`,
+      'asg_a\0!',
+      now,
+      now,
+      now,
+    )).rejects.toThrow()
+  })
+
   it('exposes the non-persisting core-directory invariant failure sink', async () => {
     expect(await one(
       'SELECT count(*) AS count FROM core_directory_invariant_failures'

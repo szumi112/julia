@@ -3,6 +3,8 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE specialists (
   id TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0)
     CHECK (
+      length(CAST(id AS BLOB)) = length(id)
+      AND
       length(id) BETWEEN 4 AND 128
       AND substr(id, 1, 3) = 'sp_'
       AND substr(id, 4, 1) GLOB '[A-Za-z0-9]'
@@ -66,6 +68,8 @@ END;
 CREATE TABLE clients (
   id TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0)
     CHECK (
+      length(CAST(id AS BLOB)) = length(id)
+      AND
       length(id) BETWEEN 4 AND 128
       AND substr(id, 1, 3) = 'cl_'
       AND substr(id, 4, 1) GLOB '[A-Za-z0-9]'
@@ -125,6 +129,8 @@ END;
 CREATE TABLE client_assignments (
   id TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0)
     CHECK (
+      length(CAST(id AS BLOB)) = length(id)
+      AND
       length(id) BETWEEN 5 AND 128
       AND substr(id, 1, 4) = 'asg_'
       AND substr(id, 5, 1) GLOB '[A-Za-z0-9]'
