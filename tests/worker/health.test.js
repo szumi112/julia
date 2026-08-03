@@ -616,6 +616,20 @@ describe('stored operational health evaluation', () => {
       .toMatchObject({ status: 'warning', detailCode: 'BACKUP_PENDING' })
   })
 
+  it('pins the latest successful backup lookup to its bounded partial index', async () => {
+    const prepared = []
+    const db = trackedDb(healthReadDb(), { prepare: (sql) => prepared.push(sql) })
+
+    await evaluate(NOW_MS, { db })
+
+    const successSql = prepared.find((sql) => (
+      sql.includes("WHERE status IN ('stored','restore_verified')")
+    ))
+    expect(successSql).toContain(
+      'FROM backup_runs INDEXED BY backup_runs_success_completed_id_idx'
+    )
+  })
+
   it.each([
     ['pending', null, NOW_MS, 'warning', 'BACKUP_PENDING'],
     ['missing after threshold', null, NOW_MS + 36 * 3_600_000 + 1, 'critical', 'BACKUP_STALE'],

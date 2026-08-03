@@ -23,6 +23,7 @@ const MIGRATIONS = Object.freeze([
   '0004_staff_provisioning_state.sql',
   '0005_outbox_operation_guard.sql',
   '0006_delivery_attempt_uniqueness.sql',
+  '0007_operational_health_indexes.sql',
 ])
 
 const TABLE_COLUMNS = Object.freeze({
@@ -195,6 +196,76 @@ const DELIVERY_INDEX = Object.freeze({
   sql: 'CREATE UNIQUE INDEX delivery_attempts_outbox_job_id_idx ON delivery_attempts (outbox_job_id)',
 })
 
+const REQUIRED_INDEXES = Object.freeze([
+  Object.freeze({
+    ...DELIVERY_INDEX,
+    columns: Object.freeze([
+      Object.freeze({ cid: 1, name: 'outbox_job_id', seqno: 0 }),
+    ]),
+    partial: 0,
+    table: 'delivery_attempts',
+    unique: 1,
+  }),
+  Object.freeze({
+    name: 'backup_runs_created_id_idx',
+    sql: 'CREATE INDEX backup_runs_created_id_idx ON backup_runs(created_at DESC,id DESC)',
+    columns: Object.freeze([
+      Object.freeze({ cid: 19, name: 'created_at', seqno: 0 }),
+      Object.freeze({ cid: 0, name: 'id', seqno: 1 }),
+    ]),
+    partial: 0,
+    table: 'backup_runs',
+    unique: 0,
+  }),
+  Object.freeze({
+    name: 'backup_runs_success_completed_id_idx',
+    sql: "CREATE INDEX backup_runs_success_completed_id_idx ON backup_runs(completed_at DESC,id DESC) WHERE status IN('stored','restore_verified')",
+    columns: Object.freeze([
+      Object.freeze({ cid: 15, name: 'completed_at', seqno: 0 }),
+      Object.freeze({ cid: 0, name: 'id', seqno: 1 }),
+    ]),
+    partial: 1,
+    table: 'backup_runs',
+    unique: 0,
+  }),
+  Object.freeze({
+    name: 'operational_actions_resolved_fingerprint_at_id_idx',
+    sql: "CREATE INDEX operational_actions_resolved_fingerprint_at_id_idx ON operational_actions(fingerprint,resolved_at DESC,id DESC) WHERE status='resolved'",
+    columns: Object.freeze([
+      Object.freeze({ cid: 1, name: 'fingerprint', seqno: 0 }),
+      Object.freeze({ cid: 11, name: 'resolved_at', seqno: 1 }),
+      Object.freeze({ cid: 0, name: 'id', seqno: 2 }),
+    ]),
+    partial: 1,
+    table: 'operational_actions',
+    unique: 0,
+  }),
+  Object.freeze({
+    name: 'outbox_jobs_ordinary_status_updated_id_idx',
+    sql: "CREATE INDEX outbox_jobs_ordinary_status_updated_id_idx ON outbox_jobs(status,updated_at DESC,id DESC) WHERE type IN('staff.access.reconcile','staff.invitation.email','staff.invitation.expire')",
+    columns: Object.freeze([
+      Object.freeze({ cid: 6, name: 'status', seqno: 0 }),
+      Object.freeze({ cid: 14, name: 'updated_at', seqno: 1 }),
+      Object.freeze({ cid: 0, name: 'id', seqno: 2 }),
+    ]),
+    partial: 1,
+    table: 'outbox_jobs',
+    unique: 0,
+  }),
+  Object.freeze({
+    name: 'scheduler_runs_status_completed_id_idx',
+    sql: 'CREATE INDEX scheduler_runs_status_completed_id_idx ON scheduler_runs(status,completed_at DESC,id DESC)',
+    columns: Object.freeze([
+      Object.freeze({ cid: 4, name: 'status', seqno: 0 }),
+      Object.freeze({ cid: 3, name: 'completed_at', seqno: 1 }),
+      Object.freeze({ cid: 0, name: 'id', seqno: 2 }),
+    ]),
+    partial: 0,
+    table: 'scheduler_runs',
+    unique: 0,
+  }),
+])
+
 const GENESIS_STATES = Object.freeze([
   Object.freeze({
     key: 'access.applied_generation',
@@ -282,6 +353,35 @@ const canonicalSchemaSql = (value) => typeof value === 'string'
   ? value.trim().replace(/;\s*$/, '').replace(/\s+/g, ' ')
   : null
 
+const canonicalIndexSql = (value) => canonicalSchemaSql(value)
+  ?.replace(/\s*([(),])\s*/g, '$1')
+
+const indexMatches = (definition, schemaResult, listResult, infoResult) => {
+  const schemaRows = schemaResult?.results
+  const indexRows = listResult?.results
+  const columns = infoResult?.results
+  return Array.isArray(schemaRows)
+    && schemaRows.length === 1
+    && exactKeys(schemaRows[0], ['name', 'type', 'sql'])
+    && schemaRows[0].name === definition.name
+    && schemaRows[0].type === 'index'
+    && canonicalIndexSql(schemaRows[0].sql) === canonicalIndexSql(definition.sql)
+    && Array.isArray(indexRows)
+    && indexRows.length === 1
+    && sameRow(indexRows[0], {
+      name: definition.name,
+      origin: 'c',
+      partial: definition.partial,
+      unique: definition.unique,
+    })
+    && Array.isArray(columns)
+    && columns.length === definition.columns.length
+    && columns.every((column, index) => (
+      exactKeys(column, ['seqno', 'cid', 'name'])
+      && sameRow(column, definition.columns[index])
+    ))
+}
+
 const schemaSqlHash = async (value) => {
   const canonical = canonicalSchemaSql(value)
   if (!canonical) return null
@@ -349,11 +449,9 @@ export async function inspectBootstrapSchema(db) {
       migrationResult,
       schemaResult,
       columnResult,
-      deliveryIndexResult,
-      deliveryIndexListResult,
-      deliveryIndexInfoResult,
       stateResult,
       staffCount,
+      ...requiredIndexResults
     ] = await Promise.all([
       db.prepare('SELECT name FROM d1_migrations ORDER BY id').all(),
       db.prepare(
@@ -374,24 +472,26 @@ export async function inspectBootstrapSchema(db) {
          ORDER BY m.name,p.cid`
       ).all(),
       db.prepare(
-        `SELECT name,type,sql
-         FROM sqlite_schema
-         WHERE type='index' AND name='delivery_attempts_outbox_job_id_idx'`
-      ).all(),
-      db.prepare(
-        `SELECT name,"unique",origin,partial
-         FROM pragma_index_list('delivery_attempts')
-         WHERE name='delivery_attempts_outbox_job_id_idx'`
-      ).all(),
-      db.prepare(
-        `SELECT seqno,cid,name
-         FROM pragma_index_info('delivery_attempts_outbox_job_id_idx')
-         ORDER BY seqno`
-      ).all(),
-      db.prepare(
         'SELECT key,value_json,version,updated_at FROM system_state ORDER BY key'
       ).all(),
       db.prepare('SELECT count(*) AS count FROM staff_users').first(),
+      ...REQUIRED_INDEXES.flatMap(({ name, table }) => [
+        db.prepare(
+          `SELECT name,type,sql
+           FROM sqlite_schema
+           WHERE type='index' AND name='${name}'`
+        ).all(),
+        db.prepare(
+          `SELECT name,"unique",origin,partial
+           FROM pragma_index_list('${table}')
+           WHERE name='${name}'`
+        ).all(),
+        db.prepare(
+          `SELECT seqno,cid,name
+           FROM pragma_index_info('${name}')
+           ORDER BY seqno`
+        ).all(),
+      ]),
     ])
     const migrations = migrationResult?.results
     const schema = schemaResult?.results
@@ -435,30 +535,13 @@ export async function inspectBootstrapSchema(db) {
       tableHashes[index] !== TABLE_HASHES[row.name]
     ))) return Object.freeze({ kind: 'refused' })
 
-    const deliveryIndexes = deliveryIndexResult?.results
-    const deliveryIndexRows = deliveryIndexListResult?.results
-    const deliveryColumns = deliveryIndexInfoResult?.results
-    if (!Array.isArray(deliveryIndexes)
-      || deliveryIndexes.length !== 1
-      || !exactKeys(deliveryIndexes[0], ['name', 'type', 'sql'])
-      || deliveryIndexes[0].name !== DELIVERY_INDEX.name
-      || deliveryIndexes[0].type !== 'index'
-      || canonicalSchemaSql(deliveryIndexes[0].sql) !== DELIVERY_INDEX.sql
-      || !Array.isArray(deliveryIndexRows)
-      || deliveryIndexRows.length !== 1
-      || !sameRow(deliveryIndexRows[0], {
-        name: DELIVERY_INDEX.name,
-        origin: 'c',
-        partial: 0,
-        unique: 1,
-      })
-      || !Array.isArray(deliveryColumns)
-      || deliveryColumns.length !== 1
-      || !sameRow(deliveryColumns[0], {
-        cid: 1,
-        name: 'outbox_job_id',
-        seqno: 0,
-      })) return Object.freeze({ kind: 'refused' })
+    if (requiredIndexResults.length !== REQUIRED_INDEXES.length * 3
+      || REQUIRED_INDEXES.some((definition, index) => !indexMatches(
+        definition,
+        requiredIndexResults[index * 3],
+        requiredIndexResults[index * 3 + 1],
+        requiredIndexResults[index * 3 + 2],
+      ))) return Object.freeze({ kind: 'refused' })
 
     const expectedColumns = Object.entries(TABLE_COLUMNS)
       .sort(([left], [right]) => left.localeCompare(right))

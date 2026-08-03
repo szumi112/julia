@@ -139,6 +139,68 @@ describe('foundation migrations', () => {
     expect((await env.DB.prepare('PRAGMA foreign_key_check').all()).results).toEqual([])
   })
 
+  it('keeps recurring operational health lookups index-bounded', async () => {
+    const cases = [
+      {
+        index: 'backup_runs_created_id_idx',
+        sql: `SELECT id,status,completed_at,last_error_code,created_at,updated_at
+              FROM backup_runs
+              ORDER BY created_at DESC,id DESC LIMIT 1`,
+        table: 'backup_runs',
+      },
+      {
+        index: 'backup_runs_success_completed_id_idx',
+        sql: `SELECT id,status,completed_at,last_error_code,created_at,updated_at
+              FROM backup_runs INDEXED BY backup_runs_success_completed_id_idx
+              WHERE status IN ('stored','restore_verified')
+              ORDER BY completed_at DESC,id DESC LIMIT 1`,
+        table: 'backup_runs',
+      },
+      {
+        index: 'operational_actions_resolved_fingerprint_at_id_idx',
+        sql: `SELECT id,fingerprint,kind,severity,status,entity_type,entity_id,
+                    details_envelope,version,created_at,updated_at,resolved_at
+              FROM operational_actions
+              WHERE fingerprint='security.authorization_denials:stf_plan:staff.manage'
+                AND status='resolved'
+              ORDER BY resolved_at DESC,id DESC LIMIT 1`,
+        table: 'operational_actions',
+      },
+      ...['dead', 'succeeded'].map((status) => ({
+        index: 'outbox_jobs_ordinary_status_updated_id_idx',
+        sql: `SELECT id,type,status,updated_at
+              FROM outbox_jobs
+              WHERE type IN ('staff.access.reconcile','staff.invitation.email','staff.invitation.expire')
+                AND status='${status}'
+              ORDER BY updated_at DESC,id DESC LIMIT 1`,
+        table: 'outbox_jobs',
+      })),
+      {
+        index: 'scheduler_runs_status_completed_id_idx',
+        sql: `SELECT id,scheduled_for,completed_at,status
+              FROM scheduler_runs
+              WHERE status='succeeded'
+              ORDER BY completed_at DESC,id DESC LIMIT 1`,
+        table: 'scheduler_runs',
+      },
+    ]
+
+    for (const fixture of cases) {
+      let details = ''
+      try {
+        const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${fixture.sql}`).all()
+        details = plan.results.map(({ detail }) => detail).join('\n')
+      } catch {
+        // A missing required index is the same failed plan contract.
+      }
+      expect(details, fixture.index).toContain(`USING INDEX ${fixture.index}`)
+      expect(details, fixture.index).not.toContain('USE TEMP B-TREE')
+      expect(details, fixture.index).not.toMatch(
+        new RegExp(`(?:^|\\n)SCAN ${fixture.table}(?:$|\\n)`)
+      )
+    }
+  })
+
   it('declares nonempty text primary keys and strict integer contracts', async () => {
     for (const [table, column] of textPrimaryKeys) {
       const columns = (await env.DB.prepare(`PRAGMA table_info(${table})`).all()).results

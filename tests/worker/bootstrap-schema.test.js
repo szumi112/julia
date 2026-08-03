@@ -16,7 +16,7 @@ it('passes exact migration/table/column/trigger/state preflight on the accepted 
   await env.DB.prepare(trigger.sql).run()
 })
 
-it('refuses missing or same-name forged guard views, triggers, and delivery uniqueness', async () => {
+it('refuses missing or same-name forged guard views, triggers, and required indexes', async () => {
   const cases = [
     {
       name: 'outbox_operation_guard_failures',
@@ -73,6 +73,39 @@ it('refuses missing or same-name forged guard views, triggers, and delivery uniq
       replacement: `CREATE INDEX delivery_attempts_outbox_job_id_idx
         ON delivery_attempts (provider)`,
     },
+    {
+      name: 'backup_runs_created_id_idx',
+      type: 'index',
+      replacement: `CREATE INDEX backup_runs_created_id_idx
+        ON backup_runs (created_at ASC, id DESC)`,
+    },
+    {
+      name: 'backup_runs_success_completed_id_idx',
+      type: 'index',
+      replacement: `CREATE INDEX backup_runs_success_completed_id_idx
+        ON backup_runs (completed_at DESC, id DESC)
+        WHERE status = 'stored'`,
+    },
+    {
+      name: 'operational_actions_resolved_fingerprint_at_id_idx',
+      type: 'index',
+      replacement: `CREATE INDEX operational_actions_resolved_fingerprint_at_id_idx
+        ON operational_actions (fingerprint, resolved_at ASC, id DESC)
+        WHERE status = 'resolved'`,
+    },
+    {
+      name: 'outbox_jobs_ordinary_status_updated_id_idx',
+      type: 'index',
+      replacement: `CREATE INDEX outbox_jobs_ordinary_status_updated_id_idx
+        ON outbox_jobs (status, updated_at ASC, id DESC)
+        WHERE type IN ('staff.access.reconcile', 'staff.invitation.email', 'staff.invitation.expire')`,
+    },
+    {
+      name: 'scheduler_runs_status_completed_id_idx',
+      type: 'index',
+      replacement: `CREATE INDEX scheduler_runs_status_completed_id_idx
+        ON scheduler_runs (status, completed_at ASC, id DESC)`,
+    },
   ]
 
   for (const fixture of cases) {
@@ -87,6 +120,9 @@ it('refuses missing or same-name forged guard views, triggers, and delivery uniq
       : null
     expect(original?.sql).toBeTypeOf('string')
     await env.DB.prepare(`DROP ${fixture.type.toUpperCase()} ${fixture.name}`).run()
+    await expect(inspectBootstrapSchema(env.DB), `${fixture.name}: missing`).resolves.toEqual({
+      kind: 'refused',
+    })
     await env.DB.prepare(fixture.replacement).run()
     await expect(inspectBootstrapSchema(env.DB), `${fixture.name}: forged`).resolves.toEqual({
       kind: 'refused',

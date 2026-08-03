@@ -306,7 +306,7 @@ async function readBackupFacts(db) {
   ).first()
   const success = await db.prepare(
     `SELECT id,status,completed_at,last_error_code,created_at,updated_at
-     FROM backup_runs
+     FROM backup_runs INDEXED BY backup_runs_success_completed_id_idx
      WHERE status IN ('stored','restore_verified')
      ORDER BY completed_at DESC,id DESC LIMIT 1`
   ).first()
