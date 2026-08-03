@@ -34,13 +34,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CAPABILITIES } from '../worker/identity/policy.js'
 import {
   buildLocalHarnessWranglerConfig,
+  LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
   LOCAL_HARNESS_CORE_DIRECTORY_COMPLETE,
   LOCAL_HARNESS_MIGRATIONS_NAME,
   LOCAL_HARNESS_RUNNER_MODE,
   LOCAL_HARNESS_WRANGLER_NAME,
 } from './local-harness-core.js'
 import { materializeCoreMigrationStage } from './apply-core-migration-stage.js'
-import { CORE_MIGRATION_STAGE_A_NAMES } from './core-migration-stages.js'
+import {
+  CORE_MIGRATION_STAGE_A_NAMES,
+  CORE_MIGRATION_STAGE_B_NAMES,
+} from './core-migration-stages.js'
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = realpathSync(resolve(SCRIPT_DIRECTORY, '..'))
@@ -49,6 +53,9 @@ const WRANGLER_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/wrang
 const VITE_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/vite/bin/vite.js'))
 const SEED_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'scripts/seed-local.mjs'))
 const UPGRADE_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'scripts/upgrade-core-directory.js'))
+const APPLY_MIGRATION_STAGE_SCRIPT_PATH = realpathSync(
+  join(PROJECT_ROOT, 'scripts/apply-core-migration-stage.js'),
+)
 const REACT_PACKAGE_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/react'))
 const REACT_DOM_PACKAGE_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/react-dom'))
 const PS_EXECUTABLE = realpathSync('/bin/ps')
@@ -105,12 +112,13 @@ const PHASE = Object.freeze({
   prepared: 1,
   migrating: 2,
   upgrading: 3,
-  seeding: 4,
-  starting: 5,
-  readiness: 6,
-  ready: 7,
-  stopping: 8,
-  closed: 9,
+  sealing: 4,
+  seeding: 5,
+  starting: 6,
+  readiness: 7,
+  ready: 8,
+  stopping: 9,
+  closed: 10,
 })
 const MANAGED_CHILDREN = new WeakMap()
 const CHILD_EXIT_PROMISES = new WeakMap()
@@ -1468,15 +1476,15 @@ const defaultPrepareHarness = async (path, expectedFence) => {
     })
   }
   const home = directory(PRIVATE_HOME_NAME)
-  const migrationsPath = join(path, LOCAL_HARNESS_MIGRATIONS_NAME)
+  const migrations = directory(LOCAL_HARNESS_MIGRATIONS_NAME)
+  const migrationsPath = join(
+    migrations.path,
+    LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
+  )
   materializeCoreMigrationStage({
     sourceDirectory: join(PROJECT_ROOT, 'migrations'),
     stage: 'stage-a',
     targetDirectory: migrationsPath,
-  })
-  const migrations = Object.freeze({
-    fence: privateDirectoryFence(migrationsPath),
-    path: migrationsPath,
   })
   const state = directory(PRIVATE_STATE_NAME)
   const tmp = directory(PRIVATE_TMP_NAME)
@@ -1487,7 +1495,7 @@ const defaultPrepareHarness = async (path, expectedFence) => {
   const wrangler = writePrivateFile(
     path,
     LOCAL_HARNESS_WRANGLER_NAME,
-    buildLocalHarnessWranglerConfig(PROJECT_ROOT, migrations.path),
+    buildLocalHarnessWranglerConfig(PROJECT_ROOT, migrationsPath),
   )
   const vite = writePrivateFile(
     viteRoot.path,
@@ -1516,7 +1524,7 @@ const defaultPrepareHarness = async (path, expectedFence) => {
   })
 }
 
-const defaultAssertHarness = async (harness) => {
+const defaultAssertHarness = async (harness, migrationStage = 'stage-a') => {
   if (!exactKeys(harness, [
     'fence',
     'home',
@@ -1551,14 +1559,28 @@ const defaultAssertHarness = async (harness) => {
   for (const file of [harness.index, harness.vite, harness.wrangler]) {
     assertPrivateFile(file)
   }
-  const migrationNames = readdirSync(harness.migrations.path).sort()
-  if (migrationNames.length !== CORE_MIGRATION_STAGE_A_NAMES.length
-    || migrationNames.some((name, index) => name !== CORE_MIGRATION_STAGE_A_NAMES[index])) {
+  const activeMigrations = join(
+    harness.migrations.path,
+    LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
+  )
+  privateDirectoryFence(activeMigrations)
+  if (readdirSync(harness.migrations.path).some((name) => (
+    name !== LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME
+  ))) fail('APP_E2E_HARNESS_INVALID')
+  const expectedMigrations = migrationStage === 'stage-a'
+    ? CORE_MIGRATION_STAGE_A_NAMES
+    : migrationStage === 'stage-b'
+      ? CORE_MIGRATION_STAGE_B_NAMES
+      : null
+  const migrationNames = readdirSync(activeMigrations).sort()
+  if (!expectedMigrations
+    || migrationNames.length !== expectedMigrations.length
+    || migrationNames.some((name, index) => name !== expectedMigrations[index])) {
     fail('APP_E2E_HARNESS_INVALID')
   }
   for (const name of migrationNames) {
-    regularFileFence(join(harness.migrations.path, name))
-    if (!readFileSync(join(harness.migrations.path, name)).equals(
+    regularFileFence(join(activeMigrations, name))
+    if (!readFileSync(join(activeMigrations, name)).equals(
       readFileSync(join(PROJECT_ROOT, 'migrations', name)),
     )) fail('APP_E2E_HARNESS_INVALID')
   }
@@ -2171,6 +2193,7 @@ export async function runAppE2E({
   let ownedFence = null
   let ownedPath = null
   let phase = PHASE.init
+  let migrationStage = 'stage-a'
   let preserveHarness = false
   let vite = null
   let viteClosed = true
@@ -2248,7 +2271,7 @@ export async function runAppE2E({
     harness = await prepareHarness(ownedPath, ownedFence)
     ownedFence = harness.fence
     if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
-    await assertHarness(harness)
+    await assertHarness(harness, migrationStage)
     if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
     advance(PHASE.prepared)
     try {
@@ -2278,7 +2301,7 @@ export async function runAppE2E({
     ]
 
     advance(PHASE.migrating)
-    await assertHarness(harness)
+    await assertHarness(harness, migrationStage)
     if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
     await executeStage({
       args: [
@@ -2298,7 +2321,7 @@ export async function runAppE2E({
     }, 'APP_E2E_MIGRATION_FAILED')
 
     advance(PHASE.upgrading)
-    await assertHarness(harness)
+    await assertHarness(harness, migrationStage)
     if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
     const upgradeResult = await executeStage({
       args: [regularExecutable(UPGRADE_SCRIPT_PATH)],
@@ -2318,8 +2341,29 @@ export async function runAppE2E({
       outcome('APP_E2E_UPGRADE_FAILED')
     }
 
+    advance(PHASE.sealing)
+    await assertHarness(harness, migrationStage)
+    if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
+    await executeStage({
+      args: [
+        regularExecutable(APPLY_MIGRATION_STAGE_SCRIPT_PATH),
+        'stage-b',
+        '--local',
+      ],
+      command: regularExecutable(NODE_EXECUTABLE),
+      cwd: harness.path,
+      env: privateChildEnvironment(harness, {
+        APP_ENV: 'development',
+        BWM_LOCAL_PERSISTENCE_PATH: harness.state.path,
+        BWM_LOCAL_RUNNER_MODE: LOCAL_HARNESS_RUNNER_MODE,
+        DATA_MODE: 'fictional',
+      }),
+      shell: false,
+    }, 'APP_E2E_MIGRATION_FAILED')
+    migrationStage = 'stage-b'
+
     advance(PHASE.seeding)
-    await assertHarness(harness)
+    await assertHarness(harness, migrationStage)
     if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
     const seedResult = await executeStage({
       args: [regularExecutable(SEED_SCRIPT_PATH)],
@@ -2339,7 +2383,7 @@ export async function runAppE2E({
     }
 
     advance(PHASE.starting)
-    await assertHarness(harness)
+    await assertHarness(harness, migrationStage)
     if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
     try {
       await assertPortAvailable(harness)
@@ -2586,7 +2630,7 @@ export async function runAppE2E({
       let integrityFailure = null
       if (harness) {
         try {
-          await assertHarness(harness)
+          await assertHarness(harness, migrationStage)
         } catch {
           if (final.ok) integrityFailure = 'APP_E2E_ARTIFACT_LEAK'
         }

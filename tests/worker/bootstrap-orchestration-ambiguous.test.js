@@ -6,7 +6,7 @@ import {
 } from '../../scripts/bootstrap-owner.mjs'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { NOW_MS } from './fixtures.js'
-import { sequence } from './bootstrap-helpers.js'
+import { ensureBootstrapStageB, sequence } from './bootstrap-helpers.js'
 
 const key = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
 
@@ -34,6 +34,7 @@ const correlationSequence = () => {
 }
 
 it('rereads exact state after an ambiguous committed creation and never resends it', async () => {
+  await ensureBootstrapStageB()
   let creationCalls = 0
   let injected = false
   const provider = vi.fn(async () => ({ reconciled: true }))

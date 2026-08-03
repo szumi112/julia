@@ -1,8 +1,17 @@
 import { env } from 'cloudflare:workers'
 import { expect, it } from 'vitest'
 import { inspectBootstrapSchema } from '../../scripts/bootstrap-core.js'
+import {
+  applyCoreDirectoryStageB,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 
-it('passes exact migration/table/column/trigger/state preflight on the accepted schema', async () => {
+it('requires completed stage B before passing exact schema preflight', async () => {
+  await expect(inspectBootstrapSchema(env.DB)).resolves.toEqual({
+    kind: 'refused',
+  })
+  await completeCoreDirectoryStageA()
+  await applyCoreDirectoryStageB()
   await expect(inspectBootstrapSchema(env.DB)).resolves.toEqual({
     kind: 'ready',
   })

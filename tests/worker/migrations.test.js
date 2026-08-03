@@ -1,5 +1,9 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
+import {
+  applyCoreDirectoryStageB,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 
 const now = '2026-07-29T10:00:00.000Z'
 const later = '2026-07-29T10:05:00.000Z'
@@ -160,6 +164,147 @@ describe('foundation migrations', () => {
       version: 1,
     })
     expect(new Date(row.updated_at).toISOString()).toBe(row.updated_at)
+  })
+
+  it('seals stage B only after audited completion and rejects every fixed anomaly class', async () => {
+    const assertStageBAbort = async () => {
+      await expect(applyCoreDirectoryStageB())
+        .rejects.toThrow(/core_directory_invariant_failed/)
+      expect((await env.DB.prepare(
+        "SELECT name FROM d1_migrations WHERE name='0010_specialist_lifecycle_assertion.sql'"
+      ).all()).results).toEqual([])
+    }
+    const insertProfile = async ({
+      specialistId,
+      staffId,
+      status = 'active',
+      version = 1,
+    }) => run(
+      `INSERT INTO specialists
+       (id,staff_user_id,status,version,archived_at,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      specialistId,
+      staffId,
+      status,
+      version,
+      status === 'archived' ? later : null,
+      now,
+      later,
+    )
+    const insertSpecialistVersion = (specialistId, version, suffix) => run(
+      `INSERT INTO record_versions
+       (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+        changed_at,correlation_id)
+       VALUES (?,'specialist',?,?,'{}',NULL,?,?)`,
+      `ver_assert_${suffix}_${version}`,
+      specialistId,
+      version,
+      later,
+      `correlation_assert_${suffix}_${version}`,
+    )
+
+    await assertStageBAbort()
+    await expect(completeCoreDirectoryStageA()).resolves.toEqual({
+      createdCount: 0,
+      processedCount: 0,
+      status: 'complete',
+    })
+
+    await insertStaff('stf_assert_missing', {
+      role: 'coordinator',
+      specialist_id: 'sp_assert_missing',
+    })
+    await assertStageBAbort()
+    await insertProfile({
+      specialistId: 'sp_assert_missing',
+      staffId: 'stf_assert_missing',
+    })
+    await insertSpecialistVersion('sp_assert_missing', 1, 'missing')
+
+    await insertStaff('stf_assert_orphan', {
+      role: 'coordinator',
+      specialist_id: null,
+    })
+    await insertProfile({
+      specialistId: 'sp_assert_orphan',
+      staffId: 'stf_assert_orphan',
+    })
+    await insertSpecialistVersion('sp_assert_orphan', 1, 'orphan')
+    await assertStageBAbort()
+    await run(
+      `UPDATE staff_users SET specialist_id='sp_assert_orphan',version=2,updated_at=?
+       WHERE id='stf_assert_orphan' AND version=1`,
+      later,
+    )
+
+    await insertStaff('stf_assert_pointer', {
+      role: 'coordinator',
+      specialist_id: 'sp_assert_pointer_other',
+    })
+    await insertProfile({
+      specialistId: 'sp_assert_pointer',
+      staffId: 'stf_assert_pointer',
+    })
+    await insertSpecialistVersion('sp_assert_pointer', 1, 'pointer')
+    await assertStageBAbort()
+    await run(
+      `UPDATE staff_users SET specialist_id='sp_assert_pointer',version=2,updated_at=?
+       WHERE id='stf_assert_pointer' AND version=1`,
+      later,
+    )
+
+    await insertStaff('stf_assert_status', {
+      role: 'coordinator',
+      specialist_id: 'sp_assert_status',
+    })
+    await insertProfile({
+      specialistId: 'sp_assert_status',
+      staffId: 'stf_assert_status',
+      status: 'pending',
+    })
+    await insertSpecialistVersion('sp_assert_status', 1, 'status')
+    await assertStageBAbort()
+    await run(
+      `UPDATE specialists
+       SET status='active',version=2,updated_at=?
+       WHERE id='sp_assert_status' AND version=1`,
+      later,
+    )
+    await insertSpecialistVersion('sp_assert_status', 2, 'status')
+
+    await insertStaff('stf_assert_missing_version', {
+      role: 'coordinator',
+      specialist_id: 'sp_assert_missing_version',
+    })
+    await insertProfile({
+      specialistId: 'sp_assert_missing_version',
+      staffId: 'stf_assert_missing_version',
+    })
+    await assertStageBAbort()
+    await insertSpecialistVersion('sp_assert_missing_version', 1, 'missing_version')
+
+    await insertStaff('stf_assert_noncontiguous', {
+      role: 'coordinator',
+      specialist_id: 'sp_assert_noncontiguous',
+    })
+    await insertProfile({
+      specialistId: 'sp_assert_noncontiguous',
+      staffId: 'stf_assert_noncontiguous',
+      version: 2,
+    })
+    await insertSpecialistVersion('sp_assert_noncontiguous', 2, 'noncontiguous')
+    await assertStageBAbort()
+    await insertSpecialistVersion('sp_assert_noncontiguous', 1, 'noncontiguous')
+
+    await expect(applyCoreDirectoryStageB()).resolves.toBeUndefined()
+    expect(await one(
+      "SELECT name FROM d1_migrations WHERE name='0010_specialist_lifecycle_assertion.sql'"
+    )).toEqual({ name: '0010_specialist_lifecycle_assertion.sql' })
+    expect((await env.DB.prepare(
+      `SELECT name,tbl_name,sql FROM sqlite_schema
+       WHERE type='trigger' AND tbl_name IN ('staff_users','specialists')
+         AND lower(sql) LIKE '%core_directory%'`
+    ).all()).results).toEqual([])
   })
 
   it('defers the specialist-to-staff foreign key until a D1 batch completes', async () => {

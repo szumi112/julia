@@ -5,21 +5,22 @@ import { selectCoreMigrationStage } from './scripts/core-migration-stages.js'
 
 export default defineConfig({
   plugins: [
-    cloudflareTest(async () => ({
-      wrangler: { configPath: './wrangler.json' },
-      miniflare: {
-        bindings: {
-          CORE_DIRECTORY_STAGE: 'stage-a-complete-before-fixtures',
-          TEST_MIGRATIONS: selectCoreMigrationStage(
-            await readD1Migrations(path.resolve('migrations')),
-            'stage-a',
-          ),
-          BWM_DATA_KEK_V1: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
-          BWM_LOOKUP_HMAC_V1: 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ',
-          BWM_BACKUP_KEK_V1: 'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
+    cloudflareTest(async () => {
+      const migrations = await readD1Migrations(path.resolve('migrations'))
+      return {
+        wrangler: { configPath: './wrangler.json' },
+        miniflare: {
+          bindings: {
+            CORE_DIRECTORY_STAGE: 'stage-a-complete-before-fixtures',
+            TEST_STAGE_A_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-a'),
+            TEST_STAGE_B_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-b'),
+            BWM_DATA_KEK_V1: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+            BWM_LOOKUP_HMAC_V1: 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ',
+            BWM_BACKUP_KEK_V1: 'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
+          },
         },
-      },
-    })),
+      }
+    }),
   ],
   test: {
     include: ['tests/worker/**/*.test.js'],

@@ -61,8 +61,8 @@ const EMPTY_BOOTSTRAP_STATES = Object.freeze([
   }),
   Object.freeze({
     key: 'core_directory_specialist_backfill_v1',
-    value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}',
-    version: 1,
+    value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"complete"}',
+    version: 2,
     updated_at: '2026-07-31T00:00:00.000Z',
   }),
   Object.freeze({
@@ -73,10 +73,29 @@ const EMPTY_BOOTSTRAP_STATES = Object.freeze([
   }),
 ])
 
-const bootstrapEntryDb = (states) => ({
+const EMPTY_BOOTSTRAP_AUDITS = Object.freeze([
+  Object.freeze({
+    action: 'core_directory.upgrade.advanced',
+    actor_staff_id: null,
+    correlation_id: '00000000-0000-4000-8000-000000000099',
+    entity_id: 'core_directory_specialist_backfill_v1',
+    entity_type: 'system_state',
+    id: 'aud_core_directory_bootstrap_fixture',
+    metadata_json: '{"createdCount":0,"processedCount":0,"stateVersion":2}',
+    occurred_at: '2026-07-31T00:00:00.000Z',
+    reason_envelope: null,
+    result: 'success',
+  }),
+])
+
+const bootstrapEntryDb = (states, audits = EMPTY_BOOTSTRAP_AUDITS) => ({
   prepare: () => ({}),
   batch: async (statements) => statements.map((_, index) => ({
-    results: index === 7 ? structuredClone(states) : [],
+    results: index === 4
+      ? structuredClone(audits)
+      : index === 7
+        ? structuredClone(states)
+        : [],
   })),
 })
 
@@ -114,6 +133,10 @@ test('bootstrap entry inspection accepts only the fixed core state and heartbeat
       key: 'unexpected.state', value_json: '{}', version: 1,
       updated_at: '2026-07-31T00:00:00.000Z',
     }]),
+  }), { kind: 'refused' })
+  assert.deepEqual(await inspectBootstrapEntryState({
+    ...input,
+    db: bootstrapEntryDb(EMPTY_BOOTSTRAP_STATES, []),
   }), { kind: 'refused' })
 })
 

@@ -115,12 +115,17 @@ const baseEnv = (path) => ({
 const runnerEnv = (t) => {
   const root = makeDirectory(t)
   const migrations = join(root, LOCAL_HARNESS_MIGRATIONS_NAME)
+  const activeMigrations = join(migrations, 'active')
   const state = join(root, 'state')
   mkdirSync(migrations, { mode: 0o700 })
+  mkdirSync(activeMigrations, { mode: 0o700 })
   mkdirSync(state, { mode: 0o700 })
   writeFileSync(
     join(root, LOCAL_HARNESS_WRANGLER_NAME),
-    buildLocalHarnessWranglerConfig(realpathSync(resolve('.')), realpathSync(migrations)),
+    buildLocalHarnessWranglerConfig(
+      realpathSync(resolve('.')),
+      realpathSync(activeMigrations),
+    ),
     { encoding: 'utf8', flag: 'wx', mode: 0o600 },
   )
   return {
@@ -145,6 +150,30 @@ test('local seed manifest owns exactly three deterministic fictional identities'
     'sp_local_specialist',
   )
   assert.equal(Object.isFrozen(LOCAL_SEED_MANIFEST), true)
+})
+
+test('local seed accepts only the exact applied stage-A plus stage-B migration history', async () => {
+  const module = await import('../../scripts/seed-local.mjs')
+  const expected = [
+    '0001_security_primitives.sql',
+    '0002_identity_operations.sql',
+    '0003_rate_limit_guard.sql',
+    '0004_staff_provisioning_state.sql',
+    '0005_outbox_operation_guard.sql',
+    '0006_delivery_attempt_uniqueness.sql',
+    '0007_operational_health_indexes.sql',
+    '0008_outbox_drain_heartbeat.sql',
+    '0009_core_directory_expand.sql',
+    '0010_specialist_lifecycle_assertion.sql',
+  ].map((name) => ({ name }))
+
+  assert.deepEqual(module.parseLocalSeedMigrationPreflight(expected), {
+    ready: true,
+  })
+  assert.throws(
+    () => module.parseLocalSeedMigrationPreflight(expected.slice(0, -1)),
+    /SEED_LOCAL_STATE_REFUSED/,
+  )
 })
 
 test('local seed recognizes only completed zero-count stage A with one exact system audit', async (t) => {

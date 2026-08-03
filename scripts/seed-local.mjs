@@ -34,10 +34,15 @@ import { decodeBase64Url, encodeBase64Url } from '../worker/security/encoding.js
 import { createKeyring } from '../worker/security/keyring.js'
 import {
   buildLocalHarnessWranglerConfig,
+  LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
   LOCAL_HARNESS_MIGRATIONS_NAME,
   LOCAL_HARNESS_RUNNER_MODE,
   LOCAL_HARNESS_WRANGLER_NAME,
 } from './local-harness-core.js'
+import {
+  CORE_MIGRATION_STAGE_A_NAMES,
+  CORE_MIGRATION_STAGE_B_NAMES,
+} from './core-migration-stages.js'
 
 export { LOCAL_SEED_MANIFEST } from './seed-core.js'
 
@@ -53,10 +58,19 @@ const CHILD_DEADLINE_MS = 30_000
 const CHILD_KILL_GRACE_MS = 500
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux'])
 const RESULT_KEYS = Object.freeze(['meta', 'results', 'success'])
+const CORE_MIGRATION_HISTORY_SQL = 'SELECT name FROM d1_migrations ORDER BY id'
+const APPLIED_CORE_MIGRATION_NAMES = Object.freeze([
+  ...CORE_MIGRATION_STAGE_A_NAMES,
+  ...CORE_MIGRATION_STAGE_B_NAMES,
+])
 const localHarnessConfig = (runnerRoot) => Buffer.from(
   buildLocalHarnessWranglerConfig(
     PROJECT_ROOT,
-    join(runnerRoot, LOCAL_HARNESS_MIGRATIONS_NAME),
+    join(
+      runnerRoot,
+      LOCAL_HARNESS_MIGRATIONS_NAME,
+      LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
+    ),
   ),
   'utf8',
 )
@@ -652,6 +666,16 @@ const parseWranglerResults = (value, expectedCount) => {
   return parsed
 }
 
+export function parseLocalSeedMigrationPreflight(rows) {
+  if (!Array.isArray(rows)
+    || rows.length !== APPLIED_CORE_MIGRATION_NAMES.length
+    || rows.some((row, index) => !exactKeys(row, ['name'])
+      || row.name !== APPLIED_CORE_MIGRATION_NAMES[index])) {
+    throw new Error('SEED_LOCAL_STATE_REFUSED')
+  }
+  return Object.freeze({ ready: true })
+}
+
 const createWranglerInspectionDb = ({ childOptions, input, runWrangler }) => {
   const descriptors = new WeakMap()
   return Object.freeze({
@@ -661,7 +685,10 @@ const createWranglerInspectionDb = ({ childOptions, input, runWrangler }) => {
         || statements.some((entry, index) => (
           descriptors.get(entry) !== LOCAL_SEED_SNAPSHOT_QUERIES[index]
         ))) fail()
-      const command = `${LOCAL_SEED_SNAPSHOT_QUERIES.join(';\n')};`
+      const command = `${[
+        CORE_MIGRATION_HISTORY_SQL,
+        ...LOCAL_SEED_SNAPSHOT_QUERIES,
+      ].join(';\n')};`
       const result = await runWrangler(wranglerInvocation(input, [
         'd1',
         'execute',
@@ -673,7 +700,12 @@ const createWranglerInspectionDb = ({ childOptions, input, runWrangler }) => {
         command,
         '--json',
       ]), childOptions)
-      return parseWranglerResults(result.stdout, LOCAL_SEED_SNAPSHOT_QUERIES.length)
+      const parsed = parseWranglerResults(
+        result.stdout,
+        LOCAL_SEED_SNAPSHOT_QUERIES.length + 1,
+      )
+      parseLocalSeedMigrationPreflight(parsed[0].results)
+      return parsed.slice(1)
     },
     prepare(sql) {
       if (!LOCAL_SEED_SNAPSHOT_QUERIES.includes(sql)) fail()

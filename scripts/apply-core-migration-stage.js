@@ -18,14 +18,24 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   CORE_MIGRATION_STAGE_A_NAMES,
+  CORE_MIGRATION_STAGE_B_NAMES,
+  CORE_DIRECTORY_INVARIANT_FAILURE_SQL,
   selectCoreMigrationStage,
 } from './core-migration-stages.js'
+import {
+  LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
+  LOCAL_HARNESS_MIGRATIONS_NAME,
+  LOCAL_HARNESS_RUNNER_MODE,
+  LOCAL_HARNESS_WRANGLER_NAME,
+} from './local-harness-core.js'
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = realpathSync(resolve(SCRIPT_DIRECTORY, '..'))
 const WRANGLER_SCRIPT = realpathSync(join(PROJECT_ROOT, 'node_modules/wrangler/bin/wrangler.js'))
 const SOURCE_DIRECTORY = realpathSync(join(PROJECT_ROOT, 'migrations'))
 const OUTPUT_ROOT = join(PROJECT_ROOT, '.core-migrations')
+const LOCAL_PERSISTENCE_PATH = join(PROJECT_ROOT, '.wrangler/state')
+const MAX_PREFLIGHT_OUTPUT_BYTES = 64 * 1024
 
 const fail = (code = 'CORE_MIGRATION_STAGE_INVALID') => {
   throw new Error(code)
@@ -162,6 +172,32 @@ export function generateCoreMigrationStage({
   })
 }
 
+export function exposeCoreMigrationStage({
+  configPath,
+  outputRoot,
+  preflightStageB,
+  sourceDirectory,
+  stage,
+}) {
+  if (stage === 'stage-b') {
+    if (typeof preflightStageB !== 'function') fail()
+    const result = preflightStageB()
+    if (!result
+      || typeof result !== 'object'
+      || Array.isArray(result)
+      || Object.keys(result).length !== 1
+      || result.ready !== true) fail('CORE_MIGRATION_STAGE_PREFLIGHT_FAILED')
+  } else if (stage !== 'stage-a' || preflightStageB !== undefined) {
+    fail()
+  }
+  return generateCoreMigrationStage({
+    configPath,
+    outputRoot,
+    sourceDirectory,
+    stage,
+  })
+}
+
 export function normalizeCoreMigrationStageInput(env, argv = []) {
   if (!env
     || typeof env !== 'object'
@@ -171,14 +207,101 @@ export function normalizeCoreMigrationStageInput(env, argv = []) {
     || env.DATA_MODE !== 'fictional'
     || !Array.isArray(argv)
     || (argv.length !== 1 && argv.length !== 2)
-    || argv[0] !== 'stage-a'
+    || !['stage-a', 'stage-b'].includes(argv[0])
     || (argv.length === 2 && argv[1] !== '--local')) {
     fail('CORE_MIGRATION_STAGE_INPUT_INVALID')
   }
   return Object.freeze({
     local: argv[1] === '--local',
-    stage: 'stage-a',
+    stage: argv[0],
   })
+}
+
+export function parseCoreMigrationStageBPreflight(stdout) {
+  let parsed
+  try { parsed = JSON.parse(stdout) } catch { fail('CORE_MIGRATION_STAGE_PREFLIGHT_FAILED') }
+  if (!Array.isArray(parsed)
+    || parsed.length !== 1
+    || !parsed[0]
+    || typeof parsed[0] !== 'object'
+    || Array.isArray(parsed[0])
+    || Object.keys(parsed[0]).length !== 3
+    || !Object.hasOwn(parsed[0], 'meta')
+    || !Object.hasOwn(parsed[0], 'results')
+    || !Object.hasOwn(parsed[0], 'success')
+    || parsed[0].success !== true
+    || !parsed[0].meta
+    || typeof parsed[0].meta !== 'object'
+    || Array.isArray(parsed[0].meta)
+    || !Array.isArray(parsed[0].results)
+    || parsed[0].results.length !== 0) {
+    fail('CORE_MIGRATION_STAGE_PREFLIGHT_FAILED')
+  }
+  return Object.freeze({ ready: true })
+}
+
+const runnerTarget = (env, input) => {
+  const runner = env.BWM_LOCAL_RUNNER_MODE === LOCAL_HARNESS_RUNNER_MODE
+  if (env.BWM_LOCAL_RUNNER_MODE !== undefined && !runner) {
+    fail('CORE_MIGRATION_STAGE_INPUT_INVALID')
+  }
+  if (!runner) {
+    return Object.freeze({
+      configPath: join(PROJECT_ROOT, 'wrangler.json'),
+      migrationsDirectory: null,
+      outputRoot: OUTPUT_ROOT,
+      persistencePath: input.local ? LOCAL_PERSISTENCE_PATH : null,
+    })
+  }
+  if (!input.local
+    || typeof env.BWM_LOCAL_PERSISTENCE_PATH !== 'string'
+    || !isAbsolute(env.BWM_LOCAL_PERSISTENCE_PATH)
+    || resolve(env.BWM_LOCAL_PERSISTENCE_PATH) !== env.BWM_LOCAL_PERSISTENCE_PATH) {
+    fail('CORE_MIGRATION_STAGE_INPUT_INVALID')
+  }
+  const persistencePath = realpathSync(env.BWM_LOCAL_PERSISTENCE_PATH)
+  const root = realpathSync(dirname(persistencePath))
+  const outputRoot = realpathSync(join(root, LOCAL_HARNESS_MIGRATIONS_NAME))
+  assertPrivateDirectory(outputRoot)
+  return Object.freeze({
+    configPath: realpathSync(join(root, LOCAL_HARNESS_WRANGLER_NAME)),
+    migrationsDirectory: join(outputRoot, LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME),
+    outputRoot,
+    persistencePath,
+  })
+}
+
+const preflightCoreMigrationStageB = ({ configPath, env, input, persistencePath }) => {
+  const args = [
+    WRANGLER_SCRIPT,
+    '--config',
+    configPath,
+    '--x-provision=false',
+    '--x-auto-create=false',
+    '--install-skills=false',
+    'd1',
+    'execute',
+    'DB',
+    ...(input.local ? ['--local'] : []),
+    ...(persistencePath ? ['--persist-to', persistencePath] : []),
+    '--command',
+    CORE_DIRECTORY_INVARIANT_FAILURE_SQL,
+    '--json',
+  ]
+  const child = spawnSync(process.execPath, args, {
+    cwd: PROJECT_ROOT,
+    encoding: 'utf8',
+    env,
+    maxBuffer: MAX_PREFLIGHT_OUTPUT_BYTES,
+    shell: false,
+  })
+  if (child.error
+    || child.signal !== null
+    || child.status !== 0
+    || typeof child.stdout !== 'string') {
+    fail('CORE_MIGRATION_STAGE_PREFLIGHT_FAILED')
+  }
+  return parseCoreMigrationStageBPreflight(child.stdout)
 }
 
 export function runCoreMigrationStage({
@@ -186,13 +309,41 @@ export function runCoreMigrationStage({
   env = process.env,
 } = {}) {
   const input = normalizeCoreMigrationStageInput(env, argv)
-  const generated = generateCoreMigrationStage({
-    configPath: join(PROJECT_ROOT, 'wrangler.json'),
-    outputRoot: OUTPUT_ROOT,
-    sourceDirectory: SOURCE_DIRECTORY,
-    stage: input.stage,
-  })
-  if (generated.names.length !== CORE_MIGRATION_STAGE_A_NAMES.length) fail()
+  const target = runnerTarget(env, input)
+  const preflightStageB = input.stage === 'stage-b'
+    ? () => preflightCoreMigrationStageB({
+        configPath: target.configPath,
+        env,
+        input,
+        persistencePath: target.persistencePath,
+      })
+    : undefined
+  const generated = target.migrationsDirectory
+    ? (() => {
+        if (input.stage === 'stage-b') {
+          const ready = preflightStageB()
+          if (ready.ready !== true) fail('CORE_MIGRATION_STAGE_PREFLIGHT_FAILED')
+        }
+        return {
+          configPath: target.configPath,
+          ...materializeCoreMigrationStage({
+            sourceDirectory: SOURCE_DIRECTORY,
+            stage: input.stage,
+            targetDirectory: target.migrationsDirectory,
+          }),
+        }
+      })()
+    : exposeCoreMigrationStage({
+        configPath: target.configPath,
+        outputRoot: target.outputRoot,
+        preflightStageB,
+        sourceDirectory: SOURCE_DIRECTORY,
+        stage: input.stage,
+      })
+  const expectedNames = input.stage === 'stage-a'
+    ? CORE_MIGRATION_STAGE_A_NAMES
+    : CORE_MIGRATION_STAGE_B_NAMES
+  if (generated.names.length !== expectedNames.length) fail()
   const args = [
     WRANGLER_SCRIPT,
     '--config',
@@ -205,6 +356,7 @@ export function runCoreMigrationStage({
     'apply',
     'DB',
     ...(input.local ? ['--local'] : []),
+    ...(target.persistencePath ? ['--persist-to', target.persistencePath] : []),
   ]
   const child = spawnSync(process.execPath, args, {
     cwd: PROJECT_ROOT,

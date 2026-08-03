@@ -2,6 +2,10 @@ import { env } from 'cloudflare:workers'
 import { buildBootstrapCreationBatch } from '../../scripts/bootstrap-core.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { NOW_MS } from './fixtures.js'
+import {
+  applyCoreDirectoryStageB,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 
 export const BOOTSTRAP_SCOPE = Object.freeze({
   id: 'centre_1',
@@ -28,10 +32,19 @@ export const bootstrapInput = (suffix) => ({
   scope: BOOTSTRAP_SCOPE,
 })
 
-export const bootstrapKeyring = (suffix) => createKeyring(
-  env,
-  bootstrapInput(suffix).keyringConfig,
-)
+export const ensureBootstrapStageB = async () => {
+  const applied = await env.DB.prepare(
+    "SELECT name FROM d1_migrations WHERE name='0010_specialist_lifecycle_assertion.sql'"
+  ).first()
+  if (applied !== null) return
+  await completeCoreDirectoryStageA()
+  await applyCoreDirectoryStageB()
+}
+
+export const bootstrapKeyring = async (suffix) => {
+  await ensureBootstrapStageB()
+  return createKeyring(env, bootstrapInput(suffix).keyringConfig)
+}
 
 export const executeBootstrapBatch = (batch) => env.DB.batch(batch.map(
   ({ sql, params }) => env.DB.prepare(sql).bind(...params),

@@ -182,6 +182,17 @@ const failBatchAtDb = (failureIndex) => ({
   },
 })
 
+const corruptBeforeFinalGuardDb = (corruptionStatements) => ({
+  prepare: env.DB.prepare.bind(env.DB),
+  batch(statements) {
+    return env.DB.batch([
+      ...statements.slice(0, -1),
+      ...corruptionStatements,
+      statements.at(-1),
+    ])
+  },
+})
+
 async function pendingPractitioner(cryptoContext, prefix) {
   const email = `${prefix}-${serial}@example.test`
   const created = await invite(cryptoContext, {
@@ -554,6 +565,63 @@ describe('retained specialist lifecycle', () => {
         idFactory: ids(`rollback_activation_${serial}_${failureIndex}`),
       })).rejects.toThrow()
       expect(await lifecycleState()).toEqual(before)
+    }
+  })
+
+  it('final supported-writer guard rolls back lifecycle invariant corruption', async () => {
+    const cryptoContext = await context()
+    const { created, email } = await pendingPractitioner(
+      cryptoContext,
+      'guarded_activation',
+    )
+    const staffId = created.data.staff.id
+    const specialistId = created.data.staff.specialistId
+    const before = await lifecycleState()
+    const cases = [
+      [
+        'pointer/profile',
+        [env.DB.prepare(
+          `UPDATE staff_users
+           SET role='owner',specialist_id=NULL,version=version+1
+           WHERE id=?`
+        ).bind(staffId)],
+      ],
+      [
+        'status',
+        [
+          env.DB.prepare(
+            `INSERT INTO record_versions
+             (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+              changed_at,correlation_id)
+             SELECT ?,entity_type,entity_id,version+1,snapshot_envelope,
+                    changed_by_staff_id,changed_at,correlation_id
+             FROM record_versions
+             WHERE entity_type='specialist' AND entity_id=? AND version=2`
+          ).bind(`rv_guard_status_${serial}`, specialistId),
+          env.DB.prepare(
+            `UPDATE specialists
+             SET status='archived',version=version+1,archived_at=?
+             WHERE id=?`
+          ).bind(NOW, specialistId),
+        ],
+      ],
+      [
+        'current snapshot',
+        [env.DB.prepare(
+          `UPDATE specialists
+           SET standard_rate_grosze=standard_rate_grosze+1,version=version+1
+           WHERE id=?`
+        ).bind(specialistId)],
+      ],
+    ]
+
+    for (const [label, corruptionStatements] of cases) {
+      await expect(activate(cryptoContext, email, {
+        db: corruptBeforeFinalGuardDb(corruptionStatements),
+        subject: `guarded_activation_${label.replaceAll(' ', '_')}_${serial}`,
+        idFactory: ids(`guarded_activation_${label.replaceAll(/[ /]/g, '_')}_${serial}`),
+      })).rejects.toThrow(/^IDENTITY_FAILURE$/)
+      expect(await lifecycleState(), label).toEqual(before)
     }
   })
 

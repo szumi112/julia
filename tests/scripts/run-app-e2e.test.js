@@ -363,7 +363,7 @@ test('readiness rejects a response body that stops yielding', { timeout: 100 }, 
   )
 })
 
-test('runner applies migrations, upgrades, seeds, then starts exact loopback Vite with one shared path', async () => {
+test('runner applies stage A, upgrades, applies stage B, seeds, then starts exact loopback Vite', async () => {
   const calls = []
   const signals = new EventEmitter()
   const vite = new EventEmitter()
@@ -419,7 +419,7 @@ test('runner applies migrations, upgrades, seeds, then starts exact loopback Vit
 
   assert.deepEqual(result, { code: 'APP_E2E_READY', ok: true })
   const runs = calls.filter(({ kind }) => kind === 'run')
-  assert.equal(runs.length, 3)
+  assert.equal(runs.length, 4)
   assert.match(runs[0].args.join(' '), /d1 migrations apply DB --local/)
   assert.deepEqual(
     runs[0].args.slice(-2),
@@ -436,9 +436,12 @@ test('runner applies migrations, upgrades, seeds, then starts exact loopback Vit
   assert.match(runs[1].args.join(' '), /scripts\/upgrade-core-directory\.js/)
   assert.equal(runs[1].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
   assert.equal(runs[1].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
-  assert.match(runs[2].args.join(' '), /scripts\/seed-local\.mjs/)
+  assert.match(runs[2].args.join(' '), /scripts\/apply-core-migration-stage\.js stage-b --local/)
   assert.equal(runs[2].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
   assert.equal(runs[2].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
+  assert.match(runs[3].args.join(' '), /scripts\/seed-local\.mjs/)
+  assert.equal(runs[3].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
+  assert.equal(runs[3].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
   const start = calls.find(({ kind }) => kind === 'start')
   assert.ok(start)
   assert.deepEqual(start.args.slice(1), [
@@ -978,6 +981,7 @@ test('runner interruption kills a stubborn inherited seed descendant before clea
           runs += 1
           if (runs === 1) return { code: 0, stderr: '', stdout: '' }
           if (runs === 2) return { code: 0, stderr: '', stdout: UPGRADE_COMPLETE_OUTPUT }
+          if (runs === 3) return { code: 0, stderr: '', stdout: '' }
           return runBoundedAppChild({
             args: ['-e', leaderSource],
             command: realpathSync(process.execPath),
@@ -1053,6 +1057,7 @@ test('runner seed-stage deadline kills a pipe-holding descendant and forbids Vit
           runs += 1
           if (runs === 1) return { code: 0, stderr: '', stdout: '' }
           if (runs === 2) return { code: 0, stderr: '', stdout: UPGRADE_COMPLETE_OUTPUT }
+          if (runs === 3) return { code: 0, stderr: '', stdout: '' }
           return runBoundedAppChild({
             args: ['-e', leaderSource],
             command: realpathSync(process.execPath),
@@ -1451,9 +1456,12 @@ test('default harness writes only credential-free private configs with separated
           assert.equal(statSync(file).mode & 0o777, 0o600)
         }
         assert.doesNotMatch(wrangler, /"secrets"/)
-        const migrationNames = readdirSync(`${ownedRoot}/migrations`).sort()
+        const migrationNames = readdirSync(`${ownedRoot}/migrations/active`).sort()
         assert.deepEqual(migrationNames, STAGE_A_MIGRATION_NAMES)
-        assert.equal(JSON.parse(wrangler).d1_databases[0].migrations_dir, `${ownedRoot}/migrations`)
+        assert.equal(
+          JSON.parse(wrangler).d1_databases[0].migrations_dir,
+          `${ownedRoot}/migrations/active`,
+        )
         assert.match(vite, /envDir: false/)
         assert.match(vite, /inspectorPort: false/)
         assert.match(vite, /remoteBindings: false/)
@@ -1558,8 +1566,8 @@ test('runner rejects a listener ownership change across the readiness response',
   assert.equal(probes, 2)
 })
 
-test('runner removes its directory on migration, upgrade, seed, pre-Vite, and readiness failures', async () => {
-  for (const failureAt of ['migration', 'upgrade', 'seed', 'start', 'readiness']) {
+test('runner removes its directory on migration, upgrade, sealing, seed, pre-Vite, and readiness failures', async () => {
+  for (const failureAt of ['migration', 'upgrade', 'sealing', 'seed', 'start', 'readiness']) {
     const removed = []
     const vite = new EventEmitter()
     vite.kill = () => {
@@ -1582,7 +1590,8 @@ test('runner removes its directory on migration, upgrade, seed, pre-Vite, and re
           runCount += 1
           if ((failureAt === 'migration' && runCount === 1)
             || (failureAt === 'upgrade' && runCount === 2)
-            || (failureAt === 'seed' && runCount === 3)) {
+            || (failureAt === 'sealing' && runCount === 3)
+            || (failureAt === 'seed' && runCount === 4)) {
             return { code: 1, stdout: 'sensitive', stderr: 'sensitive' }
           }
           return {

@@ -24,6 +24,7 @@
     "seed:local": "node scripts/seed-local.mjs",
     "dev:app:e2e": "node scripts/run-app-e2e.mjs",
     "migrate:core:stage-a": "APP_ENV=development DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-a --local",
+    "migrate:core:stage-b": "APP_ENV=development DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-b --local",
     "upgrade:core-directory": "APP_ENV=development DATA_MODE=fictional node scripts/upgrade-core-directory.js"
   },
   "dependencies": {

@@ -3,6 +3,7 @@ import { isAbsolute, join } from 'node:path'
 export const LOCAL_HARNESS_RUNNER_MODE = 'runner-v1'
 export const LOCAL_HARNESS_WRANGLER_NAME = '.bwm-harness-wrangler.json'
 export const LOCAL_HARNESS_MIGRATIONS_NAME = 'migrations'
+export const LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME = 'active'
 export const LOCAL_HARNESS_CORE_DIRECTORY_COMPLETE = '{"createdCount":0,"processedCount":0,"status":"complete"}\n'
 
 export function buildLocalHarnessWranglerConfig(

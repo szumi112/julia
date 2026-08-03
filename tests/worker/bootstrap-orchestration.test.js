@@ -4,7 +4,7 @@ import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { runBootstrapOwner } from '../../scripts/bootstrap-owner.mjs'
 import * as handlers from '../../worker/jobs/handlers.js'
 import { NOW_MS } from './fixtures.js'
-import { sequence } from './bootstrap-helpers.js'
+import { ensureBootstrapStageB, sequence } from './bootstrap-helpers.js'
 
 const key = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
 
@@ -32,6 +32,7 @@ const correlationSequence = () => {
 }
 
 it('creates once, returns a fixed retry, resumes the same IDs, and then no-ops', async () => {
+  await ensureBootstrapStageB()
   const ids = sequence('orchestration_id')
   const owners = sequence('orchestration_owner')
   const nonces = sequence('orchestration_nonce')

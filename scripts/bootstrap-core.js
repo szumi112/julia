@@ -6,6 +6,7 @@ import {
 } from '../worker/security/envelope.js'
 import { accessDesiredFingerprint } from '../worker/jobs/access-reconciliation.js'
 import { retryDelayMs } from '../worker/jobs/outbox.js'
+import { CORE_DIRECTORY_INVARIANT_FAILURE_SQL } from './core-migration-stages.js'
 
 const DAY_MS = 86_400_000
 const OUTBOX_LEASE_MS = 60_000
@@ -27,6 +28,7 @@ const MIGRATIONS = Object.freeze([
   '0007_operational_health_indexes.sql',
   '0008_outbox_drain_heartbeat.sql',
   '0009_core_directory_expand.sql',
+  '0010_specialist_lifecycle_assertion.sql',
 ])
 
 const TABLE_COLUMNS = Object.freeze({
@@ -372,8 +374,8 @@ const GENESIS_STATES = Object.freeze([
 const OUTBOX_DRAIN_HEARTBEAT_KEY = 'outbox.drain.last_success'
 const CORE_DIRECTORY_UPGRADE = Object.freeze({
   key: 'core_directory_specialist_backfill_v1',
-  value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}',
-  version: 1,
+  value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"complete"}',
+  version: 2,
 })
 const SYSTEM_STATE_COUNT = GENESIS_STATES.length + 2
 
@@ -537,7 +539,7 @@ const validAccessStateShape = (rows) => {
       && upgradeValue.afterStaffId === null
       && upgradeValue.createdCount === 0
       && upgradeValue.processedCount === 0
-      && upgradeValue.status === 'pending'
+      && upgradeValue.status === 'complete'
       && exactKeys(heartbeatValue, ['completedAt'])
       && JSON.stringify(heartbeatValue) === heartbeat.value_json
       && (heartbeatValue.completedAt === null || (
@@ -573,6 +575,7 @@ export async function inspectBootstrapSchema(db) {
       columnResult,
       stateResult,
       staffCount,
+      directoryFailure,
       ...requiredIndexResults
     ] = await Promise.all([
       db.prepare('SELECT name FROM d1_migrations ORDER BY id').all(),
@@ -597,6 +600,7 @@ export async function inspectBootstrapSchema(db) {
         'SELECT key,value_json,version,updated_at FROM system_state ORDER BY key'
       ).all(),
       db.prepare('SELECT count(*) AS count FROM staff_users').first(),
+      db.prepare(CORE_DIRECTORY_INVARIANT_FAILURE_SQL).first(),
       ...REQUIRED_INDEXES.flatMap(({ name, table }) => [
         db.prepare(
           `SELECT name,type,sql
@@ -623,7 +627,8 @@ export async function inspectBootstrapSchema(db) {
       || migrations.some((row, index) => !exactKeys(row, ['name'])
         || row.name !== MIGRATIONS[index])
       || !Array.isArray(schema)
-      || !Array.isArray(columns)) return Object.freeze({ kind: 'refused' })
+      || !Array.isArray(columns)
+      || directoryFailure !== null) return Object.freeze({ kind: 'refused' })
 
     const tableRows = schema.filter(({ type }) => type === 'table')
     const triggerRows = schema.filter(({ type }) => type === 'trigger')
@@ -1033,7 +1038,21 @@ export async function buildBootstrapCreationBatch(input = {}) {
              AND snapshot_envelope=? AND changed_by_staff_id IS NULL
              AND changed_at=? AND correlation_id=?
          )
-         AND (SELECT count(*) FROM audit_events)=1
+         AND (SELECT count(*) FROM audit_events)=2
+         AND EXISTS (
+           SELECT 1 FROM audit_events AS upgrade_audit
+           JOIN system_state AS upgrade_state
+             ON upgrade_state.key='core_directory_specialist_backfill_v1'
+           WHERE upgrade_audit.actor_staff_id IS NULL
+             AND upgrade_audit.action='core_directory.upgrade.advanced'
+             AND upgrade_audit.entity_type='system_state'
+             AND upgrade_audit.entity_id=upgrade_state.key
+             AND upgrade_audit.result='success'
+             AND upgrade_audit.reason_envelope IS NULL
+             AND upgrade_audit.metadata_json=
+               '{"createdCount":0,"processedCount":0,"stateVersion":2}'
+             AND upgrade_audit.occurred_at=upgrade_state.updated_at
+         )
          AND EXISTS (
            SELECT 1 FROM audit_events
            WHERE id=? AND occurred_at=? AND actor_staff_id IS NULL
@@ -1061,8 +1080,8 @@ export async function buildBootstrapCreationBatch(input = {}) {
          AND EXISTS (
            SELECT 1 FROM system_state
            WHERE key='core_directory_specialist_backfill_v1'
-             AND value_json='{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}'
-             AND version=1
+             AND value_json='{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"complete"}'
+             AND version=2
              AND updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', julianday(updated_at))
          )
          AND EXISTS (
@@ -1258,6 +1277,28 @@ const exactReleasedLease = (row) => exactKeys(
   && Number.isSafeInteger(row.version)
   && row.version >= 1
   && validInstant(row.updated_at)
+
+const validCoreDirectoryCompletionAudit = (row, states) => {
+  const upgrade = states.find(({ key }) => key === CORE_DIRECTORY_UPGRADE.key)
+  if (!upgrade) return false
+  try {
+    const normalized = normalizeBootstrapAuditEvent(row)
+    return normalized.action === 'core_directory.upgrade.advanced'
+      && normalized.occurred_at === upgrade.updated_at
+      && normalized.actor_staff_id === null
+      && normalized.entity_type === 'system_state'
+      && normalized.entity_id === CORE_DIRECTORY_UPGRADE.key
+      && normalized.result === 'success'
+      && normalized.reason_envelope === null
+      && sameRow(normalized.metadata, {
+        createdCount: 0,
+        processedCount: 0,
+        stateVersion: 2,
+      })
+  } catch {
+    return false
+  }
+}
 
 const validateJobBase = (row, createdAt) => {
   if (!exactKeys(row, TABLE_COLUMNS.outbox_jobs)
@@ -1622,6 +1663,9 @@ const inspectBootstrapAggregateFromSnapshot = async ({
     }
     const audit = audits.find(({ action }) => action === 'staff.bootstrap')
     const accessAudit = audits.find(({ action }) => action === 'staff.access.reconciled')
+    const upgradeAudit = audits.find(
+      ({ action }) => action === 'core_directory.upgrade.advanced',
+    )
     const normalizedAudit = normalizeBootstrapAuditEvent(audit)
     if (normalizedAudit.actor_staff_id !== null
       || audit.entity_id !== staff.id
@@ -1634,7 +1678,8 @@ const inspectBootstrapAggregateFromSnapshot = async ({
       || normalizedAudit.metadata.invitationVersion !== 1
       || normalizedAudit.metadata.specialistVersion !== null
       || normalizedAudit.metadata.staffVersion !== 1
-      || audits.length !== (published ? 2 : 1)
+      || !validCoreDirectoryCompletionAudit(upgradeAudit, states)
+      || audits.length !== (published ? 3 : 2)
       || (published && (
         !exactKeys(accessAudit, TABLE_COLUMNS.audit_events)
         || !ID.test(accessAudit.id ?? '')
@@ -1858,11 +1903,12 @@ export async function inspectBootstrapEntryState(input = {}) {
       && staffRows.length === 0
       && invitations.length === 0
       && versions.length === 0
-      && audits.length === 0
+      && audits.length === 1
       && jobs.length === 0
       && attempts.length === 0
       && emptyTables.every((rows) => rows.length === 0)
       && validAccessStateShape(states)
+      && validCoreDirectoryCompletionAudit(audits[0], states)
       && states.slice(0, GENESIS_STATES.length).every(
         (row, index) => sameRow(row, GENESIS_STATES[index]),
       )) {

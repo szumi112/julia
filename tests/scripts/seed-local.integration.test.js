@@ -22,6 +22,7 @@ import { createKeyring } from '../../worker/security/keyring.js'
 import { materializeCoreMigrationStage } from '../../scripts/apply-core-migration-stage.js'
 import {
   buildLocalHarnessWranglerConfig,
+  LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
   LOCAL_HARNESS_RUNNER_MODE,
   LOCAL_HARNESS_WRANGLER_NAME,
 } from '../../scripts/local-harness-core.js'
@@ -34,6 +35,7 @@ const key = (character) => Buffer.alloc(32, character.charCodeAt(0)).toString('b
 const configPath = (root) => join(root, LOCAL_HARNESS_WRANGLER_NAME)
 const persistencePath = (root) => join(root, 'state')
 const UPGRADE = realpathSync(join(PROJECT_ROOT, 'scripts/upgrade-core-directory.js'))
+const APPLY_STAGE = realpathSync(join(PROJECT_ROOT, 'scripts/apply-core-migration-stage.js'))
 
 const privateChildEnv = (root) => ({
   CI: '1',
@@ -70,14 +72,18 @@ const seedEnv = (root) => ({
 const applyMigrations = (root) => {
   mkdirSync(persistencePath(root), { mode: 0o700 })
   const migrationsDirectory = join(root, 'migrations')
+  const activeMigrationsDirectory = join(
+    migrationsDirectory,
+    LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
+  )
   materializeCoreMigrationStage({
     sourceDirectory: join(PROJECT_ROOT, 'migrations'),
     stage: 'stage-a',
-    targetDirectory: migrationsDirectory,
+    targetDirectory: activeMigrationsDirectory,
   })
   writeFileSync(
     configPath(root),
-    buildLocalHarnessWranglerConfig(PROJECT_ROOT, migrationsDirectory),
+    buildLocalHarnessWranglerConfig(PROJECT_ROOT, activeMigrationsDirectory),
     { encoding: 'utf8', flag: 'wx', mode: 0o600 },
   )
   const child = spawnSync(NODE, [
@@ -120,6 +126,20 @@ const applyMigrations = (root) => {
     || upgrade.stdout !== '{"createdCount":0,"processedCount":0,"status":"complete"}\n') {
     assert.fail('SEED_LOCAL_TEST_UPGRADE_FAILED')
   }
+  const sealing = spawnSync(NODE, [APPLY_STAGE, 'stage-b', '--local'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...privateChildEnv(root),
+      APP_ENV: 'development',
+      BWM_LOCAL_PERSISTENCE_PATH: persistencePath(root),
+      BWM_LOCAL_RUNNER_MODE: LOCAL_HARNESS_RUNNER_MODE,
+      DATA_MODE: 'fictional',
+    },
+    maxBuffer: 64 * 1024,
+    shell: false,
+  })
+  if (sealing.status !== 0) assert.fail('SEED_LOCAL_TEST_SEALING_FAILED')
 }
 
 const wranglerExecute = (root, operationArgs) => spawnSync(NODE, [
