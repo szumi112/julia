@@ -29,6 +29,7 @@ import {
 } from '../../scripts/seed-core.js'
 import {
   buildLocalHarnessWranglerConfig,
+  LOCAL_HARNESS_MIGRATIONS_NAME,
   LOCAL_HARNESS_RUNNER_MODE,
   LOCAL_HARNESS_WRANGLER_NAME,
 } from '../../scripts/local-harness-core.js'
@@ -51,6 +52,12 @@ const MIGRATION_STATES = [
     key: 'access.reconcile.lease',
     updated_at: '2026-07-30T00:00:00.000Z',
     value_json: '{"expiresAt":null,"nonce":null,"owner":null}',
+    version: 1,
+  },
+  {
+    key: 'core_directory_specialist_backfill_v1',
+    updated_at: '2026-08-03T12:34:56.789Z',
+    value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}',
     version: 1,
   },
   {
@@ -93,11 +100,13 @@ const baseEnv = (path) => ({
 })
 const runnerEnv = (t) => {
   const root = makeDirectory(t)
+  const migrations = join(root, LOCAL_HARNESS_MIGRATIONS_NAME)
   const state = join(root, 'state')
+  mkdirSync(migrations, { mode: 0o700 })
   mkdirSync(state, { mode: 0o700 })
   writeFileSync(
     join(root, LOCAL_HARNESS_WRANGLER_NAME),
-    buildLocalHarnessWranglerConfig(realpathSync(resolve('.'))),
+    buildLocalHarnessWranglerConfig(realpathSync(resolve('.')), realpathSync(migrations)),
     { encoding: 'utf8', flag: 'wx', mode: 0o600 },
   )
   return {
@@ -124,7 +133,7 @@ test('local seed manifest owns exactly three deterministic fictional identities'
   assert.equal(Object.isFrozen(LOCAL_SEED_MANIFEST), true)
 })
 
-test('local seed recognizes only the exact four-row migration baseline', async (t) => {
+test('local seed recognizes only the exact five-row stage-A migration baseline', async (t) => {
   assert.deepEqual(await inspectLocalSeedState({
     db: stateSnapshotDb(MIGRATION_STATES),
     keyring: {},
@@ -141,16 +150,19 @@ test('local seed recognizes only the exact four-row migration baseline', async (
       })
     }],
     ['mutated heartbeat value', (states) => {
-      states[3].value_json = '{"completedAt":null,"extra":true}'
+      states[4].value_json = '{"completedAt":null,"extra":true}'
     }],
-    ['mutated heartbeat version', (states) => { states[3].version = 2 }],
+    ['mutated heartbeat version', (states) => { states[4].version = 2 }],
     ['noncanonical heartbeat timestamp', (states) => {
-      states[3].updated_at = '2026-08-03T12:34:56Z'
+      states[4].updated_at = '2026-08-03T12:34:56Z'
     }],
     ['impossible heartbeat timestamp', (states) => {
-      states[3].updated_at = '2026-02-30T12:34:56.789Z'
+      states[4].updated_at = '2026-02-30T12:34:56.789Z'
     }],
-    ['extra heartbeat field', (states) => { states[3].extra = true }],
+    ['extra heartbeat field', (states) => { states[4].extra = true }],
+    ['mutated upgrade state', (states) => {
+      states[3].value_json = '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"complete"}'
+    }],
     ['mutated access genesis', (states) => { states[1].value_json = '{"generation":1}' }],
   ]
   for (const [name, mutate] of cases) {
@@ -374,7 +386,10 @@ test('runner-mode seed rejects an oversized private config before reading it or 
     LOCAL_HARNESS_WRANGLER_NAME,
   )
   const expected = Buffer.from(
-    buildLocalHarnessWranglerConfig(realpathSync(resolve('.'))),
+    buildLocalHarnessWranglerConfig(
+      realpathSync(resolve('.')),
+      join(dirname(configPath), LOCAL_HARNESS_MIGRATIONS_NAME),
+    ),
     'utf8',
   )
   writeFileSync(configPath, Buffer.concat([expected, Buffer.from('x')]))
@@ -449,7 +464,10 @@ test('runner-mode seed refuses a byte-identical private config inode replacement
         renameSync(configPath, movedPath)
         writeFileSync(
           configPath,
-          buildLocalHarnessWranglerConfig(realpathSync(resolve('.'))),
+          buildLocalHarnessWranglerConfig(
+            realpathSync(resolve('.')),
+            join(dirname(configPath), LOCAL_HARNESS_MIGRATIONS_NAME),
+          ),
           { encoding: 'utf8', flag: 'wx', mode: 0o600 },
         )
         utimesSync(configPath, oldAccess, new Date())

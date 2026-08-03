@@ -1,8 +1,17 @@
+import { isAbsolute, join } from 'node:path'
+
 export const LOCAL_HARNESS_RUNNER_MODE = 'runner-v1'
 export const LOCAL_HARNESS_WRANGLER_NAME = '.bwm-harness-wrangler.json'
+export const LOCAL_HARNESS_MIGRATIONS_NAME = 'migrations'
 
-export function buildLocalHarnessWranglerConfig(projectRoot) {
-  if (typeof projectRoot !== 'string' || !projectRoot.startsWith('/')) {
+export function buildLocalHarnessWranglerConfig(
+  projectRoot,
+  migrationsDirectory = join(projectRoot, '.core-migrations/active'),
+) {
+  if (typeof projectRoot !== 'string'
+    || !isAbsolute(projectRoot)
+    || typeof migrationsDirectory !== 'string'
+    || !isAbsolute(migrationsDirectory)) {
     throw new Error('LOCAL_HARNESS_CONFIG_INVALID')
   }
   return JSON.stringify({
@@ -21,7 +30,7 @@ export function buildLocalHarnessWranglerConfig(projectRoot) {
       database_name: 'bearwithme-panel-local',
       database_id: '00000000-0000-0000-0000-000000000001',
       preview_database_id: 'bearwithme-panel-local',
-      migrations_dir: `${projectRoot}/migrations`,
+      migrations_dir: migrationsDirectory,
     }],
     r2_buckets: [{
       binding: 'ARCHIVE',

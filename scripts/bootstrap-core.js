@@ -25,11 +25,14 @@ const MIGRATIONS = Object.freeze([
   '0006_delivery_attempt_uniqueness.sql',
   '0007_operational_health_indexes.sql',
   '0008_outbox_drain_heartbeat.sql',
+  '0009_core_directory_expand.sql',
 ])
 
 const TABLE_COLUMNS = Object.freeze({
   audit_events: ['id', 'occurred_at', 'actor_staff_id', 'action', 'entity_type', 'entity_id', 'result', 'reason_envelope', 'correlation_id', 'metadata_json'],
   backup_runs: ['id', 'local_day', 'local_month', 'retention_class', 'status', 'version', 'export_bookmark', 'object_key', 'manifest_key', 'ssec_key_version', 'wrapped_ssec_key_b64', 'wrap_nonce_b64', 'object_etag', 'object_size', 'started_at', 'completed_at', 'expires_at', 'restore_verified_at', 'last_error_code', 'created_at', 'updated_at'],
+  client_assignments: ['id', 'client_id', 'specialist_id', 'starts_at', 'ends_at', 'assigned_by_staff_id', 'version', 'created_at', 'updated_at'],
+  clients: ['id', 'identity_envelope', 'status', 'version', 'archived_at', 'created_at', 'updated_at'],
   data_keys: ['id', 'scope_type', 'scope_id', 'purpose', 'dek_version', 'wrapped_key_b64', 'wrap_nonce_b64', 'kek_version', 'created_at', 'retired_at'],
   delivery_attempts: ['id', 'outbox_job_id', 'provider', 'provider_reference', 'status', 'error_code', 'attempted_at'],
   idempotency_records: ['actor_id', 'operation', 'idempotency_key', 'request_hash', 'resource_type', 'resource_id', 'response_envelope', 'created_at', 'expires_at'],
@@ -38,6 +41,7 @@ const TABLE_COLUMNS = Object.freeze({
   outbox_jobs: ['id', 'type', 'aggregate_type', 'aggregate_id', 'payload_envelope', 'idempotency_key', 'status', 'attempt_count', 'max_attempts', 'scheduled_at', 'lease_owner', 'lease_expires_at', 'last_error_code', 'created_at', 'updated_at'],
   record_versions: ['id', 'entity_type', 'entity_id', 'version', 'snapshot_envelope', 'changed_by_staff_id', 'changed_at', 'correlation_id'],
   scheduler_runs: ['id', 'scheduled_for', 'started_at', 'completed_at', 'status', 'attempt_count', 'lease_owner', 'lease_expires_at', 'claimed_jobs', 'succeeded_jobs', 'failed_jobs', 'error_code'],
+  specialists: ['id', 'staff_user_id', 'standard_rate_grosze', 'status', 'version', 'archived_at', 'created_at', 'updated_at'],
   staff_invitations: ['id', 'staff_id', 'email_lookup', 'email_envelope', 'display_name_envelope', 'role', 'status', 'inviter_id', 'expires_at', 'access_allowed_at', 'email_sent_at', 'activated_at', 'revoked_at', 'version', 'created_at', 'updated_at'],
   staff_users: ['id', 'email_lookup', 'email_envelope', 'display_name_envelope', 'role', 'status', 'access_subject', 'specialist_id', 'version', 'activated_at', 'disabled_at', 'created_at', 'updated_at'],
   system_state: ['key', 'value_json', 'version', 'updated_at'],
@@ -46,6 +50,8 @@ const TABLE_COLUMNS = Object.freeze({
 const TABLE_HASHES = Object.freeze({
   audit_events: 'c33269b506c3f32e5eaaf335f673a4a48796f00803ae66c0e4e47a4f382bb67a',
   backup_runs: '83798b62670f65ce4c2ac7554929a845de6ed0b84294e0a68a73212e6225300f',
+  client_assignments: '7cec38bee8f761c3b859d266eb600ff92d2e6c7c8381dfb2e08b68b7c5bcd1a9',
+  clients: '827def5138314e49fe884f9dbd99940c0f9eea0943ee9398ac699c909b8657e7',
   data_keys: '5e7b7a2f3853932e8dce56f06542abf77a4366a592f9b28969d9433139a9eb9c',
   delivery_attempts: 'bed3635d67f1b5bc58dff7f1ce791b9ab504776cd51c9e85a549ca1cadb37f44',
   idempotency_records: '77bb61a97c5f389b44e143039992c828ab860ad832701cf80deb678c73934fd6',
@@ -54,6 +60,7 @@ const TABLE_HASHES = Object.freeze({
   outbox_jobs: 'c051a990477ff5efb82dc932d31eead7b8d15ae59b82e510c332f271537884e3',
   record_versions: 'a185ba59472d5a30d12b6f272b3c020b6b268fa6815340eb0c65892a34d10268',
   scheduler_runs: '353996a0511950d5f24aa1eb1b7f05c0fa816ef02783c3378cf1c8d265cece63',
+  specialists: '74f425ea9819c8f3e45107159e63da9c976e63fba026949c3b123b8b7ecc5909',
   staff_invitations: 'fe26c54a624d40f6061d5a6dac5233d883cd5abb2e7ca70c52b6bd178e57e07a',
   staff_users: '9df5280cca36b562d4d59142ffa116d6a1d175a855393b291688e12cde6a98af',
   system_state: '14394863ce7d8bd0af6239e90df21cbe07b4603e48a19502e08a64374a8b8ecb',
@@ -69,6 +76,17 @@ const REQUIRED_TRIGGERS = Object.freeze([
   'backup_runs_update_identity_collision',
   'backup_runs_valid_transition',
   'backup_runs_version_increment',
+  'client_assignments_identity_collision',
+  'client_assignments_immutable_identity',
+  'client_assignments_no_delete',
+  'client_assignments_valid_close',
+  'client_assignments_version_increment',
+  'clients_identity_collision',
+  'clients_immutable_identity',
+  'clients_no_delete',
+  'clients_valid_transition',
+  'clients_version_increment',
+  'core_directory_invariant_failure',
   'data_keys_identity_collision',
   'data_keys_immutable_identity',
   'data_keys_immutable_retirement',
@@ -105,6 +123,10 @@ const REQUIRED_TRIGGERS = Object.freeze([
   'scheduler_runs_no_delete',
   'scheduler_runs_update_identity_collision',
   'scheduler_runs_valid_transition',
+  'specialists_identity_collision',
+  'specialists_immutable_identity',
+  'specialists_no_delete',
+  'specialists_version_increment',
   'staff_invitations_identity_collision',
   'staff_invitations_immutable_identity',
   'staff_invitations_no_delete',
@@ -133,6 +155,17 @@ const TRIGGER_HASHES = Object.freeze({
   backup_runs_update_identity_collision: '4331f609472e85a759ad0aabb5094f79452da70d791e4d148b9b05c50b264198',
   backup_runs_valid_transition: 'd78b161dc3fd4268d011f1fd532316c65254eacf00589f9dc3481963c3c24fa4',
   backup_runs_version_increment: 'ad5247d8bc5ebb4c2db90b7357c5fadd0e74f0e82fe1ca3824899293610783e9',
+  client_assignments_identity_collision: 'b070063724c9c930f3d704021c358ebbeb196fd999fc90cf1c41994b35422c31',
+  client_assignments_immutable_identity: 'f250e1a68cc8851288945617fd14ffb599139b5fe8bc37905bf3a02ddddd9df4',
+  client_assignments_no_delete: 'f384d9d6a8cf129421cc1593f0b3730b558f9a6c02ebe6fb22b818774972c0d0',
+  client_assignments_valid_close: '14da202a7e16fdd0cf2fab2c4a0dceec91deff5ea1796a4a74889f9c88f21b1e',
+  client_assignments_version_increment: '4209acadb73d02fc594a364acc127d62057a064a56dd5396685ccda5ae3106cf',
+  clients_identity_collision: 'aa66580ad0488d5189e31b308240e5b3007c123416cb13b5618227273b61e84c',
+  clients_immutable_identity: '2f0f48e28155d2aaa8a91d45cf440ad5020168341e9db2304c5f7c81d5cff8c2',
+  clients_no_delete: '529d05614952a610b3d9433e0adf09c0f7f573089c5c2ec794b4d6b7b73e03ac',
+  clients_valid_transition: '3e7236734f88594b4d2dd1fa017ebf1f68353e25b15e6a11c39a2f0b7579da9a',
+  clients_version_increment: 'afe74455b38730f59b613d60d0bc8f42ddaf473d0fc9fc6d7f52d3b1f0072aa2',
+  core_directory_invariant_failure: 'ec6314a1dc791670e337122215153a35da2300c48dcc7373e38c8bca7ec8f5ee',
   data_keys_identity_collision: '61bd71c00bb44d3c36bf3ff9284850cad5451d1b4749dc42d1cc9ea160b9965a',
   data_keys_immutable_identity: 'ca7342a503f8a1c9c6b9df32974918949337ecf1403bf6c1574914a665797ec5',
   data_keys_immutable_retirement: '72a9c9a2f0b3fcf198c24aed3ef11072db52ea7d9d81b784ecace3b295a979d6',
@@ -169,6 +202,10 @@ const TRIGGER_HASHES = Object.freeze({
   scheduler_runs_no_delete: '59d2243c00ec77049971aef080f9e9d0069d205ea2b45fcad938353476bedb94',
   scheduler_runs_update_identity_collision: '8b9a92dda30de41290747921f6b9171e86c0844ba5d9c6d671cd517e1e40cf48',
   scheduler_runs_valid_transition: '7879e4a5cc160da27bb2cb7a45047b6d5b53709a476541975407a774f0a40790',
+  specialists_identity_collision: '72961249fb080ec9cdbb2e4dd5b18e2a9683423d12f87a3d209bca6c5038e119',
+  specialists_immutable_identity: '944e014f8ae045721bb02a80a21fee0c55864a70454c59833be2c30479736aa7',
+  specialists_no_delete: '10a7b55e857ed212073519966dcd304f64cf4f7abbc93fa65729e4ef6f2476af',
+  specialists_version_increment: '05efb3ba06442c5661f8c59293f530734fd22dc6ee1c7b5bb3518801a188eb65',
   staff_invitations_identity_collision: 'a0f3304f21b583febe67f22efc478d8bc107c7e014ebafb498dfef1e933a5803',
   staff_invitations_immutable_identity: 'd48590f91b878b6c6ed45c8dd1f18039067d71bef79777dcedf2922f7213a8cd',
   staff_invitations_no_delete: '2ecc6f9eb3f51ca6499dbb9658b4d9fa9c4b7d1857eec04842a18656b99ce802',
@@ -188,6 +225,7 @@ const TRIGGER_HASHES = Object.freeze({
 })
 
 const REQUIRED_VIEWS = Object.freeze({
+  core_directory_invariant_failures: 'CREATE VIEW core_directory_invariant_failures (failure_kind) AS SELECT CAST(NULL AS TEXT) WHERE 0',
   outbox_operation_guard_failures: "CREATE VIEW outbox_operation_guard_failures (operation_id) AS SELECT id FROM outbox_jobs WHERE 0",
   rate_limit_guard_failures: "CREATE VIEW rate_limit_guard_failures (audit_id) AS SELECT id FROM audit_events WHERE 0",
 })
@@ -198,6 +236,28 @@ const DELIVERY_INDEX = Object.freeze({
 })
 
 const REQUIRED_INDEXES = Object.freeze([
+  Object.freeze({
+    name: 'client_assignments_open_client_idx',
+    sql: 'CREATE UNIQUE INDEX client_assignments_open_client_idx ON client_assignments(client_id) WHERE ends_at IS NULL',
+    columns: Object.freeze([
+      Object.freeze({ cid: 1, name: 'client_id', seqno: 0 }),
+    ]),
+    partial: 1,
+    table: 'client_assignments',
+    unique: 1,
+  }),
+  Object.freeze({
+    name: 'client_assignments_specialist_ends_client_idx',
+    sql: 'CREATE INDEX client_assignments_specialist_ends_client_idx ON client_assignments(specialist_id,ends_at,client_id)',
+    columns: Object.freeze([
+      Object.freeze({ cid: 2, name: 'specialist_id', seqno: 0 }),
+      Object.freeze({ cid: 4, name: 'ends_at', seqno: 1 }),
+      Object.freeze({ cid: 1, name: 'client_id', seqno: 2 }),
+    ]),
+    partial: 0,
+    table: 'client_assignments',
+    unique: 0,
+  }),
   Object.freeze({
     ...DELIVERY_INDEX,
     columns: Object.freeze([
@@ -265,6 +325,27 @@ const REQUIRED_INDEXES = Object.freeze([
     table: 'scheduler_runs',
     unique: 0,
   }),
+  Object.freeze({
+    name: 'specialists_status_id_idx',
+    sql: 'CREATE INDEX specialists_status_id_idx ON specialists(status,id)',
+    columns: Object.freeze([
+      Object.freeze({ cid: 3, name: 'status', seqno: 0 }),
+      Object.freeze({ cid: 0, name: 'id', seqno: 1 }),
+    ]),
+    partial: 0,
+    table: 'specialists',
+    unique: 0,
+  }),
+  Object.freeze({
+    name: 'staff_users_specialist_id_idx',
+    sql: 'CREATE UNIQUE INDEX staff_users_specialist_id_idx ON staff_users(specialist_id) WHERE specialist_id IS NOT NULL',
+    columns: Object.freeze([
+      Object.freeze({ cid: 7, name: 'specialist_id', seqno: 0 }),
+    ]),
+    partial: 1,
+    table: 'staff_users',
+    unique: 1,
+  }),
 ])
 
 const GENESIS_STATES = Object.freeze([
@@ -288,14 +369,22 @@ const GENESIS_STATES = Object.freeze([
   }),
 ])
 const OUTBOX_DRAIN_HEARTBEAT_KEY = 'outbox.drain.last_success'
-const SYSTEM_STATE_COUNT = GENESIS_STATES.length + 1
+const CORE_DIRECTORY_UPGRADE = Object.freeze({
+  key: 'core_directory_specialist_backfill_v1',
+  value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}',
+  version: 1,
+})
+const SYSTEM_STATE_COUNT = GENESIS_STATES.length + 2
 
 const OTHER_EMPTY_TABLES = Object.freeze([
   'backup_runs',
+  'client_assignments',
+  'clients',
   'delivery_attempts',
   'idempotency_records',
   'operational_actions',
   'scheduler_runs',
+  'specialists',
 ])
 
 const ownObject = (value) => value !== null
@@ -402,8 +491,8 @@ const schemaSqlHash = async (value) => {
 const validAccessStateShape = (rows) => {
   if (!Array.isArray(rows) || rows.length !== SYSTEM_STATE_COUNT) return false
   try {
-    const [applied, desired, lease, heartbeat] = rows
-    if (![applied, desired, lease, heartbeat].every((row) => (
+    const [applied, desired, lease, upgrade, heartbeat] = rows
+    if (![applied, desired, lease, upgrade, heartbeat].every((row) => (
       exactKeys(row, ['key', 'value_json', 'version', 'updated_at'])
       && Number.isSafeInteger(row.version)
       && row.version >= 1
@@ -412,10 +501,12 @@ const validAccessStateShape = (rows) => {
       || applied.key !== 'access.applied_generation'
       || desired.key !== 'access.desired_generation'
       || lease.key !== 'access.reconcile.lease'
+      || upgrade.key !== CORE_DIRECTORY_UPGRADE.key
       || heartbeat.key !== OUTBOX_DRAIN_HEARTBEAT_KEY) return false
     const appliedValue = JSON.parse(applied.value_json)
     const desiredValue = JSON.parse(desired.value_json)
     const leaseValue = JSON.parse(lease.value_json)
+    const upgradeValue = JSON.parse(upgrade.value_json)
     const heartbeatValue = JSON.parse(heartbeat.value_json)
     return exactKeys(appliedValue, ['fingerprint', 'generation'])
       && /^[A-Za-z0-9_-]{43}$/.test(appliedValue.fingerprint ?? '')
@@ -428,6 +519,15 @@ const validAccessStateShape = (rows) => {
       && (leaseValue.expiresAt === null || validInstant(leaseValue.expiresAt))
       && (leaseValue.nonce === null || ID.test(leaseValue.nonce))
       && (leaseValue.owner === null || ID.test(leaseValue.owner))
+      && sameRow(upgrade, {
+        ...CORE_DIRECTORY_UPGRADE,
+        updated_at: upgrade.updated_at,
+      })
+      && exactKeys(upgradeValue, ['afterStaffId', 'createdCount', 'processedCount', 'status'])
+      && upgradeValue.afterStaffId === null
+      && upgradeValue.createdCount === 0
+      && upgradeValue.processedCount === 0
+      && upgradeValue.status === 'pending'
       && exactKeys(heartbeatValue, ['completedAt'])
       && JSON.stringify(heartbeatValue) === heartbeat.value_json
       && (heartbeatValue.completedAt === null || (
@@ -949,6 +1049,13 @@ export async function buildBootstrapCreationBatch(input = {}) {
          )
          AND EXISTS (
            SELECT 1 FROM system_state
+           WHERE key='core_directory_specialist_backfill_v1'
+             AND value_json='{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}'
+             AND version=1
+             AND updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', julianday(updated_at))
+         )
+         AND EXISTS (
+           SELECT 1 FROM system_state
            WHERE key='outbox.drain.last_success'
              AND typeof(version)='integer' AND version>=1
              AND (
@@ -961,7 +1068,10 @@ export async function buildBootstrapCreationBatch(input = {}) {
                )
              )
          )
-         AND (SELECT count(*) FROM system_state)=4
+         AND (SELECT count(*) FROM system_state)=5
+         AND (SELECT count(*) FROM client_assignments)=0
+         AND (SELECT count(*) FROM clients)=0
+         AND (SELECT count(*) FROM specialists)=0
          AND (SELECT count(*) FROM outbox_jobs)=2
          AND EXISTS (
            SELECT 1 FROM outbox_jobs

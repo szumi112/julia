@@ -34,6 +34,7 @@ import { decodeBase64Url, encodeBase64Url } from '../worker/security/encoding.js
 import { createKeyring } from '../worker/security/keyring.js'
 import {
   buildLocalHarnessWranglerConfig,
+  LOCAL_HARNESS_MIGRATIONS_NAME,
   LOCAL_HARNESS_RUNNER_MODE,
   LOCAL_HARNESS_WRANGLER_NAME,
 } from './local-harness-core.js'
@@ -52,8 +53,11 @@ const CHILD_DEADLINE_MS = 30_000
 const CHILD_KILL_GRACE_MS = 500
 const SUPPORTED_PLATFORMS = new Set(['darwin', 'linux'])
 const RESULT_KEYS = Object.freeze(['meta', 'results', 'success'])
-const LOCAL_HARNESS_CONFIG = Buffer.from(
-  buildLocalHarnessWranglerConfig(PROJECT_ROOT),
+const localHarnessConfig = (runnerRoot) => Buffer.from(
+  buildLocalHarnessWranglerConfig(
+    PROJECT_ROOT,
+    join(runnerRoot, LOCAL_HARNESS_MIGRATIONS_NAME),
+  ),
   'utf8',
 )
 
@@ -121,6 +125,7 @@ const assertPrivateWranglerConfig = (path, expected = null) => {
   assertCanonicalComponents(dirname(path))
   let descriptor
   let contents
+  const expectedContents = localHarnessConfig(dirname(path))
   try {
     const initialPathStats = lstatSync(path)
     if (initialPathStats.isSymbolicLink()
@@ -128,7 +133,7 @@ const assertPrivateWranglerConfig = (path, expected = null) => {
       || realpathSync(path) !== path
       || (initialPathStats.mode & 0o777) !== 0o600
       || initialPathStats.uid !== process.getuid()
-      || initialPathStats.size !== LOCAL_HARNESS_CONFIG.byteLength
+      || initialPathStats.size !== expectedContents.byteLength
       || (expected && !sameIdentity(initialPathStats, expected))) fail()
     descriptor = openSync(
       path,
@@ -144,10 +149,10 @@ const assertPrivateWranglerConfig = (path, expected = null) => {
       || (openedPathStats.mode & 0o777) !== 0o600
       || openedStats.uid !== process.getuid()
       || openedPathStats.uid !== process.getuid()
-      || openedStats.size !== LOCAL_HARNESS_CONFIG.byteLength
-      || openedPathStats.size !== LOCAL_HARNESS_CONFIG.byteLength) fail()
+      || openedStats.size !== expectedContents.byteLength
+      || openedPathStats.size !== expectedContents.byteLength) fail()
 
-    contents = Buffer.alloc(LOCAL_HARNESS_CONFIG.byteLength + 1)
+    contents = Buffer.alloc(expectedContents.byteLength + 1)
     let bytesRead = 0
     while (bytesRead < contents.byteLength) {
       const count = readSync(
@@ -160,8 +165,8 @@ const assertPrivateWranglerConfig = (path, expected = null) => {
       if (count === 0) break
       bytesRead += count
     }
-    if (bytesRead !== LOCAL_HARNESS_CONFIG.byteLength
-      || !contents.subarray(0, bytesRead).equals(LOCAL_HARNESS_CONFIG)
+    if (bytesRead !== expectedContents.byteLength
+      || !contents.subarray(0, bytesRead).equals(expectedContents)
       || readSync(descriptor, contents, 0, 1, bytesRead) !== 0) fail()
 
     const finalStats = fstatSync(descriptor)
@@ -177,8 +182,8 @@ const assertPrivateWranglerConfig = (path, expected = null) => {
       || (finalPathStats.mode & 0o777) !== 0o600
       || finalStats.uid !== process.getuid()
       || finalPathStats.uid !== process.getuid()
-      || finalStats.size !== LOCAL_HARNESS_CONFIG.byteLength
-      || finalPathStats.size !== LOCAL_HARNESS_CONFIG.byteLength) fail()
+      || finalStats.size !== expectedContents.byteLength
+      || finalPathStats.size !== expectedContents.byteLength) fail()
     return Object.freeze({
       dev: finalStats.dev,
       ino: finalStats.ino,
@@ -186,6 +191,7 @@ const assertPrivateWranglerConfig = (path, expected = null) => {
     })
   } finally {
     contents?.fill(0)
+    expectedContents.fill(0)
     if (descriptor !== undefined) closeSync(descriptor)
   }
 }

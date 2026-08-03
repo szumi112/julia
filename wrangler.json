@@ -16,7 +16,7 @@
       "database_name": "bearwithme-panel-local",
       "database_id": "00000000-0000-0000-0000-000000000001",
       "preview_database_id": "bearwithme-panel-local",
-      "migrations_dir": "migrations"
+      "migrations_dir": ".core-migrations/active"
     }
   ],
   "r2_buckets": [

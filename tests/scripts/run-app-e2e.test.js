@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import {
   existsSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   statSync,
   writeFileSync,
@@ -24,6 +25,17 @@ const NOW_MS = Date.parse('2028-01-01T00:00:00.000Z')
 const CSRF_EXPIRES = Math.floor(NOW_MS / 1000) + 900
 const CSRF_TOKEN = `v1.${CSRF_EXPIRES}.${'A'.repeat(22)}.${Buffer.alloc(32, 1).toString('base64url')}`
 const key = (byte) => Buffer.alloc(32, byte).toString('base64url')
+const STAGE_A_MIGRATION_NAMES = Object.freeze([
+  '0001_security_primitives.sql',
+  '0002_identity_operations.sql',
+  '0003_rate_limit_guard.sql',
+  '0004_staff_provisioning_state.sql',
+  '0005_outbox_operation_guard.sql',
+  '0006_delivery_attempt_uniqueness.sql',
+  '0007_operational_health_indexes.sql',
+  '0008_outbox_drain_heartbeat.sql',
+  '0009_core_directory_expand.sql',
+])
 
 const fakeHarness = (path) => {
   const directory = (name) => ({ fence: {}, path: `${path}/${name}` })
@@ -32,6 +44,7 @@ const fakeHarness = (path) => {
     fence: {},
     home: directory('home'),
     index: file('vite-root/index.html'),
+    migrations: directory('migrations'),
     path,
     state: directory('state'),
     tmp: directory('tmp'),
@@ -1421,6 +1434,7 @@ test('default harness writes only credential-free private configs with separated
         assert.equal(statSync(ownedRoot).mode & 0o777, 0o700)
         for (const directory of [
           'home',
+          'migrations',
           'state',
           'tmp',
           'vite-root',
@@ -1438,6 +1452,9 @@ test('default harness writes only credential-free private configs with separated
           assert.equal(statSync(file).mode & 0o777, 0o600)
         }
         assert.doesNotMatch(wrangler, /"secrets"/)
+        const migrationNames = readdirSync(`${ownedRoot}/migrations`).sort()
+        assert.deepEqual(migrationNames, STAGE_A_MIGRATION_NAMES)
+        assert.equal(JSON.parse(wrangler).d1_databases[0].migrations_dir, `${ownedRoot}/migrations`)
         assert.match(vite, /envDir: false/)
         assert.match(vite, /inspectorPort: false/)
         assert.match(vite, /remoteBindings: false/)

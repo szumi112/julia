@@ -60,6 +60,12 @@ const EMPTY_BOOTSTRAP_STATES = Object.freeze([
     updated_at: '2026-07-30T00:00:00.000Z',
   }),
   Object.freeze({
+    key: 'core_directory_specialist_backfill_v1',
+    value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}',
+    version: 1,
+    updated_at: '2026-07-31T00:00:00.000Z',
+  }),
+  Object.freeze({
     key: 'outbox.drain.last_success',
     value_json: '{"completedAt":null}',
     version: 1,
@@ -74,7 +80,7 @@ const bootstrapEntryDb = (states) => ({
   })),
 })
 
-test('bootstrap entry inspection accepts only the fixed heartbeat beside access genesis', async () => {
+test('bootstrap entry inspection accepts only the fixed core state and heartbeat beside access genesis', async () => {
   const input = {
     db: bootstrapEntryDb(EMPTY_BOOTSTRAP_STATES),
     keyring: {},
@@ -85,7 +91,7 @@ test('bootstrap entry inspection accepts only the fixed heartbeat beside access 
   assert.deepEqual(await inspectBootstrapEntryState(input), { kind: 'empty' })
 
   const advanced = structuredClone(EMPTY_BOOTSTRAP_STATES)
-  advanced[3] = {
+  advanced[4] = {
     key: 'outbox.drain.last_success',
     value_json: '{"completedAt":"2026-07-31T00:04:00.000Z"}',
     version: 2,
@@ -97,7 +103,7 @@ test('bootstrap entry inspection accepts only the fixed heartbeat beside access 
   }), { kind: 'empty' })
 
   const malformed = structuredClone(EMPTY_BOOTSTRAP_STATES)
-  malformed[3] = { ...malformed[3], value_json: '{"completedAt":null,"extra":true}' }
+  malformed[4] = { ...malformed[4], value_json: '{"completedAt":null,"extra":true}' }
   assert.deepEqual(await inspectBootstrapEntryState({
     ...input,
     db: bootstrapEntryDb(malformed),

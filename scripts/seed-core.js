@@ -94,12 +94,15 @@ const VERSION_COLUMNS = Object.freeze([
 const EMPTY_TABLES = Object.freeze([
   'audit_events',
   'backup_runs',
+  'client_assignments',
+  'clients',
   'delivery_attempts',
   'idempotency_records',
   'operational_actions',
   'outbox_attempts',
   'outbox_jobs',
   'scheduler_runs',
+  'specialists',
   'staff_invitations',
 ])
 export const LOCAL_SEED_SNAPSHOT_QUERIES = deepFreeze([
@@ -141,7 +144,12 @@ const OUTBOX_DRAIN_HEARTBEAT = Object.freeze({
   value_json: '{"completedAt":null}',
   version: 1,
 })
-const SYSTEM_STATE_COUNT = GENESIS_STATES.length + 1
+const CORE_DIRECTORY_UPGRADE = Object.freeze({
+  key: 'core_directory_specialist_backfill_v1',
+  value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}',
+  version: 1,
+})
+const SYSTEM_STATE_COUNT = GENESIS_STATES.length + 2
 
 const ownObject = (value) => value !== null
   && typeof value === 'object'
@@ -167,10 +175,15 @@ const exactGenesisStates = (states) => Array.isArray(states)
   && states.length === SYSTEM_STATE_COUNT
   && GENESIS_STATES.every((row, index) => sameRow(states[index], row))
   && exactKeys(states[GENESIS_STATES.length], ['key', 'value_json', 'version', 'updated_at'])
-  && states[GENESIS_STATES.length].key === OUTBOX_DRAIN_HEARTBEAT.key
-  && states[GENESIS_STATES.length].value_json === OUTBOX_DRAIN_HEARTBEAT.value_json
-  && states[GENESIS_STATES.length].version === OUTBOX_DRAIN_HEARTBEAT.version
+  && states[GENESIS_STATES.length].key === CORE_DIRECTORY_UPGRADE.key
+  && states[GENESIS_STATES.length].value_json === CORE_DIRECTORY_UPGRADE.value_json
+  && states[GENESIS_STATES.length].version === CORE_DIRECTORY_UPGRADE.version
   && validInstant(states[GENESIS_STATES.length].updated_at)
+  && exactKeys(states[GENESIS_STATES.length + 1], ['key', 'value_json', 'version', 'updated_at'])
+  && states[GENESIS_STATES.length + 1].key === OUTBOX_DRAIN_HEARTBEAT.key
+  && states[GENESIS_STATES.length + 1].value_json === OUTBOX_DRAIN_HEARTBEAT.value_json
+  && states[GENESIS_STATES.length + 1].version === OUTBOX_DRAIN_HEARTBEAT.version
+  && validInstant(states[GENESIS_STATES.length + 1].updated_at)
 const statement = (sql, params = []) => Object.freeze({
   params: Object.freeze([...params]),
   sql: sql.trim(),
@@ -363,6 +376,11 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
        WHERE key=? AND value_json=? AND version=1
          AND updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', julianday(updated_at))
      )`,
+    `EXISTS (
+       SELECT 1 FROM system_state
+       WHERE key=? AND value_json=? AND version=1
+         AND updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', julianday(updated_at))
+     )`,
   ]
   const guardParams = [
     dataKey.id,
@@ -396,6 +414,8 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
       row.value_json,
       row.updated_at,
     ]),
+    CORE_DIRECTORY_UPGRADE.key,
+    CORE_DIRECTORY_UPGRADE.value_json,
     OUTBOX_DRAIN_HEARTBEAT.key,
     OUTBOX_DRAIN_HEARTBEAT.value_json,
   ]

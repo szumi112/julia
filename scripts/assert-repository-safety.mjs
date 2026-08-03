@@ -138,12 +138,27 @@ export const assertTrackedFiles = (paths) => {
       || component.startsWith('.env')
       || component.startsWith('.dev.vars')
       || component === 'dist'
+      || component === '.core-migrations'
       || component === '.wrangler'
       || component === 'playwright-report'
       || component === 'test-results'
     )
   })
   if (forbidden.length) throw new Error(`Forbidden tracked files: ${forbidden.join(', ')}`)
+}
+
+export const assertCoreMigrationConfiguration = (config) => {
+  const databases = config?.d1_databases
+  if (!Array.isArray(databases)
+    || databases.length < 1
+    || databases.some((database) => (
+      !database
+      || typeof database !== 'object'
+      || Array.isArray(database)
+      || database.migrations_dir !== '.core-migrations/active'
+    ))) {
+    throw new Error('D1 must use the generated core migration directory')
+  }
 }
 
 export const assertDirectDependencyPins = (packageJson) => {
@@ -279,6 +294,7 @@ const runCli = () => {
   const tracked = execFileSync('git', ['ls-files', '-z']).toString().split('\0').filter(Boolean)
   assertTrackedFiles(tracked)
   assertDirectDependencyPins(parseJson('package.json'))
+  assertCoreMigrationConfiguration(parseJson('wrangler.json'))
   assertRuntimeIndex(readFileSync('index.html', 'utf8'))
   if (args[0] === '--dist') {
     const secretValues = Object.fromEntries(

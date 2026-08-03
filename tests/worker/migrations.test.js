@@ -15,6 +15,8 @@ const run = (sql, ...values) => env.DB.prepare(sql).bind(...values).run()
 const one = async (sql, ...values) => (await env.DB.prepare(sql).bind(...values).first())
 
 const strictIntegerColumns = [
+  ['client_assignments', 'version'],
+  ['clients', 'version'],
   ['data_keys', 'dek_version'],
   ['data_keys', 'kek_version'],
   ['record_versions', 'version'],
@@ -32,15 +34,19 @@ const strictIntegerColumns = [
   ['backup_runs', 'ssec_key_version'],
   ['backup_runs', 'object_size'],
   ['system_state', 'version'],
+  ['specialists', 'standard_rate_grosze'],
+  ['specialists', 'version'],
 ]
 
 const textPrimaryKeys = [
+  ['client_assignments', 'id'], ['clients', 'id'],
   ['data_keys', 'id'], ['audit_events', 'id'], ['record_versions', 'id'],
   ['staff_users', 'id'], ['staff_invitations', 'id'], ['outbox_jobs', 'id'],
   ['outbox_attempts', 'id'], ['delivery_attempts', 'id'], ['operational_actions', 'id'],
   ['scheduler_runs', 'id'], ['backup_runs', 'id'], ['system_state', 'key'],
   ['idempotency_records', 'actor_id'], ['idempotency_records', 'operation'],
   ['idempotency_records', 'idempotency_key'],
+  ['specialists', 'id'],
 ]
 
 const insertStaff = (id, overrides = {}) => {
@@ -120,10 +126,12 @@ const insertBackup = (id, overrides = {}) => {
 }
 
 describe('foundation migrations', () => {
-  it('creates only the approved Phase 1 tables', async () => {
+  it('creates the approved permissive stage-A tables', async () => {
     expect(await tableNames()).toEqual([
       'audit_events',
       'backup_runs',
+      'client_assignments',
+      'clients',
       'data_keys',
       'delivery_attempts',
       'idempotency_records',
@@ -132,11 +140,180 @@ describe('foundation migrations', () => {
       'outbox_jobs',
       'record_versions',
       'scheduler_runs',
+      'specialists',
       'staff_invitations',
       'staff_users',
       'system_state',
     ])
     expect((await env.DB.prepare('PRAGMA foreign_key_check').all()).results).toEqual([])
+  })
+
+  it('seeds the exact pending practitioner-directory upgrade state', async () => {
+    const row = await one(
+      `SELECT key,value_json,version,updated_at FROM system_state
+       WHERE key='core_directory_specialist_backfill_v1'`
+    )
+
+    expect(row).toMatchObject({
+      key: 'core_directory_specialist_backfill_v1',
+      value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}',
+      version: 1,
+    })
+    expect(new Date(row.updated_at).toISOString()).toBe(row.updated_at)
+  })
+
+  it('defers the specialist-to-staff foreign key until a D1 batch completes', async () => {
+    const staffId = 'stf_deferred_specialist_parent'
+    const specialistId = 'sp_deferred_specialist_child'
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO specialists
+         (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+         VALUES (?,?,18000,'active',1,NULL,?,?)`
+      ).bind(specialistId, staffId, now, now),
+      env.DB.prepare(
+        `INSERT INTO staff_users
+         (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+          specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+         VALUES (?,?, '{}','{}','coordinator','active',?,?,1,?,NULL,?,?)`
+      ).bind(staffId, `${staffId}_lookup`, `${staffId}_subject`, specialistId, now, now, now),
+    ])
+
+    expect(await one(
+      'SELECT id,staff_user_id FROM specialists WHERE id=?', specialistId
+    )).toEqual({ id: specialistId, staff_user_id: staffId })
+    expect((await env.DB.prepare('PRAGMA foreign_key_check').all()).results).toEqual([])
+  })
+
+  it('keeps stage A permissive for legacy staff writers and lifecycle mismatches', async () => {
+    await insertStaff('stf_legacy_zero_profile', { role: 'coordinator' })
+    expect(await one(
+      "SELECT count(*) AS count FROM specialists WHERE staff_user_id='stf_legacy_zero_profile'"
+    )).toEqual({ count: 0 })
+
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO specialists
+         (id,staff_user_id,status,created_at,updated_at)
+         VALUES ('sp_permissive_mismatch','stf_permissive_mismatch','pending',?,?)`
+      ).bind(now, now),
+      env.DB.prepare(
+        `INSERT INTO staff_users
+         (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+          specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+         VALUES ('stf_permissive_mismatch','stf_permissive_mismatch_lookup','{}','{}',
+                 'coordinator','active','stf_permissive_mismatch_subject',
+                 'sp_permissive_mismatch',1,?,NULL,?,?)`
+      ).bind(now, now, now),
+    ])
+    const result = await run(
+      `UPDATE specialists
+       SET status='archived',archived_at=?,version=2,updated_at=?
+       WHERE id='sp_permissive_mismatch'`,
+      later,
+      later,
+    )
+    expect(result.meta.changes).toBe(1)
+
+    const staffTriggers = (await env.DB.prepare(
+      "SELECT sql FROM sqlite_schema WHERE type='trigger' AND tbl_name='staff_users'"
+    ).all()).results
+    expect(staffTriggers.every(({ sql }) => !/specialists|core_directory/i.test(sql))).toBe(true)
+  })
+
+  it('enforces core row checks, immutable identities, versions, indexes, and no-delete guards', async () => {
+    await insertStaff('stf_core_schema', { role: 'coordinator' })
+    await run(
+      `INSERT INTO specialists
+       (id,staff_user_id,status,created_at,updated_at)
+       VALUES ('sp_core_schema','stf_core_schema','active',?,?)`,
+      now,
+      now,
+    )
+    await run(
+      `INSERT INTO clients
+       (id,identity_envelope,status,version,archived_at,created_at,updated_at)
+       VALUES ('cl_core_schema','{}','active',1,NULL,?,?)`,
+      now,
+      now,
+    )
+    await run(
+      `INSERT INTO client_assignments
+       (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,version,created_at,updated_at)
+       VALUES ('asg_core_schema','cl_core_schema','sp_core_schema',?,NULL,'stf_core_schema',1,?,?)`,
+      now,
+      now,
+      now,
+    )
+
+    await expect(run(
+      "UPDATE clients SET updated_at=? WHERE id='cl_core_schema'", later
+    )).rejects.toThrow(/invalid_version_increment/)
+    await expect(run(
+      "UPDATE client_assignments SET starts_at=?,version=2,updated_at=? WHERE id='asg_core_schema'",
+      later,
+      later,
+    )).rejects.toThrow(/immutable_assignment_identity/)
+    await expect(run("DELETE FROM specialists WHERE id='sp_core_schema'"))
+      .rejects.toThrow(/no_routine_delete/)
+    await expect(run(
+      `INSERT INTO clients
+       (id,identity_envelope,status,version,archived_at,created_at,updated_at)
+       VALUES ('bad_client','{}','active',1,NULL,?,?)`, now, now
+    )).rejects.toThrow()
+    await expect(run(
+      `INSERT INTO clients
+       (id,identity_envelope,status,version,archived_at,created_at,updated_at)
+       VALUES ('cl_archived_without_time','{}','archived',1,NULL,?,?)`, now, now
+    )).rejects.toThrow()
+    await expect(run(
+      `INSERT INTO client_assignments
+       (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,created_at,updated_at)
+       VALUES ('asg_bad_interval','cl_core_schema','sp_core_schema',?,?, 'stf_core_schema',?,?)`,
+      later,
+      now,
+      now,
+      now,
+    )).rejects.toThrow()
+
+    const indexes = (await env.DB.prepare(
+      `SELECT name FROM sqlite_schema
+       WHERE type='index' AND name IN (
+         'client_assignments_open_client_idx',
+         'client_assignments_specialist_ends_client_idx',
+         'specialists_status_id_idx',
+         'staff_users_specialist_id_idx'
+       ) ORDER BY name`
+    ).all()).results.map(({ name }) => name)
+    expect(indexes).toEqual([
+      'client_assignments_open_client_idx',
+      'client_assignments_specialist_ends_client_idx',
+      'specialists_status_id_idx',
+      'staff_users_specialist_id_idx',
+    ])
+  })
+
+  it('exposes the non-persisting core-directory invariant failure sink', async () => {
+    expect(await one(
+      'SELECT count(*) AS count FROM core_directory_invariant_failures'
+    )).toEqual({ count: 0 })
+    for (const failureKind of [
+      'missing_profile',
+      'orphan_profile',
+      'pointer_mismatch',
+      'status_mismatch',
+      'missing_version',
+      'noncontiguous_versions',
+      'upgrade_incomplete',
+    ]) {
+      await expect(run(
+        'INSERT INTO core_directory_invariant_failures (failure_kind) VALUES (?)',
+        failureKind,
+      )).rejects.toThrow(/core_directory_invariant_failed/)
+    }
+    expect(await one(
+      'SELECT count(*) AS count FROM core_directory_invariant_failures'
+    )).toEqual({ count: 0 })
   })
 
   it('seeds the canonical outbox drain heartbeat exactly once', async () => {

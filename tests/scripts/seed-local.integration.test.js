@@ -18,13 +18,15 @@ import {
 } from '../../scripts/seed-core.js'
 import { LOCAL_SEED_MANIFEST, runLocalSeed } from '../../scripts/seed-local.mjs'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { materializeCoreMigrationStage } from '../../scripts/apply-core-migration-stage.js'
+import { buildLocalHarnessWranglerConfig } from '../../scripts/local-harness-core.js'
 
 const SUPPORTED = process.platform === 'darwin' || process.platform === 'linux'
 const PROJECT_ROOT = realpathSync(resolve('.'))
 const NODE = realpathSync(process.execPath)
 const WRANGLER = realpathSync(join(PROJECT_ROOT, 'node_modules/wrangler/bin/wrangler.js'))
-const CONFIG = realpathSync(join(PROJECT_ROOT, 'wrangler.json'))
 const key = (character) => Buffer.alloc(32, character.charCodeAt(0)).toString('base64url')
+const configPath = (root) => join(root, '.bwm-test-wrangler.json')
 
 const privateChildEnv = (root) => ({
   CI: '1',
@@ -59,10 +61,21 @@ const seedEnv = (root) => ({
 })
 
 const applyMigrations = (root) => {
+  const migrationsDirectory = join(root, 'migrations')
+  materializeCoreMigrationStage({
+    sourceDirectory: join(PROJECT_ROOT, 'migrations'),
+    stage: 'stage-a',
+    targetDirectory: migrationsDirectory,
+  })
+  writeFileSync(
+    configPath(root),
+    buildLocalHarnessWranglerConfig(PROJECT_ROOT, migrationsDirectory),
+    { encoding: 'utf8', flag: 'wx', mode: 0o600 },
+  )
   const child = spawnSync(NODE, [
     WRANGLER,
     '--config',
-    CONFIG,
+    configPath(root),
     '--x-provision=false',
     '--x-auto-create=false',
     '--install-skills=false',
@@ -86,7 +99,7 @@ const applyMigrations = (root) => {
 const wranglerExecute = (root, operationArgs) => spawnSync(NODE, [
   WRANGLER,
   '--config',
-  CONFIG,
+  configPath(root),
   '--x-provision=false',
   '--x-auto-create=false',
   '--install-skills=false',
@@ -189,7 +202,7 @@ test('real Wrangler rolls back all seven seed writes when the final exact guard 
   }, keyringConfig)
   const built = await buildLocalSeedBatch({ keyring, keyringConfig })
   const guard = built.batch.at(-1)
-  assert.match(guard.sql, /\(SELECT count\(\*\) FROM system_state\)=4/)
+  assert.match(guard.sql, /\(SELECT count\(\*\) FROM system_state\)=5/)
   assert.match(
     guard.sql,
     /updated_at\s*=\s*strftime\('%Y-%m-%dT%H:%M:%fZ',\s*julianday\(updated_at\)\)/,
@@ -230,7 +243,7 @@ test('real Wrangler rolls back all seven seed writes when the final exact guard 
   assert.equal(counts.status, 0)
   assert.deepEqual(
     JSON.parse(counts.stdout).map(({ results }) => results[0].count),
-    [0, 0, 0, 4],
+    [0, 0, 0, 5],
   )
 })
 

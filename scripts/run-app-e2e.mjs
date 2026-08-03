@@ -34,9 +34,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CAPABILITIES } from '../worker/identity/policy.js'
 import {
   buildLocalHarnessWranglerConfig,
+  LOCAL_HARNESS_MIGRATIONS_NAME,
   LOCAL_HARNESS_RUNNER_MODE,
   LOCAL_HARNESS_WRANGLER_NAME,
 } from './local-harness-core.js'
+import { materializeCoreMigrationStage } from './apply-core-migration-stage.js'
+import { CORE_MIGRATION_STAGE_A_NAMES } from './core-migration-stages.js'
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = realpathSync(resolve(SCRIPT_DIRECTORY, '..'))
@@ -1462,6 +1465,16 @@ const defaultPrepareHarness = async (path, expectedFence) => {
     })
   }
   const home = directory(PRIVATE_HOME_NAME)
+  const migrationsPath = join(path, LOCAL_HARNESS_MIGRATIONS_NAME)
+  materializeCoreMigrationStage({
+    sourceDirectory: join(PROJECT_ROOT, 'migrations'),
+    stage: 'stage-a',
+    targetDirectory: migrationsPath,
+  })
+  const migrations = Object.freeze({
+    fence: privateDirectoryFence(migrationsPath),
+    path: migrationsPath,
+  })
   const state = directory(PRIVATE_STATE_NAME)
   const tmp = directory(PRIVATE_TMP_NAME)
   const viteRoot = directory(PRIVATE_VITE_ROOT_NAME)
@@ -1471,7 +1484,7 @@ const defaultPrepareHarness = async (path, expectedFence) => {
   const wrangler = writePrivateFile(
     path,
     LOCAL_HARNESS_WRANGLER_NAME,
-    buildLocalHarnessWranglerConfig(PROJECT_ROOT),
+    buildLocalHarnessWranglerConfig(PROJECT_ROOT, migrations.path),
   )
   const vite = writePrivateFile(
     viteRoot.path,
@@ -1487,6 +1500,7 @@ const defaultPrepareHarness = async (path, expectedFence) => {
     fence,
     home,
     index,
+    migrations,
     path,
     state,
     tmp,
@@ -1504,6 +1518,7 @@ const defaultAssertHarness = async (harness) => {
     'fence',
     'home',
     'index',
+    'migrations',
     'path',
     'state',
     'tmp',
@@ -1519,6 +1534,7 @@ const defaultAssertHarness = async (harness) => {
   privateDirectoryFence(harness.path, harness.fence)
   for (const directory of [
     harness.home,
+    harness.migrations,
     harness.state,
     harness.tmp,
     harness.viteRoot,
@@ -1531,6 +1547,17 @@ const defaultAssertHarness = async (harness) => {
   }
   for (const file of [harness.index, harness.vite, harness.wrangler]) {
     assertPrivateFile(file)
+  }
+  const migrationNames = readdirSync(harness.migrations.path).sort()
+  if (migrationNames.length !== CORE_MIGRATION_STAGE_A_NAMES.length
+    || migrationNames.some((name, index) => name !== CORE_MIGRATION_STAGE_A_NAMES[index])) {
+    fail('APP_E2E_HARNESS_INVALID')
+  }
+  for (const name of migrationNames) {
+    regularFileFence(join(harness.migrations.path, name))
+    if (!readFileSync(join(harness.migrations.path, name)).equals(
+      readFileSync(join(PROJECT_ROOT, 'migrations', name)),
+    )) fail('APP_E2E_HARNESS_INVALID')
   }
   for (const root of [harness.path, harness.viteRoot.path]) {
     if (readdirSync(root).some((name) => (

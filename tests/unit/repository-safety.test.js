@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import {
+  assertCoreMigrationConfiguration,
   assertDirectDependencyPins,
   assertRuntimeIndex,
   assertTrackedFiles,
@@ -69,8 +70,26 @@ test('tracked confidential files and test reports are rejected', () => {
     'nested/dist/asset.js',
     '.wrangler/deploy/config.json',
     'nested/.wrangler/state.json',
+    '.core-migrations/active/0009_core_directory_expand.sql',
+    'nested/.core-migrations/active/0009_core_directory_expand.sql',
   ]) {
     assert.throws(() => assertTrackedFiles([path]), /Forbidden tracked files/)
+  }
+})
+
+test('D1 configuration exposes only the ignored generated migration directory', () => {
+  assert.doesNotThrow(() => assertCoreMigrationConfiguration({
+    d1_databases: [{ binding: 'DB', migrations_dir: '.core-migrations/active' }],
+  }))
+  for (const migrationsDir of [
+    'migrations',
+    './migrations',
+    '.core-migrations',
+    '.core-migrations/active/../later',
+  ]) {
+    assert.throws(() => assertCoreMigrationConfiguration({
+      d1_databases: [{ binding: 'DB', migrations_dir: migrationsDir }],
+    }), /generated core migration directory/)
   }
 })
 
