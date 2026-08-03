@@ -190,17 +190,26 @@ const globalFailuresSql = () => `SELECT failure_kind
 FROM (SELECT ${globalFailureCaseSql} AS failure_kind)
 WHERE failure_kind IS NOT NULL`
 
-const globalGuardStatement = (db, state) => db.prepare(
+const globalGuardStatement = (db, state, { requireEmptyDirectory }) => db.prepare(
   `INSERT INTO core_directory_invariant_failures (failure_kind)
    SELECT failure_kind
    FROM (
      SELECT CASE
        WHEN changes()!=1 THEN 'upgrade_incomplete'
+       WHEN ?=1 AND (
+         EXISTS (SELECT 1 FROM staff_users WHERE specialist_id IS NOT NULL)
+         OR EXISTS (SELECT 1 FROM specialists)
+       ) THEN 'upgrade_incomplete'
        ELSE ${globalFailureCaseSql}
      END AS failure_kind
    )
    WHERE failure_kind IS NOT NULL`
-).bind(STATE_KEY, serializeState(state), state.version)
+).bind(
+  requireEmptyDirectory ? 1 : 0,
+  STATE_KEY,
+  serializeState(state),
+  state.version,
+)
 
 async function assertCompleteInvariant(db, state) {
   const failure = await db.prepare(globalFailuresSql())
@@ -375,7 +384,7 @@ async function recoverAfterCommitFailure(db, expected, originalError) {
 
 async function assertCompletedCryptoContext(db, context) {
   const staff = await nextStaff(db, null)
-  if (staff === null) invalid()
+  if (staff === null) return
   await currentProfile(db, context, staff)
 }
 
@@ -394,7 +403,14 @@ async function commitSystemUow(db, current, expected, build) {
   }
 }
 
-async function completeUpgrade({ db, current, now, correlationId, idFactory }) {
+async function completeUpgrade({
+  db,
+  current,
+  now,
+  correlationId,
+  idFactory,
+  requireEmptyDirectory,
+}) {
   const expected = Object.freeze({
     ...current,
     status: 'complete',
@@ -417,7 +433,7 @@ async function completeUpgrade({ db, current, now, correlationId, idFactory }) {
     }),
     beforeAudit: [],
     correlationId,
-    guardStatement: globalGuardStatement(db, expected),
+    guardStatement: globalGuardStatement(db, expected, { requireEmptyDirectory }),
     stateStatement: stateUpdateStatement(db, current, expected, now),
     versionStatement: null,
   })
@@ -531,10 +547,13 @@ export async function advanceCoreDirectoryUpgrade({
   try {
     const current = await readState(db)
     if (current.status === 'complete') {
-      const nonempty = await hasDirectoryRows(db)
-      if (cryptoContext === null && nonempty) cryptoRequired()
+      if (cryptoContext === null) {
+        if (await hasDirectoryRows(db)) cryptoRequired()
+        await assertCompleteInvariant(db, current)
+        return resultFor(current)
+      }
       await assertCompleteInvariant(db, current)
-      if (nonempty) await assertCompletedCryptoContext(db, cryptoContext)
+      await assertCompletedCryptoContext(db, cryptoContext)
       return resultFor(current)
     }
     const staff = await nextStaff(db, current.afterStaffId)
@@ -551,7 +570,14 @@ export async function advanceCoreDirectoryUpgrade({
       })
     }
     if (cryptoContext === null && await hasDirectoryRows(db)) cryptoRequired()
-    return completeUpgrade({ correlationId, current, db, idFactory, now })
+    return completeUpgrade({
+      correlationId,
+      current,
+      db,
+      idFactory,
+      now,
+      requireEmptyDirectory: cryptoContext === null,
+    })
   } catch (error) {
     if (error?.message === 'CORE_DIRECTORY_CRYPTO_REQUIRED') throw error
     if (error?.message === 'CORE_DIRECTORY_UPGRADE_INVALID') throw error

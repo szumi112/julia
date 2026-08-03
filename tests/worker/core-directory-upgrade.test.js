@@ -214,6 +214,7 @@ const advance = (overrides = {}) => advanceCoreDirectoryUpgrade({
 const observedDb = ({
   afterCommit = null,
   ambiguousAfterCommit = false,
+  beforeCommit = null,
   failBatchIndex = null,
 } = {}) => {
   const counts = { batch: 0, prepared: 0 }
@@ -227,6 +228,7 @@ const observedDb = ({
         )
         return env.DB.batch(forced)
       }
+      if (beforeCommit) await beforeCommit()
       const result = await env.DB.batch(statements)
       if (afterCommit) await afterCommit()
       if (ambiguousAfterCommit) throw new Error('D1_EXECUTE_AMBIGUOUS')
@@ -317,6 +319,39 @@ describe('bounded core directory upgrade', () => {
       .resolves.toEqual({ createdCount: 0, processedCount: 0, status: 'complete' })
     expect((await env.DB.prepare('SELECT count(*) AS count FROM audit_events').first()).count)
       .toBe(1)
+  })
+
+  it('rolls back keyless completion when a consistent directory appears before its batch', async () => {
+    await setUpgradeState(PENDING)
+    const before = await stateRow()
+    const injected = observedDb({
+      beforeCommit: async () => {
+        const context = await cryptoContext()
+        await insertStaff({
+          id: 'stf_upgrade_keyless_race',
+          specialistId: 'sp_upgrade_keyless_race',
+        })
+        await insertProfile(
+          context,
+          profileFor('stf_upgrade_keyless_race', 'sp_upgrade_keyless_race'),
+        )
+      },
+    })
+
+    await expect(advance({
+      correlationId: 'upgrade_keyless_race',
+      db: injected.db,
+      idFactory: ids('aud_upgrade_keyless_race'),
+    })).rejects.toThrow('CORE_DIRECTORY_UPGRADE_INVALID')
+    expect(injected.counts.batch).toBe(3)
+    expect(await stateRow()).toEqual(before)
+    expect((await auditRows('upgrade_keyless_race')).results).toHaveLength(0)
+    expect(await env.DB.prepare(
+      `SELECT
+         (SELECT count(*) FROM staff_users WHERE specialist_id IS NOT NULL) AS staff,
+         (SELECT count(*) FROM specialists) AS specialists,
+         (SELECT count(*) FROM record_versions WHERE entity_type='specialist') AS versions`
+    ).first()).toEqual({ specialists: 1, staff: 1, versions: 1 })
   })
 
   it('advances exactly one lexical row per step, validates an existing snapshot, creates mapped v1, and completes', async () => {
@@ -640,7 +675,7 @@ describe('bounded core directory upgrade', () => {
     expect((await auditRows('upgrade_wrong_key')).results).toHaveLength(0)
   })
 
-  it('authenticates crypto before accepting a completed nonempty directory', async () => {
+  it('authenticates crypto within five reads before accepting a completed nonempty directory', async () => {
     const context = await cryptoContext()
     await setUpgradeState(PENDING)
     await insertStaff({ id: 'stf_upgrade_complete_key', specialistId: 'sp_upgrade_complete_key' })
@@ -668,12 +703,16 @@ describe('bounded core directory upgrade', () => {
       activeLookupKeyVersion: 1,
     })
     const before = await stateRow()
+    const completedDb = observedDb()
 
     await expect(advance({
       correlationId: 'upgrade_complete_wrong_key',
       cryptoContext: Object.freeze({ ...context, keyring: wrongKeyring }),
+      db: completedDb.db,
       idFactory: ids('aud_upgrade_complete_wrong_key'),
     })).rejects.toThrow('CORE_DIRECTORY_UPGRADE_INVALID')
+    expect(completedDb.counts.batch).toBe(0)
+    expect(completedDb.counts.prepared).toBeLessThanOrEqual(5)
     expect(await stateRow()).toEqual(before)
     expect((await auditRows('upgrade_complete_wrong_key')).results).toHaveLength(0)
   })
