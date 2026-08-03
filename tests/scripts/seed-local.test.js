@@ -502,7 +502,7 @@ test('runner-mode seed uses the private config and keeps Wrangler in its parent 
         return {
           code: 0,
           stderr: '',
-          stdout: JSON.stringify(Array.from({ length: 8 }, () => ({
+          stdout: JSON.stringify(Array.from({ length: 10 }, () => ({
             meta: { duration: 0 },
             results: [],
             success: true,
@@ -542,7 +542,7 @@ test('runner-mode seed rechecks private config bytes after final inspection', as
       runWrangler: async () => ({
         code: 0,
         stderr: '',
-        stdout: JSON.stringify(Array.from({ length: 8 }, () => ({
+        stdout: JSON.stringify(Array.from({ length: 10 }, () => ({
           meta: { duration: 0 },
           results: [],
           success: true,
@@ -602,7 +602,7 @@ test('local seed writes a mode-0600 ciphertext-only SQL file, passes a minimal c
         spawns.push(input)
         return {
           code: 0,
-          stdout: JSON.stringify(Array.from({ length: 8 }, () => ({
+          stdout: JSON.stringify(Array.from({ length: 10 }, () => ({
             meta: { duration: 0 },
             results: [],
             success: true,
