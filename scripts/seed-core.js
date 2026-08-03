@@ -9,6 +9,8 @@ const EMPTY_FINGERPRINT = 'BYDlKyUUBNO-3cX7_bRPY-TkArudTPGjIdbwtAdLSCw'
 const RELEASED_LEASE = '{"expiresAt":null,"nonce":null,"owner":null}'
 const CORRELATION_ID = 'local_seed_v1'
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const AUDIT_ID = /^aud_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 
 const deepFreeze = (value) => {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -103,7 +105,6 @@ const SPECIALIST_COLUMNS = Object.freeze([
   'updated_at',
 ])
 const EMPTY_TABLES = Object.freeze([
-  'audit_events',
   'backup_runs',
   'client_assignments',
   'clients',
@@ -125,6 +126,7 @@ export const LOCAL_SEED_SNAPSHOT_QUERIES = deepFreeze([
   'SELECT * FROM record_versions ORDER BY entity_type,entity_id,version,id',
   'SELECT * FROM system_state ORDER BY key',
   'SELECT * FROM specialists ORDER BY id',
+  'SELECT * FROM audit_events ORDER BY rowid',
   ...EMPTY_TABLES.map((table) => `SELECT * FROM ${table} ORDER BY rowid`),
 ])
 const GENESIS_STATES = Object.freeze([
@@ -157,8 +159,8 @@ const OUTBOX_DRAIN_HEARTBEAT = Object.freeze({
 })
 const CORE_DIRECTORY_UPGRADE = Object.freeze({
   key: 'core_directory_specialist_backfill_v1',
-  value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}',
-  version: 1,
+  value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"complete"}',
+  version: 2,
 })
 const SYSTEM_STATE_COUNT = GENESIS_STATES.length + 2
 
@@ -199,6 +201,31 @@ const statement = (sql, params = []) => Object.freeze({
   params: Object.freeze([...params]),
   sql: sql.trim(),
 })
+const exactCompletionAudit = (rows, state) => Array.isArray(rows)
+  && rows.length === 1
+  && exactKeys(rows[0], [
+    'id',
+    'occurred_at',
+    'actor_staff_id',
+    'action',
+    'entity_type',
+    'entity_id',
+    'result',
+    'reason_envelope',
+    'correlation_id',
+    'metadata_json',
+  ])
+  && AUDIT_ID.test(rows[0].id ?? '')
+  && validInstant(rows[0].occurred_at)
+  && rows[0].occurred_at === state?.updated_at
+  && rows[0].actor_staff_id === null
+  && rows[0].action === 'core_directory.upgrade.advanced'
+  && rows[0].entity_type === 'system_state'
+  && rows[0].entity_id === CORE_DIRECTORY_UPGRADE.key
+  && rows[0].result === 'success'
+  && rows[0].reason_envelope === null
+  && UUID.test(rows[0].correlation_id ?? '')
+  && rows[0].metadata_json === '{"createdCount":0,"processedCount":0,"stateVersion":2}'
 const encrypted = async (keyring, dataKey, recordId, field, plaintext) => JSON.stringify(
   await encryptForScope(
     keyring,
@@ -317,13 +344,32 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
   }
   if (!specialistRow) throw new Error('SEED_LOCAL_BUILD_INVALID')
 
+  const completionAuditPredicate = `(
+    SELECT count(*) FROM audit_events
+    WHERE actor_staff_id IS NULL
+      AND action='core_directory.upgrade.advanced'
+      AND entity_type='system_state'
+      AND entity_id='core_directory_specialist_backfill_v1'
+      AND result='success'
+      AND reason_envelope IS NULL
+      AND metadata_json='{"createdCount":0,"processedCount":0,"stateVersion":2}'
+      AND occurred_at=(
+        SELECT updated_at FROM system_state
+        WHERE key='core_directory_specialist_backfill_v1'
+          AND value_json='{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"complete"}'
+          AND version=2
+      )
+  )=1`
   const emptyPredicates = [
     'data_keys',
     'staff_users',
     'specialists',
     'record_versions',
     ...EMPTY_TABLES,
-  ].map((table) => `NOT EXISTS (SELECT 1 FROM ${table})`).join('\n         AND ')
+  ].map((table) => `NOT EXISTS (SELECT 1 FROM ${table})`).concat(
+    `(SELECT count(*) FROM audit_events)=1`,
+    completionAuditPredicate,
+  ).join('\n         AND ')
   const batch = [
     statement(
       `INSERT INTO data_keys
@@ -413,6 +459,8 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
     `(SELECT count(*) FROM record_versions)=${versionRows.length}`,
     '(SELECT count(*) FROM specialists)=1',
     `(SELECT count(*) FROM system_state)=${SYSTEM_STATE_COUNT}`,
+    '(SELECT count(*) FROM audit_events)=1',
+    completionAuditPredicate,
     ...EMPTY_TABLES.map((table) => `(SELECT count(*) FROM ${table})=0`),
     `EXISTS (
        SELECT 1 FROM data_keys
@@ -446,7 +494,7 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
      )`),
     `EXISTS (
        SELECT 1 FROM system_state
-       WHERE key=? AND value_json=? AND version=1
+       WHERE key=? AND value_json=? AND version=2
          AND updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', julianday(updated_at))
      )`,
     `EXISTS (
@@ -566,20 +614,26 @@ export async function inspectLocalSeedState({ db, keyring } = {}) {
     return Object.freeze({ kind: 'refused' })
   }
   try {
-    const [dataKeys, staffRows, versions, states, specialistRows, ...emptyTables] = await snapshot(db)
+    const [dataKeys, staffRows, versions, states, specialistRows, audits, ...emptyTables] = await snapshot(db)
     const genesis = exactGenesisStates(states)
     if (dataKeys.length === 0
       && staffRows.length === 0
       && versions.length === 0
       && specialistRows.length === 0
       && emptyTables.every((rows) => rows.length === 0)
-      && genesis) return Object.freeze({ kind: 'empty' })
+      && genesis
+      && exactCompletionAudit(audits, states[GENESIS_STATES.length])) {
+      return Object.freeze({ kind: 'empty' })
+    }
     if (dataKeys.length !== 1
       || staffRows.length !== LOCAL_SEED_MANIFEST.staff.length
       || versions.length !== LOCAL_SEED_MANIFEST.staff.length + 1
       || specialistRows.length !== 1
       || emptyTables.some((rows) => rows.length !== 0)
-      || !genesis) return Object.freeze({ kind: 'refused' })
+      || !genesis
+      || !exactCompletionAudit(audits, states[GENESIS_STATES.length])) {
+      return Object.freeze({ kind: 'refused' })
+    }
     const dataKey = dataKeys[0]
     if (!exactKeys(dataKey, DATA_KEY_COLUMNS)
       || dataKey.id !== LOCAL_SEED_MANIFEST.dataKeyId

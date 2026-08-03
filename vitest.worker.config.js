@@ -9,6 +9,7 @@ export default defineConfig({
       wrangler: { configPath: './wrangler.json' },
       miniflare: {
         bindings: {
+          CORE_DIRECTORY_STAGE: 'stage-a-complete-before-fixtures',
           TEST_MIGRATIONS: selectCoreMigrationStage(
             await readD1Migrations(path.resolve('migrations')),
             'stage-a',

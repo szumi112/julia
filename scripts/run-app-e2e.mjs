@@ -34,6 +34,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { CAPABILITIES } from '../worker/identity/policy.js'
 import {
   buildLocalHarnessWranglerConfig,
+  LOCAL_HARNESS_CORE_DIRECTORY_COMPLETE,
   LOCAL_HARNESS_MIGRATIONS_NAME,
   LOCAL_HARNESS_RUNNER_MODE,
   LOCAL_HARNESS_WRANGLER_NAME,
@@ -47,6 +48,7 @@ const NODE_EXECUTABLE = realpathSync(process.execPath)
 const WRANGLER_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/wrangler/bin/wrangler.js'))
 const VITE_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/vite/bin/vite.js'))
 const SEED_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'scripts/seed-local.mjs'))
+const UPGRADE_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'scripts/upgrade-core-directory.js'))
 const REACT_PACKAGE_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/react'))
 const REACT_DOM_PACKAGE_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/react-dom'))
 const PS_EXECUTABLE = realpathSync('/bin/ps')
@@ -102,12 +104,13 @@ const PHASE = Object.freeze({
   init: 0,
   prepared: 1,
   migrating: 2,
-  seeding: 3,
-  starting: 4,
-  readiness: 5,
-  ready: 6,
-  stopping: 7,
-  closed: 8,
+  upgrading: 3,
+  seeding: 4,
+  starting: 5,
+  readiness: 6,
+  ready: 7,
+  stopping: 8,
+  closed: 9,
 })
 const MANAGED_CHILDREN = new WeakMap()
 const CHILD_EXIT_PROMISES = new WeakMap()
@@ -2293,6 +2296,27 @@ export async function runAppE2E({
       env: commonEnvironment,
       shell: false,
     }, 'APP_E2E_MIGRATION_FAILED')
+
+    advance(PHASE.upgrading)
+    await assertHarness(harness)
+    if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
+    const upgradeResult = await executeStage({
+      args: [regularExecutable(UPGRADE_SCRIPT_PATH)],
+      command: regularExecutable(NODE_EXECUTABLE),
+      cwd: harness.path,
+      env: privateChildEnvironment(harness, {
+        APP_ENV: 'development',
+        BWM_LOCAL_PERSISTENCE_PATH: harness.state.path,
+        BWM_LOCAL_RUNNER_MODE: LOCAL_HARNESS_RUNNER_MODE,
+        DATA_MODE: 'fictional',
+        ...keys,
+      }),
+      shell: false,
+    }, 'APP_E2E_UPGRADE_FAILED')
+    if (upgradeResult.stderr !== ''
+      || upgradeResult.stdout !== LOCAL_HARNESS_CORE_DIRECTORY_COMPLETE) {
+      outcome('APP_E2E_UPGRADE_FAILED')
+    }
 
     advance(PHASE.seeding)
     await assertHarness(harness)

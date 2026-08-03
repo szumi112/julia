@@ -25,6 +25,12 @@ const NOW_MS = Date.parse('2028-01-01T00:00:00.000Z')
 const CSRF_EXPIRES = Math.floor(NOW_MS / 1000) + 900
 const CSRF_TOKEN = `v1.${CSRF_EXPIRES}.${'A'.repeat(22)}.${Buffer.alloc(32, 1).toString('base64url')}`
 const key = (byte) => Buffer.alloc(32, byte).toString('base64url')
+const UPGRADE_COMPLETE_OUTPUT = '{"createdCount":0,"processedCount":0,"status":"complete"}\n'
+const stageOutput = (input) => input.args.some((value) => value.endsWith('/seed-local.mjs'))
+  ? 'SEED_LOCAL_COMPLETE\n'
+  : input.args.some((value) => value.endsWith('/upgrade-core-directory.js'))
+    ? UPGRADE_COMPLETE_OUTPUT
+    : ''
 const STAGE_A_MIGRATION_NAMES = Object.freeze([
   '0001_security_primitives.sql',
   '0002_identity_operations.sql',
@@ -230,9 +236,7 @@ const managedRunnerFixture = ({
       runChild: async (input) => ({
         code: 0,
         stderr: '',
-        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-          ? 'SEED_LOCAL_COMPLETE\n'
-          : '',
+        stdout: stageOutput(input),
       }),
       signals,
     },
@@ -359,7 +363,7 @@ test('readiness rejects a response body that stops yielding', { timeout: 100 }, 
   )
 })
 
-test('runner applies migrations, seeds, then starts exact loopback Vite with one shared path', async () => {
+test('runner applies migrations, upgrades, seeds, then starts exact loopback Vite with one shared path', async () => {
   const calls = []
   const signals = new EventEmitter()
   const vite = new EventEmitter()
@@ -394,9 +398,7 @@ test('runner applies migrations, seeds, then starts exact loopback Vite with one
         calls.push({ kind: 'run', ...input })
         return {
           code: 0,
-          stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-            ? 'SEED_LOCAL_COMPLETE\n'
-            : '',
+          stdout: stageOutput(input),
           stderr: '',
         }
       },
@@ -417,7 +419,7 @@ test('runner applies migrations, seeds, then starts exact loopback Vite with one
 
   assert.deepEqual(result, { code: 'APP_E2E_READY', ok: true })
   const runs = calls.filter(({ kind }) => kind === 'run')
-  assert.equal(runs.length, 2)
+  assert.equal(runs.length, 3)
   assert.match(runs[0].args.join(' '), /d1 migrations apply DB --local/)
   assert.deepEqual(
     runs[0].args.slice(-2),
@@ -431,9 +433,12 @@ test('runner applies migrations, seeds, then starts exact loopback Vite with one
     '--install-skills=false',
     'd1',
   ])
-  assert.match(runs[1].args.join(' '), /scripts\/seed-local\.mjs/)
+  assert.match(runs[1].args.join(' '), /scripts\/upgrade-core-directory\.js/)
   assert.equal(runs[1].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
   assert.equal(runs[1].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
+  assert.match(runs[2].args.join(' '), /scripts\/seed-local\.mjs/)
+  assert.equal(runs[2].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
+  assert.equal(runs[2].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
   const start = calls.find(({ kind }) => kind === 'start')
   assert.ok(start)
   assert.deepEqual(start.args.slice(1), [
@@ -510,9 +515,7 @@ test('runner remains live after readiness and handles a later signal before clea
       runChild: async (input) => ({
         code: 0,
         stderr: '',
-        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-          ? 'SEED_LOCAL_COMPLETE\n'
-          : '',
+        stdout: stageOutput(input),
       }),
       signals,
       startChild: () => vite,
@@ -572,9 +575,7 @@ test('runner reports a natural Vite exit after readiness as a runtime failure', 
       runChild: async (input) => ({
         code: 0,
         stderr: '',
-        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-          ? 'SEED_LOCAL_COMPLETE\n'
-          : '',
+        stdout: stageOutput(input),
       }),
       signals,
       startChild: () => vite,
@@ -885,9 +886,7 @@ test('runner forwards only the first termination signal and cleans up an owned d
       })(),
       runChild: async (input) => ({
         code: 0,
-        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-          ? 'SEED_LOCAL_COMPLETE\n'
-          : '',
+        stdout: stageOutput(input),
         stderr: '',
       }),
       startChild: () => vite,
@@ -978,6 +977,7 @@ test('runner interruption kills a stubborn inherited seed descendant before clea
         runChild: async (input, callbacks) => {
           runs += 1
           if (runs === 1) return { code: 0, stderr: '', stdout: '' }
+          if (runs === 2) return { code: 0, stderr: '', stdout: UPGRADE_COMPLETE_OUTPUT }
           return runBoundedAppChild({
             args: ['-e', leaderSource],
             command: realpathSync(process.execPath),
@@ -1052,6 +1052,7 @@ test('runner seed-stage deadline kills a pipe-holding descendant and forbids Vit
         runChild: async (input, callbacks) => {
           runs += 1
           if (runs === 1) return { code: 0, stderr: '', stdout: '' }
+          if (runs === 2) return { code: 0, stderr: '', stdout: UPGRADE_COMPLETE_OUTPUT }
           return runBoundedAppChild({
             args: ['-e', leaderSource],
             command: realpathSync(process.execPath),
@@ -1238,7 +1239,11 @@ test('runner requires the exact fresh local-seed status before starting Vite', a
         return {
           code: 0,
           stderr: '',
-          stdout: runs === 2 ? 'SEED_LOCAL_ALREADY_COMPLETE\n' : '',
+          stdout: runs === 2
+            ? UPGRADE_COMPLETE_OUTPUT
+            : runs === 3
+              ? 'SEED_LOCAL_ALREADY_COMPLETE\n'
+              : '',
         }
       },
       signals: new EventEmitter(),
@@ -1274,9 +1279,7 @@ test('runner reports artifact leaks but still removes its owned root', async () 
       runChild: async (input) => ({
         code: 0,
         stderr: '',
-        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-          ? 'SEED_LOCAL_COMPLETE\n'
-          : '',
+        stdout: stageOutput(input),
       }),
       scanHarnessArtifacts: async () => {
         throw new Error('sensitive matched bytes')
@@ -1317,9 +1320,7 @@ test('runner reports writes outside its owned root after orderly shutdown', asyn
       runChild: async (input) => ({
         code: 0,
         stderr: '',
-        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-          ? 'SEED_LOCAL_COMPLETE\n'
-          : '',
+        stdout: stageOutput(input),
       }),
       signals: new EventEmitter(),
       startChild: () => vite,
@@ -1359,9 +1360,7 @@ test('runner reports cleanup failure when removal returns without absence proof'
       runChild: async (input) => ({
         code: 0,
         stderr: '',
-        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-          ? 'SEED_LOCAL_COMPLETE\n'
-          : '',
+        stdout: stageOutput(input),
       }),
       signals: new EventEmitter(),
       startChild: () => vite,
@@ -1507,9 +1506,7 @@ test('runner stops when Vite exits before an in-flight readiness request', {
       runChild: async (input) => ({
         code: 0,
         stderr: '',
-        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-          ? 'SEED_LOCAL_COMPLETE\n'
-          : '',
+        stdout: stageOutput(input),
       }),
       signals: new EventEmitter(),
       startChild: () => {
@@ -1547,9 +1544,7 @@ test('runner rejects a listener ownership change across the readiness response',
       runChild: async (input) => ({
         code: 0,
         stderr: '',
-        stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-          ? 'SEED_LOCAL_COMPLETE\n'
-          : '',
+        stdout: stageOutput(input),
       }),
       signals: new EventEmitter(),
       startChild: () => vite,
@@ -1563,8 +1558,8 @@ test('runner rejects a listener ownership change across the readiness response',
   assert.equal(probes, 2)
 })
 
-test('runner removes its directory on migration, seed, pre-Vite, and readiness failures', async () => {
-  for (const failureAt of ['migration', 'seed', 'start', 'readiness']) {
+test('runner removes its directory on migration, upgrade, seed, pre-Vite, and readiness failures', async () => {
+  for (const failureAt of ['migration', 'upgrade', 'seed', 'start', 'readiness']) {
     const removed = []
     const vite = new EventEmitter()
     vite.kill = () => {
@@ -1586,14 +1581,13 @@ test('runner removes its directory on migration, seed, pre-Vite, and readiness f
         runChild: async (input) => {
           runCount += 1
           if ((failureAt === 'migration' && runCount === 1)
-            || (failureAt === 'seed' && runCount === 2)) {
+            || (failureAt === 'upgrade' && runCount === 2)
+            || (failureAt === 'seed' && runCount === 3)) {
             return { code: 1, stdout: 'sensitive', stderr: 'sensitive' }
           }
           return {
             code: 0,
-            stdout: input.args.some((value) => value.endsWith('/seed-local.mjs'))
-              ? 'SEED_LOCAL_COMPLETE\n'
-              : '',
+            stdout: stageOutput(input),
             stderr: '',
           }
         },
@@ -1614,7 +1608,7 @@ test('runner removes its directory on migration, seed, pre-Vite, and readiness f
       },
     })
     assert.equal(result.ok, false)
-    assert.match(result.code, /^APP_E2E_(?:MIGRATION|SEED|START|READINESS)_FAILED$/)
+    assert.match(result.code, /^APP_E2E_(?:MIGRATION|UPGRADE|SEED|START|READINESS)_FAILED$/)
     assert.deepEqual(removed, [`/tmp/bwm-${failureAt}-owned`])
     assert.doesNotMatch(JSON.stringify(result), /sensitive/)
   }

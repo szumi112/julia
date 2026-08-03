@@ -57,8 +57,8 @@ const MIGRATION_STATES = [
   {
     key: 'core_directory_specialist_backfill_v1',
     updated_at: '2026-08-03T12:34:56.789Z',
-    value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}',
-    version: 1,
+    value_json: '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"complete"}',
+    version: 2,
   },
   {
     key: 'outbox.drain.last_success',
@@ -67,14 +67,28 @@ const MIGRATION_STATES = [
     version: 1,
   },
 ]
-const stateSnapshotDb = (states) => {
+const MIGRATION_AUDIT = [{
+  action: 'core_directory.upgrade.advanced',
+  actor_staff_id: null,
+  correlation_id: '00000000-0000-4000-8000-000000000099',
+  entity_id: 'core_directory_specialist_backfill_v1',
+  entity_type: 'system_state',
+  id: 'aud_core_directory_seed_fixture',
+  metadata_json: '{"createdCount":0,"processedCount":0,"stateVersion":2}',
+  occurred_at: '2026-08-03T12:34:56.789Z',
+  reason_envelope: null,
+  result: 'success',
+}]
+const stateSnapshotDb = (states, audits = MIGRATION_AUDIT) => {
   const queries = new WeakMap()
   return {
     async batch(statements) {
       return statements.map((statement) => ({
         results: queries.get(statement) === 'SELECT * FROM system_state ORDER BY key'
           ? structuredClone(states)
-          : [],
+          : queries.get(statement) === 'SELECT * FROM audit_events ORDER BY rowid'
+            ? structuredClone(audits)
+            : [],
       }))
     },
     prepare(sql) {
@@ -133,7 +147,7 @@ test('local seed manifest owns exactly three deterministic fictional identities'
   assert.equal(Object.isFrozen(LOCAL_SEED_MANIFEST), true)
 })
 
-test('local seed recognizes only the exact five-row stage-A migration baseline', async (t) => {
+test('local seed recognizes only completed zero-count stage A with one exact system audit', async (t) => {
   assert.deepEqual(await inspectLocalSeedState({
     db: stateSnapshotDb(MIGRATION_STATES),
     keyring: {},
@@ -161,8 +175,9 @@ test('local seed recognizes only the exact five-row stage-A migration baseline',
     }],
     ['extra heartbeat field', (states) => { states[4].extra = true }],
     ['mutated upgrade state', (states) => {
-      states[3].value_json = '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"complete"}'
+      states[3].value_json = '{"afterStaffId":null,"createdCount":0,"processedCount":0,"status":"pending"}'
     }],
+    ['mutated upgrade version', (states) => { states[3].version = 1 }],
     ['mutated access genesis', (states) => { states[1].value_json = '{"generation":1}' }],
   ]
   for (const [name, mutate] of cases) {
@@ -171,6 +186,24 @@ test('local seed recognizes only the exact five-row stage-A migration baseline',
       mutate(states)
       assert.deepEqual(await inspectLocalSeedState({
         db: stateSnapshotDb(states),
+        keyring: {},
+      }), { kind: 'refused' })
+    })
+  }
+
+  for (const [name, mutate] of [
+    ['missing completion audit', (audits) => audits.pop()],
+    ['actor-bearing completion audit', (audits) => { audits[0].actor_staff_id = 'stf_private' }],
+    ['wrong completion action', (audits) => { audits[0].action = 'staff.bootstrap' }],
+    ['row-bearing completion metadata', (audits) => {
+      audits[0].metadata_json = '{"createdCount":0,"processedCount":0,"staffId":"stf_private","stateVersion":2}'
+    }],
+  ]) {
+    await t.test(name, async () => {
+      const audits = structuredClone(MIGRATION_AUDIT)
+      mutate(audits)
+      assert.deepEqual(await inspectLocalSeedState({
+        db: stateSnapshotDb(MIGRATION_STATES, audits),
         keyring: {},
       }), { kind: 'refused' })
     })

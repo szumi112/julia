@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import {
   buildLocalSeedBatch,
   inspectLocalSeedState,
@@ -8,11 +8,16 @@ import {
 } from '../../scripts/seed-core.js'
 import { decryptForScope } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { completeCoreDirectoryStageA } from './apply-migrations.js'
 
 const KEYRING_CONFIG = Object.freeze({
   activeBackupKekVersion: 1,
   activeDataKekVersion: 1,
   activeLookupKeyVersion: 1,
+})
+
+beforeAll(async () => {
+  await completeCoreDirectoryStageA()
 })
 
 it('creates and recognizes the exact encrypted deterministic local seed', async () => {
@@ -53,7 +58,7 @@ it('creates and recognizes the exact encrypted deterministic local seed', async 
   expect(await env.DB.prepare('SELECT count(*) AS count FROM specialists').first())
     .toEqual({ count: 1 })
   expect(await env.DB.prepare('SELECT count(*) AS count FROM audit_events').first())
-    .toEqual({ count: 0 })
+    .toEqual({ count: 1 })
 
   const specialist = await env.DB.prepare(
     "SELECT * FROM specialists WHERE id='sp_local_specialist'"

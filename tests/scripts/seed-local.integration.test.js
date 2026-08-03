@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
   mkdtempSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -19,14 +20,20 @@ import {
 import { LOCAL_SEED_MANIFEST, runLocalSeed } from '../../scripts/seed-local.mjs'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { materializeCoreMigrationStage } from '../../scripts/apply-core-migration-stage.js'
-import { buildLocalHarnessWranglerConfig } from '../../scripts/local-harness-core.js'
+import {
+  buildLocalHarnessWranglerConfig,
+  LOCAL_HARNESS_RUNNER_MODE,
+  LOCAL_HARNESS_WRANGLER_NAME,
+} from '../../scripts/local-harness-core.js'
 
 const SUPPORTED = process.platform === 'darwin' || process.platform === 'linux'
 const PROJECT_ROOT = realpathSync(resolve('.'))
 const NODE = realpathSync(process.execPath)
 const WRANGLER = realpathSync(join(PROJECT_ROOT, 'node_modules/wrangler/bin/wrangler.js'))
 const key = (character) => Buffer.alloc(32, character.charCodeAt(0)).toString('base64url')
-const configPath = (root) => join(root, '.bwm-test-wrangler.json')
+const configPath = (root) => join(root, LOCAL_HARNESS_WRANGLER_NAME)
+const persistencePath = (root) => join(root, 'state')
+const UPGRADE = realpathSync(join(PROJECT_ROOT, 'scripts/upgrade-core-directory.js'))
 
 const privateChildEnv = (root) => ({
   CI: '1',
@@ -53,7 +60,7 @@ const seedEnv = (root) => ({
   APP_ENV: 'development',
   BWM_BACKUP_KEK_V1: key('C'),
   BWM_DATA_KEK_V1: key('A'),
-  BWM_LOCAL_PERSISTENCE_PATH: root,
+  BWM_LOCAL_PERSISTENCE_PATH: persistencePath(root),
   BWM_LOOKUP_HMAC_V1: key('B'),
   CF_API_TOKEN: 'must-not-reach-child',
   DATA_MODE: 'fictional',
@@ -61,6 +68,7 @@ const seedEnv = (root) => ({
 })
 
 const applyMigrations = (root) => {
+  mkdirSync(persistencePath(root), { mode: 0o700 })
   const migrationsDirectory = join(root, 'migrations')
   materializeCoreMigrationStage({
     sourceDirectory: join(PROJECT_ROOT, 'migrations'),
@@ -85,7 +93,7 @@ const applyMigrations = (root) => {
     'DB',
     '--local',
     '--persist-to',
-    root,
+    persistencePath(root),
   ], {
     cwd: root,
     encoding: 'utf8',
@@ -94,6 +102,24 @@ const applyMigrations = (root) => {
     shell: false,
   })
   if (child.status !== 0) assert.fail('SEED_LOCAL_TEST_MIGRATION_FAILED')
+  const upgrade = spawnSync(NODE, [UPGRADE], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...privateChildEnv(root),
+      APP_ENV: 'development',
+      BWM_LOCAL_PERSISTENCE_PATH: persistencePath(root),
+      BWM_LOCAL_RUNNER_MODE: LOCAL_HARNESS_RUNNER_MODE,
+      DATA_MODE: 'fictional',
+    },
+    maxBuffer: 64 * 1024,
+    shell: false,
+  })
+  if (upgrade.status !== 0
+    || upgrade.stderr !== ''
+    || upgrade.stdout !== '{"createdCount":0,"processedCount":0,"status":"complete"}\n') {
+    assert.fail('SEED_LOCAL_TEST_UPGRADE_FAILED')
+  }
 }
 
 const wranglerExecute = (root, operationArgs) => spawnSync(NODE, [
@@ -108,7 +134,7 @@ const wranglerExecute = (root, operationArgs) => spawnSync(NODE, [
   'DB',
   '--local',
   '--persist-to',
-  root,
+  persistencePath(root),
   ...operationArgs,
   '--json',
 ], {

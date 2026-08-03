@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import {
   buildLocalSeedBatch,
   inspectLocalSeedState,
@@ -9,6 +9,7 @@ import {
 import { encryptForScope } from '../../worker/security/envelope.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { completeCoreDirectoryStageA } from './apply-migrations.js'
 
 const KEYRING_CONFIG = Object.freeze({
   activeBackupKekVersion: 1,
@@ -16,6 +17,10 @@ const KEYRING_CONFIG = Object.freeze({
   activeLookupKeyVersion: 1,
 })
 const key = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
+
+beforeAll(async () => {
+  await completeCoreDirectoryStageA()
+})
 
 const snapshotDb = (captured) => {
   const descriptors = new WeakMap()

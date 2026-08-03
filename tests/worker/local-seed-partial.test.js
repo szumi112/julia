@@ -1,10 +1,15 @@
 import { env } from 'cloudflare:workers'
-import { expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import {
   buildLocalSeedBatch,
   inspectLocalSeedState,
 } from '../../scripts/seed-core.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { completeCoreDirectoryStageA } from './apply-migrations.js'
+
+beforeAll(async () => {
+  await completeCoreDirectoryStageA()
+})
 
 it('refuses partial local state and the guarded batch rolls back every attempted completion', async () => {
   const keyringConfig = {

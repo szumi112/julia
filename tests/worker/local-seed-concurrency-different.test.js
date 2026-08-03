@@ -1,11 +1,12 @@
 import { env } from 'cloudflare:workers'
-import { expect, it } from 'vitest'
+import { beforeAll, expect, it } from 'vitest'
 import {
   buildLocalSeedBatch,
   inspectLocalSeedState,
 } from '../../scripts/seed-core.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { completeCoreDirectoryStageA } from './apply-migrations.js'
 
 const KEYRING_CONFIG = Object.freeze({
   activeBackupKekVersion: 1,
@@ -20,6 +21,10 @@ const bindings = (offset) => ({
 const execute = (batch) => env.DB.batch(batch.map(({ sql, params }) => (
   env.DB.prepare(sql).bind(...params)
 )))
+
+beforeAll(async () => {
+  await completeCoreDirectoryStageA()
+})
 
 it('allows exactly one competing different-key seed and refuses the losing key set', async () => {
   const leftKeyring = await createKeyring(bindings(41), KEYRING_CONFIG)
