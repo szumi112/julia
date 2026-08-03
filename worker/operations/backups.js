@@ -720,3 +720,745 @@ export async function processNextBackupCreate(input) {
     throw new Error('BACKUP_STATE_INVALID')
   }
 }
+
+const EXPORT_INPUT_KEYS = Object.freeze([
+  'accountId', 'databaseId', 'token', 'fetch', 'wait', 'now', 'signal',
+])
+const DOWNLOAD_INPUT_KEYS = Object.freeze(['downloadUrl', 'fetch', 'signal'])
+const EXPORT_ACCOUNT_ID = /^[0-9a-f]{32}$/
+const EXPORT_DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const EXPORT_TOKEN_PLACEHOLDERS = new Set([
+  'change-me', 'changeme', 'example', 'placeholder', 'replace-me', 'replaceme',
+  'todo', 'your-token-here',
+])
+const EXPORT_ENDPOINT_ORIGIN = 'https://api.cloudflare.com/client/v4'
+const EXPORT_DEADLINE_MS = 5 * 60 * 1000
+const EXPORT_POLL_INTERVAL_MS = 10 * 1000
+const EXPORT_POLL_LIMIT = 30
+const EXPORT_JSON_LIMIT_BYTES = 64 * 1024
+const EXPORT_BOOKMARK_LIMIT_BYTES = 1024
+const EXPORT_FILENAME_LIMIT_BYTES = 1024
+const EXPORT_URL_LIMIT_BYTES = 8192
+const EXPORT_JSON_DEPTH_LIMIT = 64
+const JSON_MEDIA_TYPE = /^application\/json(?:[ \t]*;[ \t]*[!#$%&'*+.^_`|~0-9A-Za-z-]+[ \t]*=[ \t]*(?:[!#$%&'*+.^_`|~0-9A-Za-z-]+|"(?:[^"\\\r\n]|\\[\t -~])*"))*[ \t]*$/i
+const adapterErrors = new WeakMap()
+const activeAdapterCaptures = new WeakSet()
+const reenteredAdapterCaptures = new WeakSet()
+
+function adapterFail(code) {
+  const error = new Error(code)
+  adapterErrors.set(error, code)
+  throw error
+}
+
+function rethrowAdapter(error, fallback = 'BACKUP_EXPORT_RESPONSE_INVALID') {
+  const code = adapterErrors.get(error)
+  throw new Error(code ?? fallback)
+}
+
+function strictAdapterSnapshot(value, keys) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  if (activeAdapterCaptures.has(value)) {
+    reenteredAdapterCaptures.add(value)
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  activeAdapterCaptures.add(value)
+  try {
+    if (Object.getPrototypeOf(value) !== Object.prototype) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const names = Reflect.ownKeys(descriptors)
+    if (names.length !== keys.length
+      || names.some((name) => typeof name !== 'string')
+      || !keys.every((key) => Object.hasOwn(descriptors, key))) {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    const snapshot = {}
+    for (const key of keys) {
+      const descriptor = descriptors[key]
+      if (!descriptor || descriptor.enumerable !== true || !Object.hasOwn(descriptor, 'value')) {
+        adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      }
+      snapshot[key] = descriptor.value
+    }
+    if (reenteredAdapterCaptures.has(value)) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    return snapshot
+  } catch (error) {
+    if (adapterErrors.has(error)) throw error
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  } finally {
+    activeAdapterCaptures.delete(value)
+    reenteredAdapterCaptures.delete(value)
+  }
+}
+
+function boundedUtf8(value, limit) {
+  if (typeof value !== 'string' || value.length > limit) return false
+  let bytes = 0
+  for (const character of value) {
+    const point = character.codePointAt(0)
+    bytes += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4
+    if (bytes > limit) return false
+  }
+  return true
+}
+
+function validExportToken(value) {
+  return typeof value === 'string'
+    && value.length >= 1
+    && value.length <= 4096
+    && boundedUtf8(value, 4096)
+    && value === value.trim()
+    && !/[\s\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
+    && !EXPORT_TOKEN_PLACEHOLDERS.has(value.replaceAll('_', '-').toLowerCase())
+}
+
+function captureAbortSignal(signal) {
+  const AbortSignalImpl = globalThis.AbortSignal
+  const EventTargetImpl = globalThis.EventTarget
+  if (typeof AbortSignalImpl !== 'function'
+    || typeof EventTargetImpl !== 'function'
+    || !(signal instanceof AbortSignalImpl)) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  const abortedGetter = Object.getOwnPropertyDescriptor(AbortSignalImpl.prototype, 'aborted')?.get
+  const add = EventTargetImpl.prototype.addEventListener
+  const remove = EventTargetImpl.prototype.removeEventListener
+  if (typeof abortedGetter !== 'function' || typeof add !== 'function' || typeof remove !== 'function') {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  const aborted = () => {
+    let value
+    try { value = abortedGetter.call(signal) } catch { adapterFail('BACKUP_EXPORT_RESPONSE_INVALID') }
+    if (typeof value !== 'boolean') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    return value
+  }
+  aborted()
+  return {
+    signal,
+    aborted,
+    add(listener) {
+      try { add.call(signal, 'abort', listener, { once: true }) } catch {
+        adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      }
+    },
+    remove(listener) {
+      try { remove.call(signal, 'abort', listener) } catch {
+        adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      }
+    },
+  }
+}
+
+function captureClock(now) {
+  let previous = null
+  return () => {
+    let value
+    try { value = now() } catch { adapterFail('BACKUP_EXPORT_RESPONSE_INVALID') }
+    if (!Number.isSafeInteger(value) || value < 0 || (previous !== null && value < previous)) {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    previous = value
+    return value
+  }
+}
+
+function captureExportInput(input) {
+  const snapshot = strictAdapterSnapshot(input, EXPORT_INPUT_KEYS)
+  if (typeof snapshot.fetch !== 'function'
+    || typeof snapshot.wait !== 'function'
+    || typeof snapshot.now !== 'function'
+    || typeof snapshot.accountId !== 'string'
+    || !EXPORT_ACCOUNT_ID.test(snapshot.accountId)
+    || snapshot.accountId === '0'.repeat(32)
+    || typeof snapshot.databaseId !== 'string'
+    || !EXPORT_DATABASE_ID.test(snapshot.databaseId)
+    || snapshot.databaseId === '00000000-0000-0000-0000-000000000000'
+    || snapshot.databaseId === '00000000-0000-0000-0000-000000000001'
+    || !validExportToken(snapshot.token)) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  return {
+    ...snapshot,
+    caller: captureAbortSignal(snapshot.signal),
+    readNow: captureClock(snapshot.now),
+  }
+}
+
+function canonicalDownloadUrl(value) {
+  if (!boundedUtf8(value, EXPORT_URL_LIMIT_BYTES)
+    || /[\s\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)) return false
+  try {
+    const parsed = new URL(value)
+    return parsed.href === value
+      && parsed.protocol === 'https:'
+      && parsed.username === ''
+      && parsed.password === ''
+      && parsed.hash === ''
+      && parsed.hostname !== ''
+  } catch {
+    return false
+  }
+}
+
+function captureDownloadInput(input) {
+  const snapshot = strictAdapterSnapshot(input, DOWNLOAD_INPUT_KEYS)
+  if (typeof snapshot.fetch !== 'function' || !canonicalDownloadUrl(snapshot.downloadUrl)) {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  return { ...snapshot, caller: captureAbortSignal(snapshot.signal) }
+}
+
+function terminalOutcome(factory, isActive) {
+  let dependency
+  try {
+    dependency = factory()
+  } catch {
+    return Promise.resolve(isActive() ? { kind: 'rejected' } : { kind: 'lost' })
+  }
+  return Promise.resolve(dependency).then(
+    (value) => (isActive() ? { kind: 'fulfilled', value } : { kind: 'lost' }),
+    () => (isActive() ? { kind: 'rejected' } : { kind: 'lost' }),
+  )
+}
+
+async function boundedDependency({
+  caller,
+  deadlineMs,
+  beforeMs,
+  readNow,
+  factory,
+  rejectionCode,
+}) {
+  if (beforeMs >= deadlineMs) adapterFail('BACKUP_EXPORT_TIMEOUT')
+  if (caller.aborted()) adapterFail(rejectionCode)
+  let settleBoundary
+  let active = true
+  const boundary = new Promise((resolve) => { settleBoundary = resolve })
+  const onAbort = () => {
+    active = false
+    settleBoundary('caller')
+  }
+  caller.add(onAbort)
+  const timer = setTimeout(() => {
+    active = false
+    settleBoundary('deadline')
+  }, deadlineMs - beforeMs)
+  const observed = terminalOutcome(factory, () => active)
+  try {
+    const winner = await Promise.race([
+      observed,
+      boundary.then((source) => ({ kind: 'boundary', source })),
+    ])
+    active = false
+    const observedNow = readNow()
+    if (observedNow >= deadlineMs) adapterFail('BACKUP_EXPORT_TIMEOUT')
+    if (caller.aborted()) adapterFail(rejectionCode)
+    if (winner.kind === 'boundary') adapterFail(rejectionCode)
+    if (winner.kind === 'rejected') adapterFail(rejectionCode)
+    return { value: winner.value, observedNow }
+  } finally {
+    active = false
+    clearTimeout(timer)
+    caller.remove(onAbort)
+  }
+}
+
+function requestDeadlineScope(runtime, deadlineMs, beforeMs) {
+  if (beforeMs >= deadlineMs) adapterFail('BACKUP_EXPORT_TIMEOUT')
+  if (runtime.caller.aborted()) adapterFail('BACKUP_EXPORT_START_FAILED')
+  const controller = new AbortController()
+  let settleBoundary
+  let deactivateCurrent = null
+  let closed = false
+  const boundary = new Promise((resolve) => { settleBoundary = resolve })
+  const onAbort = () => {
+    deactivateCurrent?.()
+    try { controller.abort() } catch {}
+    settleBoundary('caller')
+  }
+  runtime.caller.add(onAbort)
+  const timer = setTimeout(() => {
+    deactivateCurrent?.()
+    try { controller.abort() } catch {}
+    settleBoundary('deadline')
+  }, deadlineMs - beforeMs)
+  return {
+    signal: controller.signal,
+    async run(factory, rejectionCode, operationMs) {
+      if (closed) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      if (operationMs >= deadlineMs) adapterFail('BACKUP_EXPORT_TIMEOUT')
+      if (runtime.caller.aborted()) adapterFail(rejectionCode)
+      let active = true
+      const deactivate = () => { active = false }
+      deactivateCurrent = deactivate
+      const observed = terminalOutcome(factory, () => active)
+      try {
+        const winner = await Promise.race([
+          observed,
+          boundary.then((source) => ({ kind: 'boundary', source })),
+        ])
+        active = false
+        const observedNow = runtime.readNow()
+        if (observedNow >= deadlineMs) adapterFail('BACKUP_EXPORT_TIMEOUT')
+        if (runtime.caller.aborted()) adapterFail('BACKUP_EXPORT_START_FAILED')
+        if (winner.kind === 'boundary') adapterFail('BACKUP_EXPORT_START_FAILED')
+        if (winner.kind === 'rejected') adapterFail(rejectionCode)
+        return winner.value
+      } finally {
+        active = false
+        if (deactivateCurrent === deactivate) deactivateCurrent = null
+      }
+    },
+    close() {
+      if (closed) return
+      closed = true
+      clearTimeout(timer)
+      runtime.caller.remove(onAbort)
+    },
+  }
+}
+
+function responseTransportFacts(response) {
+  if (response === null || (typeof response !== 'object' && typeof response !== 'function')) {
+    adapterFail('BACKUP_EXPORT_START_FAILED')
+  }
+  let redirected
+  let ok
+  let status
+  try {
+    redirected = response.redirected
+    ok = response.ok
+    status = response.status
+  } catch {
+    adapterFail('BACKUP_EXPORT_START_FAILED')
+  }
+  if (redirected !== false
+    || typeof ok !== 'boolean'
+    || !Number.isInteger(status) || status < 100 || status > 599
+    || ok !== (status >= 200 && status < 300)
+    || !ok) adapterFail('BACKUP_EXPORT_START_FAILED')
+  return response
+}
+
+function responseBodyFacts(response) {
+  let headers
+  let body
+  try {
+    headers = response.headers
+    body = response.body
+  } catch {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  let getHeader
+  try { getHeader = headers?.get } catch { adapterFail('BACKUP_EXPORT_RESPONSE_INVALID') }
+  if (typeof getHeader !== 'function') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  let contentType
+  let contentLength
+  try {
+    contentType = getHeader.call(headers, 'content-type')
+    contentLength = getHeader.call(headers, 'content-length')
+  } catch {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  if (typeof contentType !== 'string' || !JSON_MEDIA_TYPE.test(contentType)) {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  if (contentLength !== null) {
+    if (typeof contentLength !== 'string' || !/^(?:0|[1-9]\d*)$/.test(contentLength)) {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    const declared = Number(contentLength)
+    if (!Number.isSafeInteger(declared) || declared > EXPORT_JSON_LIMIT_BYTES) {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+  }
+  let locked
+  let getReader
+  try {
+    locked = body?.locked
+    getReader = body?.getReader
+  } catch {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  if (body === null || locked !== false || typeof getReader !== 'function') {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  return { body, getReader }
+}
+
+function readerResult(result) {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  let descriptors
+  try { descriptors = Object.getOwnPropertyDescriptors(result) } catch {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  const keys = Reflect.ownKeys(descriptors)
+  if (keys.length !== 2 || !keys.includes('done') || !keys.includes('value')
+    || keys.some((key) => typeof key !== 'string')) {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  const doneDescriptor = descriptors.done
+  const valueDescriptor = descriptors.value
+  if (!doneDescriptor?.enumerable || !Object.hasOwn(doneDescriptor, 'value')
+    || typeof doneDescriptor.value !== 'boolean'
+    || (valueDescriptor && (!valueDescriptor.enumerable || !Object.hasOwn(valueDescriptor, 'value')))) {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  return { done: doneDescriptor.value, value: valueDescriptor?.value }
+}
+
+function scanJsonString(text, start, decode) {
+  let index = start + 1
+  let value = ''
+  while (index < text.length) {
+    const character = text[index]
+    if (character === '"') return { index: index + 1, value }
+    if (character.charCodeAt(0) < 0x20) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    if (character !== '\\') {
+      if (decode) value += character
+      index += 1
+      continue
+    }
+    index += 1
+    if (index >= text.length) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    const escape = text[index]
+    const simple = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' }
+    if (Object.hasOwn(simple, escape)) {
+      if (decode) value += simple[escape]
+      index += 1
+      continue
+    }
+    if (escape !== 'u' || !/^[0-9a-fA-F]{4}$/.test(text.slice(index + 1, index + 5))) {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    if (decode) value += String.fromCharCode(Number.parseInt(text.slice(index + 1, index + 5), 16))
+    index += 5
+  }
+  adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+}
+
+function rejectDuplicateEnvelopeKeys(text) {
+  let index = 0
+  const skipSpace = () => {
+    while (index < text.length && /[\u0009\u000a\u000d\u0020]/.test(text[index])) index += 1
+  }
+  const scanValue = (watch, depth) => {
+    if (depth > EXPORT_JSON_DEPTH_LIMIT) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    skipSpace()
+    if (text[index] === '{') {
+      scanObject(watch, depth + 1)
+      return
+    }
+    if (text[index] === '[') {
+      index += 1
+      skipSpace()
+      if (text[index] === ']') { index += 1; return }
+      while (index < text.length) {
+        scanValue(null, depth + 1)
+        skipSpace()
+        if (text[index] === ']') { index += 1; return }
+        if (text[index] !== ',') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+        index += 1
+      }
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    if (text[index] === '"') {
+      index = scanJsonString(text, index, false).index
+      return
+    }
+    const start = index
+    while (index < text.length && !/[\u0009\u000a\u000d\u0020,\]}]/.test(text[index])) index += 1
+    if (index === start) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  const scanObject = (watch, depth) => {
+    index += 1
+    const keys = watch ? new Set() : null
+    skipSpace()
+    if (text[index] === '}') { index += 1; return }
+    while (index < text.length) {
+      skipSpace()
+      if (text[index] !== '"') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      const scanned = scanJsonString(text, index, true)
+      const key = scanned.value
+      index = scanned.index
+      if (keys?.has(key)) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      keys?.add(key)
+      skipSpace()
+      if (text[index] !== ':') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      index += 1
+      scanValue(watch === 'top' && key === 'result' ? 'result' : null, depth)
+      skipSpace()
+      if (text[index] === '}') { index += 1; return }
+      if (text[index] !== ',') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      index += 1
+    }
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  scanValue('top', 0)
+  skipSpace()
+  if (index !== text.length) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+}
+
+async function boundedJson(response, runtime, deadlineMs, requestScope) {
+  const { body, getReader } = responseBodyFacts(response)
+  let reader
+  const chunks = []
+  let total = 0
+  let completed = false
+  try {
+    try { reader = getReader.call(body) } catch { adapterFail('BACKUP_EXPORT_RESPONSE_INVALID') }
+    if (reader === null || (typeof reader !== 'object' && typeof reader !== 'function')) {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    let read
+    try { read = reader.read } catch { adapterFail('BACKUP_EXPORT_RESPONSE_INVALID') }
+    if (typeof read !== 'function') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    while (true) {
+      const beforeMs = runtime.readNow()
+      const raw = await requestScope.run(
+        () => read.call(reader),
+        'BACKUP_EXPORT_RESPONSE_INVALID',
+        beforeMs,
+      )
+      const part = readerResult(raw)
+      if (part.done) break
+      if (!(part.value instanceof Uint8Array)) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      if (part.value.byteLength === 0) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      total += part.value.byteLength
+      if (total > EXPORT_JSON_LIMIT_BYTES) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+      chunks.push(part.value)
+    }
+    completed = true
+  } finally {
+    if (reader) {
+      if (!completed) {
+        try {
+          const cancellation = reader.cancel?.()
+          Promise.resolve(cancellation).then(() => undefined, () => undefined)
+        } catch {}
+      }
+      try { reader.releaseLock?.() } catch {}
+    }
+  }
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  let text
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  } finally {
+    bytes.fill(0)
+  }
+  rejectDuplicateEnvelopeKeys(text)
+  try {
+    return JSON.parse(text)
+  } catch {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+}
+
+function parsedExactObject(value, keys) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  const descriptors = Object.getOwnPropertyDescriptors(value)
+  const names = Reflect.ownKeys(descriptors)
+  if (names.length !== keys.length || names.some((name) => typeof name !== 'string')
+    || !keys.every((key) => Object.hasOwn(descriptors, key))) {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  const result = {}
+  for (const key of keys) {
+    const descriptor = descriptors[key]
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    result[key] = descriptor.value
+  }
+  return result
+}
+
+function validBookmark(value) {
+  return typeof value === 'string'
+    && value.length >= 1
+    && value.length <= EXPORT_BOOKMARK_LIMIT_BYTES
+    && /^[\x00-\x7f]+$/.test(value)
+}
+
+function validFilename(value) {
+  return typeof value === 'string'
+    && value.length >= 1
+    && boundedUtf8(value, EXPORT_FILENAME_LIMIT_BYTES)
+    && !/[\\/\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
+}
+
+function exportEnvelope(value, firstBookmark) {
+  const envelope = parsedExactObject(value, ['errors', 'messages', 'result', 'success'])
+  if (!Array.isArray(envelope.errors) || !Array.isArray(envelope.messages)
+    || typeof envelope.success !== 'boolean') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  if (envelope.success !== true) adapterFail('BACKUP_EXPORT_START_FAILED')
+  const resultKeys = Reflect.ownKeys(envelope.result ?? {})
+  if (resultKeys.length === 1 && resultKeys[0] === 'at_bookmark') {
+    const result = parsedExactObject(envelope.result, ['at_bookmark'])
+    if (!validBookmark(result.at_bookmark)
+      || (firstBookmark !== null && result.at_bookmark !== firstBookmark)) {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    return { complete: false, atBookmark: result.at_bookmark }
+  }
+  const result = parsedExactObject(envelope.result, ['at_bookmark', 'filename', 'signed_url'])
+  if (!validBookmark(result.at_bookmark)
+    || (firstBookmark !== null && result.at_bookmark !== firstBookmark)
+    || !validFilename(result.filename)
+    || !canonicalDownloadUrl(result.signed_url)) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  return { complete: true, atBookmark: result.at_bookmark, downloadUrl: result.signed_url }
+}
+
+async function exportRequest(runtime, endpoint, body, deadlineMs, beforeMs, firstBookmark) {
+  const scope = requestDeadlineScope(runtime, deadlineMs, beforeMs)
+  try {
+    const response = await scope.run(() => Reflect.apply(runtime.fetch, undefined, [
+      endpoint,
+      {
+        method: 'POST',
+        redirect: 'error',
+        headers: {
+          Authorization: `Bearer ${runtime.token}`,
+          'Content-Type': 'application/json',
+        },
+        body,
+        signal: scope.signal,
+      },
+    ]), 'BACKUP_EXPORT_START_FAILED', beforeMs)
+    responseTransportFacts(response)
+    return exportEnvelope(
+      await boundedJson(response, runtime, deadlineMs, scope),
+      firstBookmark,
+    )
+  } finally {
+    scope.close()
+  }
+}
+
+async function pollCaptured(runtime) {
+  const endpoint = `${EXPORT_ENDPOINT_ORIGIN}/accounts/${runtime.accountId}/d1/database/${runtime.databaseId}/export`
+  const startBody = '{"output_format":"polling"}'
+  const startMs = runtime.readNow()
+  if (!Number.isSafeInteger(startMs + EXPORT_DEADLINE_MS)) {
+    adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+  }
+  const deadlineMs = startMs + EXPORT_DEADLINE_MS
+  let response = await exportRequest(runtime, endpoint, startBody, deadlineMs, startMs, null)
+  const firstBookmark = response.atBookmark
+  let pollCount = 0
+  while (!response.complete) {
+    const beforeWait = runtime.readNow()
+    if (beforeWait >= deadlineMs || deadlineMs - beforeWait < EXPORT_POLL_INTERVAL_MS) {
+      adapterFail('BACKUP_EXPORT_TIMEOUT')
+    }
+    const waited = await boundedDependency({
+      caller: runtime.caller,
+      deadlineMs,
+      beforeMs: beforeWait,
+      readNow: runtime.readNow,
+      factory: () => Reflect.apply(runtime.wait, undefined, [EXPORT_POLL_INTERVAL_MS]),
+      rejectionCode: 'BACKUP_EXPORT_START_FAILED',
+    })
+    if (waited.observedNow - beforeWait < EXPORT_POLL_INTERVAL_MS) {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    if (pollCount >= EXPORT_POLL_LIMIT) adapterFail('BACKUP_EXPORT_TIMEOUT')
+    const beforeFetch = runtime.readNow()
+    if (beforeFetch >= deadlineMs) adapterFail('BACKUP_EXPORT_TIMEOUT')
+    pollCount += 1
+    const pollBody = JSON.stringify({
+      current_bookmark: firstBookmark,
+      output_format: 'polling',
+    })
+    response = await exportRequest(
+      runtime,
+      endpoint,
+      pollBody,
+      deadlineMs,
+      beforeFetch,
+      firstBookmark,
+    )
+  }
+  return { downloadUrl: response.downloadUrl, atBookmark: response.atBookmark }
+}
+
+export async function pollD1Export(input) {
+  try {
+    return await pollCaptured(captureExportInput(input))
+  } catch (error) {
+    rethrowAdapter(error)
+  }
+}
+
+async function downloadCaptured(runtime) {
+  if (runtime.caller.aborted()) adapterFail('BACKUP_EXPORT_DOWNLOAD_FAILED')
+  let active = true
+  let settleAbort
+  const aborted = new Promise((resolve) => { settleAbort = resolve })
+  const onAbort = () => {
+    active = false
+    settleAbort({ kind: 'aborted' })
+  }
+  runtime.caller.add(onAbort)
+  const observed = terminalOutcome(() => Reflect.apply(runtime.fetch, undefined, [
+    runtime.downloadUrl,
+    {
+      method: 'GET',
+      redirect: 'error',
+      signal: runtime.signal,
+    },
+  ]), () => active)
+  let winner
+  try {
+    winner = await Promise.race([observed, aborted])
+  } finally {
+    active = false
+    runtime.caller.remove(onAbort)
+  }
+  if (winner.kind !== 'fulfilled') adapterFail('BACKUP_EXPORT_DOWNLOAD_FAILED')
+  const response = winner.value
+  if (response === null || (typeof response !== 'object' && typeof response !== 'function')) {
+    adapterFail('BACKUP_EXPORT_DOWNLOAD_FAILED')
+  }
+  let redirected
+  let ok
+  let status
+  let body
+  let bodyUsed
+  try {
+    redirected = response.redirected
+    ok = response.ok
+    status = response.status
+    body = response.body
+    bodyUsed = response.bodyUsed
+  } catch {
+    adapterFail('BACKUP_EXPORT_DOWNLOAD_FAILED')
+  }
+  if (redirected === true) adapterFail('BACKUP_EXPORT_REDIRECTED')
+  if (redirected !== false
+    || typeof ok !== 'boolean'
+    || !Number.isInteger(status) || status < 100 || status > 599
+    || ok !== (status >= 200 && status < 300)
+    || !ok
+    || bodyUsed !== false
+    || !(body instanceof ReadableStream)) adapterFail('BACKUP_EXPORT_DOWNLOAD_FAILED')
+  let locked
+  try { locked = body.locked } catch { adapterFail('BACKUP_EXPORT_DOWNLOAD_FAILED') }
+  if (locked !== false) adapterFail('BACKUP_EXPORT_DOWNLOAD_FAILED')
+  return { body }
+}
+
+export async function downloadD1Export(input) {
+  try {
+    return await downloadCaptured(captureDownloadInput(input))
+  } catch (error) {
+    rethrowAdapter(error)
+  }
+}
