@@ -43,10 +43,12 @@ it('allows exactly one competing different-key seed and refuses the losing key s
     `SELECT
        (SELECT count(*) FROM data_keys) AS data_keys,
        (SELECT count(*) FROM record_versions) AS versions,
+       (SELECT count(*) FROM specialists) AS specialists,
        (SELECT count(*) FROM staff_users) AS staff`
   ).first()).resolves.toEqual({
     data_keys: 1,
+    specialists: 1,
     staff: 3,
-    versions: 3,
+    versions: 4,
   })
 })

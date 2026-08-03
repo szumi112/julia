@@ -27,6 +27,8 @@ it('refuses partial local state and the guarded batch rolls back every attempted
     .toEqual({ count: 1 })
   expect(await env.DB.prepare('SELECT count(*) AS count FROM staff_users').first())
     .toEqual({ count: 0 })
+  expect(await env.DB.prepare('SELECT count(*) AS count FROM specialists').first())
+    .toEqual({ count: 0 })
   expect(await env.DB.prepare('SELECT count(*) AS count FROM record_versions').first())
     .toEqual({ count: 0 })
 })

@@ -13,6 +13,7 @@ const EMPTY_FINGERPRINT = 'BYDlKyUUBNO-3cX7_bRPY-TkArudTPGjIdbwtAdLSCw'
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const INVITATION_ID = /^inv_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const LOOKUP = /^v1:[A-Za-z0-9_-]{43}$/
 
@@ -386,6 +387,15 @@ const OTHER_EMPTY_TABLES = Object.freeze([
   'scheduler_runs',
   'specialists',
 ])
+const AUDIT_SCHEMAS = Object.freeze({
+  'identity.activation': Object.freeze({ entityType: 'staff_user', metadata: { invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { invitationVersion: 'version', staffVersion: 'version' } }),
+  'staff.bootstrap': Object.freeze({ entityType: 'staff_user', metadata: { desiredGeneration: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+  'staff.deactivated': Object.freeze({ entityType: 'staff_user', metadata: { desiredGeneration: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', staffVersion: 'version' } }),
+  'staff.invitation.expired': Object.freeze({ entityType: 'staff_invitation', metadata: { desiredGeneration: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+  'staff.invited': Object.freeze({ entityType: 'staff_invitation', metadata: { desiredGeneration: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+  'specialist.backfilled': Object.freeze({ entityType: 'specialist', metadata: { specialistVersion: 'version', stateVersion: 'version' }, system: true }),
+  'core_directory.upgrade.advanced': Object.freeze({ entityType: 'system_state', metadata: { createdCount: 'count', processedCount: 'count', stateVersion: 'version' }, system: true }),
+})
 
 const ownObject = (value) => value !== null
   && typeof value === 'object'
@@ -807,6 +817,7 @@ export async function buildBootstrapCreationBatch(input = {}) {
   const metadata = JSON.stringify({
     desiredGeneration: 1,
     invitationVersion: 1,
+    specialistVersion: null,
     staffVersion: 1,
   })
   const proof = Object.freeze({
@@ -1183,6 +1194,62 @@ const aggregateRefused = () => {
   throw new Error('BOOTSTRAP_STATE_REFUSED')
 }
 
+const canonicalValue = (value) => {
+  if (Array.isArray(value)) return value.map(canonicalValue)
+  if (!ownObject(value)) return value
+  return Object.fromEntries(Object.entries(value)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, child]) => [key, canonicalValue(child)]))
+}
+const canonicalJson = (value) => JSON.stringify(canonicalValue(value))
+
+export function normalizeBootstrapAuditEvent(row) {
+  if (!exactKeys(row, TABLE_COLUMNS.audit_events)) aggregateRefused()
+  const schema = AUDIT_SCHEMAS[row.action]
+  if (!schema
+    || !ID.test(row.id ?? '')
+    || !validInstant(row.occurred_at)
+    || (row.actor_staff_id !== null && !STAFF_ID.test(row.actor_staff_id ?? ''))
+    || (schema.system && row.actor_staff_id !== null)
+    || row.entity_type !== schema.entityType
+    || !ID.test(row.entity_id ?? '')
+    || row.result !== 'success'
+    || row.reason_envelope !== null
+    || !ID.test(row.correlation_id ?? '')
+    || typeof row.metadata_json !== 'string') aggregateRefused()
+  if (row.action === 'specialist.backfilled'
+    && !SPECIALIST_ID.test(row.entity_id)) aggregateRefused()
+  if (row.action === 'core_directory.upgrade.advanced'
+    && row.entity_id !== CORE_DIRECTORY_UPGRADE.key) aggregateRefused()
+
+  let parsed
+  try {
+    parsed = JSON.parse(row.metadata_json)
+  } catch {
+    aggregateRefused()
+  }
+  if (!ownObject(parsed) || canonicalJson(parsed) !== row.metadata_json) aggregateRefused()
+  const metadataKeys = Object.keys(schema.metadata)
+  const legacyKeys = Object.keys(schema.legacyMetadata ?? {})
+  const exact = exactKeys(parsed, metadataKeys)
+  const legacy = !exact && schema.legacyMetadata && exactKeys(parsed, legacyKeys)
+  if (!exact && !legacy) aggregateRefused()
+  const types = legacy ? schema.legacyMetadata : schema.metadata
+  for (const [key, type] of Object.entries(types)) {
+    const value = parsed[key]
+    if ((type === 'version' && (!Number.isSafeInteger(value) || value < 1))
+      || (type === 'nullableVersion' && value !== null
+        && (!Number.isSafeInteger(value) || value < 1))
+      || (type === 'count' && (!Number.isSafeInteger(value) || value < 0))) {
+      aggregateRefused()
+    }
+  }
+  const metadata = legacy
+    ? Object.freeze({ ...parsed, specialistVersion: null })
+    : Object.freeze({ ...parsed })
+  return Object.freeze({ ...row, metadata })
+}
+
 const exactReleasedLease = (row) => exactKeys(
   row,
   TABLE_COLUMNS.system_state,
@@ -1555,22 +1622,18 @@ const inspectBootstrapAggregateFromSnapshot = async ({
     }
     const audit = audits.find(({ action }) => action === 'staff.bootstrap')
     const accessAudit = audits.find(({ action }) => action === 'staff.access.reconciled')
-    const metadata = JSON.stringify({
-      desiredGeneration: 1,
-      invitationVersion: 1,
-      staffVersion: 1,
-    })
-    if (!exactKeys(audit, TABLE_COLUMNS.audit_events)
-      || !ID.test(audit.id ?? '')
-      || audit.actor_staff_id !== null
-      || audit.action !== 'staff.bootstrap'
-      || audit.entity_type !== 'staff_user'
+    const normalizedAudit = normalizeBootstrapAuditEvent(audit)
+    if (normalizedAudit.actor_staff_id !== null
       || audit.entity_id !== staff.id
-      || audit.result !== 'success'
-      || audit.reason_envelope !== null
       || audit.correlation_id !== staffVersion.correlation_id
       || audit.occurred_at !== staff.created_at
-      || audit.metadata_json !== metadata
+      || !exactKeys(normalizedAudit.metadata, [
+        'desiredGeneration', 'invitationVersion', 'specialistVersion', 'staffVersion',
+      ])
+      || normalizedAudit.metadata.desiredGeneration !== 1
+      || normalizedAudit.metadata.invitationVersion !== 1
+      || normalizedAudit.metadata.specialistVersion !== null
+      || normalizedAudit.metadata.staffVersion !== 1
       || audits.length !== (published ? 2 : 1)
       || (published && (
         !exactKeys(accessAudit, TABLE_COLUMNS.audit_events)

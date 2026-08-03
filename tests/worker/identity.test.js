@@ -237,7 +237,7 @@ describe('D1-authoritative staff resolution', () => {
       occurred_at: instant, actor_staff_id: 'stf_exact_snapshot', action: 'identity.activation',
       entity_type: 'staff_user', entity_id: 'stf_exact_snapshot', result: 'success',
       reason_envelope: null, correlation_id: 'corr_exact_snapshot',
-      metadata_json: '{"invitationVersion":2,"staffVersion":2}',
+      metadata_json: '{"invitationVersion":2,"specialistVersion":null,"staffVersion":2}',
     })
   })
 

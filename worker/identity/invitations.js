@@ -12,6 +12,11 @@ import { blindEmailCandidates, blindEmailIndex, decryptForScope, encryptForScope
 import { enqueueOutboxStatement } from '../jobs/outbox.js'
 import { normalizeCanonicalEmail } from './canonical-email.js'
 import { authorize } from './policy.js'
+import {
+  prepareSpecialistTransition,
+  specialistIdFor,
+  specialistPostcondition,
+} from './specialists.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -34,7 +39,7 @@ const prefixedIdFrom = (prefix, factory) => {
 const validation = (field) => { const error = new Error('VALIDATION_FAILED'); error.details = { field }; throw error }
 const plain = (row, keys) => Object.fromEntries(keys.map((key) => [key, row[key]]))
 
-export const specialistIdFor = (staffId) => validId(staffId) && staffId.startsWith('stf_') ? `sp_${staffId.slice(4)}` : `sp_${staffId}`
+export { specialistIdFor }
 
 export function validateInvitationInput(input, { dataMode } = {}) {
   if (!exactObject(input, ['displayName', 'email', 'role'])) validation('displayName')
@@ -187,13 +192,15 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
   const staffId = reused?.id ?? prefixedIdFrom('stf', idFactory)
   const invitationId = prefixedIdFrom('inv', idFactory)
   const lookup = await blindEmailIndex(request.email, cryptoContext.keyring)
-  const staff = {
+  let staff = {
     ...(reused ?? {}),
     id: staffId,
     email_lookup: lookup,
     email_envelope: await envelope(cryptoContext, staffId, 'email', request.email),
     display_name_envelope: await envelope(cryptoContext, staffId, 'display_name', request.displayName), role: request.role,
-    status: 'pending', access_subject: null, specialist_id: request.role === 'specialist' ? specialistIdFor(staffId) : null,
+    status: 'pending', access_subject: null,
+    specialist_id: reused?.specialist_id
+      ?? (request.role === 'specialist' ? specialistIdFor(staffId) : null),
     version: reused ? reused.version + 1 : 1,
     activated_at: null,
     disabled_at: null,
@@ -226,6 +233,17 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
         updated_at: now,
       }
     : null
+  const specialist = await prepareSpecialistTransition({
+    db,
+    cryptoContext,
+    currentStaff: reused,
+    nextStaff: staff,
+    changedByStaffId: owner.id,
+    now,
+    correlationId,
+    idFactory,
+  })
+  staff = specialist.staff
   const desired = await desiredGenerationStatement(db, now, idFactory)
   const body = {
     data: {
@@ -270,6 +288,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       staffVersion: staff.version,
       invitationVersion: invitation.version,
       desiredGeneration: desired.generation,
+      specialistVersion: specialist.specialistVersion,
     },
     reasonEnvelope: null,
   })
@@ -296,6 +315,8 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     actorId: owner.id,
     correlationId,
   })
+  if (specialist.domainStatement) uow.domain(specialist.domainStatement)
+  if (specialist.versionStatement) uow.version(specialist.versionStatement)
   if (expiredOpen) {
     uow.domain(
       db.prepare(
@@ -411,6 +432,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
         expiredOpen.version,
       ]
     : []
+  const specialistProof = specialistPostcondition(staffId)
   uow.guard(rateLimitGuardStatement(db, {
     auditId,
     actorId: owner.id,
@@ -449,7 +471,8 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
         SELECT 1 FROM idempotency_records
         WHERE actor_id=? AND operation='staff.invite' AND idempotency_key=?
           AND resource_type='staff_invitation' AND resource_id=?
-      )${expiredOpen ? `\n      ${expiredOpenPostcondition}` : ''}`,
+      )
+      AND ${specialistProof.sql}${expiredOpen ? `\n      ${expiredOpenPostcondition}` : ''}`,
     postconditionBindings: [
       staffId,
       staff.email_lookup,
@@ -473,6 +496,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       owner.id,
       idempotencyKey,
       invitationId,
+      ...specialistProof.bindings,
       ...expiredOpenBindings,
     ],
   }))
@@ -567,13 +591,24 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
     decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, { expectedScope: cryptoContext.scope, recordId: row.id, field: 'display_name', envelope: JSON.parse(row.display_name_envelope) }),
   ])
   const now = iso(nowMs)
-  const staff = {
+  let staff = {
     ...row,
     status: 'disabled',
     disabled_at: now,
     version: row.version + 1,
     updated_at: now,
   }
+  const specialist = await prepareSpecialistTransition({
+    db,
+    cryptoContext,
+    currentStaff: row,
+    nextStaff: staff,
+    changedByStaffId: owner.id,
+    now,
+    correlationId,
+    idFactory,
+  })
+  staff = specialist.staff
   const revokedInvitation = invitation
     ? {
         ...invitation,
@@ -608,6 +643,8 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
     actorId: owner.id,
     correlationId,
   })
+  if (specialist.domainStatement) uow.domain(specialist.domainStatement)
+  if (specialist.versionStatement) uow.version(specialist.versionStatement)
   uow.domain(
     db.prepare(
       `UPDATE staff_users
@@ -656,6 +693,7 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
     metadata: {
       staffVersion: staff.version,
       desiredGeneration: desired.generation,
+      specialistVersion: specialist.specialistVersion,
     },
     reasonEnvelope: null,
   }))
@@ -690,6 +728,7 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
         revokedInvitation.version,
       ]
     : []
+  const specialistProof = specialistPostcondition(staffId)
   uow.guard(
     db.prepare(
       `INSERT INTO audit_events
@@ -720,6 +759,7 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
            WHERE actor_id=? AND operation='staff.deactivate' AND idempotency_key=?
              AND resource_type='staff_user' AND resource_id=?
          )
+         AND ${specialistProof.sql}
          ${invitationPostcondition}
        )`
     ).bind(
@@ -738,6 +778,7 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
       owner.id,
       idempotencyKey,
       staffId,
+      ...specialistProof.bindings,
       ...invitationBindings,
     )
   )
@@ -841,6 +882,7 @@ export async function expireInvitation({ db, cryptoContext, actorId, invitationI
       staffVersion: staff.version,
       invitationVersion: nextInvitation.version,
       desiredGeneration: desired.generation,
+      specialistVersion: null,
     },
     reasonEnvelope: null,
   }))

@@ -1,6 +1,11 @@
 import { auditEventStatement } from '../audit/events.js'
 import { isD1IdentityCollision } from '../db/errors.js'
 import { blindEmailCandidates, blindEmailIndex, decryptForScope, encryptForScope } from '../security/envelope.js'
+import {
+  prepareSpecialistTransition,
+  specialistGuardStatement,
+  specialistSnapshotMatches,
+} from './specialists.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const tables = new Set(['staff_users', 'staff_invitations'])
@@ -92,6 +97,7 @@ async function recoverActivation(db, context, { staff, invitation, principal, ac
   if (typeof activatedAt !== 'string' || currentInvitation?.activated_at !== activatedAt) return null
   const expectedStaff = {
     ...staff, status: 'active', access_subject: principal.subject, email_lookup: activeLookup,
+    specialist_id: attempt.specialistId,
     version: staff.version + 1, activated_at: activatedAt, updated_at: activatedAt,
   }
   const expectedInvitation = {
@@ -113,7 +119,29 @@ async function recoverActivation(db, context, { staff, invitation, principal, ac
     || !await snapshotMatches(context, staffVersion, currentStaff)
     || !await snapshotMatches(context, invitationVersion, currentInvitation)) return null
 
-  const metadata = JSON.stringify({ invitationVersion: expectedInvitation.version, staffVersion: expectedStaff.version })
+  let specialistVersion = null
+  let attemptedSpecialistVersion = null
+  if (attempt.specialistVersion !== null) {
+    const profile = await db.prepare('SELECT * FROM specialists WHERE id=?').bind(attempt.specialistId).first()
+    specialistVersion = await db.prepare(
+      "SELECT * FROM record_versions WHERE entity_type='specialist' AND entity_id=? AND version=?"
+    ).bind(attempt.specialistId, attempt.specialistVersion).first()
+    if (!profile || profile.staff_user_id !== staff.id || profile.status !== 'active'
+      || profile.version !== attempt.specialistVersion || profile.archived_at !== null
+      || !specialistVersion
+      || specialistVersion.changed_by_staff_id !== staff.id
+      || specialistVersion.changed_at !== activatedAt
+      || specialistVersion.correlation_id !== staffVersion.correlation_id
+      || !await specialistSnapshotMatches(context, specialistVersion, profile)) return null
+    attemptedSpecialistVersion = await db.prepare(
+      'SELECT * FROM record_versions WHERE id=?'
+    ).bind(attempt.specialistVersionId).first()
+  }
+  const metadata = JSON.stringify({
+    invitationVersion: expectedInvitation.version,
+    specialistVersion: attempt.specialistVersion,
+    staffVersion: expectedStaff.version,
+  })
   const audits = (await db.prepare(
     `SELECT * FROM audit_events
      WHERE action='identity.activation' AND entity_type='staff_user' AND entity_id=?
@@ -131,6 +159,7 @@ async function recoverActivation(db, context, { staff, invitation, principal, ac
   ])
   if (!occupiedByTarget(attemptedStaffVersion, staffVersion)
     || !occupiedByTarget(attemptedInvitationVersion, invitationVersion)
+    || !occupiedByTarget(attemptedSpecialistVersion, specialistVersion)
     || !occupiedByTarget(attemptedAudit, audit)) return null
   return asActor(currentStaff)
 }
@@ -186,12 +215,23 @@ async function activeForSubject(db, subject) {
 async function activate(db, staff, invitation, principal, context, values, options, recovery) {
   const { now, candidates, activeLookup } = values
   const { correlationId, idFactory, auditEventStatement: constructor = auditEventStatement } = options
-  const staffNext = { ...staff, status: 'active', access_subject: principal.subject, email_lookup: activeLookup, version: staff.version + 1, activated_at: now, updated_at: now }
+  let staffNext = { ...staff, status: 'active', access_subject: principal.subject, email_lookup: activeLookup, version: staff.version + 1, activated_at: now, updated_at: now }
   const invitationNext = { ...invitation, status: 'activated', email_lookup: activeLookup, version: invitation.version + 1, activated_at: now, updated_at: now }
+  const specialist = await prepareSpecialistTransition({
+    db,
+    cryptoContext: context,
+    currentStaff: staff,
+    nextStaff: staffNext,
+    changedByStaffId: staff.id,
+    now,
+    correlationId,
+    idFactory,
+  })
+  staffNext = specialist.staff
   const staffUpdate = db.prepare(
-    `UPDATE staff_users SET status='active',access_subject=?,email_lookup=?,activated_at=?,version=version+1,updated_at=?
+    `UPDATE staff_users SET status='active',access_subject=?,email_lookup=?,specialist_id=?,activated_at=?,version=version+1,updated_at=?
      WHERE id=? AND status='pending' AND access_subject IS NULL AND version=? AND email_lookup IN (${placeholders(candidates)})`
-  ).bind(principal.subject, activeLookup, now, now, staff.id, staff.version, ...candidates)
+  ).bind(principal.subject, activeLookup, staffNext.specialist_id, now, now, staff.id, staff.version, ...candidates)
   const invitationUpdate = db.prepare(
     `UPDATE staff_invitations SET status='activated',email_lookup=?,activated_at=?,version=version+1,updated_at=?
      WHERE id=? AND staff_id=? AND role=? AND status='pending' AND version=? AND email_lookup IN (${placeholders(candidates)})
@@ -203,16 +243,22 @@ async function activate(db, staff, invitation, principal, context, values, optio
   recovery.attempt = Object.freeze({
     staffVersionId: staffVersion.id,
     invitationVersionId: invitationVersion.id,
+    specialistId: specialist.specialistId,
+    specialistVersion: specialist.specialistVersion,
+    specialistVersionId: specialist.versionId ?? null,
     auditId,
   })
   const statements = [
+    ...(specialist.domainStatement ? [specialist.domainStatement] : []),
+    ...(specialist.versionStatement ? [specialist.versionStatement] : []),
     staffUpdate,
     invitationUpdate,
     staffVersion.statement,
     invitationVersion.statement,
-    constructor(db, { id: auditId, occurredAt: now, actorStaffId: staff.id, action: 'identity.activation', entityType: 'staff_user', entityId: staff.id, result: 'success', correlationId, metadata: { staffVersion: staffNext.version, invitationVersion: invitationNext.version }, reasonEnvelope: null }),
+    constructor(db, { id: auditId, occurredAt: now, actorStaffId: staff.id, action: 'identity.activation', entityType: 'staff_user', entityId: staff.id, result: 'success', correlationId, metadata: { staffVersion: staffNext.version, invitationVersion: invitationNext.version, specialistVersion: specialist.specialistVersion }, reasonEnvelope: null }),
     guardStatement(db, 'staff_users', staff, { status: 'active', access_subject: principal.subject, email_lookup: activeLookup, version: staffNext.version, activated_at: now }),
     guardStatement(db, 'staff_invitations', invitation, { status: 'activated', email_lookup: activeLookup, version: invitationNext.version, activated_at: now }),
+    specialistGuardStatement(db, staff.id),
   ]
   await db.batch(statements)
   return asActor(staffNext)

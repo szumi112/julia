@@ -496,16 +496,18 @@ const AUDIT_FACTS = Object.freeze([
   Object.freeze({ action: 'authorization.denied', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'denied', metadata: { version: 1 }, actorStaffId: 'stf_audit_actor', encryptedReason: true }),
   Object.freeze({ action: 'backup.pruned', entityType: 'backup_run', entityId: 'bkp_audit_pruned', result: 'success', metadata: { backupVersion: 2 }, actorStaffId: null }),
   Object.freeze({ action: 'data_key.rewrapped', entityType: 'data_key', entityId: 'key_audit', result: 'success', metadata: { newKekVersion: 2, oldKekVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
-  Object.freeze({ action: 'identity.activation', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { invitationVersion: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'identity.activation', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { invitationVersion: 2, specialistVersion: 1, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'identity.denied', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'denied', metadata: { version: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'identity.reindex', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { version: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'operational_action.resolved', entityType: 'operational_action', entityId: 'act_audit', result: 'success', metadata: { actionVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'staff.access.reconciled', entityType: 'access_group', entityId: 'centre_1', result: 'success', metadata: { appliedGeneration: 2, desiredGeneration: 2, invitationCount: 0 }, actorStaffId: 'stf_audit_actor' }),
-  Object.freeze({ action: 'staff.bootstrap', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 1, invitationVersion: 1, staffVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
-  Object.freeze({ action: 'staff.deactivated', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'staff.bootstrap', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 1, invitationVersion: 1, specialistVersion: null, staffVersion: 1 }, actorStaffId: null }),
+  Object.freeze({ action: 'staff.deactivated', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 2, specialistVersion: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'staff.invitation.email_accepted', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { invitationVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
-  Object.freeze({ action: 'staff.invitation.expired', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
-  Object.freeze({ action: 'staff.invited', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 1, staffVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'staff.invitation.expired', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 2, specialistVersion: null, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'staff.invited', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 1, specialistVersion: 1, staffVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'specialist.backfilled', entityType: 'specialist', entityId: 'sp_audit_backfilled', result: 'success', metadata: { specialistVersion: 1, stateVersion: 2 }, actorStaffId: null }),
+  Object.freeze({ action: 'core_directory.upgrade.advanced', entityType: 'system_state', entityId: 'core_directory_specialist_backfill_v1', result: 'success', metadata: { createdCount: 0, processedCount: 1, stateVersion: 2 }, actorStaffId: null }),
 ])
 
 async function auditRow(context, fact, index = 0, changes = {}) {
@@ -2046,6 +2048,37 @@ describe('operations route services', () => {
     expect(serialized).not.toContain('reason-not-readable')
     expect(serialized).not.toContain('reason_envelope')
     expect(serialized).not.toContain('display_name')
+  })
+
+  it('normalizes every exact Phase 1 identity audit shape without rewriting stored rows', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({ id: 'stf_audit_legacy_registry' })
+    const facts = AUDIT_FACTS.filter(({ action }) => [
+      'identity.activation',
+      'staff.bootstrap',
+      'staff.deactivated',
+      'staff.invitation.expired',
+      'staff.invited',
+    ].includes(action)).map((fact) => {
+      const { specialistVersion: ignored, ...metadata } = fact.metadata
+      return { ...fact, metadata }
+    })
+    const rows = await Promise.all(facts.map((fact, index) => auditRow(context, fact, index)))
+    const stored = rows.map(({ metadata_json }) => metadata_json)
+    const db = facade(env.DB, {
+      all: (sql) => sql.includes('FROM audit_events') ? { results: rows } : undefined,
+    })
+
+    const result = await listSecurityAudit(commonInput(actor, context, {
+      db,
+      query: new URLSearchParams(),
+    }))
+
+    expect(result.data.events.map(({ metadata }) => metadata)).toEqual(facts.map((fact) => ({
+      ...fact.metadata,
+      specialistVersion: null,
+    })))
+    expect(rows.map(({ metadata_json }) => metadata_json)).toEqual(stored)
   })
 
   it('authorizes and revalidates before parsing audit query values', async () => {

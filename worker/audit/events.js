@@ -7,18 +7,20 @@ const MAX_REASON_PLAINTEXT_BYTES = 2048
 const descriptors = new WeakMap()
 const fields = ['id', 'occurredAt', 'actorStaffId', 'action', 'entityType', 'entityId', 'result', 'correlationId', 'metadata', 'reasonEnvelope']
 const schemas = Object.freeze({
-  'identity.activation': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version' }), reasonPolicy: 'null' }),
+  'identity.activation': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
   'identity.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
   'identity.reindex': Object.freeze({ entityTypes: ['staff_user', 'staff_invitation'], result: 'success', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: Object.freeze({ oldKekVersion: 'version', newKekVersion: 'version' }), reasonPolicy: 'null' }),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'encrypted' }),
   'operational_action.resolved': Object.freeze({ entityTypes: ['operational_action'], result: 'success', metadata: Object.freeze({ actionVersion: 'version' }), reasonPolicy: 'null' }),
-  'staff.invited': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
-  'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
-  'staff.invitation.expired': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
+  'staff.invited': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
+  'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', desiredGeneration: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
+  'staff.invitation.expired': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
   'staff.access.reconciled': Object.freeze({ entityTypes: ['access_group'], result: 'success', metadata: Object.freeze({ desiredGeneration: 'version', appliedGeneration: 'version', invitationCount: 'count' }), reasonPolicy: 'null' }),
-  'staff.bootstrap': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version' }), reasonPolicy: 'null' }),
+  'staff.bootstrap': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
   'staff.invitation.email_accepted': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ invitationVersion: 'version' }), reasonPolicy: 'null' }),
+  'specialist.backfilled': Object.freeze({ entityTypes: ['specialist'], result: 'success', metadata: Object.freeze({ specialistVersion: 'version', stateVersion: 'version' }), reasonPolicy: 'null', system: true }),
+  'core_directory.upgrade.advanced': Object.freeze({ entityTypes: ['system_state'], result: 'success', metadata: Object.freeze({ stateVersion: 'version', processedCount: 'count', createdCount: 'count' }), reasonPolicy: 'null', system: true }),
 })
 
 const own = (object, key) => Object.hasOwn(object, key)
@@ -35,6 +37,8 @@ function metadataJson(action, metadata) {
   for (const [key, type] of Object.entries(schema)) {
     const value = metadata[key]
     if ((type === 'version' && (!Number.isSafeInteger(value) || value < 1))
+      || (type === 'nullableVersion' && value !== null
+        && (!Number.isSafeInteger(value) || value < 1))
       || (type === 'count' && (!Number.isSafeInteger(value) || value < 0))
       || (type === 'id' && !validId(value))) throw new Error('AUDIT_EVENT_INVALID')
   }
@@ -77,6 +81,7 @@ export function auditEventStatement(db, event) {
     : schema?.reasonPolicy === 'encrypted' && validReasonEnvelope(reasonEnvelope)
   if (!validId(id) || !validInstant(occurredAt) || (actorStaffId !== null && !validId(actorStaffId)) || !schema
     || !schema.entityTypes.includes(entityType) || schema.result !== result || !validId(entityId)
+    || (schema.system && actorStaffId !== null)
     || !validId(correlationId) || !reasonValid) throw new Error('AUDIT_EVENT_INVALID')
   const statement = db.prepare(
     `INSERT INTO audit_events

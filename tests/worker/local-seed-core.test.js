@@ -6,6 +6,7 @@ import {
   LOCAL_SEED_MANIFEST,
   serializeLocalSeedBatch,
 } from '../../scripts/seed-core.js'
+import { decryptForScope } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 
 const KEYRING_CONFIG = Object.freeze({
@@ -17,7 +18,7 @@ const KEYRING_CONFIG = Object.freeze({
 it('creates and recognizes the exact encrypted deterministic local seed', async () => {
   const keyring = await createKeyring(env, KEYRING_CONFIG)
   const built = await buildLocalSeedBatch({ keyring, keyringConfig: KEYRING_CONFIG })
-  expect(built.batch).toHaveLength(8)
+  expect(built.batch).toHaveLength(10)
   expect(built.batch.every(
     ({ params }) => params.every((value) => typeof value === 'string'),
   )).toBe(true)
@@ -48,7 +49,46 @@ it('creates and recognizes the exact encrypted deterministic local seed', async 
   expect(await env.DB.prepare('SELECT count(*) AS count FROM staff_users').first())
     .toEqual({ count: 3 })
   expect(await env.DB.prepare('SELECT count(*) AS count FROM record_versions').first())
-    .toEqual({ count: 3 })
+    .toEqual({ count: 4 })
+  expect(await env.DB.prepare('SELECT count(*) AS count FROM specialists').first())
+    .toEqual({ count: 1 })
+  expect(await env.DB.prepare('SELECT count(*) AS count FROM audit_events').first())
+    .toEqual({ count: 0 })
+
+  const specialist = await env.DB.prepare(
+    "SELECT * FROM specialists WHERE id='sp_local_specialist'"
+  ).first()
+  expect(specialist).toEqual({
+    id: 'sp_local_specialist',
+    staff_user_id: 'stf_local_specialist',
+    standard_rate_grosze: 18000,
+    status: 'active',
+    version: 1,
+    archived_at: null,
+    created_at: LOCAL_SEED_MANIFEST.createdAt,
+    updated_at: LOCAL_SEED_MANIFEST.createdAt,
+  })
+  const specialistVersion = await env.DB.prepare(
+    "SELECT * FROM record_versions WHERE entity_type='specialist' AND entity_id='sp_local_specialist'"
+  ).first()
+  expect(JSON.parse(await decryptForScope(keyring, await env.DB.prepare(
+    'SELECT * FROM data_keys WHERE id=?'
+  ).bind(LOCAL_SEED_MANIFEST.dataKeyId).first(), {
+    expectedScope: LOCAL_SEED_MANIFEST.scope,
+    recordId: specialist.id,
+    field: 'record_version',
+    envelope: JSON.parse(specialistVersion.snapshot_envelope),
+  }))).toEqual({
+    archivedAt: null,
+    createdAt: LOCAL_SEED_MANIFEST.createdAt,
+    id: specialist.id,
+    schema: 'specialist.v1',
+    staffUserId: specialist.staff_user_id,
+    standardRateGrosze: 18000,
+    status: 'active',
+    updatedAt: LOCAL_SEED_MANIFEST.createdAt,
+    version: 1,
+  })
 
   const raw = JSON.stringify((await env.DB.prepare(
     `SELECT email_envelope,display_name_envelope,access_subject

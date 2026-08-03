@@ -7,6 +7,7 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CSRF_TOKEN = /^v1\.([1-9]\d*)\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const OUTBOX_TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const AUDIT_CURSOR = /^v1\.([1-9]\d*)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -119,16 +120,18 @@ const AUDIT_SCHEMAS = Object.freeze({
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' } }),
   'backup.pruned': Object.freeze({ entityTypes: ['backup_run'], result: 'success', metadata: { backupVersion: 'version' }, system: true }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: { newKekVersion: 'version', oldKekVersion: 'version' } }),
-  'identity.activation': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { invitationVersion: 'version', staffVersion: 'version' } }),
+  'identity.activation': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { invitationVersion: 'version', staffVersion: 'version' } }),
   'identity.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' } }),
   'identity.reindex': Object.freeze({ entityTypes: ['staff_invitation', 'staff_user'], result: 'success', metadata: { version: 'version' } }),
   'operational_action.resolved': Object.freeze({ entityTypes: ['operational_action'], result: 'success', metadata: { actionVersion: 'version' } }),
   'staff.access.reconciled': Object.freeze({ entityTypes: ['access_group'], result: 'success', metadata: { appliedGeneration: 'version', desiredGeneration: 'version', invitationCount: 'count' } }),
-  'staff.bootstrap': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
-  'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', staffVersion: 'version' } }),
+  'staff.bootstrap': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+  'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', staffVersion: 'version' } }),
   'staff.invitation.email_accepted': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: { invitationVersion: 'version' } }),
-  'staff.invitation.expired': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
-  'staff.invited': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+  'staff.invitation.expired': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+  'staff.invited': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
+  'specialist.backfilled': Object.freeze({ entityTypes: ['specialist'], result: 'success', metadata: { specialistVersion: 'version', stateVersion: 'version' }, system: true }),
+  'core_directory.upgrade.advanced': Object.freeze({ entityTypes: ['system_state'], result: 'success', metadata: { createdCount: 'count', processedCount: 'count', stateVersion: 'version' }, system: true }),
 })
 
 const plainObject = (value) => value !== null && typeof value === 'object'
@@ -498,16 +501,26 @@ const acceptedResolution = (payload, actionId, version) => {
 }
 
 const acceptedAuditMetadata = (value, schema) => {
-  const keys = Object.keys(schema.metadata)
-  const metadata = captureExactObject(value, keys)
+  const schemaKeys = Object.keys(schema.metadata)
+  const legacyKeys = Object.keys(schema.legacyMetadata ?? {})
+  let types = schema.metadata
+  let metadata = captureExactObject(value, schemaKeys)
+  let legacy = false
+  if (!metadata && schema.legacyMetadata) {
+    metadata = captureExactObject(value, legacyKeys)
+    types = schema.legacyMetadata
+    legacy = metadata !== null
+  }
   if (!metadata) return null
-  for (const key of keys) {
-    const accepted = schema.metadata[key] === 'count'
+  for (const key of Object.keys(types)) {
+    const accepted = types[key] === 'count'
       ? safeCount(metadata[key])
-      : positive(metadata[key])
+      : types[key] === 'nullableVersion'
+        ? metadata[key] === null || positive(metadata[key])
+        : positive(metadata[key])
     if (!accepted) return null
   }
-  return Object.freeze(metadata)
+  return Object.freeze(legacy ? { ...metadata, specialistVersion: null } : metadata)
 }
 
 const acceptedAudit = (payload, limit) => {
@@ -534,7 +547,11 @@ const acceptedAudit = (payload, limit) => {
       || !validId(value.correlationId) || ids.has(value.id)
       || (previous && (previous.occurredAt < value.occurredAt
         || (previous.occurredAt === value.occurredAt && previous.id <= value.id)))) return null
-    if (schema.system && (value.actorStaffId !== null || !BACKUP_ID.test(value.entityId))) return null
+    if (schema.system && value.actorStaffId !== null) return null
+    if (value.action === 'backup.pruned' && !BACKUP_ID.test(value.entityId)) return null
+    if (value.action === 'specialist.backfilled' && !SPECIALIST_ID.test(value.entityId)) return null
+    if (value.action === 'core_directory.upgrade.advanced'
+      && value.entityId !== 'core_directory_specialist_backfill_v1') return null
     const metadata = acceptedAuditMetadata(value.metadata, schema)
     if (!metadata) return null
     ids.add(value.id)

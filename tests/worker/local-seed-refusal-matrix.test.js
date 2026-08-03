@@ -77,6 +77,9 @@ it('independently refuses every hostile field, plaintext, state, and cardinality
   const auditIndex = LOCAL_SEED_SNAPSHOT_QUERIES.findIndex((sql) => (
     sql.includes('FROM audit_events')
   ))
+  const specialistIndex = LOCAL_SEED_SNAPSHOT_QUERIES.findIndex((sql) => (
+    sql.includes('FROM specialists')
+  ))
   const cases = [
     ['staff ciphertext', async (rows) => {
       rows[1][0].display_name_envelope = '{"forged":true}'
@@ -135,6 +138,18 @@ it('independently refuses every hostile field, plaintext, state, and cardinality
       rows[1].push({
         ...rows[1][0],
         id: 'stf_local_extra',
+      })
+    }],
+    ['missing specialist profile', async (rows) => {
+      rows[specialistIndex] = []
+    }],
+    ['specialist status mismatch', async (rows) => {
+      rows[specialistIndex][0].status = 'pending'
+    }],
+    ['extra specialist cardinality', async (rows) => {
+      rows[specialistIndex].push({
+        ...rows[specialistIndex][0],
+        id: 'sp_local_extra',
       })
     }],
   ]

@@ -50,6 +50,7 @@ export const LOCAL_SEED_MANIFEST = deepFreeze({
       role: 'specialist',
       snapshotId: 'ver_local_specialist_v1',
       specialistId: 'sp_local_specialist',
+      specialistSnapshotId: 'ver_local_specialist_profile_v1',
     },
   ],
 })
@@ -91,6 +92,16 @@ const VERSION_COLUMNS = Object.freeze([
   'changed_at',
   'correlation_id',
 ])
+const SPECIALIST_COLUMNS = Object.freeze([
+  'id',
+  'staff_user_id',
+  'standard_rate_grosze',
+  'status',
+  'version',
+  'archived_at',
+  'created_at',
+  'updated_at',
+])
 const EMPTY_TABLES = Object.freeze([
   'audit_events',
   'backup_runs',
@@ -102,7 +113,6 @@ const EMPTY_TABLES = Object.freeze([
   'outbox_attempts',
   'outbox_jobs',
   'scheduler_runs',
-  'specialists',
   'staff_invitations',
 ])
 export const LOCAL_SEED_SNAPSHOT_QUERIES = deepFreeze([
@@ -114,6 +124,7 @@ export const LOCAL_SEED_SNAPSHOT_QUERIES = deepFreeze([
    FROM staff_users ORDER BY id`,
   'SELECT * FROM record_versions ORDER BY entity_type,entity_id,version,id',
   'SELECT * FROM system_state ORDER BY key',
+  'SELECT * FROM specialists ORDER BY id',
   ...EMPTY_TABLES.map((table) => `SELECT * FROM ${table} ORDER BY rowid`),
 ])
 const GENESIS_STATES = Object.freeze([
@@ -219,6 +230,7 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
   })
   const staffRows = []
   const versionRows = []
+  let specialistRow = null
   for (const staff of LOCAL_SEED_MANIFEST.staff) {
     const row = {
       access_subject: `local:${staff.email}`,
@@ -264,11 +276,51 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
       ),
       version: 1,
     })
+    if (staff.specialistId !== null) {
+      specialistRow = {
+        archived_at: null,
+        created_at: LOCAL_SEED_MANIFEST.createdAt,
+        id: staff.specialistId,
+        staff_user_id: staff.id,
+        standard_rate_grosze: 18000,
+        status: 'active',
+        updated_at: LOCAL_SEED_MANIFEST.createdAt,
+        version: 1,
+      }
+      versionRows.push({
+        changed_at: LOCAL_SEED_MANIFEST.createdAt,
+        changed_by_staff_id: null,
+        correlation_id: CORRELATION_ID,
+        entity_id: specialistRow.id,
+        entity_type: 'specialist',
+        id: staff.specialistSnapshotId,
+        snapshot_envelope: await encrypted(
+          keyring,
+          dataKey,
+          specialistRow.id,
+          'record_version',
+          JSON.stringify({
+            archivedAt: null,
+            createdAt: specialistRow.created_at,
+            id: specialistRow.id,
+            schema: 'specialist.v1',
+            staffUserId: specialistRow.staff_user_id,
+            standardRateGrosze: specialistRow.standard_rate_grosze,
+            status: specialistRow.status,
+            updatedAt: specialistRow.updated_at,
+            version: specialistRow.version,
+          }),
+        ),
+        version: 1,
+      })
+    }
   }
+  if (!specialistRow) throw new Error('SEED_LOCAL_BUILD_INVALID')
 
   const emptyPredicates = [
     'data_keys',
     'staff_users',
+    'specialists',
     'record_versions',
     ...EMPTY_TABLES,
   ].map((table) => `NOT EXISTS (SELECT 1 FROM ${table})`).join('\n         AND ')
@@ -287,6 +339,18 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
         dataKey.wrapped_key_b64,
         dataKey.wrap_nonce_b64,
         dataKey.created_at,
+      ],
+    ),
+    statement(
+      `INSERT INTO specialists
+       (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+       SELECT ?,?,18000,'active',1,NULL,?,?
+       WHERE changes()=1`,
+      [
+        specialistRow.id,
+        specialistRow.staff_user_id,
+        specialistRow.created_at,
+        specialistRow.updated_at,
       ],
     ),
   ]
@@ -319,18 +383,20 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
     ))
   }
   for (const row of versionRows) {
+    const table = row.entity_type === 'specialist' ? 'specialists' : 'staff_users'
     batch.push(statement(
       `INSERT INTO record_versions
        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
         changed_at,correlation_id)
-       SELECT ?,'staff_user',?,1,?,NULL,?,?
+       SELECT ?,?,?,1,?,NULL,?,?
        WHERE changes()=1
          AND EXISTS (
-           SELECT 1 FROM staff_users
+           SELECT 1 FROM ${table}
            WHERE id=? AND status='active' AND version=1
          )`,
       [
         row.id,
+        row.entity_type,
         row.entity_id,
         row.snapshot_envelope,
         row.changed_at,
@@ -345,6 +411,7 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
     '(SELECT count(*) FROM data_keys)=1',
     `(SELECT count(*) FROM staff_users)=${staffRows.length}`,
     `(SELECT count(*) FROM record_versions)=${versionRows.length}`,
+    '(SELECT count(*) FROM specialists)=1',
     `(SELECT count(*) FROM system_state)=${SYSTEM_STATE_COUNT}`,
     ...EMPTY_TABLES.map((table) => `(SELECT count(*) FROM ${table})=0`),
     `EXISTS (
@@ -361,9 +428,15 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
          AND version=1 AND activated_at=? AND disabled_at IS NULL
          AND created_at=? AND updated_at=?
      )`),
+    `EXISTS (
+       SELECT 1 FROM specialists
+       WHERE id=? AND staff_user_id=? AND standard_rate_grosze=18000
+         AND status='active' AND version=1 AND archived_at IS NULL
+         AND created_at=? AND updated_at=?
+     )`,
     ...versionRows.map(() => `EXISTS (
        SELECT 1 FROM record_versions
-       WHERE id=? AND entity_type='staff_user' AND entity_id=? AND version=1
+       WHERE id=? AND entity_type=? AND entity_id=? AND version=1
          AND snapshot_envelope=? AND changed_by_staff_id IS NULL
          AND changed_at=? AND correlation_id=?
      )`),
@@ -402,8 +475,13 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
       row.created_at,
       row.updated_at,
     ]),
+    specialistRow.id,
+    specialistRow.staff_user_id,
+    specialistRow.created_at,
+    specialistRow.updated_at,
     ...versionRows.flatMap((row) => [
       row.id,
+      row.entity_type,
       row.entity_id,
       row.snapshot_envelope,
       row.changed_at,
@@ -427,7 +505,7 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
      )`,
     guardParams,
   ))
-  if (batch.length !== 8
+  if (batch.length !== 10
     || batch.some(({ params }) => params.some((value) => typeof value !== 'string'))) {
     throw new Error('SEED_LOCAL_BUILD_INVALID')
   }
@@ -488,16 +566,18 @@ export async function inspectLocalSeedState({ db, keyring } = {}) {
     return Object.freeze({ kind: 'refused' })
   }
   try {
-    const [dataKeys, staffRows, versions, states, ...emptyTables] = await snapshot(db)
+    const [dataKeys, staffRows, versions, states, specialistRows, ...emptyTables] = await snapshot(db)
     const genesis = exactGenesisStates(states)
     if (dataKeys.length === 0
       && staffRows.length === 0
       && versions.length === 0
+      && specialistRows.length === 0
       && emptyTables.every((rows) => rows.length === 0)
       && genesis) return Object.freeze({ kind: 'empty' })
     if (dataKeys.length !== 1
       || staffRows.length !== LOCAL_SEED_MANIFEST.staff.length
-      || versions.length !== LOCAL_SEED_MANIFEST.staff.length
+      || versions.length !== LOCAL_SEED_MANIFEST.staff.length + 1
+      || specialistRows.length !== 1
       || emptyTables.some((rows) => rows.length !== 0)
       || !genesis) return Object.freeze({ kind: 'refused' })
     const dataKey = dataKeys[0]
@@ -551,6 +631,50 @@ export async function inspectLocalSeedState({ db, keyring } = {}) {
           row,
         )) return Object.freeze({ kind: 'refused' })
     }
+    const specialistManifest = LOCAL_SEED_MANIFEST.staff.find(
+      ({ specialistId }) => specialistId !== null,
+    )
+    const specialist = specialistRows[0]
+    const specialistVersion = versions.find(
+      ({ id }) => id === specialistManifest?.specialistSnapshotId,
+    )
+    if (!specialistManifest
+      || !exactKeys(specialist, SPECIALIST_COLUMNS)
+      || !exactKeys(specialistVersion, VERSION_COLUMNS)
+      || specialist.id !== specialistManifest.specialistId
+      || specialist.staff_user_id !== specialistManifest.id
+      || specialist.standard_rate_grosze !== 18000
+      || specialist.status !== 'active'
+      || specialist.version !== 1
+      || specialist.archived_at !== null
+      || specialist.created_at !== LOCAL_SEED_MANIFEST.createdAt
+      || specialist.updated_at !== LOCAL_SEED_MANIFEST.createdAt
+      || specialistVersion.entity_type !== 'specialist'
+      || specialistVersion.entity_id !== specialist.id
+      || specialistVersion.version !== 1
+      || specialistVersion.changed_by_staff_id !== null
+      || specialistVersion.changed_at !== LOCAL_SEED_MANIFEST.createdAt
+      || specialistVersion.correlation_id !== CORRELATION_ID
+      || !sameRow(
+        JSON.parse(await decrypt(
+          keyring,
+          dataKey,
+          specialist.id,
+          'record_version',
+          specialistVersion.snapshot_envelope,
+        )),
+        {
+          archivedAt: null,
+          createdAt: specialist.created_at,
+          id: specialist.id,
+          schema: 'specialist.v1',
+          staffUserId: specialist.staff_user_id,
+          standardRateGrosze: specialist.standard_rate_grosze,
+          status: specialist.status,
+          updatedAt: specialist.updated_at,
+          version: specialist.version,
+        },
+      )) return Object.freeze({ kind: 'refused' })
     return Object.freeze({ kind: 'seeded' })
   } catch {
     return Object.freeze({ kind: 'refused' })
@@ -568,7 +692,7 @@ const sqlText = (value) => {
 }
 
 export function serializeLocalSeedBatch(batch) {
-  if (!Array.isArray(batch) || batch.length !== 8) {
+  if (!Array.isArray(batch) || batch.length !== 10) {
     throw new Error('SEED_LOCAL_BUILD_INVALID')
   }
   return `${batch.map((descriptor) => {

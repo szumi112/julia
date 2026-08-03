@@ -79,7 +79,7 @@ describe('shared audit statement constructor', () => {
   })
 
   it.each([
-    ['identity.activation', 'staff_user', 'success', { invitationVersion: 2, staffVersion: 3 }],
+    ['identity.activation', 'staff_user', 'success', { invitationVersion: 2, specialistVersion: 1, staffVersion: 3 }],
     ['identity.denied', 'staff_user', 'denied', { version: 2 }],
     ['identity.reindex', 'staff_user', 'success', { version: 3 }],
     ['identity.reindex', 'staff_invitation', 'success', { version: 3 }],
@@ -93,6 +93,76 @@ describe('shared audit statement constructor', () => {
     await statement.run()
     expect((await env.DB.prepare('SELECT metadata_json FROM audit_events WHERE id=?').bind(id).first()).metadata_json)
       .toBe(JSON.stringify(Object.fromEntries(Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right)))))
+  })
+
+  it.each([
+    ['identity.activation', 'staff_user', { invitationVersion: 2, specialistVersion: null, staffVersion: 2 }],
+    ['staff.invited', 'staff_invitation', { desiredGeneration: 2, invitationVersion: 1, specialistVersion: 1, staffVersion: 1 }],
+    ['staff.deactivated', 'staff_user', { desiredGeneration: 3, specialistVersion: 2, staffVersion: 4 }],
+    ['staff.invitation.expired', 'staff_invitation', { desiredGeneration: 4, invitationVersion: 2, specialistVersion: null, staffVersion: 1 }],
+    ['staff.bootstrap', 'staff_user', { desiredGeneration: 1, invitationVersion: 1, specialistVersion: null, staffVersion: 1 }],
+  ])('requires exact new specialist metadata for %s', async (action, entityType, metadata) => {
+    const id = `aud_${action.replaceAll('.', '_')}_specialist_metadata`
+    await auditEventStatement(env.DB, {
+      ...event,
+      id,
+      action,
+      actorStaffId: null,
+      entityType,
+      entityId: entityType === 'staff_invitation' ? 'inv_target' : 'stf_target',
+      metadata,
+    }).run()
+    expect(JSON.parse((await env.DB.prepare(
+      'SELECT metadata_json FROM audit_events WHERE id=?'
+    ).bind(id).first()).metadata_json)).toEqual(metadata)
+
+    const { specialistVersion: ignored, ...legacy } = metadata
+    expect(() => auditEventStatement(env.DB, {
+      ...event,
+      id: `${id}_legacy`,
+      action,
+      actorStaffId: action === 'staff.bootstrap' ? null : 'stf_actor',
+      entityType,
+      entityId: entityType === 'staff_invitation' ? 'inv_target' : 'stf_target',
+      metadata: legacy,
+    })).toThrow(/^AUDIT_EVENT_INVALID$/)
+    expect(() => auditEventStatement(env.DB, {
+      ...event,
+      id: `${id}_extra`,
+      action,
+      actorStaffId: action === 'staff.bootstrap' ? null : 'stf_actor',
+      entityType,
+      entityId: entityType === 'staff_invitation' ? 'inv_target' : 'stf_target',
+      metadata: { ...metadata, extra: 1 },
+    })).toThrow(/^AUDIT_EVENT_INVALID$/)
+  })
+
+  it.each([
+    ['specialist.backfilled', 'specialist', 'sp_backfilled', { specialistVersion: 1, stateVersion: 2 }],
+    ['core_directory.upgrade.advanced', 'system_state', 'core_directory_specialist_backfill_v1', { createdCount: 0, processedCount: 1, stateVersion: 2 }],
+  ])('accepts only a null actor for system action %s', async (action, entityType, entityId, metadata) => {
+    const id = `aud_${action.replaceAll('.', '_')}`
+    await auditEventStatement(env.DB, {
+      ...event,
+      id,
+      action,
+      actorStaffId: null,
+      entityType,
+      entityId,
+      metadata,
+    }).run()
+    expect(JSON.parse((await env.DB.prepare(
+      'SELECT metadata_json FROM audit_events WHERE id=?'
+    ).bind(id).first()).metadata_json)).toEqual(metadata)
+    expect(() => auditEventStatement(env.DB, {
+      ...event,
+      id: `${id}_actor_mismatch`,
+      action,
+      actorStaffId: 'stf_actor',
+      entityType,
+      entityId,
+      metadata,
+    })).toThrow(/^AUDIT_EVENT_INVALID$/)
   })
 
   it('accepts authorization.denied only with its exact encrypted reason policy', async () => {
@@ -109,7 +179,7 @@ describe('shared audit statement constructor', () => {
   })
 
   it.each([
-    ['identity.activation', 'wrong_entity', 'success', { staffVersion: 2, invitationVersion: 2 }],
+    ['identity.activation', 'wrong_entity', 'success', { staffVersion: 2, invitationVersion: 2, specialistVersion: null }],
     ['identity.denied', 'staff_invitation', 'denied', { version: 2 }],
     ['identity.reindex', 'data_key', 'success', { version: 2 }],
     ['data_key.rewrapped', 'staff_user', 'success', { oldKekVersion: 1, newKekVersion: 2 }],
@@ -120,7 +190,7 @@ describe('shared audit statement constructor', () => {
   })
 
   it.each([
-    ['identity.activation', 'staff_user', 'denied', { staffVersion: 2, invitationVersion: 2 }],
+    ['identity.activation', 'staff_user', 'denied', { staffVersion: 2, invitationVersion: 2, specialistVersion: null }],
     ['identity.denied', 'staff_user', 'success', { version: 2 }],
     ['identity.reindex', 'staff_user', 'failure', { version: 2 }],
     ['data_key.rewrapped', 'data_key', 'denied', { oldKekVersion: 1, newKekVersion: 2 }],
@@ -144,7 +214,7 @@ describe('shared audit statement constructor', () => {
       { ...event, correlationId: ' ' },
       {
         ...event, action: 'identity.activation',
-        metadata: { staffVersion: 2, invitationVersion: 2, accessSubject: 1 },
+        metadata: { staffVersion: 2, invitationVersion: 2, specialistVersion: null, accessSubject: 1 },
       },
       {
         ...event, action: 'data_key.rewrapped', entityType: 'data_key', entityId: 'key_fixture',
@@ -176,7 +246,7 @@ describe('shared audit statement constructor', () => {
   it('rejects non-null reasons for identity and rewrap actions and requires one for authorization denial', async () => {
     const { reason } = await reasonFixture('aud_reason_policy')
     const nullReasonEvents = [
-      { action: 'identity.activation', entityType: 'staff_user', metadata: { staffVersion: 2, invitationVersion: 2 } },
+      { action: 'identity.activation', entityType: 'staff_user', metadata: { staffVersion: 2, invitationVersion: 2, specialistVersion: null } },
       { action: 'identity.denied', entityType: 'staff_user', result: 'denied', metadata: { version: 2 } },
       { action: 'identity.reindex', entityType: 'staff_invitation', metadata: { version: 2 } },
       { action: 'data_key.rewrapped', entityType: 'data_key', metadata: { oldKekVersion: 1, newKekVersion: 2 } },

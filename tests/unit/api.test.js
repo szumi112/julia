@@ -967,16 +967,18 @@ const AUDIT_FACTS = [
   { action: 'authorization.denied', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'denied', metadata: { version: 1 }, actorStaffId: 'stf_audit_actor' },
   { action: 'backup.pruned', entityType: 'backup_run', entityId: 'bkp_audit_pruned', result: 'success', metadata: { backupVersion: 2 }, actorStaffId: null },
   { action: 'data_key.rewrapped', entityType: 'data_key', entityId: 'key_audit', result: 'success', metadata: { newKekVersion: 2, oldKekVersion: 1 }, actorStaffId: 'stf_audit_actor' },
-  { action: 'identity.activation', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { invitationVersion: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' },
+  { action: 'identity.activation', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { invitationVersion: 2, specialistVersion: 1, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'identity.denied', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'denied', metadata: { version: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'identity.reindex', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { version: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'operational_action.resolved', entityType: 'operational_action', entityId: 'act_audit', result: 'success', metadata: { actionVersion: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'staff.access.reconciled', entityType: 'access_group', entityId: 'centre_1', result: 'success', metadata: { appliedGeneration: 2, desiredGeneration: 2, invitationCount: 0 }, actorStaffId: 'stf_audit_actor' },
-  { action: 'staff.bootstrap', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 1, invitationVersion: 1, staffVersion: 1 }, actorStaffId: 'stf_audit_actor' },
-  { action: 'staff.deactivated', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' },
+  { action: 'staff.bootstrap', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 1, invitationVersion: 1, specialistVersion: null, staffVersion: 1 }, actorStaffId: null },
+  { action: 'staff.deactivated', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 2, specialistVersion: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'staff.invitation.email_accepted', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { invitationVersion: 2 }, actorStaffId: 'stf_audit_actor' },
-  { action: 'staff.invitation.expired', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' },
-  { action: 'staff.invited', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 1, staffVersion: 1 }, actorStaffId: 'stf_audit_actor' },
+  { action: 'staff.invitation.expired', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 2, specialistVersion: null, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' },
+  { action: 'staff.invited', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 1, specialistVersion: 1, staffVersion: 1 }, actorStaffId: 'stf_audit_actor' },
+  { action: 'specialist.backfilled', entityType: 'specialist', entityId: 'sp_audit_backfilled', result: 'success', metadata: { specialistVersion: 1, stateVersion: 2 }, actorStaffId: null },
+  { action: 'core_directory.upgrade.advanced', entityType: 'system_state', entityId: 'core_directory_specialist_backfill_v1', result: 'success', metadata: { createdCount: 0, processedCount: 1, stateVersion: 2 }, actorStaffId: null },
 ]
 
 const auditBody = (facts = AUDIT_FACTS, nextCursor = null) => ({
@@ -1272,7 +1274,7 @@ test('security audit builds URLSearchParams in cursor-limit order and validates 
   })
 })
 
-test('security audit projects and deeply freezes all thirteen exact registry actions with opaque correlations', async () => {
+test('security audit projects and deeply freezes all fifteen exact registry actions with opaque correlations', async () => {
   const body = auditBody()
   const { fetchImpl } = queuedFetch(jsonResponse(body))
   const result = await createApiClient({ fetchImpl }).getSecurityAudit({ limit: 50 })
@@ -1285,6 +1287,31 @@ test('security audit projects and deeply freezes all thirteen exact registry act
     assert.notEqual(event.metadata, body.data.events[index].metadata)
   })
   assert.equal(result.events[0].correlationId, 'stored_correlation_0')
+  assertDeepFrozen(result)
+})
+
+test('security audit normalizes every exact Phase 1 identity action to a null specialist version', async () => {
+  const facts = AUDIT_FACTS.filter(({ action }) => [
+    'identity.activation',
+    'staff.bootstrap',
+    'staff.deactivated',
+    'staff.invitation.expired',
+    'staff.invited',
+  ].includes(action)).map((fact) => {
+    const { specialistVersion: ignored, ...metadata } = fact.metadata
+    return { ...structuredClone(fact), metadata }
+  })
+  const body = auditBody(facts)
+  const rawMetadata = body.data.events.map(({ metadata }) => structuredClone(metadata))
+  const { fetchImpl } = queuedFetch(jsonResponse(body))
+
+  const result = await createApiClient({ fetchImpl }).getSecurityAudit()
+
+  assert.deepEqual(result.events.map(({ metadata }) => metadata), facts.map((fact) => ({
+    ...fact.metadata,
+    specialistVersion: null,
+  })))
+  assert.deepEqual(body.data.events.map(({ metadata }) => metadata), rawMetadata)
   assertDeepFrozen(result)
 })
 

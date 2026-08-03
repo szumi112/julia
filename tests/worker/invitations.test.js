@@ -543,6 +543,7 @@ describe('staff invitation creation', () => {
       metadata_json: JSON.stringify({
         desiredGeneration: generation,
         invitationVersion: 1,
+        specialistVersion: 1,
         staffVersion: 1,
       }),
     })
@@ -929,6 +930,7 @@ describe('staff invitation expiry', () => {
       metadata_json: JSON.stringify({
         desiredGeneration: expiryGeneration,
         invitationVersion: 2,
+        specialistVersion: null,
         staffVersion: 1,
       }),
     })
@@ -1169,6 +1171,9 @@ describe('retained staff reinvitation', () => {
       })
     }
     const before = await mutationFacts()
+    const retainedSpecialistId = initialRole === 'specialist' || nextRole === 'specialist'
+      ? specialistIdFor(retained.id)
+      : null
     const result = await invite(context, {
       displayName: 'Nowa Nazwa',
       email: `  ${email.toUpperCase()}  `,
@@ -1185,7 +1190,7 @@ describe('retained staff reinvitation', () => {
       role: nextRole,
       status: 'pending',
       version: 4,
-      specialistId: nextRole === 'specialist' ? specialistIdFor(retained.id) : null,
+      specialistId: retainedSpecialistId,
     })
     expect(result.data.invitation).toMatchObject({
       status: 'provisioning',
@@ -1198,7 +1203,7 @@ describe('retained staff reinvitation', () => {
       role: nextRole,
       status: 'pending',
       access_subject: null,
-      specialist_id: nextRole === 'specialist' ? specialistIdFor(retained.id) : null,
+      specialist_id: retainedSpecialistId,
       version: 4,
       activated_at: null,
       disabled_at: null,
@@ -1210,7 +1215,7 @@ describe('retained staff reinvitation', () => {
     expect(mutationDelta(before, await mutationFacts())).toEqual({
       staff: 0,
       invitations: 1,
-      versions: 2,
+      versions: retainedSpecialistId === null ? 2 : 3,
       audits: 1,
       idempotency: 1,
       jobs: 2,
@@ -1300,7 +1305,7 @@ describe('retained staff reinvitation', () => {
     expect(mutationDelta(before, await mutationFacts())).toEqual({
       staff: 0,
       invitations: 1,
-      versions: 3,
+      versions: 4,
       audits: 1,
       idempotency: 1,
       jobs: 2,
@@ -1574,7 +1579,11 @@ describe('staff deactivation', () => {
       entity_type: 'staff_user',
       entity_id: target.id,
       result: 'success',
-      metadata_json: JSON.stringify({ desiredGeneration: generation, staffVersion: 4 }),
+      metadata_json: JSON.stringify({
+        desiredGeneration: generation,
+        specialistVersion: null,
+        staffVersion: 4,
+      }),
     })
     expect(mutationDelta(before, await mutationFacts())).toEqual({
       staff: 0,
@@ -1627,7 +1636,7 @@ describe('staff deactivation', () => {
     expect(mutationDelta(before, await mutationFacts())).toEqual({
       staff: 0,
       invitations: 0,
-      versions: 2,
+      versions: 3,
       audits: 1,
       idempotency: 1,
       jobs: 1,
