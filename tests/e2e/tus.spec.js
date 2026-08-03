@@ -23,7 +23,12 @@ function localIsoDate(date = new Date()) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
+async function installStartedTusClock(page) {
+  await page.clock.install({ time: new Date('2026-07-20T12:00:00+02:00') })
+}
+
 test('owner reviews TUS groups and toggles attendance', async ({ page }) => {
+  await installStartedTusClock(page)
   await login(page)
   await openGroup(page, 'TUS · przedszkolaki 5–6 lat')
   const cell = page.locator('.att:not([disabled])').first()
@@ -274,6 +279,7 @@ test.describe('touch layout', () => {
   })
 
   test('attendance controls keep a 44px touch target on coarse pointers', async ({ page }) => {
+    await installStartedTusClock(page)
     await login(page)
     await page.getByRole('button', { name: /Szukaj/ }).click()
     await page.getByRole('combobox', { name: 'Szukaj w panelu' }).fill('TUS')
@@ -322,6 +328,7 @@ test('owner updates TUS payment method and invoice flag', async ({ page }) => {
 })
 
 test('therapist sees only led groups without payment controls', async ({ page }) => {
+  await installStartedTusClock(page)
   await login(page)
   await switchToTherapist(page) // Justyna Jarosz-Jarszewska (p2) leads only TUS · przedszkolaki 5–6 lat
   await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
