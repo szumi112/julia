@@ -24,6 +24,7 @@ const MIGRATIONS = Object.freeze([
   '0005_outbox_operation_guard.sql',
   '0006_delivery_attempt_uniqueness.sql',
   '0007_operational_health_indexes.sql',
+  '0008_outbox_drain_heartbeat.sql',
 ])
 
 const TABLE_COLUMNS = Object.freeze({
@@ -286,6 +287,8 @@ const GENESIS_STATES = Object.freeze([
     version: 1,
   }),
 ])
+const OUTBOX_DRAIN_HEARTBEAT_KEY = 'outbox.drain.last_success'
+const SYSTEM_STATE_COUNT = GENESIS_STATES.length + 1
 
 const OTHER_EMPTY_TABLES = Object.freeze([
   'backup_runs',
@@ -397,10 +400,10 @@ const schemaSqlHash = async (value) => {
 }
 
 const validAccessStateShape = (rows) => {
-  if (!Array.isArray(rows) || rows.length !== 3) return false
+  if (!Array.isArray(rows) || rows.length !== SYSTEM_STATE_COUNT) return false
   try {
-    const [applied, desired, lease] = rows
-    if (![applied, desired, lease].every((row) => (
+    const [applied, desired, lease, heartbeat] = rows
+    if (![applied, desired, lease, heartbeat].every((row) => (
       exactKeys(row, ['key', 'value_json', 'version', 'updated_at'])
       && Number.isSafeInteger(row.version)
       && row.version >= 1
@@ -408,10 +411,12 @@ const validAccessStateShape = (rows) => {
     ))
       || applied.key !== 'access.applied_generation'
       || desired.key !== 'access.desired_generation'
-      || lease.key !== 'access.reconcile.lease') return false
+      || lease.key !== 'access.reconcile.lease'
+      || heartbeat.key !== OUTBOX_DRAIN_HEARTBEAT_KEY) return false
     const appliedValue = JSON.parse(applied.value_json)
     const desiredValue = JSON.parse(desired.value_json)
     const leaseValue = JSON.parse(lease.value_json)
+    const heartbeatValue = JSON.parse(heartbeat.value_json)
     return exactKeys(appliedValue, ['fingerprint', 'generation'])
       && /^[A-Za-z0-9_-]{43}$/.test(appliedValue.fingerprint ?? '')
       && Number.isSafeInteger(appliedValue.generation)
@@ -423,6 +428,13 @@ const validAccessStateShape = (rows) => {
       && (leaseValue.expiresAt === null || validInstant(leaseValue.expiresAt))
       && (leaseValue.nonce === null || ID.test(leaseValue.nonce))
       && (leaseValue.owner === null || ID.test(leaseValue.owner))
+      && exactKeys(heartbeatValue, ['completedAt'])
+      && JSON.stringify(heartbeatValue) === heartbeat.value_json
+      && (heartbeatValue.completedAt === null || (
+        validInstant(heartbeatValue.completedAt)
+        && heartbeatValue.completedAt <= heartbeat.updated_at
+      ))
+      && (heartbeat.version !== 1 || heartbeatValue.completedAt === null)
   } catch {
     return false
   }
@@ -559,7 +571,9 @@ export async function inspectBootstrapSchema(db) {
       || !Number.isSafeInteger(staffCount.count)
       || staffCount.count < 0
       || (staffCount.count === 0
-        && !states.every((row, index) => sameRow(row, GENESIS_STATES[index])))) {
+        && !states.slice(0, GENESIS_STATES.length).every(
+          (row, index) => sameRow(row, GENESIS_STATES[index]),
+        ))) {
       return Object.freeze({ kind: 'refused' })
     }
     return Object.freeze({ kind: 'ready' })
@@ -933,7 +947,21 @@ export async function buildBootstrapCreationBatch(input = {}) {
              AND value_json='{"expiresAt":null,"nonce":null,"owner":null}'
              AND version=1 AND updated_at='2026-07-30T00:00:00.000Z'
          )
-         AND (SELECT count(*) FROM system_state)=3
+         AND EXISTS (
+           SELECT 1 FROM system_state
+           WHERE key='outbox.drain.last_success'
+             AND typeof(version)='integer' AND version>=1
+             AND (
+               value_json='{"completedAt":null}'
+               OR (
+                 json_type(value_json,'$.completedAt')='text'
+                 AND value_json='{"completedAt":'
+                   || json_quote(json_extract(value_json,'$.completedAt')) || '}'
+                 AND json_extract(value_json,'$.completedAt')<=updated_at
+               )
+             )
+         )
+         AND (SELECT count(*) FROM system_state)=4
          AND (SELECT count(*) FROM outbox_jobs)=2
          AND EXISTS (
            SELECT 1 FROM outbox_jobs
@@ -1286,7 +1314,7 @@ const inspectBootstrapAggregateFromSnapshot = async ({
       || dataKeys.length !== 1
       || staffRows.length !== 1
       || invitations.length !== 1
-      || states.length !== 3) return Object.freeze({ kind: 'refused' })
+      || !validAccessStateShape(states)) return Object.freeze({ kind: 'refused' })
     const dataKey = dataKeys[0]
     const staff = staffRows[0]
     const invitation = invitations[0]
@@ -1661,8 +1689,10 @@ export async function inspectBootstrapEntryState(input = {}) {
       && jobs.length === 0
       && attempts.length === 0
       && emptyTables.every((rows) => rows.length === 0)
-      && states.length === GENESIS_STATES.length
-      && states.every((row, index) => sameRow(row, GENESIS_STATES[index]))) {
+      && validAccessStateShape(states)
+      && states.slice(0, GENESIS_STATES.length).every(
+        (row, index) => sameRow(row, GENESIS_STATES[index]),
+      )) {
       return Object.freeze({ kind: 'empty' })
     }
     return inspectBootstrapAggregateFromSnapshot(input, capturedRows)

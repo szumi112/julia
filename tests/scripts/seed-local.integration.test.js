@@ -188,6 +188,14 @@ test('real Wrangler rolls back all seven seed writes when the final exact guard 
     BWM_LOOKUP_HMAC_V1: env.BWM_LOOKUP_HMAC_V1,
   }, keyringConfig)
   const built = await buildLocalSeedBatch({ keyring, keyringConfig })
+  const guard = built.batch.at(-1)
+  assert.match(guard.sql, /\(SELECT count\(\*\) FROM system_state\)=4/)
+  assert.match(
+    guard.sql,
+    /updated_at\s*=\s*strftime\('%Y-%m-%dT%H:%M:%fZ',\s*julianday\(updated_at\)\)/,
+  )
+  assert.ok(guard.params.includes('outbox.drain.last_success'))
+  assert.ok(guard.params.includes('{"completedAt":null}'))
   const forced = [
     ...built.batch.slice(0, -1),
     {
@@ -222,6 +230,105 @@ test('real Wrangler rolls back all seven seed writes when the final exact guard 
   assert.equal(counts.status, 0)
   assert.deepEqual(
     JSON.parse(counts.stdout).map(({ results }) => results[0].count),
-    [0, 0, 0, 3],
+    [0, 0, 0, 4],
   )
+})
+
+test('real seed guard rolls back all writes for every drain heartbeat mutation', {
+  skip: !SUPPORTED,
+}, async (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'bwm-seed-heartbeat-guard-')))
+  t.after(() => rmSync(root, { force: true, recursive: true }))
+  applyMigrations(root)
+  const localEnv = seedEnv(root)
+  const keyringConfig = {
+    activeBackupKekVersion: 1,
+    activeDataKekVersion: 1,
+    activeLookupKeyVersion: 1,
+  }
+  const keyring = await createKeyring({
+    BWM_BACKUP_KEK_V1: localEnv.BWM_BACKUP_KEK_V1,
+    BWM_DATA_KEK_V1: localEnv.BWM_DATA_KEK_V1,
+    BWM_LOOKUP_HMAC_V1: localEnv.BWM_LOOKUP_HMAC_V1,
+  }, keyringConfig)
+  const built = await buildLocalSeedBatch({ keyring, keyringConfig })
+  const mutation = wranglerExecute(root, [
+    '--command',
+    `UPDATE system_state
+     SET value_json='{"completedAt":null,"extra":true}',
+         version=version+1,
+         updated_at='2042-07-31T10:00:00.000Z'
+     WHERE key='outbox.drain.last_success';`,
+  ])
+  assert.equal(mutation.status, 0)
+
+  const sqlPath = join(root, '.bwm-heartbeat-guard.sql')
+  writeFileSync(sqlPath, serializeLocalSeedBatch(built.batch), {
+    encoding: 'utf8',
+    flag: 'wx',
+    mode: 0o600,
+  })
+  const failed = wranglerExecute(root, ['--file', sqlPath])
+  assert.equal(failed.status, 1)
+  assert.equal(failed.stderr, '')
+  assert.deepEqual(JSON.parse(failed.stdout), {
+    error: {
+      text: 'outbox_operation_guard_failed: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)',
+    },
+  })
+
+  const state = wranglerExecute(root, [
+    '--command',
+    `SELECT count(*) AS count FROM data_keys;
+     SELECT count(*) AS count FROM staff_users;
+     SELECT count(*) AS count FROM record_versions;
+     SELECT key,value_json,version,updated_at
+     FROM system_state WHERE key='outbox.drain.last_success';`,
+  ])
+  assert.equal(state.status, 0)
+  const results = JSON.parse(state.stdout).map(({ results }) => results)
+  assert.deepEqual(results.slice(0, 3).map((rows) => rows[0].count), [0, 0, 0])
+  assert.deepEqual(results[3], [{
+    key: 'outbox.drain.last_success',
+    updated_at: '2042-07-31T10:00:00.000Z',
+    value_json: '{"completedAt":null,"extra":true}',
+    version: 2,
+  }])
+
+  const impossibleTimestamp = wranglerExecute(root, [
+    '--command',
+    `DROP TRIGGER system_state_version_increment;
+     UPDATE system_state
+     SET value_json='{"completedAt":null}',
+         version=1,
+         updated_at='2026-02-30T12:34:56.789Z'
+     WHERE key='outbox.drain.last_success';`,
+  ])
+  assert.equal(impossibleTimestamp.status, 0)
+
+  const timestampFailed = wranglerExecute(root, ['--file', sqlPath])
+  assert.equal(timestampFailed.status, 1)
+  assert.equal(timestampFailed.stderr, '')
+  assert.deepEqual(JSON.parse(timestampFailed.stdout), {
+    error: {
+      text: 'outbox_operation_guard_failed: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)',
+    },
+  })
+  const timestampState = wranglerExecute(root, [
+    '--command',
+    `SELECT count(*) AS count FROM data_keys;
+     SELECT count(*) AS count FROM staff_users;
+     SELECT count(*) AS count FROM record_versions;
+     SELECT key,value_json,version,updated_at
+     FROM system_state WHERE key='outbox.drain.last_success';`,
+  ])
+  assert.equal(timestampState.status, 0)
+  const timestampResults = JSON.parse(timestampState.stdout).map(({ results }) => results)
+  assert.deepEqual(timestampResults.slice(0, 3).map((rows) => rows[0].count), [0, 0, 0])
+  assert.deepEqual(timestampResults[3], [{
+    key: 'outbox.drain.last_success',
+    updated_at: '2026-02-30T12:34:56.789Z',
+    value_json: '{"completedAt":null}',
+    version: 1,
+  }])
 })

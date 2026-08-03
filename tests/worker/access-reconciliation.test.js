@@ -231,6 +231,53 @@ const reconcileInput = (cryptoContext, payload, overrides = {}) => {
   }
 }
 
+function meteredDb(real, { rejectPublication = false } = {}) {
+  let statements = 0
+  let maxBindings = 0
+  const wrap = (inner, sql) => ({
+    __inner: inner,
+    __sql: sql,
+    bind(...values) {
+      maxBindings = Math.max(maxBindings, values.length)
+      return wrap(inner.bind(...values), sql)
+    },
+    run() {
+      statements += 1
+      return inner.run()
+    },
+    first(column) {
+      statements += 1
+      return inner.first(column)
+    },
+    all() {
+      statements += 1
+      return inner.all()
+    },
+    raw(options) {
+      statements += 1
+      return inner.raw(options)
+    },
+  })
+  return {
+    db: {
+      prepare(sql) {
+        return wrap(real.prepare(sql), sql)
+      },
+      batch(batchStatements) {
+        statements += batchStatements.length
+        const publication = batchStatements.some((statement) => (
+          statement.__sql?.includes("action='staff.access.reconciled'")
+        ))
+        if (rejectPublication && publication) {
+          throw new Error('outbox_operation_guard_failed: SQLITE_CONSTRAINT')
+        }
+        return real.batch(batchStatements.map((statement) => statement.__inner ?? statement))
+      },
+    },
+    usage: () => ({ maxBindings, statements }),
+  }
+}
+
 describe('authoritative Access desired membership', () => {
   it('returns normalized sorted membership and the exact blind-index fingerprint vector', async () => {
     const cryptoContext = await context()
@@ -534,6 +581,30 @@ describe('guarded Access reconciliation publication', () => {
     await resetAccessState()
     await setState('access.desired_generation', { generation: 1 })
     return { cryptoContext, owner, staff, invitation }
+  }
+
+  async function provisioningQueue(count) {
+    const fixture = await provisioningFixture()
+    const invitations = [fixture.invitation]
+    for (let index = 1; index < count; index += 1) {
+      const suffix = `${String(index).padStart(2, '0')}_${serial}`
+      const email = `publication-chunk-${suffix}@example.test`
+      const staff = await seedStaff(fixture.cryptoContext, {
+        id: `stf_publication_chunk_${suffix}`,
+        email,
+        status: 'pending',
+      })
+      invitations.push(await seedInvitation(fixture.cryptoContext, {
+        id: `inv_publication_chunk_${suffix}`,
+        staffId: staff.id,
+        inviterId: fixture.owner.id,
+        email,
+      }))
+    }
+    return {
+      ...fixture,
+      invitations: invitations.toSorted((left, right) => left.id.localeCompare(right.id)),
+    }
   }
 
   it('atomically applies state, versions invitations, audits, and enqueues encrypted email jobs', async () => {
@@ -1163,6 +1234,151 @@ describe('guarded Access reconciliation publication', () => {
        ORDER BY occurred_at DESC,id DESC LIMIT 1`
     ).bind(fixture.owner.id).first()
     expect(JSON.parse(audit.metadata_json).invitationCount).toBe(2)
+  })
+
+  it.each([
+    [4, ['succeeded', 'succeeded'], [2, 2]],
+    [5, ['succeeded', 'succeeded', 'succeeded'], [2, 2, 1]],
+  ])('converges %i provisioning invitations in bounded publication chunks', async (
+    invitationCount,
+    expectedResults,
+    expectedAuditCounts,
+  ) => {
+    const fixture = await provisioningQueue(invitationCount)
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+
+    for (const [index, expectedResult] of expectedResults.entries()) {
+      await expect(handlers.handleAccessReconcile(reconcileInput(
+        fixture.cryptoContext,
+        { actorId: fixture.owner.id, generation: 1 },
+        { providers: { reconcileAccessGroup: provider } },
+      ))).resolves.toEqual({ result: expectedResult })
+
+      const invitations = (await env.DB.prepare(
+        `SELECT id,status,version FROM staff_invitations
+         WHERE id IN (${fixture.invitations.map(() => '?').join(',')})
+         ORDER BY id`
+      ).bind(...fixture.invitations.map((invitation) => invitation.id)).all()).results
+      expect(invitations.filter((invitation) => invitation.status === 'pending'))
+        .toHaveLength(Math.min((index + 1) * 2, invitationCount))
+      expect(invitations.filter((invitation) => invitation.status === 'provisioning'))
+        .toHaveLength(Math.max(invitationCount - ((index + 1) * 2), 0))
+      expect(JSON.parse((await env.DB.prepare(
+        "SELECT value_json FROM system_state WHERE key='access.reconcile.lease'"
+      ).first()).value_json)).toEqual({ expiresAt: null, nonce: null, owner: null })
+      expect(JSON.parse((await env.DB.prepare(
+        "SELECT value_json FROM system_state WHERE key='access.applied_generation'"
+      ).first()).value_json)).toMatchObject({ generation: 1 })
+    }
+
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(JSON.parse((await env.DB.prepare(
+      "SELECT value_json FROM system_state WHERE key='access.applied_generation'"
+    ).first()).value_json)).toMatchObject({ generation: 1 })
+    expect((await env.DB.prepare(
+      `SELECT count(*) AS count FROM record_versions
+       WHERE entity_type='staff_invitation'
+         AND entity_id IN (${fixture.invitations.map(() => '?').join(',')})`
+    ).bind(...fixture.invitations.map((invitation) => invitation.id)).first()).count)
+      .toBe(invitationCount)
+    expect((await env.DB.prepare(
+      `SELECT count(*) AS count FROM outbox_jobs
+       WHERE type='staff.invitation.email'
+         AND aggregate_id IN (${fixture.invitations.map(() => '?').join(',')})`
+    ).bind(...fixture.invitations.map((invitation) => invitation.id)).first()).count)
+      .toBe(invitationCount)
+    const audits = (await env.DB.prepare(
+      `SELECT metadata_json FROM audit_events
+       WHERE action='staff.access.reconciled' AND actor_staff_id=?
+       ORDER BY rowid`
+    ).bind(fixture.owner.id).all()).results
+    expect(audits.map(({ metadata_json: metadata }) => JSON.parse(metadata))).toEqual(
+      expectedAuditCounts.map((count) => ({
+        desiredGeneration: 1,
+        appliedGeneration: 1,
+        invitationCount: count,
+      })),
+    )
+    const remainingHeads = fixture.invitations.filter((_, index) => (
+      index >= 2 && index % 2 === 0
+    ))
+    const continuationKeys = remainingHeads.map((invitation) => (
+      `staff.access.reconcile.continue:1:${invitation.id}:${invitation.version}`
+    ))
+    const continuations = (await env.DB.prepare(
+      `SELECT idempotency_key,status,attempt_count,max_attempts
+       FROM outbox_jobs
+       WHERE type='staff.access.reconcile'
+         AND idempotency_key IN (${continuationKeys.map(() => '?').join(',')})
+       ORDER BY idempotency_key`
+    ).bind(...continuationKeys).all()).results
+    expect(continuations).toEqual(continuationKeys.toSorted().map((idempotencyKey) => ({
+      idempotency_key: idempotencyKey,
+      status: 'queued',
+      attempt_count: 0,
+      max_attempts: 8,
+    })))
+  })
+
+  it('keeps a rejected two-invitation publication inside dedicated-drain headroom', async () => {
+    const fixture = await provisioningQueue(5)
+    const meter = meteredDb(env.DB, { rejectPublication: true })
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      {
+        db: meter.db,
+        providers: { reconcileAccessGroup: provider },
+      },
+    ))).resolves.toEqual({ result: 'retry' })
+
+    const usage = meter.usage()
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(usage).toEqual({ maxBindings: 45, statements: 31 })
+    expect(10 + usage.statements + 7).toBeLessThanOrEqual(50)
+  })
+
+  it('converges seventeen invitations through fresh bounded continuations', async () => {
+    const fixture = await provisioningQueue(17)
+    const provider = vi.fn().mockResolvedValue({ emails: [] })
+    const results = []
+
+    for (let index = 0; index < 9; index += 1) {
+      results.push(await handlers.handleAccessReconcile(reconcileInput(
+        fixture.cryptoContext,
+        { actorId: fixture.owner.id, generation: 1 },
+        { providers: { reconcileAccessGroup: provider } },
+      )))
+    }
+
+    expect(results).toEqual(Array.from({ length: 9 }, () => ({ result: 'succeeded' })))
+    expect(provider).toHaveBeenCalledTimes(1)
+    const invitations = (await env.DB.prepare(
+      `SELECT status,version FROM staff_invitations
+       WHERE id IN (${fixture.invitations.map(() => '?').join(',')})`
+    ).bind(...fixture.invitations.map((invitation) => invitation.id)).all()).results
+    expect(invitations).toHaveLength(17)
+    expect(invitations.every((invitation) => (
+      invitation.status === 'pending' && invitation.version === 2
+    ))).toBe(true)
+
+    const continuationKeys = fixture.invitations
+      .filter((_, index) => index >= 2 && index % 2 === 0)
+      .map((invitation) => (
+        `staff.access.reconcile.continue:1:${invitation.id}:${invitation.version}`
+      ))
+    const continuations = (await env.DB.prepare(
+      `SELECT idempotency_key,status,attempt_count,max_attempts
+       FROM outbox_jobs
+       WHERE type='staff.access.reconcile'
+         AND idempotency_key IN (${continuationKeys.map(() => '?').join(',')})`
+    ).bind(...continuationKeys).all()).results
+    expect(continuations).toHaveLength(8)
+    expect(continuations.every((job) => (
+      job.status === 'queued' && job.attempt_count === 0 && job.max_attempts === 8
+    ))).toBe(true)
   })
 
   it('converges provider and D1 through an explicit A-to-B-to-A generation sequence', async () => {

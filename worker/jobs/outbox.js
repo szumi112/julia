@@ -1,5 +1,6 @@
 import { auditEventStatement } from '../audit/events.js'
 import { isD1OutboxOperationGuardFailure } from '../db/errors.js'
+import { D1_QUERY_BUDGET_EXCEEDED } from '../db/query-budget.js'
 import { decodeBase64Url, encodeBase64Url } from '../security/encoding.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
 
@@ -366,11 +367,14 @@ function validateClaimInput(input) {
     || !Number.isSafeInteger(input.nowMs) || input.nowMs < 0
     || typeof input.idFactory !== 'function'
     || typeof input.leaseOwnerFactory !== 'function'
-    || !Number.isSafeInteger(input.limit) || input.limit < 1) invalid()
+    || !Number.isSafeInteger(input.limit) || input.limit < 1
+    || (input.scanLimit !== undefined
+      && (!Number.isSafeInteger(input.scanLimit) || input.scanLimit < 1))) invalid()
   return {
     now: instantFromMs(input.nowMs),
     expiry: instantFromMs(input.nowMs + LEASE_MS),
     limit: Math.min(CLAIM_LIMIT, input.limit),
+    scanLimit: Math.min(CLAIM_SCAN_LIMIT, input.scanLimit ?? CLAIM_SCAN_LIMIT),
   }
 }
 
@@ -383,7 +387,7 @@ export async function claimDueJobs(db, input = {}) {
      WHERE status='queued' AND type<>? AND scheduled_at<=? AND attempt_count<max_attempts
      ORDER BY scheduled_at,id
      LIMIT ?`
-  ).bind(DORMANT_OUTBOX_TYPE, validated.now, CLAIM_SCAN_LIMIT).all()).results
+  ).bind(DORMANT_OUTBOX_TYPE, validated.now, validated.scanLimit).all()).results
   const claimed = []
   const leaseOwners = new Set()
   for (const row of rows) {
@@ -598,10 +602,12 @@ async function reapOne(db, cryptoContext, row, now, idFactory) {
     || attempt.result !== null
     || attempt.completed_at !== null) invalidState()
   const email = row.type === 'staff.invitation.email'
+  const exhausted = row.attempt_count >= row.max_attempts
+  const dead = email || exhausted
   const errorCode = email ? 'EMAIL_DELIVERY_AMBIGUOUS' : 'OUTBOX_LEASE_EXPIRED'
-  const attemptResult = email ? 'dead' : 'retry'
-  const jobStatus = email ? 'dead' : 'queued'
-  const action = email
+  const attemptResult = dead ? 'dead' : 'retry'
+  const jobStatus = dead ? 'dead' : 'queued'
+  const action = dead
     ? await actionFor(db, cryptoContext, {
         idFactory,
         jobId: row.id,
@@ -633,7 +639,7 @@ async function reapOne(db, cryptoContext, row, now, idFactory) {
          )`
     ).bind(
       jobStatus,
-      email ? row.scheduled_at : now,
+      dead ? row.scheduled_at : now,
       errorCode,
       now,
       row.id,
@@ -681,7 +687,7 @@ async function reapOne(db, cryptoContext, row, now, idFactory) {
       row.id,
       jobStatus,
       row.attempt_count,
-      email ? row.scheduled_at : now,
+      dead ? row.scheduled_at : now,
       errorCode,
       now,
       attempt.id,
@@ -717,23 +723,42 @@ async function reapOne(db, cryptoContext, row, now, idFactory) {
   }
 }
 
-export async function reapExpiredOutboxLeases(db, cryptoContext, input = {}) {
+function validateReapInput(input) {
+  if (!ownObject(input)
+    || !['nowMs', 'idFactory'].every((key) => Object.hasOwn(input, key))
+    || Object.keys(input).some((key) => !['nowMs', 'idFactory', 'limit'].includes(key))
+    || !Number.isSafeInteger(input.nowMs) || input.nowMs < 0
+    || typeof input.idFactory !== 'function'
+    || (input.limit !== undefined
+      && (!Number.isSafeInteger(input.limit) || input.limit < 1))) invalid()
+  return {
+    now: instantFromMs(input.nowMs),
+    limit: Math.min(CLAIM_LIMIT, input.limit ?? CLAIM_LIMIT),
+  }
+}
+
+async function reapExpiredOutboxLeasePass(db, cryptoContext, input) {
   if (!db?.prepare || !db?.batch || !validStaffCryptoContext(cryptoContext)
-    || !exactKeys(input, ['nowMs', 'idFactory'])
-    || typeof input.idFactory !== 'function') invalid()
-  const now = instantFromMs(input.nowMs)
+    || !ownObject(input)) invalid()
+  const validated = validateReapInput(input)
   const rows = (await db.prepare(
     `SELECT *
      FROM outbox_jobs
      WHERE status='processing' AND type<>? AND lease_expires_at<=?
-     ORDER BY lease_expires_at,id`
-  ).bind(DORMANT_OUTBOX_TYPE, now).all()).results
+     ORDER BY lease_expires_at,id
+     LIMIT ?`
+  ).bind(DORMANT_OUTBOX_TYPE, validated.now, validated.limit).all()).results
+  if (!Array.isArray(rows)) invalidState()
   const reaped = []
   for (const row of rows) {
-    const result = await reapOne(db, cryptoContext, row, now, input.idFactory)
+    const result = await reapOne(db, cryptoContext, row, validated.now, input.idFactory)
     if (result) reaped.push(result)
   }
-  return reaped
+  return { attempted: rows.length > 0, reaped }
+}
+
+export async function reapExpiredOutboxLeases(db, cryptoContext, input = {}) {
+  return (await reapExpiredOutboxLeasePass(db, cryptoContext, input)).reaped
 }
 
 function validateAcceptedEmailInput(input) {
@@ -1393,6 +1418,9 @@ function normalizedOutcome(outcome) {
 }
 
 function thrownOutcome(error) {
+  if (error?.message === D1_QUERY_BUDGET_EXCEEDED) {
+    return { result: 'retry', errorCode: 'OUTBOX_HANDLER_RETRY', providerReference: null }
+  }
   if (error?.message === 'EMAIL_DELIVERY_AMBIGUOUS') {
     return { result: 'dead', errorCode: 'EMAIL_DELIVERY_AMBIGUOUS', providerReference: null }
   }
@@ -1428,6 +1456,10 @@ async function currentOwnedClaim(db, claim, nowMs) {
 
 export async function processOutboxBatch(input = {}) {
   const beforeDispatch = input?.beforeDispatch
+  const limit = input?.limit ?? CLAIM_LIMIT
+  const claimScanLimit = input?.claimScanLimit ?? CLAIM_SCAN_LIMIT
+  const reapLimit = input?.reapLimit ?? CLAIM_LIMIT
+  const stopAfterReap = input?.stopAfterReap ?? false
   if (!ownObject(input)
     || !input.db?.prepare || !input.db?.batch
     || !validStaffCryptoContext(input.cryptoContext)
@@ -1436,22 +1468,29 @@ export async function processOutboxBatch(input = {}) {
     || typeof input.leaseOwnerFactory !== 'function'
     || typeof input.dispatch !== 'function'
     || (beforeDispatch !== undefined && typeof beforeDispatch !== 'function')
-    || (input.nowFactory !== undefined && typeof input.nowFactory !== 'function')) invalid()
+    || (input.nowFactory !== undefined && typeof input.nowFactory !== 'function')
+    || !Number.isSafeInteger(limit) || limit < 1
+    || !Number.isSafeInteger(claimScanLimit) || claimScanLimit < 1
+    || !Number.isSafeInteger(reapLimit) || reapLimit < 1
+    || typeof stopAfterReap !== 'boolean') invalid()
   const nowFactory = input.nowFactory ?? Date.now
   const currentMs = () => {
     const value = nowFactory()
     if (!Number.isSafeInteger(value) || value < 0) invalid()
     return Math.max(input.nowMs, value)
   }
-  await reapExpiredOutboxLeases(input.db, input.cryptoContext, {
+  const reapPass = await reapExpiredOutboxLeasePass(input.db, input.cryptoContext, {
     nowMs: input.nowMs,
     idFactory: input.idFactory,
+    limit: reapLimit,
   })
+  if (stopAfterReap && reapPass.attempted) return reapPass.reaped
   const claims = await claimDueJobs(input.db, {
     nowMs: input.nowMs,
     idFactory: input.idFactory,
     leaseOwnerFactory: input.leaseOwnerFactory,
-    limit: CLAIM_LIMIT,
+    limit,
+    scanLimit: claimScanLimit,
   })
   const completed = []
   for (const claim of claims) {

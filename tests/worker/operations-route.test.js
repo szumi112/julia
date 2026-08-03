@@ -438,6 +438,21 @@ const ACTION_FACTS = Object.freeze([
   }),
 ])
 
+const DENIAL_OVERFLOW_FACT = Object.freeze({
+  id: 'act_denial_overflow',
+  fingerprint: 'security.authorization_denials:overflow',
+  kind: 'authorization_denial_spike',
+  severity: 'critical',
+  entityType: 'centre',
+  entityId: 'centre_1',
+  details: Object.freeze({
+    errorCode: 'AUTHORIZATION_DENIAL_OVERFLOW',
+    minimumCount: 101,
+    threshold: 100,
+    windowMinutes: 15,
+  }),
+})
+
 async function actionRows(context, facts = ACTION_FACTS) {
   return Promise.all(facts.map((fact, index) => actionRow(context, {
     ...fact,
@@ -1122,6 +1137,27 @@ describe('operations route services', () => {
     await expect(getOperationalHealth(commonInput(actor, context))).resolves.toEqual({ data: snapshot })
   })
 
+  it.each(['OUTBOX_DRAIN_FAILED', 'OUTBOX_DRAIN_STALE'])(
+    'returns the exact critical outbox drain state %s',
+    async (detailCode) => {
+      const context = await cryptoContext()
+      const actor = await seedActiveActor({
+        id: `stf_health_${detailCode.toLowerCase()}`,
+        role: 'owner',
+      })
+      const snapshot = validSnapshot()
+      snapshot.checks[0] = {
+        ...snapshot.checks[0],
+        status: 'critical',
+        detailCode,
+      }
+      await seedHealthSnapshot(snapshot)
+
+      await expect(getOperationalHealth(commonInput(actor, context)))
+        .resolves.toEqual({ data: snapshot })
+    },
+  )
+
   it.each([
     ['missing row', null],
     ['duplicate rows', 'duplicate'],
@@ -1204,6 +1240,44 @@ describe('operations route services', () => {
       expect(JSON.stringify(action)).not.toContain('details_envelope')
       expect(JSON.stringify(action)).not.toContain('fingerprint')
     }
+  })
+
+  it('returns the exact centre-scoped denial overflow only to an owner', async () => {
+    const context = await cryptoContext()
+    const owner = await seedActiveActor({ id: 'stf_denial_overflow_owner', role: 'owner' })
+    const coordinator = await seedActiveActor({
+      id: 'stf_denial_overflow_coordinator',
+      role: 'coordinator',
+    })
+    const row = await actionRow(context, DENIAL_OVERFLOW_FACT)
+    const db = facade(env.DB, {
+      all(sql) {
+        if (!sql.includes('FROM operational_actions')) return undefined
+        return {
+          results: sql.includes("kind<>'authorization_denial_spike'") ? [] : [row],
+        }
+      },
+    })
+
+    await expect(listOpenOperationalActions(commonInput(owner, context, { db }))).resolves.toEqual({
+      data: {
+        actions: [{
+          id: row.id,
+          kind: row.kind,
+          severity: row.severity,
+          entityType: row.entity_type,
+          entityId: row.entity_id,
+          details: DENIAL_OVERFLOW_FACT.details,
+          version: 1,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        }],
+        truncated: false,
+      },
+    })
+    await expect(listOpenOperationalActions(commonInput(coordinator, context, { db }))).resolves.toEqual({
+      data: { actions: [], truncated: false },
+    })
   })
 
   it('excludes coordinator denial spikes before limit, decryption, and response projection', async () => {
@@ -1407,6 +1481,49 @@ describe('operations route services', () => {
       .rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
   })
 
+  it.each([
+    ['wrong fingerprint', { fingerprint: 'security.authorization_denials:overflow_other' }],
+    ['wrong severity', { severity: 'warning' }],
+    ['wrong entity type', { entityType: 'staff_user' }],
+    ['wrong entity id', { entityId: 'centre_2' }],
+    ['wrong error code', {
+      details: { ...DENIAL_OVERFLOW_FACT.details, errorCode: 'AUTHORIZATION_DENIAL_SPIKE' },
+    }],
+    ['wrong minimum count', {
+      details: { ...DENIAL_OVERFLOW_FACT.details, minimumCount: 100 },
+    }],
+    ['wrong threshold', {
+      details: { ...DENIAL_OVERFLOW_FACT.details, threshold: 101 },
+    }],
+    ['wrong window', {
+      details: { ...DENIAL_OVERFLOW_FACT.details, windowMinutes: 14 },
+    }],
+    ['extra detail', {
+      details: { ...DENIAL_OVERFLOW_FACT.details, count: 101 },
+    }],
+    ['superseded count key', {
+      details: {
+        countAtLeast: 101,
+        errorCode: 'AUTHORIZATION_DENIAL_OVERFLOW',
+        threshold: 100,
+        windowMinutes: 15,
+      },
+    }],
+  ])('rejects malformed centre-scoped denial overflow: %s', async (_label, changes) => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({
+      id: `stf_denial_overflow_invalid_${++fixtureSerial}`,
+      role: 'owner',
+    })
+    const row = await actionRow(context, { ...DENIAL_OVERFLOW_FACT, ...changes })
+    const db = facade(env.DB, {
+      all: (sql) => sql.includes('FROM operational_actions') ? { results: [row] } : undefined,
+    })
+
+    await expect(listOpenOperationalActions(commonInput(actor, context, { db })))
+      .rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+  })
+
   it('accepts an unknown ordinary outbox type only with OUTBOX_TYPE_INVALID', async () => {
     const context = await cryptoContext()
     const actor = await seedActiveActor({ id: 'stf_action_unknown_outbox' })
@@ -1587,6 +1704,46 @@ describe('operations route services', () => {
       field: 'reason',
       envelope: JSON.parse(rows[0].reason_envelope),
     })).resolves.toBe('security.audit.read denied')
+  })
+
+  it('keeps centre-scoped denial overflow resolution owner-only', async () => {
+    const context = await cryptoContext()
+    const coordinator = await seedActiveActor({
+      id: 'stf_resolve_denial_overflow_coordinator',
+      role: 'coordinator',
+    })
+    const owner = await seedActiveActor({ id: 'stf_resolve_denial_overflow_owner', role: 'owner' })
+    const row = await insertAction(await actionRow(context, DENIAL_OVERFLOW_FACT))
+
+    try {
+      await expect(resolveOperationalAction(resolutionInput(coordinator, context, row.id, {
+        idFactory: ids('aud_resolve_denial_overflow_coordinator'),
+      }))).rejects.toThrow(/^FORBIDDEN$/)
+      expect(await env.DB.prepare(
+        'SELECT status,version FROM operational_actions WHERE id=?'
+      ).bind(row.id).first()).toEqual({ status: 'open', version: 1 })
+      expect(await denialRows(coordinator.id)).toHaveLength(1)
+
+      await expect(resolveOperationalAction(resolutionInput(owner, context, row.id, {
+        idFactory: ids('aud_resolve_denial_overflow_owner'),
+      }))).resolves.toEqual({
+        data: {
+          action: {
+            id: row.id,
+            status: 'resolved',
+            version: 2,
+            resolvedAt: NOW,
+            updatedAt: NOW,
+          },
+        },
+      })
+    } finally {
+      await env.DB.prepare(
+        `UPDATE operational_actions
+         SET status='resolved',resolved_at=?,updated_at=?,version=version+1
+         WHERE id=? AND status='open'`
+      ).bind(NOW, NOW, row.id).run()
+    }
   })
 
   it('returns a safe current version for valid stale and already-resolved actions', async () => {

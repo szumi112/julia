@@ -87,6 +87,7 @@ async function claim(options = {}) {
     idFactory: options.idFactory ?? sequence(`attempt_${++serial}`),
     leaseOwnerFactory: options.leaseOwnerFactory ?? sequence(`lease_${serial}`),
     limit: options.limit ?? 10,
+    ...(Object.hasOwn(options, 'scanLimit') ? { scanLimit: options.scanLimit } : {}),
   })
 }
 
@@ -557,6 +558,50 @@ describe('durable outbox claims', () => {
     await park('job_claim_rollback')
   })
 
+  it('bounds raced claim attempts by the requested scan limit', async () => {
+    const cryptoContext = await context()
+    for (const suffix of ['one', 'two']) {
+      await enqueue(cryptoContext, {
+        id: `job_claim_scan_${suffix}`,
+        invitationId: `inv_claim_scan_${suffix}`,
+        idempotencyKey: `staff.invitation.expire:claim-scan-${suffix}`,
+      })
+    }
+    let batches = 0
+    const losingDb = {
+      prepare: env.DB.prepare.bind(env.DB),
+      async batch(statements) {
+        batches += 1
+        return env.DB.batch([
+          ...statements.slice(0, -1),
+          env.DB.prepare(
+            `INSERT INTO outbox_operation_guard_failures (operation_id)
+             VALUES (?)`
+          ).bind(`forced_claim_scan_${batches}`),
+        ])
+      },
+    }
+
+    const claimed = await claim({
+      db: losingDb,
+      idFactory: sequence('attempt_claim_scan'),
+      leaseOwnerFactory: sequence('lease_claim_scan'),
+      limit: 1,
+      scanLimit: 1,
+    })
+    const rows = (await env.DB.prepare(
+      "SELECT id,status FROM outbox_jobs WHERE id LIKE 'job_claim_scan_%' ORDER BY id"
+    ).all()).results
+    await parkPrefix('job_claim_scan_')
+
+    expect(claimed).toEqual([])
+    expect(batches).toBe(1)
+    expect(rows).toEqual([
+      { id: 'job_claim_scan_one', status: 'queued' },
+      { id: 'job_claim_scan_two', status: 'queued' },
+    ])
+  })
+
   it('does not claim future, processing, malformed, terminal, or exhausted jobs', async () => {
     const cryptoContext = await context()
     await enqueue(cryptoContext, {
@@ -748,6 +793,109 @@ describe('durable outbox expired-lease reaping', () => {
       await park(claimed.id)
     }
   )
+
+  it.each(['staff.access.reconcile', 'staff.invitation.expire'])(
+    'dead-letters an expired final %s attempt and opens one critical action',
+    async (type) => {
+      const cryptoContext = await context()
+      const suffix = type.endsWith('reconcile') ? 'access' : 'expiry'
+      const input = await enqueue(cryptoContext, {
+        id: `job_reap_exhausted_${suffix}`,
+        type,
+        invitationId: `inv_reap_exhausted_${suffix}`,
+        idempotencyKey: `${type}:reap-exhausted-${suffix}`,
+      })
+      await env.DB.prepare(
+        `UPDATE outbox_jobs
+         SET status='processing',attempt_count=8,lease_owner=?,lease_expires_at=?,updated_at=?
+         WHERE id=?`
+      ).bind(`lease_reap_exhausted_${suffix}`, NOW, NOW, input.id).run()
+      await env.DB.prepare(
+        `INSERT INTO outbox_attempts (id,job_id,attempt_number,started_at)
+         VALUES (?,?,8,?)`
+      ).bind(
+        `attempt_reap_exhausted_${suffix}`,
+        input.id,
+        new Date(NOW_MS - 60_000).toISOString(),
+      ).run()
+
+      await expect(outbox.reapExpiredOutboxLeases(env.DB, cryptoContext, {
+        nowMs: NOW_MS + 60_000,
+        idFactory: sequence(`action_reap_exhausted_${suffix}`),
+      })).resolves.toEqual([{ id: input.id, result: 'dead' }])
+      expect(await job(input.id)).toMatchObject({
+        status: 'dead',
+        scheduled_at: NOW,
+        lease_owner: null,
+        lease_expires_at: null,
+        last_error_code: 'OUTBOX_LEASE_EXPIRED',
+      })
+      expect(await attempts(input.id)).toMatchObject([{
+        attempt_number: 8,
+        result: 'dead',
+        error_code: 'OUTBOX_LEASE_EXPIRED',
+      }])
+      const [action] = await actions(input.id)
+      expect(action).toMatchObject({
+        id: `action_reap_exhausted_${suffix}_1`,
+        severity: 'critical',
+        status: 'open',
+      })
+      await expect(decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+        expectedScope: SCOPE,
+        recordId: action.id,
+        field: 'action_details',
+        envelope: JSON.parse(action.details_envelope),
+      })).resolves.toBe(
+        `{"errorCode":"OUTBOX_LEASE_EXPIRED","jobId":"${input.id}","outboxType":"${type}"}`
+      )
+      await expect(outbox.reapExpiredOutboxLeases(env.DB, cryptoContext, {
+        nowMs: NOW_MS + 120_000,
+        idFactory: sequence(`action_reap_exhausted_repeat_${suffix}`),
+      })).resolves.toEqual([])
+      expect(await actions(input.id)).toHaveLength(1)
+      expect(await attempts(input.id)).toHaveLength(1)
+    }
+  )
+
+  it('reaps only the requested oldest expired lease', async () => {
+    const cryptoContext = await context()
+    for (const suffix of ['one', 'two']) {
+      await enqueue(cryptoContext, {
+        id: `job_reap_limit_${suffix}`,
+        invitationId: `inv_reap_limit_${suffix}`,
+        idempotencyKey: `staff.invitation.expire:reap-limit-${suffix}`,
+      })
+    }
+    await claim({
+      idFactory: sequence('attempt_reap_limit'),
+      leaseOwnerFactory: sequence('lease_reap_limit'),
+      limit: 2,
+    })
+
+    let result
+    let thrown
+    try {
+      result = await outbox.reapExpiredOutboxLeases(env.DB, cryptoContext, {
+        nowMs: NOW_MS + 60_000,
+        idFactory: sequence('action_reap_limit'),
+        limit: 1,
+      })
+    } catch (error) {
+      thrown = error
+    }
+    const first = await job('job_reap_limit_one')
+    const second = await job('job_reap_limit_two')
+    await settle('job_reap_limit_one')
+    await settle('job_reap_limit_two')
+    await park('job_reap_limit_one')
+    await park('job_reap_limit_two')
+
+    expect(thrown).toBeUndefined()
+    expect(result).toEqual([{ id: 'job_reap_limit_one', result: 'retry' }])
+    expect(first).toMatchObject({ status: 'queued' })
+    expect(second).toMatchObject({ status: 'processing' })
+  })
 
   it('fails closed on a missing or mismatched open attempt', async () => {
     const cryptoContext = await context()
@@ -1234,6 +1382,86 @@ describe('generic outbox processor', () => {
     expect(await actions(input.id)).toEqual([])
   })
 
+  it('honors one bounded claim and one-candidate scan per invocation', async () => {
+    const cryptoContext = await context()
+    for (const suffix of ['one', 'two']) {
+      await enqueue(cryptoContext, {
+        id: `job_processor_limit_${suffix}`,
+        invitationId: `inv_processor_limit_${suffix}`,
+        idempotencyKey: `staff.invitation.expire:processor-limit-${suffix}`,
+      })
+    }
+    const dispatched = []
+
+    const completed = await outbox.processOutboxBatch({
+      db: env.DB,
+      cryptoContext,
+      config: {},
+      nowMs: NOW_MS,
+      idFactory: sequence('processor_limit_id'),
+      leaseOwnerFactory: sequence('processor_limit_lease'),
+      limit: 1,
+      claimScanLimit: 1,
+      reapLimit: 1,
+      stopAfterReap: true,
+      dispatch: async ({ job: current }) => {
+        dispatched.push(current.id)
+        return { result: 'succeeded' }
+      },
+    })
+    const second = await job('job_processor_limit_two')
+    await park('job_processor_limit_two')
+
+    expect(completed).toEqual([{ id: 'job_processor_limit_one', result: 'succeeded' }])
+    expect(dispatched).toEqual(['job_processor_limit_one'])
+    expect(second).toMatchObject({
+      status: 'queued',
+      attempt_count: 0,
+    })
+  })
+
+  it('returns after one reap without claiming or dispatching in the same invocation', async () => {
+    const cryptoContext = await context()
+    await enqueue(cryptoContext, {
+      id: 'job_processor_reap_only',
+      invitationId: 'inv_processor_reap_only',
+      idempotencyKey: 'staff.invitation.expire:processor-reap-only',
+    })
+    await claim({
+      idFactory: sequence('attempt_processor_reap_only'),
+      leaseOwnerFactory: sequence('lease_processor_reap_only'),
+      limit: 1,
+    })
+    let dispatches = 0
+
+    const completed = await outbox.processOutboxBatch({
+      db: env.DB,
+      cryptoContext,
+      config: {},
+      nowMs: NOW_MS + 60_000,
+      idFactory: sequence('processor_reap_only_id'),
+      leaseOwnerFactory: sequence('processor_reap_only_lease'),
+      limit: 1,
+      claimScanLimit: 1,
+      reapLimit: 1,
+      stopAfterReap: true,
+      dispatch: async () => {
+        dispatches += 1
+        return { result: 'succeeded' }
+      },
+    })
+    const current = await job('job_processor_reap_only')
+    await park('job_processor_reap_only')
+
+    expect(completed).toEqual([{ id: 'job_processor_reap_only', result: 'retry' }])
+    expect(dispatches).toBe(0)
+    expect(current).toMatchObject({
+      status: 'queued',
+      attempt_count: 1,
+      last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+  })
+
   it('does not dispatch when beforeDispatch consumes the remaining lease', async () => {
     const cryptoContext = await context()
     const input = await enqueue(cryptoContext, {
@@ -1459,6 +1687,36 @@ describe('generic outbox processor', () => {
     ).all()).results
     for (const { id } of remaining) await park(id)
     await park('job_processor_10')
+  })
+
+  it('retries a fixed D1 query-budget exhaustion instead of dead-lettering the job', async () => {
+    const cryptoContext = await context()
+    const input = await enqueue(cryptoContext, {
+      id: 'job_processor_query_budget',
+      invitationId: 'inv_processor_query_budget',
+      idempotencyKey: 'staff.invitation.expire:processor-query-budget',
+    })
+
+    const completed = await outbox.processOutboxBatch({
+      db: env.DB,
+      cryptoContext,
+      config: {},
+      nowMs: NOW_MS,
+      idFactory: sequence('processor_query_budget_id'),
+      leaseOwnerFactory: sequence('processor_query_budget_lease'),
+      limit: 1,
+      claimScanLimit: 1,
+      dispatch: async () => { throw new Error('D1_QUERY_BUDGET_EXCEEDED') },
+    })
+
+    expect(completed).toEqual([{ id: input.id, result: 'retry' }])
+    expect(await job(input.id)).toMatchObject({
+      status: 'queued',
+      attempt_count: 1,
+      last_error_code: 'OUTBOX_HANDLER_RETRY',
+    })
+    expect(await actions(input.id)).toEqual([])
+    await park(input.id)
   })
 
   it('never dispatches an unknown type and dead-letters it with a fixed code', async () => {

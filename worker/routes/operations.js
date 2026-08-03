@@ -82,7 +82,12 @@ const HEALTH_CHECKS = Object.freeze([
   Object.freeze({
     id: 'outbox.processing',
     label: 'Kolejka zadań',
-    pairs: new Set(['ok:OUTBOX_HEALTHY', 'critical:OUTBOX_DEAD']),
+    pairs: new Set([
+      'ok:OUTBOX_HEALTHY',
+      'critical:OUTBOX_DEAD',
+      'critical:OUTBOX_DRAIN_FAILED',
+      'critical:OUTBOX_DRAIN_STALE',
+    ]),
   }),
   Object.freeze({
     id: 'backup.freshness',
@@ -491,7 +496,18 @@ function validateActionDetails(row, details) {
       || details.appliedGeneration >= details.desiredGeneration
       || details.errorCode !== 'ACCESS_RECONCILIATION_LAG') invalidState()
   } else if (row.kind === 'authorization_denial_spike') {
-    if (row.severity !== 'warning' || row.entity_type !== 'staff_user'
+    if (row.entity_type === 'centre') {
+      if (row.fingerprint !== 'security.authorization_denials:overflow'
+        || row.severity !== 'critical' || row.entity_id !== 'centre_1'
+        || !exactSnapshot(
+          details,
+          ['errorCode', 'minimumCount', 'threshold', 'windowMinutes'],
+          invalidState,
+        )
+        || details.errorCode !== 'AUTHORIZATION_DENIAL_OVERFLOW'
+        || details.minimumCount !== 101 || details.threshold !== 100
+        || details.windowMinutes !== 15) invalidState()
+    } else if (row.severity !== 'warning' || row.entity_type !== 'staff_user'
       || !exactSnapshot(details, ['actorId', 'capability', 'count', 'errorCode', 'threshold'], invalidState)
       || details.actorId !== row.entity_id || !DENIAL_CAPABILITIES.has(details.capability)
       || row.fingerprint !== `security.authorization_denials:${row.entity_id}:${details.capability}`

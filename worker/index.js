@@ -1,7 +1,10 @@
 import { createApp } from './app.js'
 import { loadConfig } from './config.js'
+import { runOutboxDrain } from './operations/outbox-drain.js'
 import { runScheduled } from './operations/scheduler.js'
 
+const OPERATIONS_CRON = '*/5 * * * *'
+const OUTBOX_CRON = '* * * * *'
 const app = createApp()
 
 export default {
@@ -11,7 +14,12 @@ export default {
   },
   scheduled(controller, env, ctx) {
     loadConfig(env)
-    ctx.waitUntil(runScheduled({
+    const cron = controller?.cron
+    if (cron !== OPERATIONS_CRON && cron !== OUTBOX_CRON) {
+      throw new Error('SCHEDULED_CRON_INVALID')
+    }
+    const run = cron === OUTBOX_CRON ? runOutboxDrain : runScheduled
+    ctx.waitUntil(run({
       scheduledTime: controller.scheduledTime,
       env,
     }))

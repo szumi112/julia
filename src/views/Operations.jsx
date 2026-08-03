@@ -26,6 +26,8 @@ const HEALTH_DETAILS = Object.freeze({
   BACKUP_STALE: 'Brakuje aktualnej kopii zapasowej.',
   OUTBOX_HEALTHY: 'Kolejka zadań działa prawidłowo.',
   OUTBOX_DEAD: 'Co najmniej jedno zadanie wymaga interwencji.',
+  OUTBOX_DRAIN_FAILED: 'Ostatnia próba obsługi kolejki nie powiodła się.',
+  OUTBOX_DRAIN_STALE: 'Kolejka zadań nie została obsłużona w oczekiwanym czasie.',
   SCHEDULER_STARTING: 'Zadania cykliczne oczekują na pierwsze zakończenie.',
   SCHEDULER_HEALTHY: 'Zadania cykliczne działają prawidłowo.',
   SCHEDULER_STALE: 'Zadania cykliczne nie zakończyły się w oczekiwanym czasie.',

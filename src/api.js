@@ -82,7 +82,12 @@ const HEALTH_CHECKS = Object.freeze([
   Object.freeze({
     id: 'outbox.processing',
     label: 'Kolejka zadań',
-    pairs: new Set(['ok:OUTBOX_HEALTHY', 'critical:OUTBOX_DEAD']),
+    pairs: new Set([
+      'ok:OUTBOX_HEALTHY',
+      'critical:OUTBOX_DEAD',
+      'critical:OUTBOX_DRAIN_FAILED',
+      'critical:OUTBOX_DRAIN_STALE',
+    ]),
   }),
   Object.freeze({
     id: 'backup.freshness',
@@ -372,7 +377,9 @@ const acceptedActionDetails = (action) => {
   if (action.kind === 'access_reconciliation_lag') {
     keys = ['appliedGeneration', 'desiredGeneration', 'errorCode']
   } else if (action.kind === 'authorization_denial_spike') {
-    keys = ['actorId', 'capability', 'count', 'errorCode', 'threshold']
+    keys = action.entityType === 'centre'
+      ? ['errorCode', 'minimumCount', 'threshold', 'windowMinutes']
+      : ['actorId', 'capability', 'count', 'errorCode', 'threshold']
   } else if (action.kind === 'backup_failed') {
     keys = ['backupId', 'errorCode']
   } else if (action.kind === 'backup_stale') {
@@ -391,7 +398,12 @@ const acceptedActionDetails = (action) => {
       || details.appliedGeneration >= details.desiredGeneration
       || details.errorCode !== 'ACCESS_RECONCILIATION_LAG') return null
   } else if (action.kind === 'authorization_denial_spike') {
-    if (action.severity !== 'warning' || action.entityType !== 'staff_user'
+    if (action.entityType === 'centre') {
+      if (action.severity !== 'critical' || action.entityId !== 'centre_1'
+        || details.errorCode !== 'AUTHORIZATION_DENIAL_OVERFLOW'
+        || details.minimumCount !== 101 || details.threshold !== 100
+        || details.windowMinutes !== 15) return null
+    } else if (action.severity !== 'warning' || action.entityType !== 'staff_user'
       || !validId(action.entityId)
       || details.actorId !== action.entityId || !DENIAL_CAPABILITIES.has(details.capability)
       || !safeCount(details.count) || details.count < 10

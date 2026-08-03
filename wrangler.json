@@ -27,7 +27,7 @@
     }
   ],
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": ["* * * * *", "*/5 * * * *"]
   },
   "vars": {
     "APP_ENV": "development",

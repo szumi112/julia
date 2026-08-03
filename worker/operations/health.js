@@ -22,9 +22,13 @@ const REASON_CAPABILITY = new Map([
   ['staff.manage denied', 'staff.manage'],
 ])
 const SCHEDULER_STALE_MS = 900_000
+const OUTBOX_DRAIN_STALE_MS = 300_000
 const BACKUP_STALE_MS = 129_600_000
 const DENIAL_WINDOW_MS = 900_000
 const DENIAL_THRESHOLD = 10
+const DENIAL_ROW_LIMIT = 100
+const DENIAL_GROUP_LIMIT = DENIAL_ROW_LIMIT / DENIAL_THRESHOLD
+const ACTION_CANDIDATE_LIMIT = DENIAL_GROUP_LIMIT + 4
 const CHECK_COLLATOR = new Intl.Collator('pl-PL', { sensitivity: 'base', numeric: true })
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -46,6 +50,7 @@ const CHECKS = Object.freeze([
 const SNAPSHOT_PAIRS = Object.freeze({
   'outbox.processing': Object.freeze([
     'ok:OUTBOX_HEALTHY', 'critical:OUTBOX_DEAD',
+    'critical:OUTBOX_DRAIN_FAILED', 'critical:OUTBOX_DRAIN_STALE',
   ]),
   'backup.freshness': Object.freeze([
     'ok:BACKUP_NOT_DUE', 'ok:BACKUP_FRESH', 'warning:BACKUP_PENDING',
@@ -396,17 +401,99 @@ async function readOutboxFacts(db) {
        AND status='dead'
      ORDER BY updated_at DESC,id DESC LIMIT 1`
   ).first()
-  const succeeded = await db.prepare(
-    `SELECT id,type,status,updated_at
-     FROM outbox_jobs
-     WHERE type IN ('staff.access.reconcile','staff.invitation.email','staff.invitation.expire')
-       AND status='succeeded'
-     ORDER BY updated_at DESC,id DESC LIMIT 1`
+  const activity = await db.prepare(
+    `WITH heartbeat AS (
+       SELECT key,value_json,version,updated_at
+       FROM system_state WHERE key='outbox.drain.last_success'
+     ), latest_success AS (
+       SELECT id,type,status,updated_at
+       FROM outbox_jobs INDEXED BY outbox_jobs_ordinary_status_updated_id_idx
+       WHERE type IN ('staff.access.reconcile','staff.invitation.email','staff.invitation.expire')
+         AND status='succeeded'
+       ORDER BY updated_at DESC,id DESC LIMIT 1
+     )
+     SELECT heartbeat.key AS heartbeat_key,
+            heartbeat.value_json AS heartbeat_value_json,
+            heartbeat.version AS heartbeat_version,
+            heartbeat.updated_at AS heartbeat_updated_at,
+            latest_success.id AS succeeded_id,
+            latest_success.type AS succeeded_type,
+            latest_success.status AS succeeded_status,
+            latest_success.updated_at AS succeeded_updated_at
+     FROM (SELECT 1) AS singleton
+     LEFT JOIN heartbeat ON 1=1
+     LEFT JOIN latest_success ON 1=1`
   ).first()
+  if (!exactKeys(activity, [
+    'heartbeat_key', 'heartbeat_value_json', 'heartbeat_version', 'heartbeat_updated_at',
+    'succeeded_id', 'succeeded_type', 'succeeded_status', 'succeeded_updated_at',
+  ])) invalidState()
+  const heartbeatMissing = activity.heartbeat_key === null
+    && activity.heartbeat_value_json === null
+    && activity.heartbeat_version === null
+    && activity.heartbeat_updated_at === null
+  let heartbeat = null
+  if (!heartbeatMissing) {
+    if (activity.heartbeat_key !== 'outbox.drain.last_success'
+      || !positiveInteger(activity.heartbeat_version)
+      || !validInstant(activity.heartbeat_updated_at)) invalidState()
+    const value = parseCanonicalJson(activity.heartbeat_value_json)
+    if (!exactKeys(value, ['completedAt'])
+      || (value.completedAt !== null && !validInstant(value.completedAt))
+      || (activity.heartbeat_version === 1 && value.completedAt !== null)
+      || (value.completedAt !== null && value.completedAt > activity.heartbeat_updated_at)) {
+      invalidState()
+    }
+    heartbeat = {
+      completedAt: value.completedAt,
+      attemptedAt: activity.heartbeat_updated_at,
+      version: activity.heartbeat_version,
+    }
+  }
+  const succeededMissing = activity.succeeded_id === null
+    && activity.succeeded_type === null
+    && activity.succeeded_status === null
+    && activity.succeeded_updated_at === null
+  const succeeded = succeededMissing ? null : validateOutboxFact({
+    id: activity.succeeded_id,
+    type: activity.succeeded_type,
+    status: activity.succeeded_status,
+    updated_at: activity.succeeded_updated_at,
+  }, 'succeeded')
   return {
     dead: dead === null ? null : validateOutboxFact(dead, 'dead'),
-    succeeded: succeeded === null ? null : validateOutboxFact(succeeded, 'succeeded'),
+    heartbeat,
+    succeeded,
   }
+}
+
+const latestInstant = (left, right) => left === null
+  ? right
+  : right === null || left >= right ? left : right
+
+function outboxHealth(nowMs, baseline, facts) {
+  const heartbeatSuccess = facts.heartbeat?.completedAt ?? null
+  const heartbeatEstablished = facts.heartbeat?.version > 1
+  const jobSuccess = heartbeatEstablished ? null : facts.succeeded?.updated_at ?? null
+  const lastSuccessAt = latestInstant(heartbeatSuccess, jobSuccess)
+  const attemptedAt = heartbeatEstablished ? facts.heartbeat.attemptedAt : null
+  for (const instant of [lastSuccessAt, attemptedAt]) {
+    if (instant !== null && Date.parse(instant) > nowMs) invalidState()
+  }
+  if (facts.dead) return {
+    status: 'critical', detailCode: 'OUTBOX_DEAD', lastSuccessAt,
+  }
+  if (attemptedAt !== null
+    && (lastSuccessAt === null || attemptedAt > lastSuccessAt)
+    && nowMs - Date.parse(attemptedAt) <= OUTBOX_DRAIN_STALE_MS) {
+    return { status: 'critical', detailCode: 'OUTBOX_DRAIN_FAILED', lastSuccessAt }
+  }
+  const freshnessAnchor = lastSuccessAt ?? attemptedAt ?? baseline
+  if (freshnessAnchor !== null
+    && nowMs - Date.parse(freshnessAnchor) > OUTBOX_DRAIN_STALE_MS) {
+    return { status: 'critical', detailCode: 'OUTBOX_DRAIN_STALE', lastSuccessAt }
+  }
+  return { status: 'ok', detailCode: 'OUTBOX_HEALTHY', lastSuccessAt }
 }
 
 async function readLatestSchedulerSuccess(db) {
@@ -557,14 +644,23 @@ function validateActionDetails(row, details) {
       || details.errorCode !== 'SCHEDULER_STALE'
       || details.schedulerRunId !== row.entity_id || details.thresholdMinutes !== 15) invalidState()
   } else if (row.kind === 'authorization_denial_spike') {
-    if (row.severity !== 'warning' || row.entity_type !== 'staff_user'
-      || !exactKeys(details, ['actorId', 'capability', 'count', 'errorCode', 'threshold'])
-      || details.actorId !== row.entity_id
-      || !CAPABILITIES.includes(details.capability)
-      || row.fingerprint !== `security.authorization_denials:${row.entity_id}:${details.capability}`
-      || !safeCount(details.count) || details.count < DENIAL_THRESHOLD
-      || details.errorCode !== 'AUTHORIZATION_DENIAL_SPIKE'
-      || details.threshold !== DENIAL_THRESHOLD) invalidState()
+    const exactSpike = row.severity === 'warning' && row.entity_type === 'staff_user'
+      && exactKeys(details, ['actorId', 'capability', 'count', 'errorCode', 'threshold'])
+      && details.actorId === row.entity_id
+      && CAPABILITIES.includes(details.capability)
+      && row.fingerprint === `security.authorization_denials:${row.entity_id}:${details.capability}`
+      && safeCount(details.count) && details.count >= DENIAL_THRESHOLD
+      && details.errorCode === 'AUTHORIZATION_DENIAL_SPIKE'
+      && details.threshold === DENIAL_THRESHOLD
+    const overflow = row.severity === 'critical'
+      && row.entity_type === 'centre' && row.entity_id === 'centre_1'
+      && row.fingerprint === 'security.authorization_denials:overflow'
+      && exactKeys(details, ['errorCode', 'minimumCount', 'threshold', 'windowMinutes'])
+      && details.errorCode === 'AUTHORIZATION_DENIAL_OVERFLOW'
+      && details.minimumCount === DENIAL_ROW_LIMIT + 1
+      && details.threshold === DENIAL_ROW_LIMIT
+      && details.windowMinutes === DENIAL_WINDOW_MS / 60_000
+    if (!exactSpike && !overflow) invalidState()
   } else invalidState()
   return details
 }
@@ -577,18 +673,43 @@ async function validateStoredAction(cryptoContext, row, status, fingerprint) {
   return row
 }
 
-async function latestResolvedDenial(db, cryptoContext, fingerprint) {
-  const row = await db.prepare(
+const placeholders = (count) => Array.from({ length: count }, () => '?').join(',')
+
+async function latestResolvedDenials(db, cryptoContext, fingerprints) {
+  if (fingerprints.length === 0) return new Map()
+  if (fingerprints.length > DENIAL_GROUP_LIMIT
+    || new Set(fingerprints).size !== fingerprints.length) invalidState()
+  const ordered = [...fingerprints].sort()
+  const rows = (await db.prepare(
     `SELECT id,fingerprint,kind,severity,status,entity_type,entity_id,details_envelope,
             version,created_at,updated_at,resolved_at
-     FROM operational_actions
-     WHERE fingerprint=? AND status='resolved'
-     ORDER BY resolved_at DESC,id DESC LIMIT 1`
-  ).bind(fingerprint).first()
-  if (row === null) return null
-  await validateStoredAction(cryptoContext, row, 'resolved', fingerprint)
-  if (row.kind !== 'authorization_denial_spike') invalidState()
-  return row
+     FROM (
+       SELECT id,fingerprint,kind,severity,status,entity_type,entity_id,details_envelope,
+              version,created_at,updated_at,resolved_at,
+              ROW_NUMBER() OVER (
+                PARTITION BY fingerprint ORDER BY resolved_at DESC,id DESC
+              ) AS resolution_rank
+       FROM operational_actions INDEXED BY operational_actions_resolved_fingerprint_at_id_idx
+       WHERE status='resolved' AND fingerprint IN (${placeholders(ordered.length)})
+     )
+     WHERE resolution_rank=1
+     ORDER BY fingerprint ASC
+     LIMIT ?`
+  ).bind(...ordered, ordered.length + 1).all())?.results
+  if (!Array.isArray(rows) || rows.length > ordered.length) invalidState()
+  const expected = new Set(ordered)
+  const resolved = new Map()
+  for (const raw of rows) {
+    if (!plainObject(raw)
+      || !expected.has(raw.fingerprint)
+      || resolved.has(raw.fingerprint)) invalidState()
+    const row = await validateStoredAction(
+      cryptoContext, raw, 'resolved', raw.fingerprint,
+    )
+    if (row.kind !== 'authorization_denial_spike') invalidState()
+    resolved.set(row.fingerprint, row)
+  }
+  return resolved
 }
 
 async function denialCandidates(db, cryptoContext, nowMs, generatedAt) {
@@ -596,15 +717,23 @@ async function denialCandidates(db, cryptoContext, nowMs, generatedAt) {
   const rows = (await db.prepare(
     `SELECT id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
             reason_envelope,correlation_id,metadata_json
-     FROM audit_events
-     WHERE occurred_at>=? AND occurred_at<=?
-       AND action='authorization.denied'
-       AND actor_staff_id IS NOT NULL
+     FROM (
+       SELECT id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
+              reason_envelope,correlation_id,metadata_json
+       FROM audit_events
+       WHERE occurred_at>=? AND occurred_at<=?
+         AND action='authorization.denied'
+         AND actor_staff_id IS NOT NULL
+       ORDER BY occurred_at DESC,id DESC
+       LIMIT ${DENIAL_ROW_LIMIT + 1}
+     )
      ORDER BY occurred_at ASC,id ASC`
   ).bind(lowerAt, generatedAt).all())?.results
-  if (!Array.isArray(rows)) invalidState()
+  if (!Array.isArray(rows) || rows.length > DENIAL_ROW_LIMIT + 1) invalidState()
+  const overflow = rows.length === DENIAL_ROW_LIMIT + 1
+  const sampledRows = overflow ? rows.slice(1) : rows
   const groups = new Map()
-  for (const raw of rows) {
+  for (const raw of sampledRows) {
     const row = validateDenialRow(raw, lowerAt, generatedAt)
     const reason = await decryptText(
       cryptoContext, row.id, 'reason', row.reason_envelope, invalidDenial,
@@ -619,10 +748,18 @@ async function denialCandidates(db, cryptoContext, nowMs, generatedAt) {
     group.events.push(row)
     groups.set(key, group)
   }
+  const qualifying = [...groups.values()].filter(
+    ({ events }) => events.length >= DENIAL_THRESHOLD,
+  )
+  if (qualifying.length > DENIAL_GROUP_LIMIT) invalidState()
+  const fingerprints = qualifying.map(
+    (group) => `security.authorization_denials:${group.actorId}:${group.capability}`,
+  )
+  const resolutions = await latestResolvedDenials(db, cryptoContext, fingerprints)
   const candidates = []
-  for (const group of groups.values()) {
+  for (const group of qualifying) {
     const fingerprint = `security.authorization_denials:${group.actorId}:${group.capability}`
-    const resolution = await latestResolvedDenial(db, cryptoContext, fingerprint)
+    const resolution = resolutions.get(fingerprint) ?? null
     const effective = resolution && resolution.resolved_at > lowerAt
       ? group.events.filter(({ occurred_at: occurredAt }) => occurredAt > resolution.resolved_at)
       : group.events
@@ -641,20 +778,48 @@ async function denialCandidates(db, cryptoContext, nowMs, generatedAt) {
       },
     })
   }
+  if (overflow) candidates.push({
+    fingerprint: 'security.authorization_denials:overflow',
+    kind: 'authorization_denial_spike',
+    severity: 'critical',
+    entityType: 'centre',
+    entityId: 'centre_1',
+    details: {
+      errorCode: 'AUTHORIZATION_DENIAL_OVERFLOW',
+      minimumCount: DENIAL_ROW_LIMIT + 1,
+      threshold: DENIAL_ROW_LIMIT,
+      windowMinutes: DENIAL_WINDOW_MS / 60_000,
+    },
+  })
   return candidates
 }
 
-async function readOpenAction(db, cryptoContext, fingerprint) {
+async function readOpenActions(db, cryptoContext, fingerprints) {
+  if (fingerprints.length === 0) return new Map()
+  if (fingerprints.length > ACTION_CANDIDATE_LIMIT
+    || new Set(fingerprints).size !== fingerprints.length) invalidState()
+  const ordered = [...fingerprints].sort()
   const rows = (await db.prepare(
     `SELECT id,fingerprint,kind,severity,status,entity_type,entity_id,details_envelope,
             version,created_at,updated_at,resolved_at
      FROM operational_actions
-     WHERE fingerprint=? AND status='open'
-     ORDER BY id`
-  ).bind(fingerprint).all())?.results
-  if (!Array.isArray(rows) || rows.length > 1) invalidState()
-  if (rows.length === 0) return null
-  return validateStoredAction(cryptoContext, rows[0], 'open', fingerprint)
+     WHERE status='open' AND fingerprint IN (${placeholders(ordered.length)})
+     ORDER BY fingerprint ASC,id ASC
+     LIMIT ?`
+  ).bind(...ordered, ordered.length + 1).all())?.results
+  if (!Array.isArray(rows) || rows.length > ordered.length) invalidState()
+  const expected = new Set(ordered)
+  const open = new Map()
+  for (const raw of rows) {
+    if (!plainObject(raw)
+      || !expected.has(raw.fingerprint)
+      || open.has(raw.fingerprint)) invalidState()
+    open.set(
+      raw.fingerprint,
+      await validateStoredAction(cryptoContext, raw, 'open', raw.fingerprint),
+    )
+  }
+  return open
 }
 
 const compareCandidates = (left, right) => left.fingerprint < right.fingerprint
@@ -697,11 +862,7 @@ async function evaluateCaptured(input) {
     detailCode: accessLag ? 'ACCESS_RECONCILIATION_LAG' : 'ACCESS_CURRENT',
     lastSuccessAt: access.updatedAt,
   }
-  const outboxState = {
-    status: outbox.dead ? 'critical' : 'ok',
-    detailCode: outbox.dead ? 'OUTBOX_DEAD' : 'OUTBOX_HEALTHY',
-    lastSuccessAt: outbox.succeeded?.updated_at ?? null,
-  }
+  const outboxState = outboxHealth(input.nowMs, anchor, outbox)
   const checks = [
     makeCheck('access.reconciliation', 'Synchronizacja dostępu', accessState),
     makeCheck('backup.freshness', 'Kopie zapasowe', backup),
@@ -726,10 +887,17 @@ async function evaluateCaptured(input) {
   if (schedulerState.candidate) candidates.push(schedulerState.candidate)
   candidates.push(...await denialCandidates(input.db, input.cryptoContext, input.nowMs, generatedAt))
   candidates.sort(compareCandidates)
+  if (candidates.length > ACTION_CANDIDATE_LIMIT
+    || new Set(candidates.map(({ fingerprint }) => fingerprint)).size !== candidates.length) invalidState()
+  const openActions = await readOpenActions(
+    input.db,
+    input.cryptoContext,
+    candidates.map(({ fingerprint }) => fingerprint),
+  )
   const actionCandidates = []
   const existingActions = []
   for (const candidate of candidates) {
-    const existing = await readOpenAction(input.db, input.cryptoContext, candidate.fingerprint)
+    const existing = openActions.get(candidate.fingerprint) ?? null
     if (existing) existingActions.push(existing)
     else actionCandidates.push(candidate)
   }
@@ -965,22 +1133,13 @@ function publicationGuard(db, run, completedAt, valueJson, snapshotVersion, acti
     completedAt,
   ]
   for (const action of actions) {
-    predicates.push(`(
-      SELECT count(*) FROM operational_actions
-      WHERE id=? AND fingerprint=? AND kind=? AND severity=? AND status='open'
-        AND entity_type=? AND entity_id=? AND details_envelope=? AND version=1
-        AND created_at=? AND updated_at=? AND resolved_at IS NULL
-    )=1`)
+    predicates.push(`EXISTS (
+      SELECT 1 FROM operational_actions
+      WHERE id=? AND fingerprint=? AND status='open'
+    )`)
     bindings.push(
       action.id,
       action.fingerprint,
-      action.kind,
-      action.severity,
-      action.entity_type,
-      action.entity_id,
-      action.details_envelope,
-      action.created_at,
-      action.updated_at,
     )
   }
   return db.prepare(
@@ -1005,76 +1164,76 @@ async function classifyMechanicalConflict({
   if (!fence?.owned) ownershipLost()
   const freshSnapshot = await readSnapshot(db)
   let race = !sameObservedSnapshot(observedSnapshot, freshSnapshot)
-  for (const action of proposedActions) {
-    const fresh = await readOpenAction(db, cryptoContext, action.fingerprint)
-    if (fresh) race = true
-  }
+  const freshActions = await readOpenActions(
+    db,
+    cryptoContext,
+    proposedActions.map(({ fingerprint }) => fingerprint),
+  )
+  if (freshActions.size > 0) race = true
   return race
 }
 
 export async function publishScheduledOperationalState(input) {
   const validated = capturePublisherInput(input)
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const current = observe(validated.now)
-    await readFence(validated.db, validated.run, current.completedAt)
-    const evaluated = await evaluateCaptured({
+  const attempt = 1
+  const current = observe(validated.now)
+  await readFence(validated.db, validated.run, current.completedAt)
+  const evaluated = await evaluateCaptured({
+    db: validated.db,
+    cryptoContext: validated.cryptoContext,
+    nowMs: current.nowMs,
+    prospectiveSchedulerRun: {
+      id: validated.run.id,
+      completedAt: current.completedAt,
+    },
+    generatedAt: current.completedAt,
+  })
+  const existingSnapshot = await readSnapshot(validated.db)
+  const valueJson = canonicalJson(evaluated.snapshot)
+  const snapshotVersion = existingSnapshot ? existingSnapshot.version + 1 : 1
+  if (!positiveInteger(snapshotVersion)) invalidState()
+  const proposedActions = await prepareNewActions(
+    validated.db,
+    validated.cryptoContext,
+    evaluated.actionCandidates,
+    current.completedAt,
+    validated.idFactory,
+  )
+  const guardedActions = [...evaluated.existingActions, ...proposedActions]
+  const statements = [
+    ...proposedActions.map((action) => actionInsert(validated.db, action)),
+    snapshotStatement(validated.db, existingSnapshot, valueJson, current.completedAt),
+    schedulerSuccessStatement(validated.db, validated.run, current.completedAt),
+    publicationGuard(
+      validated.db,
+      validated.run,
+      current.completedAt,
+      valueJson,
+      snapshotVersion,
+      guardedActions,
+      attempt,
+    ),
+  ]
+  try {
+    await validated.db.batch(statements)
+    return {
+      completedAt: current.completedAt,
+      snapshot: evaluated.snapshot,
+      snapshotVersion,
+      createdActions: proposedActions.length,
+      publicationAttempts: attempt,
+    }
+  } catch (error) {
+    if (!isD1OutboxOperationGuardFailure(error) && !isD1IdentityCollision(error)) throw error
+    const raced = await classifyMechanicalConflict({
       db: validated.db,
       cryptoContext: validated.cryptoContext,
-      nowMs: current.nowMs,
-      prospectiveSchedulerRun: {
-        id: validated.run.id,
-        completedAt: current.completedAt,
-      },
-      generatedAt: current.completedAt,
+      run: validated.run,
+      completedAt: current.completedAt,
+      observedSnapshot: existingSnapshot,
+      proposedActions,
     })
-    const existingSnapshot = await readSnapshot(validated.db)
-    const valueJson = canonicalJson(evaluated.snapshot)
-    const snapshotVersion = existingSnapshot ? existingSnapshot.version + 1 : 1
-    if (!positiveInteger(snapshotVersion)) invalidState()
-    const proposedActions = await prepareNewActions(
-      validated.db,
-      validated.cryptoContext,
-      evaluated.actionCandidates,
-      current.completedAt,
-      validated.idFactory,
-    )
-    const guardedActions = [...evaluated.existingActions, ...proposedActions]
-    const statements = [
-      ...proposedActions.map((action) => actionInsert(validated.db, action)),
-      snapshotStatement(validated.db, existingSnapshot, valueJson, current.completedAt),
-      schedulerSuccessStatement(validated.db, validated.run, current.completedAt),
-      publicationGuard(
-        validated.db,
-        validated.run,
-        current.completedAt,
-        valueJson,
-        snapshotVersion,
-        guardedActions,
-        attempt,
-      ),
-    ]
-    try {
-      await validated.db.batch(statements)
-      return {
-        completedAt: current.completedAt,
-        snapshot: evaluated.snapshot,
-        snapshotVersion,
-        createdActions: proposedActions.length,
-        publicationAttempts: attempt,
-      }
-    } catch (error) {
-      if (!isD1OutboxOperationGuardFailure(error) && !isD1IdentityCollision(error)) throw error
-      const raced = await classifyMechanicalConflict({
-        db: validated.db,
-        cryptoContext: validated.cryptoContext,
-        run: validated.run,
-        completedAt: current.completedAt,
-        observedSnapshot: existingSnapshot,
-        proposedActions,
-      })
-      if (!raced) invalidState()
-      if (attempt === 2) conflict()
-    }
+    if (!raced) invalidState()
+    conflict()
   }
-  conflict()
 }

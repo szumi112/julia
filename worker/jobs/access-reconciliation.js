@@ -21,6 +21,7 @@ const EMAIL = /^[^@\s]+@example\.test$/
 const LEASE_MS = 60_000
 const PROVIDER_TIMEOUT_MS = 15_000
 const PROVIDER_RUNWAY_MS = (PROVIDER_TIMEOUT_MS * 3) + 1_000
+const PROVISIONING_PUBLICATION_LIMIT = 2
 const DOMAIN_SEPARATOR = 'bwm:access-desired-set:v1\n'
 const textEncoder = new TextEncoder()
 
@@ -499,19 +500,28 @@ async function publishApplied({
   appliedState,
   leaseState,
   membership,
+  advanceApplied,
   nowMs,
   nowFactory,
   idFactory,
 }) {
   const now = iso(nowMs)
-  const appliedValue = JSON.stringify({
-    fingerprint: membership.fingerprint,
-    generation: desiredState.value.generation,
-  })
+  const appliedValue = advanceApplied
+    ? JSON.stringify({
+      fingerprint: membership.fingerprint,
+      generation: desiredState.value.generation,
+    })
+    : appliedState.value_json
+  const appliedVersion = appliedState.version + (advanceApplied ? 1 : 0)
+  const appliedGeneration = advanceApplied
+    ? desiredState.value.generation
+    : appliedState.value.generation
   const releasedValue = JSON.stringify({ expiresAt: null, nonce: null, owner: null })
+  const provisioningInvitations = membership.includedPendingInvitations
+    .filter((candidate) => candidate.status === 'provisioning')
+  const firstRemainingInvitation = provisioningInvitations[PROVISIONING_PUBLICATION_LIMIT] ?? null
   const invitationChanges = []
-  for (const invitation of membership.includedPendingInvitations
-    .filter((candidate) => candidate.status === 'provisioning')) {
+  for (const invitation of provisioningInvitations.slice(0, PROVISIONING_PUBLICATION_LIMIT)) {
     const current = await invitationRow(db, invitation)
     const next = {
       ...current,
@@ -549,6 +559,33 @@ async function publishApplied({
       }),
     })
   }
+  let continuation = null
+  if (firstRemainingInvitation) {
+    const id = idFrom(idFactory)
+    const idempotencyKey = [
+      'staff.access.reconcile.continue',
+      desiredState.value.generation,
+      firstRemainingInvitation.id,
+      firstRemainingInvitation.version,
+    ].join(':')
+    continuation = {
+      id,
+      idempotencyKey,
+      statement: await enqueueOutboxStatement(db, cryptoContext, {
+        id,
+        type: 'staff.access.reconcile',
+        aggregateType: 'access_group',
+        aggregateId: 'centre_1',
+        payload: {
+          actorId,
+          generation: desiredState.value.generation,
+        },
+        idempotencyKey,
+        scheduledAt: now,
+        nowMs,
+      }),
+    }
+  }
   const auditId = idFrom(idFactory)
   const audit = auditEventStatement(db, {
     id: auditId,
@@ -561,7 +598,7 @@ async function publishApplied({
     correlationId,
     metadata: {
       desiredGeneration: desiredState.value.generation,
-      appliedGeneration: desiredState.value.generation,
+      appliedGeneration,
       invitationCount: invitationChanges.length,
     },
     reasonEnvelope: null,
@@ -572,39 +609,41 @@ async function publishApplied({
     || membership.includedPendingInvitations.some(
       (invitation) => invitation.expiresAt <= guardNow,
     )) {
-    return false
+    return Object.freeze({ complete: false, published: false })
   }
   const uow = createUnitOfWork(db, {
     mode: 'mutation',
     actorId,
     correlationId,
   })
-  uow.domain(
-    db.prepare(
-      `UPDATE system_state
-       SET value_json=?,version=version+1,updated_at=?
-       WHERE key='access.applied_generation' AND value_json=? AND version=?
-         AND EXISTS (
-           SELECT 1 FROM system_state
-           WHERE key='access.desired_generation' AND value_json=? AND version=?
-         )
-         AND EXISTS (
-           SELECT 1 FROM system_state
-           WHERE key='access.reconcile.lease' AND value_json=? AND version=?
-             AND json_extract(value_json,'$.expiresAt')>?
-         )`
-    ).bind(
-      appliedValue,
-      now,
-      appliedState.value_json,
-      appliedState.version,
-      desiredState.value_json,
-      desiredState.version,
-      leaseState.value_json,
-      leaseState.version,
-      guardNow,
+  if (advanceApplied) {
+    uow.domain(
+      db.prepare(
+        `UPDATE system_state
+         SET value_json=?,version=version+1,updated_at=?
+         WHERE key='access.applied_generation' AND value_json=? AND version=?
+           AND EXISTS (
+             SELECT 1 FROM system_state
+             WHERE key='access.desired_generation' AND value_json=? AND version=?
+           )
+           AND EXISTS (
+             SELECT 1 FROM system_state
+             WHERE key='access.reconcile.lease' AND value_json=? AND version=?
+               AND json_extract(value_json,'$.expiresAt')>?
+           )`
+      ).bind(
+        appliedValue,
+        now,
+        appliedState.value_json,
+        appliedState.version,
+        desiredState.value_json,
+        desiredState.version,
+        leaseState.value_json,
+        leaseState.version,
+        guardNow,
+      )
     )
-  )
+  }
   for (const change of invitationChanges) {
     uow.domain(
       db.prepare(
@@ -648,6 +687,7 @@ async function publishApplied({
     uow.version(change.version.statement)
     uow.outbox(change.job)
   }
+  if (continuation) uow.outbox(continuation.statement)
   uow.audit(audit)
   uow.domain(
     db.prepare(
@@ -672,7 +712,7 @@ async function publishApplied({
       desiredState.value_json,
       desiredState.version,
       appliedValue,
-      appliedState.version + 1,
+      appliedVersion,
     )
   )
   const invitationPredicates = invitationChanges.map(() => (
@@ -709,29 +749,37 @@ async function publishApplied({
     change.next.id,
     change.jobKey,
   ])
-  const membershipPredicates = membership.includedPendingInvitations.map(() => (
-    `AND EXISTS (
-       SELECT 1 FROM staff_invitations
-       WHERE id=? AND staff_id=? AND email_lookup=? AND status='pending'
-         AND version=? AND expires_at=? AND expires_at>?
-     )
-     AND EXISTS (
-       SELECT 1 FROM staff_users
-       WHERE id=? AND email_lookup=? AND status=? AND version=?
-     )`
-  )).join('\n')
-  const membershipBindings = membership.includedPendingInvitations.flatMap((invitation) => [
-    invitation.id,
-    invitation.staffId,
-    invitation.emailLookup,
-    invitation.status === 'provisioning' ? invitation.version + 1 : invitation.version,
-    invitation.expiresAt,
-    guardNow,
-    invitation.staffId,
-    invitation.staffEmailLookup,
-    invitation.staffStatus,
-    invitation.staffVersion,
-  ])
+  const changedInvitationIds = new Set(
+    invitationChanges.map((change) => change.invitation.id),
+  )
+  const membershipProof = JSON.stringify(
+    membership.includedPendingInvitations.map((invitation) => ({
+      emailLookup: invitation.emailLookup,
+      expiresAt: invitation.expiresAt,
+      id: invitation.id,
+      staffEmailLookup: invitation.staffEmailLookup,
+      staffId: invitation.staffId,
+      staffStatus: invitation.staffStatus,
+      staffVersion: invitation.staffVersion,
+      status: changedInvitationIds.has(invitation.id) ? 'pending' : invitation.status,
+      version: invitation.version + (changedInvitationIds.has(invitation.id) ? 1 : 0),
+    })),
+  )
+  const continuationPredicate = continuation
+    ? `AND EXISTS (
+         SELECT 1 FROM outbox_jobs
+         WHERE id=? AND type='staff.access.reconcile'
+           AND aggregate_type='access_group' AND aggregate_id='centre_1'
+           AND idempotency_key=? AND status='queued'
+           AND attempt_count=0 AND max_attempts=8
+           AND scheduled_at=? AND created_at=scheduled_at AND updated_at=scheduled_at
+           AND lease_owner IS NULL AND lease_expires_at IS NULL
+           AND last_error_code IS NULL
+       )`
+    : ''
+  const continuationBindings = continuation
+    ? [continuation.id, continuation.idempotencyKey, now]
+    : []
   uow.guard(operationGuard(
     db,
     `access_publish_${auditId}`,
@@ -756,31 +804,65 @@ async function publishApplied({
          AND correlation_id=? AND metadata_json=?
      )
      ${invitationPredicates}
-     ${membershipPredicates}`,
+     ${continuationPredicate}
+     AND (
+       SELECT count(*)
+       FROM json_each(?) AS expected
+       JOIN staff_invitations AS invitation
+         ON invitation.id=json_extract(expected.value,'$.id')
+       JOIN staff_users AS staff
+         ON staff.id=json_extract(expected.value,'$.staffId')
+       WHERE json_type(expected.value,'$.id')='text'
+         AND json_type(expected.value,'$.staffId')='text'
+         AND json_type(expected.value,'$.emailLookup')='text'
+         AND json_type(expected.value,'$.status')='text'
+         AND json_type(expected.value,'$.expiresAt')='text'
+         AND json_type(expected.value,'$.version')='integer'
+         AND json_type(expected.value,'$.staffEmailLookup')='text'
+         AND json_type(expected.value,'$.staffStatus')='text'
+         AND json_type(expected.value,'$.staffVersion')='integer'
+         AND invitation.staff_id=json_extract(expected.value,'$.staffId')
+         AND invitation.email_lookup=json_extract(expected.value,'$.emailLookup')
+         AND invitation.status=json_extract(expected.value,'$.status')
+         AND invitation.expires_at=json_extract(expected.value,'$.expiresAt')
+         AND invitation.expires_at>?
+         AND invitation.version=json_extract(expected.value,'$.version')
+         AND staff.email_lookup=json_extract(expected.value,'$.staffEmailLookup')
+         AND staff.status=json_extract(expected.value,'$.staffStatus')
+         AND staff.version=json_extract(expected.value,'$.staffVersion')
+     )=?`,
     [
       releasedValue,
       leaseState.version + 1,
       desiredState.value_json,
       desiredState.version,
       appliedValue,
-      appliedState.version + 1,
+      appliedVersion,
       auditId,
       actorId,
       correlationId,
       JSON.stringify({
-        appliedGeneration: desiredState.value.generation,
+        appliedGeneration,
         desiredGeneration: desiredState.value.generation,
         invitationCount: invitationChanges.length,
       }),
       ...invitationBindings,
-      ...membershipBindings,
+      ...continuationBindings,
+      membershipProof,
+      guardNow,
+      membership.includedPendingInvitations.length,
     ],
   ))
   try {
     await uow.commit()
-    return true
+    return Object.freeze({
+      complete: continuation === null,
+      published: true,
+    })
   } catch (error) {
-    if (isD1OutboxOperationGuardFailure(error)) return false
+    if (isD1OutboxOperationGuardFailure(error)) {
+      return Object.freeze({ complete: false, published: false })
+    }
     throw error
   }
 }
@@ -863,9 +945,33 @@ export async function handleAccessReconcile(input) {
       : { result: 'retry' }
   }
   if (applied.generation === generation && applied.fingerprint === membership.fingerprint) {
-    return await releaseLease(input.db, lease, providerFenceNowMs)
-      ? { result: 'succeeded' }
-      : { result: 'retry' }
+    if (membership.provisioningInvitations.length === 0) {
+      return await releaseLease(input.db, lease, providerFenceNowMs)
+        ? { result: 'succeeded' }
+        : { result: 'retry' }
+    }
+    const publication = await publishApplied({
+      db: input.db,
+      cryptoContext: input.cryptoContext,
+      actorId: input.payload.actorId,
+      correlationId: idFrom(input.correlationIdFactory),
+      desiredState: currentStates.desired,
+      appliedState: currentStates.applied,
+      leaseState: providerFenceLease,
+      membership,
+      advanceApplied: false,
+      nowMs: providerFenceNowMs,
+      nowFactory: observedNowMs,
+      idFactory: input.idFactory,
+    })
+    if (publication.published) {
+      return { result: 'succeeded' }
+    }
+    const cleanupNowMs = observedNowMs()
+    if (lease.expiresAt <= iso(cleanupNowMs)) {
+      await releaseLease(input.db, lease, cleanupNowMs)
+    }
+    return { result: 'retry' }
   }
   if (Date.parse(lease.expiresAt) - providerFenceNowMs < PROVIDER_RUNWAY_MS) {
     await releaseLease(input.db, lease, providerFenceNowMs)
@@ -929,11 +1035,14 @@ export async function handleAccessReconcile(input) {
     appliedState: finalStates.applied,
     leaseState: finalLease,
     membership: finalMembership,
+    advanceApplied: true,
     nowMs: finalNowMs,
     nowFactory: observedNowMs,
     idFactory: input.idFactory,
   })
-  if (published) return { result: 'succeeded' }
+  if (published.published) {
+    return { result: 'succeeded' }
+  }
   const cleanupNowMs = observedNowMs()
   if (lease.expiresAt <= iso(cleanupNowMs)) {
     await releaseLease(input.db, lease, cleanupNowMs)

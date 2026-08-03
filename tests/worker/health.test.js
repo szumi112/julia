@@ -16,6 +16,7 @@ const SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 
 const NOW_MS = Date.parse('2042-01-02T02:00:00.000Z')
 const DENIAL_MS = NOW_MS - 86_400_000
 const LEASE_MS = 900_000
+const DRAIN_STALE_MS = 300_000
 const ORDINARY_TYPES = ['staff.access.reconcile', 'staff.invitation.email', 'staff.invitation.expire']
 
 const nowIso = (ms) => new Date(ms).toISOString()
@@ -284,17 +285,28 @@ function trackedDb(real, hooks = {}) {
   const wrap = (inner, sql) => ({
     __inner: inner,
     __sql: sql,
-    bind(...values) { return wrap(inner.bind(...values), sql) },
-    run: () => inner.run(),
+    bind(...values) {
+      hooks.bind?.({ sql, values })
+      return wrap(inner.bind(...values), sql)
+    },
+    run() {
+      hooks.terminal?.({ method: 'run', sql, statementCount: 1 })
+      return inner.run()
+    },
     async first(column) {
+      hooks.terminal?.({ method: 'first', sql, statementCount: 1 })
       const replacement = await hooks.first?.({ sql, column })
       return replacement === undefined ? inner.first(column) : replacement
     },
     async all() {
+      hooks.terminal?.({ method: 'all', sql, statementCount: 1 })
       const replacement = await hooks.all?.({ sql })
       return replacement === undefined ? inner.all() : replacement
     },
-    raw: (options) => inner.raw(options),
+    raw(options) {
+      hooks.terminal?.({ method: 'raw', sql, statementCount: 1 })
+      return inner.raw(options)
+    },
   })
   return {
     prepare(sql) {
@@ -303,6 +315,7 @@ function trackedDb(real, hooks = {}) {
     },
     async batch(statements) {
       const sql = statements.map((statement) => statement.__sql ?? '')
+      hooks.terminal?.({ method: 'batch', sql, statementCount: statements.length })
       const execute = () => real.batch(statements.map((statement) => statement.__inner ?? statement))
       return hooks.batch ? hooks.batch({ statements, sql, execute }) : execute()
     },
@@ -323,6 +336,7 @@ function healthReadDb({
   backupAttempt,
   backupSuccess,
   deadJob,
+  drainHeartbeat,
   succeededJob,
   schedulerSuccess,
   openAction,
@@ -333,6 +347,18 @@ function healthReadDb({
       if (sql.includes('FROM backup_runs') && sql.includes("WHERE status IN ('stored','restore_verified')")) return backupSuccess ?? null
       if (sql.includes('FROM backup_runs') && sql.includes('ORDER BY created_at DESC')) return backupAttempt ?? null
       if (sql.includes('FROM outbox_jobs') && sql.includes("status='dead'")) return deadJob ?? null
+      if (sql.includes('WITH heartbeat AS')) return {
+        heartbeat_key: drainHeartbeat ? 'outbox.drain.last_success' : null,
+        heartbeat_value_json: drainHeartbeat
+          ? canonical({ completedAt: drainHeartbeat.completedAt })
+          : null,
+        heartbeat_version: drainHeartbeat?.version ?? null,
+        heartbeat_updated_at: drainHeartbeat?.attemptedAt ?? null,
+        succeeded_id: succeededJob?.id ?? null,
+        succeeded_type: succeededJob?.type ?? null,
+        succeeded_status: succeededJob?.status ?? null,
+        succeeded_updated_at: succeededJob?.updated_at ?? null,
+      }
       if (sql.includes('FROM outbox_jobs') && sql.includes("status='succeeded'")) return succeededJob ?? null
       if (sql.includes('FROM scheduler_runs') && sql.includes("WHERE status='succeeded'")) return schedulerSuccess ?? null
       if (sql.includes('FROM operational_actions') && sql.includes("status='open'")) return openAction ?? null
@@ -765,6 +791,70 @@ describe('stored operational health evaluation', () => {
   })
 
   it.each([
+    ['exact threshold', -DRAIN_STALE_MS, 'ok', 'OUTBOX_HEALTHY'],
+    ['older threshold', -DRAIN_STALE_MS - 1, 'critical', 'OUTBOX_DRAIN_STALE'],
+  ])('evaluates the outbox drain heartbeat at the %s', async (
+    _label,
+    offset,
+    status,
+    detailCode,
+  ) => {
+    const completedAt = nowIso(NOW_MS + offset)
+
+    expect(checkFor(await evaluate(NOW_MS, { db: healthReadDb({
+      drainHeartbeat: { completedAt, attemptedAt: completedAt, version: 2 },
+    }) }), 'outbox.processing')).toMatchObject({
+      status,
+      detailCode,
+      lastSuccessAt: completedAt,
+    })
+  })
+
+  it('marks an initial missing drain heartbeat stale after the scheduler baseline', async () => {
+    const completedAt = nowIso(NOW_MS - DRAIN_STALE_MS - 1)
+
+    expect(checkFor(await evaluate(NOW_MS, { db: healthReadDb({
+      earliest: { id: 'run_outbox_drain_missing', scheduled_for: completedAt },
+      drainHeartbeat: { completedAt: null, attemptedAt: completedAt, version: 1 },
+    }) }), 'outbox.processing')).toMatchObject({
+      status: 'critical',
+      detailCode: 'OUTBOX_DRAIN_STALE',
+      lastSuccessAt: null,
+    })
+  })
+
+  it('reports a recent failed drain attempt after the last success becomes stale', async () => {
+    const completedAt = nowIso(NOW_MS - DRAIN_STALE_MS - 1)
+
+    expect(checkFor(await evaluate(NOW_MS, { db: healthReadDb({
+      drainHeartbeat: { completedAt, attemptedAt: nowIso(NOW_MS), version: 3 },
+    }) }), 'outbox.processing')).toMatchObject({
+      status: 'critical',
+      detailCode: 'OUTBOX_DRAIN_FAILED',
+      lastSuccessAt: completedAt,
+    })
+  })
+
+  it('does not let a job committed by a failed drain mask its heartbeat failure', async () => {
+    const completedAt = nowIso(NOW_MS - DRAIN_STALE_MS - 1)
+    const attemptedAt = nowIso(NOW_MS)
+
+    expect(checkFor(await evaluate(NOW_MS, { db: healthReadDb({
+      drainHeartbeat: { completedAt, attemptedAt, version: 3 },
+      succeededJob: {
+        id: 'job_partial_drain_success',
+        type: ORDINARY_TYPES[0],
+        status: 'succeeded',
+        updated_at: attemptedAt,
+      },
+    }) }), 'outbox.processing')).toMatchObject({
+      status: 'critical',
+      detailCode: 'OUTBOX_DRAIN_FAILED',
+      lastSuccessAt: completedAt,
+    })
+  })
+
+  it.each([
     ['exact threshold', -LEASE_MS, 'ok', 'SCHEDULER_HEALTHY'],
     ['older threshold', -LEASE_MS - 1, 'critical', 'SCHEDULER_STALE'],
   ])('evaluates persisted scheduler success at the %s', async (_label, offset, status, detailCode) => {
@@ -941,6 +1031,92 @@ describe('stored operational health evaluation', () => {
       ({ entityId, kind }) => kind === 'authorization_denial_spike' && entityId === 'stf_denial_bounds'
     )
     expect(candidate.details).toMatchObject({ capability: 'staff.manage', count: 10, threshold: 10 })
+  })
+
+  it('opens one generic spike when denial overflow could hide an invalid older row', async () => {
+    const context = await cryptoContext()
+    const at = DENIAL_MS - 90 * 86_400_000
+    const actorId = 'stf_denial_source_cap'
+    await seedStaff(actorId)
+    await seedDenial(context, {
+      id: 'aud_denial_source_cap_older',
+      actorId,
+      occurredAt: nowIso(at - 101),
+      reason: 'unknown older denial',
+    })
+    for (let index = 0; index < 100; index += 1) await seedDenial(context, {
+      id: `aud_denial_source_cap_${index.toString().padStart(3, '0')}`,
+      actorId,
+      occurredAt: nowIso(at - index),
+      reason: 'security.audit.read denied',
+    })
+
+    const candidates = (await evaluate(at)).actionCandidates.filter(
+      ({ kind }) => kind === 'authorization_denial_spike'
+    )
+    expect(candidates).toContainEqual({
+      fingerprint: 'security.authorization_denials:overflow',
+      kind: 'authorization_denial_spike',
+      severity: 'critical',
+      entityType: 'centre',
+      entityId: 'centre_1',
+      details: {
+        errorCode: 'AUTHORIZATION_DENIAL_OVERFLOW',
+        minimumCount: 101,
+        threshold: 100,
+        windowMinutes: 15,
+      },
+    })
+    expect(candidates).toContainEqual({
+      fingerprint: `security.authorization_denials:${actorId}:security.audit.read`,
+      kind: 'authorization_denial_spike',
+      severity: 'warning',
+      entityType: 'staff_user',
+      entityId: actorId,
+      details: {
+        actorId,
+        capability: 'security.audit.read',
+        count: 100,
+        errorCode: 'AUTHORIZATION_DENIAL_SPIKE',
+        threshold: 10,
+      },
+    })
+    expect(candidates).toHaveLength(2)
+  })
+
+  it('opens one generic spike when newer ignored denials hide a qualifying signal', async () => {
+    const context = await cryptoContext()
+    const at = DENIAL_MS - 89 * 86_400_000
+    const actorId = 'stf_denial_overflow_signal'
+    await seedStaff(actorId)
+    for (let index = 0; index < 10; index += 1) await seedDenial(context, {
+      id: `aud_denial_overflow_signal_${index.toString().padStart(2, '0')}`,
+      actorId,
+      occurredAt: nowIso(at - 200 + index),
+      reason: 'security.audit.read denied',
+    })
+    for (let index = 0; index < 100; index += 1) await seedDenial(context, {
+      id: `aud_denial_overflow_ignored_${index.toString().padStart(3, '0')}`,
+      actorId,
+      occurredAt: nowIso(at - 100 + index),
+      reason: 'staff invitation rate limit',
+    })
+
+    expect((await evaluate(at)).actionCandidates.filter(
+      ({ kind }) => kind === 'authorization_denial_spike'
+    )).toEqual([{
+      fingerprint: 'security.authorization_denials:overflow',
+      kind: 'authorization_denial_spike',
+      severity: 'critical',
+      entityType: 'centre',
+      entityId: 'centre_1',
+      details: {
+        errorCode: 'AUTHORIZATION_DENIAL_OVERFLOW',
+        minimumCount: 101,
+        threshold: 100,
+        windowMinutes: 15,
+      },
+    }])
   })
 
   it('requires ten denials strictly after a newer matching resolution', async () => {
@@ -1604,37 +1780,146 @@ describe('atomic scheduled operational publication', () => {
     expect(result.createdActions).toBeGreaterThanOrEqual(1)
   })
 
-  it('recomputes once after a proven first snapshot race', async () => {
-    const fixture = await publisherFixture({ id: 'run_snapshot_race' })
-    const before = await env.DB.prepare(
-      "SELECT version FROM system_state WHERE key='health.snapshot'"
-    ).first()
-    let batches = 0
-    const db = trackedDb(env.DB, {
-      async batch({ execute }) {
-        batches += 1
-        if (batches === 1) {
-          await env.DB.prepare(
-            "UPDATE system_state SET version=version+1 WHERE key='health.snapshot'"
-          ).run()
-        }
-        return execute()
-      },
+  it('atomically publishes one encrypted denial overflow action without duplicating it', async () => {
+    const at = DENIAL_MS - 88 * 86_400_000
+    const actorId = 'stf_denial_overflow_publish'
+    const first = await publisherFixture({
+      id: 'run_denial_overflow_publish',
+      scheduledFor: nowIso(at - 20_000),
     })
-    const observations = [NOW_MS, NOW_MS + 1]
+    await seedStaff(actorId)
+    for (let index = 0; index < 101; index += 1) await seedDenial(first.context, {
+      id: `aud_denial_overflow_publish_${index.toString().padStart(3, '0')}`,
+      actorId,
+      occurredAt: nowIso(at - index),
+      reason: 'staff invitation rate limit',
+    })
+
+    const result = await publishScheduledOperationalState({
+      db: env.DB,
+      cryptoContext: first.context,
+      run: first.run,
+      idFactory: idSequence('opa_denial_overflow_publish'),
+      now: () => at,
+    })
+    expect(result.createdActions).toBe(1)
+    expect((await env.DB.prepare('SELECT status FROM scheduler_runs WHERE id=?')
+      .bind(first.run.id).first()).status).toBe('succeeded')
+
+    const action = await env.DB.prepare(
+      `SELECT id,fingerprint,kind,severity,status,entity_type,entity_id,details_envelope,
+              version,created_at,updated_at,resolved_at
+       FROM operational_actions
+       WHERE fingerprint='security.authorization_denials:overflow' AND status='open'`
+    ).first()
+    expect(action).toMatchObject({
+      fingerprint: 'security.authorization_denials:overflow',
+      kind: 'authorization_denial_spike',
+      severity: 'critical',
+      status: 'open',
+      entity_type: 'centre',
+      entity_id: 'centre_1',
+      version: 1,
+      created_at: nowIso(at),
+      updated_at: nowIso(at),
+      resolved_at: null,
+    })
+    expect(await decryptForScope(first.context.keyring, first.context.dataKey, {
+      expectedScope: first.context.scope,
+      recordId: action.id,
+      field: 'action_details',
+      envelope: JSON.parse(action.details_envelope),
+    })).toBe(canonical({
+      errorCode: 'AUTHORIZATION_DENIAL_OVERFLOW',
+      minimumCount: 101,
+      threshold: 100,
+      windowMinutes: 15,
+    }))
+
+    const second = await publisherFixture({
+      id: 'run_denial_overflow_publish_again',
+      scheduledFor: nowIso(at - 10_000),
+    })
+    const repeated = await publishScheduledOperationalState({
+      db: env.DB,
+      cryptoContext: second.context,
+      run: second.run,
+      idFactory: idSequence('opa_denial_overflow_duplicate'),
+      now: () => at,
+    })
+    expect(repeated.createdActions).toBe(0)
+    expect((await env.DB.prepare(
+      `SELECT count(*) AS count FROM operational_actions
+       WHERE fingerprint='security.authorization_denials:overflow'`
+    ).first()).count).toBe(1)
+  })
+
+  it('bounds D1 executions and statement bindings for ten qualifying denial groups', async () => {
+    const at = DENIAL_MS - 120 * 86_400_000
+    const fixture = await publisherFixture({
+      id: 'run_ten_denial_groups',
+      scheduledFor: nowIso(at - 10_000),
+    })
+    for (let group = 0; group < 10; group += 1) {
+      const actorId = `stf_ten_denial_groups_${group}`
+      await seedStaff(actorId)
+      for (let event = 0; event < 10; event += 1) await seedDenial(fixture.context, {
+        id: `aud_ten_denial_groups_${group}_${event}`,
+        actorId,
+        occurredAt: nowIso(at - group * 10 - event),
+        reason: 'operations.health.read denied',
+      })
+    }
+    let executions = 0
+    let maxBindings = 0
+    const db = trackedDb(env.DB, {
+      bind({ values }) { maxBindings = Math.max(maxBindings, values.length) },
+      terminal({ statementCount }) { executions += statementCount },
+    })
+
     const result = await publishScheduledOperationalState({
       db,
       cryptoContext: fixture.context,
       run: fixture.run,
-      idFactory: idSequence('opa_snapshot_race'),
-      now: () => observations.shift(),
+      idFactory: idSequence('opa_ten_denial_groups'),
+      now: () => at,
     })
-    expect(result).toMatchObject({ publicationAttempts: 2, snapshotVersion: before.version + 2 })
-    expect(batches).toBe(2)
-    expect((await env.DB.prepare('SELECT status FROM scheduler_runs WHERE id=?').bind(fixture.run.id).first()).status).toBe('succeeded')
+
+    expect(result).toMatchObject({
+      createdActions: 10,
+      publicationAttempts: 1,
+    })
+    expect(executions).toBe(25)
+    expect(maxBindings).toBeLessThanOrEqual(39)
   })
 
-  it('accepts a concurrent randomized-envelope action winner only after a fresh full retry', async () => {
+  it('defers a proven snapshot race to the next scheduler run', async () => {
+    const fixture = await publisherFixture({ id: 'run_snapshot_race' })
+    let batches = 0
+    let executions = 0
+    const db = trackedDb(env.DB, {
+      terminal({ statementCount }) { executions += statementCount },
+      async batch({ execute }) {
+        batches += 1
+        await env.DB.prepare(
+          "UPDATE system_state SET version=version+1 WHERE key='health.snapshot'"
+        ).run()
+        return execute()
+      },
+    })
+    await expect(publishScheduledOperationalState({
+      db,
+      cryptoContext: fixture.context,
+      run: fixture.run,
+      idFactory: idSequence('opa_snapshot_race'),
+      now: () => NOW_MS,
+    })).rejects.toThrow(/^HEALTH_SNAPSHOT_CONFLICT$/)
+    expect(batches).toBe(1)
+    expect(executions).toBeLessThanOrEqual(20)
+    expect((await env.DB.prepare('SELECT status FROM scheduler_runs WHERE id=?').bind(fixture.run.id).first()).status).toBe('running')
+  })
+
+  it('defers a concurrent randomized-envelope action winner to the next scheduler run', async () => {
     const fixture = await publisherFixture({ id: 'run_action_race' })
     const actorId = 'stf_concurrent_action'
     const fingerprint = `security.authorization_denials:${actorId}:operations.health.read`
@@ -1669,15 +1954,14 @@ describe('atomic scheduled operational publication', () => {
         return execute()
       },
     })
-    const result = await publishScheduledOperationalState({
+    await expect(publishScheduledOperationalState({
       db,
       cryptoContext: fixture.context,
       run: fixture.run,
       idFactory: idSequence('opa_concurrent_action_loser'),
       now: () => NOW_MS,
-    })
-    expect(result).toMatchObject({ publicationAttempts: 2, createdActions: 0 })
-    expect(batches).toBe(2)
+    })).rejects.toThrow(/^HEALTH_SNAPSHOT_CONFLICT$/)
+    expect(batches).toBe(1)
     expect((await env.DB.prepare(
       'SELECT count(*) AS count FROM operational_actions WHERE fingerprint=? AND status=\'open\''
     ).bind(fingerprint).first()).count).toBe(1)
@@ -1845,7 +2129,7 @@ describe('atomic scheduled operational publication', () => {
       .bind('opa_task7_preserved').first()).toEqual(before)
   })
 
-  it('throws the fixed conflict after a second proven snapshot race', async () => {
+  it('throws the fixed conflict after one proven snapshot race', async () => {
     const fixture = await publisherFixture({ id: 'run_snapshot_conflict' })
     let batches = 0
     const db = trackedDb(env.DB, {
@@ -1861,7 +2145,7 @@ describe('atomic scheduled operational publication', () => {
       db, cryptoContext: fixture.context, run: fixture.run,
       idFactory: idSequence('opa_snapshot_conflict'), now: () => NOW_MS,
     })).rejects.toThrow(/^HEALTH_SNAPSHOT_CONFLICT$/)
-    expect(batches).toBe(2)
+    expect(batches).toBe(1)
     expect((await env.DB.prepare('SELECT status FROM scheduler_runs WHERE id=?').bind(fixture.run.id).first()).status).toBe('running')
   })
 
@@ -1947,7 +2231,7 @@ describe('atomic scheduled operational publication', () => {
       .bind(fixture.run.id).first()).toEqual({ status: 'running', attempt_count: 2, lease_owner: 'new_owner' })
   })
 
-  it('calls the injected clock once per attempt and has no provider input or fallback', async () => {
+  it('calls the injected clock once per publication and has no provider input or fallback', async () => {
     const fixture = await publisherFixture({ id: 'run_single_clock' })
     const now = vi.fn(() => NOW_MS)
     const providers = { call: vi.fn(() => { throw new Error('provider must stay unused') }) }

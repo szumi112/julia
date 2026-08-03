@@ -1,11 +1,11 @@
 import { loadConfig } from '../config.js'
 import { isD1IdentityCollision, isD1OutboxOperationGuardFailure } from '../db/errors.js'
+import { createD1QueryBudget } from '../db/query-budget.js'
 import { dispatchOutboxJob as dispatchJob } from '../jobs/handlers.js'
 import {
   decryptOutboxPayload,
   enqueueOutboxStatement as enqueueStatement,
   outboxStatementDescriptorFor,
-  processOutboxBatch as processBatch,
 } from '../jobs/outbox.js'
 import { safeLog as writeSafeLog } from '../logging/safe-log.js'
 import { decodeBase64Url } from '../security/encoding.js'
@@ -15,7 +15,8 @@ import { publishScheduledOperationalState } from './health.js'
 
 const IDENTITY_SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const SCHEDULER_LEASE_MS = 900_000
-const ORDINARY_LIMIT = 10
+const ORDINARY_LIMIT = 1
+const RECORDED_ORDINARY_LIMIT = 10
 const BACKUP_MAX_ATTEMPTS = 8
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -149,7 +150,7 @@ function dependencies(deps) {
     createKeyring: deps.createKeyring ?? buildKeyring,
     backupDue: deps.backupDue ?? calculateBackupDue,
     enqueueOutboxStatement: deps.enqueueOutboxStatement ?? enqueueStatement,
-    processOutboxBatch: deps.processOutboxBatch ?? processBatch,
+    processOutboxBatch: deps.processOutboxBatch ?? null,
     dispatchOutboxJob: deps.dispatchOutboxJob ?? dispatchJob,
     safeLog: deps.safeLog ?? writeSafeLog,
     providers: deps.providers ?? {},
@@ -186,7 +187,7 @@ function validateSchedulerRow(row) {
     || !validCount(row.claimed_jobs)
     || !validCount(row.succeeded_jobs)
     || !validCount(row.failed_jobs)
-    || row.claimed_jobs > ORDINARY_LIMIT
+    || row.claimed_jobs > RECORDED_ORDINARY_LIMIT
     || row.succeeded_jobs + row.failed_jobs > row.claimed_jobs) invalidState()
   if (row.status === 'running') {
     if (row.completed_at !== null || row.error_code !== null) invalidState()
@@ -750,8 +751,17 @@ const emitLog = async (log, level, fields) => {
 }
 
 export async function runScheduled(input) {
-  const validated = validateInvocation(input)
-  const deps = dependencies(validated.deps)
+  const captured = validateInvocation(input)
+  const budget = createD1QueryBudget(captured.db, {
+    totalLimit: 50,
+    recoveryReserve: 3,
+  })
+  const validated = {
+    ...captured,
+    db: budget.work,
+    env: { ...captured.env, DB: budget.work },
+  }
+  const deps = dependencies(captured.deps)
   let owned = null
   let backupEnqueued = false
   let counts = { claimedJobs: 0, succeededJobs: 0, failedJobs: 0 }
@@ -795,41 +805,47 @@ export async function runScheduled(input) {
       )
     }
 
-    const processorCheckpoint = await ownershipCheckpoint(
-      validated.db,
-      validated.scheduledFor,
-      owned,
-      deps.now,
-    )
-    const outcomes = await deps.processOutboxBatch({
-      db: validated.db,
-      cryptoContext,
-      config: validated.config,
-      nowMs: processorCheckpoint.ms,
-      nowFactory: deps.now,
-      idFactory: deps.idFactory,
-      leaseOwnerFactory: deps.leaseOwnerFactory,
-      limit: ORDINARY_LIMIT,
-      beforeDispatch: () => ownershipCheckpoint(
+    let outcomes = []
+    if (deps.processOutboxBatch) {
+      const processorCheckpoint = await ownershipCheckpoint(
         validated.db,
         validated.scheduledFor,
         owned,
         deps.now,
-      ),
-      dispatch: async (dispatchInput) => {
-        if (dispatchInput?.job?.type === 'backup.create') invalidState()
-        return deps.dispatchOutboxJob({
-          ...dispatchInput,
-          env: validated.env,
-          bindings: validated.env,
-          providers: deps.providers,
-          idFactory: deps.idFactory,
-          leaseOwnerFactory: deps.leaseOwnerFactory,
-          leaseNonceFactory: deps.leaseNonceFactory,
-          correlationIdFactory: deps.correlationIdFactory,
-        })
-      },
-    })
+      )
+      outcomes = await deps.processOutboxBatch({
+        db: validated.db,
+        cryptoContext,
+        config: validated.config,
+        nowMs: processorCheckpoint.ms,
+        nowFactory: deps.now,
+        idFactory: deps.idFactory,
+        leaseOwnerFactory: deps.leaseOwnerFactory,
+        limit: ORDINARY_LIMIT,
+        claimScanLimit: ORDINARY_LIMIT,
+        reapLimit: ORDINARY_LIMIT,
+        stopAfterReap: true,
+        beforeDispatch: () => ownershipCheckpoint(
+          validated.db,
+          validated.scheduledFor,
+          owned,
+          deps.now,
+        ),
+        dispatch: async (dispatchInput) => {
+          if (dispatchInput?.job?.type === 'backup.create') invalidState()
+          return deps.dispatchOutboxJob({
+            ...dispatchInput,
+            env: validated.env,
+            bindings: validated.env,
+            providers: deps.providers,
+            idFactory: deps.idFactory,
+            leaseOwnerFactory: deps.leaseOwnerFactory,
+            leaseNonceFactory: deps.leaseNonceFactory,
+            correlationIdFactory: deps.correlationIdFactory,
+          })
+        },
+      })
+    }
     counts = validateOutcomes(outcomes)
 
     await ownershipCheckpoint(validated.db, validated.scheduledFor, owned, deps.now)
@@ -858,8 +874,8 @@ export async function runScheduled(input) {
   } catch {
     if (owned) {
       try {
-        await ownershipCheckpoint(validated.db, validated.scheduledFor, owned, deps.now)
-        await failScheduler(validated.db, validated.scheduledFor, owned, counts, deps.now)
+        await ownershipCheckpoint(budget.recovery, validated.scheduledFor, owned, deps.now)
+        await failScheduler(budget.recovery, validated.scheduledFor, owned, counts, deps.now)
       } catch {
         // A stale or expired owner cannot mutate the current scheduler row.
       }

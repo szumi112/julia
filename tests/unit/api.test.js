@@ -937,6 +937,20 @@ const ACTION_FACTS = [
   },
 ]
 
+const DENIAL_OVERFLOW_FACT = {
+  id: 'act_denial_overflow',
+  kind: 'authorization_denial_spike',
+  severity: 'critical',
+  entityType: 'centre',
+  entityId: 'centre_1',
+  details: {
+    errorCode: 'AUTHORIZATION_DENIAL_OVERFLOW',
+    minimumCount: 101,
+    threshold: 100,
+    windowMinutes: 15,
+  },
+}
+
 const actionsBody = (facts = ACTION_FACTS, truncated = false) => ({
   data: {
     actions: facts.map((fact, index) => ({
@@ -1038,6 +1052,24 @@ test('operations health projects and deeply freezes the exact four-check snapsho
   assertDeepFrozen(result)
 })
 
+test('operations health accepts the exact critical outbox drain states', async () => {
+  for (const detailCode of ['OUTBOX_DRAIN_FAILED', 'OUTBOX_DRAIN_STALE']) {
+    const body = healthBody()
+    body.data.checks[0] = {
+      ...body.data.checks[0],
+      status: 'critical',
+      detailCode,
+    }
+    const { fetchImpl } = queuedFetch(jsonResponse(body))
+
+    const result = await createApiClient({ fetchImpl }).getOperationsHealth()
+
+    assert.equal(result.checks[0].status, 'critical')
+    assert.equal(result.checks[0].detailCode, detailCode)
+    assertDeepFrozen(result)
+  }
+})
+
 test('operations health rejects malformed envelopes, order, labels, pairs, times, and duplicate IDs', async (t) => {
   const cases = [
     ['extra outer key', (body) => { body.extra = true }],
@@ -1087,6 +1119,43 @@ test('operational actions project and deeply freeze all six accepted kinds', asy
     assert.notEqual(action.details, body.data.actions[index].details)
   })
   assertDeepFrozen(result)
+})
+
+test('operational actions accept and freeze a centre-scoped denial overflow spike', async () => {
+  const { fetchImpl } = queuedFetch(jsonResponse(actionsBody([DENIAL_OVERFLOW_FACT])))
+
+  const result = await createApiClient({ fetchImpl }).getOperationalActions()
+
+  assert.deepEqual(result.actions[0], actionsBody([DENIAL_OVERFLOW_FACT]).data.actions[0])
+  assertDeepFrozen(result)
+})
+
+test('operational actions reject malformed centre-scoped denial overflow spikes', async (t) => {
+  const cases = [
+    ['warning severity', (fact) => { fact.severity = 'warning' }],
+    ['staff entity type', (fact) => { fact.entityType = 'staff_user' }],
+    ['wrong centre', (fact) => { fact.entityId = 'centre_2' }],
+    ['wrong error code', (fact) => { fact.details.errorCode = 'AUTHORIZATION_DENIAL_SPIKE' }],
+    ['wrong minimum count', (fact) => { fact.details.minimumCount = 100 }],
+    ['wrong threshold', (fact) => { fact.details.threshold = 101 }],
+    ['wrong window', (fact) => { fact.details.windowMinutes = 14 }],
+    ['extra detail', (fact) => { fact.details.count = 101 }],
+    ['superseded count key', (fact) => {
+      delete fact.details.minimumCount
+      fact.details.countAtLeast = 101
+    }],
+  ]
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const fact = structuredClone(DENIAL_OVERFLOW_FACT)
+      mutate(fact)
+      const { fetchImpl } = queuedFetch(parsedResponse(actionsBody([fact])))
+      await assert.rejects(
+        createApiClient({ fetchImpl }).getOperationalActions(),
+        assertInvalidResponse,
+      )
+    })
+  }
 })
 
 test('operational actions accept only the frozen ordinary and bounded unknown outbox combinations', async (t) => {

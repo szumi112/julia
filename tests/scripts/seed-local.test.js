@@ -22,7 +22,11 @@ import {
   normalizeLocalSeedInput,
   runLocalSeed,
 } from '../../scripts/seed-local.mjs'
-import { LOCAL_SEED_MANIFEST as CORE_LOCAL_SEED_MANIFEST } from '../../scripts/seed-core.js'
+import {
+  inspectLocalSeedState,
+  LOCAL_SEED_MANIFEST as CORE_LOCAL_SEED_MANIFEST,
+  LOCAL_SEED_SNAPSHOT_QUERIES,
+} from '../../scripts/seed-core.js'
 import {
   buildLocalHarnessWranglerConfig,
   LOCAL_HARNESS_RUNNER_MODE,
@@ -30,6 +34,50 @@ import {
 } from '../../scripts/local-harness-core.js'
 
 const key = (character) => Buffer.alloc(32, character.charCodeAt(0)).toString('base64url')
+const MIGRATION_STATES = [
+  {
+    key: 'access.applied_generation',
+    updated_at: '2026-07-30T00:00:00.000Z',
+    value_json: '{"fingerprint":"BYDlKyUUBNO-3cX7_bRPY-TkArudTPGjIdbwtAdLSCw","generation":0}',
+    version: 1,
+  },
+  {
+    key: 'access.desired_generation',
+    updated_at: '2026-07-30T00:00:00.000Z',
+    value_json: '{"generation":0}',
+    version: 1,
+  },
+  {
+    key: 'access.reconcile.lease',
+    updated_at: '2026-07-30T00:00:00.000Z',
+    value_json: '{"expiresAt":null,"nonce":null,"owner":null}',
+    version: 1,
+  },
+  {
+    key: 'outbox.drain.last_success',
+    updated_at: '2026-08-03T12:34:56.789Z',
+    value_json: '{"completedAt":null}',
+    version: 1,
+  },
+]
+const stateSnapshotDb = (states) => {
+  const queries = new WeakMap()
+  return {
+    async batch(statements) {
+      return statements.map((statement) => ({
+        results: queries.get(statement) === 'SELECT * FROM system_state ORDER BY key'
+          ? structuredClone(states)
+          : [],
+      }))
+    },
+    prepare(sql) {
+      assert.ok(LOCAL_SEED_SNAPSHOT_QUERIES.includes(sql))
+      const statement = Object.freeze({})
+      queries.set(statement, sql)
+      return statement
+    },
+  }
+}
 const makeDirectory = (t) => {
   const path = mkdtempSync(join(tmpdir(), 'bwm-seed-test-'))
   t.after(() => rmSync(path, { force: true, recursive: true }))
@@ -74,6 +122,47 @@ test('local seed manifest owns exactly three deterministic fictional identities'
     'sp_local_specialist',
   )
   assert.equal(Object.isFrozen(LOCAL_SEED_MANIFEST), true)
+})
+
+test('local seed recognizes only the exact four-row migration baseline', async (t) => {
+  assert.deepEqual(await inspectLocalSeedState({
+    db: stateSnapshotDb(MIGRATION_STATES),
+    keyring: {},
+  }), { kind: 'empty' })
+
+  const cases = [
+    ['missing heartbeat', (states) => { states.pop() }],
+    ['extra state', (states) => {
+      states.push({
+        key: 'unexpected.state',
+        updated_at: '2026-08-03T12:34:56.789Z',
+        value_json: '{}',
+        version: 1,
+      })
+    }],
+    ['mutated heartbeat value', (states) => {
+      states[3].value_json = '{"completedAt":null,"extra":true}'
+    }],
+    ['mutated heartbeat version', (states) => { states[3].version = 2 }],
+    ['noncanonical heartbeat timestamp', (states) => {
+      states[3].updated_at = '2026-08-03T12:34:56Z'
+    }],
+    ['impossible heartbeat timestamp', (states) => {
+      states[3].updated_at = '2026-02-30T12:34:56.789Z'
+    }],
+    ['extra heartbeat field', (states) => { states[3].extra = true }],
+    ['mutated access genesis', (states) => { states[1].value_json = '{"generation":1}' }],
+  ]
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const states = structuredClone(MIGRATION_STATES)
+      mutate(states)
+      assert.deepEqual(await inspectLocalSeedState({
+        db: stateSnapshotDb(states),
+        keyring: {},
+      }), { kind: 'refused' })
+    })
+  }
 })
 
 test('local seed validates exact environment, argv, canonical absolute directory, and keys', (t) => {

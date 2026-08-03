@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import worker from '../../worker/index.js'
+import { enqueueOutboxStatement } from '../../worker/jobs/outbox.js'
 import { getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 
@@ -17,6 +18,26 @@ const valid = {
   BWM_DATA_KEK_V1: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
   BWM_LOOKUP_HMAC_V1: 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ',
   BWM_BACKUP_KEK_V1: 'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
+}
+const IDENTITY_SCOPE = Object.freeze({
+  type: 'staff_directory',
+  id: 'centre_1',
+  purpose: 'identity',
+})
+
+async function ensureIdentityKey(runtimeEnv, id, createdAt) {
+  const keyring = await createKeyring(runtimeEnv, {
+    activeDataKekVersion: 1,
+    activeLookupKeyVersion: 1,
+    activeBackupKekVersion: 1,
+  })
+  const dataKey = await getOrCreateDataKey(
+    env.DB,
+    keyring,
+    IDENTITY_SCOPE,
+    { id, createdAt },
+  )
+  return { keyring, dataKey, scope: IDENTITY_SCOPE }
 }
 
 describe('Worker entry boundary', () => {
@@ -54,24 +75,11 @@ describe('Worker entry boundary', () => {
   it('validates configuration first and gives one promise ownership of scheduled completion', async () => {
     const scheduledTime = Date.parse('2038-01-15T00:00:00.000Z')
     const runtimeEnv = { ...env, ...valid, DB: env.DB }
-    const keyring = await createKeyring(runtimeEnv, {
-      activeDataKekVersion: 1,
-      activeLookupKeyVersion: 1,
-      activeBackupKekVersion: 1,
-    })
-    await getOrCreateDataKey(
-      env.DB,
-      keyring,
-      { type: 'staff_directory', id: 'centre_1', purpose: 'identity' },
-      {
-        id: 'key_entry_scheduler',
-        createdAt: '2038-01-15T00:00:00.000Z',
-      },
-    )
+    await ensureIdentityKey(runtimeEnv, 'key_entry_scheduler', '2038-01-15T00:00:00.000Z')
     const promises = []
 
     expect(worker.scheduled(
-      { scheduledTime },
+      { scheduledTime, cron: '*/5 * * * *' },
       runtimeEnv,
       { waitUntil(promise) { promises.push(promise) } }
     )).toBeUndefined()
@@ -87,5 +95,101 @@ describe('Worker entry boundary', () => {
       scheduled_for: '2038-01-15T00:00:00.000Z',
       status: 'succeeded',
     })
+  })
+
+  it('routes the explicit five-minute cron to the operations scheduler', async () => {
+    const scheduledTime = Date.parse('2038-01-15T00:05:00.000Z')
+    const runtimeEnv = { ...env, ...valid, DB: env.DB }
+    await ensureIdentityKey(runtimeEnv, 'key_entry_operations', '2038-01-15T00:05:00.000Z')
+    const promises = []
+
+    expect(worker.scheduled(
+      { scheduledTime, cron: '*/5 * * * *' },
+      runtimeEnv,
+      { waitUntil(promise) { promises.push(promise) } }
+    )).toBeUndefined()
+    expect(promises).toHaveLength(1)
+
+    await expect(promises[0]).resolves.toMatchObject({
+      status: 'succeeded',
+      reason: null,
+    })
+    expect(await env.DB.prepare(
+      'SELECT scheduled_for,status FROM scheduler_runs WHERE scheduled_for=?'
+    ).bind('2038-01-15T00:05:00.000Z').first()).toEqual({
+      scheduled_for: '2038-01-15T00:05:00.000Z',
+      status: 'succeeded',
+    })
+  })
+
+  it('routes the minute cron to the isolated outbox drain', async () => {
+    const scheduledTime = Date.parse('2038-01-15T00:01:00.000Z')
+    const runtimeEnv = { ...env, ...valid, DB: env.DB }
+    const cryptoContext = await ensureIdentityKey(
+      runtimeEnv,
+      'key_entry_outbox',
+      '2038-01-15T00:01:00.000Z',
+    )
+    const job = await enqueueOutboxStatement(env.DB, cryptoContext, {
+      id: 'job_entry_outbox',
+      type: 'staff.invitation.expire',
+      aggregateType: 'staff_invitation',
+      aggregateId: 'inv_entry_outbox_missing',
+      payload: {
+        actorId: 'stf_entry_outbox_owner',
+        invitationId: 'inv_entry_outbox_missing',
+      },
+      idempotencyKey: 'staff.invitation.expire:entry-outbox',
+      scheduledAt: '2038-01-15T00:01:00.000Z',
+      nowMs: scheduledTime,
+    })
+    await job.run()
+    const promises = []
+
+    expect(worker.scheduled(
+      { scheduledTime, cron: '* * * * *' },
+      runtimeEnv,
+      { waitUntil(promise) { promises.push(promise) } }
+    )).toBeUndefined()
+    expect(promises).toHaveLength(1)
+
+    await expect(promises[0]).resolves.toEqual({
+      status: 'succeeded',
+      reason: null,
+      claimedJobs: 1,
+      succeededJobs: 1,
+      failedJobs: 0,
+    })
+    expect(await env.DB.prepare(
+      'SELECT id FROM scheduler_runs WHERE scheduled_for=?'
+    ).bind('2038-01-15T00:01:00.000Z').first()).toBeNull()
+    expect(await env.DB.prepare(
+      'SELECT status,attempt_count FROM outbox_jobs WHERE id=?'
+    ).bind('job_entry_outbox').first()).toEqual({
+      status: 'succeeded',
+      attempt_count: 1,
+    })
+  })
+
+  it('rejects missing cron metadata before giving work to waitUntil', () => {
+    let waitUntilCalls = 0
+
+    expect(() => worker.scheduled(
+      { scheduledTime: Date.parse('2038-01-15T00:02:00.000Z') },
+      { ...env, ...valid, DB: env.DB },
+      { waitUntil() { waitUntilCalls += 1 } }
+    )).toThrow(/^SCHEDULED_CRON_INVALID$/)
+    expect(waitUntilCalls).toBe(0)
+  })
+
+  it('rejects an unknown cron before giving work to waitUntil', () => {
+    let waitUntilCalls = 0
+
+    expect(() => worker.scheduled(
+      { scheduledTime: Date.parse('2038-01-15T00:02:00.000Z'), cron: '2 * * * *' },
+      { ...env, ...valid, DB: env.DB },
+      { waitUntil() { waitUntilCalls += 1 } }
+    )).toThrow(/^SCHEDULED_CRON_INVALID$/)
+    expect(waitUntilCalls).toBe(0)
   })
 })

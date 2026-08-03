@@ -7,6 +7,7 @@ import {
   normalizeBootstrapInput,
   runBootstrapOwner,
 } from '../../scripts/bootstrap-owner.mjs'
+import { inspectBootstrapEntryState } from '../../scripts/bootstrap-core.js'
 import { isD1OutboxOperationGuardFailure } from '../../worker/db/errors.js'
 
 const key = (character) => Buffer.alloc(32, character.charCodeAt(0)).toString('base64url')
@@ -37,6 +38,77 @@ const okResult = (results = []) => ({
     success: true,
   }],
   success: true,
+})
+
+const EMPTY_BOOTSTRAP_STATES = Object.freeze([
+  Object.freeze({
+    key: 'access.applied_generation',
+    value_json: '{"fingerprint":"BYDlKyUUBNO-3cX7_bRPY-TkArudTPGjIdbwtAdLSCw","generation":0}',
+    version: 1,
+    updated_at: '2026-07-30T00:00:00.000Z',
+  }),
+  Object.freeze({
+    key: 'access.desired_generation',
+    value_json: '{"generation":0}',
+    version: 1,
+    updated_at: '2026-07-30T00:00:00.000Z',
+  }),
+  Object.freeze({
+    key: 'access.reconcile.lease',
+    value_json: '{"expiresAt":null,"nonce":null,"owner":null}',
+    version: 1,
+    updated_at: '2026-07-30T00:00:00.000Z',
+  }),
+  Object.freeze({
+    key: 'outbox.drain.last_success',
+    value_json: '{"completedAt":null}',
+    version: 1,
+    updated_at: '2026-07-31T00:00:00.000Z',
+  }),
+])
+
+const bootstrapEntryDb = (states) => ({
+  prepare: () => ({}),
+  batch: async (statements) => statements.map((_, index) => ({
+    results: index === 7 ? structuredClone(states) : [],
+  })),
+})
+
+test('bootstrap entry inspection accepts only the fixed heartbeat beside access genesis', async () => {
+  const input = {
+    db: bootstrapEntryDb(EMPTY_BOOTSTRAP_STATES),
+    keyring: {},
+    nowMs: Date.parse('2026-07-31T00:05:00.000Z'),
+    ownerDisplayName: 'Alicja Testowa',
+    ownerEmail: 'owner@example.test',
+  }
+  assert.deepEqual(await inspectBootstrapEntryState(input), { kind: 'empty' })
+
+  const advanced = structuredClone(EMPTY_BOOTSTRAP_STATES)
+  advanced[3] = {
+    key: 'outbox.drain.last_success',
+    value_json: '{"completedAt":"2026-07-31T00:04:00.000Z"}',
+    version: 2,
+    updated_at: '2026-07-31T00:04:00.000Z',
+  }
+  assert.deepEqual(await inspectBootstrapEntryState({
+    ...input,
+    db: bootstrapEntryDb(advanced),
+  }), { kind: 'empty' })
+
+  const malformed = structuredClone(EMPTY_BOOTSTRAP_STATES)
+  malformed[3] = { ...malformed[3], value_json: '{"completedAt":null,"extra":true}' }
+  assert.deepEqual(await inspectBootstrapEntryState({
+    ...input,
+    db: bootstrapEntryDb(malformed),
+  }), { kind: 'refused' })
+  assert.deepEqual(await inspectBootstrapEntryState({
+    ...input,
+    db: bootstrapEntryDb([...EMPTY_BOOTSTRAP_STATES, {
+      key: 'unexpected.state', value_json: '{}', version: 1,
+      updated_at: '2026-07-31T00:00:00.000Z',
+    }]),
+  }), { kind: 'refused' })
 })
 
 test('production is blocked before argv, identity, key, or provider validation', async () => {

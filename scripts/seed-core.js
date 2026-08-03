@@ -8,6 +8,7 @@ import {
 const EMPTY_FINGERPRINT = 'BYDlKyUUBNO-3cX7_bRPY-TkArudTPGjIdbwtAdLSCw'
 const RELEASED_LEASE = '{"expiresAt":null,"nonce":null,"owner":null}'
 const CORRELATION_ID = 'local_seed_v1'
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 const deepFreeze = (value) => {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -135,6 +136,12 @@ const GENESIS_STATES = Object.freeze([
     version: 1,
   }),
 ])
+const OUTBOX_DRAIN_HEARTBEAT = Object.freeze({
+  key: 'outbox.drain.last_success',
+  value_json: '{"completedAt":null}',
+  version: 1,
+})
+const SYSTEM_STATE_COUNT = GENESIS_STATES.length + 1
 
 const ownObject = (value) => value !== null
   && typeof value === 'object'
@@ -146,6 +153,24 @@ const exactKeys = (value, keys) => ownObject(value)
 const sameRow = (actual, expected) => ownObject(actual)
   && Object.keys(actual).length === Object.keys(expected).length
   && Object.entries(expected).every(([key, value]) => Object.is(actual[key], value))
+const validInstant = (value) => {
+  try {
+    return typeof value === 'string'
+      && INSTANT.test(value)
+      && !Number.isNaN(Date.parse(value))
+      && new Date(value).toISOString() === value
+  } catch {
+    return false
+  }
+}
+const exactGenesisStates = (states) => Array.isArray(states)
+  && states.length === SYSTEM_STATE_COUNT
+  && GENESIS_STATES.every((row, index) => sameRow(states[index], row))
+  && exactKeys(states[GENESIS_STATES.length], ['key', 'value_json', 'version', 'updated_at'])
+  && states[GENESIS_STATES.length].key === OUTBOX_DRAIN_HEARTBEAT.key
+  && states[GENESIS_STATES.length].value_json === OUTBOX_DRAIN_HEARTBEAT.value_json
+  && states[GENESIS_STATES.length].version === OUTBOX_DRAIN_HEARTBEAT.version
+  && validInstant(states[GENESIS_STATES.length].updated_at)
 const statement = (sql, params = []) => Object.freeze({
   params: Object.freeze([...params]),
   sql: sql.trim(),
@@ -307,7 +332,7 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
     '(SELECT count(*) FROM data_keys)=1',
     `(SELECT count(*) FROM staff_users)=${staffRows.length}`,
     `(SELECT count(*) FROM record_versions)=${versionRows.length}`,
-    '(SELECT count(*) FROM system_state)=3',
+    `(SELECT count(*) FROM system_state)=${SYSTEM_STATE_COUNT}`,
     ...EMPTY_TABLES.map((table) => `(SELECT count(*) FROM ${table})=0`),
     `EXISTS (
        SELECT 1 FROM data_keys
@@ -333,6 +358,11 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
        SELECT 1 FROM system_state
        WHERE key=? AND value_json=? AND version=1 AND updated_at=?
      )`),
+    `EXISTS (
+       SELECT 1 FROM system_state
+       WHERE key=? AND value_json=? AND version=1
+         AND updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', julianday(updated_at))
+     )`,
   ]
   const guardParams = [
     dataKey.id,
@@ -366,6 +396,8 @@ export async function buildLocalSeedBatch({ keyring, keyringConfig } = {}) {
       row.value_json,
       row.updated_at,
     ]),
+    OUTBOX_DRAIN_HEARTBEAT.key,
+    OUTBOX_DRAIN_HEARTBEAT.value_json,
   ]
   batch.push(statement(
     `INSERT INTO outbox_operation_guard_failures (operation_id)
@@ -437,8 +469,7 @@ export async function inspectLocalSeedState({ db, keyring } = {}) {
   }
   try {
     const [dataKeys, staffRows, versions, states, ...emptyTables] = await snapshot(db)
-    const genesis = states.length === GENESIS_STATES.length
-      && states.every((row, index) => sameRow(row, GENESIS_STATES[index]))
+    const genesis = exactGenesisStates(states)
     if (dataKeys.length === 0
       && staffRows.length === 0
       && versions.length === 0

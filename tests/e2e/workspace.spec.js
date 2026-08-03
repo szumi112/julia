@@ -1119,7 +1119,9 @@ test('calendar opens the therapist agenda and exposes exact partial payment edit
   await expect(page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
   await expect(agenda).toBeVisible()
-  const partialPayment = agenda.getByRole('button', { name: /Częściowo/ })
+  const partialPayments = agenda.getByRole('button', { name: /Częściowo/ })
+  await expect(partialPayments).not.toHaveCount(0)
+  const partialPayment = partialPayments.first()
   await partialPayment.scrollIntoViewIfNeeded()
   await partialPayment.click()
   await page.getByRole('menuitemradio', { name: 'Częściowo opłacona' }).click()
@@ -1137,7 +1139,11 @@ test('calendar combines payment and attendance filters after role scope', async 
   await filters.getByRole('button', { name: 'Nieobecność', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Filtry · 2' })).toBeVisible()
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
-  await expect(agenda.locator('[data-payment="unpaid"][data-attendance="noshow"]')).toHaveCount(1)
+  const rows = agenda.locator('.agenda__row')
+  await expect(rows).not.toHaveCount(0)
+  await expect(
+    rows.locator(':scope:not([data-payment="unpaid"][data-attendance="noshow"])')
+  ).toHaveCount(0)
   await page.getByRole('button', { name: 'Wyczyść filtry' }).click()
   // clearing brings the settled sessions straight back into the same list
   await expect(agenda.locator('[data-terminal="true"]').first()).toBeVisible()

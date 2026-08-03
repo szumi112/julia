@@ -139,6 +139,24 @@ describe('foundation migrations', () => {
     expect((await env.DB.prepare('PRAGMA foreign_key_check').all()).results).toEqual([])
   })
 
+  it('seeds the canonical outbox drain heartbeat exactly once', async () => {
+    const row = await one(
+      "SELECT key,value_json,version,updated_at FROM system_state WHERE key='outbox.drain.last_success'"
+    )
+
+    expect(row).toMatchObject({
+      key: 'outbox.drain.last_success',
+      value_json: '{"completedAt":null}',
+      version: 1,
+    })
+    expect(new Date(row.updated_at).toISOString()).toBe(row.updated_at)
+    await expect(run(
+      `INSERT INTO system_state (key,value_json,version,updated_at)
+       VALUES ('outbox.drain.last_success','{"completedAt":null}',1,?)`,
+      now,
+    )).rejects.toThrow(/identity_collision/)
+  })
+
   it('keeps recurring operational health lookups index-bounded', async () => {
     const cases = [
       {

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { runScheduled } from '../../worker/operations/scheduler.js'
 import { partsInWarsaw } from '../../worker/operations/clock.js'
 import { decryptOutboxPayload, enqueueOutboxStatement, processOutboxBatch } from '../../worker/jobs/outbox.js'
-import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
+import { decryptForScope, encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 
@@ -254,7 +254,10 @@ function trackedDb(real, hooks = {}) {
   const wrap = (inner, sql) => ({
     __inner: inner,
     __sql: sql,
-    bind(...values) { return wrap(inner.bind(...values), sql) },
+    bind(...values) {
+      hooks.bind?.({ sql, values })
+      return wrap(inner.bind(...values), sql)
+    },
     async run() {
       const execute = () => inner.run()
       return hooks.run ? hooks.run({ sql, execute }) : execute()
@@ -1063,7 +1066,7 @@ describe('backup due facts and atomic dormant publication', () => {
       attempt_count: 0,
     })
     await env.DB.prepare(
-      "UPDATE outbox_jobs SET scheduled_at='2099-01-01T00:00:00.000Z' WHERE id=?"
+      "UPDATE outbox_jobs SET scheduled_at='9999-12-31T23:59:59.999Z' WHERE id=?"
     ).bind('job_unrelated_backup_collision').run()
   })
 
@@ -1250,8 +1253,197 @@ describe('production identity crypto loading', () => {
   })
 })
 
+describe('scheduled operational publication budget', () => {
+  it('publishes the centre denial-overflow action within Cloudflare Free D1 limits', async () => {
+    const context = await cryptoContext()
+    const scheduledTime = schedule(++serial)
+    const occurredAt = nowIso(scheduledTime)
+    const actorId = 'stf_scheduler_denial_overflow'
+    await env.DB.prepare(
+      `INSERT INTO staff_users
+       (id,email_lookup,email_envelope,display_name_envelope,role,status,version,created_at,updated_at)
+       VALUES (?,?,?,?,?,'pending',1,?,?)`
+    ).bind(
+      actorId,
+      'lookup_scheduler_denial_overflow',
+      '{}',
+      '{}',
+      'coordinator',
+      occurredAt,
+      occurredAt,
+    ).run()
+    for (let index = 0; index < 101; index += 1) {
+      const suffix = index.toString().padStart(3, '0')
+      const id = `aud_scheduler_denial_overflow_${suffix}`
+      const reasonEnvelope = JSON.stringify(await encryptForScope(
+        context.keyring,
+        context.dataKey,
+        {
+          expectedScope: context.scope,
+          recordId: id,
+          field: 'reason',
+          plaintext: 'staff invitation rate limit',
+        },
+      ))
+      await env.DB.prepare(
+        `INSERT INTO audit_events
+         (id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
+          reason_envelope,correlation_id,metadata_json)
+         VALUES (?,?,?,'authorization.denied','staff_user',?,'denied',?,?,?)`
+      ).bind(
+        id,
+        nowIso(scheduledTime - index),
+        actorId,
+        actorId,
+        reasonEnvelope,
+        `cor_scheduler_denial_overflow_${suffix}`,
+        '{"version":1}',
+      ).run()
+    }
+
+    let statements = 0
+    let maxBindings = 0
+    const terminal = async ({ execute }) => {
+      statements += 1
+      return execute()
+    }
+    const db = trackedDb(env.DB, {
+      bind({ values }) { maxBindings = Math.max(maxBindings, values.length) },
+      run: terminal,
+      first: terminal,
+      all: terminal,
+      raw: terminal,
+      async batch({ sql, execute }) {
+        statements += sql.length
+        return execute()
+      },
+    })
+    const deps = schedulerDeps('denial_overflow_budget', context, scheduledTime)
+    delete deps.processOutboxBatch
+
+    const result = await runScheduled({
+      scheduledTime,
+      env: runtimeEnv(db),
+      deps,
+    })
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      claimedJobs: 0,
+      succeededJobs: 0,
+      failedJobs: 0,
+    })
+    expect(statements).toBeLessThanOrEqual(50)
+    expect(maxBindings).toBeLessThanOrEqual(100)
+    const action = await env.DB.prepare(
+      `SELECT id,fingerprint,kind,severity,status,entity_type,entity_id,details_envelope,
+              version,created_at,updated_at,resolved_at
+       FROM operational_actions
+       WHERE fingerprint='security.authorization_denials:overflow' AND status='open'`
+    ).first()
+    expect(action).toMatchObject({
+      fingerprint: 'security.authorization_denials:overflow',
+      kind: 'authorization_denial_spike',
+      severity: 'critical',
+      status: 'open',
+      entity_type: 'centre',
+      entity_id: 'centre_1',
+      version: 1,
+      created_at: occurredAt,
+      updated_at: occurredAt,
+      resolved_at: null,
+    })
+    const details = await decryptForScope(context.keyring, context.dataKey, {
+      expectedScope: context.scope,
+      recordId: action.id,
+      field: 'action_details',
+      envelope: JSON.parse(action.details_envelope),
+    })
+    expect(JSON.parse(details)).toEqual({
+      errorCode: 'AUTHORIZATION_DENIAL_OVERFLOW',
+      minimumCount: 101,
+      threshold: 100,
+      windowMinutes: 15,
+    })
+  })
+})
+
 describe('ordinary outbox integration and privacy', () => {
-  it('dispatches at most ten ordinary jobs once while dormant backup work remains untouched', async () => {
+  it('leaves ordinary jobs queued when the dedicated drain processor is not injected', async () => {
+    const context = await cryptoContext()
+    const scheduledTime = schedule(++serial)
+    const timestamp = nowIso(scheduledTime)
+    const jobId = 'job_scheduler_dedicated_drain'
+    await enqueueOrdinary(context, {
+      id: jobId,
+      scheduledAt: timestamp,
+      suffix: 'scheduler_dedicated_drain',
+    })
+    const deps = schedulerDeps('dedicated_drain', context, scheduledTime)
+    delete deps.processOutboxBatch
+
+    await expect(runScheduled({
+      scheduledTime,
+      env: runtimeEnv(),
+      deps,
+    })).resolves.toMatchObject({
+      status: 'succeeded',
+      claimedJobs: 0,
+      succeededJobs: 0,
+      failedJobs: 0,
+    })
+
+    expect(await env.DB.prepare(
+      'SELECT status,attempt_count FROM outbox_jobs WHERE id=?'
+    ).bind(jobId).first()).toEqual({ status: 'queued', attempt_count: 0 })
+    await env.DB.prepare(
+      "UPDATE outbox_jobs SET scheduled_at='9999-12-31T23:59:59.999Z' WHERE id=?"
+    ).bind(jobId).run()
+  })
+
+  it('stops normal work at 47 statements and uses the final three only for failure state', async () => {
+    const context = await cryptoContext()
+    const scheduledTime = schedule(++serial)
+    let statements = 0
+    const terminal = async ({ execute }) => {
+      statements += 1
+      return execute()
+    }
+    const db = trackedDb(env.DB, {
+      run: terminal,
+      first: terminal,
+      all: terminal,
+      raw: terminal,
+      async batch({ sql, execute }) {
+        statements += sql.length
+        return execute()
+      },
+    })
+    const process = vi.fn(async ({ db: budgetedDb }) => {
+      for (let index = 0; index < 100; index += 1) {
+        await budgetedDb.prepare('SELECT 1').first()
+      }
+      return []
+    })
+
+    await expect(runScheduled({
+      scheduledTime,
+      env: runtimeEnv(db),
+      deps: schedulerDeps('query_budget', context, scheduledTime, {
+        processOutboxBatch: process,
+      }),
+    })).resolves.toMatchObject({
+      status: 'failed',
+      reason: 'coordinator_failed',
+    })
+
+    expect(statements).toBe(50)
+    expect(await schedulerRow(scheduledTime)).toMatchObject({
+      status: 'failed',
+      error_code: 'SCHEDULER_COORDINATOR_FAILED',
+    })
+  })
+
+  it('dispatches at most one ordinary job while dormant backup work remains untouched', async () => {
     const context = await cryptoContext()
     const scheduledTime = schedule(++serial)
     const timestamp = nowIso(scheduledTime)
@@ -1281,20 +1473,20 @@ describe('ordinary outbox integration and privacy', () => {
     const result = await runScheduled({ scheduledTime, env: runtimeEnv(), deps })
     expect(result).toMatchObject({
       status: 'succeeded',
-      claimedJobs: 10,
-      succeededJobs: 10,
+      claimedJobs: 1,
+      succeededJobs: 1,
       failedJobs: 0,
     })
-    expect(dispatches).toHaveLength(10)
+    expect(dispatches).toEqual(['job_scheduler_max_ten_00'])
     expect(dispatches).not.toContain('job_scheduler_dormant')
     expect(await env.DB.prepare('SELECT status,attempt_count FROM outbox_jobs WHERE id=?')
       .bind('job_scheduler_dormant').first()).toEqual({ status: 'queued', attempt_count: 0 })
     expect(await env.DB.prepare(
       `SELECT count(*) AS count FROM outbox_jobs
        WHERE id LIKE 'job_scheduler_max_ten_%' AND status='queued'`
-    ).first()).toEqual({ count: 1 })
+    ).first()).toEqual({ count: 10 })
     await env.DB.prepare(
-      `UPDATE outbox_jobs SET scheduled_at='2099-01-01T00:00:00.000Z'
+      `UPDATE outbox_jobs SET scheduled_at='9999-12-31T23:59:59.999Z'
        WHERE id LIKE 'job_scheduler_max_ten_%' AND status='queued'`
     ).run()
   })
@@ -1394,41 +1586,34 @@ describe('ordinary outbox integration and privacy', () => {
     ])
   })
 
-  it('counts succeeded, retry, and dead outcomes without leaking handler details or failing the coordinator', async () => {
+  it.each([
+    ['succeeded', 1, 0],
+    ['retry', 0, 1],
+    ['dead', 0, 1],
+  ])('counts one %s outcome without leaking handler details or failing the coordinator', async (
+    expectedResult,
+    succeededJobs,
+    failedJobs,
+  ) => {
     const context = await cryptoContext()
     const scheduledTime = schedule(++serial)
-    const timestamp = nowIso(scheduledTime)
-    for (const result of ['succeeded', 'retry', 'dead']) {
-      await enqueueOrdinary(context, {
-        id: `job_scheduler_outcome_${result}`,
-        scheduledAt: timestamp,
-        suffix: `scheduler_outcome_${result}`,
-      })
-    }
+    const jobId = `job_scheduler_outcome_${expectedResult}`
     const providerSecret = 'parent@example.test provider body'
-    const dispatchOutboxJob = vi.fn(async (input) => {
-      expect(input.env).toBe(input.bindings)
-      expect(input.providers.marker).toBe('outcome_counts')
-      if (input.job.id.endsWith('succeeded')) return { result: 'succeeded' }
-      if (input.job.id.endsWith('retry')) throw new Error(providerSecret)
-      return { result: 'dead', errorCode: 'OUTBOX_HANDLER_FAILURE' }
-    })
     const log = vi.fn()
     const result = await runScheduled({
       scheduledTime,
       env: runtimeEnv(),
-      deps: schedulerDeps('outcome_counts', context, scheduledTime, {
-        processOutboxBatch,
-        dispatchOutboxJob,
+      deps: schedulerDeps(`outcome_counts_${expectedResult}`, context, scheduledTime, {
+        processOutboxBatch: vi.fn(async () => [{ id: jobId, result: expectedResult }]),
         safeLog: log,
       }),
     })
 
     expect(result).toMatchObject({
       status: 'succeeded',
-      claimedJobs: 3,
-      succeededJobs: 1,
-      failedJobs: 2,
+      claimedJobs: 1,
+      succeededJobs,
+      failedJobs,
     })
     expect(JSON.stringify(await schedulerRow(scheduledTime))).not.toContain(providerSecret)
     expect(JSON.stringify(log.mock.calls)).not.toContain(providerSecret)
@@ -1436,7 +1621,7 @@ describe('ordinary outbox integration and privacy', () => {
 
   it.each([
     ['not an array', null],
-    ['more than ten', Array.from({ length: 11 }, (_, index) => ({ id: `job_bad_${index}`, result: 'succeeded' }))],
+    ['more than one', Array.from({ length: 2 }, (_, index) => ({ id: `job_bad_${index}`, result: 'succeeded' }))],
     ['duplicate ids', [{ id: 'job_bad_duplicate', result: 'succeeded' }, { id: 'job_bad_duplicate', result: 'retry' }]],
     ['extra facts', [{ id: 'job_bad_extra', result: 'succeeded', payload: 'secret' }]],
     ['invalid result', [{ id: 'job_bad_result', result: 'dormant' }]],
@@ -1476,7 +1661,6 @@ describe('ordinary outbox integration and privacy', () => {
       deps: schedulerDeps('fixed_logs_completed', context, completedTime, {
         processOutboxBatch: vi.fn(async () => [
           { id: 'job_log_success', result: 'succeeded' },
-          { id: 'job_log_retry', result: 'retry' },
         ]),
         safeLog: completedLog,
       }),
@@ -1496,9 +1680,9 @@ describe('ordinary outbox integration and privacy', () => {
         result: 'completed',
         runId: 'id_fixed_logs_completed_1',
         attemptCount: 1,
-        claimedJobs: 2,
+        claimedJobs: 1,
         succeededJobs: 1,
-        failedJobs: 1,
+        failedJobs: 0,
       }],
     ])
 
