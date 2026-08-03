@@ -1234,6 +1234,52 @@ describe('generic outbox processor', () => {
     expect(await actions(input.id)).toEqual([])
   })
 
+  it('does not dispatch when beforeDispatch consumes the remaining lease', async () => {
+    const cryptoContext = await context()
+    const input = await enqueue(cryptoContext, {
+      id: 'job_processor_hook_lease_expired',
+      invitationId: 'inv_processor_hook_lease_expired',
+      idempotencyKey: 'staff.invitation.expire:processor-hook-lease-expired',
+    })
+    let currentMs = NOW_MS
+    let hookCalls = 0
+    let dispatches = 0
+
+    const completed = await outbox.processOutboxBatch({
+      db: env.DB,
+      cryptoContext,
+      config: {},
+      nowMs: NOW_MS,
+      nowFactory: () => currentMs,
+      idFactory: sequence('processor_hook_lease_expired_id'),
+      leaseOwnerFactory: sequence('processor_hook_lease_expired_lease'),
+      beforeDispatch: async () => {
+        hookCalls += 1
+        currentMs = NOW_MS + 60_000
+      },
+      dispatch: async () => {
+        dispatches += 1
+        return { result: 'succeeded' }
+      },
+    })
+
+    expect(hookCalls).toBe(1)
+    expect(dispatches).toBe(0)
+    expect(completed).toEqual([])
+    expect(await job(input.id)).toMatchObject({
+      status: 'processing',
+      attempt_count: 1,
+    })
+    expect(await attempts(input.id)).toEqual([
+      expect.objectContaining({
+        attempt_number: 1,
+        completed_at: null,
+        result: null,
+      }),
+    ])
+    await settle(input.id)
+  })
+
   it('processes ordinary work behind a dormant backlog without dispatching or mutating backups', async () => {
     const cryptoContext = await context()
     await seedBackupBacklog(

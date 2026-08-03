@@ -1455,11 +1455,16 @@ export async function processOutboxBatch(input = {}) {
   })
   const completed = []
   for (const claim of claims) {
-    const dispatchNowMs = currentMs()
-    const currentClaim = await currentOwnedClaim(input.db, claim, dispatchNowMs)
+    let dispatchNowMs = currentMs()
+    let currentClaim = await currentOwnedClaim(input.db, claim, dispatchNowMs)
     if (!currentClaim) continue
     if (isAllowedType(currentClaim.type) && !isOrdinaryRunnableType(currentClaim.type)) continue
-    if (isOrdinaryRunnableType(currentClaim.type) && beforeDispatch) await beforeDispatch()
+    if (isOrdinaryRunnableType(currentClaim.type) && beforeDispatch) {
+      await beforeDispatch()
+      dispatchNowMs = currentMs()
+      currentClaim = await currentOwnedClaim(input.db, claim, dispatchNowMs)
+      if (!currentClaim) continue
+    }
     let outcome
     if (!isAllowedType(currentClaim.type)) {
       outcome = {
