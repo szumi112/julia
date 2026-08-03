@@ -160,6 +160,15 @@ describe('shared audit statement constructor', () => {
     expect(JSON.parse((await env.DB.prepare(
       'SELECT metadata_json FROM audit_events WHERE id=?'
     ).bind(id).first()).metadata_json)).toEqual(metadata)
+    expect(auditDescriptorFor(auditEventStatement(env.DB, {
+      ...event,
+      id: `${id}_descriptor`,
+      action,
+      actorStaffId: null,
+      entityType,
+      entityId,
+      metadata,
+    }))).toMatchObject({ action, actorStaffId: null, result: 'success' })
     expect(() => auditEventStatement(env.DB, {
       ...event,
       id: `${id}_actor_mismatch`,

@@ -8,6 +8,7 @@ import {
 import {
   commitRateLimitedMutation,
   createIdempotencyStatement,
+  createSystemUnitOfWork,
   createUnitOfWork,
   inspectIdempotency,
   isRateLimitDenialDescriptor,
@@ -38,6 +39,19 @@ const audit = (db, id = 'aud_uow', result = 'success') => auditEventStatement(db
   reasonEnvelope: null,
 })
 
+const systemAudit = (db, id = 'aud_system_uow') => auditEventStatement(db, {
+  id,
+  occurredAt: now,
+  actorStaffId: null,
+  action: 'core_directory.upgrade.advanced',
+  entityType: 'system_state',
+  entityId: 'core_directory_specialist_backfill_v1',
+  result: 'success',
+  correlationId,
+  metadata: { stateVersion: 2, processedCount: 1, createdCount: 0 },
+  reasonEnvelope: null,
+})
+
 async function seedActor(id, lookup = `lookup_${id}`) {
   if (await env.DB.prepare('SELECT id FROM staff_users WHERE id=?').bind(id).first()) return
   await env.DB.prepare(
@@ -64,6 +78,70 @@ const encryptedReasonEnvelope = JSON.stringify({
 })
 
 describe('guarded unit of work', () => {
+  it('commits the explicit null-actor system mutation with one final guard', async () => {
+    const calls = []
+    const db = {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: async (statements) => { calls.push(statements) },
+    }
+    const domain = db.prepare('SELECT 1')
+    const auditStatement = systemAudit(db)
+    const guard = db.prepare('SELECT 2')
+    const uow = createSystemUnitOfWork(db, { correlationId })
+    uow.domain(domain)
+    uow.audit(auditStatement)
+    uow.guard(guard)
+    await uow.commit()
+    expect(calls).toEqual([[domain, auditStatement, guard]])
+    await expect(uow.commit()).rejects.toThrow(/^UNIT_OF_WORK_INVALID$/)
+  })
+
+  it('rejects anything outside the exact system mutation shape before D1', async () => {
+    let batchCalls = 0
+    const db = {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: async () => { batchCalls += 1 },
+    }
+    expect(() => createSystemUnitOfWork(db, { correlationId, extra: true }))
+      .toThrow(/^UNIT_OF_WORK_INVALID$/)
+    expect(() => createUnitOfWork(db, { mode: 'mutation', actorId: null, correlationId }))
+      .toThrow(/^UNIT_OF_WORK_INVALID$/)
+    expect(() => createUnitOfWork(db, { mode: 'denial', actorId: null, correlationId }))
+      .toThrow(/^UNIT_OF_WORK_INVALID$/)
+    expect(() => createUnitOfWork(db, { mode: 'system-mutation', actorId: null, correlationId }))
+      .toThrow(/^UNIT_OF_WORK_INVALID$/)
+
+    const actorAudit = createSystemUnitOfWork(db, { correlationId })
+    expect(() => actorAudit.audit(audit(db, 'aud_system_actor'))).toThrow(/^UNIT_OF_WORK_INVALID$/)
+
+    const idempotency = createSystemUnitOfWork(db, { correlationId })
+    expect(() => idempotency.idempotency(db.prepare('SELECT 1'))).toThrow(/^UNIT_OF_WORK_INVALID$/)
+
+    const missingAudit = createSystemUnitOfWork(db, { correlationId })
+    missingAudit.domain(db.prepare('SELECT 1'))
+    missingAudit.guard(db.prepare('SELECT 2'))
+    await expect(missingAudit.commit()).rejects.toThrow(/^UNIT_OF_WORK_INVALID$/)
+
+    const missingGuard = createSystemUnitOfWork(db, { correlationId })
+    missingGuard.domain(db.prepare('SELECT 1'))
+    missingGuard.audit(systemAudit(db, 'aud_system_missing_guard'))
+    await expect(missingGuard.commit()).rejects.toThrow(/^UNIT_OF_WORK_INVALID$/)
+
+    const duplicateAudit = createSystemUnitOfWork(db, { correlationId })
+    duplicateAudit.domain(db.prepare('SELECT 1'))
+    duplicateAudit.audit(systemAudit(db, 'aud_system_first'))
+    duplicateAudit.audit(systemAudit(db, 'aud_system_second'))
+    duplicateAudit.guard(db.prepare('SELECT 2'))
+    await expect(duplicateAudit.commit()).rejects.toThrow(/^UNIT_OF_WORK_INVALID$/)
+
+    const duplicateGuard = createSystemUnitOfWork(db, { correlationId })
+    duplicateGuard.domain(db.prepare('SELECT 1'))
+    duplicateGuard.audit(systemAudit(db, 'aud_system_guards'))
+    duplicateGuard.guard(db.prepare('SELECT 2'))
+    expect(() => duplicateGuard.guard(db.prepare('SELECT 3'))).toThrow(/^UNIT_OF_WORK_INVALID$/)
+    expect(batchCalls).toBe(0)
+  })
+
   it('preserves service order, moves one guard last, and commits once', async () => {
     const calls = []
     const batch = async (value) => {

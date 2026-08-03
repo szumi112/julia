@@ -22,6 +22,7 @@ const exactKeys = (value, keys) => Object.keys(value).length === keys.length
   && keys.every((key) => Object.hasOwn(value, key))
 const units = new WeakMap()
 const rateLimitGuards = new WeakMap()
+const systemContexts = new WeakSet()
 
 const validGuardBinding = (value) => value === null || typeof value === 'string'
   || (typeof value === 'number' && Number.isFinite(value))
@@ -71,10 +72,20 @@ export function rateLimitGuardStatement(db, input = {}) {
   return statement
 }
 
+export function createSystemUnitOfWork(db, input) {
+  if (!ownObject(input) || !exactKeys(input, ['correlationId'])) fail()
+  const context = { mode: 'system-mutation', actorId: null, correlationId: input.correlationId }
+  systemContexts.add(context)
+  return createUnitOfWork(db, context)
+}
+
 export function createUnitOfWork(db, context) {
+  const systemMode = context?.mode === 'system-mutation'
   if (!db?.batch || !ownObject(context)
-    || !['mutation', 'denial'].includes(context.mode)
-    || !validId(context.actorId)
+    || !['mutation', 'denial', 'system-mutation'].includes(context.mode)
+    || (systemMode
+      ? (!systemContexts.has(context) || context.actorId !== null)
+      : !validId(context.actorId))
     || !isCorrelationId(context.correlationId)) fail()
 
   const statements = []
@@ -93,11 +104,13 @@ export function createUnitOfWork(db, context) {
     const outboxDescriptor = outboxStatementDescriptorFor(statement)
     if (outboxDescriptor && kind !== 'outbox') fail()
     if (context.mode === 'denial' && kind !== 'audit') fail()
+    if (context.mode === 'system-mutation' && kind === 'idempotency') fail()
     if (kind === 'audit') {
       const descriptor = auditDescriptorFor(statement)
-      if (!descriptor || descriptor.actorStaffId !== context.actorId
+      if (!descriptor
+        || descriptor.actorStaffId !== context.actorId
         || descriptor.correlationId !== context.correlationId
-        || descriptor.result !== (context.mode === 'mutation' ? 'success' : 'denied')) fail()
+        || descriptor.result !== (context.mode === 'denial' ? 'denied' : 'success')) fail()
       primaryAudit = descriptor
       audits += 1
     } else {
@@ -116,7 +129,7 @@ export function createUnitOfWork(db, context) {
     idempotency: (statement) => add('idempotency', statement),
     guard(statement) {
       open()
-      if (context.mode !== 'mutation' || guard || !prepared(statement)
+      if (!['mutation', 'system-mutation'].includes(context.mode) || guard || !prepared(statement)
         || auditDescriptorFor(statement)) fail()
       guard = statement
       return api
@@ -125,7 +138,7 @@ export function createUnitOfWork(db, context) {
       open()
       committed = true
       if (audits !== 1) fail()
-      if (context.mode === 'mutation' && (nonAudit < 1 || !guard)) fail()
+      if (['mutation', 'system-mutation'].includes(context.mode) && (nonAudit < 1 || !guard)) fail()
       if (context.mode === 'denial' && (nonAudit !== 0 || guard || statements.length !== 1)) fail()
       return db.batch(guard ? [...statements, guard] : statements)
     },
