@@ -528,12 +528,6 @@ function validateActionDetails(row, details) {
   return details
 }
 
-async function validateAction(input, value, expectedStatus) {
-  const row = validateActionIdentity(value, expectedStatus)
-  const details = validateActionDetails(row, await decryptActionDetails(input, row))
-  return { row, details }
-}
-
 const publicAction = ({ row, details }) => ({
   id: row.id,
   kind: row.kind,
@@ -551,28 +545,41 @@ function requireNewestFirst(previous, current) {
     || (previous.created_at === current.created_at && previous.id <= current.id)) invalidState()
 }
 
-async function readOpenActions(input) {
+async function readOpenActions(input, canReadSecurity) {
+  const securityScope = canReadSecurity
+    ? ''
+    : "\n       AND kind<>'authorization_denial_spike'"
   const result = await input.db.prepare(
     `SELECT id,fingerprint,kind,severity,status,entity_type,entity_id,details_envelope,
             version,created_at,updated_at,resolved_at
      FROM operational_actions
-     WHERE status='open'
+     WHERE status='open'${securityScope}
      ORDER BY created_at DESC,id DESC
      LIMIT ?`
   ).bind(101).all()
   const rows = captureAllRows(result, 101)
-  const validated = []
+  const identities = []
   let previous = null
   for (const value of rows) {
-    const action = await validateAction(input, value, 'open')
-    if (previous) requireNewestFirst(previous, action.row)
-    previous = action.row
-    validated.push(action)
+    const row = validateActionIdentity(value, 'open')
+    if (!canReadSecurity && row.kind === 'authorization_denial_spike') invalidState()
+    if (previous) requireNewestFirst(previous, row)
+    previous = row
+    identities.push(row)
   }
-  return {
+  const includesSecurity = identities.some(({ kind }) => kind === 'authorization_denial_spike')
+  const revalidate = async () => {
+    await requireCapability(input, 'operations.health.read')
+    if (includesSecurity) await requireCapability(input, 'security.audit.read')
+  }
+  await revalidate()
+  const validated = []
+  for (const row of identities) validated.push(await validateCapturedAction(input, row))
+  await revalidate()
+  return Object.freeze({
     actions: validated.slice(0, 100).map(publicAction),
     truncated: validated.length === 101,
-  }
+  })
 }
 
 async function readActionById(input, actionId) {
@@ -963,7 +970,10 @@ export async function getOperationalHealth(value) {
 export async function listOpenOperationalActions(value) {
   const input = captureInput(value)
   await requireCapability(input, 'operations.health.read')
-  return { data: await readOpenActions(input) }
+  const canReadSecurity = authorize(
+    input.actor, 'security.audit.read', CENTRE, { nowMs: input.nowMs }
+  )
+  return { data: await readOpenActions(input, canReadSecurity) }
 }
 
 export async function resolveOperationalAction(value) {

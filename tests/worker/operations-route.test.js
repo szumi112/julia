@@ -1170,9 +1170,9 @@ describe('operations route services', () => {
     ).first()).toEqual(before)
   })
 
-  it.each(['owner', 'coordinator'])('returns all six exact validated open action kinds for %s', async (role) => {
+  it('returns all six exact validated open action kinds for owner', async () => {
     const context = await cryptoContext()
-    const actor = await seedActiveActor({ id: `stf_actions_${role}`, role })
+    const actor = await seedActiveActor({ id: 'stf_actions_owner', role: 'owner' })
     const rows = await actionRows(context)
     const db = facade(env.DB, {
       all: (sql) => sql.includes('FROM operational_actions') ? { results: rows } : undefined,
@@ -1204,6 +1204,127 @@ describe('operations route services', () => {
       expect(JSON.stringify(action)).not.toContain('details_envelope')
       expect(JSON.stringify(action)).not.toContain('fingerprint')
     }
+  })
+
+  it('excludes coordinator denial spikes before limit, decryption, and response projection', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({ id: 'stf_actions_coordinator_boundary', role: 'coordinator' })
+    const rows = await actionRows(context)
+    const corruptRows = rows.map((row) => row.kind === 'authorization_denial_spike'
+      ? { ...row, details_envelope: 'corrupt-security-envelope' }
+      : row)
+    const db = facade(env.DB, {
+      all(sql) {
+        if (!sql.includes('FROM operational_actions')) return undefined
+        const scoped = /kind\s*<>\s*'authorization_denial_spike'/.test(sql)
+        return {
+          results: scoped
+            ? corruptRows.filter(({ kind }) => kind !== 'authorization_denial_spike')
+            : corruptRows,
+        }
+      },
+    })
+    const decrypt = vi.spyOn(crypto.subtle, 'decrypt')
+
+    let result
+    let actionDecryptCalls
+    try {
+      result = await listOpenOperationalActions(commonInput(actor, context, { db }))
+    } finally {
+      actionDecryptCalls = decrypt.mock.calls.filter(([algorithm]) => (
+        new TextDecoder().decode(algorithm.additionalData).includes('\naction_details\n')
+      )).length
+      decrypt.mockRestore()
+    }
+
+    expect(result.data.actions.map(({ kind }) => kind)).toEqual(
+      ACTION_FACTS.filter(({ kind }) => kind !== 'authorization_denial_spike')
+        .map(({ kind }) => kind)
+    )
+    expect(result.data.truncated).toBe(false)
+    expect(actionDecryptCalls).toBe(5)
+  })
+
+  it('revalidates the actor after the action query and before decrypting details', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({ id: 'stf_actions_predecrypt_guard', role: 'coordinator' })
+    await insertAction(await actionRow(context, {
+      ...ACTION_FACTS[2],
+      id: 'act_predecrypt_guard',
+      fingerprint: 'backup.failed:bkp_predecrypt_guard',
+      entityId: 'bkp_predecrypt_guard',
+      details: { backupId: 'bkp_predecrypt_guard', errorCode: 'BACKUP_FAILED' },
+    }))
+    const db = facade(env.DB, {
+      async all(sql, bindings) {
+        if (!sql.includes('FROM operational_actions')) return undefined
+        const result = await env.DB.prepare(sql).bind(...bindings).all()
+        await env.DB.prepare(
+          `UPDATE staff_users SET status='disabled',disabled_at=?,updated_at=?,version=version+1
+           WHERE id=?`
+        ).bind(NOW, NOW, actor.id).run()
+        return result
+      },
+    })
+    const decrypt = vi.spyOn(crypto.subtle, 'decrypt')
+
+    const result = await caught(listOpenOperationalActions(commonInput(actor, context, {
+      db,
+      idFactory: ids('aud_actions_predecrypt'),
+    })))
+    const actionDecryptCalls = decrypt.mock.calls.filter(([algorithm]) => (
+      new TextDecoder().decode(algorithm.additionalData).includes('\naction_details\n')
+    )).length
+    decrypt.mockRestore()
+
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('FORBIDDEN')
+    expect(actionDecryptCalls).toBe(0)
+    expect(await denialRows(actor.id)).toHaveLength(1)
+  })
+
+  it('revalidates the actor after decryption before returning action details', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({ id: 'stf_actions_response_guard', role: 'coordinator' })
+    const row = await actionRow(context, {
+      ...ACTION_FACTS[2],
+      id: 'act_response_guard',
+      fingerprint: 'backup.failed:bkp_response_guard',
+      entityId: 'bkp_response_guard',
+      details: { backupId: 'bkp_response_guard', errorCode: 'BACKUP_FAILED' },
+    })
+    const db = facade(env.DB, {
+      all(sql) {
+        return sql.includes('FROM operational_actions') ? { results: [row] } : undefined
+      },
+    })
+    const originalDecrypt = crypto.subtle.decrypt.bind(crypto.subtle)
+    let disabled = false
+    const decrypt = vi.spyOn(crypto.subtle, 'decrypt').mockImplementation(async (...args) => {
+      const plaintext = await originalDecrypt(...args)
+      if (!disabled) {
+        disabled = true
+        await env.DB.prepare(
+          `UPDATE staff_users SET status='disabled',disabled_at=?,updated_at=?,version=version+1
+           WHERE id=?`
+        ).bind(NOW, NOW, actor.id).run()
+      }
+      return plaintext
+    })
+
+    const result = await caught(listOpenOperationalActions(commonInput(actor, context, {
+      db,
+      idFactory: ids('aud_actions_response'),
+    })))
+    const actionDecryptCalls = decrypt.mock.calls.filter(([algorithm]) => (
+      new TextDecoder().decode(algorithm.additionalData).includes('\naction_details\n')
+    )).length
+    decrypt.mockRestore()
+
+    expect(result).toBeInstanceOf(Error)
+    expect(result.message).toBe('FORBIDDEN')
+    expect(actionDecryptCalls).toBe(1)
+    expect(await denialRows(actor.id)).toHaveLength(1)
   })
 
   it('returns 100 actions only after validating the 101st row and reports truncation', async () => {
