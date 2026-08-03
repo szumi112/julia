@@ -104,6 +104,12 @@ const PATHS = {
       <path d="M4.5 19.5h15" />
     </>
   ),
+  refresh: (
+    <>
+      <path d="M19.2 8.3A8 8 0 105.7 17" />
+      <path d="M19.2 4.7v3.6h-3.6" />
+    </>
+  ),
   arrowL: <path d="M19 12H5M11 6l-6 6 6 6" />,
   alert: (
     <>

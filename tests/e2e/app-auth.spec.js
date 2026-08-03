@@ -383,6 +383,41 @@ test('@owner renders immutable identity and keeps browser application storage em
       url: request.url(),
     })
   })
+  await page.route('**/api/v1/operations/health', (route) => route.fulfill(json(200, {
+    data: {
+      generatedAt: '2026-07-31T08:20:00.000Z',
+      checks: [
+        {
+          id: 'outbox.processing',
+          label: 'Kolejka zadań',
+          status: 'ok',
+          lastSuccessAt: '2026-07-31T08:15:00.000Z',
+          detailCode: 'OUTBOX_HEALTHY',
+        },
+        {
+          id: 'backup.freshness',
+          label: 'Kopie zapasowe',
+          status: 'warning',
+          lastSuccessAt: null,
+          detailCode: 'BACKUP_PENDING',
+        },
+        {
+          id: 'access.reconciliation',
+          label: 'Synchronizacja dostępu',
+          status: 'critical',
+          lastSuccessAt: '2026-07-31T08:05:00.000Z',
+          detailCode: 'ACCESS_RECONCILIATION_LAG',
+        },
+        {
+          id: 'scheduler.runs',
+          label: 'Zadania cykliczne',
+          status: 'ok',
+          lastSuccessAt: '2026-07-31T08:12:00.000Z',
+          detailCode: 'SCHEDULER_HEALTHY',
+        },
+      ],
+    },
+  })))
 
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.goto('.')
