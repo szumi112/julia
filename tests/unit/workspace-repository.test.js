@@ -375,6 +375,97 @@ test('demo generated payment IDs skip legacy and nested history candidates deter
   assert.equal(actions.length, 2)
 })
 
+test('demo reserves identities across concurrent delayed creates and payment histories', async () => {
+  let state = demoState()
+  state = {
+    ...state,
+    sessions: state.sessions.map((item) => item.id === 's2'
+      ? { ...item, status: 'completed' }
+      : item),
+  }
+  let clientSequence = 20
+  let appointmentSequence = 20
+  const repository = createDemoWorkspaceRepository({
+    dispatch(action) {
+      setTimeout(() => {
+        if (action.type === 'ADD_CLIENT') {
+          state = { ...state, clients: [...state.clients, { ...action.client, id: `c${++clientSequence}` }] }
+        }
+        if (action.type === 'ADD_SESSION') {
+          state = { ...state, sessions: [...state.sessions, { ...action.session, id: `s${++appointmentSequence}` }] }
+        }
+        if (action.type === 'UPDATE_SESSION') {
+          state = { ...state, sessions: state.sessions.map((item) => (
+            item.id === action.id ? { ...item, ...action.patch } : item
+          )) }
+        }
+      }, 0)
+    },
+    getState: () => state,
+  })
+
+  const clients = await Promise.all([
+    repository.createClient(clientInput({ name: 'Ala Nowak', specialistId: 'sp_demo_p1' })),
+    repository.createClient(clientInput({ name: 'Ela Nowak', specialistId: 'sp_demo_p1' })),
+  ])
+  assert.deepEqual(clients.map(({ id }) => id), ['cl_demo_new_1', 'cl_demo_new_2'])
+
+  const appointments = await Promise.all([
+    repository.createAppointment(appointmentInput({ clientId: 'cl_demo_c1', specialistId: 'sp_demo_p1', date: '2026-08-10' })),
+    repository.createAppointment(appointmentInput({ clientId: 'cl_demo_c1', specialistId: 'sp_demo_p1', date: '2026-08-11' })),
+  ])
+  assert.deepEqual(appointments.map(({ id }) => id), ['apt_demo_new_1', 'apt_demo_new_2'])
+
+  const recorded = await Promise.all([
+    repository.recordPayment('apt_demo_s1', 1, { amountGrosze: 100, method: 'cash', paidDate: '2026-08-06' }),
+    repository.recordPayment('apt_demo_s2', 1, { amountGrosze: 100, method: 'card', paidDate: '2026-09-02' }),
+  ])
+  const paymentIds = recorded.map((item) => item.paymentEntries.at(-1).id)
+  assert.deepEqual(paymentIds, ['pay_demo_new_1', 'pay_demo_new_2'])
+
+  const corrected = await Promise.all([
+    repository.correctPayment(paymentIds[0], 2, {
+      reason: 'Korekta A', replacement: { amountGrosze: 90, method: 'card', paidDate: '2026-08-07' },
+    }),
+    repository.correctPayment(paymentIds[1], 2, {
+      reason: 'Korekta B', replacement: { amountGrosze: 80, method: 'cash', paidDate: '2026-09-03' },
+    }),
+  ])
+  assert.deepEqual(corrected.map((item) => item.paymentEntries.at(-1).id), [
+    'pay_demo_new_3', 'pay_demo_new_4',
+  ])
+  const loaded = await repository.loadWindow({ from: '2026-08-01', to: '2026-09-30' })
+  const canonicalIds = loaded.appointments.flatMap((item) => item.paymentEntries.map(({ id }) => id))
+  assert.equal(new Set(canonicalIds).size, canonicalIds.length)
+})
+
+test('demo releases a failed payment reservation for deterministic reuse', async () => {
+  let state = demoState()
+  let apply = false
+  const repository = createDemoWorkspaceRepository({
+    dispatch(action) {
+      if (!apply) return
+      state = { ...state, sessions: state.sessions.map((item) => (
+        item.id === action.id ? { ...item, ...action.patch } : item
+      )) }
+    },
+    getState: () => state,
+  })
+  const input = { amountGrosze: 100, method: 'card', paidDate: '2026-08-06' }
+  await assert.rejects(repository.recordPayment('apt_demo_s1', 1, input), /DEMO_STATE_NOT_APPLIED/)
+  apply = true
+  const recorded = await repository.recordPayment('apt_demo_s1', 1, input)
+  assert.equal(recorded.paymentEntries.at(-1).id, 'pay_demo_new_1')
+  const correction = {
+    reason: 'Korekta', replacement: { amountGrosze: 90, method: 'cash', paidDate: '2026-08-07' },
+  }
+  apply = false
+  await assert.rejects(repository.correctPayment('pay_demo_new_1', 2, correction), /DEMO_STATE_NOT_APPLIED/)
+  apply = true
+  const corrected = await repository.correctPayment('pay_demo_new_1', 2, correction)
+  assert.equal(corrected.paymentEntries.at(-1).id, 'pay_demo_new_2')
+})
+
 test('demo rejects two matching created rows instead of choosing one nondeterministically', async () => {
   let state = demoState()
   const repository = createDemoWorkspaceRepository({
