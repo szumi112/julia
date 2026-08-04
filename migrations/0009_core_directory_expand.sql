@@ -212,10 +212,7 @@ WHERE 0;
 CREATE TRIGGER core_directory_invariant_failure
 INSTEAD OF INSERT ON core_directory_invariant_failures
 BEGIN
-  SELECT CASE NEW.failure_kind
-    WHEN 'rate_limit_guard_failed' THEN RAISE(ABORT, 'rate_limit_guard_failed')
-    ELSE RAISE(ABORT, 'core_directory_invariant_failed')
-  END;
+  SELECT RAISE(ABORT, 'core_directory_invariant_failed');
 END;
 
 INSERT INTO system_state (key, value_json, version, updated_at)

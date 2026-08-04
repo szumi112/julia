@@ -274,6 +274,35 @@ function failedGenerationCasDb() {
   }
 }
 
+function failedIdempotencyWriteDb() {
+  return {
+    prepare(sql) {
+      const guarded = sql.includes('INSERT INTO idempotency_records')
+        ? sql.replace(
+            'VALUES (?,?,?,?,?,?,?,?,?)',
+            'SELECT ?,?,?,?,?,?,?,?,? WHERE 0',
+          )
+        : sql
+      return env.DB.prepare(guarded)
+    },
+    batch: env.DB.batch.bind(env.DB),
+  }
+}
+
+function winnerBeforeBatchDb(commitWinner) {
+  let started = false
+  return {
+    prepare: env.DB.prepare.bind(env.DB),
+    async batch(statements) {
+      if (!started) {
+        started = true
+        await commitWinner()
+      }
+      return env.DB.batch(statements)
+    },
+  }
+}
+
 describe('staff invitation input', () => {
   it.each(['coordinator', 'owner', 'specialist'])('accepts and normalizes the %s role', (role) => {
     expect(validateInvitationInput({
@@ -1670,6 +1699,53 @@ describe('staff deactivation', () => {
     })
   })
 
+  it('concurrent exact deactivation recovers the winner through idempotency', async () => {
+    const context = await cryptoContext()
+    const created = await invite(context, {
+      displayName: 'Concurrent Practitioner',
+      email: 'deactivate-concurrent@example.test',
+      role: 'specialist',
+    }, {
+      idempotencyKey: 'deactivate-concurrent-create',
+      idFactory: ids('deactivate_concurrent_create'),
+    })
+    const before = await mutationFacts()
+    let winner
+    const db = winnerBeforeBatchDb(async () => {
+      winner = await deactivate(context, created.data.staff.id, created.data.staff.version, {
+        idempotencyKey: 'deactivate-concurrent-shared',
+        correlationId: '66666666-6666-4666-8666-666666666661',
+        idFactory: ids('deactivate_concurrent_one'),
+      })
+    })
+    const recovered = await deactivate(
+      context,
+      created.data.staff.id,
+      created.data.staff.version,
+      {
+        db,
+        idempotencyKey: 'deactivate-concurrent-shared',
+        correlationId: '66666666-6666-4666-8666-666666666662',
+        idFactory: ids('deactivate_concurrent_two'),
+      },
+    )
+
+    expect(recovered).toEqual(winner)
+    expect(recovered.data.staff).toMatchObject({
+      id: created.data.staff.id,
+      status: 'disabled',
+      version: 2,
+    })
+    expect(mutationDelta(before, await mutationFacts())).toEqual({
+      staff: 0,
+      invitations: 0,
+      versions: 3,
+      audits: 1,
+      idempotency: 1,
+      jobs: 1,
+    })
+  })
+
   it('returns only allow-listed stale-version detail and hides missing staff facts', async () => {
     const context = await cryptoContext()
     const target = await seedStaff(context, {
@@ -1751,7 +1827,27 @@ describe('staff deactivation', () => {
       db: failedGenerationCasDb(),
       idempotencyKey: 'deactivate-guard-key',
       idFactory: ids('deactivate_guard'),
-    })).rejects.toThrow()
+    })).rejects.toThrow(/identity_collision/)
+    expect(await mutationFacts()).toEqual(before)
+    expect(await env.DB.prepare(
+      'SELECT status,version FROM staff_users WHERE id=?'
+    ).bind(target.id).first()).toEqual({ status: 'active', version: 1 })
+  })
+
+  it('preserves collision semantics when deactivation idempotency evidence is missing', async () => {
+    const context = await cryptoContext()
+    const target = await seedStaff(context, {
+      id: 'stf_deactivate_idempotency_guard',
+      email: 'deactivate-idempotency-guard@example.test',
+      status: 'active',
+    })
+    const before = await mutationFacts()
+
+    await expect(deactivate(context, target.id, target.version, {
+      db: failedIdempotencyWriteDb(),
+      idempotencyKey: 'deactivate-idempotency-guard',
+      idFactory: ids('deactivate_idempotency_guard'),
+    })).rejects.toThrow(/identity_collision/)
     expect(await mutationFacts()).toEqual(before)
     expect(await env.DB.prepare(
       'SELECT status,version FROM staff_users WHERE id=?'

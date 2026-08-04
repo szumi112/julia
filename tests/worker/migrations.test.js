@@ -549,7 +549,7 @@ describe('foundation migrations', () => {
     }
     await expect(run(
       "INSERT INTO core_directory_invariant_failures (failure_kind) VALUES ('rate_limit_guard_failed')"
-    )).rejects.toThrow(/rate_limit_guard_failed/)
+    )).rejects.toThrow(/core_directory_invariant_failed/)
     expect(await one(
       'SELECT count(*) AS count FROM core_directory_invariant_failures'
     )).toEqual({ count: 0 })

@@ -6,12 +6,23 @@ import {
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
 
+const FROZEN_CORE_DIRECTORY_TRIGGER = `CREATE TRIGGER core_directory_invariant_failure
+INSTEAD OF INSERT ON core_directory_invariant_failures
+BEGIN
+  SELECT RAISE(ABORT, 'core_directory_invariant_failed');
+END`
+
 it('requires completed stage B before passing exact schema preflight', async () => {
   await expect(inspectBootstrapSchema(env.DB)).resolves.toEqual({
     kind: 'refused',
   })
   await completeCoreDirectoryStageA()
   await applyCoreDirectoryStageB()
+  await expect(inspectBootstrapSchema(env.DB)).resolves.toEqual({
+    kind: 'ready',
+  })
+  await env.DB.prepare('DROP TRIGGER core_directory_invariant_failure').run()
+  await env.DB.prepare(FROZEN_CORE_DIRECTORY_TRIGGER).run()
   await expect(inspectBootstrapSchema(env.DB)).resolves.toEqual({
     kind: 'ready',
   })

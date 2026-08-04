@@ -173,6 +173,28 @@ describe('guarded unit of work', () => {
     expect(() => uow.domain(db.prepare('SELECT 6'))).toThrow(/^UNIT_OF_WORK_INVALID$/)
   })
 
+  it('places one ordinary pre-guard immediately before one final guard', async () => {
+    const calls = []
+    const db = {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: async (statements) => { calls.push(statements) },
+    }
+    const domain = db.prepare('SELECT 1')
+    const auditStatement = audit(db, 'aud_uow_pre_guard')
+    const preGuard = db.prepare('SELECT 2')
+    const finalGuard = db.prepare('SELECT 3')
+    const uow = createUnitOfWork(db, {
+      mode: 'mutation', actorId: 'stf_uow', correlationId,
+    })
+    uow.domain(domain)
+    uow.audit(auditStatement)
+    uow.preGuard(preGuard)
+    uow.guard(finalGuard)
+
+    await uow.commit()
+    expect(calls).toEqual([[domain, auditStatement, preGuard, finalGuard]])
+  })
+
   it('rejects invalid mutation and denial shapes before D1', async () => {
     let batchCalls = 0
     const batch = async () => { batchCalls += 1 }
@@ -194,7 +216,7 @@ describe('guarded unit of work', () => {
     expect(batchCalls).toBe(1)
   })
 
-  it.each(['domain', 'version', 'outbox', 'idempotency', 'guard'])(
+  it.each(['domain', 'version', 'outbox', 'idempotency', 'preGuard', 'guard'])(
     'rejects a tagged audit statement smuggled through %s before D1',
     async (channel) => {
       let batchCalls = 0
@@ -231,6 +253,12 @@ describe('guarded unit of work', () => {
     guards.audit(audit(db, 'aud_uow_guards'))
     guards.guard(db.prepare('SELECT 2'))
     expect(() => guards.guard(db.prepare('SELECT 3'))).toThrow(/^UNIT_OF_WORK_INVALID$/)
+
+    const preGuards = createUnitOfWork(db, {
+      mode: 'mutation', actorId: 'stf_uow', correlationId,
+    })
+    preGuards.preGuard(db.prepare('SELECT 1'))
+    expect(() => preGuards.preGuard(db.prepare('SELECT 2'))).toThrow(/^UNIT_OF_WORK_INVALID$/)
     expect(batchCalls).toBe(0)
   })
 

@@ -18,8 +18,8 @@ import { normalizeCanonicalEmail } from './canonical-email.js'
 import { authorize } from './policy.js'
 import {
   prepareSpecialistTransition,
+  specialistGuardStatement,
   specialistIdFor,
-  specialistPostcondition,
 } from './specialists.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -436,8 +436,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
         expiredOpen.version,
       ]
     : []
-  const specialistProof = specialistPostcondition(staffId)
-  uow.guard(rateLimitGuardStatement(db, {
+  uow.preGuard(rateLimitGuardStatement(db, {
     auditId,
     actorId: owner.id,
     action: 'staff.invited',
@@ -501,9 +500,8 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       invitationId,
       ...expiredOpenBindings,
     ],
-    identityPostconditionSql: specialistProof.sql,
-    identityPostconditionBindings: specialistProof.bindings,
   }))
+  uow.guard(specialistGuardStatement(db, staffId))
   try {
     await commitRateLimitedMutation(db, uow, {
       actorId: owner.id,
@@ -733,11 +731,15 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
         revokedInvitation.version,
       ]
     : []
-  const specialistProof = specialistPostcondition(staffId)
-  uow.guard(
+  uow.preGuard(
     db.prepare(
-      `INSERT INTO core_directory_invariant_failures (failure_kind)
-       SELECT 'missing_profile' WHERE NOT (
+      `INSERT INTO audit_events
+       (id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
+        reason_envelope,correlation_id,metadata_json)
+       SELECT id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
+              reason_envelope,correlation_id,metadata_json
+       FROM audit_events
+       WHERE id=? AND NOT (
          EXISTS (
            SELECT 1 FROM staff_users
            WHERE id=? AND status='disabled' AND disabled_at=? AND version=? AND updated_at=?
@@ -759,10 +761,10 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
            WHERE actor_id=? AND operation='staff.deactivate' AND idempotency_key=?
              AND resource_type='staff_user' AND resource_id=?
          )
-         AND ${specialistProof.sql}
          ${invitationPostcondition}
        )`
     ).bind(
+      auditId,
       staffId,
       now,
       staff.version,
@@ -777,10 +779,10 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
       owner.id,
       idempotencyKey,
       staffId,
-      ...specialistProof.bindings,
       ...invitationBindings,
     )
   )
+  uow.guard(specialistGuardStatement(db, staffId))
   try {
     await uow.commit()
     return body
