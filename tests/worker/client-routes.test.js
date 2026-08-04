@@ -416,6 +416,193 @@ describe('persistent client archive', () => {
     })
   })
 
+  it('does not downgrade a combined appointment race and retired client key', async () => {
+    const client = await seed()
+    let mutated = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!mutated) {
+          mutated = true
+          const now = new Date(NOW_MS + 1_000).toISOString()
+          await env.DB.batch([
+            env.DB.prepare(`INSERT INTO appointments
+              (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+               status,source,version,cancelled_at,created_at,updated_at)
+              VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+            ).bind(`apt_archive_key_race_${sequence}`, client.id, 'sp_target',
+              new Date(NOW_MS + 2_000).toISOString(), new Date(NOW_MS + 62_000).toISOString(),
+              now, now),
+            env.DB.prepare("UPDATE data_keys SET retired_at=? WHERE scope_type='client' AND scope_id=?")
+              .bind(now, client.id),
+          ])
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    let failure
+    try { await archive(client, { db }) } catch (error) { failure = error }
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure.message).not.toBe('CLIENT_ARCHIVE_CONFLICT')
+    expect(failure.message).toMatch(/core_directory_invariant/)
+  })
+
+  it('does not downgrade a combined appointment race and assignment-history corruption', async () => {
+    const client = await seed()
+    let mutated = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!mutated) {
+          mutated = true
+          const now = new Date(NOW_MS + 1_000).toISOString()
+          await env.DB.batch([
+            env.DB.prepare(`INSERT INTO appointments
+              (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+               status,source,version,cancelled_at,created_at,updated_at)
+              VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+            ).bind(`apt_archive_history_race_${sequence}`, client.id, 'sp_target',
+              new Date(NOW_MS + 2_000).toISOString(), new Date(NOW_MS + 62_000).toISOString(),
+              now, now),
+            env.DB.prepare(`INSERT INTO record_versions
+              (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+               changed_at,correlation_id) VALUES (?, 'client', ?, 2, '{}', ?, ?, ?)`)
+              .bind(`ver_archive_cross_history_${sequence}`, client.assignment.id,
+                actor.id, now, CORRELATION_ID),
+          ])
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    let failure
+    try { await archive(client, { db }) } catch (error) { failure = error }
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure.message).not.toBe('CLIENT_ARCHIVE_CONFLICT')
+    expect(failure.message).toMatch(/core_directory_invariant/)
+  })
+
+  it('does not downgrade a combined appointment race and practitioner lifecycle corruption', async () => {
+    const fixture = ++sequence
+    const specialistId = `sp_archive_lifecycle_${fixture}`
+    const staffId = `stf_archive_lifecycle_${fixture}`
+    const now = new Date(NOW_MS).toISOString()
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO staff_users
+        (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+         specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+        VALUES (?,?,?,?,?,'active',?,?,1,?,NULL,?,?)`).bind(
+        staffId, `lookup_archive_lifecycle_${fixture}`, '{}', '{}', 'specialist',
+        `access-archive-lifecycle-${fixture}`, specialistId, now, now, now,
+      ),
+      env.DB.prepare(`INSERT INTO specialists
+        (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+        VALUES (?,?,18000,'active',1,NULL,?,?)`).bind(specialistId, staffId, now, now),
+      env.DB.prepare(`INSERT INTO record_versions
+        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+         changed_at,correlation_id) VALUES (?,'specialist',?,1,'{}',NULL,?,?)`)
+        .bind(`ver_archive_lifecycle_${fixture}`, specialistId, now, CORRELATION_ID),
+    ])
+    const client = await seed({ specialistId })
+    let mutated = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!mutated) {
+          mutated = true
+          const racedAt = new Date(NOW_MS + 1_000).toISOString()
+          await env.DB.batch([
+            env.DB.prepare(`INSERT INTO appointments
+              (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+               status,source,version,cancelled_at,created_at,updated_at)
+              VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+            ).bind(`apt_archive_practitioner_race_${sequence}`, client.id, specialistId,
+              new Date(NOW_MS + 2_000).toISOString(), new Date(NOW_MS + 62_000).toISOString(),
+              racedAt, racedAt),
+            env.DB.prepare(`UPDATE staff_users
+              SET status='disabled',version=version+1,disabled_at=?,updated_at=? WHERE id=?`)
+              .bind(racedAt, racedAt, staffId),
+          ])
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    let failure
+    try { await archive(client, { db }) } catch (error) { failure = error }
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure.message).not.toBe('CLIENT_ARCHIVE_CONFLICT')
+    expect(failure.message).toMatch(/core_directory_invariant/)
+  })
+
+  it('does not downgrade a combined appointment race and audit identity collision', async () => {
+    const client = await seed()
+    const ids = ['archive_round2_client_ver', 'archive_round2_assignment_ver',
+      'archive_round2_audit']
+    let mutated = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!mutated) {
+          mutated = true
+          const now = new Date(NOW_MS + 1_000).toISOString()
+          await env.DB.batch([
+            env.DB.prepare(`INSERT INTO appointments
+              (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+               status,source,version,cancelled_at,created_at,updated_at)
+              VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+            ).bind(`apt_archive_audit_race_${sequence}`, client.id, 'sp_target',
+              new Date(NOW_MS + 2_000).toISOString(), new Date(NOW_MS + 62_000).toISOString(),
+              now, now),
+            env.DB.prepare(`INSERT INTO audit_events
+              (id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
+               reason_envelope,correlation_id,metadata_json)
+              VALUES ('aud_archive_round2_audit',?,?,'unrelated.action','client',?,'failure',NULL,?,'{}')`
+            ).bind(now, actor.id, client.id, CORRELATION_ID),
+          ])
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    let failure
+    try {
+      await archive(client, { db, idFactory: () => ids.shift() })
+    } catch (error) { failure = error }
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure.message).not.toBe('CLIENT_ARCHIVE_CONFLICT')
+    expect(failure.message).toMatch(/identity_collision/)
+  })
+
+  it('preserves the guard failure when the rollback proof is malformed', async () => {
+    const client = await seed()
+    let inserted = false
+    const db = {
+      prepare(sql) {
+        if (sql.includes('AS proven')) {
+          return { bind: () => ({ first: async () => ({ blocked: 1, proven: 1, extra: true }) }) }
+        }
+        return env.DB.prepare(sql)
+      },
+      async batch(statements) {
+        if (!inserted) {
+          inserted = true
+          const now = new Date(NOW_MS + 1_000).toISOString()
+          await env.DB.prepare(`INSERT INTO appointments
+            (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+             status,source,version,cancelled_at,created_at,updated_at)
+            VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+          ).bind(`apt_archive_malformed_proof_${sequence}`, client.id, 'sp_target',
+            new Date(NOW_MS + 2_000).toISOString(), new Date(NOW_MS + 62_000).toISOString(),
+            now, now).run()
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    let failure
+    try { await archive(client, { db }) } catch (error) { failure = error }
+    expect(failure).toBeInstanceOf(Error)
+    expect(failure.message).not.toBe('CLIENT_ARCHIVE_CONFLICT')
+    expect(failure.message).toMatch(/core_directory_invariant/)
+  })
+
   it('rolls back each ordered seven-statement archive position byte-for-byte', async () => {
     for (let failedAt = 0; failedAt < 7; failedAt += 1) {
       const client = await seed()

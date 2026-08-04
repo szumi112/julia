@@ -1045,6 +1045,109 @@ const archiveGuardStatement = (db, values) => {
   )
 }
 
+const loadArchiveConflictProof = async (db, values) => {
+  const lifecycle = specialistPostcondition(values.practitionerStaffId)
+  return db.prepare(
+    `SELECT
+       CASE WHEN EXISTS (SELECT 1 FROM appointments
+         WHERE client_id=? AND starts_at>=? AND status!='cancelled')
+       THEN 1 ELSE 0 END AS blocked,
+       CASE WHEN (
+         EXISTS (SELECT 1 FROM data_keys
+           WHERE id=? AND scope_type='client' AND scope_id=? AND purpose='identity'
+             AND dek_version=1 AND retired_at IS NULL)
+         AND EXISTS (SELECT 1 FROM clients
+           WHERE id=? AND identity_envelope=? AND status=? AND version=?
+             AND archived_at IS NULL AND created_at=? AND updated_at=?)
+         AND EXISTS (SELECT 1 FROM client_assignments
+           WHERE id=? AND client_id=? AND specialist_id=? AND starts_at=?
+             AND ends_at IS NULL AND assigned_by_staff_id=? AND version=?
+             AND created_at=? AND updated_at=?)
+         AND (SELECT count(*) FROM client_assignments
+           WHERE client_id=? AND ends_at IS NULL)=1
+         AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
+           WHERE retained.client_id=? AND (
+             (retained.id=? AND (retained.ends_at IS NOT NULL OR retained.version!=?))
+             OR (retained.id!=? AND (retained.ends_at IS NULL OR retained.version!=2))
+           ))
+         AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
+           WHERE retained.client_id=? AND (
+             (SELECT count(*) FROM record_versions AS history
+               WHERE history.entity_type='client_assignment'
+                 AND history.entity_id=retained.id)!=retained.version
+             OR (SELECT min(history.version) FROM record_versions AS history
+               WHERE history.entity_type='client_assignment'
+                 AND history.entity_id=retained.id)!=1
+             OR (SELECT max(history.version) FROM record_versions AS history
+               WHERE history.entity_type='client_assignment'
+                 AND history.entity_id=retained.id)!=retained.version
+           ))
+         AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+           JOIN client_assignments AS retained ON retained.id=history.entity_id
+           WHERE retained.client_id=? AND (
+             history.entity_type!='client_assignment'
+             OR NOT json_valid(history.snapshot_envelope)
+             OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                  THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+             OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                  THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1
+           ))
+         AND (SELECT count(*) FROM record_versions
+           WHERE entity_type='client' AND entity_id=?)=?
+         AND (SELECT min(version) FROM record_versions
+           WHERE entity_type='client' AND entity_id=?)=1
+         AND (SELECT max(version) FROM record_versions
+           WHERE entity_type='client' AND entity_id=?)=?
+         AND NOT EXISTS (SELECT 1 FROM record_versions
+           WHERE entity_id=? AND entity_type!='client')
+         AND NOT EXISTS (SELECT 1 FROM record_versions
+           WHERE entity_type='client' AND entity_id=?
+             AND (NOT json_valid(snapshot_envelope)
+               OR json_extract(CASE WHEN json_valid(snapshot_envelope)
+                    THEN snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+               OR json_extract(CASE WHEN json_valid(snapshot_envelope)
+                    THEN snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1))
+         AND NOT EXISTS (SELECT 1 FROM record_versions WHERE id IN (?,?))
+         AND NOT EXISTS (SELECT 1 FROM audit_events WHERE id=?)
+         AND NOT EXISTS (SELECT 1 FROM idempotency_records
+           WHERE actor_id=? AND operation=? AND idempotency_key=?)
+         AND (${lifecycle.sql})
+       ) THEN 1 ELSE 0 END AS proven`
+  ).bind(
+    values.client.id, values.now,
+    values.dataKeyId, values.client.id,
+    values.client.id, values.identityEnvelope, values.client.status,
+    values.client.version, values.client.createdAt, values.client.updatedAt,
+    values.assignment.id, values.client.id, values.assignment.specialistId,
+    values.assignment.startsAt, values.assignment.assignedByStaffId,
+    values.assignment.version, values.assignment.createdAt, values.assignment.updatedAt,
+    values.client.id,
+    values.client.id, values.assignment.id, values.assignment.version,
+    values.assignment.id,
+    values.client.id,
+    values.client.id, values.dataKeyId,
+    values.client.id, values.client.version,
+    values.client.id,
+    values.client.id, values.client.version,
+    values.client.id,
+    values.client.id, values.dataKeyId,
+    values.clientVersionId, values.assignmentVersionId,
+    values.auditId,
+    values.actorId, ARCHIVE_OPERATION, values.idempotencyKey,
+    ...lifecycle.bindings,
+  ).first()
+}
+
+const archiveConflictProofFact = (value) => {
+  try {
+    const fact = replayObject(value, ['blocked', 'proven'])
+    if (![0, 1].includes(fact.blocked) || ![0, 1].includes(fact.proven)) replayFailure()
+    return Object.freeze(fact)
+  } catch {
+    replayFailure()
+  }
+}
+
 const editGuardStatement = (db, values) => {
   const targetLifecycle = values.reassigned
     ? specialistPostcondition(values.targetPractitioner.staffUserId)
@@ -1590,16 +1693,18 @@ export async function archiveClient(input) {
           && fact.version > current.version) versionConflict(fact.version)
         if (isD1CoreDirectoryInvariantFailure(originalError)
           && fact.status === current.status && fact.version === current.version) {
-          const racedAppointment = await command.db.prepare(
-            `SELECT 1 AS blocked FROM appointments
-             WHERE client_id=? AND starts_at>=? AND status!='cancelled' LIMIT 1`
-          ).bind(current.id, now).first()
-          if (racedAppointment) {
-            let conflict
-            try {
-              conflict = replayObject(racedAppointment, ['blocked'])
-            } catch { throw originalError }
-            if (conflict.blocked === 1) throw new Error('CLIENT_ARCHIVE_CONFLICT')
+          let conflict
+          try {
+            conflict = archiveConflictProofFact(await loadArchiveConflictProof(command.db, {
+              client: current, assignment: current.assignment, now,
+              identityEnvelope: current.identityEnvelope, dataKeyId: context.dataKey.id,
+              practitionerStaffId: practitioner.staffUserId,
+              clientVersionId, assignmentVersionId, auditId,
+              actorId: actor.id, idempotencyKey: command.idempotencyKey,
+            }))
+          } catch { throw originalError }
+          if (conflict.blocked === 1 && conflict.proven === 1) {
+            throw new Error('CLIENT_ARCHIVE_CONFLICT')
           }
         }
       }
