@@ -12,6 +12,7 @@ export const CORE_MIGRATION_STAGE_A_NAMES = Object.freeze([
 
 export const CORE_MIGRATION_STAGE_B_NAMES = Object.freeze([
   '0010_specialist_lifecycle_assertion.sql',
+  '0011_appointment_ledger.sql',
 ])
 
 export const CORE_DIRECTORY_INVARIANT_FAILURE_SQL = `SELECT failure_kind

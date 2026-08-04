@@ -26,6 +26,7 @@ const STAGE_A_NAMES = Object.freeze([
 ])
 const STAGE_B_NAMES = Object.freeze([
   '0010_specialist_lifecycle_assertion.sql',
+  '0011_appointment_ledger.sql',
 ])
 
 const migration = (name) => Object.freeze({
@@ -58,6 +59,7 @@ test('stage A selects the exact named D1 migrations and never exposes stage B', 
   const source = [
     ...STAGE_A_NAMES.map(migration),
     migration('0010_specialist_lifecycle_assertion.sql'),
+    migration('0011_appointment_ledger.sql'),
   ]
   const selected = module.selectCoreMigrationStage(source, 'stage-a')
 
@@ -66,7 +68,7 @@ test('stage A selects the exact named D1 migrations and never exposes stage B', 
   assert.equal(Object.isFrozen(selected), true)
 })
 
-test('stage B selects only the exact later named migration', async () => {
+test('stage B selects only the exact ordered later migrations', async () => {
   const module = await loadStageModule()
   assert.ok(module, 'core migration stage selector must exist')
   const source = [
@@ -77,7 +79,8 @@ test('stage B selects only the exact later named migration', async () => {
   const selected = module.selectCoreMigrationStage(source, 'stage-b')
 
   assert.deepEqual(selected.map(({ name }) => name), STAGE_B_NAMES)
-  assert.equal(selected[0], source.at(-1))
+  assert.equal(selected[0], source.at(-2))
+  assert.equal(selected[1], source.at(-1))
   assert.equal(Object.isFrozen(selected), true)
 })
 
@@ -89,7 +92,7 @@ test('stage selection fails closed on missing, duplicate, unordered, or unknown 
     valid.slice(0, -1),
     [...valid, valid.at(-1)],
     [valid[1], valid[0], ...valid.slice(2)],
-    [...valid, migration('0011_appointment_ledger.sql')],
+    [...valid, migration('0012_unknown.sql')],
   ]
 
   for (const source of cases) {

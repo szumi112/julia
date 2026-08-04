@@ -5,7 +5,10 @@ import { advanceCoreDirectoryUpgrade } from '../../scripts/upgrade-core-director
 import { createWrappedDataKey, encryptForScope } from '../../worker/security/envelope.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { completeCoreDirectoryStageA } from './apply-migrations.js'
+import {
+  applyCoreDirectoryStageB,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 
 const NOW = '2031-04-05T06:07:08.009Z'
 const NOW_MS = Date.parse(NOW)
@@ -421,6 +424,24 @@ describe('bounded core directory upgrade', () => {
       value_json: '{"afterStaffId":"stf_upgrade_b","createdCount":1,"processedCount":2,"status":"complete"}',
       version: initialVersion + 3,
     })
+    await expect(applyCoreDirectoryStageB()).resolves.toBeUndefined()
+    expect((await env.DB.prepare(
+      "SELECT name FROM d1_migrations WHERE name>='0010' ORDER BY id"
+    ).all()).results).toEqual([
+      { name: '0010_specialist_lifecycle_assertion.sql' },
+      { name: '0011_appointment_ledger.sql' },
+    ])
+    expect((await env.DB.prepare(
+      `SELECT name FROM sqlite_schema
+       WHERE type='table' AND name IN (
+         'appointments','payment_corrections','payment_entries','session_charges'
+       ) ORDER BY name`
+    ).all()).results.map(({ name }) => name)).toEqual([
+      'appointments',
+      'payment_corrections',
+      'payment_entries',
+      'session_charges',
+    ])
   })
 
   it('rolls back profile, version, audit, state, and guard at every create-UOW statement', async () => {

@@ -165,6 +165,7 @@ test('local seed accepts only the exact applied stage-A plus stage-B migration h
     '0008_outbox_drain_heartbeat.sql',
     '0009_core_directory_expand.sql',
     '0010_specialist_lifecycle_assertion.sql',
+    '0011_appointment_ledger.sql',
   ].map((name) => ({ name }))
 
   assert.deepEqual(module.parseLocalSeedMigrationPreflight(expected), {

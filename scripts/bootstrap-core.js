@@ -29,9 +29,11 @@ const MIGRATIONS = Object.freeze([
   '0008_outbox_drain_heartbeat.sql',
   '0009_core_directory_expand.sql',
   '0010_specialist_lifecycle_assertion.sql',
+  '0011_appointment_ledger.sql',
 ])
 
 const TABLE_COLUMNS = Object.freeze({
+  appointments: ['id', 'client_id', 'specialist_id', 'service_id', 'starts_at', 'ends_at', 'time_zone', 'location', 'status', 'source', 'version', 'cancelled_at', 'created_at', 'updated_at'],
   audit_events: ['id', 'occurred_at', 'actor_staff_id', 'action', 'entity_type', 'entity_id', 'result', 'reason_envelope', 'correlation_id', 'metadata_json'],
   backup_runs: ['id', 'local_day', 'local_month', 'retention_class', 'status', 'version', 'export_bookmark', 'object_key', 'manifest_key', 'ssec_key_version', 'wrapped_ssec_key_b64', 'wrap_nonce_b64', 'object_etag', 'object_size', 'started_at', 'completed_at', 'expires_at', 'restore_verified_at', 'last_error_code', 'created_at', 'updated_at'],
   client_assignments: ['id', 'client_id', 'specialist_id', 'starts_at', 'ends_at', 'assigned_by_staff_id', 'version', 'created_at', 'updated_at'],
@@ -42,8 +44,11 @@ const TABLE_COLUMNS = Object.freeze({
   operational_actions: ['id', 'fingerprint', 'kind', 'severity', 'status', 'entity_type', 'entity_id', 'details_envelope', 'version', 'created_at', 'updated_at', 'resolved_at'],
   outbox_attempts: ['id', 'job_id', 'attempt_number', 'started_at', 'completed_at', 'result', 'error_code', 'provider_reference'],
   outbox_jobs: ['id', 'type', 'aggregate_type', 'aggregate_id', 'payload_envelope', 'idempotency_key', 'status', 'attempt_count', 'max_attempts', 'scheduled_at', 'lease_owner', 'lease_expires_at', 'last_error_code', 'created_at', 'updated_at'],
+  payment_corrections: ['id', 'reversed_entry_id', 'replacement_entry_id', 'reason_envelope', 'recorded_by_staff_id', 'created_at'],
+  payment_entries: ['id', 'appointment_id', 'amount_grosze', 'method', 'received_at', 'recorded_by_staff_id', 'external_reference_envelope', 'created_at'],
   record_versions: ['id', 'entity_type', 'entity_id', 'version', 'snapshot_envelope', 'changed_by_staff_id', 'changed_at', 'correlation_id'],
   scheduler_runs: ['id', 'scheduled_for', 'started_at', 'completed_at', 'status', 'attempt_count', 'lease_owner', 'lease_expires_at', 'claimed_jobs', 'succeeded_jobs', 'failed_jobs', 'error_code'],
+  session_charges: ['id', 'appointment_id', 'service_id', 'expected_amount_grosze', 'currency', 'version', 'created_at', 'updated_at'],
   specialists: ['id', 'staff_user_id', 'standard_rate_grosze', 'status', 'version', 'archived_at', 'created_at', 'updated_at'],
   staff_invitations: ['id', 'staff_id', 'email_lookup', 'email_envelope', 'display_name_envelope', 'role', 'status', 'inviter_id', 'expires_at', 'access_allowed_at', 'email_sent_at', 'activated_at', 'revoked_at', 'version', 'created_at', 'updated_at'],
   staff_users: ['id', 'email_lookup', 'email_envelope', 'display_name_envelope', 'role', 'status', 'access_subject', 'specialist_id', 'version', 'activated_at', 'disabled_at', 'created_at', 'updated_at'],
@@ -51,6 +56,7 @@ const TABLE_COLUMNS = Object.freeze({
 })
 
 const TABLE_HASHES = Object.freeze({
+  appointments: '612f295a8c3aaf1e76794f948ef866f8f5f5ceab30deeed957305e34a9c5469f',
   audit_events: 'c33269b506c3f32e5eaaf335f673a4a48796f00803ae66c0e4e47a4f382bb67a',
   backup_runs: '83798b62670f65ce4c2ac7554929a845de6ed0b84294e0a68a73212e6225300f',
   client_assignments: '1b4c8592ee76cbc16b16148a4329582abd6ab19db656e0f9c5faee47f3e85b52',
@@ -61,8 +67,11 @@ const TABLE_HASHES = Object.freeze({
   operational_actions: '6e7ec96f92628a932de2ee5a163e8d86c5efb61766053d006b2a229ba4aa7122',
   outbox_attempts: '1974b7495d8709aa1656681e7ea22089ced58c8aa10c63a95bcfd3d6f43a5cf7',
   outbox_jobs: 'c051a990477ff5efb82dc932d31eead7b8d15ae59b82e510c332f271537884e3',
+  payment_corrections: 'e133f2cab9f8d236ff163c16e394ee8c28f52c5223b742b699273e1039cf8a92',
+  payment_entries: '1d261867ad46dbbe68e311a4525f204773c97750e3303dab57a6ac3e44303d9f',
   record_versions: 'a185ba59472d5a30d12b6f272b3c020b6b268fa6815340eb0c65892a34d10268',
   scheduler_runs: '353996a0511950d5f24aa1eb1b7f05c0fa816ef02783c3378cf1c8d265cece63',
+  session_charges: 'd77b3a728faa0cc67e90b0bde1ca50dc9e58b10f55ed825a64f3c5f03b971861',
   specialists: 'a362be8a0c6f09553caecdfcd16f9aa2b6ccf8e783bddc2a07892e9e916be843',
   staff_invitations: 'fe26c54a624d40f6061d5a6dac5233d883cd5abb2e7ca70c52b6bd178e57e07a',
   staff_users: '9df5280cca36b562d4d59142ffa116d6a1d175a855393b291688e12cde6a98af',
@@ -70,6 +79,10 @@ const TABLE_HASHES = Object.freeze({
 })
 
 const REQUIRED_TRIGGERS = Object.freeze([
+  'appointments_identity_collision',
+  'appointments_immutable_identity',
+  'appointments_no_delete',
+  'appointments_version_increment',
   'audit_events_identity_collision',
   'audit_events_no_delete',
   'audit_events_no_update',
@@ -117,6 +130,13 @@ const REQUIRED_TRIGGERS = Object.freeze([
   'outbox_jobs_update_identity_collision',
   'outbox_jobs_valid_transition',
   'outbox_operation_guard_failure',
+  'payment_corrections_identity_collision',
+  'payment_corrections_no_delete',
+  'payment_corrections_no_update',
+  'payment_corrections_valid_relationship',
+  'payment_entries_identity_collision',
+  'payment_entries_no_delete',
+  'payment_entries_no_update',
   'rate_limit_guard_failure',
   'record_versions_identity_collision',
   'record_versions_no_delete',
@@ -126,6 +146,12 @@ const REQUIRED_TRIGGERS = Object.freeze([
   'scheduler_runs_no_delete',
   'scheduler_runs_update_identity_collision',
   'scheduler_runs_valid_transition',
+  'session_charges_identity_collision',
+  'session_charges_immutable_identity',
+  'session_charges_no_delete',
+  'session_charges_service_match_insert',
+  'session_charges_service_match_update',
+  'session_charges_version_increment',
   'specialists_identity_collision',
   'specialists_immutable_identity',
   'specialists_no_delete',
@@ -149,6 +175,10 @@ const REQUIRED_TRIGGERS = Object.freeze([
 ])
 
 const TRIGGER_HASHES = Object.freeze({
+  appointments_identity_collision: '66030df353eb8bd1d7c9762aafbe59bd0f81049869d8ea936b2dbe83d0f627b6',
+  appointments_immutable_identity: '4529a2643e13aab084d84f6cea277ef856370a154bf54aa904d6b4da6e15f340',
+  appointments_no_delete: '6bee42a82dfbbb4f53d05954259aa5d2802f00057f2ec2aeb29c37e6ca3d6ec9',
+  appointments_version_increment: '8e65fbf1de70f4f9e83940893e4d659f78c61defb3e9da7b5059c72e4765913f',
   audit_events_identity_collision: '3b41e5008a2416469580975d9944bcd00cbcf250453d8647e8fa9760e7862e9b',
   audit_events_no_delete: 'c369521a215c414492439abf558d7079ca7bd13f6091579f4bd8f94b66227509',
   audit_events_no_update: '230e61aabdac4e6cee6d99bd07648ca3c5eb61f2019ce99647d6450c93aa93c0',
@@ -196,6 +226,13 @@ const TRIGGER_HASHES = Object.freeze({
   outbox_jobs_update_identity_collision: '20fe80044b0059f757707767b60ce874797d8c9d2d6d65d9e950c5250cdfd9d1',
   outbox_jobs_valid_transition: '408b97dca427241a91011ce6dc8bf676fe0054be37022601764fef0e5cd8e2f2',
   outbox_operation_guard_failure: '034b2214bac8f6ffa4f4b13b44ccce09cde138ae3985ab5f7ead72949158f544',
+  payment_corrections_identity_collision: '805518183878dca1149ca73df1aba34e92fa430e67efc4558cf4a6c7686f8c4d',
+  payment_corrections_no_delete: 'a32b2f80f71fa078c77ef9e8ca706f0e37137e404fba6b397a3b14be1253b137',
+  payment_corrections_no_update: '82494d3d930f8ea4489eb728fadc9526bfcb89fc3f7c41fb486bb6296993c09e',
+  payment_corrections_valid_relationship: '451a8cbb6ea88b45c86f0cb89fe006a8ba7d61b6f3cd9279fa167aced6aedefb',
+  payment_entries_identity_collision: '7cd269b9042def8a6d62fd71a85293752eec76cdf0dd31ff3eadd17cd5bcb797',
+  payment_entries_no_delete: '348c6cba5a99c699ac6f618b0151715c90f206ad58ff9d4ba084781b7cb07d39',
+  payment_entries_no_update: '45e24b9ca9c875b639ad8c75a5029938dffc552557ed1bd41dab32df38ce84b3',
   rate_limit_guard_failure: '1a92c4f1f82af5a908460f49319db2a06efd43c11a2272abdb266947246c075f',
   record_versions_identity_collision: '6968d157c9de6d3986c6e910711b3b99e5902ae905a6563f84b221d0b24cb050',
   record_versions_no_delete: '4c24eb0c2ad469231d1f48b2b02f53d6cdf9ab1f4cd6dd2911f97f4d1fb3f403',
@@ -205,6 +242,12 @@ const TRIGGER_HASHES = Object.freeze({
   scheduler_runs_no_delete: '59d2243c00ec77049971aef080f9e9d0069d205ea2b45fcad938353476bedb94',
   scheduler_runs_update_identity_collision: '8b9a92dda30de41290747921f6b9171e86c0844ba5d9c6d671cd517e1e40cf48',
   scheduler_runs_valid_transition: '7879e4a5cc160da27bb2cb7a45047b6d5b53709a476541975407a774f0a40790',
+  session_charges_identity_collision: 'd6debd451d63f2bdd39adbe6d6dd0de124998631710d8b3816d06e4f9fbc994a',
+  session_charges_immutable_identity: '374707f96f5c635864038b162676c972c2f15253387198d2956803fb7f9d893a',
+  session_charges_no_delete: '9c0b610824d87d87215593a298841a10d4f910eb51a1f68e3d9b2ae91f7bd3df',
+  session_charges_service_match_insert: '69c6ec820a40701d36ef1026fe856849bed158c17be53be348873ad830a73013',
+  session_charges_service_match_update: '306c29d25b4d4a2fb160c18a64729fea0d29103ada5cff0b2c1dd1a362d84c27',
+  session_charges_version_increment: 'bd3e5e1b241624ffbd43c8b2bf3b576b70d683c2ea24d58a1e7fc7f9d069996f',
   specialists_identity_collision: '72961249fb080ec9cdbb2e4dd5b18e2a9683423d12f87a3d209bca6c5038e119',
   specialists_immutable_identity: '944e014f8ae045721bb02a80a21fee0c55864a70454c59833be2c30479736aa7',
   specialists_no_delete: '10a7b55e857ed212073519966dcd304f64cf4f7abbc93fa65729e4ef6f2476af',
@@ -239,6 +282,30 @@ const DELIVERY_INDEX = Object.freeze({
 })
 
 const REQUIRED_INDEXES = Object.freeze([
+  Object.freeze({
+    name: 'appointments_client_starts_id_idx',
+    sql: 'CREATE INDEX appointments_client_starts_id_idx ON appointments(client_id,starts_at,id)',
+    columns: Object.freeze([
+      Object.freeze({ cid: 1, name: 'client_id', seqno: 0 }),
+      Object.freeze({ cid: 4, name: 'starts_at', seqno: 1 }),
+      Object.freeze({ cid: 0, name: 'id', seqno: 2 }),
+    ]),
+    partial: 0,
+    table: 'appointments',
+    unique: 0,
+  }),
+  Object.freeze({
+    name: 'appointments_specialist_starts_id_idx',
+    sql: 'CREATE INDEX appointments_specialist_starts_id_idx ON appointments(specialist_id,starts_at,id)',
+    columns: Object.freeze([
+      Object.freeze({ cid: 2, name: 'specialist_id', seqno: 0 }),
+      Object.freeze({ cid: 4, name: 'starts_at', seqno: 1 }),
+      Object.freeze({ cid: 0, name: 'id', seqno: 2 }),
+    ]),
+    partial: 0,
+    table: 'appointments',
+    unique: 0,
+  }),
   Object.freeze({
     name: 'client_assignments_open_client_idx',
     sql: 'CREATE UNIQUE INDEX client_assignments_open_client_idx ON client_assignments(client_id) WHERE ends_at IS NULL',
@@ -380,13 +447,17 @@ const CORE_DIRECTORY_UPGRADE = Object.freeze({
 const SYSTEM_STATE_COUNT = GENESIS_STATES.length + 2
 
 const OTHER_EMPTY_TABLES = Object.freeze([
+  'appointments',
   'backup_runs',
   'client_assignments',
   'clients',
   'delivery_attempts',
   'idempotency_records',
   'operational_actions',
+  'payment_corrections',
+  'payment_entries',
   'scheduler_runs',
+  'session_charges',
   'specialists',
 ])
 const AUDIT_SCHEMAS = Object.freeze({
@@ -1099,8 +1170,12 @@ export async function buildBootstrapCreationBatch(input = {}) {
              )
          )
          AND (SELECT count(*) FROM system_state)=5
+         AND (SELECT count(*) FROM appointments)=0
          AND (SELECT count(*) FROM client_assignments)=0
          AND (SELECT count(*) FROM clients)=0
+         AND (SELECT count(*) FROM payment_corrections)=0
+         AND (SELECT count(*) FROM payment_entries)=0
+         AND (SELECT count(*) FROM session_charges)=0
          AND (SELECT count(*) FROM specialists)=0
          AND (SELECT count(*) FROM outbox_jobs)=2
          AND EXISTS (

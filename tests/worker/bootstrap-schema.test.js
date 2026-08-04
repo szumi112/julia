@@ -88,6 +88,16 @@ it('refuses missing or same-name forged guard views, triggers, and required inde
         END`,
     },
     {
+      name: 'appointments_version_increment',
+      type: 'trigger',
+      replacement: `CREATE TRIGGER appointments_version_increment
+        BEFORE UPDATE ON appointments
+        WHEN 0
+        BEGIN
+          SELECT RAISE(ABORT, 'invalid_version_increment');
+        END`,
+    },
+    {
       name: 'delivery_attempts_outbox_job_id_idx',
       type: 'index',
       replacement: `CREATE INDEX delivery_attempts_outbox_job_id_idx
@@ -126,6 +136,12 @@ it('refuses missing or same-name forged guard views, triggers, and required inde
       replacement: `CREATE INDEX scheduler_runs_status_completed_id_idx
         ON scheduler_runs (status, completed_at ASC, id DESC)`,
     },
+    {
+      name: 'appointments_client_starts_id_idx',
+      type: 'index',
+      replacement: `CREATE INDEX appointments_client_starts_id_idx
+        ON appointments (client_id, id, starts_at)`,
+    },
   ]
 
   for (const fixture of cases) {
@@ -156,32 +172,45 @@ it('refuses missing or same-name forged guard views, triggers, and required inde
   }
 })
 
-it('refuses a same-name table whose constraints differ from the migration contract', async () => {
-  const forgedDb = {
-    prepare(sql) {
-      const prepared = env.DB.prepare(sql)
-      if (!sql.includes("WHERE type IN ('table','trigger','view')")) return prepared
-      return {
-        async all() {
-          const result = await prepared.all()
-          return {
-            ...result,
-            results: result.results.map((row) => row.name === 'staff_users'
-              ? {
-                  ...row,
-                  sql: row.sql.replace(
-                    "role IN ('owner', 'coordinator', 'specialist')",
-                    "role IN ('owner', 'coordinator', 'specialist', 'admin')",
-                  ),
-                }
-              : row),
-          }
-        },
-      }
+it('refuses same-name tables whose constraints differ from the migration contract', async () => {
+  const cases = [
+    {
+      name: 'staff_users',
+      replace: (sql) => sql.replace(
+        "role IN ('owner', 'coordinator', 'specialist')",
+        "role IN ('owner', 'coordinator', 'specialist', 'admin')",
+      ),
     },
-  }
+    {
+      name: 'appointments',
+      replace: (sql) => sql.replace(
+        "status IN ('scheduled', 'completed', 'cancelled', 'noshow')",
+        "status IN ('scheduled', 'completed', 'cancelled', 'noshow', 'draft')",
+      ),
+    },
+  ]
 
-  await expect(inspectBootstrapSchema(forgedDb)).resolves.toEqual({
-    kind: 'refused',
-  })
+  for (const fixture of cases) {
+    const forgedDb = {
+      prepare(sql) {
+        const prepared = env.DB.prepare(sql)
+        if (!sql.includes("WHERE type IN ('table','trigger','view')")) return prepared
+        return {
+          async all() {
+            const result = await prepared.all()
+            return {
+              ...result,
+              results: result.results.map((row) => row.name === fixture.name
+                ? { ...row, sql: fixture.replace(row.sql) }
+                : row),
+            }
+          },
+        }
+      },
+    }
+
+    await expect(inspectBootstrapSchema(forgedDb), fixture.name).resolves.toEqual({
+      kind: 'refused',
+    })
+  }
 })
