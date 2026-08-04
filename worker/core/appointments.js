@@ -320,8 +320,9 @@ const loadScopedClient = async (db, body, actor) => db.prepare(
   actor.role, actor.role, actor.specialistId, body.startsAt, body.startsAt,
 ).first()
 
-const resultRows = (value) => {
+const resultRows = (value, maxRows) => {
   try {
+    if (!Number.isSafeInteger(maxRows) || maxRows < 0 || maxRows > 1_001) notFound()
     if (value === null || typeof value !== 'object' || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype) notFound()
     const descriptors = Object.getOwnPropertyDescriptors(value)
@@ -330,8 +331,24 @@ const resultRows = (value) => {
       || !['results', 'success', 'meta'].includes(key))) notFound()
     const descriptor = descriptors.results
     if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable
-      || !Array.isArray(descriptor.value) || descriptor.value.length > 256) notFound()
-    return descriptor.value
+      || !Array.isArray(descriptor.value)
+      || Object.getPrototypeOf(descriptor.value) !== Array.prototype) notFound()
+    const rowDescriptors = Object.getOwnPropertyDescriptors(descriptor.value)
+    const rowKeys = Reflect.ownKeys(rowDescriptors)
+    const lengthDescriptor = rowDescriptors.length
+    if (!lengthDescriptor || !Object.hasOwn(lengthDescriptor, 'value')
+      || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0
+      || lengthDescriptor.value > maxRows || rowKeys.length !== lengthDescriptor.value + 1
+      || rowKeys.some((key) => typeof key !== 'string'
+        || (key !== 'length' && !/^(0|[1-9]\d*)$/.test(key)))) notFound()
+    const rows = []
+    for (let index = 0; index < lengthDescriptor.value; index += 1) {
+      const rowDescriptor = rowDescriptors[index]
+      if (!rowDescriptor || !Object.hasOwn(rowDescriptor, 'value')
+        || !rowDescriptor.enumerable) notFound()
+      rows.push(rowDescriptor.value)
+    }
+    return Object.freeze(rows)
   } catch (error) {
     if (error instanceof Error && error.message === 'NOT_FOUND') throw error
     notFound()
@@ -346,7 +363,7 @@ const loadClientVersions = (db, clientId) => db.prepare(
 ).bind(clientId).all()
 
 const authenticateClientVersions = async (context, current, identity, value) => {
-  const rows = resultRows(value)
+  const rows = resultRows(value, 256)
   if (rows.length !== current.version || rows.length < 1) notFound()
   const ids = new Set()
   let previousUpdatedAt = null
@@ -403,7 +420,7 @@ const loadAssignmentVersions = (db, clientId) => db.prepare(
 ).bind(clientId).all()
 
 const authenticateAssignmentVersions = async (context, current, value) => {
-  const rows = resultRows(value)
+  const rows = resultRows(value, 256)
   if (rows.length < 1) notFound()
   const groups = new Map()
   const versionIds = new Set()
@@ -1137,7 +1154,7 @@ const loadEntityVersions = (db, entityId) => db.prepare(
 ).bind(entityId).all()
 
 const retainedVersionRows = (value, entityType, entityId, currentVersion) => {
-  const rows = resultRows(value)
+  const rows = resultRows(value, 257)
   if (rows.length !== currentVersion || rows.length < 1 || rows.length > 257) notFound()
   const ids = new Set()
   return rows.map((candidate, index) => {
@@ -1262,11 +1279,11 @@ const loadPaymentHistory = (db, appointmentId) => db.prepare(
           correction.created_at AS corrected_at
    FROM payment_entries AS payment
    LEFT JOIN payment_corrections AS correction ON correction.reversed_entry_id=payment.id
-   WHERE payment.appointment_id=? ORDER BY payment.received_at,payment.id LIMIT 1002`
+   WHERE payment.appointment_id=? ORDER BY payment.received_at,payment.id LIMIT 1001`
 ).bind(appointmentId).all()
 
 const authenticatePaymentHistory = async (context, appointment, charge, value) => {
-  const rows = resultRows(value)
+  const rows = resultRows(value, 1_001)
   if (rows.length > 1_000) notFound()
   const ids = new Set()
   const corrections = new Set()
@@ -1423,6 +1440,7 @@ const validateEditReplay = (value, appointmentId, request) => {
       && !['cash', 'card', 'transfer', 'monthly'].includes(payment.latestMethod))
     || (payment.latestReceivedAt !== null && !canonicalInstant(payment.latestReceivedAt))
     || !Array.isArray(appointment.paymentEntries)
+    || appointment.paymentEntries.length > 1_000
     || Reflect.ownKeys(Object.getOwnPropertyDescriptors(appointment.paymentEntries)).length
       !== appointment.paymentEntries.length + 1) cryptoFailure()
   const ids = new Set()
@@ -1436,7 +1454,11 @@ const validateEditReplay = (value, appointmentId, request) => {
       || !['cash', 'card', 'transfer', 'monthly'].includes(entry.method)
       || !canonicalInstant(entry.receivedAt)
       || (entry.correctedAt !== null && !canonicalInstant(entry.correctedAt))
-      || (entry.replacementEntryId !== null && !isPaymentId(entry.replacementEntryId))) {
+      || (entry.replacementEntryId !== null && !isPaymentId(entry.replacementEntryId))
+      || (entry.correctedAt === null && entry.replacementEntryId !== null)
+      || (entry.correctedAt !== null
+        && (entry.correctedAt < appointment.createdAt
+          || entry.correctedAt > appointment.updatedAt))) {
       cryptoFailure()
     }
     ids.add(entry.id)
@@ -1445,16 +1467,36 @@ const validateEditReplay = (value, appointmentId, request) => {
   for (let index = 1; index < entries.length; index += 1) {
     if (entries[index - 1].receivedAt > entries[index].receivedAt
       || (entries[index - 1].receivedAt === entries[index].receivedAt
-        && entries[index - 1].id >= entries[index].id)) cryptoFailure()
+        && entries[index - 1].id.localeCompare(entries[index].id) >= 0)) cryptoFailure()
   }
+  const replacementTargets = new Set()
+  const replacementLinks = new Map()
   for (const entry of entries) {
-    if (entry.replacementEntryId !== null
-      && (!ids.has(entry.replacementEntryId) || entry.replacementEntryId === entry.id)) cryptoFailure()
+    if (entry.replacementEntryId === null) continue
+    if (!ids.has(entry.replacementEntryId) || entry.replacementEntryId === entry.id
+      || replacementTargets.has(entry.replacementEntryId)) cryptoFailure()
+    replacementTargets.add(entry.replacementEntryId)
+    replacementLinks.set(entry.id, entry.replacementEntryId)
+  }
+  for (const start of replacementLinks.keys()) {
+    const path = new Set()
+    let current = start
+    while (replacementLinks.has(current)) {
+      if (path.has(current)) cryptoFailure()
+      path.add(current)
+      current = replacementLinks.get(current)
+    }
   }
   const effective = entries.filter(({ correctedAt }) => correctedAt === null)
-  const collected = effective.reduce((sum, { amountGrosze }) => sum + amountGrosze, 0)
+  const collected = effective.reduce((sum, { amountGrosze }) => {
+    const next = sum + amountGrosze
+    if (!Number.isSafeInteger(next)) cryptoFailure()
+    return next
+  }, 0)
   const latest = effective.at(-1) ?? null
-  if (collected !== payment.collectedGrosze
+  if ((!['completed', 'noshow'].includes(request.status) && collected !== 0)
+    || collected > charge.expectedAmountGrosze
+    || collected !== payment.collectedGrosze
     || (latest?.method ?? null) !== payment.latestMethod
     || (latest?.receivedAt ?? null) !== payment.latestReceivedAt) cryptoFailure()
   const normalizedPayment = Object.freeze({ ...payment, entries: Object.freeze(entries) })

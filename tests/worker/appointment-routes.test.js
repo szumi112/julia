@@ -13,6 +13,7 @@ import { postAppointment, postAppointmentEdit } from '../../worker/routes/appoin
 import { createClient, editClient } from '../../worker/core/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { decryptForScope, encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
+import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { clientKeyScope } from '../../worker/core/crypto.js'
 import { createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db/query-budget.js'
 import { createApp } from '../../worker/app.js'
@@ -764,6 +765,101 @@ describe('persistent appointment editing', () => {
         correctedAt: null, replacementEntryId: null }] })
   }
 
+  const seedPaymentHistory = async (appointment, count) => {
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(appointment.clientId).first()
+    const scope = clientKeyScope(appointment.clientId)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
+    })
+    const changedAt = new Date(NOW_MS + 500).toISOString()
+    const receivedAt = new Date(NOW_MS + 200).toISOString()
+    const marker = `edit_history_${++sequence}`
+    const entries = Array.from({ length: count }, (_, index) => ({
+      id: `pay_${marker}_${String(index).padStart(4, '0')}`,
+      amountGrosze: 1, method: 'card', receivedAt,
+      correctedAt: null, replacementEntryId: null,
+    }))
+    for (let offset = 0; offset < entries.length; offset += 100) {
+      await env.DB.batch(entries.slice(offset, offset + 100).map((entry) => (
+        env.DB.prepare(`INSERT INTO payment_entries
+          (id,appointment_id,amount_grosze,method,received_at,recorded_by_staff_id,
+           external_reference_envelope,created_at) VALUES (?,?,?,?,?,?,NULL,?)`).bind(
+          entry.id, appointment.id, entry.amountGrosze, entry.method, entry.receivedAt,
+          OWNER.id, entry.receivedAt,
+        )
+      )))
+    }
+    await env.DB.prepare('UPDATE appointments SET version=2,updated_at=? WHERE id=? AND version=1')
+      .bind(changedAt, appointment.id).run()
+    const snapshot = {
+      cancelledAt: null, clientId: appointment.clientId, createdAt: appointment.createdAt,
+      endsAt: appointment.endsAt, id: appointment.id, location: appointment.location,
+      paymentAggregate: {
+        collectedGrosze: count,
+        outstandingGrosze: appointment.charge.expectedAmountGrosze - count,
+        status: 'partial',
+      },
+      schema: 'appointment.v1', serviceId: appointment.serviceId, source: appointment.source,
+      specialistId: appointment.specialistId, startsAt: appointment.startsAt,
+      status: 'completed', timeZone: appointment.timeZone, updatedAt: changedAt, version: 2,
+    }
+    const envelope = await encryptForScope(await ring(), dataKey, {
+      expectedScope: scope, recordId: appointment.id, field: 'record_version',
+      plaintext: JSON.stringify(snapshot),
+    })
+    await env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      `ver_${marker}`, 'appointment', appointment.id, 2, JSON.stringify(envelope),
+      OWNER.id, changedAt, CORRELATION_ID,
+    ).run()
+    return Object.freeze({ ...appointment, version: 2, status: 'completed', updatedAt: changedAt,
+      payment: { status: 'partial', collectedGrosze: count,
+        outstandingGrosze: appointment.charge.expectedAmountGrosze - count,
+        latestMethod: 'card', latestReceivedAt: receivedAt },
+      paymentEntries: entries })
+  }
+
+  const canonicalJson = (value) => JSON.stringify(value === null
+    || typeof value !== 'object' ? value
+    : Array.isArray(value) ? value.map((entry) => JSON.parse(canonicalJson(entry)))
+      : Object.fromEntries(Object.keys(value).sort()
+        .map((key) => [key, JSON.parse(canonicalJson(value[key]))])))
+
+  const withEncryptedEditReplay = async (clientId, idempotencyKey, response) => {
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(clientId).first()
+    const scope = clientKeyScope(clientId)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
+    })
+    const tuple = new TextEncoder().encode(
+      ['bwm:idempotency:record:v1', OWNER.id, 'appointments.edit', idempotencyKey].join('\n'),
+    )
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', tuple))
+    const recordId = `idem_${encodeBase64Url(digest)}`
+    tuple.fill(0)
+    digest.fill(0)
+    const responseEnvelope = JSON.stringify(await encryptForScope(await ring(), dataKey, {
+      expectedScope: scope, recordId, field: 'idempotency_response',
+      plaintext: canonicalJson(response),
+    }))
+    return { prepare(sql) {
+      const prepared = env.DB.prepare(sql)
+      if (!sql.includes('SELECT request_hash,resource_type,resource_id,response_envelope')) {
+        return prepared
+      }
+      return { bind(...bindings) {
+        const bound = prepared.bind(...bindings)
+        return { async first() {
+          const row = await bound.first()
+          return row === null ? null : { ...row, response_envelope: responseEnvelope }
+        } }
+      } }
+    }, batch: (statements) => env.DB.batch(statements) }
+  }
+
   it('strictly captures the edit target/body and freezes the payment transition boundary', async () => {
     expect(validateEditAppointmentBody(EDIT_BODY)).toEqual({
       ...EDIT_BODY, startsAt: '2027-01-16T09:00:00.000Z',
@@ -1004,6 +1100,94 @@ describe('persistent appointment editing', () => {
     }
   })
 
+  it.each([256, 257, 1_000])(
+    'accepts a real D1 payment history with %i rows within the unchanged statement budget',
+    async (count) => {
+      const client = await seedClient()
+      const created = (await create(client, { body: {
+        ...BODY, clientId: client.id, date: `2027-08-${String(count % 20 + 1).padStart(2, '0')}`,
+        status: 'completed',
+      } })).body.data.appointment
+      const current = await seedPaymentHistory(created, count)
+      const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+      const result = await edit(current, { db: budget.work, recoveryDb: budget.recovery,
+        body: { ...EDIT_BODY, expectedVersion: 2,
+          date: `2027-08-${String(count % 20 + 1).padStart(2, '0')}`,
+          location: 'Gabinet graniczny', status: 'completed' } })
+      expect(result.body.data.appointment.paymentEntries).toHaveLength(count)
+      expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+        used: 14, remaining: 36, workRemaining: 28,
+        totalLimit: 50, recoveryReserve: 8,
+      })
+    },
+  )
+
+  it('rejects the 1001st real D1 payment row at the sentinel without spending IDs', async () => {
+    const client = await seedClient()
+    const created = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-08-04', status: 'completed',
+    } })).body.data.appointment
+    const current = await seedPaymentHistory(created, 1_001)
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    const idFactory = vi.fn()
+    await expect(edit(current, { db: budget.work, recoveryDb: budget.recovery, idFactory,
+      body: { ...EDIT_BODY, expectedVersion: 2, date: '2027-08-04', status: 'completed' },
+    })).rejects.toThrow('NOT_FOUND')
+    expect(idFactory).not.toHaveBeenCalled()
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 6, remaining: 44, workRemaining: 36,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('descriptor-captures payment result arrays before indexed access', async () => {
+    for (const hostile of ['accessor', 'proxy-get', 'proxy-descriptor']) {
+      const client = await seedClient()
+      const created = (await create(client, { body: {
+        ...BODY, clientId: client.id, date: `2027-08-0${5 + ['accessor', 'proxy-get', 'proxy-descriptor'].indexOf(hostile)}`,
+        status: 'completed',
+      } })).body.data.appointment
+      const current = await seedCollectedPayment(created)
+      let indexed = false
+      const db = { prepare(sql) {
+        const prepared = env.DB.prepare(sql)
+        if (!sql.trimStart().startsWith('SELECT payment.id')) return prepared
+        return { bind(...bindings) {
+          const bound = prepared.bind(...bindings)
+          return { async all() {
+            const result = await bound.all()
+            if (hostile === 'accessor') {
+              const rows = [...result.results]
+              Object.defineProperty(rows, '0', { enumerable: true, configurable: true,
+                get() { throw new Error('escaped payment accessor') } })
+              return { ...result, results: rows }
+            }
+            const rows = new Proxy(result.results, hostile === 'proxy-get' ? {
+              get(target, key, receiver) {
+                if (key === '0') { indexed = true; throw new Error('escaped proxy get') }
+                return Reflect.get(target, key, receiver)
+              },
+            } : {
+              getOwnPropertyDescriptor() { throw new Error('escaped proxy descriptor') },
+            })
+            return { ...result, results: rows }
+          } }
+        } }
+      }, batch: (statements) => env.DB.batch(statements) }
+      const invocation = edit(current, { db, body: {
+        ...EDIT_BODY, expectedVersion: 2,
+        date: `2027-08-0${5 + ['accessor', 'proxy-get', 'proxy-descriptor'].indexOf(hostile)}`,
+        location: 'Gabinet deskryptorów', status: 'completed',
+      } })
+      if (hostile === 'proxy-get') {
+        await expect(invocation).resolves.toMatchObject({ status: 200 })
+        expect(indexed).toBe(false)
+      } else {
+        await expect(invocation).rejects.toThrow('NOT_FOUND')
+      }
+    }
+  })
+
   it('requires the exact rooted assignment effective at the proposed start for every role', async () => {
     const client = await seedClient()
     const current = (await create(client, { body: {
@@ -1166,6 +1350,81 @@ describe('persistent appointment editing', () => {
       nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
       appointmentId: current.id, body, idempotencyKey: key,
     })).rejects.toThrow('CRYPTO_FAILURE')
+  })
+
+  it('authenticates the complete frozen payment-correction graph on encrypted edit replay', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-08-09', status: 'completed',
+    } })).body.data.appointment
+    const body = { ...EDIT_BODY, expectedVersion: 1, date: '2027-08-09', time: '11:00',
+      status: 'completed' }
+    const key = `appointment-edit-hostile-replay-${++sequence}`
+    const result = await editAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(`appointment_edit_hostile_${sequence}`),
+      appointmentId: current.id, body, idempotencyKey: key,
+    })
+    const valid = JSON.parse(JSON.stringify(result))
+    const appointment = valid.body.data.appointment
+    const correctedAt = new Date(NOW_MS + 500).toISOString()
+    const receivedAt = new Date(NOW_MS + 200).toISOString()
+    appointment.paymentEntries = [
+      { id: 'pay_replay_graph_a', amountGrosze: 50, method: 'cash', receivedAt,
+        correctedAt, replacementEntryId: 'pay_replay_graph_b' },
+      { id: 'pay_replay_graph_b', amountGrosze: 100, method: 'card', receivedAt,
+        correctedAt, replacementEntryId: 'pay_replay_graph_c' },
+      { id: 'pay_replay_graph_c', amountGrosze: 150, method: 'card', receivedAt,
+        correctedAt: null, replacementEntryId: null },
+      { id: 'pay_replay_graph_d', amountGrosze: 200, method: 'transfer', receivedAt,
+        correctedAt: null, replacementEntryId: null },
+    ]
+    appointment.payment = { status: 'partial', collectedGrosze: 350,
+      outstandingGrosze: 19_150, latestMethod: 'transfer', latestReceivedAt: receivedAt }
+
+    const validDb = await withEncryptedEditReplay(client.id, key, valid)
+    await expect(editAppointment({
+      db: validDb, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: current.id, body, idempotencyKey: key,
+    })).resolves.toEqual(valid)
+
+    const hostileCases = {
+      'correctedAt/replacement coherence': (candidate) => {
+        candidate.body.data.appointment.paymentEntries[3].replacementEntryId = 'pay_replay_graph_a'
+      },
+      'unique replacement targets': (candidate) => {
+        candidate.body.data.appointment.paymentEntries[0].replacementEntryId = 'pay_replay_graph_c'
+      },
+      'correction chronology': (candidate) => {
+        candidate.body.data.appointment.paymentEntries[0].correctedAt = '2027-01-15T08:59:59.999Z'
+      },
+      'self replacement': (candidate) => {
+        candidate.body.data.appointment.paymentEntries[0].replacementEntryId = 'pay_replay_graph_a'
+      },
+      'replacement cycle': (candidate) => {
+        candidate.body.data.appointment.paymentEntries[1].replacementEntryId = 'pay_replay_graph_a'
+      },
+      'exact aggregate': (candidate) => {
+        candidate.body.data.appointment.payment.collectedGrosze += 1
+        candidate.body.data.appointment.payment.outstandingGrosze -= 1
+      },
+      'canonical order': (candidate) => {
+        const entries = candidate.body.data.appointment.paymentEntries
+        ;[entries[2], entries[3]] = [entries[3], entries[2]]
+      },
+    }
+    for (const [name, mutate] of Object.entries(hostileCases)) {
+      const hostile = JSON.parse(JSON.stringify(valid))
+      mutate(hostile)
+      const db = await withEncryptedEditReplay(client.id, key, hostile)
+      await expect(editAppointment({
+        db, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+        nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+        appointmentId: current.id, body, idempotencyKey: key,
+      }), name).rejects.toThrow('CRYPTO_FAILURE')
+    }
   })
 
   it('classifies an overlap introduced at the final guard and leaves no edit residue', async () => {
