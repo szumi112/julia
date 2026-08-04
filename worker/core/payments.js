@@ -15,12 +15,17 @@ import {
   paymentAggregateFor,
 } from './appointments.js'
 import {
+  assertLocation,
   isAppointmentId,
   isAuditId,
+  isChargeId,
+  isClientId,
   isOpaqueId,
   isPaymentId,
+  isSpecialistId,
   isVersionId,
 } from '../../src/core-records.js'
+import { SERVICE_BY_ID } from '../../src/services.js'
 
 const BODY_KEYS = Object.freeze(['expectedVersion', 'amountGrosze', 'method', 'receivedAt'])
 const METHODS = Object.freeze(['cash', 'card', 'transfer', 'monthly'])
@@ -172,17 +177,30 @@ const validateReplay = (value, appointmentId, request) => {
     'status', 'collectedGrosze', 'outstandingGrosze', 'latestMethod', 'latestReceivedAt',
   ], cryptoFailure)
   if (replay.status !== 200 || appointment.id !== appointmentId
+    || !isAppointmentId(appointment.id) || !isClientId(appointment.clientId)
+    || !isSpecialistId(appointment.specialistId) || !SERVICE_BY_ID[appointment.serviceId]
+    || !canonicalInstant(appointment.startsAt) || !canonicalInstant(appointment.endsAt)
+    || appointment.endsAt <= appointment.startsAt || appointment.timeZone !== 'Europe/Warsaw'
     || appointment.version !== request.expectedVersion + 1
     || !['completed', 'noshow'].includes(appointment.status)
     || appointment.cancelledAt !== null || appointment.source !== 'panel'
-    || charge.currency !== 'PLN' || !Number.isSafeInteger(charge.expectedAmountGrosze)
+    || !canonicalInstant(appointment.createdAt) || !canonicalInstant(appointment.updatedAt)
+    || appointment.updatedAt < appointment.createdAt
+    || !isChargeId(charge.id) || charge.serviceId !== appointment.serviceId
+    || !SERVICE_BY_ID[charge.serviceId] || charge.currency !== 'PLN'
+    || !Number.isSafeInteger(charge.version) || charge.version < 1
+    || !Number.isSafeInteger(charge.expectedAmountGrosze)
     || charge.expectedAmountGrosze < 1 || charge.expectedAmountGrosze > 1_000_000
     || !Array.isArray(appointment.paymentEntries) || appointment.paymentEntries.length < 1
-    || appointment.paymentEntries.length > 1_000) cryptoFailure()
+    || appointment.paymentEntries.length > 1_000
+    || Reflect.ownKeys(Object.getOwnPropertyDescriptors(appointment.paymentEntries)).length
+      !== appointment.paymentEntries.length + 1) cryptoFailure()
+  try { assertLocation(appointment.location) } catch { cryptoFailure() }
   const ids = new Set()
   let collected = 0
   let latest = null
   let matching = 0
+  let previous = null
   const entries = appointment.paymentEntries.map((candidate) => {
     const entry = captureExact(candidate, [
       'id', 'amountGrosze', 'method', 'receivedAt', 'correctedAt', 'replacementEntryId',
@@ -192,12 +210,17 @@ const validateReplay = (value, appointmentId, request) => {
       || entry.amountGrosze > 1_000_000 || !METHODS.includes(entry.method)
       || !canonicalInstant(entry.receivedAt)
       || (entry.correctedAt !== null && !canonicalInstant(entry.correctedAt))
-      || (entry.replacementEntryId !== null && !isPaymentId(entry.replacementEntryId))) {
+      || (entry.replacementEntryId !== null && !isPaymentId(entry.replacementEntryId))
+      || (entry.correctedAt === null && entry.replacementEntryId !== null)
+      || (entry.correctedAt !== null
+        && (entry.correctedAt < appointment.createdAt
+          || entry.correctedAt > appointment.updatedAt))) {
       cryptoFailure()
     }
-    if (latest && (latest.receivedAt > entry.receivedAt
-      || (latest.receivedAt === entry.receivedAt && latest.id >= entry.id))) cryptoFailure()
+    if (previous && (previous.receivedAt > entry.receivedAt
+      || (previous.receivedAt === entry.receivedAt && previous.id >= entry.id))) cryptoFailure()
     ids.add(entry.id)
+    previous = entry
     if (entry.correctedAt === null) {
       collected += entry.amountGrosze
       latest = entry
@@ -206,10 +229,34 @@ const validateReplay = (value, appointmentId, request) => {
     }
     return Object.freeze(entry)
   })
+  const byId = new Map(entries.map((entry) => [entry.id, entry]))
+  const replacementTargets = new Set()
+  const links = new Map()
+  for (const entry of entries) {
+    if (entry.replacementEntryId === null) continue
+    const replacement = byId.get(entry.replacementEntryId)
+    if (!replacement || replacement.id === entry.id
+      || replacementTargets.has(replacement.id)
+      || (replacement.correctedAt !== null
+        && replacement.correctedAt < entry.correctedAt)) cryptoFailure()
+    replacementTargets.add(replacement.id)
+    links.set(entry.id, replacement.id)
+  }
+  for (const start of links.keys()) {
+    const path = new Set()
+    let cursor = start
+    while (links.has(cursor)) {
+      if (path.has(cursor)) cryptoFailure()
+      path.add(cursor)
+      cursor = links.get(cursor)
+    }
+  }
   if (!Number.isSafeInteger(collected) || collected > charge.expectedAmountGrosze
     || matching < 1 || payment.collectedGrosze !== collected
     || payment.outstandingGrosze !== charge.expectedAmountGrosze - collected
     || payment.status !== (collected === charge.expectedAmountGrosze ? 'paid' : 'partial')
+    || !METHODS.includes(payment.latestMethod)
+    || !canonicalInstant(payment.latestReceivedAt)
     || payment.latestMethod !== latest?.method
     || payment.latestReceivedAt !== latest?.receivedAt) cryptoFailure()
   return Object.freeze({ status: 200, body: Object.freeze({ data: Object.freeze({

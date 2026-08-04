@@ -53,6 +53,11 @@ const ROUTE_TARGET = 'POST /api/v1/appointments'
 const PROSPECTIVE_APPOINTMENT_ID = 'apt_authorization_target'
 const DAY_MS = 86_400_000
 const TERMINAL_CANCELLATION_CANDIDATE_CAP = 32
+// A full ledger can retain 1,000 entries and later correct each entry once. The
+// appointment stream therefore needs room for create + both mutation classes,
+// while client/assignment/charge streams retain their existing tighter bounds.
+const APPOINTMENT_VERSION_CAP = 4_096
+const CHARGE_VERSION_CAP = 257
 const ownership = createOwnershipCapabilityBoundary()
 const versionBuilder = createRecordVersionBuilder(ownership.consumer)
 
@@ -356,7 +361,8 @@ const loadScopedClient = async (db, body, actor) => db.prepare(
 
 const resultRows = (value, maxRows) => {
   try {
-    if (!Number.isSafeInteger(maxRows) || maxRows < 0 || maxRows > 1_001) notFound()
+    if (!Number.isSafeInteger(maxRows) || maxRows < 0
+      || maxRows > APPOINTMENT_VERSION_CAP + 1) notFound()
     if (value === null || typeof value !== 'object' || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype) notFound()
     const descriptors = Object.getOwnPropertyDescriptors(value)
@@ -1182,15 +1188,23 @@ const editScopedFact = (value, appointmentId, body) => {
   })
 }
 
-const loadEntityVersions = (db, entityId) => db.prepare(
+const loadEntityVersions = (db, entityId, entityType) => {
+  const cap = entityType === 'appointment' ? APPOINTMENT_VERSION_CAP
+    : entityType === 'session_charge' ? CHARGE_VERSION_CAP : 0
+  if (cap === 0) throw new Error('INTERNAL_ERROR')
+  return db.prepare(
   `SELECT id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
           changed_at,correlation_id
-   FROM record_versions WHERE entity_id=? ORDER BY version,id LIMIT 258`
-).bind(entityId).all()
+   FROM record_versions WHERE entity_id=? ORDER BY version,id LIMIT ${cap + 1}`
+  ).bind(entityId).all()
+}
 
 const retainedVersionRows = (value, entityType, entityId, currentVersion) => {
-  const rows = resultRows(value, 257)
-  if (rows.length !== currentVersion || rows.length < 1 || rows.length > 257) notFound()
+  const cap = entityType === 'appointment' ? APPOINTMENT_VERSION_CAP
+    : entityType === 'session_charge' ? CHARGE_VERSION_CAP : 0
+  if (cap === 0) notFound()
+  const rows = resultRows(value, cap + 1)
+  if (rows.length !== currentVersion || rows.length < 1 || rows.length > cap) notFound()
   const ids = new Set()
   return rows.map((candidate, index) => {
     const row = captureExact(candidate, [
@@ -1777,11 +1791,11 @@ const retainedEditState = async (command, actor) => {
       retained.charge.expectedAmountGrosze,
       payment.collectedGrosze,
     ),
-    await loadEntityVersions(command.db, retained.appointment.id),
+    await loadEntityVersions(command.db, retained.appointment.id, 'appointment'),
   )
   await authenticateChargeVersions(
     context, retained.charge,
-    await loadEntityVersions(command.db, retained.charge.id),
+    await loadEntityVersions(command.db, retained.charge.id, 'session_charge'),
   )
   return Object.freeze({ ...retained, context, payment })
 }
@@ -2330,11 +2344,11 @@ const retainedCancellationState = async (
       retained.charge.expectedAmountGrosze,
       payment.collectedGrosze,
     ),
-    await loadEntityVersions(command.db, retained.appointment.id),
+    await loadEntityVersions(command.db, retained.appointment.id, 'appointment'),
   )
   await authenticateChargeVersions(
     context, retained.charge,
-    await loadEntityVersions(command.db, retained.charge.id),
+    await loadEntityVersions(command.db, retained.charge.id, 'session_charge'),
   )
   return Object.freeze({ ...retained, context, payment })
 }
@@ -2678,7 +2692,8 @@ const authenticateTerminalCancellationProof = async (
       if (!isAppointmentId(replayAppointment.id) || !isClientId(replayAppointment.clientId)
         || replayAppointment.clientId !== appointment.clientId
         || !Number.isSafeInteger(replayAppointment.version) || replayAppointment.version < 2
-        || replayAppointment.version > 257 || replayAppointment.updatedAt !== row.created_at) {
+        || replayAppointment.version > APPOINTMENT_VERSION_CAP
+        || replayAppointment.updatedAt !== row.created_at) {
         cryptoFailure()
       }
       const request = Object.freeze({ expectedVersion: replayAppointment.version - 1 })

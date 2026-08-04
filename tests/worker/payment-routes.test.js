@@ -6,11 +6,12 @@ import {
   validateRecordPaymentBody,
 } from '../../worker/core/payments.js'
 import { postAppointmentPayment } from '../../worker/routes/appointments.js'
-import { createAppointment } from '../../worker/core/appointments.js'
+import { cancelAppointment, createAppointment } from '../../worker/core/appointments.js'
 import { createClient } from '../../worker/core/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
 import { clientKeyScope } from '../../worker/core/crypto.js'
+import { encodeBase64Url } from '../../worker/security/encoding.js'
 import {
   areSiblingD1QueryBudgetViews,
   createD1QueryBudget,
@@ -188,6 +189,115 @@ const seedPaymentGraph = async (appointment, entries, corrections = []) => {
   return Object.freeze({ ...appointment, version: 2, updatedAt: changedAt })
 }
 
+const seedContiguousPayments = async (appointment, count) => {
+  const client = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+    .bind(appointment.clientId).first()
+  const scope = clientKeyScope(appointment.clientId)
+  const dataKey = await loadDataKey(env.DB, {
+    envelope: JSON.parse(client.identity_envelope), expectedScope: scope,
+  })
+  const statements = []
+  let updatedAt = appointment.updatedAt
+  for (let index = 1; index <= count; index += 1) {
+    const version = index + 1
+    updatedAt = new Date(NOW_MS + index).toISOString()
+    const paymentId = `pay_contiguous_${sequence}_${String(index).padStart(4, '0')}`
+    const snapshot = {
+      cancelledAt: null, clientId: appointment.clientId, createdAt: appointment.createdAt,
+      endsAt: appointment.endsAt, id: appointment.id, location: appointment.location,
+      paymentAggregate: { collectedGrosze: index,
+        outstandingGrosze: appointment.charge.expectedAmountGrosze - index,
+        status: 'partial' },
+      schema: 'appointment.v1', serviceId: appointment.serviceId, source: 'panel',
+      specialistId: appointment.specialistId, startsAt: appointment.startsAt,
+      status: appointment.status, timeZone: 'Europe/Warsaw', updatedAt, version,
+    }
+    const envelope = await encryptForScope(await ring(), dataKey, {
+      expectedScope: scope, recordId: appointment.id, field: 'record_version',
+      plaintext: JSON.stringify(snapshot),
+    })
+    statements.push(
+      env.DB.prepare(`INSERT INTO payment_entries
+        (id,appointment_id,amount_grosze,method,received_at,recorded_by_staff_id,
+         external_reference_envelope,created_at) VALUES (?,?,?,?,?,?,NULL,?)`).bind(
+        paymentId, appointment.id, 1, 'cash', '2027-01-15T07:00:00.000Z',
+        OWNER.id, updatedAt,
+      ),
+      env.DB.prepare('UPDATE appointments SET version=?,updated_at=? WHERE id=? AND version=?')
+        .bind(version, updatedAt, appointment.id, version - 1),
+      env.DB.prepare(`INSERT INTO record_versions
+        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+         changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+        `ver_contiguous_${sequence}_${String(version).padStart(4, '0')}`,
+        'appointment', appointment.id, version, JSON.stringify(envelope), OWNER.id,
+        updatedAt, BASE.correlationId,
+      ),
+    )
+  }
+  for (let offset = 0; offset < statements.length; offset +=  ninetyStatements) {
+    await env.DB.batch(statements.slice(offset, offset + ninetyStatements))
+  }
+  return Object.freeze({ ...appointment, version: count + 1, updatedAt })
+}
+
+const ninetyStatements = 90
+
+const canonicalJson = (value) => JSON.stringify(value === null
+  || typeof value !== 'object' ? value
+  : Array.isArray(value) ? value.map((entry) => JSON.parse(canonicalJson(entry)))
+    : Object.fromEntries(Object.keys(value).sort()
+      .map((key) => [key, JSON.parse(canonicalJson(value[key]))])))
+
+const withEncryptedPaymentReplay = async (clientId, idempotencyKey, response) => {
+  const client = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+    .bind(clientId).first()
+  const scope = clientKeyScope(clientId)
+  const dataKey = await loadDataKey(env.DB, {
+    envelope: JSON.parse(client.identity_envelope), expectedScope: scope,
+  })
+  const tuple = new TextEncoder().encode(
+    ['bwm:idempotency:record:v1', OWNER.id, 'appointments.payment', idempotencyKey].join('\n'),
+  )
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', tuple))
+  const recordId = `idem_${encodeBase64Url(digest)}`
+  tuple.fill(0)
+  digest.fill(0)
+  const responseEnvelope = JSON.stringify(await encryptForScope(await ring(), dataKey, {
+    expectedScope: scope, recordId, field: 'idempotency_response',
+    plaintext: canonicalJson(response),
+  }))
+  return { prepare(sql) {
+    const prepared = env.DB.prepare(sql)
+    if (!sql.includes('SELECT request_hash,resource_type,resource_id,response_envelope')) {
+      return prepared
+    }
+    return { bind(...bindings) {
+      const bound = prepared.bind(...bindings)
+      return { async first() {
+        const row = await bound.first()
+        return row === null ? null : { ...row, response_envelope: responseEnvelope }
+      } }
+    } }
+  }, batch: (statements) => env.DB.batch(statements) }
+}
+
+const withCorruptedAll = (needle, mutate) => ({
+  prepare(sql) {
+    const prepared = env.DB.prepare(sql)
+    if (!sql.includes(needle)) return prepared
+    return { bind(...bindings) {
+      const bound = prepared.bind(...bindings)
+      return { async all() {
+        const result = await bound.all()
+        return { ...result, results: result.results.map((row, index) => (
+          index === 0 ? mutate({ ...row }) : row
+        )) }
+      } }
+    } }
+  },
+  batch: (statements) => env.DB.batch(statements),
+})
+
 describe('appointment payment capture', () => {
   it('strictly captures the exact payment body and canonical digest', async () => {
     expect(validateRecordPaymentBody(BODY)).toEqual(BODY)
@@ -273,6 +383,52 @@ describe('appointment payment capture', () => {
       nowMs: input.nowMs + 2 })).resolves.toEqual(result)
   })
 
+  it('rejects every malformed authenticated payment replay DTO and correction graph', async () => {
+    const appointment = await seedAppointment()
+    const input = await paymentInput(appointment)
+    const result = await recordAppointmentPayment(input)
+    const original = result.body.data.appointment
+    const correctedAt = original.updatedAt
+    const correctedPrefix = [
+      { id: 'pay_replay_z', amountGrosze: 1, method: 'cash',
+        receivedAt: '2027-01-15T08:20:00.000Z', correctedAt,
+        replacementEntryId: null },
+      { id: 'pay_replay_a', amountGrosze: 1, method: 'cash',
+        receivedAt: '2027-01-15T08:10:00.000Z', correctedAt,
+        replacementEntryId: null },
+    ]
+    const cycle = [
+      { ...correctedPrefix[1], id: 'pay_replay_cycle_a',
+        replacementEntryId: 'pay_replay_cycle_b' },
+      { ...correctedPrefix[0], id: 'pay_replay_cycle_b',
+        replacementEntryId: 'pay_replay_cycle_a' },
+    ]
+    const malformedAppointments = [
+      { ...original, clientId: 'not-a-client' },
+      { ...original, specialistId: 'not-a-specialist' },
+      { ...original, startsAt: original.endsAt },
+      { ...original, timeZone: 'UTC' },
+      { ...original, location: ' bad ' },
+      { ...original, createdAt: '2027-01-15T09:00:00Z' },
+      { ...original, charge: { ...original.charge, serviceId: 'konsultacja' } },
+      { ...original, charge: { ...original.charge, id: 'not-a-charge' } },
+      { ...original, version: input.body.expectedVersion + 2 },
+      { ...original, paymentEntries: [...correctedPrefix, ...original.paymentEntries] },
+      { ...original, paymentEntries: [{ ...correctedPrefix[0],
+        replacementEntryId: 'pay_replay_missing' }, ...original.paymentEntries] },
+      { ...original, paymentEntries: [...cycle, ...original.paymentEntries] },
+      { ...original, payment: { ...original.payment, collectedGrosze: 9_999 } },
+    ]
+    for (const malformed of malformedAppointments) {
+      const db = await withEncryptedPaymentReplay(
+        appointment.clientId, input.idempotencyKey,
+        { status: 200, body: { data: { appointment: malformed } } },
+      )
+      await expect(recordAppointmentPayment({ ...input, db, idFactory: vi.fn() }))
+        .rejects.toThrow('CRYPTO_FAILURE')
+    }
+  })
+
   it('supports exact remainder and derives latest by received time rather than insertion', async () => {
     const appointment = await seedAppointment('noshow')
     const firstInput = await paymentInput(appointment, { body: {
@@ -315,25 +471,34 @@ describe('appointment payment capture', () => {
     })
 
     const boundaryAppointment = await seedAppointment()
-    const receivedAt = '2027-01-15T07:00:00.000Z'
-    const entries = Array.from({ length: 999 }, (_, index) => ({
-      id: `pay_boundary_${sequence}_${String(index).padStart(4, '0')}`,
-      amountGrosze: 1, method: 'cash', receivedAt,
-    }))
-    const boundary = await seedPaymentGraph(boundaryAppointment, entries)
+    const boundary = await seedContiguousPayments(boundaryAppointment, 999)
     const result = await recordAppointmentPayment(await paymentInput(boundary, {
       nowMs: NOW_MS + 3_000,
-      body: { ...BODY, expectedVersion: 2, amountGrosze: 1 },
+      body: { ...BODY, expectedVersion: 1_000, amountGrosze: 1 },
     }))
     expect(result.body.data.appointment.paymentEntries).toHaveLength(1_000)
+    expect(result.body.data.appointment.version).toBe(1_001)
     const idFactory = vi.fn()
     await expect(recordAppointmentPayment(await paymentInput(
       result.body.data.appointment, {
         nowMs: NOW_MS + 4_000, idFactory,
-        body: { ...BODY, expectedVersion: 3, amountGrosze: 1 },
+        body: { ...BODY, expectedVersion: 1_001, amountGrosze: 1 },
       },
     ))).rejects.toThrow('PAYMENT_AMOUNT_CONFLICT')
     expect(idFactory).not.toHaveBeenCalled()
+
+    await env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      `ver_contiguous_gap_${sequence}`, 'appointment', boundary.id, 1_003, '{}',
+      OWNER.id, new Date(NOW_MS + 4_001).toISOString(), BASE.correlationId,
+    ).run()
+    await expect(recordAppointmentPayment(await paymentInput(
+      result.body.data.appointment, {
+        nowMs: NOW_MS + 5_000, idFactory: vi.fn(),
+        body: { ...BODY, expectedVersion: 1_001, amountGrosze: 1 },
+      },
+    ))).rejects.toThrow('NOT_FOUND')
   })
 
   it('rejects stale, nonbillable, overpay, guessed, and unauthorized targets before IDs', async () => {
@@ -395,6 +560,22 @@ describe('appointment payment capture', () => {
       .rejects.toThrow(/identity_collision/)
     expect(await env.DB.prepare('SELECT count(*) AS count FROM payment_entries WHERE appointment_id=?')
       .bind(collisionTarget.id).first()).toEqual({ count: 0 })
+
+    for (const kind of ['version', 'audit']) {
+      const target = await seedAppointment()
+      const existing = kind === 'version'
+        ? (await env.DB.prepare('SELECT id FROM record_versions ORDER BY id LIMIT 1').first()).id
+        : (await env.DB.prepare('SELECT id FROM audit_events ORDER BY id LIMIT 1').first()).id
+      const suffix = existing.slice(4)
+      const generatedIds = kind === 'version'
+        ? [`payment_${kind}_${sequence}`, suffix, `payment_${kind}_audit_${sequence}`]
+        : [`payment_${kind}_${sequence}`, `payment_${kind}_version_${sequence}`, suffix]
+      await expect(recordAppointmentPayment(await paymentInput(target, {
+        idFactory: () => generatedIds.shift(),
+      }))).rejects.toThrow(/identity_collision/)
+      expect(await env.DB.prepare('SELECT count(*) AS count FROM payment_entries WHERE appointment_id=?')
+        .bind(target.id).first()).toEqual({ count: 0 })
+    }
   })
 
   it('classifies concurrent overpay with at most one winner and no failed residue', async () => {
@@ -416,6 +597,202 @@ describe('appointment payment capture', () => {
     expect(await env.DB.prepare(`SELECT count(*) AS count FROM idempotency_records
       WHERE operation='appointments.payment' AND resource_id=?`).bind(appointment.clientId).first())
       .toEqual({ count: 1 })
+  })
+
+  it('preserves invariant failure precedence when an overpay race combines retained corruption', async () => {
+    const appointment = await seedAppointment()
+    let injected = false
+    let corrupt = false
+    const db = {
+      prepare(sql) {
+        const prepared = env.DB.prepare(sql)
+        if (!sql.includes('FROM client_assignments AS assignment')) return prepared
+        return { bind(...bindings) {
+          const bound = prepared.bind(...bindings)
+          return { async all() {
+            const result = await bound.all()
+            return corrupt ? { ...result, results: result.results.map((row, index) => (
+              index === 0 ? { ...row, record_version_type: 'client' } : row
+            )) } : result
+          } }
+        } }
+      },
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          await recordAppointmentPayment({
+            db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+            nowMs: NOW_MS + 10_000, correlationId: BASE.correlationId,
+            idFactory: suffixes(`payment_combined_winner_${++sequence}`),
+            appointmentId: appointment.id,
+            body: { ...BODY, expectedVersion: 1, amountGrosze: 12_000 },
+            idempotencyKey: `payment-combined-winner-${sequence}`,
+          })
+          corrupt = true
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    const error = await recordAppointmentPayment(await paymentInput(appointment, {
+      db, nowMs: NOW_MS + 10_000,
+      body: { ...BODY, expectedVersion: 1, amountGrosze: 12_000 },
+      idempotencyKey: `payment-combined-loser-${sequence}`,
+    })).catch((caught) => caught)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toMatch(/^D1_ERROR:/)
+    expect(error.message).not.toBe('PAYMENT_AMOUNT_CONFLICT')
+    expect(await env.DB.prepare('SELECT count(*) AS count FROM payment_entries WHERE appointment_id=?')
+      .bind(appointment.id).first()).toEqual({ count: 1 })
+  })
+
+  it('recovers an injected same-key winner with one ordinary proof and exactly two reserve reads', async () => {
+    const appointment = await seedAppointment()
+    const key = `payment-injected-winner-${sequence}`
+    const body = { ...BODY, expectedVersion: 1, amountGrosze: 5_000 }
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    let recoveryReads = 0
+    const recoveryDb = { prepare(sql) {
+      recoveryReads += 1
+      return budget.recovery.prepare(sql)
+    } }
+    let injected = false
+    let winner
+    const db = {
+      prepare: (sql) => budget.work.prepare(sql),
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          winner = await recordAppointmentPayment({
+            db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+            nowMs: NOW_MS + 10_000, correlationId: BASE.correlationId,
+            idFactory: suffixes(`payment_injected_winner_${++sequence}`),
+            appointmentId: appointment.id, body, idempotencyKey: key,
+          })
+        }
+        return budget.work.batch(statements)
+      },
+    }
+    const loser = await recordAppointmentPayment({
+      db, recoveryDb, actor: OWNER, keyring: await ring(), nowMs: NOW_MS + 10_000,
+      correlationId: BASE.correlationId,
+      idFactory: suffixes(`payment_injected_loser_${++sequence}`),
+      appointmentId: appointment.id, body, idempotencyKey: key,
+    })
+    expect(loser).toEqual(winner)
+    expect(recoveryReads).toBe(2)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 17, remaining: 33, workRemaining: 25,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('fails closed for missing keys, wrong stored scope, retained corruption, and cancellation', async () => {
+    const missingKeyAppointment = await seedAppointment()
+    const missingInput = await paymentInput(missingKeyAppointment)
+    await recordAppointmentPayment(missingInput)
+    const missingKeyDb = { prepare(sql) {
+      if (sql.includes('FROM data_keys')) return {
+        bind() { return { first: async () => null } },
+      }
+      return env.DB.prepare(sql)
+    }, batch: (statements) => env.DB.batch(statements) }
+    await expect(recordAppointmentPayment({ ...missingInput, db: missingKeyDb,
+      idFactory: vi.fn() })).rejects.toThrow('CRYPTO_FAILURE')
+
+    const wrongScopeAppointment = await seedAppointment()
+    const wrongInput = await paymentInput(wrongScopeAppointment)
+    await recordAppointmentPayment(wrongInput)
+    const wrongScopeDb = { prepare(sql) {
+      const prepared = env.DB.prepare(sql)
+      if (!sql.includes('SELECT request_hash,resource_type,resource_id,response_envelope')) {
+        return prepared
+      }
+      return { bind(...bindings) {
+        const bound = prepared.bind(...bindings)
+        return { async first() {
+          const row = await bound.first()
+          return { ...row, resource_id: missingKeyAppointment.clientId }
+        } }
+      } }
+    }, batch: (statements) => env.DB.batch(statements) }
+    await expect(recordAppointmentPayment({ ...wrongInput, db: wrongScopeDb,
+      idFactory: vi.fn() }))
+      .rejects.toThrow('CRYPTO_FAILURE')
+
+    const crossType = await seedAppointment()
+    await env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      `ver_payment_cross_type_${++sequence}`, 'client', crossType.id, 99, '{}',
+      OWNER.id, new Date(NOW_MS + 1).toISOString(), BASE.correlationId,
+    ).run()
+    await expect(recordAppointmentPayment(await paymentInput(crossType, {
+      idFactory: vi.fn(),
+    }))).rejects.toThrow('NOT_FOUND')
+
+    const cancelled = await seedAppointment('scheduled')
+    await cancelAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 1_000, correlationId: BASE.correlationId,
+      idFactory: suffixes(`payment_cancelled_${++sequence}`), appointmentId: cancelled.id,
+      body: { expectedVersion: 1 }, idempotencyKey: `payment-cancelled-${sequence}-key`,
+    })
+    await expect(recordAppointmentPayment(await paymentInput(cancelled, {
+      idFactory: vi.fn(),
+    }))).rejects.toThrow('NOT_FOUND')
+  })
+
+  it('authenticates every retained client, assignment, appointment, charge, and correction row', async () => {
+    const cases = [
+      ['FROM record_versions WHERE entity_id=?\n   ORDER BY version,id LIMIT 257',
+        (row) => ({ ...row, snapshot_envelope: '{}' })],
+      ['FROM client_assignments AS assignment',
+        (row) => ({ ...row, record_version_type: 'client' })],
+      ['FROM record_versions WHERE entity_id=? ORDER BY version,id LIMIT 4097',
+        (row) => ({ ...row, entity_type: 'client' })],
+    ]
+    for (const [needle, mutate] of cases) {
+      const appointment = await seedAppointment()
+      const idFactory = vi.fn()
+      await expect(recordAppointmentPayment(await paymentInput(appointment, {
+        db: withCorruptedAll(needle, mutate), idFactory,
+      }))).rejects.toThrow('NOT_FOUND')
+      expect(idFactory).not.toHaveBeenCalled()
+    }
+
+    const chargeAppointment = await seedAppointment()
+    const chargeDb = { prepare(sql) {
+      const prepared = env.DB.prepare(sql)
+      if (!sql.includes('LIMIT 258')) return prepared
+      return { bind(...bindings) {
+        const bound = prepared.bind(...bindings)
+        return { async all() {
+          const result = await bound.all()
+          return { ...result, results: result.results.map((row, index) => (
+            index === 0 ? { ...row, entity_type: 'client' } : row
+          )) }
+        } }
+      } }
+    }, batch: (statements) => env.DB.batch(statements) }
+    await expect(recordAppointmentPayment(await paymentInput(chargeAppointment, {
+      db: chargeDb, idFactory: vi.fn(),
+    }))).rejects.toThrow('NOT_FOUND')
+
+    const correctionAppointment = await seedAppointment()
+    const correctedAt = new Date(NOW_MS + 500).toISOString()
+    const marker = sequence
+    const corrected = await seedPaymentGraph(correctionAppointment, [
+      { id: `pay_corrupt_reason_${marker}`, amountGrosze: 1, method: 'cash',
+        receivedAt: BODY.receivedAt, createdAt: correctedAt },
+    ], [{ id: `cor_corrupt_reason_${marker}`,
+      reversedEntryId: `pay_corrupt_reason_${marker}`,
+      replacementEntryId: null, createdAt: correctedAt }])
+    await expect(recordAppointmentPayment(await paymentInput(corrected, {
+      db: withCorruptedAll('FROM payment_entries AS payment',
+        (row) => ({ ...row, reason_envelope: '{}' })),
+      nowMs: NOW_MS + 2_000, body: { ...BODY, expectedVersion: 2, amountGrosze: 1 },
+      idFactory: vi.fn(),
+    }))).rejects.toThrow('NOT_FOUND')
   })
 
   it('rolls back every one of the exact six batch statements byte-for-byte', async () => {
@@ -474,7 +851,9 @@ describe('appointment payment capture', () => {
     )
     expect(response.status).toBe(200)
     expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
-    expect(usageForD1QueryBudgetViews(views.work, views.recovery).used)
-      .toBeLessThanOrEqual(23)
+    expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
+      used: 14, remaining: 36, workRemaining: 28,
+      totalLimit: 50, recoveryReserve: 8,
+    })
   })
 })
