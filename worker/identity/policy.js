@@ -24,7 +24,7 @@ const ROLE_CAPABILITIES = Object.freeze({
 const nonempty = (value) => typeof value === 'string'
   && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
 const staffId = (value) => typeof value === 'string'
-  && /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(value)
+  && /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value)
 
 const captureFields = (value, keys) => {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null

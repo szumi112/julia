@@ -1,4 +1,5 @@
-const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const INVALID_NAME = /[\p{Cc}\p{Cf}]/u
 
 const denied = () => {
@@ -16,7 +17,7 @@ const acceptedName = (value) => {
 
 const acceptedSpecialistId = (value, required) => {
   if (value === null && !required) return null
-  if (typeof value !== 'string' || !ID.test(value)) denied()
+  if (typeof value !== 'string' || !SPECIALIST_ID.test(value)) denied()
   return value
 }
 
@@ -33,7 +34,7 @@ const acceptedShellRole = (sessionUser) => {
     if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) denied()
     actor[key] = descriptor.value
   }
-  if (typeof actor.id !== 'string' || !ID.test(actor.id)
+  if (typeof actor.id !== 'string' || !STAFF_ID.test(actor.id)
     || !Number.isSafeInteger(actor.version) || actor.version < 1) denied()
   const name = acceptedName(actor.displayName)
   const shared = { authorityVersion: actor.version }

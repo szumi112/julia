@@ -1,6 +1,6 @@
 import { isAppointmentId, isClientId, isSpecialistId } from '../../src/core-records.js'
 
-const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ROLES = new Set(['owner', 'coordinator', 'specialist'])
 const notFound = () => { throw new Error('NOT_FOUND') }
 const cryptoFailure = () => { throw new Error('CRYPTO_FAILURE') }
@@ -45,8 +45,10 @@ const exactRow = (value, keys) => {
 
 const first = async (db, sql, bindings) => {
   try {
-    if (!db?.prepare) cryptoFailure()
-    return await db.prepare(sql).bind(...bindings).first()
+    if (db === null || typeof db !== 'object') cryptoFailure()
+    const prepare = db.prepare
+    if (typeof prepare !== 'function') cryptoFailure()
+    return await Reflect.apply(prepare, db, [sql]).bind(...bindings).first()
   } catch {
     cryptoFailure()
   }

@@ -254,10 +254,10 @@ const acceptedActor = (value) => {
   const actor = captureExactObject(value, [
     'id', 'displayName', 'role', 'specialistId', 'version',
   ])
-  if (!actor || !validId(actor.id) || !validText(actor.displayName, 120)
+  if (!actor || !STAFF_ID.test(actor.id) || !validText(actor.displayName, 120)
     || !ROLES.has(actor.role) || !positive(actor.version)
-    || (actor.specialistId !== null && !validId(actor.specialistId))
-    || (actor.role === 'specialist' && !validId(actor.specialistId))) {
+    || (actor.specialistId !== null && !SPECIALIST_ID.test(actor.specialistId))
+    || (actor.role === 'specialist' && !SPECIALIST_ID.test(actor.specialistId))) {
     return null
   }
   return Object.freeze({

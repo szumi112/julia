@@ -147,4 +147,66 @@ describe('core authorization resource facts', () => {
     }))).rejects.toThrow(/^NOT_FOUND$/)
     expect(db.calls).toHaveLength(0)
   })
+
+  it('rejects cross-typed and oversized actor identifiers before SQL', async () => {
+    for (const actor of [
+      { id: `stf_${'a'.repeat(125)}`, role: 'owner', specialistId: null },
+      { id: 'sp_actor', role: 'owner', specialistId: null },
+      { id: 'stf_owner', role: 'owner', specialistId: 'stf_profile' },
+    ]) {
+      const db = fakeDb()
+      await expect(loadAppointmentResourceFact(db, actor, 'apt_one')).rejects.toThrow(/^NOT_FOUND$/)
+      expect(db.calls).toHaveLength(0)
+    }
+
+    const boundaryDb = fakeDb({ appointment_id: 'apt_one', specialist_id: 'sp_other' })
+    await expect(loadAppointmentResourceFact(boundaryDb, {
+      id: `stf_${'a'.repeat(124)}`, role: 'owner', specialistId: `sp_${'a'.repeat(125)}`,
+    }, 'apt_one')).resolves.toEqual({
+      kind: 'appointment', appointmentId: 'apt_one', specialistId: 'sp_other',
+    })
+    expect(boundaryDb.calls).toHaveLength(1)
+  })
+
+  it('captures db.prepare once with its receiver and contains hostile database access', async () => {
+    let reads = 0
+    let calls = 0
+    const db = {}
+    Object.defineProperty(db, 'prepare', {
+      get() {
+        reads += 1
+        if (reads > 1) throw new Error('prepare-reread-secret')
+        return function prepare(sql) {
+          expect(this).toBe(db)
+          calls += 1
+          return {
+            bind: (...bindings) => ({
+              first: async () => {
+                expect(sql).toContain('FROM appointments a')
+                expect(bindings).toEqual(['apt_one'])
+                return { appointment_id: 'apt_one', specialist_id: 'sp_other' }
+              },
+            }),
+          }
+        }
+      },
+    })
+    await expect(loadAppointmentResourceFact(db, owner, 'apt_one')).resolves.toEqual({
+      kind: 'appointment', appointmentId: 'apt_one', specialistId: 'sp_other',
+    })
+    expect(reads).toBe(1)
+    expect(calls).toBe(1)
+
+    const throwing = {}
+    Object.defineProperty(throwing, 'prepare', {
+      get() { throw new Error('prepare-getter-secret') },
+    })
+    const target = {}
+    const revoked = Proxy.revocable(target, {})
+    revoked.revoke()
+    for (const hostile of [throwing, revoked.proxy]) {
+      await expect(loadAppointmentResourceFact(hostile, owner, 'apt_one'))
+        .rejects.toThrow(/^CRYPTO_FAILURE$/)
+    }
+  })
 })

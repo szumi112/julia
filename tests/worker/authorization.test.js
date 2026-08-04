@@ -28,6 +28,11 @@ describe('authorization matrix', () => {
       'client.operational.read', 'clinical.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
     ])
     expect(capabilitiesForActor({ id: 'stf_unknown', role: 'unknown', specialistId: null })).toEqual([])
+    expect(capabilitiesForActor({
+      id: `stf_${'a'.repeat(124)}`,
+      role: 'specialist',
+      specialistId: `sp_${'a'.repeat(125)}`,
+    })).toEqual(capabilitiesForActor(ACTORS.specialist))
   })
 
   it.each([
@@ -118,6 +123,14 @@ describe('authorization matrix', () => {
     }
     for (const actor of [ACTORS.owner, ACTORS.coordinator]) expect(authorize(actor, 'tus.manage', { kind: 'tus_group', groupId: 'tus_1', leaderSpecialistIds: [] }, { nowMs: NOW_MS })).toBe(false)
     expect(authorize(ACTORS.owner, 'staff.manage', centre, { nowMs: -1 })).toBe(false)
+    for (const actor of [
+      { id: `stf_${'a'.repeat(125)}`, role: 'owner', specialistId: null },
+      { id: 'sp_actor', role: 'owner', specialistId: null },
+      { id: 'stf_owner', role: 'owner', specialistId: 'stf_profile' },
+    ]) {
+      expect(capabilitiesForActor(actor)).toEqual([])
+      expect(authorize(actor, 'staff.manage', centre, { nowMs: NOW_MS })).toBe(false)
+    }
   })
 
   it.each([

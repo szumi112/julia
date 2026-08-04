@@ -646,11 +646,28 @@ test('requires and freezes the exact positive authority revision actor shape', a
   assert.equal(Object.isFrozen(session.actor), true)
   assert.deepEqual(Reflect.ownKeys(session.actor).sort(), ['displayName', 'id', 'role', 'specialistId', 'version'])
 
+  const boundaryActor = {
+    id: `stf_${'a'.repeat(124)}`,
+    displayName: 'Anna Graniczna',
+    role: 'specialist',
+    specialistId: `sp_${'a'.repeat(125)}`,
+    version: 1,
+  }
+  const boundary = queuedFetch(jsonResponse(sessionBody({
+    actor: boundaryActor,
+    capabilities: [...capabilitiesForActor(boundaryActor)],
+  })))
+  assert.deepEqual((await createApiClient({ fetchImpl: boundary.fetchImpl }).getSession()).actor, boundaryActor)
+
   for (const mutate of [
     (actor) => { delete actor.version },
     (actor) => { actor.version = 0 },
     (actor) => { actor.version = 1.5 },
     (actor) => { actor.extra = true },
+    (actor) => { actor.id = 'sp_owner' },
+    (actor) => { actor.id = `stf_${'a'.repeat(125)}` },
+    (actor) => { actor.specialistId = 'stf_profile' },
+    (actor) => { actor.specialistId = `sp_${'a'.repeat(126)}` },
   ]) {
     const body = structuredClone(sessionBody())
     mutate(body.data.actor)

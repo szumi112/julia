@@ -16,7 +16,8 @@ export async function getSession({
   loadDataKey: loadKey = loadDataKey,
 } = {}) {
   if (!db?.prepare || principal?.kind !== 'human' || typeof principal.subject !== 'string'
-    || !actor?.id || !Number.isSafeInteger(actor.version) || !Number.isSafeInteger(nowMs)) denied()
+    || !actor?.id || !Number.isSafeInteger(actor.version) || actor.version < 1
+    || !Number.isSafeInteger(nowMs)) denied()
   const row = await db.prepare(
     `SELECT display_name_envelope
      FROM staff_users

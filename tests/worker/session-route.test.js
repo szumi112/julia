@@ -65,6 +65,34 @@ async function fixture(suffix = 'owner', {
 }
 
 describe('/api/v1/session route', () => {
+  it.each([0, -1])('rejects actor version %s before any D1 read', async (version) => {
+    let reads = 0
+    const db = {
+      prepare() {
+        reads += 1
+        throw new Error('must-not-read')
+      },
+    }
+    await expect(getSession({
+      db,
+      config,
+      principal: { kind: 'human', subject: 'access-session-version' },
+      actor: { id: 'stf_session_version', role: 'owner', specialistId: null, version },
+      cryptoContext: {},
+      nowMs: NOW_MS,
+    })).rejects.toThrow(/^ACCESS_DENIED$/)
+    expect(reads).toBe(0)
+
+    await expect(getSession({
+      db: env.DB,
+      config,
+      principal: { kind: 'human', subject: 'access-session-version' },
+      actor: { id: 'stf_session_version', role: 'owner', specialistId: null, version },
+      cryptoContext: {},
+      nowMs: NOW_MS,
+    })).rejects.toThrow(/^ACCESS_DENIED$/)
+  })
+
   it('revalidates the actor row, decrypts only the display name, and binds exact CSRF expiry', async () => {
     const cryptoContext = await fixture('owner')
     const result = await getSession({

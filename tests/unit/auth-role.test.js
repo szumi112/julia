@@ -47,6 +47,20 @@ test('maps each accepted backend role to the exact shell role', () => {
     psychId: 'sp_specialist',
     scope: 'own',
   })
+  assert.deepEqual(shellRoleFor({
+    id: `stf_${'a'.repeat(124)}`,
+    displayName: 'Anna Graniczna',
+    role: 'specialist',
+    specialistId: `sp_${'a'.repeat(125)}`,
+    version: 1,
+  }), {
+    authorityVersion: 1,
+    id: 'therapist',
+    label: 'Specjalista',
+    name: 'Anna Graniczna',
+    psychId: `sp_${'a'.repeat(125)}`,
+    scope: 'own',
+  })
 })
 
 test('fails closed with one fixed authorization error for malformed actors', () => {
@@ -66,6 +80,10 @@ test('fails closed with one fixed authorization error for malformed actors', () 
     { ...valid, version: 0 },
     { ...valid, version: 1.5 },
     { ...valid, extra: true },
+    { ...valid, id: 'sp_owner' },
+    { ...valid, id: `stf_${'a'.repeat(125)}` },
+    { ...valid, specialistId: 'stf_profile' },
+    { ...valid, specialistId: `sp_${'a'.repeat(126)}` },
   ]
 
   for (const actor of invalidActors) {
