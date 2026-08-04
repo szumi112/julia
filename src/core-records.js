@@ -61,12 +61,12 @@ export const isVersionId = (value) => typeof value === 'string' && ids.version.t
 export const isAuditId = (value) => typeof value === 'string' && ids.audit.test(value)
 
 export const assertId = (value, kind, field = `${kind}Id`) => {
-  if (!ids[kind]?.test(value)) fail(field)
+  if (typeof value !== 'string' || !ids[kind]?.test(value)) fail(field)
   return value
 }
 
 export const assertNfcTrimmed = (value, { field = 'string', minBytes = 1, maxBytes }) => {
-  if (typeof value !== 'string' || value !== value.trim() || value !== value.normalize('NFC')) fail(field)
+  if (typeof value !== 'string' || /[\uD800-\uDFFF]/.test(value) || value !== value.trim() || value !== value.normalize('NFC')) fail(field)
   const bytes = encoder.encode(value).byteLength
   if (bytes < minBytes || bytes > maxBytes) fail(field)
   return value
@@ -111,6 +111,7 @@ export const assertClientStatusTransition = (from, to) => {
   if (!clientStatuses.has(from) || !clientStatuses.has(to)) fail('status')
   if (from === to) fail('status')
   if (from === 'archived') fail('status', 'CLIENT_STATUS_CONFLICT')
+  if (to === 'archived') fail('status')
   return to
 }
 
@@ -121,7 +122,7 @@ export const assertAppointmentStatus = (value, { cancellation = false } = {}) =>
 
 export const assertAppointmentTransition = (from, to, { cancellation = false } = {}) => {
   if (!appointmentStatuses.has(from) || !appointmentStatuses.has(to)) fail('status')
-  if (from === 'cancelled') fail('status', 'APPOINTMENT_STATUS_CONFLICT')
+  if (from === 'cancelled') fail('status')
   if (from === to) fail('status')
   if (to === 'cancelled') {
     if (!cancellation) fail('status')
@@ -129,6 +130,15 @@ export const assertAppointmentTransition = (from, to, { cancellation = false } =
   }
   if (cancellation || !editableAppointmentStatuses.has(to)) fail('status')
   return to
+}
+
+export const assertAppointmentPaymentTransition = ({ fromStatus, toStatus, previousAmountGrosze, nextAmountGrosze, collectedGrosze, cancellation = false }) => {
+  assertInteger(previousAmountGrosze, 'expectedAmountGrosze', 1, MAX_GROSZE)
+  assertInteger(nextAmountGrosze, 'expectedAmountGrosze', 1, MAX_GROSZE)
+  if (!Number.isSafeInteger(collectedGrosze) || collectedGrosze < 0) fail('amountGrosze')
+  if ((!isBillable({ status: toStatus }) || nextAmountGrosze < collectedGrosze) && collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
+  assertAppointmentTransition(fromStatus, toStatus, { cancellation })
+  return toStatus
 }
 
 export const isCanonicalUtc = (value) => {
@@ -184,8 +194,8 @@ export const warsawDateFromUtc = (instant) => warsawDateTimeFromUtc(instant).dat
 // Find the unique UTC instant whose Warsaw wall-clock parts equal the request.
 // Enumerating legal IANA offsets keeps nonexistent/ambiguous DST times explicit.
 export const warsawDateTimeToUtc = (date, time) => {
-  const { year, month, day } = dateParts(date)
-  assertWallTime(time)
+  const { year, month, day } = dateParts(date, 'dateTime')
+  assertWallTime(time, 'dateTime')
   const [hour, minute] = time.split(':').map(Number)
   const localMs = Date.UTC(year, month - 1, day, hour, minute)
   const candidates = []
@@ -238,7 +248,7 @@ export const validateWarsawDateWindow = (from, to) => {
   const start = dateParts(from, 'from')
   const end = dateParts(to, 'to')
   const span = Math.round((Date.UTC(end.year, end.month - 1, end.day) - Date.UTC(start.year, start.month - 1, start.day)) / 86_400_000) + 1
-  if (span < 1 || span > 93) fail('window')
+  if (span < 1 || span > 93) fail('to')
   return {
     from,
     to,
@@ -251,16 +261,19 @@ export const validateWarsawDateWindow = (from, to) => {
 export const warsawNoonToUtc = (paidDate) => warsawDateTimeToUtc(assertCivilDate(paidDate, 'paidDate'), '12:00')
 
 export const assertAssignment = (value) => {
-  assertExactObject(value, ['id', 'clientId', 'specialistId', 'startsAt', 'endsAt', 'version'])
+  assertExactObject(value, ['id', 'clientId', 'specialistId', 'startsAt', 'endsAt', 'version', 'assignedByStaffId', 'createdAt', 'updatedAt'])
   assertId(value.id, 'assignment')
   assertId(value.clientId, 'client')
   assertId(value.specialistId, 'specialist')
+  assertId(value.assignedByStaffId, 'opaque', 'assignedByStaffId')
   assertCanonicalUtc(value.startsAt, 'startsAt')
   if (value.endsAt !== null) {
     assertCanonicalUtc(value.endsAt, 'endsAt')
     if (value.endsAt <= value.startsAt) fail('endsAt')
   }
   assertInteger(value.version, 'version', 1, Number.MAX_SAFE_INTEGER)
+  assertCanonicalUtc(value.createdAt, 'createdAt')
+  assertCanonicalUtc(value.updatedAt, 'updatedAt')
   return { ...value }
 }
 
@@ -268,10 +281,25 @@ export const assertEffectiveAssignment = (assignments, clientId, specialistId, a
   assertId(clientId, 'client')
   assertId(specialistId, 'specialist')
   assertCanonicalUtc(at, 'startsAt')
-  const assignment = assignments.find((item) => item.clientId === clientId
+  if (!Array.isArray(assignments)) fail('assignment')
+  const matching = assignments.map(assertAssignment).filter((item) => item.clientId === clientId
     && item.specialistId === specialistId && item.startsAt <= at && (item.endsAt === null || at < item.endsAt))
-  if (!assignment) fail('assignment')
-  return assignment
+  if (matching.length !== 1) fail('assignment', 'CLIENT_ASSIGNMENT_CONFLICT')
+  return matching[0]
+}
+
+export const assertReassignment = ({ assignments, appointments, clientId, newSpecialistId, commandNow }) => {
+  assertId(clientId, 'client')
+  assertId(newSpecialistId, 'specialist', 'specialistId')
+  assertCanonicalUtc(commandNow, 'commandNow')
+  if (!Array.isArray(assignments) || !Array.isArray(appointments)) fail('assignment')
+  const open = assignments.map(assertAssignment).filter((item) => item.clientId === clientId && item.endsAt === null)
+  if (open.length !== 1) fail('assignment', 'CLIENT_ASSIGNMENT_CONFLICT')
+  if (open[0].specialistId === newSpecialistId
+    || appointments.some((appointment) => appointment.specialistId === open[0].specialistId && appointment.status !== 'cancelled' && appointment.startsAt >= commandNow)) {
+    fail('assignment', 'CLIENT_ASSIGNMENT_CONFLICT')
+  }
+  return { closedAssignmentId: open[0].id, endsAt: commandNow, specialistId: newSpecialistId, startsAt: commandNow }
 }
 
 export const canArchiveClient = (appointments, commandNow) => {
@@ -280,7 +308,7 @@ export const canArchiveClient = (appointments, commandNow) => {
 }
 
 export const assertClientArchivable = (appointments, commandNow) => {
-  if (!canArchiveClient(appointments, commandNow)) fail('status', 'CLIENT_STATUS_CONFLICT')
+  if (!canArchiveClient(appointments, commandNow)) fail('status', 'CLIENT_ARCHIVE_CONFLICT')
 }
 
 export const hasSpecialistOverlap = (appointments, candidate, { excludeId = null } = {}) => {
@@ -320,14 +348,18 @@ export const validateCorrectionInput = (value) => {
   return { reason, replacement: validatePaymentInput(value.replacement) }
 }
 
-export const assertCorrection = ({ reason, reversedEntry, replacement }) => {
-  assertCorrectionReason(reason)
-  if (!reversedEntry || !isPaymentId(reversedEntry.id) || !isAppointmentId(reversedEntry.appointmentId)) fail('reversedEntry')
-  if (replacement !== null && (!isPaymentId(replacement.id) || replacement.appointmentId !== reversedEntry.appointmentId)) fail('replacement')
+export const assertCorrection = (value) => {
+  assertExactObject(value, ['reason', 'reversedEntry', 'replacement'], 'correction')
+  const reason = assertCorrectionReason(value.reason)
+  const reversedEntry = assertPaymentEntry(value.reversedEntry)
+  if (value.replacement === null) return { reason, reversedEntry, replacement: null }
+  const replacement = assertPaymentEntry(value.replacement)
+  if (replacement.id === reversedEntry.id || replacement.appointmentId !== reversedEntry.appointmentId) fail('replacement')
   return { reason, reversedEntry, replacement }
 }
 
-export const paymentAggregate = ({ status, expectedAmountGrosze, paymentEntries, corrections }) => {
+export const paymentAggregate = ({ appointmentId, status, expectedAmountGrosze, paymentEntries, corrections }) => {
+  assertId(appointmentId, 'appointment')
   if (!appointmentStatuses.has(status)) fail('status')
   assertInteger(expectedAmountGrosze, 'expectedAmountGrosze', 1, MAX_GROSZE)
   if (!Array.isArray(paymentEntries) || !Array.isArray(corrections)) fail('paymentEntries')
@@ -340,22 +372,24 @@ export const paymentAggregate = ({ status, expectedAmountGrosze, paymentEntries,
     if (idsSeen.has(entry.id)) fail('paymentEntries')
     idsSeen.add(entry.id)
   }
-  if (new Set(entries.map((entry) => entry.appointmentId)).size > 1) fail('paymentEntries')
+  if (entries.some((entry) => entry.appointmentId !== appointmentId)) fail('paymentEntries', 'PAYMENT_CORRECTION_CONFLICT')
   const reversed = new Set()
   const replacements = new Set()
   for (const correction of corrections) {
-    const reversedId = correction.reversedEntryId
-    const replacementId = correction.replacementEntryId ?? null
-    if (!idsSeen.has(reversedId) || reversed.has(reversedId) || (replacementId !== null && (!idsSeen.has(replacementId) || replacements.has(replacementId) || reversed.has(replacementId)))) fail('correction')
+    assertExactObject(correction, ['id', 'reversedEntryId', 'replacementEntryId', 'createdAt'], 'correction')
+    assertId(correction.id, 'correction')
+    assertCanonicalUtc(correction.createdAt, 'createdAt')
+    const reversedId = assertId(correction.reversedEntryId, 'payment', 'reversedEntryId')
+    const replacementId = correction.replacementEntryId === null ? null : assertId(correction.replacementEntryId, 'payment', 'replacementEntryId')
+    if (!idsSeen.has(reversedId) || reversed.has(reversedId) || replacementId === reversedId || (replacementId !== null && (!idsSeen.has(replacementId) || replacements.has(replacementId) || reversed.has(replacementId)))) fail('correction', 'PAYMENT_CORRECTION_CONFLICT')
     const original = entries.find((entry) => entry.id === reversedId)
     const replacement = replacementId === null ? null : entries.find((entry) => entry.id === replacementId)
-    if (replacement && replacement.appointmentId !== original.appointmentId) fail('correction')
+    if (replacement && replacement.appointmentId !== original.appointmentId) fail('correction', 'PAYMENT_CORRECTION_CONFLICT')
     reversed.add(reversedId)
     if (replacementId) replacements.add(replacementId)
   }
   const effective = entries.filter((entry) => !reversed.has(entry.id))
   const collectedGrosze = effective.reduce((total, entry) => total + entry.amountGrosze, 0)
-  if (!isBillable({ status }) && collectedGrosze !== 0) fail('payment', 'PAYMENT_STATUS_CONFLICT')
   if (collectedGrosze > expectedAmountGrosze) fail('amountGrosze', 'PAYMENT_AMOUNT_CONFLICT')
   const latest = effective.toSorted((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.id.localeCompare(b.id)).at(-1) ?? null
   if (!isBillable({ status })) return { status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0, latestMethod: null, latestReceivedAt: null }
@@ -368,67 +402,84 @@ export const paymentAggregate = ({ status, expectedAmountGrosze, paymentEntries,
   }
 }
 
-export const clientDto = (client, assignment = client.assignment ?? null) => ({
-  id: client.id,
-  name: client.name,
-  age: client.age,
-  status: client.status,
-  version: client.version,
-  archivedAt: client.archivedAt ?? null,
-  createdAt: client.createdAt,
-  updatedAt: client.updatedAt,
-  readOnly: client.status === 'archived',
-  assignment: assignment === null ? null : { id: assignment.id, specialistId: assignment.specialistId, startsAt: assignment.startsAt, version: assignment.version },
-})
-
-export const clientCompatibilityDto = (client, assignment = client.assignment ?? null) => ({
-  ...clientDto(client, assignment),
-  email: '', phone: '', notes: [], familyId: null, familyRole: null,
-})
-
-export const appointmentDto = (appointment) => {
-  const payment = paymentAggregate({
-    status: appointment.status,
-    expectedAmountGrosze: appointment.expectedAmountGrosze,
-    paymentEntries: appointment.paymentEntries ?? [],
-    corrections: appointment.corrections ?? [],
-  })
-  const correctionsByEntry = new Map((appointment.corrections ?? []).map((correction) => [correction.reversedEntryId, correction]))
-  return {
-    id: appointment.id,
-    clientId: appointment.clientId,
-    specialistId: appointment.specialistId,
-    serviceId: appointment.serviceId,
-    startsAt: appointment.startsAt,
-    endsAt: appointment.endsAt,
-    timeZone: WARSAW_TIME_ZONE,
-    location: appointment.location ?? null,
-    status: appointment.status,
-    source: 'panel',
-    version: appointment.version ?? 1,
-    cancelledAt: appointment.cancelledAt ?? null,
-    createdAt: appointment.createdAt ?? null,
-    updatedAt: appointment.updatedAt ?? null,
-    charge: { id: appointment.chargeId ?? null, serviceId: appointment.serviceId, expectedAmountGrosze: appointment.expectedAmountGrosze, currency: 'PLN', version: appointment.chargeVersion ?? 1 },
-    payment,
-    paymentEntries: (appointment.paymentEntries ?? []).map((entry) => {
-      const correction = correctionsByEntry.get(entry.id)
-      return {
-        id: entry.id,
-        amountGrosze: entry.amountGrosze,
-        method: entry.method,
-        receivedAt: entry.receivedAt,
-        correctedAt: correction?.createdAt ?? entry.correctedAt ?? null,
-        replacementEntryId: correction?.replacementEntryId ?? entry.replacementEntryId ?? null,
-      }
-    }),
-  }
+const assertDtoAssignment = (assignment) => {
+  if (assignment === null) return null
+  assertExactObject(assignment, ['id', 'specialistId', 'startsAt', 'version'], 'client')
+  assertId(assignment.id, 'assignment')
+  assertId(assignment.specialistId, 'specialist')
+  assertCanonicalUtc(assignment.startsAt, 'startsAt')
+  assertInteger(assignment.version, 'version', 1, Number.MAX_SAFE_INTEGER)
+  return { ...assignment }
 }
 
-export const appointmentCompatibilityDto = (appointment) => ({
-  ...appointmentDto(appointment),
-  ...(appointment.client ? { client: clientCompatibilityDto(appointment.client) } : {}),
-})
+export const clientDto = (client) => {
+  assertExactObject(client, ['id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt', 'assignment'], 'client')
+  assertId(client.id, 'client')
+  assertClientIdentity({ name: client.name, age: client.age })
+  assertClientStatus(client.status, { archivable: true })
+  assertInteger(client.version, 'version', 1, Number.MAX_SAFE_INTEGER)
+  assertCanonicalUtc(client.createdAt, 'createdAt')
+  assertCanonicalUtc(client.updatedAt, 'updatedAt')
+  if ((client.status === 'archived') !== (client.archivedAt !== null)) fail('client')
+  if (client.archivedAt !== null) assertCanonicalUtc(client.archivedAt, 'archivedAt')
+  const assignment = assertDtoAssignment(client.assignment)
+  if (client.status === 'archived' && assignment !== null) fail('client')
+  return { ...client, readOnly: client.status === 'archived', assignment }
+}
 
+export const specialistDto = (specialist) => {
+  assertExactObject(specialist, ['id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion'], 'specialist')
+  assertId(specialist.id, 'specialist')
+  assertNfcTrimmed(specialist.displayName, { field: 'displayName', minBytes: 1, maxBytes: 120 })
+  assertInteger(specialist.standardRateGrosze, 'standardRateGrosze', 1, MAX_GROSZE)
+  if (specialist.status !== 'active') fail('specialist')
+  assertInteger(specialist.version, 'version', 1, Number.MAX_SAFE_INTEGER)
+  assertInteger(specialist.staffVersion, 'staffVersion', 1, Number.MAX_SAFE_INTEGER)
+  return { ...specialist }
+}
+
+export const appointmentDto = (appointment) => {
+  assertExactObject(appointment, ['id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone', 'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt', 'charge', 'paymentEntries', 'corrections'], 'appointment')
+  assertId(appointment.id, 'appointment')
+  assertId(appointment.clientId, 'client')
+  assertId(appointment.specialistId, 'specialist')
+  if (!SERVICE_BY_ID[appointment.serviceId]) fail('serviceId')
+  assertCanonicalUtc(appointment.startsAt, 'startsAt')
+  assertCanonicalUtc(appointment.endsAt, 'endsAt')
+  if (appointment.endsAt <= appointment.startsAt || appointment.timeZone !== WARSAW_TIME_ZONE || appointment.source !== 'panel') fail('appointment')
+  assertLocation(appointment.location)
+  assertAppointmentStatus(appointment.status, { cancellation: true })
+  if ((appointment.status === 'cancelled') !== (appointment.cancelledAt !== null)) fail('appointment')
+  if (appointment.cancelledAt !== null) assertCanonicalUtc(appointment.cancelledAt, 'cancelledAt')
+  assertInteger(appointment.version, 'version', 1, Number.MAX_SAFE_INTEGER)
+  assertCanonicalUtc(appointment.createdAt, 'createdAt')
+  assertCanonicalUtc(appointment.updatedAt, 'updatedAt')
+  assertExactObject(appointment.charge, ['id', 'serviceId', 'expectedAmountGrosze', 'currency', 'version'], 'charge')
+  assertId(appointment.charge.id, 'charge')
+  if (appointment.charge.serviceId !== appointment.serviceId || appointment.charge.currency !== 'PLN') fail('charge')
+  assertInteger(appointment.charge.expectedAmountGrosze, 'expectedAmountGrosze', 1, MAX_GROSZE)
+  assertInteger(appointment.charge.version, 'version', 1, Number.MAX_SAFE_INTEGER)
+  const payment = paymentAggregate({ appointmentId: appointment.id, status: appointment.status, expectedAmountGrosze: appointment.charge.expectedAmountGrosze, paymentEntries: appointment.paymentEntries, corrections: appointment.corrections })
+  const correctionsByEntry = new Map(appointment.corrections.map((correction) => [correction.reversedEntryId, correction]))
+  const paymentEntries = appointment.paymentEntries
+    .toSorted((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.id.localeCompare(b.id))
+    .map((entry) => ({ id: entry.id, amountGrosze: entry.amountGrosze, method: entry.method, receivedAt: entry.receivedAt, correctedAt: correctionsByEntry.get(entry.id)?.createdAt ?? null, replacementEntryId: correctionsByEntry.get(entry.id)?.replacementEntryId ?? null }))
+  return { id: appointment.id, clientId: appointment.clientId, specialistId: appointment.specialistId, serviceId: appointment.serviceId, startsAt: appointment.startsAt, endsAt: appointment.endsAt, timeZone: appointment.timeZone, location: appointment.location, status: appointment.status, source: appointment.source, version: appointment.version, cancelledAt: appointment.cancelledAt, createdAt: appointment.createdAt, updatedAt: appointment.updatedAt, charge: { ...appointment.charge }, payment, paymentEntries }
+}
+
+export const legacyClientProjection = (client) => ({ ...clientDto(client), email: '', phone: '', notes: [], familyId: null, familyRole: null, psychId: client.assignment?.specialistId ?? null })
+export const legacyAppointmentProjection = (appointment) => ({ ...appointment, psychId: appointment.specialistId, date: warsawDateFromUtc(appointment.startsAt), time: warsawDateTimeFromUtc(appointment.startsAt).time, duration: Math.round((new Date(appointment.endsAt) - new Date(appointment.startsAt)) / 60_000), amount: appointment.charge.expectedAmountGrosze / 100, payment: appointment.payment.status, paidAmount: appointment.payment.collectedGrosze / 100, method: appointment.payment.latestMethod, paidDate: appointment.payment.latestReceivedAt === null ? null : warsawDateFromUtc(appointment.payment.latestReceivedAt) })
+
+export const clientCompatibilityDto = legacyClientProjection
+export const appointmentCompatibilityDto = legacyAppointmentProjection
 export const toClientDto = clientDto
 export const toAppointmentDto = appointmentDto
+
+export const safeValidationDetails = (run) => {
+  try { run() } catch (error) {
+    const field = String(error?.message ?? '').split('/')[1]
+    const allowed = new Set(['body', 'name', 'age', 'status', 'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes', 'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt', 'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to', 'specialists', 'clients', 'appointments', 'paymentEntries'])
+    return allowed.has(field) ? { field } : null
+  }
+  return null
+}

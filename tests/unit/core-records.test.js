@@ -5,6 +5,9 @@ import {
   appointmentDto,
   addElapsedMinutes,
   assertClientArchivable,
+  assertAppointmentPaymentTransition,
+  assertId,
+  assertReassignment,
   assertAppointmentTransition,
   assertClientStatusTransition,
   assertCorrection,
@@ -17,6 +20,10 @@ import {
   isClientId,
   paymentAggregate,
   clientDto,
+  legacyAppointmentProjection,
+  legacyClientProjection,
+  safeValidationDetails,
+  specialistDto,
   validateAppointmentInput,
   validateClientInput,
   validateCorrectionInput,
@@ -35,6 +42,8 @@ test('core records reject unknown object keys and entity-mismatched identifiers'
   assert.equal(isClientId('sp_abc-123'), false)
   assert.equal(isAppointmentId('apt_abc-123'), true)
   assert.equal(isAppointmentId('cl_abc-123'), false)
+  assert.throws(() => assertId({ toString: () => 'cl_one' }, 'client'), /VALIDATION_FAILED\/clientId/)
+  assert.throws(() => assertNfcTrimmed('\uD800', { field: 'name', minBytes: 1, maxBytes: 120 }), /VALIDATION_FAILED\/name/)
 })
 
 test('command inputs have closed keys and canonical core values', () => {
@@ -65,11 +74,17 @@ test('core records require already trimmed NFC strings and bounded snapshots', (
 
 test('core record status transitions preserve archival and cancellation terminality', () => {
   assert.doesNotThrow(() => assertClientStatusTransition('active', 'paused'))
+  assert.throws(() => assertClientStatusTransition('active', 'archived'), /VALIDATION_FAILED\/status/)
   assert.throws(() => assertClientStatusTransition('archived', 'active'), /CLIENT_STATUS_CONFLICT/)
   assert.doesNotThrow(() => assertAppointmentTransition('scheduled', 'completed'))
   assert.doesNotThrow(() => assertAppointmentTransition('scheduled', 'cancelled', { cancellation: true }))
   assert.throws(() => assertAppointmentTransition('scheduled', 'cancelled'), /VALIDATION_FAILED\/status/)
-  assert.throws(() => assertAppointmentTransition('cancelled', 'completed'), /APPOINTMENT_STATUS_CONFLICT/)
+  assert.throws(() => assertAppointmentTransition('cancelled', 'completed'), /VALIDATION_FAILED\/status/)
+})
+
+test('payment-aware appointment changes use the one frozen conflict code', () => {
+  assert.throws(() => assertAppointmentPaymentTransition({ fromStatus: 'completed', toStatus: 'scheduled', previousAmountGrosze: 18000, nextAmountGrosze: 18000, collectedGrosze: 1 }), /APPOINTMENT_PAYMENT_CONFLICT/)
+  assert.throws(() => assertAppointmentPaymentTransition({ fromStatus: 'completed', toStatus: 'completed', previousAmountGrosze: 18000, nextAmountGrosze: 1, collectedGrosze: 2 }), /APPOINTMENT_PAYMENT_CONFLICT/)
 })
 
 test('specialist intervals are half-open so back-to-back appointments remain valid', () => {
@@ -80,31 +95,35 @@ test('specialist intervals are half-open so back-to-back appointments remain val
 })
 
 test('assignment and client archive rules retain effective history', () => {
-  const assignment = { id: 'asg_one', clientId: 'cl_one', specialistId: 'sp_one', startsAt: '2026-08-01T10:00:00.000Z', endsAt: null, version: 1 }
-  assert.equal(assertEffectiveAssignment([assignment], 'cl_one', 'sp_one', '2026-08-02T10:00:00.000Z'), assignment)
+  const assignment = { id: 'asg_one', clientId: 'cl_one', specialistId: 'sp_one', startsAt: '2026-08-01T10:00:00.000Z', endsAt: null, version: 1, assignedByStaffId: 'staff_one', createdAt: '2026-08-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z' }
+  assert.deepEqual(assertEffectiveAssignment([assignment], 'cl_one', 'sp_one', '2026-08-02T10:00:00.000Z'), assignment)
+  assert.throws(() => assertEffectiveAssignment([assignment, { ...assignment, id: 'asg_two' }], 'cl_one', 'sp_one', '2026-08-02T10:00:00.000Z'), /CLIENT_ASSIGNMENT_CONFLICT/)
+  assert.throws(() => assertReassignment({ assignments: [assignment], appointments: [{ specialistId: 'sp_one', startsAt: '2026-08-03T10:00:00.000Z', status: 'scheduled' }], clientId: 'cl_one', newSpecialistId: 'sp_two', commandNow: '2026-08-02T10:00:00.000Z' }), /CLIENT_ASSIGNMENT_CONFLICT/)
   assert.doesNotThrow(() => assertClientArchivable([{ status: 'cancelled', startsAt: '2026-08-03T10:00:00.000Z' }], '2026-08-02T10:00:00.000Z'))
-  assert.throws(() => assertClientArchivable([{ status: 'scheduled', startsAt: '2026-08-03T10:00:00.000Z' }], '2026-08-02T10:00:00.000Z'), /CLIENT_STATUS_CONFLICT/)
+  assert.throws(() => assertClientArchivable([{ status: 'scheduled', startsAt: '2026-08-03T10:00:00.000Z' }], '2026-08-02T10:00:00.000Z'), /CLIENT_ARCHIVE_CONFLICT/)
   assert.throws(() => validateAppointmentInput({ clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', date: '2026-03-29', time: '02:10', durationMinutes: 50, expectedAmountGrosze: 18000, location: null, status: 'scheduled' }), /VALIDATION_FAILED\/dateTime/)
   assert.throws(() => assertClientStatusTransition('paused', 'paused'), /VALIDATION_FAILED\/status/)
 })
 
 test('payment aggregate excludes reversed entries, uses the last effective entry, and bounds collection', () => {
   const aggregate = paymentAggregate({
+    appointmentId: 'apt_one',
     status: 'completed',
     expectedAmountGrosze: 18000,
     paymentEntries: [
       { id: 'pay_first', appointmentId: 'apt_one', amountGrosze: 5000, method: 'cash', receivedAt: '2026-08-01T10:00:00.000Z' },
       { id: 'pay_replacement', appointmentId: 'apt_one', amountGrosze: 18000, method: 'transfer', receivedAt: '2026-08-02T10:00:00.000Z' },
     ],
-    corrections: [{ reversedEntryId: 'pay_first', replacementEntryId: 'pay_replacement' }],
+    corrections: [{ id: 'cor_one', reversedEntryId: 'pay_first', replacementEntryId: 'pay_replacement', createdAt: '2026-08-02T11:00:00.000Z' }],
   })
   assert.deepEqual(aggregate, {
     status: 'paid', collectedGrosze: 18000, outstandingGrosze: 0,
     latestMethod: 'transfer', latestReceivedAt: '2026-08-02T10:00:00.000Z',
   })
-  assert.throws(() => paymentAggregate({ status: 'completed', expectedAmountGrosze: 100, paymentEntries: [{ id: 'pay_one', appointmentId: 'apt_one', amountGrosze: 101, method: 'cash', receivedAt: '2026-08-01T10:00:00.000Z' }], corrections: [] }), /PAYMENT_AMOUNT_CONFLICT/)
+  assert.throws(() => paymentAggregate({ appointmentId: 'apt_one', status: 'completed', expectedAmountGrosze: 100, paymentEntries: [{ id: 'pay_one', appointmentId: 'apt_one', amountGrosze: 101, method: 'cash', receivedAt: '2026-08-01T10:00:00.000Z' }], corrections: [] }), /PAYMENT_AMOUNT_CONFLICT/)
+  assert.throws(() => paymentAggregate({ appointmentId: 'apt_one', status: 'completed', expectedAmountGrosze: 100, paymentEntries: [{ id: 'pay_one', appointmentId: 'apt_other', amountGrosze: 1, method: 'cash', receivedAt: '2026-08-01T10:00:00.000Z' }], corrections: [] }), /PAYMENT_CORRECTION_CONFLICT/)
   assert.throws(() => assertCorrection({ reason: ' ', reversedEntry: { id: 'pay_one', appointmentId: 'apt_one' }, replacement: null }), /VALIDATION_FAILED\/reason/)
-  assert.throws(() => assertCorrection({ reason: 'Zwrot', reversedEntry: { id: 'pay_one', appointmentId: 'apt_one' }, replacement: { id: 'pay_two', appointmentId: 'apt_other' } }), /VALIDATION_FAILED\/replacement/)
+  assert.throws(() => assertCorrection({ reason: 'Zwrot', reversedEntry: { id: 'pay_one', appointmentId: 'apt_one', amountGrosze: 1, method: 'cash', receivedAt: '2026-08-01T10:00:00.000Z' }, replacement: { id: 'pay_two', appointmentId: 'apt_other', amountGrosze: 1, method: 'cash', receivedAt: '2026-08-01T10:00:00.000Z' } }), /VALIDATION_FAILED\/replacement/)
   assert.deepEqual(validateCorrectionInput({ reason: 'Zwrot', replacement: { amountGrosze: 5000, method: 'card', receivedAt: '2026-08-03T10:00:00.000Z' } }), {
     reason: 'Zwrot', replacement: { amountGrosze: 5000, method: 'card', receivedAt: '2026-08-03T10:00:00.000Z' },
   })
@@ -129,17 +148,20 @@ test('Warsaw inclusive date windows have exact 1..93 day bounds', () => {
     from: '2026-03-29', to: '2026-03-29', startsAt: '2026-03-28T23:00:00.000Z', endsAt: '2026-03-29T22:00:00.000Z', timeZone: 'Europe/Warsaw',
   })
   assert.doesNotThrow(() => validateWarsawDateWindow('2026-01-01', '2026-04-03'))
-  assert.throws(() => validateWarsawDateWindow('2026-01-01', '2026-04-04'), /VALIDATION_FAILED\/window/)
+  assert.throws(() => validateWarsawDateWindow('2026-01-01', '2026-04-04'), /VALIDATION_FAILED\/to/)
+  assert.deepEqual(safeValidationDetails(() => validateWarsawDateWindow('bad', '2026-01-01')), { field: 'from' })
+  assert.deepEqual(safeValidationDetails(() => validateAppointmentInput({ clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', date: '2026-03-29', time: '02:30', durationMinutes: 50, expectedAmountGrosze: 18000, location: null, status: 'scheduled' })), { field: 'dateTime' })
 })
 
-test('paid dates use unambiguous Warsaw noon and compatibility DTOs mark archived clients readonly', () => {
+test('canonical DTOs fail closed and separate legacy projections derive frontend fields', () => {
   assert.equal(warsawNoonToUtc('2026-08-04'), '2026-08-04T10:00:00.000Z')
   assert.equal(warsawNoonToUtc('2026-01-04'), '2026-01-04T11:00:00.000Z')
-  assert.deepEqual(appointmentCompatibilityDto({
-    id: 'apt_one', clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', startsAt: '2026-08-04T07:15:00.000Z', endsAt: '2026-08-04T08:05:00.000Z',
-    status: 'completed', expectedAmountGrosze: 18000, paymentEntries: [], corrections: [], client: { id: 'cl_one', name: 'Ada', age: 8, status: 'archived', version: 2, archivedAt: '2026-08-01T10:00:00.000Z', createdAt: '2026-01-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z' },
-  }).client.readOnly, true)
-  const client = { id: 'cl_one', name: 'Ada', age: 8, status: 'archived', version: 2, archivedAt: '2026-08-01T10:00:00.000Z', createdAt: '2026-01-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z' }
+  const client = { id: 'cl_one', name: 'Ada', age: 8, status: 'archived', version: 2, archivedAt: '2026-08-01T10:00:00.000Z', createdAt: '2026-01-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z', assignment: null }
   assert.deepEqual(Object.keys(clientDto(client)).sort(), ['age', 'archivedAt', 'assignment', 'createdAt', 'id', 'name', 'readOnly', 'status', 'updatedAt', 'version'])
-  assert.deepEqual(Object.keys(appointmentDto({ id: 'apt_one', clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', startsAt: '2026-08-04T07:15:00.000Z', endsAt: '2026-08-04T08:05:00.000Z', status: 'scheduled', expectedAmountGrosze: 18000 })).sort(), ['cancelledAt', 'charge', 'clientId', 'createdAt', 'endsAt', 'id', 'location', 'payment', 'paymentEntries', 'serviceId', 'source', 'specialistId', 'startsAt', 'status', 'timeZone', 'updatedAt', 'version'])
+  assert.throws(() => appointmentDto({ id: 'apt_one' }), /VALIDATION_FAILED\/appointment/)
+  assert.throws(() => clientDto({ ...client, assignment: { id: 'asg_one' } }), /VALIDATION_FAILED\/client/)
+  assert.deepEqual(specialistDto({ id: 'sp_one', displayName: 'Ada', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 2 }).id, 'sp_one')
+  assert.equal(legacyClientProjection(client).email, '')
+  const dto = appointmentDto({ id: 'apt_one', clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', startsAt: '2026-08-04T07:15:00.000Z', endsAt: '2026-08-04T08:05:00.000Z', timeZone: 'Europe/Warsaw', location: null, status: 'completed', source: 'panel', version: 1, cancelledAt: null, createdAt: '2026-08-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z', charge: { id: 'chg_one', serviceId: 'zajecia', expectedAmountGrosze: 18000, currency: 'PLN', version: 1 }, paymentEntries: [{ id: 'pay_one', appointmentId: 'apt_one', amountGrosze: 18000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }], corrections: [] })
+  assert.deepEqual(legacyAppointmentProjection(dto), { ...dto, psychId: 'sp_one', date: '2026-08-04', time: '09:15', duration: 50, amount: 180, payment: 'paid', paidAmount: 180, method: 'card', paidDate: '2026-08-04' })
 })
