@@ -29,7 +29,7 @@ import { getSession } from './routes/session.js'
 import { getStaff, postDeactivation, postInvitation } from './routes/staff.js'
 import { getWorkspace } from './routes/workspace.js'
 import { postClient, postClientArchive, postClientEdit } from './routes/clients.js'
-import { postAppointment } from './routes/appointments.js'
+import { postAppointment, postAppointmentEdit } from './routes/appointments.js'
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
 import { loadDataKey } from './security/envelope.js'
 import { createKeyring } from './security/keyring.js'
@@ -419,6 +419,20 @@ export function createApp(deps = {}) {
       ...(deps.createAppointment ? { create: deps.createAppointment } : {}),
     }
     const result = await (deps.postAppointment ?? postAppointment)(input)
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/appointments/:appointmentId/edits', async (c) => {
+    if (c.get('routeId') !== 'appointments.edit') throw new AppError('NOT_FOUND')
+    const input = {
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+      appointmentId: c.req.param('appointmentId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.editAppointment ? { edit: deps.editAppointment } : {}),
+    }
+    const result = await (deps.postAppointmentEdit ?? postAppointmentEdit)(input)
     return c.json(result.body, result.status)
   })
   app.options('/api/v1/session', (c) => new Response(null, {

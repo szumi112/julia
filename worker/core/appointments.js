@@ -6,7 +6,7 @@ import {
   inspectStoredScopeIdempotency,
   recoverStoredScopeIdempotencyAfterCollision,
 } from '../db/unit-of-work.js'
-import { isD1IdentityCollision } from '../db/errors.js'
+import { isD1CoreDirectoryInvariantFailure, isD1IdentityCollision } from '../db/errors.js'
 import { authorize } from '../identity/policy.js'
 import { specialistPostcondition } from '../identity/specialists.js'
 import { auditEventStatement } from '../audit/events.js'
@@ -24,16 +24,20 @@ import {
   isAuditId,
   isChargeId,
   isClientId,
+  isCorrectionId,
   isOpaqueId,
+  isPaymentId,
   isSpecialistId,
   isVersionId,
   validateAppointmentInput,
 } from '../../src/core-records.js'
+import { SERVICE_BY_ID } from '../../src/services.js'
 
 const BODY_KEYS = Object.freeze([
   'clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes',
   'expectedAmountGrosze', 'location', 'status',
 ])
+const EDIT_BODY_KEYS = Object.freeze(['expectedVersion', ...BODY_KEYS.slice(1)])
 const INPUT_KEYS = Object.freeze([
   'db', 'recoveryDb', 'actor', 'keyring', 'nowMs', 'correlationId', 'idFactory',
   'body', 'idempotencyKey',
@@ -42,6 +46,7 @@ const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const OPERATION = 'appointments.create'
+const EDIT_OPERATION = 'appointments.edit'
 const ROUTE_TARGET = 'POST /api/v1/appointments'
 const PROSPECTIVE_APPOINTMENT_ID = 'apt_authorization_target'
 const DAY_MS = 86_400_000
@@ -83,6 +88,93 @@ export function validateCreateAppointmentBody(value) {
       : null
     if (typeof message === 'string' && /^VALIDATION_FAILED\//.test(message)) throw error
     validation('body')
+  }
+}
+
+export function validateEditAppointmentBody(value) {
+  const captured = captureExact(value, EDIT_BODY_KEYS)
+  if (!Number.isSafeInteger(captured.expectedVersion) || captured.expectedVersion < 1) {
+    validation('expectedVersion')
+  }
+  const appointment = validateCreateAppointmentBody(Object.freeze({
+    clientId: 'cl_edit_validation',
+    specialistId: captured.specialistId,
+    serviceId: captured.serviceId,
+    date: captured.date,
+    time: captured.time,
+    durationMinutes: captured.durationMinutes,
+    expectedAmountGrosze: captured.expectedAmountGrosze,
+    location: captured.location,
+    status: captured.status,
+  }))
+  return Object.freeze({
+    expectedVersion: captured.expectedVersion,
+    specialistId: appointment.specialistId,
+    serviceId: appointment.serviceId,
+    date: appointment.date,
+    time: appointment.time,
+    durationMinutes: appointment.durationMinutes,
+    expectedAmountGrosze: appointment.expectedAmountGrosze,
+    location: appointment.location,
+    status: appointment.status,
+    startsAt: appointment.startsAt,
+    endsAt: appointment.endsAt,
+    timeZone: appointment.timeZone,
+  })
+}
+
+const digestEditNormalized = async (appointmentId, body) => {
+  const encoded = new TextEncoder().encode(JSON.stringify({
+    body: {
+      date: body.date,
+      durationMinutes: body.durationMinutes,
+      endsAt: body.endsAt,
+      expectedAmountGrosze: body.expectedAmountGrosze,
+      expectedVersion: body.expectedVersion,
+      location: body.location,
+      serviceId: body.serviceId,
+      specialistId: body.specialistId,
+      startsAt: body.startsAt,
+      status: body.status,
+      time: body.time,
+      timeZone: body.timeZone,
+    },
+    route: `POST /api/v1/appointments/${appointmentId}/edits`,
+  }))
+  let digest
+  try {
+    digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded))
+    return encodeBase64Url(digest)
+  } finally {
+    encoded.fill(0)
+    digest?.fill(0)
+  }
+}
+
+export async function digestEditAppointmentRequest(appointmentId, value) {
+  if (typeof appointmentId !== 'string' || !isAppointmentId(appointmentId)) {
+    validation('appointmentId')
+  }
+  return digestEditNormalized(appointmentId, validateEditAppointmentBody(value))
+}
+
+export function assertAppointmentPaymentTransition(value) {
+  const fact = captureExact(value, [
+    'currentStatus', 'currentAmountGrosze', 'proposedStatus',
+    'proposedAmountGrosze', 'collectedGrosze',
+  ], () => { throw new Error('INTERNAL_ERROR') })
+  if (!['scheduled', 'completed', 'noshow'].includes(fact.currentStatus)
+    || !['scheduled', 'completed', 'noshow'].includes(fact.proposedStatus)
+    || !Number.isSafeInteger(fact.currentAmountGrosze) || fact.currentAmountGrosze < 1
+    || !Number.isSafeInteger(fact.proposedAmountGrosze) || fact.proposedAmountGrosze < 1
+    || !Number.isSafeInteger(fact.collectedGrosze) || fact.collectedGrosze < 0) {
+    throw new Error('INTERNAL_ERROR')
+  }
+  if (fact.collectedGrosze > 0
+    && (!['completed', 'noshow'].includes(fact.proposedStatus)
+      || fact.proposedAmountGrosze < fact.currentAmountGrosze
+      || fact.proposedAmountGrosze < fact.collectedGrosze)) {
+    throw new Error('APPOINTMENT_PAYMENT_CONFLICT')
   }
 }
 
@@ -880,6 +972,1091 @@ export async function createAppointment(input) {
     try { proof = await overlapProof(command.db, guardValues) } catch { throw originalError }
     const fact = captureExact(proof, ['proven'], cryptoFailure)
     if (fact.proven === 1) throw new Error('APPOINTMENT_OVERLAP')
+    throw originalError
+  }
+}
+
+const EDIT_INPUT_KEYS = Object.freeze([
+  ...INPUT_KEYS.slice(0, 7), 'appointmentId', ...INPUT_KEYS.slice(7),
+])
+
+const captureEditCommand = (input) => {
+  const captured = captureExact(input, EDIT_INPUT_KEYS)
+  if (!captured.db?.prepare || !captured.db?.batch || !captured.recoveryDb?.prepare
+    || !captured.keyring || typeof captured.idFactory !== 'function'
+    || !Number.isSafeInteger(captured.nowMs) || captured.nowMs < 0
+    || typeof captured.correlationId !== 'string' || !CORRELATION_ID.test(captured.correlationId)
+    || typeof captured.idempotencyKey !== 'string'
+    || !IDEMPOTENCY_KEY.test(captured.idempotencyKey)) validation('body')
+  if (typeof captured.appointmentId !== 'string'
+    || !isAppointmentId(captured.appointmentId)) validation('appointmentId')
+  return Object.freeze({
+    ...captured,
+    body: validateEditAppointmentBody(captured.body),
+  })
+}
+
+const versionConflict = (currentVersion) => {
+  const error = new Error('VERSION_CONFLICT')
+  Object.defineProperty(error, 'details', {
+    enumerable: true,
+    value: Object.freeze({ currentVersion }),
+  })
+  throw error
+}
+
+const loadScopedAppointmentForEdit = (db, appointmentId, body, actor) => db.prepare(
+  `SELECT appointment.id,appointment.client_id,appointment.specialist_id,
+          appointment.service_id,appointment.starts_at,appointment.ends_at,
+          appointment.time_zone,appointment.location,appointment.status,
+          appointment.source,appointment.version,appointment.cancelled_at,
+          appointment.created_at,appointment.updated_at,
+          charge.id AS charge_id,charge.appointment_id AS charge_appointment_id,
+          charge.service_id AS charge_service_id,
+          charge.expected_amount_grosze,charge.currency,
+          charge.version AS charge_version,charge.created_at AS charge_created_at,
+          charge.updated_at AS charge_updated_at,
+          client.identity_envelope,client.status AS client_status,
+          client.version AS client_version,client.archived_at,
+          client.created_at AS client_created_at,client.updated_at AS client_updated_at,
+          assignment.id AS assignment_id,assignment.specialist_id AS assignment_specialist_id,
+          assignment.starts_at AS assignment_starts_at,assignment.ends_at AS assignment_ends_at,
+          assignment.assigned_by_staff_id,assignment.version AS assignment_version,
+          assignment.created_at AS assignment_created_at,
+          assignment.updated_at AS assignment_updated_at,
+          practitioner.staff_user_id AS practitioner_staff_id
+   FROM appointments AS appointment
+   JOIN session_charges AS charge ON charge.appointment_id=appointment.id
+   JOIN clients AS client ON client.id=appointment.client_id
+   JOIN client_assignments AS assignment ON assignment.client_id=client.id
+     AND assignment.specialist_id=? AND assignment.starts_at<=?
+     AND (assignment.ends_at IS NULL OR ?<assignment.ends_at)
+   JOIN specialists AS practitioner ON practitioner.id=assignment.specialist_id
+     AND practitioner.status='active'
+   JOIN staff_users AS practitioner_staff
+     ON practitioner_staff.id=practitioner.staff_user_id
+    AND practitioner_staff.specialist_id=practitioner.id
+    AND practitioner_staff.status='active'
+   WHERE appointment.id=? AND appointment.status IN ('scheduled','completed','noshow')
+     AND appointment.cancelled_at IS NULL
+     AND client.status IN ('active','paused') AND client.archived_at IS NULL
+     AND (? IN ('owner','coordinator')
+       OR (?='specialist' AND ?=practitioner.id))
+     AND (SELECT count(*) FROM session_charges AS exact_charge
+       WHERE exact_charge.appointment_id=appointment.id)=1
+     AND (SELECT count(*) FROM client_assignments AS effective
+       WHERE effective.client_id=client.id AND effective.starts_at<=?
+         AND (effective.ends_at IS NULL OR ?<effective.ends_at))=1`
+).bind(
+  body.specialistId, body.startsAt, body.startsAt, appointmentId,
+  actor.role, actor.role, actor.specialistId, body.startsAt, body.startsAt,
+).first()
+
+const editScopedFact = (value, appointmentId, body) => {
+  const row = captureExact(value, [
+    'id', 'client_id', 'specialist_id', 'service_id', 'starts_at', 'ends_at',
+    'time_zone', 'location', 'status', 'source', 'version', 'cancelled_at',
+    'created_at', 'updated_at', 'charge_id', 'charge_appointment_id',
+    'charge_service_id', 'expected_amount_grosze', 'currency', 'charge_version',
+    'charge_created_at', 'charge_updated_at', 'identity_envelope', 'client_status',
+    'client_version', 'archived_at', 'client_created_at', 'client_updated_at',
+    'assignment_id', 'assignment_specialist_id', 'assignment_starts_at',
+    'assignment_ends_at', 'assigned_by_staff_id', 'assignment_version',
+    'assignment_created_at', 'assignment_updated_at', 'practitioner_staff_id',
+  ], notFound)
+  try { assertLocation(row.location) } catch { notFound() }
+  if (row.id !== appointmentId || !isClientId(row.client_id)
+    || !isSpecialistId(row.specialist_id) || !SERVICE_BY_ID[row.service_id]
+    || !canonicalInstant(row.starts_at) || !canonicalInstant(row.ends_at)
+    || row.ends_at <= row.starts_at || row.time_zone !== 'Europe/Warsaw'
+    || !['scheduled', 'completed', 'noshow'].includes(row.status)
+    || row.source !== 'panel' || !Number.isSafeInteger(row.version) || row.version < 1
+    || row.cancelled_at !== null || !canonicalInstant(row.created_at)
+    || !canonicalInstant(row.updated_at) || row.updated_at < row.created_at
+    || !isChargeId(row.charge_id) || row.charge_appointment_id !== appointmentId
+    || row.charge_service_id !== row.service_id
+    || !Number.isSafeInteger(row.expected_amount_grosze)
+    || row.expected_amount_grosze < 1 || row.expected_amount_grosze > 1_000_000
+    || row.currency !== 'PLN' || !Number.isSafeInteger(row.charge_version)
+    || row.charge_version < 1 || !canonicalInstant(row.charge_created_at)
+    || !canonicalInstant(row.charge_updated_at)
+    || row.charge_updated_at < row.charge_created_at
+    || typeof row.identity_envelope !== 'string'
+    || !['active', 'paused'].includes(row.client_status)
+    || !Number.isSafeInteger(row.client_version) || row.client_version < 1
+    || row.archived_at !== null || !canonicalInstant(row.client_created_at)
+    || !canonicalInstant(row.client_updated_at)
+    || !isAssignmentId(row.assignment_id)
+    || row.assignment_specialist_id !== body.specialistId
+    || !canonicalInstant(row.assignment_starts_at)
+    || (row.assignment_ends_at !== null
+      && (!canonicalInstant(row.assignment_ends_at)
+        || row.assignment_ends_at <= row.assignment_starts_at))
+    || !(row.assignment_starts_at <= body.startsAt
+      && (row.assignment_ends_at === null || body.startsAt < row.assignment_ends_at))
+    || typeof row.assigned_by_staff_id !== 'string' || !STAFF_ID.test(row.assigned_by_staff_id)
+    || !Number.isSafeInteger(row.assignment_version) || row.assignment_version < 1
+    || !canonicalInstant(row.assignment_created_at)
+    || !canonicalInstant(row.assignment_updated_at)
+    || typeof row.practitioner_staff_id !== 'string'
+    || !STAFF_ID.test(row.practitioner_staff_id)) notFound()
+  return Object.freeze({
+    appointment: Object.freeze({
+      id: row.id, clientId: row.client_id, specialistId: row.specialist_id,
+      serviceId: row.service_id, startsAt: row.starts_at, endsAt: row.ends_at,
+      timeZone: row.time_zone, location: row.location, status: row.status,
+      source: row.source, version: row.version, cancelledAt: null,
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    }),
+    charge: Object.freeze({
+      id: row.charge_id, appointmentId: row.id, serviceId: row.charge_service_id,
+      expectedAmountGrosze: row.expected_amount_grosze, currency: row.currency,
+      version: row.charge_version, createdAt: row.charge_created_at,
+      updatedAt: row.charge_updated_at,
+    }),
+    client: Object.freeze({
+      id: row.client_id, identityEnvelope: row.identity_envelope,
+      status: row.client_status, version: row.client_version, archivedAt: null,
+      createdAt: row.client_created_at, updatedAt: row.client_updated_at,
+      assignment: Object.freeze({
+        id: row.assignment_id, clientId: row.client_id,
+        specialistId: row.assignment_specialist_id, startsAt: row.assignment_starts_at,
+        endsAt: row.assignment_ends_at, assignedByStaffId: row.assigned_by_staff_id,
+        version: row.assignment_version, createdAt: row.assignment_created_at,
+        updatedAt: row.assignment_updated_at,
+      }),
+    }),
+    practitionerStaffId: row.practitioner_staff_id,
+  })
+}
+
+const loadEntityVersions = (db, entityId) => db.prepare(
+  `SELECT id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+          changed_at,correlation_id
+   FROM record_versions WHERE entity_id=? ORDER BY version,id LIMIT 258`
+).bind(entityId).all()
+
+const retainedVersionRows = (value, entityType, entityId, currentVersion) => {
+  const rows = resultRows(value)
+  if (rows.length !== currentVersion || rows.length < 1 || rows.length > 257) notFound()
+  const ids = new Set()
+  return rows.map((candidate, index) => {
+    const row = captureExact(candidate, [
+      'id', 'entity_type', 'entity_id', 'version', 'snapshot_envelope',
+      'changed_by_staff_id', 'changed_at', 'correlation_id',
+    ], notFound)
+    if (!isVersionId(row.id) || ids.has(row.id) || row.entity_type !== entityType
+      || row.entity_id !== entityId || row.version !== index + 1
+      || typeof row.snapshot_envelope !== 'string'
+      || typeof row.changed_by_staff_id !== 'string' || !STAFF_ID.test(row.changed_by_staff_id)
+      || !canonicalInstant(row.changed_at) || typeof row.correlation_id !== 'string'
+      || !isOpaqueId(row.correlation_id)) notFound()
+    ids.add(row.id)
+    return Object.freeze(row)
+  })
+}
+
+const decryptRetainedSnapshot = async (context, entityId, envelope) => {
+  try {
+    const plaintext = await decryptForScope(context.keyring, context.dataKey, {
+      expectedScope: context.scope, recordId: entityId, field: 'record_version',
+      envelope: JSON.parse(envelope),
+    })
+    const parsed = JSON.parse(plaintext)
+    if (JSON.stringify(parsed) !== plaintext) notFound()
+    return parsed
+  } catch (error) {
+    if (error instanceof Error && error.message === 'NOT_FOUND') throw error
+    notFound()
+  }
+}
+
+const paymentAggregateFor = (status, amount, collected) => Object.freeze({
+  status: collected === 0 ? 'unpaid' : collected === amount ? 'paid' : 'partial',
+  collectedGrosze: collected,
+  outstandingGrosze: ['completed', 'noshow'].includes(status) ? amount - collected : 0,
+})
+
+const authenticateAppointmentVersions = async (context, current, aggregate, value) => {
+  const rows = retainedVersionRows(value, 'appointment', current.id, current.version)
+  let previousUpdatedAt = null
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]
+    const snapshot = captureExact(
+      await decryptRetainedSnapshot(context, current.id, row.snapshot_envelope),
+      [
+        'cancelledAt', 'clientId', 'createdAt', 'endsAt', 'id', 'location',
+        'paymentAggregate', 'schema', 'serviceId', 'source', 'specialistId',
+        'startsAt', 'status', 'timeZone', 'updatedAt', 'version',
+      ],
+      notFound,
+    )
+    const payment = captureExact(snapshot.paymentAggregate, [
+      'collectedGrosze', 'outstandingGrosze', 'status',
+    ], notFound)
+    try { assertLocation(snapshot.location) } catch { notFound() }
+    if (snapshot.schema !== 'appointment.v1' || snapshot.id !== current.id
+      || snapshot.clientId !== current.clientId || snapshot.source !== current.source
+      || snapshot.createdAt !== current.createdAt || snapshot.version !== row.version
+      || !isSpecialistId(snapshot.specialistId) || !SERVICE_BY_ID[snapshot.serviceId]
+      || !canonicalInstant(snapshot.startsAt) || !canonicalInstant(snapshot.endsAt)
+      || snapshot.endsAt <= snapshot.startsAt || snapshot.timeZone !== 'Europe/Warsaw'
+      || !['scheduled', 'completed', 'noshow'].includes(snapshot.status)
+      || snapshot.cancelledAt !== null || snapshot.updatedAt !== row.changed_at
+      || (previousUpdatedAt !== null && snapshot.updatedAt <= previousUpdatedAt)
+      || !['unpaid', 'partial', 'paid'].includes(payment.status)
+      || !Number.isSafeInteger(payment.collectedGrosze) || payment.collectedGrosze < 0
+      || !Number.isSafeInteger(payment.outstandingGrosze) || payment.outstandingGrosze < 0) {
+      notFound()
+    }
+    previousUpdatedAt = snapshot.updatedAt
+    if (index === rows.length - 1 && (
+      snapshot.specialistId !== current.specialistId
+      || snapshot.serviceId !== current.serviceId || snapshot.startsAt !== current.startsAt
+      || snapshot.endsAt !== current.endsAt || snapshot.location !== current.location
+      || snapshot.status !== current.status || snapshot.updatedAt !== current.updatedAt
+      || payment.status !== aggregate.status
+      || payment.collectedGrosze !== aggregate.collectedGrosze
+      || payment.outstandingGrosze !== aggregate.outstandingGrosze
+    )) notFound()
+  }
+}
+
+const authenticateChargeVersions = async (context, current, value) => {
+  const rows = retainedVersionRows(value, 'session_charge', current.id, current.version)
+  let previousUpdatedAt = null
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index]
+    const snapshot = captureExact(
+      await decryptRetainedSnapshot(context, current.id, row.snapshot_envelope),
+      [
+        'appointmentId', 'createdAt', 'currency', 'expectedAmountGrosze', 'id',
+        'schema', 'serviceId', 'updatedAt', 'version',
+      ],
+      notFound,
+    )
+    if (snapshot.schema !== 'session_charge.v1' || snapshot.id !== current.id
+      || snapshot.appointmentId !== current.appointmentId
+      || snapshot.currency !== 'PLN' || snapshot.createdAt !== current.createdAt
+      || snapshot.version !== row.version || !SERVICE_BY_ID[snapshot.serviceId]
+      || !Number.isSafeInteger(snapshot.expectedAmountGrosze)
+      || snapshot.expectedAmountGrosze < 1 || snapshot.expectedAmountGrosze > 1_000_000
+      || snapshot.updatedAt !== row.changed_at
+      || (previousUpdatedAt !== null && snapshot.updatedAt <= previousUpdatedAt)) notFound()
+    previousUpdatedAt = snapshot.updatedAt
+    if (index === rows.length - 1 && (
+      snapshot.serviceId !== current.serviceId
+      || snapshot.expectedAmountGrosze !== current.expectedAmountGrosze
+      || snapshot.updatedAt !== current.updatedAt
+    )) notFound()
+  }
+}
+
+const loadPaymentHistory = (db, appointmentId) => db.prepare(
+  `SELECT payment.id,payment.appointment_id,payment.amount_grosze,payment.method,
+          payment.received_at,payment.recorded_by_staff_id,
+          payment.external_reference_envelope,payment.created_at AS payment_created_at,
+          correction.id AS correction_id,correction.reversed_entry_id,
+          correction.replacement_entry_id,correction.reason_envelope,
+          correction.recorded_by_staff_id AS correction_recorded_by_staff_id,
+          correction.created_at AS corrected_at
+   FROM payment_entries AS payment
+   LEFT JOIN payment_corrections AS correction ON correction.reversed_entry_id=payment.id
+   WHERE payment.appointment_id=? ORDER BY payment.received_at,payment.id LIMIT 1002`
+).bind(appointmentId).all()
+
+const authenticatePaymentHistory = async (context, appointment, charge, value) => {
+  const rows = resultRows(value)
+  if (rows.length > 1_000) notFound()
+  const ids = new Set()
+  const corrections = new Set()
+  const replacements = new Set()
+  const captured = []
+  for (const candidate of rows) {
+    const row = captureExact(candidate, [
+      'id', 'appointment_id', 'amount_grosze', 'method', 'received_at',
+      'recorded_by_staff_id', 'external_reference_envelope', 'payment_created_at',
+      'correction_id', 'reversed_entry_id', 'replacement_entry_id', 'reason_envelope',
+      'correction_recorded_by_staff_id', 'corrected_at',
+    ], notFound)
+    if (!isPaymentId(row.id) || ids.has(row.id) || row.appointment_id !== appointment.id
+      || !Number.isSafeInteger(row.amount_grosze) || row.amount_grosze < 1
+      || row.amount_grosze > 1_000_000
+      || !['cash', 'card', 'transfer', 'monthly'].includes(row.method)
+      || !canonicalInstant(row.received_at) || !canonicalInstant(row.payment_created_at)
+      || row.payment_created_at < appointment.createdAt
+      || row.payment_created_at > appointment.updatedAt
+      || typeof row.recorded_by_staff_id !== 'string' || !STAFF_ID.test(row.recorded_by_staff_id)
+      || row.external_reference_envelope !== null) notFound()
+    ids.add(row.id)
+    const nullCorrection = row.correction_id === null && row.reversed_entry_id === null
+      && row.replacement_entry_id === null && row.reason_envelope === null
+      && row.correction_recorded_by_staff_id === null && row.corrected_at === null
+    if (!nullCorrection) {
+      if (!isCorrectionId(row.correction_id) || corrections.has(row.correction_id)
+        || row.reversed_entry_id !== row.id
+        || (row.replacement_entry_id !== null && (!isPaymentId(row.replacement_entry_id)
+          || replacements.has(row.replacement_entry_id)))
+        || typeof row.reason_envelope !== 'string'
+        || typeof row.correction_recorded_by_staff_id !== 'string'
+        || !STAFF_ID.test(row.correction_recorded_by_staff_id)
+        || !canonicalInstant(row.corrected_at)
+        || row.corrected_at < row.payment_created_at
+        || row.corrected_at > appointment.updatedAt) notFound()
+      corrections.add(row.correction_id)
+      if (row.replacement_entry_id !== null) replacements.add(row.replacement_entry_id)
+      try {
+        const reason = await decryptForScope(context.keyring, context.dataKey, {
+          expectedScope: context.scope, recordId: row.correction_id, field: 'reason',
+          envelope: JSON.parse(row.reason_envelope),
+        })
+        const encoded = new TextEncoder().encode(reason)
+        const valid = typeof reason === 'string' && reason === reason.trim()
+          && reason === reason.normalize('NFC') && encoded.byteLength >= 1
+          && encoded.byteLength <= 500
+        encoded.fill(0)
+        if (!valid) notFound()
+      } catch (error) {
+        if (error instanceof Error && error.message === 'NOT_FOUND') throw error
+        notFound()
+      }
+    }
+    captured.push(Object.freeze(row))
+  }
+  for (const row of captured) {
+    if (row.replacement_entry_id !== null) {
+      const replacement = captured.find(({ id }) => id === row.replacement_entry_id)
+      if (!replacement || replacement.id === row.id
+        || replacement.payment_created_at !== row.corrected_at) notFound()
+    }
+  }
+  const links = new Map(captured.filter(({ replacement_entry_id }) => replacement_entry_id !== null)
+    .map((row) => [row.id, row.replacement_entry_id]))
+  for (const start of links.keys()) {
+    const visited = new Set()
+    let cursor = start
+    while (links.has(cursor)) {
+      if (visited.has(cursor)) notFound()
+      visited.add(cursor)
+      cursor = links.get(cursor)
+    }
+  }
+  const effective = captured.filter(({ correction_id }) => correction_id === null)
+  const collectedGrosze = effective.reduce((sum, row) => {
+    const next = sum + row.amount_grosze
+    if (!Number.isSafeInteger(next)) notFound()
+    return next
+  }, 0)
+  if (collectedGrosze > charge.expectedAmountGrosze
+    || (!['completed', 'noshow'].includes(appointment.status) && collectedGrosze !== 0)) notFound()
+  const latest = effective.at(-1) ?? null
+  const aggregate = paymentAggregateFor(
+    appointment.status, charge.expectedAmountGrosze, collectedGrosze,
+  )
+  return Object.freeze({
+    ...aggregate,
+    latestMethod: latest?.method ?? null,
+    latestReceivedAt: latest?.received_at ?? null,
+    entries: Object.freeze(captured.map((row) => Object.freeze({
+      id: row.id, amountGrosze: row.amount_grosze, method: row.method,
+      receivedAt: row.received_at, correctedAt: row.corrected_at,
+      replacementEntryId: row.replacement_entry_id,
+    }))),
+  })
+}
+
+const editAppointmentDto = (appointment, charge, payment) => Object.freeze({
+  id: appointment.id, clientId: appointment.clientId,
+  specialistId: appointment.specialistId, serviceId: appointment.serviceId,
+  startsAt: appointment.startsAt, endsAt: appointment.endsAt,
+  timeZone: appointment.timeZone, location: appointment.location,
+  status: appointment.status, source: appointment.source, version: appointment.version,
+  cancelledAt: appointment.cancelledAt, createdAt: appointment.createdAt,
+  updatedAt: appointment.updatedAt,
+  charge: Object.freeze({
+    id: charge.id, serviceId: charge.serviceId,
+    expectedAmountGrosze: charge.expectedAmountGrosze,
+    currency: charge.currency, version: charge.version,
+  }),
+  payment: Object.freeze({
+    status: payment.status, collectedGrosze: payment.collectedGrosze,
+    outstandingGrosze: payment.outstandingGrosze,
+    latestMethod: payment.latestMethod, latestReceivedAt: payment.latestReceivedAt,
+  }),
+  paymentEntries: Object.freeze(payment.entries.map((entry) => Object.freeze({ ...entry }))),
+})
+
+const validateEditReplay = (value, appointmentId, request) => {
+  const replay = replayObject(value, ['status', 'body'])
+  const body = replayObject(replay.body, ['data'])
+  const data = replayObject(body.data, ['appointment'])
+  const appointment = replayObject(data.appointment, [
+    'id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone',
+    'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt',
+    'charge', 'payment', 'paymentEntries',
+  ])
+  const charge = replayObject(appointment.charge, [
+    'id', 'serviceId', 'expectedAmountGrosze', 'currency', 'version',
+  ])
+  const payment = replayObject(appointment.payment, [
+    'status', 'collectedGrosze', 'outstandingGrosze', 'latestMethod', 'latestReceivedAt',
+  ])
+  if (replay.status !== 200 || appointment.id !== appointmentId
+    || !isClientId(appointment.clientId) || appointment.specialistId !== request.specialistId
+    || appointment.serviceId !== request.serviceId || appointment.startsAt !== request.startsAt
+    || appointment.endsAt !== request.endsAt || appointment.timeZone !== 'Europe/Warsaw'
+    || appointment.location !== request.location || appointment.status !== request.status
+    || appointment.source !== 'panel' || appointment.version !== request.expectedVersion + 1
+    || appointment.cancelledAt !== null || !canonicalInstant(appointment.createdAt)
+    || !canonicalInstant(appointment.updatedAt) || appointment.updatedAt < appointment.createdAt
+    || !isChargeId(charge.id) || charge.serviceId !== request.serviceId
+    || charge.expectedAmountGrosze !== request.expectedAmountGrosze
+    || charge.currency !== 'PLN' || !Number.isSafeInteger(charge.version) || charge.version < 1
+    || !['unpaid', 'partial', 'paid'].includes(payment.status)
+    || !Number.isSafeInteger(payment.collectedGrosze) || payment.collectedGrosze < 0
+    || payment.collectedGrosze > charge.expectedAmountGrosze
+    || payment.outstandingGrosze !== (['completed', 'noshow'].includes(request.status)
+      ? charge.expectedAmountGrosze - payment.collectedGrosze : 0)
+    || payment.status !== (payment.collectedGrosze === 0 ? 'unpaid'
+      : payment.collectedGrosze === charge.expectedAmountGrosze ? 'paid' : 'partial')
+    || (payment.latestMethod !== null
+      && !['cash', 'card', 'transfer', 'monthly'].includes(payment.latestMethod))
+    || (payment.latestReceivedAt !== null && !canonicalInstant(payment.latestReceivedAt))
+    || !Array.isArray(appointment.paymentEntries)
+    || Reflect.ownKeys(Object.getOwnPropertyDescriptors(appointment.paymentEntries)).length
+      !== appointment.paymentEntries.length + 1) cryptoFailure()
+  const ids = new Set()
+  const entries = appointment.paymentEntries.map((candidate) => {
+    const entry = replayObject(candidate, [
+      'id', 'amountGrosze', 'method', 'receivedAt', 'correctedAt', 'replacementEntryId',
+    ])
+    if (!isPaymentId(entry.id) || ids.has(entry.id)
+      || !Number.isSafeInteger(entry.amountGrosze) || entry.amountGrosze < 1
+      || entry.amountGrosze > 1_000_000
+      || !['cash', 'card', 'transfer', 'monthly'].includes(entry.method)
+      || !canonicalInstant(entry.receivedAt)
+      || (entry.correctedAt !== null && !canonicalInstant(entry.correctedAt))
+      || (entry.replacementEntryId !== null && !isPaymentId(entry.replacementEntryId))) {
+      cryptoFailure()
+    }
+    ids.add(entry.id)
+    return Object.freeze(entry)
+  })
+  for (let index = 1; index < entries.length; index += 1) {
+    if (entries[index - 1].receivedAt > entries[index].receivedAt
+      || (entries[index - 1].receivedAt === entries[index].receivedAt
+        && entries[index - 1].id >= entries[index].id)) cryptoFailure()
+  }
+  for (const entry of entries) {
+    if (entry.replacementEntryId !== null
+      && (!ids.has(entry.replacementEntryId) || entry.replacementEntryId === entry.id)) cryptoFailure()
+  }
+  const effective = entries.filter(({ correctedAt }) => correctedAt === null)
+  const collected = effective.reduce((sum, { amountGrosze }) => sum + amountGrosze, 0)
+  const latest = effective.at(-1) ?? null
+  if (collected !== payment.collectedGrosze
+    || (latest?.method ?? null) !== payment.latestMethod
+    || (latest?.receivedAt ?? null) !== payment.latestReceivedAt) cryptoFailure()
+  const normalizedPayment = Object.freeze({ ...payment, entries: Object.freeze(entries) })
+  return Object.freeze({ status: 200, body: Object.freeze({
+    data: Object.freeze({ appointment: editAppointmentDto(appointment, charge, normalizedPayment) }),
+  }) })
+}
+
+const conditionalVersionStatement = (db, version, conditionSql, bindings) => db.prepare(
+  `INSERT INTO record_versions
+   (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+    changed_at,correlation_id)
+   SELECT ?,?,?,?,?,?,?,? WHERE ${conditionSql}`
+).bind(
+  version.row.id, version.row.entity_type, version.row.entity_id, version.row.version,
+  version.row.snapshot_envelope, version.row.changed_by_staff_id,
+  version.row.changed_at, version.row.correlation_id, ...bindings,
+)
+
+const editGuardStatement = (db, values) => {
+  const assignmentChain = assignmentChainPostcondition(
+    values.client.id, values.appointment.specialistId, values.appointment.startsAt,
+  )
+  const lifecycle = specialistPostcondition(values.practitionerStaffId)
+  return db.prepare(
+    `INSERT INTO core_directory_invariant_failures (failure_kind)
+     SELECT 'appointment_edit_postcondition'
+     WHERE NOT (
+       EXISTS (SELECT 1 FROM appointments WHERE id=? AND client_id=?
+         AND specialist_id=? AND service_id=? AND starts_at=? AND ends_at=?
+         AND time_zone='Europe/Warsaw' AND location IS ? AND status=?
+         AND source=? AND version=? AND cancelled_at IS NULL
+         AND created_at=? AND updated_at=?)
+       AND (SELECT count(*) FROM appointments WHERE id=?)=1
+       AND EXISTS (SELECT 1 FROM session_charges WHERE id=? AND appointment_id=?
+         AND service_id=? AND expected_amount_grosze=? AND currency='PLN'
+         AND version=? AND created_at=? AND updated_at=?)
+       AND (SELECT count(*) FROM session_charges WHERE appointment_id=?)=1
+       AND (SELECT count(*) FROM record_versions
+         WHERE entity_type='appointment' AND entity_id=?)=?
+       AND (SELECT min(version) FROM record_versions
+         WHERE entity_type='appointment' AND entity_id=?)=1
+       AND (SELECT max(version) FROM record_versions
+         WHERE entity_type='appointment' AND entity_id=?)=?
+       AND (SELECT count(*) FROM record_versions
+         WHERE entity_type='session_charge' AND entity_id=?)=?
+       AND (SELECT min(version) FROM record_versions
+         WHERE entity_type='session_charge' AND entity_id=?)=1
+       AND (SELECT max(version) FROM record_versions
+         WHERE entity_type='session_charge' AND entity_id=?)=?
+       AND NOT EXISTS (SELECT 1 FROM record_versions WHERE
+         (entity_id=? AND entity_type!='appointment')
+         OR (entity_id=? AND entity_type!='session_charge'))
+       AND EXISTS (SELECT 1 FROM record_versions WHERE id=?
+         AND entity_type='appointment' AND entity_id=? AND version=?
+         AND changed_by_staff_id=? AND changed_at=? AND correlation_id=?
+         AND json_extract(snapshot_envelope,'$.dataKeyId')=?
+         AND json_extract(snapshot_envelope,'$.dataKeyVersion')=1)
+       ${values.chargeChanged ? `AND EXISTS (SELECT 1 FROM record_versions WHERE id=?
+         AND entity_type='session_charge' AND entity_id=? AND version=?
+         AND changed_by_staff_id=? AND changed_at=? AND correlation_id=?
+         AND json_extract(snapshot_envelope,'$.dataKeyId')=?
+         AND json_extract(snapshot_envelope,'$.dataKeyVersion')=1)` : ''}
+       AND NOT EXISTS (SELECT 1 FROM record_versions WHERE
+         (entity_id IN (?,?) AND (NOT json_valid(snapshot_envelope)
+           OR json_extract(CASE WHEN json_valid(snapshot_envelope)
+                THEN snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+           OR json_extract(CASE WHEN json_valid(snapshot_envelope)
+                THEN snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1)))
+       AND EXISTS (SELECT 1 FROM audit_events WHERE id=? AND actor_staff_id=?
+         AND action='appointment.updated' AND entity_type='appointment' AND entity_id=?
+         AND result='success' AND reason_envelope IS NULL AND correlation_id=?
+         AND metadata_json=?)
+       AND EXISTS (SELECT 1 FROM idempotency_records WHERE actor_id=? AND operation=?
+         AND idempotency_key=? AND resource_type='client' AND resource_id=?
+         AND json_extract(request_hash,'$.dataKeyId')=?
+         AND json_extract(request_hash,'$.dataKeyVersion')=1
+         AND json_extract(response_envelope,'$.dataKeyId')=?
+         AND json_extract(response_envelope,'$.dataKeyVersion')=1)
+       AND EXISTS (SELECT 1 FROM data_keys WHERE id=? AND scope_type='client'
+         AND scope_id=? AND purpose='identity' AND dek_version=1 AND retired_at IS NULL)
+       AND EXISTS (SELECT 1 FROM clients WHERE id=? AND identity_envelope=?
+         AND status IN ('active','paused') AND archived_at IS NULL AND version=?)
+       AND (SELECT count(*) FROM record_versions
+         WHERE entity_type='client' AND entity_id=?)=?
+       AND NOT EXISTS (SELECT 1 FROM record_versions
+         WHERE entity_id=? AND entity_type!='client')
+       AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
+         WHERE retained.client_id=? AND (
+           (SELECT count(*) FROM record_versions AS history
+             WHERE history.entity_type='client_assignment'
+               AND history.entity_id=retained.id)!=retained.version
+           OR (SELECT min(history.version) FROM record_versions AS history
+             WHERE history.entity_type='client_assignment'
+               AND history.entity_id=retained.id)!=1
+           OR (SELECT max(history.version) FROM record_versions AS history
+             WHERE history.entity_type='client_assignment'
+               AND history.entity_id=retained.id)!=retained.version))
+       AND (${assignmentChain.sql})
+       AND EXISTS (SELECT 1 FROM specialists AS specialist JOIN staff_users AS staff
+         ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
+         WHERE specialist.id=? AND specialist.staff_user_id=?
+           AND specialist.status='active' AND staff.status='active')
+       AND NOT EXISTS (SELECT 1 FROM appointments AS other WHERE other.specialist_id=?
+         AND other.id!=? AND other.status!='cancelled'
+         AND other.starts_at<? AND ?<other.ends_at)
+       AND (SELECT count(*) FROM payment_entries WHERE appointment_id=?)=?
+       AND NOT EXISTS (SELECT 1 FROM payment_entries AS payment
+         WHERE payment.appointment_id=? AND (
+           payment.amount_grosze<1 OR payment.amount_grosze>1000000
+           OR payment.method NOT IN ('cash','card','transfer','monthly')
+           OR payment.external_reference_envelope IS NOT NULL
+           OR NOT EXISTS (SELECT 1 FROM staff_users WHERE id=payment.recorded_by_staff_id)))
+       AND NOT EXISTS (SELECT 1 FROM payment_corrections AS correction
+         JOIN payment_entries AS payment ON payment.id=correction.reversed_entry_id
+         WHERE payment.appointment_id=? AND (
+           correction.replacement_entry_id=correction.reversed_entry_id
+           OR NOT json_valid(correction.reason_envelope)
+           OR json_extract(CASE WHEN json_valid(correction.reason_envelope)
+                THEN correction.reason_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+           OR json_extract(CASE WHEN json_valid(correction.reason_envelope)
+                THEN correction.reason_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1
+           OR (correction.replacement_entry_id IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM payment_entries AS replacement
+             WHERE replacement.id=correction.replacement_entry_id
+               AND replacement.appointment_id=payment.appointment_id))))
+       AND (SELECT coalesce(sum(payment.amount_grosze),0) FROM payment_entries AS payment
+         WHERE payment.appointment_id=? AND NOT EXISTS (SELECT 1 FROM payment_corrections
+           WHERE reversed_entry_id=payment.id))=?
+       AND (?=0 OR (? IN ('completed','noshow') AND ?>=?))
+       AND (${lifecycle.sql})
+     )`
+  ).bind(
+    values.appointment.id, values.client.id, values.appointment.specialistId,
+    values.appointment.serviceId, values.appointment.startsAt, values.appointment.endsAt,
+    values.appointment.location, values.appointment.status, values.appointment.source,
+    values.appointment.version, values.appointment.createdAt, values.now,
+    values.appointment.id,
+    values.charge.id, values.appointment.id, values.charge.serviceId,
+    values.charge.expectedAmountGrosze, values.charge.version,
+    values.charge.createdAt, values.charge.updatedAt, values.appointment.id,
+    values.appointment.id, values.appointment.version,
+    values.appointment.id, values.appointment.id, values.appointment.version,
+    values.charge.id, values.charge.version, values.charge.id, values.charge.id,
+    values.charge.version, values.appointment.id, values.charge.id,
+    values.appointmentVersionId, values.appointment.id, values.appointment.version,
+    values.actorId, values.now, values.correlationId, values.dataKeyId,
+    ...(values.chargeChanged ? [
+      values.chargeVersionId, values.charge.id, values.charge.version,
+      values.actorId, values.now, values.correlationId, values.dataKeyId,
+    ] : []),
+    values.appointment.id, values.charge.id, values.dataKeyId,
+    values.auditId, values.actorId, values.appointment.id, values.correlationId,
+    JSON.stringify({
+      appointmentVersion: values.appointment.version,
+      chargeVersion: values.charge.version,
+    }),
+    values.actorId, EDIT_OPERATION, values.idempotencyKey, values.client.id,
+    values.dataKeyId, values.dataKeyId,
+    values.dataKeyId, values.client.id,
+    values.client.id, values.client.identityEnvelope, values.client.version,
+    values.client.id, values.client.version, values.client.id, values.client.id,
+    ...assignmentChain.bindings,
+    values.appointment.specialistId, values.practitionerStaffId,
+    values.appointment.specialistId, values.appointment.id,
+    values.appointment.endsAt, values.appointment.startsAt,
+    values.appointment.id, values.payment.entries.length,
+    values.appointment.id, values.appointment.id, values.dataKeyId,
+    values.appointment.id, values.payment.collectedGrosze,
+    values.payment.collectedGrosze, values.appointment.status,
+    values.charge.expectedAmountGrosze, values.currentCharge.expectedAmountGrosze,
+    ...lifecycle.bindings,
+  )
+}
+
+const loadEditOverlap = (db, body, appointmentId) => db.prepare(
+  `SELECT 1 AS blocked FROM appointments
+   WHERE specialist_id=? AND id!=? AND status!='cancelled'
+     AND starts_at<? AND ?<ends_at LIMIT 1`
+).bind(body.specialistId, appointmentId, body.endsAt, body.startsAt).first()
+
+const editCollisionProof = (db, values) => db.prepare(
+  `SELECT CASE WHEN EXISTS (SELECT 1 FROM idempotency_records
+       WHERE actor_id=? AND operation=? AND idempotency_key=?)
+     THEN 1 ELSE 0 END AS stored,
+   CASE WHEN EXISTS (SELECT 1 FROM record_versions WHERE id IN (?,?))
+       OR EXISTS (SELECT 1 FROM audit_events WHERE id=?)
+     THEN 1 ELSE 0 END AS generated_collision`
+).bind(
+  values.actorId, EDIT_OPERATION, values.idempotencyKey,
+  values.appointmentVersionId, values.chargeVersionId ?? '', values.auditId,
+).first()
+
+const retainedEditState = async (command, actor) => {
+  const retained = editScopedFact(
+    await loadScopedAppointmentForEdit(
+      command.db, command.appointmentId, command.body, actor,
+    ),
+    command.appointmentId,
+    command.body,
+  )
+  if (!authorize(actor, 'appointment.manage', {
+    kind: 'appointment', appointmentId: retained.appointment.id,
+    specialistId: command.body.specialistId,
+  }, { nowMs: command.nowMs })) notFound()
+  const context = await loadClientCryptoContext(command.db, command.keyring, {
+    clientId: retained.client.id, envelope: retained.client.identityEnvelope,
+  })
+  const identity = await decryptClientIdentity(context, {
+    clientId: retained.client.id, envelope: retained.client.identityEnvelope,
+  })
+  await authenticateClientVersions(
+    context, retained.client, identity,
+    await loadClientVersions(command.db, retained.client.id),
+  )
+  await authenticateAssignmentVersions(
+    context, retained.client,
+    await loadAssignmentVersions(command.db, retained.client.id),
+  )
+  const payment = await authenticatePaymentHistory(
+    context, retained.appointment, retained.charge,
+    await loadPaymentHistory(command.db, retained.appointment.id),
+  )
+  await authenticateAppointmentVersions(
+    context,
+    retained.appointment,
+    paymentAggregateFor(
+      retained.appointment.status,
+      retained.charge.expectedAmountGrosze,
+      payment.collectedGrosze,
+    ),
+    await loadEntityVersions(command.db, retained.appointment.id),
+  )
+  await authenticateChargeVersions(
+    context, retained.charge,
+    await loadEntityVersions(command.db, retained.charge.id),
+  )
+  return Object.freeze({ ...retained, context, payment })
+}
+
+const loadRaceClientState = (db, clientId, startsAt) => db.prepare(
+  `SELECT client.id AS client_id,client.identity_envelope,
+          client.status AS client_status,client.version AS client_version,
+          client.archived_at,client.created_at AS client_created_at,
+          client.updated_at AS client_updated_at,assignment.id AS assignment_id,
+          assignment.specialist_id,assignment.starts_at,assignment.ends_at,
+          assignment.assigned_by_staff_id,assignment.version AS assignment_version,
+          assignment.created_at AS assignment_created_at,
+          assignment.updated_at AS assignment_updated_at,
+          specialist.staff_user_id AS practitioner_staff_id,
+          specialist.status AS practitioner_status,
+          staff.specialist_id AS staff_specialist_id,staff.status AS staff_status
+   FROM clients AS client
+   JOIN client_assignments AS assignment ON assignment.client_id=client.id
+     AND assignment.starts_at<=? AND (assignment.ends_at IS NULL OR ?<assignment.ends_at)
+   LEFT JOIN specialists AS specialist ON specialist.id=assignment.specialist_id
+   LEFT JOIN staff_users AS staff ON staff.id=specialist.staff_user_id
+   WHERE client.id=? AND client.status IN ('active','paused')
+     AND client.archived_at IS NULL
+     AND (SELECT count(*) FROM client_assignments AS effective
+       WHERE effective.client_id=client.id AND effective.starts_at<=?
+         AND (effective.ends_at IS NULL OR ?<effective.ends_at))=1`
+).bind(startsAt, startsAt, clientId, startsAt, startsAt).first()
+
+const raceClientFact = (value, clientId, startsAt) => {
+  const row = captureExact(value, [
+    'client_id', 'identity_envelope', 'client_status', 'client_version', 'archived_at',
+    'client_created_at', 'client_updated_at', 'assignment_id', 'specialist_id',
+    'starts_at', 'ends_at', 'assigned_by_staff_id', 'assignment_version',
+    'assignment_created_at', 'assignment_updated_at', 'practitioner_staff_id',
+    'practitioner_status', 'staff_specialist_id', 'staff_status',
+  ], notFound)
+  if (row.client_id !== clientId || typeof row.identity_envelope !== 'string'
+    || !['active', 'paused'].includes(row.client_status)
+    || !Number.isSafeInteger(row.client_version) || row.client_version < 1
+    || row.archived_at !== null || !canonicalInstant(row.client_created_at)
+    || !canonicalInstant(row.client_updated_at) || !isAssignmentId(row.assignment_id)
+    || !isSpecialistId(row.specialist_id) || !canonicalInstant(row.starts_at)
+    || (row.ends_at !== null && (!canonicalInstant(row.ends_at) || row.ends_at <= row.starts_at))
+    || !(row.starts_at <= startsAt && (row.ends_at === null || startsAt < row.ends_at))
+    || typeof row.assigned_by_staff_id !== 'string' || !STAFF_ID.test(row.assigned_by_staff_id)
+    || !Number.isSafeInteger(row.assignment_version) || row.assignment_version < 1
+    || !canonicalInstant(row.assignment_created_at)
+    || !canonicalInstant(row.assignment_updated_at)
+    || (row.practitioner_staff_id !== null
+      && (typeof row.practitioner_staff_id !== 'string'
+        || !STAFF_ID.test(row.practitioner_staff_id)))
+    || !['active', 'pending', 'archived'].includes(row.practitioner_status)
+    || (row.staff_specialist_id !== null && !isSpecialistId(row.staff_specialist_id))
+    || !['active', 'pending', 'disabled'].includes(row.staff_status)) notFound()
+  return Object.freeze({
+    client: Object.freeze({
+      id: row.client_id, identityEnvelope: row.identity_envelope,
+      status: row.client_status, version: row.client_version, archivedAt: null,
+      createdAt: row.client_created_at, updatedAt: row.client_updated_at,
+      assignment: Object.freeze({
+        id: row.assignment_id, clientId: row.client_id, specialistId: row.specialist_id,
+        startsAt: row.starts_at, endsAt: row.ends_at,
+        assignedByStaffId: row.assigned_by_staff_id, version: row.assignment_version,
+        createdAt: row.assignment_created_at, updatedAt: row.assignment_updated_at,
+      }),
+    }),
+    joined: row.practitioner_staff_id !== null
+      && row.staff_specialist_id === row.specialist_id,
+    active: row.practitioner_status === 'active' && row.staff_status === 'active',
+  })
+}
+
+const classifyAssignmentOrPractitionerRace = async (command, prior, originalError) => {
+  let fresh
+  try {
+    fresh = raceClientFact(
+      await loadRaceClientState(
+        command.db, prior.client.id, command.body.startsAt,
+      ),
+      prior.client.id,
+      command.body.startsAt,
+    )
+    const identity = await decryptClientIdentity(prior.context, {
+      clientId: fresh.client.id, envelope: fresh.client.identityEnvelope,
+    })
+    await authenticateClientVersions(
+      prior.context, fresh.client, identity,
+      await loadClientVersions(command.db, fresh.client.id),
+    )
+    await authenticateAssignmentVersions(
+      prior.context, fresh.client,
+      await loadAssignmentVersions(command.db, fresh.client.id),
+    )
+  } catch { throw originalError }
+  if (fresh.client.assignment.specialistId !== command.body.specialistId
+    || !fresh.joined || !fresh.active) notFound()
+  throw originalError
+}
+
+const reproveEditRace = async (command, actor, prior, originalError) => {
+  let fresh
+  try { fresh = await retainedEditState(command, actor) } catch (error) {
+    let message
+    try { message = error instanceof Error
+      ? Object.getOwnPropertyDescriptor(error, 'message')?.value : null } catch {}
+    if (message === 'NOT_FOUND') {
+      return classifyAssignmentOrPractitionerRace(command, prior, originalError)
+    }
+    throw originalError
+  }
+  if (fresh.appointment.version !== prior.appointment.version) {
+    versionConflict(fresh.appointment.version)
+  }
+  try {
+    assertAppointmentPaymentTransition({
+      currentStatus: fresh.appointment.status,
+      currentAmountGrosze: fresh.charge.expectedAmountGrosze,
+      proposedStatus: command.body.status,
+      proposedAmountGrosze: command.body.expectedAmountGrosze,
+      collectedGrosze: fresh.payment.collectedGrosze,
+    })
+  } catch (error) {
+    if (error instanceof Error && error.message === 'APPOINTMENT_PAYMENT_CONFLICT') throw error
+    throw originalError
+  }
+  let overlap
+  try {
+    overlap = overlapFact(await loadEditOverlap(
+      command.db, command.body, command.appointmentId,
+    ))
+  } catch { throw originalError }
+  if (overlap) throw new Error('APPOINTMENT_OVERLAP')
+  throw originalError
+}
+
+export async function editAppointment(input) {
+  const command = captureEditCommand(input)
+  const actor = actorFact(command.actor)
+  const requestDigest = await digestEditNormalized(
+    command.appointmentId, command.body,
+  )
+  const idem = Object.freeze({
+    actorId: actor.id, operation: EDIT_OPERATION,
+    idempotencyKey: command.idempotencyKey, requestDigest,
+    resourceType: 'client', scopeType: 'client', scopePurpose: 'identity',
+  })
+  const replay = await inspectStoredScopeIdempotency(command.db, command.keyring, idem)
+  if (replay) return validateEditReplay(replay, command.appointmentId, command.body)
+
+  const current = await retainedEditState(command, actor)
+  if (command.body.expectedVersion !== current.appointment.version) {
+    versionConflict(current.appointment.version)
+  }
+  const chargeChanged = command.body.serviceId !== current.charge.serviceId
+    || command.body.expectedAmountGrosze !== current.charge.expectedAmountGrosze
+  if (command.body.specialistId === current.appointment.specialistId
+    && command.body.serviceId === current.appointment.serviceId
+    && command.body.startsAt === current.appointment.startsAt
+    && command.body.endsAt === current.appointment.endsAt
+    && command.body.location === current.appointment.location
+    && command.body.status === current.appointment.status
+    && !chargeChanged) validation('body')
+  assertAppointmentPaymentTransition({
+    currentStatus: current.appointment.status,
+    currentAmountGrosze: current.charge.expectedAmountGrosze,
+    proposedStatus: command.body.status,
+    proposedAmountGrosze: command.body.expectedAmountGrosze,
+    collectedGrosze: current.payment.collectedGrosze,
+  })
+  if (overlapFact(await loadEditOverlap(
+    command.db, command.body, command.appointmentId,
+  ))) {
+    if (storedOperationExists(await loadStoredOperationPresence(command.db, idem))) {
+      const winner = await recoverStoredScopeIdempotencyAfterCollision(
+        command.recoveryDb, command.keyring, idem, identityCollisionSignal(),
+      )
+      return validateEditReplay(winner, command.appointmentId, command.body)
+    }
+    throw new Error('APPOINTMENT_OVERLAP')
+  }
+
+  let now
+  try { now = new Date(command.nowMs).toISOString() } catch { throw new Error('INTERNAL_ERROR') }
+  if (now <= current.appointment.updatedAt
+    || (chargeChanged && now <= current.charge.updatedAt)) throw new Error('INTERNAL_ERROR')
+  const used = new Set()
+  const appointmentVersionId = generated(command.idFactory, 'ver', isVersionId, used)
+  const chargeVersionId = chargeChanged
+    ? generated(command.idFactory, 'ver', isVersionId, used)
+    : null
+  const auditId = generated(command.idFactory, 'aud', isAuditId, used)
+  const proposedAggregate = paymentAggregateFor(
+    command.body.status,
+    command.body.expectedAmountGrosze,
+    current.payment.collectedGrosze,
+  )
+  const appointment = Object.freeze({
+    id: current.appointment.id, clientId: current.appointment.clientId,
+    specialistId: command.body.specialistId, serviceId: command.body.serviceId,
+    startsAt: command.body.startsAt, endsAt: command.body.endsAt,
+    timeZone: 'Europe/Warsaw', location: command.body.location,
+    status: command.body.status, source: current.appointment.source,
+    version: current.appointment.version + 1, cancelledAt: null,
+    createdAt: current.appointment.createdAt, updatedAt: now,
+    paymentAggregate: proposedAggregate,
+  })
+  const charge = Object.freeze({
+    id: current.charge.id, appointmentId: current.appointment.id,
+    serviceId: command.body.serviceId,
+    expectedAmountGrosze: command.body.expectedAmountGrosze,
+    currency: current.charge.currency,
+    version: current.charge.version + (chargeChanged ? 1 : 0),
+    createdAt: current.charge.createdAt,
+    updatedAt: chargeChanged ? now : current.charge.updatedAt,
+  })
+  const appointmentVersion = await versionBuilder.build(command.db, current.context, {
+    clientId: current.client.id, versionId: appointmentVersionId,
+    entityType: 'appointment', entity: appointment,
+    changedByStaffId: actor.id, changedAt: now,
+    correlationId: command.correlationId, ownerFact: null,
+  })
+  const chargeOwner = ownership.issuer.issueCharge(Object.freeze({
+    clientId: current.client.id, appointmentId: appointment.id,
+  }))
+  const chargeVersion = chargeChanged
+    ? await versionBuilder.build(command.db, current.context, {
+        clientId: current.client.id, versionId: chargeVersionId,
+        entityType: 'session_charge', entity: charge,
+        changedByStaffId: actor.id, changedAt: now,
+        correlationId: command.correlationId, ownerFact: chargeOwner,
+      })
+    : null
+  const responsePayment = Object.freeze({
+    status: proposedAggregate.status,
+    collectedGrosze: proposedAggregate.collectedGrosze,
+    outstandingGrosze: proposedAggregate.outstandingGrosze,
+    latestMethod: current.payment.latestMethod,
+    latestReceivedAt: current.payment.latestReceivedAt,
+    entries: current.payment.entries,
+  })
+  const response = Object.freeze({ status: 200, body: Object.freeze({
+    data: Object.freeze({
+      appointment: editAppointmentDto(appointment, charge, responsePayment),
+    }),
+  }) })
+  const idempotency = await createIdempotencyStatement(command.db, current.context, {
+    actorId: actor.id, operation: EDIT_OPERATION,
+    idempotencyKey: command.idempotencyKey, requestDigest,
+    expectedScope: current.context.scope, resourceType: 'client',
+    resourceId: current.client.id, response, createdAt: now,
+    expiresAt: new Date(command.nowMs + 7 * DAY_MS).toISOString(),
+  })
+  const values = Object.freeze({
+    appointment, charge, currentCharge: current.charge, chargeChanged,
+    client: current.client, payment: responsePayment,
+    practitionerStaffId: current.practitionerStaffId,
+    now, actorId: actor.id, appointmentVersionId, chargeVersionId,
+    auditId, correlationId: command.correlationId,
+    idempotencyKey: command.idempotencyKey,
+    dataKeyId: current.context.dataKey.id,
+  })
+  const uow = createUnitOfWork(command.db, {
+    mode: 'mutation', actorId: actor.id, correlationId: command.correlationId,
+  })
+  uow.domain(command.db.prepare(
+    `UPDATE appointments SET specialist_id=?,service_id=?,starts_at=?,ends_at=?,
+       location=?,status=?,version=?,updated_at=?
+     WHERE id=? AND client_id=? AND version=? AND specialist_id=? AND service_id=?
+       AND starts_at=? AND ends_at=? AND time_zone='Europe/Warsaw'
+       AND location IS ? AND status=? AND source=? AND cancelled_at IS NULL
+       AND created_at=? AND updated_at=?
+       AND EXISTS (SELECT 1 FROM client_assignments AS assignment
+         JOIN specialists AS specialist ON specialist.id=assignment.specialist_id
+           AND specialist.status='active'
+         JOIN staff_users AS staff ON staff.id=specialist.staff_user_id
+           AND staff.specialist_id=specialist.id AND staff.status='active'
+         WHERE assignment.client_id=? AND assignment.specialist_id=?
+           AND assignment.starts_at<=?
+           AND (assignment.ends_at IS NULL OR ?<assignment.ends_at))
+       AND (SELECT count(*) FROM client_assignments
+         WHERE client_id=? AND starts_at<=?
+           AND (ends_at IS NULL OR ?<ends_at))=1
+       AND NOT EXISTS (SELECT 1 FROM appointments AS other
+         WHERE other.specialist_id=? AND other.id!=? AND other.status!='cancelled'
+           AND other.starts_at<? AND ?<other.ends_at)
+       AND (SELECT coalesce(sum(payment.amount_grosze),0)
+         FROM payment_entries AS payment
+         WHERE payment.appointment_id=? AND NOT EXISTS
+           (SELECT 1 FROM payment_corrections WHERE reversed_entry_id=payment.id))=?`
+  ).bind(
+    appointment.specialistId, appointment.serviceId, appointment.startsAt,
+    appointment.endsAt, appointment.location, appointment.status,
+    appointment.version, now,
+    current.appointment.id, current.client.id, current.appointment.version,
+    current.appointment.specialistId, current.appointment.serviceId,
+    current.appointment.startsAt, current.appointment.endsAt,
+    current.appointment.location, current.appointment.status,
+    current.appointment.source, current.appointment.createdAt,
+    current.appointment.updatedAt,
+    current.client.id, appointment.specialistId, appointment.startsAt,
+    appointment.startsAt, current.client.id, appointment.startsAt,
+    appointment.startsAt, appointment.specialistId, appointment.id,
+    appointment.endsAt, appointment.startsAt, appointment.id,
+    current.payment.collectedGrosze,
+  ))
+  if (chargeChanged) {
+    uow.domain(command.db.prepare(
+      `UPDATE session_charges SET service_id=?,expected_amount_grosze=?,version=?,updated_at=?
+       WHERE id=? AND appointment_id=? AND service_id=? AND expected_amount_grosze=?
+         AND currency='PLN' AND version=? AND created_at=? AND updated_at=?
+         AND EXISTS (SELECT 1 FROM appointments WHERE id=? AND version=?
+           AND service_id=? AND updated_at=?)`
+    ).bind(
+      charge.serviceId, charge.expectedAmountGrosze, charge.version, now,
+      current.charge.id, current.appointment.id, current.charge.serviceId,
+      current.charge.expectedAmountGrosze, current.charge.version,
+      current.charge.createdAt, current.charge.updatedAt,
+      appointment.id, appointment.version, appointment.serviceId, now,
+    ))
+  }
+  uow.version(conditionalVersionStatement(
+    command.db, appointmentVersion,
+    'EXISTS (SELECT 1 FROM appointments WHERE id=? AND version=? AND updated_at=?)',
+    [appointment.id, appointment.version, now],
+  ))
+  if (chargeChanged) {
+    uow.version(conditionalVersionStatement(
+      command.db, chargeVersion,
+      'EXISTS (SELECT 1 FROM appointments WHERE id=? AND version=? AND updated_at=?) AND EXISTS (SELECT 1 FROM session_charges WHERE id=? AND version=? AND updated_at=?)',
+      [appointment.id, appointment.version, now, charge.id, charge.version, now],
+    ))
+  }
+  uow.audit(auditEventStatement(command.db, {
+    id: auditId, occurredAt: now, actorStaffId: actor.id,
+    action: 'appointment.updated', entityType: 'appointment', entityId: appointment.id,
+    result: 'success', correlationId: command.correlationId,
+    metadata: { appointmentVersion: appointment.version, chargeVersion: charge.version },
+    reasonEnvelope: null,
+  }))
+  uow.idempotency(idempotency)
+  uow.guard(editGuardStatement(command.db, values))
+  try {
+    await uow.commit()
+    return response
+  } catch (originalError) {
+    if (isD1IdentityCollision(originalError)) {
+      let collision
+      try {
+        collision = captureExact(
+          await editCollisionProof(command.db, values),
+          ['stored', 'generated_collision'],
+          cryptoFailure,
+        )
+      } catch { throw originalError }
+      if (![0, 1].includes(collision.stored)
+        || ![0, 1].includes(collision.generated_collision)) throw originalError
+      if (collision.stored === 1 && collision.generated_collision === 0) {
+        const winner = await recoverStoredScopeIdempotencyAfterCollision(
+          command.recoveryDb, command.keyring, idem, originalError,
+        )
+        return validateEditReplay(winner, command.appointmentId, command.body)
+      }
+    }
+    if (isD1CoreDirectoryInvariantFailure(originalError)) {
+      return reproveEditRace(command, actor, current, originalError)
+    }
     throw originalError
   }
 }

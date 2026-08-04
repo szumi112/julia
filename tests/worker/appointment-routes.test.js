@@ -1,14 +1,18 @@
 import { env } from 'cloudflare:workers'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  assertAppointmentPaymentTransition,
   createAppointment,
+  editAppointment,
+  digestEditAppointmentRequest,
   digestCreateAppointmentRequest,
+  validateEditAppointmentBody,
   validateCreateAppointmentBody,
 } from '../../worker/core/appointments.js'
-import { postAppointment } from '../../worker/routes/appointments.js'
+import { postAppointment, postAppointmentEdit } from '../../worker/routes/appointments.js'
 import { createClient, editClient } from '../../worker/core/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { decryptForScope, loadDataKey } from '../../worker/security/envelope.js'
+import { decryptForScope, encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
 import { clientKeyScope } from '../../worker/core/crypto.js'
 import { createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db/query-budget.js'
 import { createApp } from '../../worker/app.js'
@@ -656,7 +660,7 @@ describe('persistent appointment creation', () => {
       .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: { field: 'durationMinutes' } })
   })
 
-  it('serves create through HTTP while later ledger routes remain inactive', async () => {
+  it('serves create through HTTP while cancellation and payment remain inactive', async () => {
     const service = vi.fn(async () => ({ status: 201, body: { data: { appointment: { id: 'apt_http' } } } }))
     const app = createApp({
       config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
@@ -674,16 +678,621 @@ describe('persistent appointment creation', () => {
     }, body: JSON.stringify(BODY) })
     expect((await request('/api/v1/appointments')).status).toBe(201)
     expect(service).toHaveBeenCalledOnce()
-    const later = await app.request('/api/v1/appointments/apt_http/edits', {
+    const later = await app.request('/api/v1/appointments/apt_http/cancellation', {
       method: 'POST', headers: {
         origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
         'idempotency-key': 'appointment-http-key-0002', 'x-csrf-token': 'valid',
       },
-      body: JSON.stringify({ expectedVersion: 1, specialistId: BODY.specialistId,
-        serviceId: BODY.serviceId, date: BODY.date, time: BODY.time,
-        durationMinutes: BODY.durationMinutes, expectedAmountGrosze: BODY.expectedAmountGrosze,
-        location: BODY.location, status: BODY.status }),
+      body: JSON.stringify({ expectedVersion: 1 }),
     })
     expect(later.status).toBe(404)
+  })
+})
+
+describe('persistent appointment editing', () => {
+  const EDIT_BODY = Object.freeze({
+    expectedVersion: 1, specialistId: BODY.specialistId, serviceId: BODY.serviceId,
+    date: BODY.date, time: BODY.time, durationMinutes: BODY.durationMinutes,
+    expectedAmountGrosze: BODY.expectedAmountGrosze, location: BODY.location,
+    status: BODY.status,
+  })
+  const edit = async (appointment, overrides = {}) => {
+    const marker = `appointment_edit_${++sequence}`
+    return editAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(), nowMs: NOW_MS + 1_000,
+      correlationId: CORRELATION_ID, idFactory: suffixes(marker), appointmentId: appointment.id,
+      body: { ...EDIT_BODY, expectedVersion: appointment.version },
+      idempotencyKey: `${marker}-key`, ...overrides,
+    })
+  }
+  const seedCollectedPayment = async (appointment, amountGrosze = 5_000) => {
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(appointment.clientId).first()
+    const scope = clientKeyScope(appointment.clientId)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
+    })
+    const changedAt = new Date(NOW_MS + 500).toISOString()
+    const receivedAt = new Date(NOW_MS + 200).toISOString()
+    const paymentId = `pay_edit_fixture_${++sequence}`
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO payment_entries
+        (id,appointment_id,amount_grosze,method,received_at,recorded_by_staff_id,
+         external_reference_envelope,created_at) VALUES (?,?,?,?,?,?,NULL,?)`).bind(
+        paymentId, appointment.id, amountGrosze, 'card', receivedAt, OWNER.id, receivedAt,
+      ),
+      env.DB.prepare('UPDATE appointments SET version=2,updated_at=? WHERE id=? AND version=1')
+        .bind(changedAt, appointment.id),
+    ])
+    const snapshot = {
+      cancelledAt: null,
+      clientId: appointment.clientId,
+      createdAt: appointment.createdAt,
+      endsAt: appointment.endsAt,
+      id: appointment.id,
+      location: appointment.location,
+      paymentAggregate: {
+        collectedGrosze: amountGrosze,
+        outstandingGrosze: appointment.charge.expectedAmountGrosze - amountGrosze,
+        status: amountGrosze === appointment.charge.expectedAmountGrosze ? 'paid' : 'partial',
+      },
+      schema: 'appointment.v1',
+      serviceId: appointment.serviceId,
+      source: appointment.source,
+      specialistId: appointment.specialistId,
+      startsAt: appointment.startsAt,
+      status: 'completed',
+      timeZone: appointment.timeZone,
+      updatedAt: changedAt,
+      version: 2,
+    }
+    const envelope = await encryptForScope(await ring(), dataKey, {
+      expectedScope: scope, recordId: appointment.id, field: 'record_version',
+      plaintext: JSON.stringify(snapshot),
+    })
+    await env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      `ver_edit_payment_${sequence}`, 'appointment', appointment.id, 2,
+      JSON.stringify(envelope), OWNER.id, changedAt, CORRELATION_ID,
+    ).run()
+    return Object.freeze({ ...appointment, version: 2, updatedAt: changedAt,
+      payment: { status: snapshot.paymentAggregate.status, collectedGrosze: amountGrosze,
+        outstandingGrosze: snapshot.paymentAggregate.outstandingGrosze,
+        latestMethod: 'card', latestReceivedAt: receivedAt },
+      paymentEntries: [{ id: paymentId, amountGrosze, method: 'card', receivedAt,
+        correctedAt: null, replacementEntryId: null }] })
+  }
+
+  it('strictly captures the edit target/body and freezes the payment transition boundary', async () => {
+    expect(validateEditAppointmentBody(EDIT_BODY)).toEqual({
+      ...EDIT_BODY, startsAt: '2027-01-16T09:00:00.000Z',
+      endsAt: '2027-01-16T09:50:00.000Z', timeZone: 'Europe/Warsaw',
+    })
+    expect(() => validateEditAppointmentBody({ ...EDIT_BODY, expectedVersion: 0 }))
+      .toThrow('VALIDATION_FAILED/expectedVersion')
+    await expect(digestEditAppointmentRequest('apt_edit_target', EDIT_BODY))
+      .resolves.toMatch(/^[A-Za-z0-9_-]{43}$/)
+    await expect(digestEditAppointmentRequest('apt_bad/id', EDIT_BODY))
+      .rejects.toThrow('VALIDATION_FAILED/appointmentId')
+    for (const [status, amount, collected, allowed] of [
+      ['scheduled', 19_500, 0, true],
+      ['scheduled', 19_500, 1, false],
+      ['completed', 19_500, 1, true],
+      ['noshow', 19_500, 1, true],
+      ['completed', 19_499, 1, false],
+      ['completed', 19_500, 19_500, true],
+      ['completed', 20_000, 20_001, false],
+    ]) {
+      const invoke = () => assertAppointmentPaymentTransition({
+        currentStatus: 'completed', currentAmountGrosze: 19_500,
+        proposedStatus: status, proposedAmountGrosze: amount,
+        collectedGrosze: collected,
+      })
+      if (allowed) expect(invoke()).toBeUndefined()
+      else expect(invoke).toThrow('APPOINTMENT_PAYMENT_CONFLICT')
+    }
+  })
+
+  it('atomically edits mutable appointment fields without advancing an unchanged charge', async () => {
+    const client = await seedClient()
+    const created = await create(client, { body: { ...BODY, clientId: client.id,
+      date: '2027-04-01', status: 'completed' } })
+    const current = created.body.data.appointment
+    const result = await edit(current, { body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2027-04-01', time: '11:00',
+      location: 'Gabinet 3', status: 'noshow',
+    } })
+    expect(result).toEqual({ status: 200, body: { data: { appointment: {
+      ...current, startsAt: '2027-04-01T09:00:00.000Z', endsAt: '2027-04-01T09:50:00.000Z',
+      location: 'Gabinet 3', status: 'noshow', version: 2,
+      updatedAt: new Date(NOW_MS + 1_000).toISOString(),
+      payment: { ...current.payment, outstandingGrosze: 19_500 },
+    } } } })
+    expect(result.body.data.appointment.charge.version).toBe(1)
+    expect((await env.DB.prepare('SELECT version FROM appointments WHERE id=?')
+      .bind(current.id).first()).version).toBe(2)
+    expect((await env.DB.prepare('SELECT version FROM session_charges WHERE id=?')
+      .bind(current.charge.id).first()).version).toBe(1)
+  })
+
+  it('advances the charge exactly once only when service or amount changes', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: { ...BODY, clientId: client.id,
+      date: '2027-04-02' } })).body.data.appointment
+    const result = await edit(current, { body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2027-04-02',
+      serviceId: 'konsultacja', durationMinutes: 90, expectedAmountGrosze: 25_000,
+      status: 'completed',
+    } })
+    expect(result.body.data.appointment).toMatchObject({
+      id: current.id, clientId: current.clientId, source: current.source,
+      createdAt: current.createdAt, version: 2, serviceId: 'konsultacja',
+      status: 'completed', charge: { id: current.charge.id, serviceId: 'konsultacja',
+        expectedAmountGrosze: 25_000, version: 2 },
+    })
+    expect((await env.DB.prepare(`SELECT entity_type,version FROM record_versions
+      WHERE entity_id IN (?,?) ORDER BY entity_type,version`).bind(current.id, current.charge.id).all()).results)
+      .toEqual([
+        { entity_type: 'appointment', version: 1 },
+        { entity_type: 'appointment', version: 2 },
+        { entity_type: 'session_charge', version: 1 },
+        { entity_type: 'session_charge', version: 2 },
+      ])
+  })
+
+  it('orders authenticated scope before stale and stale before no-op without generating IDs', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: { ...BODY, clientId: client.id,
+      date: '2027-04-03' } })).body.data.appointment
+    const staleIds = vi.fn()
+    await expect(edit(current, { idFactory: staleIds, body: {
+      ...EDIT_BODY, expectedVersion: 2, date: '2027-04-03',
+    } })).rejects.toMatchObject({ message: 'VERSION_CONFLICT', details: { currentVersion: 1 } })
+    expect(staleIds).not.toHaveBeenCalled()
+    const noOpIds = vi.fn()
+    await expect(edit(current, { idFactory: noOpIds, body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2027-04-03',
+    } })).rejects.toThrow('VALIDATION_FAILED/body')
+    expect(noOpIds).not.toHaveBeenCalled()
+    await expect(edit({ ...current, id: 'apt_guessed_target' }, { idFactory: vi.fn(), body: {
+      ...EDIT_BODY, expectedVersion: 999, date: '2027-04-03',
+    } })).rejects.toThrow('NOT_FOUND')
+  })
+
+  it('excludes self from overlap, blocks another visit, and replays before facts and IDs', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: { ...BODY, clientId: client.id,
+      date: '2027-04-04' } })).body.data.appointment
+    const first = await edit(current, { body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2027-04-04', time: '10:10',
+    } })
+    const replayFactory = vi.fn(() => { throw new Error('must not generate') })
+    expect(await editAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 99_000, correlationId: CORRELATION_ID,
+      idFactory: replayFactory, appointmentId: current.id,
+      body: { ...EDIT_BODY, expectedVersion: 1, date: '2027-04-04', time: '10:10' },
+      idempotencyKey: `appointment_edit_${sequence}-key`,
+    })).toEqual(first)
+    expect(replayFactory).not.toHaveBeenCalled()
+
+    const otherClient = await seedClient()
+    const other = (await create(otherClient, { body: { ...BODY, clientId: otherClient.id,
+      date: '2027-04-05', time: '12:00' } })).body.data.appointment
+    await create(client, { body: { ...BODY, clientId: client.id,
+      date: '2027-04-05', time: '13:00' } })
+    await expect(edit(other, { body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2027-04-05', time: '13:10',
+    } })).rejects.toThrow('APPOINTMENT_OVERLAP')
+  })
+
+  it('keeps the edit route adapter exact and maps only frozen safe fields', async () => {
+    const service = vi.fn(async () => ({ status: 200, body: { data: { appointment: {} } } }))
+    const input = {
+      db: {}, recoveryDb: {}, actor: OWNER, keyring: {}, nowMs: NOW_MS,
+      correlationId: CORRELATION_ID, idFactory: vi.fn(), appointmentId: 'apt_adapter_target',
+      body: EDIT_BODY, idempotencyKey: 'appointment-edit-adapter-key', edit: service,
+    }
+    expect((await postAppointmentEdit(input)).status).toBe(200)
+    expect(service).toHaveBeenCalledWith(expect.objectContaining({
+      appointmentId: 'apt_adapter_target', body: EDIT_BODY,
+    }))
+    await expect(postAppointmentEdit({ ...input, appointmentId: 'apt_bad/id' }))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: undefined })
+    await expect(postAppointmentEdit({ ...input, body: { ...EDIT_BODY, status: 'cancelled' } }))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: { field: 'status' } })
+  })
+
+  it('rolls back every statement in both edit UOW shapes and stays within exact budgets', async () => {
+    for (const [shape, statementCount] of [['unchanged', 5], ['changed', 7]]) {
+      for (let failedAt = 0; failedAt < statementCount; failedAt += 1) {
+        const client = await seedClient()
+        const current = (await create(client, { body: { ...BODY, clientId: client.id,
+          date: `2027-05-${String(1 + failedAt + (shape === 'changed' ? 10 : 0)).padStart(2, '0')}`,
+        } })).body.data.appointment
+        const before = await ledgerSnapshot()
+        const db = {
+          prepare: (sql) => env.DB.prepare(sql),
+          batch: (statements) => env.DB.batch(statements.map((statement, index) => index === failedAt
+            ? env.DB.prepare("INSERT INTO core_directory_invariant_failures (failure_kind) VALUES ('forced')")
+            : statement)),
+        }
+        const body = shape === 'changed'
+          ? { ...EDIT_BODY, expectedVersion: 1, date: `2027-05-${String(11 + failedAt).padStart(2, '0')}`,
+              serviceId: 'konsultacja', durationMinutes: 90, expectedAmountGrosze: 25_000 }
+          : { ...EDIT_BODY, expectedVersion: 1,
+              date: `2027-05-${String(1 + failedAt).padStart(2, '0')}`, time: '11:00' }
+        await expect(edit(current, { db, body,
+          idempotencyKey: `appointment-edit-rollback-${shape}-${sequence}-${failedAt}` }))
+          .rejects.toThrow()
+        expect(await ledgerSnapshot()).toEqual(before)
+      }
+    }
+
+    for (const [shape, expectedUsed] of [['unchanged', 14], ['changed', 16]]) {
+      const client = await seedClient()
+      const date = shape === 'changed' ? '2027-06-02' : '2027-06-01'
+      const current = (await create(client, { body: { ...BODY, clientId: client.id, date } }))
+        .body.data.appointment
+      const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+      const body = shape === 'changed'
+        ? { ...EDIT_BODY, expectedVersion: 1, date,
+            serviceId: 'konsultacja', durationMinutes: 90, expectedAmountGrosze: 25_000 }
+        : { ...EDIT_BODY, expectedVersion: 1, date, time: '11:00' }
+      await edit(current, { db: budget.work, recoveryDb: budget.recovery, body })
+      expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+        used: expectedUsed, remaining: 50 - expectedUsed, workRemaining: 42 - expectedUsed,
+        totalLimit: 50, recoveryReserve: 8,
+      })
+    }
+  })
+
+  it('returns one canonical winner to same-key concurrent edits with two-read reserve recovery', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: { ...BODY, clientId: client.id,
+      date: '2027-06-03' } })).body.data.appointment
+    const keyring = await ring()
+    const key = `appointment-edit-same-key-${sequence}`
+    const body = { ...EDIT_BODY, expectedVersion: 1, date: '2027-06-03', time: '11:00' }
+    const command = (marker) => editAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 1_000,
+      correlationId: CORRELATION_ID, idFactory: suffixes(marker),
+      appointmentId: current.id, body, idempotencyKey: key,
+    })
+    const [first, second] = await Promise.all([
+      command(`appointment_edit_same_a_${++sequence}`),
+      command(`appointment_edit_same_b_${++sequence}`),
+    ])
+    expect(second).toEqual(first)
+    expect((await env.DB.prepare('SELECT version FROM appointments WHERE id=?')
+      .bind(current.id).first()).version).toBe(2)
+    expect((await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE entity_id=? AND action='appointment.updated'`).bind(current.id).first()).count).toBe(1)
+  })
+
+  it('preserves payment entries and enforces nonbillable and charge-reduction conflicts', async () => {
+    const allowedClient = await seedClient()
+    const allowedCreated = (await create(allowedClient, { body: {
+      ...BODY, clientId: allowedClient.id, date: '2027-06-05', status: 'completed',
+    } })).body.data.appointment
+    const paid = await seedCollectedPayment(allowedCreated)
+    const allowed = await edit(paid, { body: {
+      ...EDIT_BODY, expectedVersion: 2, date: '2027-06-05', time: '11:00',
+      status: 'noshow',
+    } })
+    expect(allowed.body.data.appointment).toMatchObject({
+      version: 3, status: 'noshow', payment: { status: 'partial', collectedGrosze: 5_000,
+        outstandingGrosze: 14_500, latestMethod: 'card' },
+      paymentEntries: paid.paymentEntries,
+    })
+
+    for (const [index, body] of [
+      { status: 'scheduled' },
+      { status: 'completed', expectedAmountGrosze: 19_499 },
+    ].entries()) {
+      const client = await seedClient()
+      const created = (await create(client, { body: {
+        ...BODY, clientId: client.id, date: `2027-06-0${6 + index}`, status: 'completed',
+      } })).body.data.appointment
+      const current = await seedCollectedPayment(created)
+      const idFactory = vi.fn()
+      await expect(edit(current, { idFactory, body: {
+        ...EDIT_BODY, expectedVersion: 2, date: `2027-06-0${6 + index}`, ...body,
+      } })).rejects.toThrow('APPOINTMENT_PAYMENT_CONFLICT')
+      expect(idFactory).not.toHaveBeenCalled()
+    }
+  })
+
+  it('requires the exact rooted assignment effective at the proposed start for every role', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-01-15', time: '10:50', status: 'completed',
+    } })).body.data.appointment
+    await editClient({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 2 * 60 * 60 * 1000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(`appointment_edit_assignment_${++sequence}`), clientId: client.id,
+      body: { expectedVersion: 1, name: client.name, age: 12,
+        status: 'active', specialistId: 'sp_appointment_second' },
+      idempotencyKey: `appointment-edit-assignment-${sequence}-key`,
+    })
+    const historical = await edit(current, { actor: {
+      id: 'stf_appointment_target', role: 'specialist', specialistId: 'sp_appointment_target',
+    }, body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2027-01-15', time: '10:50',
+      status: 'completed', location: 'Gabinet historyczny',
+    } })
+    expect(historical.body.data.appointment.specialistId).toBe('sp_appointment_target')
+
+    const secondClient = await seedClient()
+    const secondCurrent = (await create(secondClient, { body: {
+      ...BODY, clientId: secondClient.id, date: '2027-07-11',
+    } })).body.data.appointment
+    const idFactory = vi.fn()
+    await expect(edit(secondCurrent, { idFactory, body: {
+      ...EDIT_BODY, expectedVersion: 1, specialistId: 'sp_appointment_second',
+      date: '2027-07-11',
+    } })).rejects.toThrow('NOT_FOUND')
+    expect(idFactory).not.toHaveBeenCalled()
+  })
+
+  it('authenticates complete appointment/charge histories and stores exact audit metadata', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-07-12',
+    } })).body.data.appointment
+    const result = await edit(current, { body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2027-07-12',
+      serviceId: 'konsultacja', durationMinutes: 90, expectedAmountGrosze: 25_000,
+    } })
+    const appointment = result.body.data.appointment
+    expect(await env.DB.prepare(`SELECT action,entity_type,entity_id,reason_envelope,metadata_json
+      FROM audit_events WHERE entity_id=? AND action='appointment.updated'`).bind(current.id).first())
+      .toEqual({ action: 'appointment.updated', entity_type: 'appointment',
+        entity_id: current.id, reason_envelope: null,
+        metadata_json: JSON.stringify({ appointmentVersion: 2, chargeVersion: 2 }) })
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(client.id).first()
+    const scope = clientKeyScope(client.id)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
+    })
+    for (const [entityId, schema] of [[current.id, 'appointment.v1'], [current.charge.id, 'session_charge.v1']]) {
+      const row = await env.DB.prepare(`SELECT snapshot_envelope FROM record_versions
+        WHERE entity_id=? ORDER BY version DESC LIMIT 1`).bind(entityId).first()
+      const plaintext = await decryptForScope(await ring(), dataKey, {
+        expectedScope: scope, recordId: entityId, field: 'record_version',
+        envelope: JSON.parse(row.snapshot_envelope),
+      })
+      expect(JSON.parse(plaintext)).toMatchObject({ schema, version: 2 })
+    }
+    expect(appointment.charge.version).toBe(2)
+
+    await env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      `ver_edit_cross_type_${++sequence}`, 'client', current.id, 99, '{}', OWNER.id,
+      new Date(NOW_MS + 2_000).toISOString(), CORRELATION_ID,
+    ).run()
+    const idFactory = vi.fn()
+    await expect(edit(appointment, { idFactory, body: {
+      ...EDIT_BODY, expectedVersion: 2, date: '2027-07-12', time: '11:00',
+      serviceId: 'konsultacja', durationMinutes: 90, expectedAmountGrosze: 25_000,
+    } })).rejects.toThrow('NOT_FOUND')
+    expect(idFactory).not.toHaveBeenCalled()
+  })
+
+  it('recovers a winner committed between replay and UOW with exactly two reserve reads', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-07-13',
+    } })).body.data.appointment
+    const body = { ...EDIT_BODY, expectedVersion: 1, date: '2027-07-13', time: '11:00' }
+    const key = `appointment-edit-injected-winner-${sequence}`
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    let recoveryReads = 0
+    const recoveryDb = { prepare(sql) {
+      recoveryReads += 1
+      return budget.recovery.prepare(sql)
+    } }
+    let injected = false
+    let winner
+    const db = {
+      prepare(sql) {
+        const prepared = budget.work.prepare(sql)
+        if (injected || !sql.includes('id!=? AND status')) return prepared
+        return { bind(...bindings) {
+          const bound = prepared.bind(...bindings)
+          return { async first() {
+            injected = true
+            winner = await editAppointment({
+              db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+              nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+              idFactory: suffixes(`appointment_edit_injected_${++sequence}`),
+              appointmentId: current.id, body, idempotencyKey: key,
+            })
+            return bound.first()
+          } }
+        } }
+      },
+      batch: (statements) => budget.work.batch(statements),
+    }
+    const loser = await editAppointment({
+      db, recoveryDb, actor: OWNER, keyring: await ring(), nowMs: NOW_MS + 1_000,
+      correlationId: CORRELATION_ID,
+      idFactory: suffixes(`appointment_edit_loser_${++sequence}`),
+      appointmentId: current.id, body, idempotencyKey: key,
+    })
+    expect(loser).toEqual(winner)
+    expect(recoveryReads).toBe(2)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 17, remaining: 33, workRemaining: 25,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('keeps edit replay client-scoped across retired, conflicting, and unavailable keys', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-07-19',
+    } })).body.data.appointment
+    const body = { ...EDIT_BODY, expectedVersion: 1, date: '2027-07-19', time: '11:00' }
+    const key = `appointment-edit-replay-key-${sequence}`
+    const result = await editAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(`appointment_edit_replay_${++sequence}`),
+      appointmentId: current.id, body, idempotencyKey: key,
+    })
+    const row = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(client.id).first()
+    await env.DB.prepare('UPDATE data_keys SET retired_at=? WHERE id=?').bind(
+      new Date(NOW_MS + 2_000).toISOString(), JSON.parse(row.identity_envelope).dataKeyId,
+    ).run()
+    expect(await editAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: current.id, body, idempotencyKey: key,
+    })).toEqual(result)
+    await expect(editAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: current.id, body: { ...body, location: 'Inny gabinet' },
+      idempotencyKey: key,
+    })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+    await expect(editAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: {},
+      nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: current.id, body, idempotencyKey: key,
+    })).rejects.toThrow('CRYPTO_FAILURE')
+  })
+
+  it('classifies an overlap introduced at the final guard and leaves no edit residue', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: { ...BODY, clientId: client.id,
+      date: '2027-06-04' } })).body.data.appointment
+    const before = await ledgerSnapshot()
+    let raced = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!raced) {
+          raced = true
+          await env.DB.prepare(`INSERT INTO appointments
+            (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+             status,source,version,cancelled_at,created_at,updated_at)
+            VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+          ).bind('apt_edit_race_blocker', client.id, BODY.specialistId,
+            '2027-06-04T09:30:00.000Z', '2027-06-04T10:20:00.000Z',
+            new Date(NOW_MS).toISOString(), new Date(NOW_MS).toISOString()).run()
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    await expect(edit(current, { db, body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2027-06-04', time: '11:00',
+    } })).rejects.toThrow('APPOINTMENT_OVERLAP')
+    const after = await ledgerSnapshot()
+    expect(after.appointments.find(({ id }) => id === 'apt_edit_race_blocker'))
+      .toEqual(expect.objectContaining({ id: 'apt_edit_race_blocker' }))
+    expect(after.appointments.filter(({ id }) => id !== 'apt_edit_race_blocker'))
+      .toEqual(before.appointments)
+    for (const table of Object.keys(before).filter((key) => key !== 'appointments')) {
+      expect(after[table]).toEqual(before[table])
+    }
+  })
+
+  it('classifies a valid assignment race as opaque not-found without edit residue', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-07-15',
+    } })).body.data.appointment
+    let raced = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!raced) {
+          raced = true
+          await editClient({
+            db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+            nowMs: Date.parse('2027-07-16T09:00:00.000Z'), correlationId: CORRELATION_ID,
+            idFactory: suffixes(`appointment_edit_assignment_race_${++sequence}`),
+            clientId: client.id,
+            body: { expectedVersion: 1, name: client.name, age: 12,
+              status: 'active', specialistId: 'sp_appointment_second' },
+            idempotencyKey: `appointment-edit-assignment-race-${sequence}-key`,
+          })
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    await expect(edit(current, { db, body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2027-07-17',
+    } })).rejects.toThrow('NOT_FOUND')
+    expect(await env.DB.prepare('SELECT version,starts_at FROM appointments WHERE id=?')
+      .bind(current.id).first()).toEqual({ version: 1, starts_at: current.startsAt })
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE entity_id=? AND action='appointment.updated'`).bind(current.id).first())
+      .toEqual({ count: 0 })
+  })
+
+  it('preserves the invariant failure when an assignment branch races with overlap', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-07-18',
+    } })).body.data.appointment
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(client.id).first()
+    const dataKeyId = JSON.parse(clientRow.identity_envelope).dataKeyId
+    const marker = `edit_branch_${++sequence}`
+    let raced = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!raced) {
+          raced = true
+          const now = new Date(NOW_MS).toISOString()
+          for (const [suffix, startsAt] of [
+            ['a', new Date(NOW_MS - 4 * 60 * 60 * 1000).toISOString()],
+            ['b', new Date(NOW_MS - 3 * 60 * 60 * 1000).toISOString()],
+          ]) {
+            const assignmentId = `asg_${marker}_${suffix}`
+            await env.DB.prepare(`INSERT INTO client_assignments
+              (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
+               version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(
+              assignmentId, client.id, BODY.specialistId, startsAt, now,
+              OWNER.id, 2, startsAt, now,
+            ).run()
+            for (const version of [1, 2]) {
+              await env.DB.prepare(`INSERT INTO record_versions
+                (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+                 changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+                `ver_${marker}_${suffix}_${version}`, 'client_assignment', assignmentId,
+                version, JSON.stringify({ dataKeyId, dataKeyVersion: 1 }), OWNER.id,
+                version === 1 ? startsAt : now, CORRELATION_ID,
+              ).run()
+            }
+          }
+          await env.DB.prepare(`INSERT INTO appointments
+            (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+             status,source,version,cancelled_at,created_at,updated_at)
+            VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+          ).bind(`apt_${marker}_blocker`, client.id, BODY.specialistId,
+            '2027-07-18T08:30:00.000Z', '2027-07-18T09:20:00.000Z', now, now).run()
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    let failure
+    try {
+      await edit(current, { db, body: {
+        ...EDIT_BODY, expectedVersion: 1, date: '2027-07-18', time: '11:00',
+      } })
+    } catch (error) { failure = error }
+    expect(failure?.message).toMatch(/core_directory_invariant_failed/)
+    expect(failure?.message).not.toBe('APPOINTMENT_OVERLAP')
+    expect((await env.DB.prepare('SELECT version FROM appointments WHERE id=?')
+      .bind(current.id).first()).version).toBe(1)
   })
 })
