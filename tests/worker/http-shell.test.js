@@ -139,7 +139,7 @@ describe('closed core route descriptors', () => {
     ['/api/v1/appointments/apt_one/payments', { expectedVersion: 1, amountGrosze: 10000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }],
     ['/api/v1/payments/pay_one/corrections', { expectedVersion: 1, reason: 'Korekta', replacement: null }],
   ]
-  const futureCommands = commands.slice(2)
+  const futureCommands = commands.slice(3)
   const headers = {
     origin,
     'content-type': 'application/json',
@@ -249,6 +249,29 @@ describe('closed core route descriptors', () => {
     expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
       used: 1, remaining: 49, workRemaining: 41, totalLimit: 50, recoveryReserve: 8,
     })
+  })
+
+  it('dispatches appointment create through the authentic shared command boundary', async () => {
+    let views
+    const createAppointment = vi.fn(async (input) => {
+      views = { work: input.db, recovery: input.recoveryDb }
+      expect(input).toMatchObject({
+        idempotencyKey: 'core-command-key-0001', body: commands[2][1],
+      })
+      await input.db.prepare('SELECT appointment_domain_1').first()
+      return { status: 201, body: { data: { appointment: { id: 'apt_one' } } } }
+    })
+    const input = deps({
+      db: coreBudgetDb(), createAppointment, verifyCsrfToken: vi.fn(async () => true),
+      readJsonBodyOnce: vi.fn(async (request) => request.json()),
+    })
+    const response = await createApp(input).request('/api/v1/appointments', {
+      method: 'POST', headers, body: JSON.stringify(commands[2][1]),
+    })
+    expect(response.status).toBe(201)
+    expect(await response.json()).toEqual({ data: { appointment: { id: 'apt_one' } } })
+    expect(createAppointment).toHaveBeenCalledOnce()
+    expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
   })
 
   it('rejects idempotency and exact body-shape failures in the frozen shell order', async () => {
