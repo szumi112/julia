@@ -411,6 +411,25 @@ const loadOverlap = (db, body) => db.prepare(
    WHERE specialist_id=? AND status!='cancelled' AND starts_at<? AND ?<ends_at LIMIT 1`
 ).bind(body.specialistId, body.endsAt, body.startsAt).first()
 
+const loadStoredOperationPresence = (db, input) => db.prepare(
+  `SELECT 1 AS stored FROM idempotency_records
+   WHERE actor_id=? AND operation=? AND idempotency_key=? LIMIT 1`
+).bind(input.actorId, input.operation, input.idempotencyKey).first()
+
+const storedOperationExists = (value) => {
+  if (value === null) return false
+  const row = captureExact(value, ['stored'], cryptoFailure)
+  if (row.stored !== 1) cryptoFailure()
+  return true
+}
+
+// Constructed only after the bounded work read proves the exact authoritative
+// actor/operation/key row exists, adapting that proven identity collision to the
+// frozen two-read reserve recovery helper.
+const identityCollisionSignal = () => new Error(
+  'identity_collision: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)'
+)
+
 const paymentFor = (status, amount) => Object.freeze({
   status: 'unpaid', collectedGrosze: 0,
   outstandingGrosze: ['completed', 'noshow'].includes(status) ? amount : 0,
@@ -468,8 +487,44 @@ const validateReplay = (value, request) => {
   return Object.freeze({ status: 201, body: Object.freeze({ data: Object.freeze({ appointment: dto }) }) })
 }
 
+const assignmentChainPostcondition = (clientId, specialistId, startsAt) => Object.freeze({
+  sql: `(SELECT count(*) FROM client_assignments AS root
+      WHERE root.client_id=? AND (SELECT count(*) FROM client_assignments AS predecessor
+        WHERE predecessor.client_id=root.client_id
+          AND predecessor.ends_at=root.starts_at)=0)=1
+    AND (SELECT count(*) FROM client_assignments
+      WHERE client_id=? AND ends_at IS NULL)=1
+    AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
+      WHERE retained.client_id=? AND (
+        (retained.ends_at IS NULL AND retained.version!=1)
+        OR (retained.ends_at IS NOT NULL AND retained.version!=2)
+        OR retained.created_at!=retained.starts_at
+        OR retained.updated_at!=coalesce(retained.ends_at,retained.created_at)
+        OR (SELECT count(*) FROM client_assignments AS predecessor
+          WHERE predecessor.client_id=retained.client_id
+            AND predecessor.ends_at=retained.starts_at)>1
+        OR (retained.ends_at IS NOT NULL AND
+          (SELECT count(*) FROM client_assignments AS successor
+            WHERE successor.client_id=retained.client_id
+              AND successor.starts_at=retained.ends_at)!=1)))
+    AND (SELECT count(*) FROM client_assignments
+      WHERE client_id=? AND starts_at<=?
+        AND (ends_at IS NULL OR ?<ends_at))=1
+    AND (SELECT count(*) FROM client_assignments
+      WHERE client_id=? AND specialist_id=? AND starts_at<=?
+        AND (ends_at IS NULL OR ?<ends_at))=1`,
+  bindings: Object.freeze([
+    clientId, clientId, clientId,
+    clientId, startsAt, startsAt,
+    clientId, specialistId, startsAt, startsAt,
+  ]),
+})
+
 const guardStatement = (db, values) => {
   const lifecycle = specialistPostcondition(values.practitionerStaffId)
+  const assignmentChain = assignmentChainPostcondition(
+    values.client.id, values.appointment.specialistId, values.appointment.startsAt,
+  )
   return db.prepare(
     `INSERT INTO core_directory_invariant_failures (failure_kind)
      SELECT 'appointment_create_postcondition'
@@ -508,8 +563,6 @@ const guardStatement = (db, values) => {
          AND json_extract(response_envelope,'$.dataKeyVersion')=1)
        AND EXISTS (SELECT 1 FROM data_keys WHERE id=? AND scope_type='client'
          AND scope_id=? AND purpose='identity' AND dek_version=1)
-       AND (SELECT count(*) FROM client_assignments WHERE client_id=? AND specialist_id=?
-         AND starts_at<=? AND (ends_at IS NULL OR ?<ends_at))=1
        AND EXISTS (SELECT 1 FROM clients WHERE id=? AND status IN ('active','paused')
          AND archived_at IS NULL AND version=? AND identity_envelope=?)
        AND (SELECT count(*) FROM record_versions
@@ -538,27 +591,6 @@ const guardStatement = (db, values) => {
            OR (SELECT max(history.version) FROM record_versions AS history
              WHERE history.entity_type='client_assignment'
                AND history.entity_id=retained.id)!=retained.version))
-       AND (SELECT count(*) FROM client_assignments
-         WHERE client_id=? AND ends_at IS NULL)=1
-       AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
-         WHERE retained.client_id=? AND (
-           (retained.ends_at IS NULL AND retained.version!=1)
-           OR (retained.ends_at IS NOT NULL AND retained.version!=2)
-           OR retained.created_at!=retained.starts_at
-           OR retained.updated_at!=coalesce(retained.ends_at,retained.created_at)
-           OR (retained.ends_at IS NOT NULL AND
-             (SELECT count(*) FROM client_assignments AS next
-               WHERE next.client_id=retained.client_id
-                 AND next.starts_at=retained.ends_at)!=1)
-           OR (retained.ends_at IS NULL AND EXISTS (
-             SELECT 1 FROM client_assignments AS later
-             WHERE later.client_id=retained.client_id
-               AND later.starts_at>retained.starts_at))))
-       AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
-         JOIN client_assignments AS duplicate
-           ON duplicate.client_id=retained.client_id
-          AND duplicate.starts_at=retained.starts_at AND duplicate.id!=retained.id
-         WHERE retained.client_id=?)
        AND NOT EXISTS (SELECT 1 FROM record_versions AS history
          JOIN client_assignments AS retained ON retained.id=history.entity_id
          WHERE retained.client_id=? AND (history.entity_type!='client_assignment'
@@ -567,6 +599,7 @@ const guardStatement = (db, values) => {
                 THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
            OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
                 THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1))
+       AND (${assignmentChain.sql})
        AND EXISTS (SELECT 1 FROM specialists AS specialist JOIN staff_users AS staff
          ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
          WHERE specialist.id=? AND specialist.staff_user_id=?
@@ -590,14 +623,13 @@ const guardStatement = (db, values) => {
     JSON.stringify({ appointmentVersion: 1, chargeVersion: 1 }),
     values.actorId, OPERATION, values.idempotencyKey, values.client.id,
     values.dataKeyId, values.dataKeyId, values.dataKeyId, values.client.id,
-    values.client.id, values.appointment.specialistId, values.appointment.startsAt,
-    values.appointment.startsAt, values.client.id, values.client.version,
+    values.client.id, values.client.version,
     values.client.identityEnvelope,
     values.client.id, values.client.version, values.client.id,
     values.client.id, values.client.version, values.client.id,
     values.client.id, values.dataKeyId,
-    values.client.id, values.client.id, values.client.id, values.client.id,
-    values.client.id, values.dataKeyId,
+    values.client.id, values.client.id, values.dataKeyId,
+    ...assignmentChain.bindings,
     values.appointment.specialistId,
     values.practitionerStaffId, values.appointment.specialistId, values.appointment.id,
     values.appointment.endsAt, values.appointment.startsAt, values.appointment.id,
@@ -607,6 +639,9 @@ const guardStatement = (db, values) => {
 
 const overlapProof = async (db, values) => {
   const lifecycle = specialistPostcondition(values.practitionerStaffId)
+  const assignmentChain = assignmentChainPostcondition(
+    values.client.id, values.appointment.specialistId, values.appointment.startsAt,
+  )
   return db.prepare(
     `SELECT CASE WHEN
      EXISTS (SELECT 1 FROM appointments WHERE specialist_id=? AND status!='cancelled'
@@ -648,27 +683,6 @@ const overlapProof = async (db, values) => {
          OR (SELECT max(history.version) FROM record_versions AS history
            WHERE history.entity_type='client_assignment'
              AND history.entity_id=retained.id)!=retained.version))
-     AND (SELECT count(*) FROM client_assignments
-       WHERE client_id=? AND ends_at IS NULL)=1
-     AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
-       WHERE retained.client_id=? AND (
-         (retained.ends_at IS NULL AND retained.version!=1)
-         OR (retained.ends_at IS NOT NULL AND retained.version!=2)
-         OR retained.created_at!=retained.starts_at
-         OR retained.updated_at!=coalesce(retained.ends_at,retained.created_at)
-         OR (retained.ends_at IS NOT NULL AND
-           (SELECT count(*) FROM client_assignments AS next
-             WHERE next.client_id=retained.client_id
-               AND next.starts_at=retained.ends_at)!=1)
-         OR (retained.ends_at IS NULL AND EXISTS (
-           SELECT 1 FROM client_assignments AS later
-           WHERE later.client_id=retained.client_id
-             AND later.starts_at>retained.starts_at))))
-     AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
-       JOIN client_assignments AS duplicate
-         ON duplicate.client_id=retained.client_id
-        AND duplicate.starts_at=retained.starts_at AND duplicate.id!=retained.id
-       WHERE retained.client_id=?)
      AND NOT EXISTS (SELECT 1 FROM record_versions AS history
        JOIN client_assignments AS retained ON retained.id=history.entity_id
        WHERE retained.client_id=? AND (history.entity_type!='client_assignment'
@@ -677,8 +691,7 @@ const overlapProof = async (db, values) => {
               THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
          OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
               THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1))
-     AND (SELECT count(*) FROM client_assignments WHERE client_id=? AND specialist_id=?
-       AND starts_at<=? AND (ends_at IS NULL OR ?<ends_at))=1
+     AND (${assignmentChain.sql})
      AND EXISTS (SELECT 1 FROM specialists AS specialist JOIN staff_users AS staff
        ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
        WHERE specialist.id=? AND specialist.staff_user_id=?
@@ -696,10 +709,9 @@ const overlapProof = async (db, values) => {
     values.client.id, values.client.version, values.client.id,
     values.client.id, values.client.version, values.client.id,
     values.client.id, values.dataKeyId,
-    values.client.id, values.client.id, values.client.id, values.client.id,
-    values.client.id, values.dataKeyId,
-    values.client.id, values.appointment.specialistId, values.appointment.startsAt,
-    values.appointment.startsAt, values.appointment.specialistId,
+    values.client.id, values.client.id, values.dataKeyId,
+    ...assignmentChain.bindings,
+    values.appointment.specialistId,
     values.practitionerStaffId, ...lifecycle.bindings,
   ).first()
 }
@@ -750,8 +762,12 @@ export async function createAppointment(input) {
     context, current, await loadAssignmentVersions(command.db, current.id),
   )
   if (overlapFact(await loadOverlap(command.db, command.body))) {
-    const winner = await inspectStoredScopeIdempotency(command.db, command.keyring, idem)
-    if (winner) return validateReplay(winner, command.body)
+    if (storedOperationExists(await loadStoredOperationPresence(command.db, idem))) {
+      const winner = await recoverStoredScopeIdempotencyAfterCollision(
+        command.recoveryDb, command.keyring, idem, identityCollisionSignal(),
+      )
+      return validateReplay(winner, command.body)
+    }
     throw new Error('APPOINTMENT_OVERLAP')
   }
 

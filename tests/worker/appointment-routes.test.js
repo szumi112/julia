@@ -309,14 +309,25 @@ describe('persistent appointment creation', () => {
   })
 
   it('rechecks stored idempotency when a winner commits between replay and overlap preflight', async () => {
-    const run = async ({ differentDigest }) => {
+    const run = async ({ differentDigest = false, malformedRecovery = false }) => {
       const client = await seedClient()
-      const date = differentDigest ? '2027-02-16' : '2027-02-15'
-      const key = `appointment-overlap-replay-${sequence}-${differentDigest}`
+      const date = malformedRecovery ? '2027-02-18'
+        : differentDigest ? '2027-02-16' : '2027-02-15'
+      const key = `appointment-overlap-replay-${sequence}-${differentDigest}-${malformedRecovery}`
       const winnerBody = { ...BODY, clientId: client.id, date }
       const loserBody = { ...winnerBody,
         expectedAmountGrosze: differentDigest ? BODY.expectedAmountGrosze + 1 : BODY.expectedAmountGrosze }
       const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+      let recoveryReads = 0
+      const recoveryDb = { prepare(sql) {
+        recoveryReads += 1
+        const prepared = budget.recovery.prepare(sql)
+        if (!malformedRecovery || recoveryReads !== 2) return prepared
+        return { bind(...bindings) {
+          const bound = prepared.bind(...bindings)
+          return { async first() { await bound.first(); return null } }
+        } }
+      } }
       let injected = false
       let winner
       const db = {
@@ -345,19 +356,72 @@ describe('persistent appointment creation', () => {
       }
       const idFactory = vi.fn()
       const loser = createAppointment({
-        db, recoveryDb: budget.recovery, actor: OWNER, keyring: await ring(), nowMs: NOW_MS,
+        db, recoveryDb, actor: OWNER, keyring: await ring(), nowMs: NOW_MS,
         correlationId: CORRELATION_ID, idFactory, body: loserBody, idempotencyKey: key,
       })
-      if (differentDigest) await expect(loser).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+      if (malformedRecovery) await expect(loser).rejects.toThrow('CRYPTO_FAILURE')
+      else if (differentDigest) await expect(loser).rejects.toThrow('IDEMPOTENCY_CONFLICT')
       else expect(await loser).toEqual(winner)
       expect(idFactory).not.toHaveBeenCalled()
+      expect(recoveryReads).toBe(2)
       expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
-        used: 8, remaining: 42, workRemaining: 34,
+        used: 9, remaining: 41, workRemaining: 33,
         totalLimit: 50, recoveryReserve: 8,
       })
     }
     await run({ differentDigest: false })
     await run({ differentDigest: true })
+    await run({ malformedRecovery: true })
+  })
+
+  it('classifies an unrelated overlap with one work read and zero reserve reads', async () => {
+    const client = await seedClient()
+    const date = '2027-02-08'
+    await create(client, { body: { ...BODY, clientId: client.id, date } })
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    let recoveryReads = 0
+    const recoveryDb = { prepare(sql) {
+      recoveryReads += 1
+      return budget.recovery.prepare(sql)
+    } }
+    await expect(create(client, {
+      db: budget.work, recoveryDb,
+      body: { ...BODY, clientId: client.id, date, time: '10:10' },
+      idempotencyKey: `appointment-unrelated-overlap-${sequence}`,
+    })).rejects.toThrow('APPOINTMENT_OVERLAP')
+    expect(recoveryReads).toBe(0)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 7, remaining: 43, workRemaining: 35,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('fails closed on a malformed stored-operation proof without entering reserve recovery', async () => {
+    const client = await seedClient()
+    const date = '2027-02-09'
+    await create(client, { body: { ...BODY, clientId: client.id, date } })
+    let recoveryReads = 0
+    const recoveryDb = { prepare(sql) {
+      recoveryReads += 1
+      return env.DB.prepare(sql)
+    } }
+    const db = {
+      batch: (statements) => env.DB.batch(statements),
+      prepare(sql) {
+        const prepared = env.DB.prepare(sql)
+        if (!sql.includes('SELECT 1 AS stored FROM idempotency_records')) return prepared
+        return { bind(...bindings) {
+          const bound = prepared.bind(...bindings)
+          return { async first() { await bound.first(); return { stored: 2 } } }
+        } }
+      },
+    }
+    await expect(create(client, {
+      db, recoveryDb,
+      body: { ...BODY, clientId: client.id, date, time: '10:10' },
+      idempotencyKey: `appointment-malformed-${sequence}-key`,
+    })).rejects.toThrow('CRYPTO_FAILURE')
+    expect(recoveryReads).toBe(0)
   })
 
   it('rejects cross-type retained histories before IDs and generated cross-type rows atomically', async () => {
@@ -437,6 +501,69 @@ describe('persistent appointment creation', () => {
     expect(failure?.message).not.toBe('APPOINTMENT_OVERLAP')
     expect(await env.DB.prepare("SELECT count(*) AS count FROM appointments WHERE id='apt_combined_target'").first())
       .toEqual({ count: 0 })
+  })
+
+  it('rolls back concurrent assignment branches and never masks branch plus overlap corruption', async () => {
+    for (const combined of [false, true]) {
+      const client = await seedClient()
+      const now = new Date(NOW_MS).toISOString()
+      const keyRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+        .bind(client.id).first()
+      const dataKeyId = JSON.parse(keyRow.identity_envelope).dataKeyId
+      const marker = `branch_${combined}_${++sequence}`
+      const date = combined ? '2027-03-23' : '2027-03-22'
+      let raced = false
+      const db = {
+        prepare: (sql) => env.DB.prepare(sql),
+        async batch(statements) {
+          if (!raced) {
+            raced = true
+            const branches = [
+              { id: `asg_${marker}_one`, startsAt: new Date(NOW_MS - 2 * 60 * 60 * 1000).toISOString() },
+              { id: `asg_${marker}_two`, startsAt: new Date(NOW_MS - 60 * 60 * 1000).toISOString() },
+            ]
+            for (const branch of branches) {
+              await env.DB.prepare(`INSERT INTO client_assignments
+                (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
+                 version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(
+                branch.id, client.id, 'sp_appointment_target', branch.startsAt, now,
+                OWNER.id, 2, branch.startsAt, now,
+              ).run()
+              for (const version of [1, 2]) {
+                await env.DB.prepare(`INSERT INTO record_versions
+                  (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+                   changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+                  `ver_${marker}_${branch.id}_${version}`, 'client_assignment', branch.id,
+                  version, JSON.stringify({ dataKeyId, dataKeyVersion: 1 }), OWNER.id,
+                  version === 1 ? branch.startsAt : now, CORRELATION_ID,
+                ).run()
+              }
+            }
+            if (combined) {
+              await env.DB.prepare(`INSERT INTO appointments
+                (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+                 status,source,version,cancelled_at,created_at,updated_at)
+                VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+              ).bind(`apt_${marker}_blocker`, client.id, 'sp_appointment_target',
+                '2027-03-23T09:00:00.000Z', '2027-03-23T09:50:00.000Z', now, now).run()
+            }
+          }
+          return env.DB.batch(statements)
+        },
+      }
+      const generated = [`${marker}_target`, `${marker}_charge`, `${marker}_apt_ver`,
+        `${marker}_charge_ver`, `${marker}_audit`]
+      let failure
+      try {
+        await create(client, { db, idFactory: () => generated.shift(),
+          body: { ...BODY, clientId: client.id, date },
+          idempotencyKey: `appointment-${marker}-key` })
+      } catch (error) { failure = error }
+      expect(failure?.message).toMatch(/core_directory_invariant_failed/)
+      expect(failure?.message).not.toBe('APPOINTMENT_OVERLAP')
+      expect(await env.DB.prepare('SELECT count(*) AS count FROM appointments WHERE id=?')
+        .bind(`apt_${marker}_target`).first()).toEqual({ count: 0 })
+    }
   })
 
   it('stores authenticated client-key histories, exact audit metadata, and closed replay', async () => {
