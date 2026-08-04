@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { apiClient, ApiError, createApiClient } from '../../src/api.js'
-import { isWellFormedUnicode } from '../../src/core-records.js'
+import { isWellFormedUnicode, validateClientInput } from '../../src/core-records.js'
+import { validateCreateClientBody } from '../../worker/core/clients.js'
 import { capabilitiesForActor } from '../../worker/identity/policy.js'
 
 const CORRELATION_ID = '77777777-7777-4777-8777-777777777777'
@@ -2876,6 +2877,9 @@ test('client commands reject malformed and hostile inputs before fetch or key ge
     (client) => client.editClient('cl_ola', Number.MAX_SAFE_INTEGER, clientInput()),
     (client) => client.archiveClient('cl_ola', 0),
     (client) => client.archiveClient('cl_ola', 1, null),
+    (client) => client.createClient(clientInput(), {}),
+    (client) => client.editClient('cl_ola', 1, clientInput(), {}),
+    (client) => client.archiveClient('cl_ola', 1, {}),
     (client) => client.createClient(clientInput(), { idempotencyKey: 'bad key' }),
     (client) => client.createClient(clientInput(), { idempotencyKey: 'valid-key-0001', extra: true }),
     (client) => client.createClient(clientInput(), Object.defineProperty({}, 'idempotencyKey', {
@@ -2901,6 +2905,92 @@ test('client commands reject malformed and hostile inputs before fetch or key ge
   assert.equal(generated, 0)
   assert.equal(coercions, 0)
   assert.equal(gets, 0)
+})
+
+test('client command options distinguish omission from every malformed supplied object', async () => {
+  let generated = 0
+  let reads = 0
+  const keyFactory = () => { generated += 1; return 'client-option-key-0001' }
+  const malformedOptions = () => {
+    const hidden = Object.defineProperty({}, 'idempotencyKey', {
+      value: 'client-option-key-0001', enumerable: false,
+    })
+    const accessor = Object.defineProperty({}, 'idempotencyKey', {
+      enumerable: true,
+      get() { reads += 1; throw new Error('private option value') },
+    })
+    return [
+      {},
+      { idempotencyKey: 'client-option-key-0001', extra: true },
+      hidden,
+      accessor,
+      { idempotencyKey: 'client-option-key-0001', [Symbol('extra')]: true },
+      new Proxy({ idempotencyKey: 'client-option-key-0001' }, {
+        ownKeys() { throw new Error('private option proxy') },
+      }),
+    ]
+  }
+  const invokes = [
+    (client, options) => client.createClient(clientInput(), options),
+    (client, options) => client.editClient('cl_ola', 1, clientInput(), options),
+    (client, options) => client.archiveClient('cl_ola', 1, options),
+  ]
+  for (const invoke of invokes) {
+    for (const options of malformedOptions()) {
+      const queued = queuedFetch()
+      const client = createApiClient({
+        fetchImpl: queued.fetchImpl,
+        idempotencyKeyFactory: keyFactory,
+      })
+      await assert.rejects(Promise.resolve().then(() => invoke(client, options)), (error) => {
+        assertClientInput(error)
+        assert.doesNotMatch(JSON.stringify(error), /private option/)
+        return true
+      })
+      assert.equal(queued.calls.length, 0)
+    }
+  }
+  assert.equal(generated, 0)
+  assert.equal(reads, 0)
+})
+
+test('client identity validation stays byte-for-byte aligned across browser, core, and Worker', async () => {
+  const joinedName = 'Ada\u200DNowak'
+  const input = clientInput({ name: joinedName })
+  assert.deepEqual(validateClientInput(input), input)
+  assert.deepEqual(validateCreateClientBody(input), input)
+
+  const response = clientEnvelope(clientDto({ name: joinedName }))
+  const queued = queuedFetch(jsonResponse(sessionBody()), jsonResponse(response, 201))
+  let generated = 0
+  const client = createApiClient({
+    fetchImpl: queued.fetchImpl,
+    idempotencyKeyFactory: () => { generated += 1; return 'unicode-client-key-0001' },
+  })
+  await client.getSession()
+  const result = await client.createClient(input, undefined)
+  assert.equal(generated, 1)
+  assert.equal(result.name, joinedName)
+  assert.equal(queued.calls[1].init.body,
+    '{"name":"Ada‍Nowak","age":12,"status":"active","specialistId":"sp_anna"}')
+
+  const workspace = fullWorkspaceBody()
+  workspace.data.clients[0].name = joinedName
+  const workspaceQueue = queuedFetch(jsonResponse(workspace))
+  const loaded = await createApiClient({ fetchImpl: workspaceQueue.fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+  assert.equal(loaded.clients[0].name, joinedName)
+
+  for (const name of ['\uD800', 'Ada\uD800Nowak', '\uDFFF']) {
+    const malformed = clientInput({ name })
+    assert.throws(() => validateClientInput(malformed), /VALIDATION_FAILED\/name/)
+    assert.throws(() => validateCreateClientBody(malformed), /VALIDATION_FAILED\/name/)
+    const browser = queuedFetch()
+    await assert.rejects(createApiClient({ fetchImpl: browser.fetchImpl }).createClient(malformed),
+      assertClientInput)
+    assert.equal(browser.calls.length, 0)
+  }
 })
 
 test('client command success validators enforce exact operation relationships', async () => {

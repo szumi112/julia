@@ -317,7 +317,11 @@ const workspaceNullableInstant = (value) => value === null || validInstant(value
 const validWorkspaceText = (value, maxBytes) => typeof value === 'string'
   && isWellFormedUnicode(value) && validText(value, maxBytes)
 const workspaceLocation = (value) => value === null || validWorkspaceText(value, 80)
-const workspaceIdentity = (name, age) => validWorkspaceText(name, 120)
+const validClientIdentityText = (value) => typeof value === 'string'
+  && isWellFormedUnicode(value) && value.length > 0
+  && value === value.trim() && value === value.normalize('NFC')
+  && new TextEncoder().encode(value).byteLength <= 120
+const workspaceIdentity = (name, age) => validClientIdentityText(name)
   && (age === null || (Number.isSafeInteger(age) && age >= 1 && age <= 26))
 
 const captureWorkspaceSpecialist = (raw) => {
@@ -405,8 +409,7 @@ const captureClientInput = (raw) => {
 }
 
 const captureClientOptions = (raw) => {
-  const empty = captureDataObject(raw, [])
-  if (empty) return Object.freeze({ idempotencyKey: undefined })
+  if (raw === undefined) return Object.freeze({ idempotencyKey: undefined })
   const value = captureDataObject(raw, ['idempotencyKey'])
   return value && acceptedKey(value.idempotencyKey)
     ? Object.freeze({ idempotencyKey: value.idempotencyKey })
@@ -1376,7 +1379,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     await getSession()
     return send()
   }
-  const createClient = (input, options = {}) => {
+  const createClient = (input, options) => {
     const requested = captureClientInput(input)
     const acceptedOptions = captureClientOptions(options)
     if (!requested || !acceptedOptions) {
@@ -1396,7 +1399,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
-  const editClient = (clientId, expectedVersion, input, options = {}) => {
+  const editClient = (clientId, expectedVersion, input, options) => {
     const requested = captureClientInput(input)
     const acceptedOptions = captureClientOptions(options)
     if (typeof clientId !== 'string' || !CLIENT_ID.test(clientId)
@@ -1421,7 +1424,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
-  const archiveClient = (clientId, expectedVersion, options = {}) => {
+  const archiveClient = (clientId, expectedVersion, options) => {
     const acceptedOptions = captureClientOptions(options)
     if (typeof clientId !== 'string' || !CLIENT_ID.test(clientId)
       || !positive(expectedVersion) || expectedVersion >= Number.MAX_SAFE_INTEGER
