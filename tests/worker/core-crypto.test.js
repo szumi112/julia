@@ -1,17 +1,19 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it, vi } from 'vitest'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { decryptForScope } from '../../worker/security/envelope.js'
+import { decryptForScope, encryptForScope } from '../../worker/security/envelope.js'
 import { decodeBase64Url, encodeBase64Url } from '../../worker/security/encoding.js'
 import {
   assertClientKeyScope,
   buildClientDataKey,
+  chargeOwnershipFact,
   clientKeyScope,
   decryptClientCorrectionReason,
   decryptClientIdentity,
   encryptClientCorrectionReason,
   encryptClientIdentity,
   loadClientCryptoContext,
+  paymentOwnershipFact,
 } from '../../worker/core/crypto.js'
 import { buildRecordVersion } from '../../worker/core/versions.js'
 
@@ -55,6 +57,31 @@ const contextFor = async (clientId, suffix) => {
   })
   return { keyring, built, context: { keyring, dataKey: built.row, scope: built.scope } }
 }
+
+const chargeOwner = (clientId, appointmentId) => chargeOwnershipFact({
+  clientId, appointmentId,
+})
+
+const paymentOwner = (clientId, appointmentId, paymentId) => paymentOwnershipFact({
+  clientId, appointmentId, paymentId,
+})
+
+const accessorObject = (value, key, getter) => Object.defineProperties(
+  {},
+  Object.fromEntries(Object.entries(value).map(([name, current]) => [name, {
+    configurable: true,
+    enumerable: true,
+    ...(name === key ? { get: getter } : { value: current, writable: true }),
+  }])),
+)
+
+const stableDescriptorProxy = (value, onGet) => new Proxy(value, {
+  get(target, key, receiver) {
+    onGet(key)
+    const current = Reflect.get(target, key, receiver)
+    return typeof current === 'number' ? current + 1000 : `drift_${String(current)}`
+  },
+})
 
 describe('client crypto boundary', () => {
   it('accepts only the exact client identity key scope', () => {
@@ -234,24 +261,79 @@ describe('client crypto boundary', () => {
     }))
   })
 
+  it('authenticates identity against same-scope ciphertext created under a different record or field', async () => {
+    const { keyring, built, context } = await contextFor('cl_crypto_identity_aad', 'crypto_identity_aad')
+    for (const aad of [
+      { recordId: 'cl_crypto_identity_other', field: 'identity' },
+      { recordId: 'cl_crypto_identity_aad', field: 'record_version' },
+    ]) {
+      const envelope = JSON.stringify(await encryptForScope(keyring, built.row, {
+        expectedScope: built.scope,
+        ...aad,
+        plaintext: '{"schema":"client.identity.v1","name":"AAD Fikcyjna","age":8}',
+      }))
+      await cryptoFailure(decryptClientIdentity(context, {
+        clientId: 'cl_crypto_identity_aad', envelope,
+      }))
+    }
+  })
+
   it('binds correction reasons to the owning client and exact correction AAD', async () => {
     const { context } = await contextFor('cl_crypto_reason', 'crypto_reason')
+    const ownerFact = paymentOwner(
+      'cl_crypto_reason', 'apt_crypto_reason', 'pay_crypto_reason',
+    )
     const envelope = await encryptClientCorrectionReason(context, {
-      correctionId: 'cor_crypto_reason', reason: 'Korekta fikcyjnej wpłaty',
+      correctionId: 'cor_crypto_reason', appointmentId: 'apt_crypto_reason',
+      paymentId: 'pay_crypto_reason', reason: 'Korekta fikcyjnej wpłaty', ownerFact,
     })
     expect(envelope).not.toContain('Korekta fikcyjnej wpłaty')
     await expect(decryptClientCorrectionReason(context, {
-      correctionId: 'cor_crypto_reason', envelope,
+      correctionId: 'cor_crypto_reason', appointmentId: 'apt_crypto_reason',
+      paymentId: 'pay_crypto_reason', envelope, ownerFact,
     })).resolves.toBe('Korekta fikcyjnej wpłaty')
     await cryptoFailure(decryptClientCorrectionReason(context, {
-      correctionId: 'cor_crypto_other', envelope,
+      correctionId: 'cor_crypto_other', appointmentId: 'apt_crypto_reason',
+      paymentId: 'pay_crypto_reason', envelope, ownerFact,
     }))
     await cryptoFailure(encryptClientCorrectionReason(context, {
-      correctionId: 'apt_wrong', reason: 'Korekta fikcyjnej wpłaty',
+      correctionId: 'apt_wrong', appointmentId: 'apt_crypto_reason',
+      paymentId: 'pay_crypto_reason', reason: 'Korekta fikcyjnej wpłaty', ownerFact,
     }))
     await cryptoFailure(encryptClientCorrectionReason(context, {
-      correctionId: 'cor_crypto_reason', reason: ' Korekta fikcyjnej wpłaty',
+      correctionId: 'cor_crypto_reason', appointmentId: 'apt_crypto_reason',
+      paymentId: 'pay_crypto_reason', reason: ' Korekta fikcyjnej wpłaty', ownerFact,
     }))
+  })
+
+  it('requires a branded closed payment ownership fact for correction reasons', async () => {
+    const { context } = await contextFor('cl_crypto_reason_owner', 'crypto_reason_owner')
+    const valid = paymentOwner(
+      'cl_crypto_reason_owner', 'apt_crypto_reason_owner', 'pay_crypto_reason_owner',
+    )
+    expect(Object.isFrozen(valid)).toBe(true)
+    expect(Object.keys(valid)).toEqual(['clientId', 'appointmentId', 'paymentId'])
+    for (const ownerFact of [
+      undefined,
+      { clientId: 'cl_crypto_reason_owner', appointmentId: 'apt_crypto_reason_owner', paymentId: 'pay_crypto_reason_owner' },
+      paymentOwner('cl_foreign', 'apt_crypto_reason_owner', 'pay_crypto_reason_owner'),
+      paymentOwner('cl_crypto_reason_owner', 'apt_foreign', 'pay_crypto_reason_owner'),
+      paymentOwner('cl_crypto_reason_owner', 'apt_crypto_reason_owner', 'pay_foreign'),
+    ]) await cryptoFailure(encryptClientCorrectionReason(context, {
+      correctionId: 'cor_crypto_reason_owner', appointmentId: 'apt_crypto_reason_owner',
+      paymentId: 'pay_crypto_reason_owner', reason: 'Powód fikcyjny', ownerFact,
+    }))
+    for (const target of [
+      { appointmentId: 'apt_foreign', paymentId: 'pay_crypto_reason_owner' },
+      { appointmentId: 'apt_crypto_reason_owner', paymentId: 'pay_foreign' },
+    ]) await cryptoFailure(encryptClientCorrectionReason(context, {
+      correctionId: 'cor_crypto_reason_owner', reason: 'Powód fikcyjny',
+      ownerFact: valid, ...target,
+    }))
+    await expect(encryptClientCorrectionReason(context, {
+      correctionId: 'cor_crypto_reason_owner', appointmentId: 'apt_crypto_reason_owner',
+      paymentId: 'pay_crypto_reason_owner', reason: 'Powód fikcyjny', ownerFact: valid,
+    })).resolves.toEqual(expect.any(String))
   })
 
   it('clears observable plaintext and raw-key buffers after successful encrypt and decrypt', async () => {
@@ -302,6 +384,74 @@ describe('client crypto boundary', () => {
     }
     expect(captured).toHaveLength(1)
     expect([...captured[0]]).toEqual(new Array(captured[0].byteLength).fill(0))
+  })
+
+  it('rejects throwing and stateful accessors across scope, key, input, and ownership boundaries', async () => {
+    const { context } = await contextFor('cl_crypto_accessors', 'crypto_accessors')
+    let getterCalls = 0
+    const getter = () => {
+      getterCalls += 1
+      if (getterCalls % 2) return 'cl_crypto_accessors'
+      throw new Error('drift')
+    }
+    await cryptoFailure(encryptClientIdentity({
+      ...context,
+      scope: accessorObject(context.scope, 'id', getter),
+    }, { clientId: 'cl_crypto_accessors', name: 'Getter Fikcyjna', age: 8 }))
+    await cryptoFailure(encryptClientIdentity({
+      ...context,
+      dataKey: accessorObject(context.dataKey, 'scope_id', getter),
+    }, { clientId: 'cl_crypto_accessors', name: 'Getter Fikcyjna', age: 8 }))
+    await cryptoFailure(encryptClientIdentity(context, accessorObject({
+      clientId: 'cl_crypto_accessors', name: 'Getter Fikcyjna', age: 8,
+    }, 'name', getter)))
+    expect(() => chargeOwnershipFact(accessorObject({
+      clientId: 'cl_crypto_accessors', appointmentId: 'apt_crypto_accessors',
+    }, 'appointmentId', getter))).toThrow(/^CRYPTO_FAILURE$/)
+    expect(() => paymentOwnershipFact(accessorObject({
+      clientId: 'cl_crypto_accessors', appointmentId: 'apt_crypto_accessors',
+      paymentId: 'pay_crypto_accessors',
+    }, 'paymentId', getter))).toThrow(/^CRYPTO_FAILURE$/)
+    expect(getterCalls).toBe(0)
+
+    const throwing = new Proxy({}, { ownKeys() { throw new Error('proxy failure') } })
+    expect(() => assertClientKeyScope(throwing)).toThrow(/^CRYPTO_FAILURE$/)
+    await cryptoFailure(encryptClientIdentity(throwing, throwing))
+
+    const poisonousError = Object.defineProperty({}, 'message', {
+      get() { throw new Error('message getter escaped') },
+    })
+    const poisonous = new Proxy({}, { ownKeys() { throw poisonousError } })
+    expect(() => assertClientKeyScope(poisonous)).toThrow(/^CRYPTO_FAILURE$/)
+  })
+
+  it('captures proxy data descriptors once and binds only the validated values', async () => {
+    const keyring = await ring()
+    let directReads = 0
+    const input = stableDescriptorProxy({
+      clientId: 'cl_crypto_descriptor', dataKeyId: 'key_crypto_descriptor', createdAt: now,
+    }, () => { directReads += 1 })
+    const db = captureDb()
+    const built = await buildClientDataKey(db, keyring, input)
+    expect(directReads).toBe(0)
+    expect(built.row).toMatchObject({
+      id: 'key_crypto_descriptor', scope_id: 'cl_crypto_descriptor', created_at: now,
+    })
+    expect(db.calls[0].values).toEqual([
+      'key_crypto_descriptor', 'client', 'cl_crypto_descriptor', 'identity', 1,
+      expect.any(String), expect.any(String), 1, now, null,
+    ])
+
+    let ownerReads = 0
+    const owner = paymentOwnershipFact(stableDescriptorProxy({
+      clientId: 'cl_crypto_descriptor', appointmentId: 'apt_crypto_descriptor',
+      paymentId: 'pay_crypto_descriptor',
+    }, () => { ownerReads += 1 }))
+    expect(ownerReads).toBe(0)
+    expect(owner).toEqual({
+      clientId: 'cl_crypto_descriptor', appointmentId: 'apt_crypto_descriptor',
+      paymentId: 'pay_crypto_descriptor',
+    })
   })
 })
 
@@ -361,6 +511,9 @@ describe('core record version encryption', () => {
       const result = await buildRecordVersion(db, context, {
         clientId: client.id, versionId, entityType, entity,
         changedByStaffId: null, changedAt: now, correlationId,
+        ownerFact: entityType === 'session_charge'
+          ? chargeOwner(client.id, entity.appointmentId)
+          : null,
       })
       expect(Object.keys(result).sort()).toEqual(['row', 'statement'])
       expect(result.row).toEqual({
@@ -375,6 +528,18 @@ describe('core record version encryption', () => {
         envelope: JSON.parse(result.row.snapshot_envelope),
       })
       expect(plaintext).toBe(JSON.stringify(expected))
+      for (const aad of [
+        { recordId: 'wrong_record_version_aad', field: 'record_version' },
+        { recordId: entity.id, field: 'identity' },
+      ]) {
+        const wrongEnvelope = await encryptForScope(keyring, key.row, {
+          expectedScope: key.scope, ...aad, plaintext: JSON.stringify(expected),
+        })
+        await cryptoFailure(decryptForScope(keyring, key.row, {
+          expectedScope: key.scope, recordId: entity.id, field: 'record_version',
+          envelope: wrongEnvelope,
+        }))
+      }
       statements.push(result.statement)
     }
 
@@ -404,6 +569,7 @@ describe('core record version encryption', () => {
     const valid = {
       clientId: client.id, versionId: 'ver_version_invalid', entityType: 'client',
       entity: client, changedByStaffId: actorId, changedAt: now, correlationId,
+      ownerFact: null,
     }
     for (const overrides of [
       { clientId: 'cl_version_other' },
@@ -418,5 +584,123 @@ describe('core record version encryption', () => {
       { extra: true },
     ]) await cryptoFailure(buildRecordVersion(db, context, { ...valid, ...overrides }))
     expect(db.calls).toEqual([])
+  })
+
+  it('requires a branded matching charge ownership fact and a human actor remains bound', async () => {
+    const { context } = await contextFor(client.id, 'version_charge_owner')
+    const db = captureDb()
+    const valid = {
+      clientId: client.id, versionId: 'ver_version_charge_owner',
+      entityType: 'session_charge', entity: charge, changedByStaffId: actorId,
+      changedAt: now, correlationId: 'corr_version_charge_owner',
+      ownerFact: chargeOwner(client.id, charge.appointmentId),
+    }
+    expect(Object.isFrozen(valid.ownerFact)).toBe(true)
+    expect(Object.keys(valid.ownerFact)).toEqual(['clientId', 'appointmentId'])
+    for (const ownerFact of [
+      null,
+      { clientId: client.id, appointmentId: charge.appointmentId },
+      chargeOwner('cl_foreign', charge.appointmentId),
+      chargeOwner(client.id, 'apt_foreign'),
+    ]) await cryptoFailure(buildRecordVersion(db, context, { ...valid, ownerFact }))
+    expect(db.calls).toEqual([])
+
+    const built = await buildRecordVersion(db, context, valid)
+    expect(built.row.changed_by_staff_id).toBe(actorId)
+    expect(db.calls[0].values).toEqual([
+      valid.versionId, 'session_charge', charge.id, charge.version,
+      expect.any(String), actorId, now, valid.correlationId,
+    ])
+  })
+
+  it('refuses record-version encryption with a retired client key', async () => {
+    const { context } = await contextFor(client.id, 'version_retired')
+    const retired = { ...context, dataKey: { ...context.dataKey, retired_at: now } }
+    await cryptoFailure(buildRecordVersion(env.DB, retired, {
+      clientId: client.id, versionId: 'ver_version_retired', entityType: 'client',
+      entity: client, changedByStaffId: null, changedAt: now,
+      correlationId: 'corr_version_retired', ownerFact: null,
+    }))
+  })
+
+  it('rejects accessors in version context, metadata, every entity, aggregate, and owner input', async () => {
+    const { context } = await contextFor(client.id, 'version_accessors')
+    let getterCalls = 0
+    const getter = () => {
+      getterCalls += 1
+      if (getterCalls % 2) return now
+      throw new Error('drift')
+    }
+    const base = {
+      clientId: client.id, versionId: 'ver_version_accessors', entityType: 'client',
+      entity: client, changedByStaffId: null, changedAt: now,
+      correlationId: 'corr_version_accessors', ownerFact: null,
+    }
+    await cryptoFailure(buildRecordVersion(env.DB, {
+      ...context, scope: accessorObject(context.scope, 'id', getter),
+    }, base))
+    await cryptoFailure(buildRecordVersion(env.DB, {
+      ...context, dataKey: accessorObject(context.dataKey, 'scope_id', getter),
+    }, base))
+    await cryptoFailure(buildRecordVersion(
+      env.DB, context, accessorObject(base, 'changedAt', getter),
+    ))
+    const entities = [
+      ['client', client, null],
+      ['client_assignment', assignment, null],
+      ['appointment', appointment, null],
+      ['session_charge', charge, chargeOwner(client.id, charge.appointmentId)],
+    ]
+    for (const [entityType, entity, ownerFact] of entities) {
+      await cryptoFailure(buildRecordVersion(env.DB, context, {
+        ...base, versionId: `ver_accessor_${entityType}`, entityType,
+        entity: accessorObject(entity, 'id', getter), ownerFact,
+      }))
+    }
+    await cryptoFailure(buildRecordVersion(env.DB, context, {
+      ...base,
+      versionId: 'ver_accessor_aggregate',
+      entityType: 'appointment',
+      entity: {
+        ...appointment,
+        paymentAggregate: accessorObject(
+          appointment.paymentAggregate, 'status', getter,
+        ),
+      },
+    }))
+    expect(() => chargeOwnershipFact(accessorObject({
+      clientId: client.id, appointmentId: charge.appointmentId,
+    }, 'clientId', getter))).toThrow(/^CRYPTO_FAILURE$/)
+    expect(getterCalls).toBe(0)
+  })
+
+  it('captures stateful entity and aggregate proxies once before binding ciphertext rows', async () => {
+    const { context } = await contextFor(client.id, 'version_descriptors')
+    const db = captureDb()
+    let directReads = 0
+    const proxiedAggregate = stableDescriptorProxy(
+      appointment.paymentAggregate,
+      () => { directReads += 1 },
+    )
+    const proxiedAppointment = stableDescriptorProxy({
+      ...appointment, paymentAggregate: proxiedAggregate,
+    }, () => { directReads += 1 })
+    const built = await buildRecordVersion(db, context, stableDescriptorProxy({
+      clientId: client.id, versionId: 'ver_version_descriptors',
+      entityType: 'appointment', entity: proxiedAppointment,
+      changedByStaffId: actorId, changedAt: now,
+      correlationId: 'corr_version_descriptors', ownerFact: null,
+    }, () => { directReads += 1 }))
+    expect(directReads).toBe(0)
+    expect(built.row).toMatchObject({
+      id: 'ver_version_descriptors', entity_type: 'appointment',
+      entity_id: appointment.id, version: appointment.version,
+      changed_by_staff_id: actorId, changed_at: now,
+      correlation_id: 'corr_version_descriptors',
+    })
+    expect(db.calls[0].values).toEqual([
+      'ver_version_descriptors', 'appointment', appointment.id, appointment.version,
+      expect.any(String), actorId, now, 'corr_version_descriptors',
+    ])
   })
 })
