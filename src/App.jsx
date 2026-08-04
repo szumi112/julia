@@ -6,6 +6,32 @@ import { ToastHost } from './ui.jsx'
 import { setReduceMotion } from './anim.js'
 import { APP_MODE } from './app-mode.js'
 import { AuthProvider, useAuth } from './auth.jsx'
+import { apiClient } from './api.js'
+import { DEMO_ROLES } from './data.js'
+import {
+  createApiWorkspaceRepository,
+  createDemoWorkspaceRepository,
+} from './workspace-repository.js'
+import { createWorkspaceAuthorityKey } from './workspace-provider.js'
+
+const demoRepositoryFactory = ({ dispatch, getState }) => (
+  createDemoWorkspaceRepository({ dispatch, getState })
+)
+const apiRepositoryFactory = () => createApiWorkspaceRepository({ api: apiClient })
+
+const demoAuthorityKeyFor = (state) => {
+  const demoRole = DEMO_ROLES.find((role) => role.id === state.demoRoleId) || DEMO_ROLES[0]
+  return createWorkspaceAuthorityKey({
+    repositoryMode: 'demo',
+    dataMode: 'fictional',
+    actorId: `demo-${demoRole.id}`,
+    actorVersion: 1,
+    role: demoRole.id,
+    specialistId: demoRole.psychId === null ? null : `sp_demo_${demoRole.psychId}`,
+    capabilities: [],
+    demoRoleId: demoRole.id,
+  })
+}
 
 function MotionSync() {
   const { state } = useApp()
@@ -38,24 +64,32 @@ function DemoRoot() {
 
 function DemoApp() {
   return (
-    <AppProvider>
+    <AppProvider repositoryFactory={demoRepositoryFactory} authorityKey={demoAuthorityKeyFor}>
       <DemoRoot />
     </AppProvider>
   )
 }
 
-const authorityKeyFor = (session) => JSON.stringify([
-  session.actor.id,
-  session.actor.role,
-  session.actor.specialistId,
-  [...session.capabilities].sort(),
-  session.dataMode,
-])
+const authorityKeyFor = (session) => createWorkspaceAuthorityKey({
+  repositoryMode: 'api',
+  dataMode: session.dataMode,
+  actorId: session.actor.id,
+  actorVersion: session.actor.version,
+  role: session.actor.role,
+  specialistId: session.actor.specialistId,
+  capabilities: session.capabilities,
+  demoRoleId: null,
+})
 
 function ProtectedApp() {
   const { logout, session, status } = useAuth()
+  const authorityKey = authorityKeyFor(session)
   return (
-    <AppProvider key={authorityKeyFor(session)}>
+    <AppProvider
+      key={authorityKey}
+      repositoryFactory={apiRepositoryFactory}
+      authorityKey={authorityKey}
+    >
       <MotionSync />
       <Shell
         appMode="app"

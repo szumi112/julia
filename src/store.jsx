@@ -1,5 +1,8 @@
 // In-memory app state — no persistence by design (demo).
-import { createContext, useContext, useMemo, useReducer, useState, useCallback, useEffect } from 'react'
+import {
+  createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef,
+  useState, useSyncExternalStore,
+} from 'react'
 import { DEMO_ROLES, INITIAL_STATE } from './data.js'
 import { monthKey, billableSummary, outstandingOf, paymentPatchFor, toISODate } from './format.js'
 import {
@@ -7,6 +10,7 @@ import {
   unlinkTusGuardian, updateTusKidAndClients, withTusGroupDefaults,
 } from './tus.js'
 import { dissolveLoneFamilies, withPsychologistDefaults } from './workspace.js'
+import { createWorkspaceProviderController } from './workspace-provider.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -248,10 +252,35 @@ function reducer(state, action) {
   }
 }
 
-export function AppProvider({ children }) {
+export function AppProvider({ children, repositoryFactory, authorityKey }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE)
+  const stateRef = useRef(state)
+  stateRef.current = state
   const [toasts, setToasts] = useState([])
   const clearToasts = useCallback(() => setToasts([]), [])
+  const effectiveAuthorityKey = typeof authorityKey === 'function'
+    ? authorityKey(state)
+    : authorityKey
+  const workspaceControllerRef = useRef(null)
+  if (workspaceControllerRef.current === null) {
+    workspaceControllerRef.current = createWorkspaceProviderController({
+      repositoryFactory,
+      dispatch,
+      getState: () => stateRef.current,
+      authorityKey: effectiveAuthorityKey,
+      clearToasts,
+    })
+  }
+  const workspaceController = workspaceControllerRef.current
+  const workspaceSnapshot = useSyncExternalStore(
+    workspaceController.subscribe,
+    workspaceController.getSnapshot,
+    workspaceController.getSnapshot,
+  )
+
+  useEffect(() => {
+    workspaceController.resetAuthority(effectiveAuthorityKey)
+  }, [effectiveAuthorityKey, workspaceController])
 
   // Toast actions can mutate scoped data. A role boundary invalidates both
   // their visible context and their authority, so never carry them across it.
@@ -293,8 +322,8 @@ export function AppProvider({ children }) {
   const dismissToast = useCallback((id) => leave(id, 0), [leave])
 
   const value = useMemo(
-    () => ({ state, dispatch, toast }),
-    [state, toast]
+    () => ({ state, dispatch, toast, workspace: workspaceSnapshot.workspace }),
+    [state, toast, workspaceSnapshot.workspace]
   )
   const toastValue = useMemo(
     () => ({ toasts, dismissToast, clearToasts }),
