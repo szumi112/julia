@@ -55,6 +55,7 @@ test('rejects invalid, impossible, reversed, and inexact civil ranges', () => {
     {},
     { from: '2026-02-29', to: '2026-03-01' },
     { from: '2026-08-02', to: '2026-08-01' },
+    { from: '0000-12-31', to: '0001-01-01' },
     { from: '2026-8-01', to: '2026-08-02' },
     { from: '2026-08-01', to: '2026-08-02', extra: true },
   ]) assert.throws(() => captureLoadedWorkspaceLoad(state, invalid), TypeError)
@@ -81,14 +82,35 @@ test('normalizes overlapping, adjacent, duplicate, and subsumed loaded ranges', 
 
 test('normalizes leap-day and year-boundary adjacency without host timezone dependence', () => {
   let state = createLoadedWorkspaceState()
+  state = load(state, { from: '0004-02-28', to: '0004-02-29' })
+  state = load(state, { from: '0004-03-01', to: '0004-03-01' })
   state = load(state, { from: '2024-02-28', to: '2024-02-29' })
   state = load(state, { from: '2024-03-01', to: '2024-03-01' })
   state = load(state, { from: '2026-12-31', to: '2026-12-31' })
   state = load(state, { from: '2027-01-01', to: '2027-01-02' })
   assert.deepEqual(state.loadedRanges, [
+    { from: '0004-02-28', to: '0004-03-01' },
     { from: '2024-02-28', to: '2024-03-01' },
     { from: '2026-12-31', to: '2027-01-02' },
   ])
+})
+
+test('accepts year 0001 appointment boundaries and rejects year 0000 instants', () => {
+  let state = createLoadedWorkspaceState()
+  state = load(state, {
+    from: '0001-06-01', specialists: [specialist()], clients: [client()],
+    appointments: [appointment('apt_era', 'cl_ola', '0001-06-01T12:00:00.000Z')],
+  })
+  assert.deepEqual(Object.keys(state.appointmentsById), ['apt_era'])
+  const capture = captureLoadedWorkspaceLoad(state, range('0001-06-02'))
+  assert.throws(() => mergeLoadedWorkspaceLoad(state, capture, payload({
+    from: '0001-06-02', specialists: [specialist()], clients: [client()],
+    appointments: [appointment('apt_zero', 'cl_ola', '0000-06-02T12:00:00.000Z')],
+  })), TypeError)
+  state = load(state, {
+    from: '9999-12-31', specialists: [specialist()], clients: [client()],
+  })
+  assert.equal(isWorkspaceWindowLoaded(state, range('9999-12-31')), true)
 })
 
 test('reports only full union coverage and never infers coverage from rows', () => {
@@ -329,6 +351,63 @@ test('captures caller data deeply and freezes merge state and result', () => {
   assert.ok(Object.isFrozen(result.state.appointmentsById.apt_one.paymentEntries))
 })
 
+test('rejects nested prototype-pollution keys without inheritance or source mutation', () => {
+  const state = createLoadedWorkspaceState()
+  const source = appointment('apt_pollution', 'cl_ola', '2026-08-01T08:00:00.000Z')
+  Object.defineProperty(source.charge, '__proto__', {
+    enumerable: true,
+    configurable: true,
+    writable: true,
+    value: { polluted: true },
+  })
+  const sourcePrototype = Object.getPrototypeOf(source.charge)
+  const capture = captureLoadedWorkspaceLoad(state, range('2026-08-01'))
+  assert.throws(() => mergeLoadedWorkspaceLoad(state, capture, payload({
+    from: '2026-08-01', specialists: [specialist()], clients: [client()],
+    appointments: [source],
+  })), TypeError)
+  assert.equal(Object.getPrototypeOf(source.charge), sourcePrototype)
+  assert.equal(source.charge.polluted, undefined)
+  assert.equal({}.polluted, undefined)
+
+  const inherited = Object.create({ status: 'active' })
+  Object.assign(inherited, { id: 'sp_inherited', displayName: 'Inherited', version: 1 })
+  assert.throws(() => mergeLoadedWorkspaceLoad(state, capture, payload({
+    from: '2026-08-01', specialists: [inherited],
+  })), TypeError)
+
+  const missingOwnStatus = { id: 'sp_missing', displayName: 'Missing', version: 1 }
+  Object.defineProperty(Object.prototype, 'status', {
+    configurable: true,
+    value: 'active',
+  })
+  try {
+    assert.throws(() => mergeLoadedWorkspaceLoad(state, capture, payload({
+      from: '2026-08-01', specialists: [missingOwnStatus],
+    })), TypeError)
+  } finally {
+    delete Object.prototype.status
+  }
+})
+
+test('preserves safe canonical own fields without retaining caller references', () => {
+  const state = createLoadedWorkspaceState()
+  const source = appointment('apt_fields', 'cl_ola', '2026-08-01T08:00:00.000Z')
+  source.payment = { status: 'unpaid', latestMethod: null }
+  const result = mergeLoadedWorkspaceLoad(
+    state,
+    captureLoadedWorkspaceLoad(state, range('2026-08-01')),
+    payload({
+      from: '2026-08-01', specialists: [specialist()], clients: [client()],
+      appointments: [source],
+    }),
+  )
+  assert.deepEqual(result.state.appointmentsById.apt_fields.payment, {
+    status: 'unpaid', latestMethod: null,
+  })
+  assert.notEqual(result.state.appointmentsById.apt_fields.payment, source.payment)
+})
+
 test('fails closed on mismatched, incomplete, extra, accessor, sparse, and proxy payloads', () => {
   const state = createLoadedWorkspaceState()
   const capture = captureLoadedWorkspaceLoad(state, range('2026-08-01'))
@@ -371,4 +450,90 @@ test('guards safe-integer generation and write-epoch increments', () => {
   assert.throws(() => resetLoadedWorkspaceAuthority(state), RangeError)
   state = Object.freeze({ ...createLoadedWorkspaceState(), writeEpoch: Number.MAX_SAFE_INTEGER })
   assert.throws(() => recordLoadedWorkspaceWrite(state), RangeError)
+})
+
+test('authenticates every public state argument before reading or returning it', () => {
+  const canonical = createLoadedWorkspaceState()
+  let reads = 0
+  const accessor = {}
+  for (const key of Object.keys(canonical)) {
+    Object.defineProperty(accessor, key, key === 'writeEpoch'
+      ? { enumerable: true, get() { reads += 1; return 0 } }
+      : { enumerable: true, value: canonical[key] })
+  }
+  const proxy = new Proxy({}, { ownKeys() { throw new Error('state trap') } })
+  const extra = Object.freeze({ ...canonical, extra: true })
+  const mutableRanges = Object.freeze({ ...canonical, loadedRanges: [] })
+  const badRange = Object.freeze({
+    ...canonical,
+    loadedRanges: Object.freeze([Object.freeze({ from: '2026-08-02', to: '2026-08-01' })]),
+  })
+  const plainMap = Object.freeze({ ...canonical, clientsById: Object.freeze({}) })
+  const hidden = { ...canonical }
+  Object.defineProperty(hidden, 'extra', { value: true })
+  Object.freeze(hidden)
+  const mapAccessor = Object.create(null)
+  Object.defineProperty(mapAccessor, 'sp_trap', {
+    enumerable: true,
+    get() { reads += 1; return specialist('sp_trap') },
+  })
+  Object.freeze(mapAccessor)
+  const accessorMapState = Object.freeze({ ...canonical, specialistsById: mapAccessor })
+  const validCapture = captureLoadedWorkspaceLoad(canonical, range('2026-08-01'))
+  const validPayload = payload({ from: '2026-08-01' })
+  for (const value of [
+    accessor, proxy, extra, hidden, mutableRanges, badRange, plainMap, accessorMapState,
+  ]) {
+    assert.throws(() => captureLoadedWorkspaceLoad(value, range('2026-08-01')), TypeError)
+    assert.throws(() => isWorkspaceWindowLoaded(value, range('2026-08-01')), TypeError)
+    assert.throws(() => recordLoadedWorkspaceWrite(value), TypeError)
+    assert.throws(() => resetLoadedWorkspaceAuthority(value), TypeError)
+    assert.throws(() => mergeLoadedWorkspaceLoad(value, validCapture, validPayload), TypeError)
+  }
+  assert.equal(reads, 0)
+})
+
+test('rejects mutable, key-mismatched, and referentially corrupt state entities', () => {
+  let canonical = createLoadedWorkspaceState()
+  canonical = load(canonical, {
+    from: '2026-08-01', specialists: [specialist()], clients: [client()],
+    appointments: [appointment('apt_state', 'cl_ola', '2026-08-01T08:00:00.000Z')],
+  })
+  const nullMap = (entries) => {
+    const value = Object.create(null)
+    for (const [key, item] of entries) value[key] = item
+    return Object.freeze(value)
+  }
+  const mutableClient = { ...canonical.clientsById.cl_ola }
+  const mutableEntityState = Object.freeze({
+    ...canonical,
+    clientsById: nullMap([['cl_ola', mutableClient]]),
+  })
+  const mismatchedKeyState = Object.freeze({
+    ...canonical,
+    clientsById: nullMap([['cl_wrong', canonical.clientsById.cl_ola]]),
+  })
+  const orphanState = Object.freeze({
+    ...canonical,
+    clientsById: Object.freeze(Object.create(null)),
+  })
+  for (const value of [mutableEntityState, mismatchedKeyState, orphanState]) {
+    assert.throws(() => isWorkspaceWindowLoaded(value, range('2026-08-01')), TypeError)
+  }
+})
+
+test('all public transitions return state that remains immutable after mutation probes', () => {
+  const initial = createLoadedWorkspaceState()
+  const written = recordLoadedWorkspaceWrite(initial)
+  const reset = resetLoadedWorkspaceAuthority(written)
+  const capture = captureLoadedWorkspaceLoad(reset, range('2026-08-01'))
+  const merged = mergeLoadedWorkspaceLoad(reset, capture, payload({ from: '2026-08-01' })).state
+  for (const value of [initial, written, reset, merged]) {
+    assert.ok(Object.isFrozen(value))
+    assert.ok(Object.isFrozen(value.loadedRanges))
+    assert.ok(Object.isFrozen(value.specialistsById))
+    assert.throws(() => { value.writeEpoch = 9 }, TypeError)
+    assert.throws(() => { value.loadedRanges.push(range('2026-08-02')) }, TypeError)
+    assert.throws(() => { value.clientsById.cl_bad = client('cl_bad') }, TypeError)
+  }
 })
