@@ -6,7 +6,7 @@ import {
   validateCreateAppointmentBody,
 } from '../../worker/core/appointments.js'
 import { postAppointment } from '../../worker/routes/appointments.js'
-import { createClient } from '../../worker/core/clients.js'
+import { createClient, editClient } from '../../worker/core/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { decryptForScope, loadDataKey } from '../../worker/security/envelope.js'
 import { clientKeyScope } from '../../worker/core/crypto.js'
@@ -65,6 +65,26 @@ beforeAll(async () => {
       (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
        changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
       'ver_appointment_target', 'specialist', 'sp_appointment_target', 1, '{}', null,
+      now, CORRELATION_ID,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_appointment_second', 'lookup_appointment_second', '{}', '{}', 'owner',
+      'active', 'access-appointment-second', 'sp_appointment_second', 1,
+      now, null, now, now,
+    ),
+    env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'sp_appointment_second', 'stf_appointment_second', 20_000, 'active', 1,
+      null, now, now,
+    ),
+    env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'ver_appointment_second', 'specialist', 'sp_appointment_second', 1, '{}', null,
       now, CORRELATION_ID,
     ),
   ])
@@ -195,6 +215,34 @@ describe('persistent appointment creation', () => {
     }
   })
 
+  it('selects a historical effective assignment independently of the one terminal open assignment', async () => {
+    const client = await seedClient()
+    const editIds = suffixes(`appointment_reassign_${++sequence}`)
+    await editClient({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 2 * 60 * 60 * 1000, correlationId: CORRELATION_ID,
+      idFactory: editIds, clientId: client.id,
+      body: { expectedVersion: 1, name: `Fikcyjny ${sequence - 1}`, age: 12,
+        status: 'active', specialistId: 'sp_appointment_second' },
+      idempotencyKey: `appointment-reassign-${sequence}-key`,
+    })
+    const cases = [
+      ['09:59', 'sp_appointment_target', false],
+      ['10:00', 'sp_appointment_target', true],
+      ['11:59', 'sp_appointment_target', true],
+      ['12:00', 'sp_appointment_target', false],
+      ['12:00', 'sp_appointment_second', true],
+    ]
+    for (const [index, [time, specialistId, allowed]] of cases.entries()) {
+      const operation = create(client, {
+        body: { ...BODY, clientId: client.id, date: '2027-01-15', time, specialistId },
+        idempotencyKey: `appointment-assignment-boundary-${sequence}-${index}`,
+      })
+      if (allowed) expect((await operation).status).toBe(201)
+      else await expect(operation).rejects.toThrow('NOT_FOUND')
+    }
+  })
+
   it('uses half-open overlap, ignores cancelled visits, and replays before facts or IDs', async () => {
     const client = await seedClient()
     const visit = { ...BODY, clientId: client.id, date: '2027-01-17' }
@@ -258,6 +306,137 @@ describe('persistent appointment creation', () => {
     expect(await env.DB.prepare(`SELECT count(*) AS count FROM appointments
       WHERE specialist_id='sp_appointment_target'
         AND starts_at='2027-02-13T09:00:00.000Z'`).first()).toEqual({ count: 1 })
+  })
+
+  it('rechecks stored idempotency when a winner commits between replay and overlap preflight', async () => {
+    const run = async ({ differentDigest }) => {
+      const client = await seedClient()
+      const date = differentDigest ? '2027-02-16' : '2027-02-15'
+      const key = `appointment-overlap-replay-${sequence}-${differentDigest}`
+      const winnerBody = { ...BODY, clientId: client.id, date }
+      const loserBody = { ...winnerBody,
+        expectedAmountGrosze: differentDigest ? BODY.expectedAmountGrosze + 1 : BODY.expectedAmountGrosze }
+      const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+      let injected = false
+      let winner
+      const db = {
+        prepare(sql) {
+          const prepared = budget.work.prepare(sql)
+          if (!injected && sql.includes('SELECT 1 AS blocked FROM appointments')) {
+            return {
+              bind(...bindings) {
+                const bound = prepared.bind(...bindings)
+                return { async first() {
+                  injected = true
+                  winner = await createAppointment({
+                    db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+                    nowMs: NOW_MS, correlationId: CORRELATION_ID,
+                    idFactory: suffixes(`appointment_overlap_winner_${++sequence}`),
+                    body: winnerBody, idempotencyKey: key,
+                  })
+                  return bound.first()
+                } }
+              },
+            }
+          }
+          return prepared
+        },
+        batch: (statements) => budget.work.batch(statements),
+      }
+      const idFactory = vi.fn()
+      const loser = createAppointment({
+        db, recoveryDb: budget.recovery, actor: OWNER, keyring: await ring(), nowMs: NOW_MS,
+        correlationId: CORRELATION_ID, idFactory, body: loserBody, idempotencyKey: key,
+      })
+      if (differentDigest) await expect(loser).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+      else expect(await loser).toEqual(winner)
+      expect(idFactory).not.toHaveBeenCalled()
+      expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+        used: 8, remaining: 42, workRemaining: 34,
+        totalLimit: 50, recoveryReserve: 8,
+      })
+    }
+    await run({ differentDigest: false })
+    await run({ differentDigest: true })
+  })
+
+  it('rejects cross-type retained histories before IDs and generated cross-type rows atomically', async () => {
+    for (const target of ['client', 'assignment']) {
+      const client = await seedClient()
+      const entityId = target === 'client' ? client.id : client.assignment.id
+      const source = await env.DB.prepare('SELECT snapshot_envelope FROM record_versions WHERE entity_id=? LIMIT 1')
+        .bind(entityId).first()
+      await env.DB.prepare(`INSERT INTO record_versions
+        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+         changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+        `ver_cross_type_${target}_${++sequence}`,
+        target === 'client' ? 'client_assignment' : 'client', entityId, 99,
+        source.snapshot_envelope, OWNER.id, new Date(NOW_MS).toISOString(), CORRELATION_ID,
+      ).run()
+      const idFactory = vi.fn()
+      await expect(create(client, { idFactory,
+        body: { ...BODY, clientId: client.id, date: `2027-03-0${sequence % 9 + 1}` },
+        idempotencyKey: `appointment-cross-history-${target}-${sequence}`,
+      })).rejects.toThrow('NOT_FOUND')
+      expect(idFactory).not.toHaveBeenCalled()
+    }
+
+    const client = await seedClient()
+    await env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      `ver_cross_generated_${++sequence}`, 'client', 'apt_cross_generated', 77,
+      '{}', OWNER.id, new Date(NOW_MS).toISOString(), CORRELATION_ID,
+    ).run()
+    const before = await ledgerSnapshot()
+    const values = ['cross_generated', `cross_charge_${sequence}`, `cross_apt_ver_${sequence}`,
+      `cross_charge_ver_${sequence}`, `cross_audit_${sequence}`]
+    await expect(create(client, {
+      idFactory: () => values.shift(),
+      body: { ...BODY, clientId: client.id, date: '2027-03-20' },
+      idempotencyKey: `appointment-cross-generated-${sequence}`,
+    })).rejects.toThrow()
+    expect(await ledgerSnapshot()).toEqual(before)
+  })
+
+  it('preserves the invariant failure when an overlap race combines with a generated cross-type row', async () => {
+    const client = await seedClient()
+    const now = new Date(NOW_MS).toISOString()
+    await env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      `ver_combined_cross_${++sequence}`, 'client', 'apt_combined_target', 88,
+      '{}', OWNER.id, now, CORRELATION_ID,
+    ).run()
+    let raced = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!raced) {
+          raced = true
+          await env.DB.prepare(`INSERT INTO appointments
+            (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+             status,source,version,cancelled_at,created_at,updated_at)
+            VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+          ).bind('apt_combined_blocker', client.id, 'sp_appointment_target',
+            '2027-03-21T09:00:00.000Z', '2027-03-21T09:50:00.000Z', now, now).run()
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    const values = ['combined_target', `combined_charge_${sequence}`,
+      `combined_apt_ver_${sequence}`, `combined_charge_ver_${sequence}`,
+      `combined_audit_${sequence}`]
+    let failure
+    try {
+      await create(client, { db, idFactory: () => values.shift(),
+        body: { ...BODY, clientId: client.id, date: '2027-03-21' },
+        idempotencyKey: `appointment-combined-race-${sequence}` })
+    } catch (error) { failure = error }
+    expect(failure?.message).toMatch(/core_directory_invariant_failed/)
+    expect(failure?.message).not.toBe('APPOINTMENT_OVERLAP')
+    expect(await env.DB.prepare("SELECT count(*) AS count FROM appointments WHERE id='apt_combined_target'").first())
+      .toEqual({ count: 0 })
   })
 
   it('stores authenticated client-key histories, exact audit metadata, and closed replay', async () => {
