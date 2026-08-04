@@ -224,6 +224,25 @@ const practitionerFact = (value) => {
   }
 }
 
+const retainedPractitionerFact = (value) => {
+  try {
+    const row = replayObject(value, ['id', 'staff_user_id', 'specialist_status', 'staff_status'])
+    const consistent = (row.specialist_status === 'pending' && row.staff_status === 'pending')
+      || (row.specialist_status === 'active' && row.staff_status === 'active')
+      || (row.specialist_status === 'archived' && row.staff_status === 'disabled')
+    if (typeof row.id !== 'string' || !SPECIALIST_ID.test(row.id)
+      || typeof row.staff_user_id !== 'string' || !STAFF_ID.test(row.staff_user_id)
+      || !consistent) notFound()
+    return Object.freeze({
+      id: row.id, staffUserId: row.staff_user_id,
+      specialistStatus: row.specialist_status, staffStatus: row.staff_status,
+    })
+  } catch (error) {
+    if (error instanceof Error && error.message === 'NOT_FOUND') throw error
+    notFound()
+  }
+}
+
 const generated = (factory, prefix, grammar, used) => {
   let suffix
   try { suffix = factory() } catch { throw new Error('INTERNAL_ERROR') }
@@ -382,6 +401,29 @@ const loadActivePractitioner = async (db, specialistId, actor) => db.prepare(
      AND (
        ? IN ('owner','coordinator')
        OR (?='specialist' AND specialist.id=?)
+     )`
+).bind(specialistId, actor.role, actor.role, actor.specialistId).first()
+
+const loadRetainedPractitioner = async (db, specialistId, actor) => db.prepare(
+  `SELECT specialist.id,
+          specialist.staff_user_id,
+          specialist.status AS specialist_status,
+          staff.status AS staff_status
+   FROM specialists AS specialist
+   JOIN staff_users AS staff
+     ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
+   WHERE specialist.id=?
+     AND EXISTS (SELECT 1 FROM record_versions AS version
+       WHERE version.entity_type='specialist' AND version.entity_id=specialist.id
+         AND version.version=specialist.version)
+     AND (
+       (? IN ('owner','coordinator') AND (
+         (specialist.status='pending' AND staff.status='pending')
+         OR (specialist.status='active' AND staff.status='active')
+         OR (specialist.status='archived' AND staff.status='disabled')
+       ))
+       OR (?='specialist' AND specialist.id=?
+         AND specialist.status='active' AND staff.status='active')
      )`
 ).bind(specialistId, actor.role, actor.role, actor.specialistId).first()
 
@@ -715,6 +757,154 @@ const validateRetainedCurrentSnapshots = async (context, current, identity) => {
   }
 }
 
+const loadRetainedAssignmentHistory = async (db, clientId) => db.prepare(
+  `SELECT assignment.id,
+          assignment.client_id,
+          assignment.specialist_id,
+          assignment.starts_at,
+          assignment.ends_at,
+          assignment.assigned_by_staff_id,
+          assignment.version AS assignment_version,
+          assignment.created_at,
+          assignment.updated_at,
+          version.id AS record_version_id,
+          version.entity_type AS record_version_type,
+          version.entity_id AS record_version_entity_id,
+          version.version AS record_version_number,
+          version.snapshot_envelope,
+          version.changed_by_staff_id,
+          version.changed_at,
+          version.correlation_id
+   FROM client_assignments AS assignment
+   LEFT JOIN record_versions AS version ON version.entity_id=assignment.id
+   WHERE assignment.client_id=?
+   ORDER BY assignment.starts_at,assignment.id,version.version,version.id
+   LIMIT 257`
+).bind(clientId).all()
+
+const retainedAssignmentHistoryFacts = (value, current, dataKeyId) => {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) notFound()
+    const outerDescriptors = Object.getOwnPropertyDescriptors(value)
+    const outerKeys = Reflect.ownKeys(outerDescriptors)
+    if (!outerKeys.includes('results')
+      || outerKeys.some((key) => typeof key !== 'string'
+        || !['results', 'success', 'meta'].includes(key))) notFound()
+    const resultsDescriptor = outerDescriptors.results
+    if (!resultsDescriptor || !Object.hasOwn(resultsDescriptor, 'value')
+      || !resultsDescriptor.enumerable) notFound()
+    const results = resultsDescriptor.value
+    if (!Array.isArray(results) || results.length < 1 || results.length > 256) notFound()
+    const groups = new Map()
+    const versionIds = new Set()
+    for (const candidate of results) {
+      const row = replayObject(candidate, [
+        'id', 'client_id', 'specialist_id', 'starts_at', 'ends_at',
+        'assigned_by_staff_id', 'assignment_version', 'created_at', 'updated_at',
+        'record_version_id', 'record_version_type', 'record_version_entity_id',
+        'record_version_number', 'snapshot_envelope', 'changed_by_staff_id',
+        'changed_at', 'correlation_id',
+      ])
+      if (typeof row.id !== 'string' || !ASSIGNMENT_ID.test(row.id)
+        || row.client_id !== current.id
+        || typeof row.specialist_id !== 'string' || !SPECIALIST_ID.test(row.specialist_id)
+        || !canonicalInstant(row.starts_at)
+        || (row.ends_at !== null && (!canonicalInstant(row.ends_at) || row.ends_at <= row.starts_at))
+        || typeof row.assigned_by_staff_id !== 'string' || !STAFF_ID.test(row.assigned_by_staff_id)
+        || !Number.isSafeInteger(row.assignment_version)
+        || !((row.ends_at === null && row.assignment_version === 1)
+          || (row.ends_at !== null && row.assignment_version === 2))
+        || !canonicalInstant(row.created_at) || !canonicalInstant(row.updated_at)
+        || row.created_at > row.updated_at
+        || typeof row.record_version_id !== 'string' || !VERSION_ID.test(row.record_version_id)
+        || versionIds.has(row.record_version_id)
+        || row.record_version_type !== 'client_assignment'
+        || row.record_version_entity_id !== row.id
+        || !Number.isSafeInteger(row.record_version_number)
+        || row.record_version_number < 1
+        || typeof row.changed_by_staff_id !== 'string' || !STAFF_ID.test(row.changed_by_staff_id)
+        || !canonicalInstant(row.changed_at)
+        || typeof row.correlation_id !== 'string' || !ID.test(row.correlation_id)) notFound()
+      retainedSnapshotFact(row.snapshot_envelope, dataKeyId)
+      versionIds.add(row.record_version_id)
+      const immutable = JSON.stringify([
+        row.client_id, row.specialist_id, row.starts_at, row.ends_at,
+        row.assigned_by_staff_id, row.assignment_version, row.created_at, row.updated_at,
+      ])
+      const group = groups.get(row.id) ?? { immutable, row, versions: [] }
+      if (group.immutable !== immutable) notFound()
+      group.versions.push(Object.freeze({
+        id: row.record_version_id, number: row.record_version_number,
+        envelope: row.snapshot_envelope, changedAt: row.changed_at,
+      }))
+      groups.set(row.id, group)
+    }
+    const currentGroup = groups.get(current.assignment.id)
+    if (!currentGroup || groups.size < 1) notFound()
+    for (const [id, group] of groups) {
+      if (group.versions.length !== group.row.assignment_version
+        || group.versions.some((version, index) => version.number !== index + 1)) notFound()
+      if (id === current.assignment.id
+        && (group.row.client_id !== current.assignment.clientId
+          || group.row.specialist_id !== current.assignment.specialistId
+          || group.row.starts_at !== current.assignment.startsAt
+          || group.row.ends_at !== current.assignment.endsAt
+          || group.row.assigned_by_staff_id !== current.assignment.assignedByStaffId
+          || group.row.assignment_version !== current.assignment.version
+          || group.row.created_at !== current.assignment.createdAt
+          || group.row.updated_at !== current.assignment.updatedAt)) notFound()
+    }
+    return Object.freeze([...groups.values()].map((group) => Object.freeze({
+      assignment: Object.freeze({
+        id: group.row.id, clientId: group.row.client_id,
+        specialistId: group.row.specialist_id, startsAt: group.row.starts_at,
+        endsAt: group.row.ends_at, assignedByStaffId: group.row.assigned_by_staff_id,
+        version: group.row.assignment_version, createdAt: group.row.created_at,
+        updatedAt: group.row.updated_at,
+      }),
+      versions: Object.freeze(group.versions),
+    })))
+  } catch (error) {
+    if (error instanceof Error && error.message === 'NOT_FOUND') throw error
+    notFound()
+  }
+}
+
+const authenticateRetainedAssignmentHistory = async (context, history) => {
+  try {
+    for (const group of history) {
+      const assignment = group.assignment
+      for (const version of group.versions) {
+        const endsAt = version.number === assignment.version ? assignment.endsAt : null
+        const updatedAt = version.number === assignment.version
+          ? assignment.updatedAt
+          : assignment.createdAt
+        const expected = JSON.stringify({
+          assignedByStaffId: assignment.assignedByStaffId,
+          clientId: assignment.clientId,
+          createdAt: assignment.createdAt,
+          endsAt,
+          id: assignment.id,
+          schema: 'client_assignment.v1',
+          specialistId: assignment.specialistId,
+          startsAt: assignment.startsAt,
+          updatedAt,
+          version: version.number,
+        })
+        const plaintext = await decryptForScope(context.keyring, context.dataKey, {
+          expectedScope: context.scope, recordId: assignment.id,
+          field: 'record_version', envelope: JSON.parse(version.envelope),
+        })
+        if (plaintext !== expected) notFound()
+      }
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === 'NOT_FOUND') throw error
+    notFound()
+  }
+}
+
 const conditionalVersionStatement = (db, version, conditionSql, bindings) => db.prepare(
   `INSERT INTO record_versions
    (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
@@ -755,6 +945,31 @@ const archiveGuardStatement = (db, values) => {
          WHERE id=? AND client_id=? AND specialist_id=? AND starts_at=? AND ends_at=?
            AND assigned_by_staff_id=? AND version=? AND created_at=? AND updated_at=?)
        AND NOT EXISTS (SELECT 1 FROM client_assignments WHERE client_id=? AND ends_at IS NULL)
+       AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
+         WHERE retained.client_id=?
+           AND (retained.ends_at IS NULL OR retained.version!=2))
+       AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
+         WHERE retained.client_id=? AND (
+           (SELECT count(*) FROM record_versions AS history
+             WHERE history.entity_type='client_assignment'
+               AND history.entity_id=retained.id)!=retained.version
+           OR (SELECT min(history.version) FROM record_versions AS history
+             WHERE history.entity_type='client_assignment'
+               AND history.entity_id=retained.id)!=1
+           OR (SELECT max(history.version) FROM record_versions AS history
+             WHERE history.entity_type='client_assignment'
+               AND history.entity_id=retained.id)!=retained.version
+         ))
+       AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+         JOIN client_assignments AS retained ON retained.id=history.entity_id
+         WHERE retained.client_id=? AND (
+           history.entity_type!='client_assignment'
+           OR NOT json_valid(history.snapshot_envelope)
+           OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+           OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1
+         ))
        AND (SELECT count(*) FROM record_versions
          WHERE entity_type='client' AND entity_id=?)=?
        AND (SELECT min(version) FROM record_versions
@@ -806,6 +1021,7 @@ const archiveGuardStatement = (db, values) => {
     values.assignment.startsAt, values.now, values.assignment.assignedByStaffId,
     values.assignment.version, values.assignment.createdAt, values.now,
     values.client.id,
+    values.client.id, values.client.id, values.client.id, values.dataKeyId,
     values.client.id, values.client.version,
     values.client.id, values.client.id, values.client.version,
     values.assignment.id, values.assignment.version,
@@ -1248,8 +1464,8 @@ export async function archiveClient(input) {
       specialistId: current.assignment.specialistId, status: 'active',
     },
   }, { nowMs: command.nowMs })) notFound()
-  const practitioner = practitionerFact(
-    await loadActivePractitioner(command.db, current.assignment.specialistId, actor),
+  const practitioner = retainedPractitionerFact(
+    await loadRetainedPractitioner(command.db, current.assignment.specialistId, actor),
   )
   const context = await loadClientCryptoContext(command.db, command.keyring, {
     clientId: current.id, envelope: current.identityEnvelope,
@@ -1258,6 +1474,10 @@ export async function archiveClient(input) {
     clientId: current.id, envelope: current.identityEnvelope,
   })
   await validateRetainedCurrentSnapshots(context, current, identity)
+  const assignmentHistory = retainedAssignmentHistoryFacts(
+    await loadRetainedAssignmentHistory(command.db, current.id), current, context.dataKey.id,
+  )
+  await authenticateRetainedAssignmentHistory(context, assignmentHistory)
   if (command.body.expectedVersion !== current.version) versionConflict(current.version)
   const blocked = await command.db.prepare(
     `SELECT 1 AS blocked FROM appointments
@@ -1364,9 +1584,24 @@ export async function archiveClient(input) {
       const row = await command.db.prepare('SELECT status,version FROM clients WHERE id=?')
         .bind(current.id).first()
       if (row) {
-        const fact = replayObject(row, ['status', 'version'])
+        let fact
+        try { fact = replayObject(row, ['status', 'version']) } catch { throw originalError }
         if (fact.status === 'archived' && Number.isSafeInteger(fact.version)
           && fact.version > current.version) versionConflict(fact.version)
+        if (isD1CoreDirectoryInvariantFailure(originalError)
+          && fact.status === current.status && fact.version === current.version) {
+          const racedAppointment = await command.db.prepare(
+            `SELECT 1 AS blocked FROM appointments
+             WHERE client_id=? AND starts_at>=? AND status!='cancelled' LIMIT 1`
+          ).bind(current.id, now).first()
+          if (racedAppointment) {
+            let conflict
+            try {
+              conflict = replayObject(racedAppointment, ['blocked'])
+            } catch { throw originalError }
+            if (conflict.blocked === 1) throw new Error('CLIENT_ARCHIVE_CONFLICT')
+          }
+        }
       }
     }
     throw originalError

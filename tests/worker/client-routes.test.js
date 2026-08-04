@@ -13,7 +13,12 @@ import {
 } from '../../worker/core/clients.js'
 import { postClient, postClientArchive, postClientEdit } from '../../worker/routes/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { decryptForScope, encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
+import {
+  decryptForScope,
+  encryptForScope,
+  getOrCreateDataKey,
+  loadDataKey,
+} from '../../worker/security/envelope.js'
 import {
   buildClientDataKey,
   clientKeyScope,
@@ -55,6 +60,50 @@ describe('persistent client archive', () => {
       body: { expectedVersion: client.version },
       idempotencyKey: `${marker}-key`, ...overrides,
     })
+  }
+  const addHistoricalAssignment = async (client, kind) => {
+    const keyring = await ring()
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(client.id).first()
+    const scope = clientKeyScope(client.id)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
+    })
+    const id = `asg_archive_history_${++sequence}`
+    const startsAt = new Date(NOW_MS - 20_000).toISOString()
+    const endsAt = new Date(NOW_MS - 10_000).toISOString()
+    const version = kind === 'missing' ? 1 : 2
+    await env.DB.prepare(
+      `INSERT INTO client_assignments
+       (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
+        version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`
+    ).bind(id, client.id, 'sp_target', startsAt, endsAt, 'stf_client_owner',
+      version, startsAt, endsAt).run()
+    if (kind === 'missing') return
+    const snapshotVersions = kind === 'noncontiguous' ? [2] : [1, 2]
+    for (const snapshotVersion of snapshotVersions) {
+      const plaintext = JSON.stringify({
+        assignedByStaffId: 'stf_client_owner',
+        clientId: kind === 'corrupt' && snapshotVersion === 2
+          ? 'cl_archive_corrupt' : client.id,
+        createdAt: startsAt, endsAt: snapshotVersion === 2 ? endsAt : null, id,
+        schema: 'client_assignment.v1', specialistId: 'sp_target', startsAt,
+        updatedAt: snapshotVersion === 2 ? endsAt : startsAt, version: snapshotVersion,
+      })
+      const envelope = await encryptForScope(keyring, dataKey, {
+        expectedScope: scope, recordId: id, field: 'record_version', plaintext,
+      })
+      if (kind === 'wrong-key' && snapshotVersion === 2) {
+        envelope.dataKeyId = `key_archive_wrong_${sequence}`
+      }
+      await env.DB.prepare(
+        `INSERT INTO record_versions
+         (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+          changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`
+      ).bind(`ver_archive_history_${sequence}_${snapshotVersion}`, 'client_assignment', id,
+        snapshotVersion, JSON.stringify(envelope), 'stf_client_owner',
+        snapshotVersion === 2 ? endsAt : startsAt, CORRELATION_ID).run()
+    }
   }
 
   it('strictly captures one expected version and binds its digest to the target', async () => {
@@ -151,6 +200,87 @@ describe('persistent client archive', () => {
     expect((await archive(client, { actor: coordinator })).body.data.client.status).toBe('archived')
   })
 
+  it('allows centre roles to archive clients assigned to a retained disabled practitioner', async () => {
+    const client = await seed({ specialistId: 'sp_archive_retained' })
+    const visitAt = new Date(NOW_MS - 3_600_000).toISOString()
+    const visitEnd = new Date(NOW_MS - 3_000_000).toISOString()
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO appointments
+        (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+         status,source,version,cancelled_at,created_at,updated_at)
+        VALUES ('apt_archive_workspace',?,?,'zajecia',?,?,'Europe/Warsaw',NULL,
+         'completed','panel',1,NULL,?,?)`).bind(
+        client.id, 'sp_archive_retained', visitAt, visitEnd,
+        new Date(NOW_MS - 7_200_000).toISOString(), visitEnd,
+      ),
+      env.DB.prepare(`INSERT INTO session_charges
+        (id,appointment_id,service_id,expected_amount_grosze,currency,version,created_at,updated_at)
+        VALUES ('chg_archive_workspace','apt_archive_workspace','zajecia',18000,'PLN',1,?,?)`
+      ).bind(new Date(NOW_MS - 7_200_000).toISOString(), visitEnd),
+    ])
+    const disabledAt = new Date(NOW_MS + 500).toISOString()
+    await env.DB.batch([
+      env.DB.prepare("UPDATE staff_users SET status='disabled',version=2,disabled_at=?,updated_at=? WHERE id='stf_archive_retained'").bind(disabledAt, disabledAt),
+      env.DB.prepare("UPDATE specialists SET status='archived',version=2,archived_at=?,updated_at=? WHERE id='sp_archive_retained'").bind(disabledAt, disabledAt),
+      env.DB.prepare(`INSERT INTO record_versions
+        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,changed_at,correlation_id)
+        VALUES ('ver_archive_disabled_practitioner','specialist','sp_archive_retained',2,'{}','stf_client_owner',?,?)`).bind(disabledAt, CORRELATION_ID),
+    ])
+    expect((await archive(client)).body.data.client.status).toBe('archived')
+    const keyring = await ring()
+    const staffScope = { type: 'staff_directory', id: 'centre_archive_workspace', purpose: 'identity' }
+    const staffKey = await getOrCreateDataKey(env.DB, keyring, staffScope, {
+      id: 'key_archive_workspace_staff', createdAt: new Date(NOW_MS).toISOString(),
+    })
+    for (const [staffId, name] of [
+      ['stf_client_target', 'Fikcyjny Cel'],
+      ['stf_client_self', 'Fikcyjna Specjalistka'],
+    ]) {
+      const envelope = await encryptForScope(keyring, staffKey, {
+        expectedScope: staffScope, recordId: staffId, field: 'display_name', plaintext: name,
+      })
+      await env.DB.prepare(`UPDATE staff_users
+        SET display_name_envelope=?,version=version+1,updated_at=? WHERE id=?`
+      ).bind(JSON.stringify(envelope), new Date(NOW_MS + 1_000).toISOString(), staffId).run()
+    }
+    const workspaceApp = createApp({
+      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+      db: env.DB, cryptoContext: { keyring, dataKey: staffKey, scope: staffScope },
+      resolveAccessPrincipal: vi.fn(async () => ({ kind: 'human', subject: 'archive-history' })),
+      resolveActor: vi.fn(async () => ({
+        id: 'stf_archive_retained', role: 'specialist', specialistId: 'sp_archive_retained',
+        version: 2,
+      })),
+    })
+    const day = visitAt.slice(0, 10)
+    const response = await workspaceApp.request(`/api/v1/workspace?from=${day}&to=${day}`)
+    expect(response.status).toBe(200)
+    const workspace = await response.json()
+    expect(workspace.data.clients).toEqual([expect.objectContaining({
+      id: client.id, status: 'archived', readOnly: true, assignment: null,
+    })])
+    expect(workspace.data.appointments).toEqual([expect.objectContaining({
+      id: 'apt_archive_workspace', clientId: client.id, specialistId: 'sp_archive_retained',
+      status: 'completed',
+    })])
+    expect(await env.DB.prepare('SELECT * FROM appointments WHERE id=?')
+      .bind('apt_archive_workspace').first()).toMatchObject({ starts_at: visitAt, status: 'completed' })
+  })
+
+  it.each(['corrupt', 'missing', 'noncontiguous', 'wrong-key'])(
+    'rejects %s older assignment history before IDs or writes', async (kind) => {
+      const client = await seed()
+      await addHistoricalAssignment(client, kind)
+      const before = await env.DB.prepare('SELECT * FROM clients WHERE id=?').bind(client.id).first()
+      const idFactory = vi.fn()
+      await expect(archive(client, { idFactory,
+        idempotencyKey: `archive-history-${kind}-${sequence}-key` })).rejects.toThrow('NOT_FOUND')
+      expect(idFactory).not.toHaveBeenCalled()
+      expect(await env.DB.prepare('SELECT * FROM clients WHERE id=?').bind(client.id).first())
+        .toEqual(before)
+    },
+  )
+
   it('checks replay before target facts and generated IDs', async () => {
     const client = await seed()
     const key = `archive-replay-${++sequence}-key`
@@ -227,8 +357,8 @@ describe('persistent client archive', () => {
       db: budget.work, recoveryDb: budget.recovery, keyring, idempotencyKey: key,
     })
     expect(result.body.data.client.status).toBe('archived')
-    expect(beforeRecovery.used).toBe(12)
-    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery).used).toBe(14)
+    expect(beforeRecovery.used).toBe(13)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery).used).toBe(15)
   })
 
   it('contains a concurrent different-key loser as a version conflict with no residue', async () => {
@@ -252,6 +382,38 @@ describe('persistent client archive', () => {
       .toEqual({ count: 1 })
     expect(await env.DB.prepare('SELECT count(*) AS count FROM idempotency_records WHERE resource_id=? AND operation=?').bind(client.id, 'clients.archive').first())
       .toEqual({ count: 1 })
+  })
+
+  it('classifies a future appointment inserted after preflight without masking other guards', async () => {
+    const client = await seed()
+    let inserted = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!inserted) {
+          inserted = true
+          const startsAt = new Date(NOW_MS + 1_000).toISOString()
+          await env.DB.prepare(`INSERT INTO appointments
+            (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+             status,source,version,cancelled_at,created_at,updated_at)
+            VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,'scheduled','panel',1,NULL,?,?)`
+          ).bind(`apt_archive_race_${sequence}`, client.id, 'sp_target', startsAt,
+            new Date(NOW_MS + 61_000).toISOString(), new Date(NOW_MS).toISOString(),
+            new Date(NOW_MS).toISOString()).run()
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    const budget = createD1QueryBudget(db, { totalLimit: 50, recoveryReserve: 8 })
+    await expect(archive(client, {
+      db: budget.work, recoveryDb: budget.recovery,
+      idempotencyKey: `archive-appointment-race-${sequence}-key`,
+    })).rejects.toThrow('CLIENT_ARCHIVE_CONFLICT')
+    expect(await env.DB.prepare('SELECT status,version FROM clients WHERE id=?').bind(client.id).first())
+      .toEqual({ status: 'active', version: 1 })
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 15, remaining: 35, workRemaining: 27, totalLimit: 50, recoveryReserve: 8,
+    })
   })
 
   it('rolls back each ordered seven-statement archive position byte-for-byte', async () => {
@@ -280,7 +442,7 @@ describe('persistent client archive', () => {
     const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
     await archive(client, { db: budget.work, recoveryDb: budget.recovery })
     expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
-      used: 12, remaining: 38, workRemaining: 30, totalLimit: 50, recoveryReserve: 8,
+      used: 13, remaining: 37, workRemaining: 29, totalLimit: 50, recoveryReserve: 8,
     })
   })
 
@@ -338,6 +500,24 @@ beforeAll(async () => {
        changed_at,correlation_id)
       VALUES (?,?,?,?,?,?,?,?)`).bind(
       'ver_client_target_specialist', 'specialist', 'sp_target', 1, '{}', null,
+      instant, CORRELATION_ID,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_archive_retained', 'lookup_archive_retained', '{}', '{}', 'specialist', 'active',
+      'access-archive-retained', 'sp_archive_retained', 1, instant, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'sp_archive_retained', 'stf_archive_retained', 18000, 'active', 1, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'ver_archive_retained_specialist', 'specialist', 'sp_archive_retained', 1, '{}', null,
       instant, CORRELATION_ID,
     ),
     env.DB.prepare(`INSERT INTO staff_users
