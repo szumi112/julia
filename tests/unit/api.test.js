@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { ApiError, createApiClient } from '../../src/api.js'
+import { apiClient, ApiError, createApiClient } from '../../src/api.js'
 import { capabilitiesForActor } from '../../worker/identity/policy.js'
 
 const CORRELATION_ID = '77777777-7777-4777-8777-777777777777'
@@ -105,6 +105,720 @@ const queuedFetch = (...responses) => {
 }
 
 const header = (call, name) => new Headers(call.init.headers).get(name)
+
+const emptyWorkspaceBody = (from = '2026-08-01', to = '2026-08-31') => ({
+  data: {
+    window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
+    specialists: [],
+    clients: [],
+    appointments: [],
+  },
+})
+
+const fullWorkspaceBody = () => ({
+  data: {
+    window: {
+      from: '2026-08-01',
+      to: '2026-08-31',
+      timeZone: 'Europe/Warsaw',
+      complete: true,
+    },
+    specialists: [{
+      id: 'sp_anna',
+      displayName: 'Anna Żuraw',
+      standardRateGrosze: 18000,
+      status: 'active',
+      version: 2,
+      staffVersion: 3,
+    }],
+    clients: [{
+      id: 'cl_ola',
+      name: 'Ola Nowak',
+      age: 12,
+      status: 'active',
+      version: 4,
+      archivedAt: null,
+      createdAt: '2026-07-01T08:00:00.000Z',
+      updatedAt: '2026-08-10T12:00:00.000Z',
+      readOnly: false,
+      assignment: {
+        id: 'asg_ola_anna',
+        specialistId: 'sp_anna',
+        startsAt: '2026-07-01T08:00:00.000Z',
+        version: 1,
+      },
+    }],
+    appointments: [{
+      id: 'apt_ola_august',
+      clientId: 'cl_ola',
+      specialistId: 'sp_anna',
+      serviceId: 'zajecia',
+      startsAt: '2026-08-10T08:00:00.000Z',
+      endsAt: '2026-08-10T08:50:00.000Z',
+      timeZone: 'Europe/Warsaw',
+      location: 'Gabinet 1',
+      status: 'completed',
+      source: 'panel',
+      version: 4,
+      cancelledAt: null,
+      createdAt: '2026-08-01T08:00:00.000Z',
+      updatedAt: '2026-08-10T12:00:00.000Z',
+      charge: {
+        id: 'chg_ola_august',
+        serviceId: 'zajecia',
+        expectedAmountGrosze: 18000,
+        currency: 'PLN',
+        version: 1,
+      },
+      payment: {
+        status: 'paid',
+        collectedGrosze: 18000,
+        outstandingGrosze: 0,
+        latestMethod: 'card',
+        latestReceivedAt: '2026-08-10T11:00:00.000Z',
+      },
+      paymentEntries: [{
+        id: 'pay_original',
+        amountGrosze: 7000,
+        method: 'cash',
+        receivedAt: '2026-08-10T10:00:00.000Z',
+        correctedAt: '2026-08-10T10:30:00.000Z',
+        replacementEntryId: 'pay_replacement',
+      }, {
+        id: 'pay_replacement',
+        amountGrosze: 18000,
+        method: 'card',
+        receivedAt: '2026-08-10T11:00:00.000Z',
+        correctedAt: null,
+        replacementEntryId: null,
+      }],
+    }],
+  },
+})
+
+test('rejects invalid workspace windows without fetching and constructs the exact GET', async () => {
+  assert.equal(typeof apiClient.loadWorkspaceWindow, 'function')
+  const { calls, fetchImpl } = queuedFetch(jsonResponse(emptyWorkspaceBody()))
+  const client = createApiClient({ fetchImpl })
+  const hostile = Object.defineProperty({}, 'from', {
+    enumerable: true,
+    get() { throw new Error('private input') },
+  })
+  const invalid = [
+    null,
+    [],
+    { from: '2026-08-01' },
+    { from: '2026-08-01', to: '2026-08-31', extra: true },
+    { from: '2026-8-01', to: '2026-08-31' },
+    { from: '2026-02-29', to: '2026-03-01' },
+    { from: '2026-08-02', to: '2026-08-01' },
+    { from: '2026-01-01', to: '2026-04-04' },
+    hostile,
+  ]
+
+  for (const options of invalid) {
+    await assert.rejects(client.loadWorkspaceWindow(options), {
+      code: 'CLIENT_INPUT_INVALID',
+      message: 'CLIENT_INPUT_INVALID',
+    })
+  }
+  assert.equal(calls.length, 0)
+
+  assert.deepEqual(await client.loadWorkspaceWindow({
+    from: '2026-08-01',
+    to: '2026-08-31',
+  }), emptyWorkspaceBody().data)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, '/api/v1/workspace?from=2026-08-01&to=2026-08-31')
+  assert.deepEqual(calls[0].init, {
+    method: 'GET',
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  })
+  assert.equal(header(calls[0], 'Content-Type'), null)
+  assert.equal(header(calls[0], 'X-CSRF-Token'), null)
+  assert.equal(header(calls[0], 'Idempotency-Key'), null)
+  assert.equal(Object.hasOwn(calls[0].init, 'body'), false)
+})
+
+test('captures workspace inputs without coercion or value access and never mutates them', async () => {
+  let gets = 0
+  let coercions = 0
+  const hostileProxy = new Proxy({ from: '2026-08-01', to: '2026-08-31' }, {
+    get() { gets += 1; throw new Error('input value trap') },
+    ownKeys() { throw new Error('input descriptor trap') },
+  })
+  const coercible = {
+    valueOf() { coercions += 1; return '2026-08-01' },
+    toString() { coercions += 1; return '2026-08-01' },
+  }
+  const symbolInput = { from: '2026-08-01', to: '2026-08-31' }
+  symbolInput[Symbol('extra')] = true
+  const nonEnumerable = Object.defineProperties({}, {
+    from: { value: '2026-08-01', enumerable: true },
+    to: { value: '2026-08-31', enumerable: false },
+  })
+  const inherited = Object.create({ from: '2026-08-01', to: '2026-08-31' })
+  const { calls, fetchImpl } = queuedFetch()
+  const client = createApiClient({ fetchImpl })
+  for (const options of [
+    hostileProxy,
+    { from: coercible, to: '2026-08-31' },
+    symbolInput,
+    nonEnumerable,
+    inherited,
+  ]) await assert.rejects(client.loadWorkspaceWindow(options), { code: 'CLIENT_INPUT_INVALID' })
+
+  assert.equal(gets, 0)
+  assert.equal(coercions, 0)
+  assert.equal(calls.length, 0)
+  assert.deepEqual(symbolInput.from, '2026-08-01')
+  assert.equal(Reflect.ownKeys(symbolInput).length, 3)
+})
+
+test('accepts exactly 93 civil days and enforces Warsaw DST half-open appointment bounds', async () => {
+  const dst = fullWorkspaceBody()
+  dst.data.window = {
+    from: '2026-03-29', to: '2026-03-29', timeZone: 'Europe/Warsaw', complete: true,
+  }
+  Object.assign(dst.data.clients[0], {
+    createdAt: '2026-02-01T08:00:00.000Z',
+    updatedAt: '2026-03-29T01:00:00.000Z',
+  })
+  dst.data.clients[0].assignment.startsAt = '2026-02-01T08:00:00.000Z'
+  Object.assign(dst.data.appointments[0], {
+    startsAt: '2026-03-28T23:00:00.000Z',
+    endsAt: '2026-03-28T23:50:00.000Z',
+    status: 'scheduled',
+    createdAt: '2026-03-01T08:00:00.000Z',
+    updatedAt: '2026-03-29T01:00:00.000Z',
+  })
+  dst.data.appointments[0].paymentEntries = []
+  dst.data.appointments[0].payment = {
+    status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0,
+    latestMethod: null, latestReceivedAt: null,
+  }
+  const exact93 = emptyWorkspaceBody('2026-01-01', '2026-04-03')
+  const { fetchImpl } = queuedFetch(parsedResponse(exact93), parsedResponse(dst))
+  const client = createApiClient({ fetchImpl })
+  assert.equal((await client.loadWorkspaceWindow({
+    from: '2026-01-01', to: '2026-04-03',
+  })).window.to, '2026-04-03')
+  assert.equal((await client.loadWorkspaceWindow({
+    from: '2026-03-29', to: '2026-03-29',
+  })).appointments[0].startsAt, '2026-03-28T23:00:00.000Z')
+
+  const upper = structuredClone(dst)
+  upper.data.appointments[0].startsAt = '2026-03-29T22:00:00.000Z'
+  upper.data.appointments[0].endsAt = '2026-03-29T22:50:00.000Z'
+  const upperFetch = queuedFetch(parsedResponse(upper)).fetchImpl
+  await assert.rejects(createApiClient({ fetchImpl: upperFetch }).loadWorkspaceWindow({
+    from: '2026-03-29', to: '2026-03-29',
+  }), { code: 'INVALID_RESPONSE' })
+})
+
+test('captures and deeply freezes a complete workspace response independently of its source', async () => {
+  const source = fullWorkspaceBody()
+  const { fetchImpl } = queuedFetch(parsedResponse(source))
+  const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01',
+    to: '2026-08-31',
+  })
+
+  assert.deepEqual(result, source.data)
+  assert.equal(Object.isFrozen(result), true)
+  assert.equal(Object.isFrozen(result.window), true)
+  assert.equal(Object.isFrozen(result.specialists), true)
+  assert.equal(Object.isFrozen(result.specialists[0]), true)
+  assert.equal(Object.isFrozen(result.clients[0].assignment), true)
+  assert.equal(Object.isFrozen(result.appointments[0].charge), true)
+  assert.equal(Object.isFrozen(result.appointments[0].payment), true)
+  assert.equal(Object.isFrozen(result.appointments[0].paymentEntries), true)
+  assert.equal(Object.isFrozen(result.appointments[0].paymentEntries[0]), true)
+
+  source.data.clients[0].name = 'Zmienione źródło'
+  source.data.appointments[0].paymentEntries[1].amountGrosze = 1
+  assert.equal(result.clients[0].name, 'Ola Nowak')
+  assert.equal(result.appointments[0].paymentEntries[1].amountGrosze, 18000)
+})
+
+const rejectWorkspaceBody = async (body) => {
+  const { fetchImpl } = queuedFetch(parsedResponse(body))
+  await assert.rejects(createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01',
+    to: '2026-08-31',
+  }), (error) => error instanceof ApiError
+    && error.code === 'INVALID_RESPONSE'
+    && error.message === 'INVALID_RESPONSE'
+    && error.status === 200)
+}
+
+const workspaceAt = (body, path) => path.reduce((value, key) => value[key], body)
+
+test('rejects missing, extra, and wrong-typed workspace keys at every nesting level', async () => {
+  const objectPaths = [
+    [],
+    ['data'],
+    ['data', 'window'],
+    ['data', 'specialists', 0],
+    ['data', 'clients', 0],
+    ['data', 'clients', 0, 'assignment'],
+    ['data', 'appointments', 0],
+    ['data', 'appointments', 0, 'charge'],
+    ['data', 'appointments', 0, 'payment'],
+    ['data', 'appointments', 0, 'paymentEntries', 0],
+  ]
+  for (const path of objectPaths) {
+    const template = fullWorkspaceBody()
+    const keys = Object.keys(workspaceAt(template, path))
+    for (const key of keys) {
+      const missing = fullWorkspaceBody()
+      delete workspaceAt(missing, path)[key]
+      await rejectWorkspaceBody(missing)
+
+      const wrong = fullWorkspaceBody()
+      workspaceAt(wrong, path)[key] = { invalid: true }
+      await rejectWorkspaceBody(wrong)
+    }
+    const extra = fullWorkspaceBody()
+    workspaceAt(extra, path).contact = 'private@example.test'
+    await rejectWorkspaceBody(extra)
+  }
+})
+
+test('rejects invalid specialist, client, assignment, and appointment scalar contracts', async () => {
+  const cases = [
+    (body) => { body.data.window.from = '2026-08-02' },
+    (body) => { body.data.window.timeZone = 'UTC' },
+    (body) => { body.data.window.complete = false },
+    (body) => { body.data.specialists[0].id = 'staff_anna' },
+    (body) => { body.data.specialists[0].displayName = ' Anna' },
+    (body) => { body.data.specialists[0].displayName = 'A\u0000nna' },
+    (body) => { body.data.specialists[0].standardRateGrosze = 1_000_001 },
+    (body) => { body.data.specialists[0].status = 'pending' },
+    (body) => { body.data.specialists[0].version = 0 },
+    (body) => { body.data.specialists[0].staffVersion = 0 },
+    (body) => { body.data.clients[0].id = 'client_ola' },
+    (body) => { body.data.clients[0].name = 'Ola ' },
+    (body) => { body.data.clients[0].age = 27 },
+    (body) => { body.data.clients[0].status = 'deleted' },
+    (body) => { body.data.clients[0].version = 1.5 },
+    (body) => { body.data.clients[0].createdAt = '2026-07-01T08:00:00Z' },
+    (body) => { body.data.clients[0].updatedAt = '2026-06-01T08:00:00.000Z' },
+    (body) => { body.data.clients[0].archivedAt = '2026-08-01T00:00:00.000Z' },
+    (body) => { body.data.clients[0].readOnly = true },
+    (body) => { body.data.clients[0].assignment.id = 'assignment_1' },
+    (body) => { body.data.clients[0].assignment.specialistId = 'sp_missing' },
+    (body) => { body.data.clients[0].assignment.startsAt = '2026-06-01T08:00:00.000Z' },
+    (body) => { body.data.clients[0].assignment.version = 0 },
+    (body) => { body.data.appointments[0].id = 'appointment_1' },
+    (body) => { body.data.appointments[0].clientId = 'cl_missing' },
+    (body) => { body.data.appointments[0].specialistId = 'specialist_1' },
+    (body) => { body.data.appointments[0].serviceId = 'unknown-service' },
+    (body) => { body.data.appointments[0].startsAt = '2026-07-31T21:59:59.999Z' },
+    (body) => { body.data.appointments[0].endsAt = body.data.appointments[0].startsAt },
+    (body) => { body.data.appointments[0].timeZone = 'UTC' },
+    (body) => { body.data.appointments[0].location = ' Gabinet' },
+    (body) => { body.data.appointments[0].status = 'removed' },
+    (body) => { body.data.appointments[0].source = 'import' },
+    (body) => { body.data.appointments[0].version = 0 },
+    (body) => { body.data.appointments[0].cancelledAt = '2026-08-10T09:00:00.000Z' },
+    (body) => { body.data.appointments[0].createdAt = 'not-an-instant' },
+    (body) => { body.data.appointments[0].updatedAt = '2026-07-01T00:00:00.000Z' },
+    (body) => { body.data.appointments[0].charge.id = 'charge_1' },
+    (body) => { body.data.appointments[0].charge.serviceId = 'plan' },
+    (body) => { body.data.appointments[0].charge.expectedAmountGrosze = 0 },
+    (body) => { body.data.appointments[0].charge.currency = 'EUR' },
+    (body) => { body.data.appointments[0].charge.version = 0 },
+  ]
+  for (const mutate of cases) {
+    const body = fullWorkspaceBody()
+    mutate(body)
+    await rejectWorkspaceBody(body)
+  }
+})
+
+test('accepts archived and history-only clients exactly when referenced by an appointment', async () => {
+  const archived = fullWorkspaceBody()
+  Object.assign(archived.data.clients[0], {
+    status: 'archived',
+    archivedAt: '2026-08-10T12:00:00.000Z',
+    readOnly: true,
+    assignment: null,
+  })
+  const { fetchImpl } = queuedFetch(parsedResponse(archived))
+  const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+  assert.equal(result.clients[0].readOnly, true)
+  assert.equal(result.clients[0].assignment, null)
+
+  const historyOnly = fullWorkspaceBody()
+  historyOnly.data.clients[0].assignment = null
+  const historyFetch = queuedFetch(parsedResponse(historyOnly)).fetchImpl
+  assert.equal((await createApiClient({ fetchImpl: historyFetch }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })).clients[0].readOnly, false)
+
+  for (const mutate of [
+    (body) => { body.data.clients[0].status = 'archived'; body.data.clients[0].readOnly = true; body.data.clients[0].assignment = null },
+    (body) => { body.data.clients[0].assignment = null },
+  ]) {
+    const body = fullWorkspaceBody()
+    mutate(body)
+    body.data.appointments = []
+    await rejectWorkspaceBody(body)
+  }
+})
+
+test('accepts a valid historical appointment specialist absent from the active directory', async () => {
+  const body = fullWorkspaceBody()
+  body.data.appointments[0].specialistId = 'sp_historical'
+  const { fetchImpl } = queuedFetch(parsedResponse(body))
+  const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+  assert.equal(result.appointments[0].specialistId, 'sp_historical')
+})
+
+test('recomputes payment aggregates and rejects incoherent correction relationships', async () => {
+  const cases = [
+    (body) => { body.data.appointments[0].paymentEntries[0].id = 'payment_1' },
+    (body) => { body.data.appointments[0].paymentEntries[0].amountGrosze = 0 },
+    (body) => { body.data.appointments[0].paymentEntries[0].method = 'crypto' },
+    (body) => { body.data.appointments[0].paymentEntries[0].receivedAt = '2026-08-10' },
+    (body) => { body.data.appointments[0].paymentEntries[0].correctedAt = null },
+    (body) => { body.data.appointments[0].paymentEntries[0].replacementEntryId = 'pay_missing' },
+    (body) => { body.data.appointments[0].paymentEntries[0].replacementEntryId = 'pay_original' },
+    (body) => { body.data.appointments[0].paymentEntries[1].replacementEntryId = 'pay_original'; body.data.appointments[0].paymentEntries[1].correctedAt = '2026-08-10T11:30:00.000Z' },
+    (body) => { body.data.appointments[0].payment.status = 'partial' },
+    (body) => { body.data.appointments[0].payment.collectedGrosze = 7000 },
+    (body) => { body.data.appointments[0].payment.outstandingGrosze = 1 },
+    (body) => { body.data.appointments[0].payment.latestMethod = 'cash' },
+    (body) => { body.data.appointments[0].payment.latestReceivedAt = null },
+    (body) => { body.data.appointments[0].paymentEntries.reverse() },
+  ]
+  for (const mutate of cases) {
+    const body = fullWorkspaceBody()
+    mutate(body)
+    await rejectWorkspaceBody(body)
+  }
+
+  for (const status of ['scheduled', 'cancelled']) {
+    const body = fullWorkspaceBody()
+    Object.assign(body.data.appointments[0], {
+      status,
+      cancelledAt: status === 'cancelled' ? '2026-08-10T12:00:00.000Z' : null,
+    })
+    await rejectWorkspaceBody(body)
+  }
+})
+
+test('rejects duplicate IDs and noncanonical directory and appointment ordering', async () => {
+  const cases = [
+    (body) => { body.data.specialists.push(structuredClone(body.data.specialists[0])) },
+    (body) => { body.data.clients.push(structuredClone(body.data.clients[0])) },
+    (body) => { body.data.appointments.push(structuredClone(body.data.appointments[0])) },
+    (body) => {
+      const second = structuredClone(body.data.appointments[0])
+      second.id = 'apt_second'; second.charge.id = body.data.appointments[0].charge.id
+      second.paymentEntries = []; second.payment = { status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18000, latestMethod: null, latestReceivedAt: null }
+      body.data.appointments.push(second)
+    },
+    (body) => {
+      const second = structuredClone(body.data.appointments[0])
+      second.id = 'apt_second'; second.charge.id = 'chg_second'
+      second.paymentEntries[0].id = 'pay_other'; second.paymentEntries[0].replacementEntryId = 'pay_replacement'
+      body.data.appointments.push(second)
+    },
+    (body) => {
+      const second = structuredClone(body.data.specialists[0])
+      second.id = 'sp_aaron'; second.displayName = 'Aarón'
+      body.data.specialists.push(second)
+    },
+    (body) => {
+      const second = structuredClone(body.data.clients[0])
+      second.id = 'cl_ania'; second.name = 'Ania'; second.assignment.id = 'asg_ania'
+      body.data.clients.push(second)
+    },
+    (body) => {
+      const second = structuredClone(body.data.appointments[0])
+      second.id = 'apt_earlier'; second.charge.id = 'chg_earlier'
+      second.startsAt = '2026-08-09T08:00:00.000Z'; second.endsAt = '2026-08-09T08:50:00.000Z'
+      second.paymentEntries = []; second.payment = { status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18000, latestMethod: null, latestReceivedAt: null }
+      body.data.appointments.push(second)
+    },
+  ]
+  for (const mutate of cases) {
+    const body = fullWorkspaceBody()
+    mutate(body)
+    await rejectWorkspaceBody(body)
+  }
+})
+
+const unpaidAppointment = (index) => {
+  const appointment = structuredClone(fullWorkspaceBody().data.appointments[0])
+  const suffix = String(index).padStart(4, '0')
+  appointment.id = `apt_${suffix}`
+  appointment.charge.id = `chg_${suffix}`
+  appointment.paymentEntries = []
+  appointment.payment = {
+    status: 'unpaid',
+    collectedGrosze: 0,
+    outstandingGrosze: 18000,
+    latestMethod: null,
+    latestReceivedAt: null,
+  }
+  return appointment
+}
+
+test('accepts every workspace cap boundary and rejects overflow without truncation', async () => {
+  const boundaryBodies = []
+
+  const specialists = fullWorkspaceBody()
+  specialists.data.specialists = Array.from({ length: 50 }, (_, index) => ({
+    ...structuredClone(specialists.data.specialists[0]),
+    id: `sp_${String(index).padStart(3, '0')}`,
+    displayName: 'Anna',
+  }))
+  specialists.data.clients[0].assignment.specialistId = 'sp_000'
+  specialists.data.appointments[0].specialistId = 'sp_000'
+  boundaryBodies.push(specialists)
+
+  const clients = fullWorkspaceBody()
+  clients.data.clients = Array.from({ length: 200 }, (_, index) => {
+    const client = structuredClone(clients.data.clients[0])
+    const suffix = String(index).padStart(3, '0')
+    client.id = `cl_${suffix}`
+    client.name = 'Ola'
+    client.assignment.id = `asg_${suffix}`
+    return client
+  })
+  clients.data.appointments[0].clientId = 'cl_000'
+  boundaryBodies.push(clients)
+
+  const appointments = fullWorkspaceBody()
+  appointments.data.appointments = Array.from({ length: 500 }, (_, index) => (
+    unpaidAppointment(index)
+  ))
+  boundaryBodies.push(appointments)
+
+  const payments = fullWorkspaceBody()
+  const paymentEntries = Array.from({ length: 1_000 }, (_, index) => ({
+    id: `pay_${String(index).padStart(4, '0')}`,
+    amountGrosze: 1,
+    method: 'cash',
+    receivedAt: '2026-08-10T11:00:00.000Z',
+    correctedAt: null,
+    replacementEntryId: null,
+  }))
+  Object.assign(payments.data.appointments[0].charge, { expectedAmountGrosze: 1_000 })
+  payments.data.appointments[0].paymentEntries = paymentEntries
+  payments.data.appointments[0].payment = {
+    status: 'paid', collectedGrosze: 1_000, outstandingGrosze: 0,
+    latestMethod: 'cash', latestReceivedAt: '2026-08-10T11:00:00.000Z',
+  }
+  boundaryBodies.push(payments)
+
+  for (const body of boundaryBodies) {
+    const { fetchImpl } = queuedFetch(parsedResponse(body))
+    const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+      from: '2026-08-01', to: '2026-08-31',
+    })
+    assert.equal(result.specialists.length, body.data.specialists.length)
+    assert.equal(result.clients.length, body.data.clients.length)
+    assert.equal(result.appointments.length, body.data.appointments.length)
+    assert.equal(result.appointments.reduce(
+      (sum, appointment) => sum + appointment.paymentEntries.length, 0,
+    ), body.data.appointments.reduce(
+      (sum, appointment) => sum + appointment.paymentEntries.length, 0,
+    ))
+  }
+
+  const overflows = [
+    (() => {
+      const body = structuredClone(specialists)
+      body.data.specialists.push({ ...body.data.specialists.at(-1), id: 'sp_999' })
+      return body
+    })(),
+    (() => {
+      const body = structuredClone(clients)
+      const next = { ...body.data.clients.at(-1), id: 'cl_999', assignment: {
+        ...body.data.clients.at(-1).assignment, id: 'asg_999',
+      } }
+      body.data.clients.push(next)
+      return body
+    })(),
+    (() => {
+      const body = structuredClone(appointments)
+      body.data.appointments.push(unpaidAppointment(9999))
+      return body
+    })(),
+    (() => {
+      const body = structuredClone(payments)
+      body.data.appointments[0].charge.expectedAmountGrosze = 1_001
+      body.data.appointments[0].payment.collectedGrosze = 1_001
+      body.data.appointments[0].paymentEntries.push({
+        ...body.data.appointments[0].paymentEntries.at(-1), id: 'pay_9999',
+      })
+      return body
+    })(),
+  ]
+  for (const body of overflows) await rejectWorkspaceBody(body)
+
+  const distributed = fullWorkspaceBody()
+  const first = unpaidAppointment(0)
+  const second = unpaidAppointment(1)
+  const entriesFor = (start, count) => Array.from({ length: count }, (_, offset) => ({
+    id: `pay_${String(start + offset).padStart(4, '0')}`,
+    amountGrosze: 1,
+    method: 'cash',
+    receivedAt: '2026-08-10T11:00:00.000Z',
+    correctedAt: null,
+    replacementEntryId: null,
+  }))
+  first.charge.expectedAmountGrosze = 600
+  first.paymentEntries = entriesFor(0, 600)
+  first.payment = { status: 'paid', collectedGrosze: 600, outstandingGrosze: 0,
+    latestMethod: 'cash', latestReceivedAt: '2026-08-10T11:00:00.000Z' }
+  second.charge.expectedAmountGrosze = 401
+  second.paymentEntries = entriesFor(600, 401)
+  second.payment = { status: 'paid', collectedGrosze: 401, outstandingGrosze: 0,
+    latestMethod: 'cash', latestReceivedAt: '2026-08-10T11:00:00.000Z' }
+  distributed.data.appointments = [first, second]
+  await rejectWorkspaceBody(distributed)
+})
+
+test('contains hostile workspace descriptors, arrays, prototypes, proxies, and accessors', async () => {
+  const hostileBodies = []
+
+  const getter = fullWorkspaceBody()
+  Object.defineProperty(getter.data.clients[0], 'name', {
+    enumerable: true,
+    get() { throw new Error('fictional client private getter') },
+  })
+  hostileBodies.push(getter)
+
+  const hidden = fullWorkspaceBody()
+  Object.defineProperty(hidden.data.clients[0], 'name', {
+    value: hidden.data.clients[0].name,
+    enumerable: false,
+  })
+  hostileBodies.push(hidden)
+
+  const symbol = fullWorkspaceBody()
+  symbol.data.appointments[0][Symbol('private')] = 'not accepted'
+  hostileBodies.push(symbol)
+
+  const sparse = fullWorkspaceBody()
+  delete sparse.data.appointments[0].paymentEntries[0]
+  hostileBodies.push(sparse)
+
+  const arrayProperty = fullWorkspaceBody()
+  arrayProperty.data.clients.privateData = true
+  hostileBodies.push(arrayProperty)
+
+  const arrayAccessor = fullWorkspaceBody()
+  Object.defineProperty(arrayAccessor.data.specialists, '0', {
+    enumerable: true,
+    get() { throw new Error('directory getter') },
+  })
+  hostileBodies.push(arrayAccessor)
+
+  const prototype = fullWorkspaceBody()
+  Object.setPrototypeOf(prototype.data.appointments[0].charge, { inherited: true })
+  hostileBodies.push(prototype)
+
+  const proxy = fullWorkspaceBody()
+  proxy.data.clients[0] = new Proxy(proxy.data.clients[0], {
+    ownKeys() { throw new Error('proxy trap detail') },
+  })
+  hostileBodies.push(proxy)
+
+  for (const body of hostileBodies) await rejectWorkspaceBody(body)
+})
+
+test('sanitizes workspace server, network, response, and validator failures', async () => {
+  const throwingResponse = {}
+  Object.defineProperty(throwingResponse, 'status', {
+    get() { throw new Error('provider response secret') },
+  })
+  const throwingPayload = {}
+  Object.defineProperty(throwingPayload, 'data', {
+    enumerable: true,
+    get() { throw new Error('fictional client secret') },
+  })
+  const failures = [
+    new Error('network provider secret'),
+    throwingResponse,
+    parsedResponse(throwingPayload),
+    parsedResponse({ error: { code: 'UNKNOWN_PRIVATE_CODE', correlationId: CORRELATION_ID } }, 500),
+    parsedResponse({ error: {
+      code: 'INTERNAL_ERROR',
+      correlationId: CORRELATION_ID,
+      details: { sql: 'SELECT fictional_private_name' },
+    } }, 500),
+  ]
+  for (const response of failures) {
+    const { fetchImpl } = queuedFetch(response)
+    let error
+    try {
+      await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+        from: '2026-08-01', to: '2026-08-31',
+      })
+      assert.fail('workspace failure must reject')
+    } catch (caught) {
+      error = caught
+    }
+    assert.equal(error instanceof ApiError, true)
+    assert.equal(['NETWORK_ERROR', 'INVALID_RESPONSE', 'INTERNAL_ERROR'].includes(error.code), true)
+    const exposed = JSON.stringify(error)
+    assert.equal(exposed.includes('secret'), false)
+    assert.equal(exposed.includes('fictional_private_name'), false)
+    assert.equal(exposed.includes('from='), false)
+    assert.equal(error.message, error.code)
+  }
+})
+
+test('performs independent uncached workspace GETs without changing session or mutation state', async () => {
+  const invitationResult = {
+    data: { staff: staff({ status: 'pending' }), invitation },
+  }
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    parsedResponse(emptyWorkspaceBody()),
+    parsedResponse({ data: null }),
+    parsedResponse(emptyWorkspaceBody()),
+    jsonResponse(invitationResult, 201),
+  )
+  let generated = 0
+  const client = createApiClient({
+    fetchImpl,
+    idempotencyKeyFactory: () => { generated += 1; return 'generated-key-0001' },
+  })
+  await client.getSession()
+  const options = Object.freeze({ from: '2026-08-01', to: '2026-08-31' })
+  await client.loadWorkspaceWindow(options)
+  await assert.rejects(client.loadWorkspaceWindow(options), { code: 'INVALID_RESPONSE' })
+  await client.loadWorkspaceWindow(options)
+  await client.inviteStaff({
+    displayName: 'Anna', email: 'anna@example.test', role: 'specialist',
+  }, { idempotencyKey: 'workspace-state-key-0001' })
+
+  assert.equal(calls.length, 5)
+  assert.deepEqual(calls.slice(1, 4).map((call) => call.url), [
+    '/api/v1/workspace?from=2026-08-01&to=2026-08-31',
+    '/api/v1/workspace?from=2026-08-01&to=2026-08-31',
+    '/api/v1/workspace?from=2026-08-01&to=2026-08-31',
+  ])
+  assert.equal(generated, 0)
+  assert.equal(header(calls[4], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(calls[4], 'Idempotency-Key'), 'workspace-state-key-0001')
+  assert.equal(calls.slice(1, 4).some((call) => header(call, 'X-CSRF-Token') !== null), false)
+  assert.equal(calls.slice(1, 4).some((call) => header(call, 'Idempotency-Key') !== null), false)
+  assert.equal(calls.slice(1, 4).some((call) => Object.hasOwn(call.init, 'body')), false)
+  assert.equal(JSON.stringify(options), '{"from":"2026-08-01","to":"2026-08-31"}')
+})
 
 test('gets and validates the session over the exact same-origin request', async () => {
   const body = sessionBody()

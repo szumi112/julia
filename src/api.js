@@ -1,4 +1,5 @@
 import { APP_MODE } from './app-mode.js'
+import { SERVICE_BY_ID } from './services.js'
 import {
   captureCoreAuditEvent,
   captureCoreAuditMetadata,
@@ -17,12 +18,20 @@ const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const CLIENT_ID = /^cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const ASSIGNMENT_ID = /^asg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const APPOINTMENT_ID = /^apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const CHARGE_ID = /^chg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const PAYMENT_ID = /^pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CORRECTION_ID = /^cor_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const OUTBOX_TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const AUDIT_CURSOR = /^v1\.([1-9]\d*)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
 const INVALID_TEXT = /[\p{Cc}\p{Cf}]/u
+const workspaceCollator = new Intl.Collator('pl-PL', { sensitivity: 'base', usage: 'sort' })
+const WORKSPACE_SERVICE_IDS = new Set(Object.keys(SERVICE_BY_ID))
+const workspaceDayFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Europe/Warsaw', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+})
 
 const SERVER_STATUS = Object.freeze({
   INVALID_CONTENT_LENGTH: 400,
@@ -213,6 +222,385 @@ const captureArray = (value, maximum) => {
   const captured = new Array(length)
   for (let index = 0; index < length; index += 1) captured[index] = value[index]
   return captured
+}
+
+const captureDataObject = (value, keys) => {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) return null
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const actual = Reflect.ownKeys(descriptors)
+    if (actual.length !== keys.length
+      || actual.some((key) => typeof key !== 'string' || !keys.includes(key))) return null
+    const captured = Object.create(null)
+    for (const key of keys) {
+      const descriptor = descriptors[key]
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return null
+      captured[key] = descriptor.value
+    }
+    return captured
+  } catch {
+    return null
+  }
+}
+
+const captureDenseArray = (value, maximum) => {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const length = descriptors.length?.value
+    if (!Number.isSafeInteger(length) || length < 0 || length > maximum
+      || Reflect.ownKeys(descriptors).length !== length + 1) return null
+    const captured = new Array(length)
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)]
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return null
+      captured[index] = descriptor.value
+    }
+    return captured
+  } catch {
+    return null
+  }
+}
+
+const workspaceCivil = (value) => {
+  if (typeof value !== 'string') return null
+  const match = CIVIL_DATE.exec(value)
+  if (!match) return null
+  const epoch = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  const date = new Date(epoch)
+  return date.getUTCFullYear() === Number(match[1])
+    && date.getUTCMonth() === Number(match[2]) - 1
+    && date.getUTCDate() === Number(match[3])
+    ? Object.freeze({ value, epoch })
+    : null
+}
+
+const acceptedWorkspaceOptions = (options) => {
+  const captured = captureDataObject(options, ['from', 'to'])
+  const from = captured && workspaceCivil(captured.from)
+  const to = captured && workspaceCivil(captured.to)
+  if (!from || !to) return null
+  const days = Math.floor((to.epoch - from.epoch) / 86_400_000) + 1
+  return days >= 1 && days <= 93
+    ? Object.freeze({ from: from.value, to: to.value })
+    : null
+}
+
+const workspaceOffsetAt = (epoch) => {
+  const fields = Object.fromEntries(workspaceDayFormatter.formatToParts(new Date(epoch))
+    .filter(({ type }) => type !== 'literal')
+    .map(({ type, value }) => [type, Number(value)]))
+  return Date.UTC(fields.year, fields.month - 1, fields.day,
+    fields.hour, fields.minute, fields.second) - epoch
+}
+
+const workspaceMidnight = (civil) => {
+  let instant = civil.epoch - workspaceOffsetAt(civil.epoch)
+  instant = civil.epoch - workspaceOffsetAt(instant)
+  return new Date(instant).toISOString()
+}
+
+const workspaceBounds = (requested) => {
+  const from = workspaceCivil(requested.from)
+  const to = workspaceCivil(requested.to)
+  if (!from || !to) return null
+  const after = Object.freeze({ epoch: to.epoch + 86_400_000 })
+  return Object.freeze({ lower: workspaceMidnight(from), upper: workspaceMidnight(after) })
+}
+
+const workspacePositive = (value, maximum = Number.MAX_SAFE_INTEGER) => (
+  Number.isSafeInteger(value) && value >= 1 && value <= maximum
+)
+const workspaceNullableInstant = (value) => value === null || validInstant(value)
+const workspaceLocation = (value) => value === null || validText(value, 80)
+const workspaceIdentity = (name, age) => validText(name, 120)
+  && (age === null || (Number.isSafeInteger(age) && age >= 1 && age <= 26))
+
+const captureWorkspaceSpecialist = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion',
+  ])
+  if (!value || typeof value.id !== 'string' || !SPECIALIST_ID.test(value.id)
+    || !validText(value.displayName, 120)
+    || !workspacePositive(value.standardRateGrosze, 1_000_000)
+    || value.status !== 'active' || !workspacePositive(value.version)
+    || !workspacePositive(value.staffVersion)) return null
+  return Object.freeze({
+    id: value.id,
+    displayName: value.displayName,
+    standardRateGrosze: value.standardRateGrosze,
+    status: 'active',
+    version: value.version,
+    staffVersion: value.staffVersion,
+  })
+}
+
+const captureWorkspaceAssignment = (raw) => {
+  const value = captureDataObject(raw, ['id', 'specialistId', 'startsAt', 'version'])
+  if (!value || typeof value.id !== 'string' || !ASSIGNMENT_ID.test(value.id)
+    || typeof value.specialistId !== 'string' || !SPECIALIST_ID.test(value.specialistId)
+    || !validInstant(value.startsAt) || !workspacePositive(value.version)) return null
+  return Object.freeze({
+    id: value.id,
+    specialistId: value.specialistId,
+    startsAt: value.startsAt,
+    version: value.version,
+  })
+}
+
+const captureWorkspaceClient = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt',
+    'readOnly', 'assignment',
+  ])
+  if (!value || typeof value.id !== 'string' || !CLIENT_ID.test(value.id)
+    || !workspaceIdentity(value.name, value.age)
+    || !['active', 'paused', 'archived'].includes(value.status)
+    || !workspacePositive(value.version) || !workspaceNullableInstant(value.archivedAt)
+    || !validInstant(value.createdAt) || !validInstant(value.updatedAt)
+    || value.createdAt > value.updatedAt
+    || (value.status === 'archived') !== (value.archivedAt !== null)
+    || value.readOnly !== (value.status === 'archived')) return null
+  const assignment = value.assignment === null ? null : captureWorkspaceAssignment(value.assignment)
+  if ((value.assignment !== null && !assignment)
+    || (value.status === 'archived' && assignment !== null)
+    || (value.archivedAt !== null
+      && (value.archivedAt < value.createdAt || value.archivedAt > value.updatedAt))
+    || (assignment !== null
+      && (assignment.startsAt < value.createdAt || assignment.startsAt > value.updatedAt))) return null
+  return Object.freeze({
+    id: value.id,
+    name: value.name,
+    age: value.age,
+    status: value.status,
+    version: value.version,
+    archivedAt: value.archivedAt,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    readOnly: value.readOnly,
+    assignment,
+  })
+}
+
+const captureWorkspacePaymentEntry = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'amountGrosze', 'method', 'receivedAt', 'correctedAt', 'replacementEntryId',
+  ])
+  if (!value || typeof value.id !== 'string' || !PAYMENT_ID.test(value.id)
+    || !workspacePositive(value.amountGrosze, 1_000_000)
+    || !['cash', 'card', 'transfer', 'monthly'].includes(value.method)
+    || !validInstant(value.receivedAt) || !workspaceNullableInstant(value.correctedAt)
+    || (value.replacementEntryId !== null
+      && (typeof value.replacementEntryId !== 'string'
+        || !PAYMENT_ID.test(value.replacementEntryId)))
+    || (value.correctedAt === null && value.replacementEntryId !== null)) return null
+  return Object.freeze({
+    id: value.id,
+    amountGrosze: value.amountGrosze,
+    method: value.method,
+    receivedAt: value.receivedAt,
+    correctedAt: value.correctedAt,
+    replacementEntryId: value.replacementEntryId,
+  })
+}
+
+const captureWorkspaceAppointment = (raw, bounds) => {
+  const value = captureDataObject(raw, [
+    'id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone',
+    'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt',
+    'charge', 'payment', 'paymentEntries',
+  ])
+  if (!value || typeof value.id !== 'string' || !APPOINTMENT_ID.test(value.id)
+    || typeof value.clientId !== 'string' || !CLIENT_ID.test(value.clientId)
+    || typeof value.specialistId !== 'string' || !SPECIALIST_ID.test(value.specialistId)
+    || typeof value.serviceId !== 'string' || !WORKSPACE_SERVICE_IDS.has(value.serviceId)
+    || !validInstant(value.startsAt) || !validInstant(value.endsAt)
+    || value.startsAt < bounds.lower || value.startsAt >= bounds.upper
+    || value.endsAt <= value.startsAt || value.timeZone !== 'Europe/Warsaw'
+    || !workspaceLocation(value.location)
+    || !['scheduled', 'completed', 'cancelled', 'noshow'].includes(value.status)
+    || value.source !== 'panel' || !workspacePositive(value.version)
+    || !workspaceNullableInstant(value.cancelledAt)
+    || (value.status === 'cancelled') !== (value.cancelledAt !== null)
+    || !validInstant(value.createdAt) || !validInstant(value.updatedAt)
+    || value.createdAt > value.updatedAt
+    || (value.cancelledAt !== null
+      && (value.cancelledAt < value.createdAt || value.cancelledAt > value.updatedAt))) return null
+
+  const charge = captureDataObject(value.charge, [
+    'id', 'serviceId', 'expectedAmountGrosze', 'currency', 'version',
+  ])
+  if (!charge || typeof charge.id !== 'string' || !CHARGE_ID.test(charge.id)
+    || charge.serviceId !== value.serviceId
+    || !workspacePositive(charge.expectedAmountGrosze, 1_000_000)
+    || charge.currency !== 'PLN' || !workspacePositive(charge.version)) return null
+
+  const payment = captureDataObject(value.payment, [
+    'status', 'collectedGrosze', 'outstandingGrosze', 'latestMethod', 'latestReceivedAt',
+  ])
+  const rawEntries = captureDenseArray(value.paymentEntries, 1_000)
+  if (!payment || !rawEntries) return null
+  const entries = rawEntries.map(captureWorkspacePaymentEntry)
+  if (entries.some((entry) => !entry)) return null
+  const ids = new Set()
+  let previous = null
+  for (const entry of entries) {
+    if (ids.has(entry.id)
+      || (previous && (previous.receivedAt > entry.receivedAt
+        || (previous.receivedAt === entry.receivedAt
+          && previous.id.localeCompare(entry.id) >= 0)))) return null
+    ids.add(entry.id)
+    previous = entry
+    if (entry.correctedAt !== null
+      && (entry.correctedAt < value.createdAt || entry.correctedAt > value.updatedAt)) return null
+  }
+  const replacementTargets = new Set()
+  const replacementLinks = new Map()
+  for (const entry of entries) {
+    if (entry.replacementEntryId === null) continue
+    if (entry.replacementEntryId === entry.id || !ids.has(entry.replacementEntryId)
+      || replacementTargets.has(entry.replacementEntryId)) return null
+    replacementTargets.add(entry.replacementEntryId)
+    replacementLinks.set(entry.id, entry.replacementEntryId)
+  }
+  for (const start of replacementLinks.keys()) {
+    const path = new Set()
+    let current = start
+    while (replacementLinks.has(current)) {
+      if (path.has(current)) return null
+      path.add(current)
+      current = replacementLinks.get(current)
+    }
+  }
+  let collected = 0
+  const effective = []
+  for (const entry of entries) {
+    if (entry.correctedAt !== null) continue
+    collected += entry.amountGrosze
+    if (!Number.isSafeInteger(collected)) return null
+    effective.push(entry)
+  }
+  const billable = value.status === 'completed' || value.status === 'noshow'
+  const expectedStatus = collected === 0 ? 'unpaid'
+    : collected === charge.expectedAmountGrosze ? 'paid' : 'partial'
+  const latest = effective.at(-1) ?? null
+  if (collected > charge.expectedAmountGrosze || (!billable && collected !== 0)
+    || payment.status !== expectedStatus || payment.collectedGrosze !== collected
+    || payment.outstandingGrosze !== (billable ? charge.expectedAmountGrosze - collected : 0)
+    || payment.latestMethod !== (latest?.method ?? null)
+    || payment.latestReceivedAt !== (latest?.receivedAt ?? null)) return null
+
+  return Object.freeze({
+    id: value.id,
+    clientId: value.clientId,
+    specialistId: value.specialistId,
+    serviceId: value.serviceId,
+    startsAt: value.startsAt,
+    endsAt: value.endsAt,
+    timeZone: 'Europe/Warsaw',
+    location: value.location,
+    status: value.status,
+    source: 'panel',
+    version: value.version,
+    cancelledAt: value.cancelledAt,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+    charge: Object.freeze({
+      id: charge.id,
+      serviceId: charge.serviceId,
+      expectedAmountGrosze: charge.expectedAmountGrosze,
+      currency: 'PLN',
+      version: charge.version,
+    }),
+    payment: Object.freeze({
+      status: payment.status,
+      collectedGrosze: payment.collectedGrosze,
+      outstandingGrosze: payment.outstandingGrosze,
+      latestMethod: payment.latestMethod,
+      latestReceivedAt: payment.latestReceivedAt,
+    }),
+    paymentEntries: Object.freeze(entries),
+  })
+}
+
+const acceptedWorkspace = (payload, requested) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, [
+    'window', 'specialists', 'clients', 'appointments',
+  ])
+  const window = data && captureDataObject(data.window, ['from', 'to', 'timeZone', 'complete'])
+  const specialists = data && captureDenseArray(data.specialists, 50)
+  const clients = data && captureDenseArray(data.clients, 200)
+  const appointments = data && captureDenseArray(data.appointments, 500)
+  const bounds = workspaceBounds(requested)
+  if (!window || !specialists || !clients || !appointments || !bounds
+    || window.from !== requested.from || window.to !== requested.to
+    || window.timeZone !== 'Europe/Warsaw' || window.complete !== true) return null
+  const acceptedSpecialists = specialists.map(captureWorkspaceSpecialist)
+  const acceptedClients = clients.map(captureWorkspaceClient)
+  const acceptedAppointments = appointments.map((value) => (
+    captureWorkspaceAppointment(value, bounds)
+  ))
+  if (acceptedSpecialists.some((value) => !value)
+    || acceptedClients.some((value) => !value)
+    || acceptedAppointments.some((value) => !value)) return null
+  const specialistIds = new Set()
+  let previousSpecialist = null
+  for (const specialist of acceptedSpecialists) {
+    if (specialistIds.has(specialist.id)
+      || (previousSpecialist && (workspaceCollator.compare(
+        previousSpecialist.displayName, specialist.displayName,
+      ) > 0 || (workspaceCollator.compare(
+        previousSpecialist.displayName, specialist.displayName,
+      ) === 0 && previousSpecialist.id.localeCompare(specialist.id) >= 0)))) return null
+    specialistIds.add(specialist.id)
+    previousSpecialist = specialist
+  }
+  const clientIds = new Set()
+  let previousClient = null
+  for (const client of acceptedClients) {
+    if (clientIds.has(client.id)
+      || (previousClient && (workspaceCollator.compare(previousClient.name, client.name) > 0
+        || (workspaceCollator.compare(previousClient.name, client.name) === 0
+          && previousClient.id.localeCompare(client.id) >= 0)))
+      || (client.assignment !== null && !specialistIds.has(client.assignment.specialistId))) return null
+    clientIds.add(client.id)
+    previousClient = client
+  }
+  const appointmentIds = new Set()
+  const chargeIds = new Set()
+  const paymentIds = new Set()
+  let paymentEntryCount = 0
+  let previousAppointment = null
+  const referencedClients = new Set()
+  for (const appointment of acceptedAppointments) {
+    if (appointmentIds.has(appointment.id) || chargeIds.has(appointment.charge.id)
+      || !clientIds.has(appointment.clientId)
+      || (previousAppointment && (previousAppointment.startsAt > appointment.startsAt
+        || (previousAppointment.startsAt === appointment.startsAt
+          && previousAppointment.id.localeCompare(appointment.id) >= 0)))) return null
+    appointmentIds.add(appointment.id)
+    chargeIds.add(appointment.charge.id)
+    referencedClients.add(appointment.clientId)
+    previousAppointment = appointment
+    paymentEntryCount += appointment.paymentEntries.length
+    if (paymentEntryCount > 1_000) return null
+    for (const entry of appointment.paymentEntries) {
+      if (paymentIds.has(entry.id)) return null
+      paymentIds.add(entry.id)
+    }
+  }
+  if (acceptedClients.some((client) => (
+    (client.status === 'archived' || client.assignment === null)
+      && !referencedClients.has(client.id)
+  ))) return null
+  return Object.freeze({
+    window: Object.freeze({ ...window }),
+    specialists: Object.freeze(acceptedSpecialists),
+    clients: Object.freeze(acceptedClients),
+    appointments: Object.freeze(acceptedAppointments),
+  })
 }
 const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
 const canonicalBase64Url = (value) => {
@@ -824,6 +1212,19 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   }, {
     validate: acceptedStaffList,
   })
+  const loadWorkspaceWindow = (options) => {
+    const accepted = acceptedWorkspaceOptions(options)
+    if (!accepted) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    return requestJson(
+      `${API_ROOT}/workspace?from=${accepted.from}&to=${accepted.to}`,
+      {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: baseHeaders(),
+      },
+      { validate: (payload) => acceptedWorkspace(payload, accepted) },
+    )
+  }
   const getOperationsHealth = () => requestJson(`${API_ROOT}/operations/health`, {
     method: 'GET',
     credentials: 'same-origin',
@@ -978,6 +1379,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   return Object.freeze({
     getSession,
     listStaff,
+    loadWorkspaceWindow,
     getOperationsHealth,
     getOperationalActions,
     getSecurityAudit,
