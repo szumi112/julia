@@ -397,6 +397,7 @@ export function createDemoWorkspaceRepository(options) {
           legacyId: item.id, version: 1, createdAt, updatedAt: createdAt,
           archivedAt: null, assignmentId: demoId('asg', item.id),
           assignmentStartsAt: createdAt, assignmentVersion: 1, pending: null,
+          origin: 'legacy',
         })
       }
     }
@@ -420,7 +421,7 @@ export function createDemoWorkspaceRepository(options) {
         const meta = {
           legacyId: item.id, version: 1, chargeVersion: 1, createdAt,
           updatedAt: createdAt, cancelledAt: item.status === 'cancelled' ? createdAt : null,
-          entries: [], corrections: [], pending: null,
+          entries: [], corrections: [], pending: null, origin: 'legacy',
         }
         const paidAmount = item.paidAmount
         if (paidAmount > 0) {
@@ -484,15 +485,14 @@ export function createDemoWorkspaceRepository(options) {
     if (actual !== expected) fail('expectedVersion', 'VERSION_CONFLICT')
   }
 
-  const observeState = async ({ area, before, inspect }) => {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+  const observeState = async ({ before, inspect, snapshot }) => {
+    // One immediate observation plus five macrotask turns bounds React reducer reconciliation.
+    for (let turn = 0; turn <= 5; turn += 1) {
       const state = currentState()
       const accepted = inspect(state)
       if (accepted !== null) return accepted
-      if (collectionSignature(area, state[area]) !== before) {
-        fail('state', 'DEMO_STATE_MISMATCH')
-      }
-      if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 0))
+      if (snapshot(state) !== before) fail('state', 'DEMO_STATE_MISMATCH')
+      if (turn < 5) await new Promise((resolve) => setTimeout(resolve, 0))
     }
     fail('state', 'DEMO_STATE_NOT_APPLIED')
   }
@@ -535,36 +535,55 @@ export function createDemoWorkspaceRepository(options) {
     }
   }
 
-  const collectionSignature = (area, rows) => JSON.stringify(rows.map((raw) => {
-    if (area === 'clients') {
-      const item = captureLegacyClient(raw)
-      return [item.id, item.name, item.age, item.psychId, item.since, item.status]
-    }
+  const clientRowSignature = (raw) => {
+    const item = captureLegacyClient(raw)
+    return JSON.stringify([item.id, item.name, item.age, item.psychId, item.since, item.status])
+  }
+
+  const appointmentRowSignature = (raw) => {
     const item = captureLegacyAppointment(raw)
-    return [
+    return JSON.stringify([
       item.id, item.clientId, item.psychId, item.service, item.date, item.time,
       item.duration, item.expectedAmountGrosze, item.location, item.status, item.payment,
       item.paidAmount, item.method, item.paidDate ?? null,
-    ]
-  }))
+    ])
+  }
+
+  const clientTargetSnapshot = (state, meta) => {
+    const item = findClient(state, meta)
+    return item === undefined ? null : clientRowSignature(item)
+  }
+
+  const appointmentTargetSnapshot = (state, meta) => {
+    const item = findAppointment(state, meta)
+    return item === undefined ? null : appointmentRowSignature(item)
+  }
 
   const createdClient = (state, meta) => {
-    const matches = state.clients.map(captureLegacyClient).filter((item) => (
+    const candidates = state.clients.map(captureLegacyClient).filter((item) => (
       !meta.pending.knownIds.has(item.id)
-      && sameClientRequest(meta.pending, item)
     ))
-    if (matches.length !== 1) return null
+    const matches = candidates.filter((item) => sameClientRequest(meta.pending, item))
+    const unexplained = candidates.filter((item) => !matches.includes(item)
+      && ![...clients.values()].some((other) => other !== meta && other.origin === 'command'
+        && (other.legacyId === item.id || sameClientRequest(other.pending, item))))
+    if (matches.length > 1 || unexplained.length > 0) fail('state', 'DEMO_STATE_MISMATCH')
+    if (matches.length === 0) return null
     meta.legacyId = matches[0].id
     meta.pending = null
     return matches[0]
   }
 
   const createdAppointment = (state, meta) => {
-    const matches = state.sessions.map(captureLegacyAppointment).filter((item) => (
+    const candidates = state.sessions.map(captureLegacyAppointment).filter((item) => (
       !meta.pending.knownIds.has(item.id)
-      && sameAppointmentRequest(meta.pending, item)
     ))
-    if (matches.length !== 1) return null
+    const matches = candidates.filter((item) => sameAppointmentRequest(meta.pending, item))
+    const unexplained = candidates.filter((item) => !matches.includes(item)
+      && ![...appointments.values()].some((other) => other !== meta && other.origin === 'command'
+        && (other.legacyId === item.id || sameAppointmentRequest(other.pending, item))))
+    if (matches.length > 1 || unexplained.length > 0) fail('state', 'DEMO_STATE_MISMATCH')
+    if (matches.length === 0) return null
     meta.legacyId = matches[0].id
     meta.pending = null
     return matches[0]
@@ -709,7 +728,6 @@ export function createDemoWorkspaceRepository(options) {
       const state = currentState()
       const psychId = legacySpecialist(requested.specialistId)
       if (clients.size >= 200) fail('clients')
-      const before = collectionSignature('clients', state.clients)
       const createdAt = commandInstant()
       const allocated = allocateDemoId({
         kind: 'cl', after: clientSequence, maximum: 200,
@@ -720,6 +738,7 @@ export function createDemoWorkspaceRepository(options) {
         legacyId: null, version: 1, createdAt, updatedAt: createdAt,
         archivedAt: null, assignmentId: `asg_${coreId.slice(3)}`,
         assignmentStartsAt: createdAt, assignmentVersion: 1,
+        origin: 'command',
         pending: {
           ...requested, psychId,
           knownIds: new Set(state.clients.map((item) => captureLegacyClient(item).id)),
@@ -736,7 +755,7 @@ export function createDemoWorkspaceRepository(options) {
           },
         })
         const added = await observeState({
-          area: 'clients', before,
+          before: null, snapshot: () => null,
           inspect: (next) => createdClient(next, meta),
         })
         clientSequence = Math.max(clientSequence, allocated.sequence)
@@ -759,10 +778,10 @@ export function createDemoWorkspaceRepository(options) {
         if (raw.name === requested.name && raw.age === requested.age
           && raw.status === requested.status && !reassigned) fail('body')
         const updatedAt = commandInstant(meta.updatedAt)
-        const before = collectionSignature('clients', state.clients)
+        const before = clientRowSignature(raw)
         dispatch({ type: 'UPDATE_CLIENT', id: meta.legacyId, patch: { name: requested.name, age: requested.age, status: requested.status, psychId } })
         const applied = await observeState({
-          area: 'clients', before,
+          before, snapshot: (next) => clientTargetSnapshot(next, meta),
           inspect: (next) => {
             const item = findClient(next, meta)
             return item && matchesClient(item, requested, psychId) ? item : null
@@ -786,10 +805,10 @@ export function createDemoWorkspaceRepository(options) {
       return serializeMutation(clientMutationReservations, id, async () => {
         const raw = findClient(state, meta)
         const archivedAt = commandInstant(meta.updatedAt)
-        const before = collectionSignature('clients', state.clients)
+        const before = clientRowSignature(raw)
         dispatch({ type: 'DELETE_CLIENT', id: meta.legacyId })
         await observeState({
-          area: 'clients', before,
+          before, snapshot: (next) => clientTargetSnapshot(next, meta),
           inspect: (next) => findClient(next, meta) === undefined ? true : null,
         })
         meta.version += 1
@@ -804,7 +823,6 @@ export function createDemoWorkspaceRepository(options) {
       const client = clientMeta(requested.clientId, state)
       const psychId = legacySpecialist(requested.specialistId)
       if (appointments.size >= 500) fail('appointments')
-      const before = collectionSignature('sessions', state.sessions)
       const createdAt = commandInstant()
       const allocated = allocateDemoId({
         kind: 'apt', after: appointmentSequence, maximum: 500,
@@ -814,6 +832,7 @@ export function createDemoWorkspaceRepository(options) {
       const meta = {
         legacyId: null, version: 1, chargeVersion: 1, createdAt,
         updatedAt: createdAt, cancelledAt: null, entries: [], corrections: [],
+        origin: 'command',
         pending: {
           clientId: client.legacyId, psychId, service: requested.serviceId,
           date: requested.date, time: requested.time, duration: requested.durationMinutes,
@@ -835,7 +854,7 @@ export function createDemoWorkspaceRepository(options) {
           },
         })
         const added = await observeState({
-          area: 'sessions', before,
+          before: null, snapshot: () => null,
           inspect: (next) => createdAppointment(next, meta),
         })
         appointmentSequence = Math.max(appointmentSequence, allocated.sequence)
@@ -881,10 +900,10 @@ export function createDemoWorkspaceRepository(options) {
           duration: requested.durationMinutes, amount: requested.expectedAmountGrosze / 100,
           location: requested.location, status: requested.status,
         }
-        const before = collectionSignature('sessions', state.sessions)
+        const before = appointmentRowSignature(raw)
         dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
         const applied = await observeState({
-          area: 'sessions', before,
+          before, snapshot: (next) => appointmentTargetSnapshot(next, meta),
           inspect: (next) => {
             const item = findAppointment(next, meta)
             return item && matchesAppointment(
@@ -911,10 +930,10 @@ export function createDemoWorkspaceRepository(options) {
         })
         if (aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
         const cancelledAt = commandInstant(meta.updatedAt)
-        const before = collectionSignature('sessions', state.sessions)
+        const before = appointmentRowSignature(raw)
         dispatch({ type: 'DELETE_SESSION', id: meta.legacyId })
         await observeState({
-          area: 'sessions', before,
+          before, snapshot: (next) => appointmentTargetSnapshot(next, meta),
           inspect: (next) => findAppointment(next, meta) === undefined ? true : null,
         })
         meta.version += 1
@@ -952,10 +971,10 @@ export function createDemoWorkspaceRepository(options) {
           })
           const updatedAt = commandInstant(meta.updatedAt)
           const patch = patchAggregate(id, raw, { ...meta, entries: proposed })
-          const before = collectionSignature('sessions', state.sessions)
+          const before = appointmentRowSignature(raw)
           dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
           const applied = await observeState({
-            area: 'sessions', before,
+            before, snapshot: (next) => appointmentTargetSnapshot(next, meta),
             inspect: (next) => {
               const item = findAppointment(next, meta)
               return item && matchesPaymentPatch(item, patch) ? item : null
@@ -1025,10 +1044,10 @@ export function createDemoWorkspaceRepository(options) {
           const patch = patchAggregate(link.appointmentId, raw, {
             ...meta, entries, corrections,
           })
-          const before = collectionSignature('sessions', state.sessions)
+          const before = appointmentRowSignature(raw)
           dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
           const applied = await observeState({
-            area: 'sessions', before,
+            before, snapshot: (next) => appointmentTargetSnapshot(next, meta),
             inspect: (next) => {
               const item = findAppointment(next, meta)
               return item && matchesPaymentPatch(item, patch) ? item : null

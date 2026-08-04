@@ -563,6 +563,122 @@ test('demo permits concurrent mutations for different clients and appointments',
   assert.deepEqual(appointments.map(({ version }) => version), [2, 2])
 })
 
+test('demo observes delayed out-of-order mutations by target while validating the whole state', async () => {
+  const afterTurns = (turns, operation) => {
+    if (turns === 0) setTimeout(operation, 0)
+    else setTimeout(() => afterTurns(turns - 1, operation), 0)
+  }
+  let state = demoState()
+  const repository = createDemoWorkspaceRepository({
+    dispatch(action) {
+      const turns = action.id === 'c1' || action.id === 's1' ? 2 : 0
+      afterTurns(turns, () => {
+        if (action.type === 'UPDATE_CLIENT') {
+          state = { ...state, clients: state.clients.map((item) => (
+            item.id === action.id ? { ...item, ...action.patch } : item
+          )) }
+        }
+        if (action.type === 'UPDATE_SESSION') {
+          state = { ...state, sessions: state.sessions.map((item) => (
+            item.id === action.id ? { ...item, ...action.patch } : item
+          )) }
+        }
+      })
+    },
+    getState: () => state,
+  })
+  const clients = await Promise.all([
+    repository.editClient('cl_demo_c1', 1, clientInput({ name: 'Ada A', age: 8, specialistId: 'sp_demo_p1' })),
+    repository.editClient('cl_demo_c2', 1, clientInput({ name: 'Zenon B', age: 10, status: 'paused', specialistId: 'sp_demo_p2' })),
+  ])
+  assert.deepEqual(clients.map(({ version }) => version), [2, 2])
+  const appointments = await Promise.all([
+    repository.editAppointment('apt_demo_s1', 1, {
+      specialistId: 'sp_demo_p1', serviceId: 'zajecia', date: '2026-08-04',
+      time: '09:00', durationMinutes: 50, expectedAmountGrosze: 18_000,
+      location: 'Gabinet 2', status: 'completed',
+    }),
+    repository.editAppointment('apt_demo_s2', 1, {
+      specialistId: 'sp_demo_p2', serviceId: 'zajecia', date: '2026-09-01',
+      time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20_000,
+      location: 'Gabinet 4', status: 'scheduled',
+    }),
+  ])
+  assert.deepEqual(appointments.map(({ version }) => version), [2, 2])
+  const mixed = await Promise.all([
+    repository.recordPayment('apt_demo_s1', 2, { amountGrosze: 100, method: 'card', paidDate: '2026-08-06' }),
+    repository.editAppointment('apt_demo_s2', 2, {
+      specialistId: 'sp_demo_p2', serviceId: 'zajecia', date: '2026-09-01',
+      time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20_000,
+      location: 'Gabinet 5', status: 'scheduled',
+    }),
+  ])
+  assert.deepEqual(mixed.map(({ version }) => version), [3, 3])
+  assert.equal(mixed[0].paymentEntries.at(-1).id, 'pay_demo_new_1')
+})
+
+test('demo reconciles unrelated out-of-order creates and the fifth macrotask boundary', async () => {
+  const afterTurns = (turns, operation) => {
+    if (turns === 0) setTimeout(operation, 0)
+    else setTimeout(() => afterTurns(turns - 1, operation), 0)
+  }
+  let state = demoState()
+  let sequence = 40
+  const repository = createDemoWorkspaceRepository({
+    dispatch(action) {
+      const turns = action.client.name === 'Ala Wolna' ? 2 : 0
+      afterTurns(turns, () => {
+        state = { ...state, clients: [...state.clients, { ...action.client, id: `c${++sequence}` }] }
+      })
+    },
+    getState: () => state,
+  })
+  const created = await Promise.all([
+    repository.createClient(clientInput({ name: 'Ala Wolna', specialistId: 'sp_demo_p1' })),
+    repository.createClient(clientInput({ name: 'Ela Szybka', specialistId: 'sp_demo_p1' })),
+  ])
+  assert.deepEqual(created.map(({ id }) => id), ['cl_demo_new_1', 'cl_demo_new_2'])
+
+  let boundaryState = demoState()
+  const boundary = createDemoWorkspaceRepository({
+    dispatch(action) {
+      afterTurns(4, () => {
+        boundaryState = { ...boundaryState, clients: [
+          ...boundaryState.clients, { ...action.client, id: 'c_boundary' },
+        ] }
+      })
+    },
+    getState: () => boundaryState,
+  })
+  const finalTurn = await boundary.createClient(clientInput({ name: 'Piąty Obrót', specialistId: 'sp_demo_p1' }))
+  assert.equal(finalTurn.id, 'cl_demo_new_1')
+})
+
+test('demo target observation still fails closed on a malformed surrounding row', async () => {
+  let state = demoState()
+  const repository = createDemoWorkspaceRepository({
+    dispatch(action) {
+      setTimeout(() => {
+        state = {
+          ...state,
+          clients: state.clients.map((item) => item.id === 'c2'
+            ? { ...item, age: 'private-invalid' }
+            : item),
+        }
+      }, 0)
+      setTimeout(() => {
+        state = { ...state, clients: state.clients.map((item) => (
+          item.id === action.id ? { ...item, ...action.patch } : item
+        )) }
+      }, 0)
+    },
+    getState: () => state,
+  })
+  await assert.rejects(repository.editClient(
+    'cl_demo_c1', 1, clientInput({ name: 'Ada Nowak', age: 8, specialistId: 'sp_demo_p1' }),
+  ), /VALIDATION_FAILED\/age/)
+})
+
 test('demo rejects two matching created rows instead of choosing one nondeterministically', async () => {
   let state = demoState()
   const repository = createDemoWorkspaceRepository({
