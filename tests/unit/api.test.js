@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { apiClient, ApiError, createApiClient } from '../../src/api.js'
+import { isWellFormedUnicode } from '../../src/core-records.js'
 import { capabilitiesForActor } from '../../worker/identity/policy.js'
 
 const CORRELATION_ID = '77777777-7777-4777-8777-777777777777'
@@ -340,6 +341,43 @@ test('captures and deeply freezes a complete workspace response independently of
   source.data.appointments[0].paymentEntries[1].amountGrosze = 1
   assert.equal(result.clients[0].name, 'Ola Nowak')
   assert.equal(result.appointments[0].paymentEntries[1].amountGrosze, 18000)
+})
+
+test('workspace text rejects malformed Unicode and preserves valid astral pairs', async () => {
+  const malformed = [
+    '\uD800',
+    '\uDFFF',
+    'Anna\uD800',
+    'An\uD800na',
+    'Anna\uDFFF',
+    'An\uDFFFna',
+  ]
+  const fields = [
+    (body, value) => { body.data.specialists[0].displayName = value },
+    (body, value) => { body.data.clients[0].name = value },
+    (body, value) => { body.data.appointments[0].location = value },
+  ]
+  for (const value of malformed) {
+    assert.equal(isWellFormedUnicode(value, { forceFallback: true }), false)
+    for (const setValue of fields) {
+      const body = fullWorkspaceBody()
+      setValue(body, value)
+      await rejectWorkspaceBody(body)
+    }
+  }
+
+  assert.equal(isWellFormedUnicode('😀', { forceFallback: true }), true)
+  const astral = fullWorkspaceBody()
+  astral.data.specialists[0].displayName = 'Anna 😀'
+  astral.data.clients[0].name = 'Ola 😀'
+  astral.data.appointments[0].location = 'Gabinet 😀'
+  const { fetchImpl } = queuedFetch(parsedResponse(astral))
+  const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+  assert.equal(result.specialists[0].displayName, 'Anna 😀')
+  assert.equal(result.clients[0].name, 'Ola 😀')
+  assert.equal(result.appointments[0].location, 'Gabinet 😀')
 })
 
 const rejectWorkspaceBody = async (body) => {

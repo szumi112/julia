@@ -1,4 +1,5 @@
 import { APP_MODE } from './app-mode.js'
+import { isWellFormedUnicode } from './core-records.js'
 import { SERVICE_BY_ID } from './services.js'
 import {
   captureCoreAuditEvent,
@@ -313,8 +314,10 @@ const workspacePositive = (value, maximum = Number.MAX_SAFE_INTEGER) => (
   Number.isSafeInteger(value) && value >= 1 && value <= maximum
 )
 const workspaceNullableInstant = (value) => value === null || validInstant(value)
-const workspaceLocation = (value) => value === null || validText(value, 80)
-const workspaceIdentity = (name, age) => validText(name, 120)
+const validWorkspaceText = (value, maxBytes) => typeof value === 'string'
+  && isWellFormedUnicode(value) && validText(value, maxBytes)
+const workspaceLocation = (value) => value === null || validWorkspaceText(value, 80)
+const workspaceIdentity = (name, age) => validWorkspaceText(name, 120)
   && (age === null || (Number.isSafeInteger(age) && age >= 1 && age <= 26))
 
 const captureWorkspaceSpecialist = (raw) => {
@@ -322,7 +325,7 @@ const captureWorkspaceSpecialist = (raw) => {
     'id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion',
   ])
   if (!value || typeof value.id !== 'string' || !SPECIALIST_ID.test(value.id)
-    || !validText(value.displayName, 120)
+    || !validWorkspaceText(value.displayName, 120)
     || !workspacePositive(value.standardRateGrosze, 1_000_000)
     || value.status !== 'active' || !workspacePositive(value.version)
     || !workspacePositive(value.staffVersion)) return null
