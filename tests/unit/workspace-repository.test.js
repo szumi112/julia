@@ -256,6 +256,23 @@ test('demo appointment and payment lifecycle preserves cents, versions, reversal
   assert.deepEqual(harness.actions[5], { type: 'DELETE_SESSION', id: 's12' })
 })
 
+test('demo appointment edit treats a location-only change as a real mutation', async () => {
+  const harness = demoHarness()
+  const repository = createDemoWorkspaceRepository({ dispatch: harness.dispatch, getState: harness.getState })
+  const edited = await repository.editAppointment('apt_demo_s2', 1, {
+    specialistId: 'sp_demo_p2', serviceId: 'zajecia', date: '2026-09-01',
+    time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20_000,
+    location: 'Gabinet 4', status: 'scheduled',
+  })
+  assert.equal(edited.location, 'Gabinet 4')
+  assert.deepEqual(harness.actions[0], {
+    type: 'UPDATE_SESSION', id: 's2', patch: {
+      psychId: 'p2', service: 'zajecia', date: '2026-09-01', time: '10:00',
+      duration: 50, amount: 200, location: 'Gabinet 4', status: 'scheduled',
+    },
+  })
+})
+
 test('demo rejects stale and missing targets before dispatch and never mutates caller or state', async () => {
   const harness = demoHarness()
   const initial = structuredClone(harness.getState())
@@ -387,10 +404,45 @@ test('demo rebuilds live indexes and rejects removed or inactive specialists bef
   const actions = []
   const repository = createDemoWorkspaceRepository({ dispatch: (action) => actions.push(action), getState: () => state })
   await repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' })
-  state = { ...state, psychologists: [{ ...state.psychologists[0], status: 'inactive' }] }
+  state = {
+    ...state, psychologists: [{ ...state.psychologists[0], status: 'inactive' }],
+    clients: [], sessions: [],
+  }
   await assert.rejects(repository.createClient(clientInput({ specialistId: 'sp_demo_p1' })), /NOT_FOUND/)
   await assert.rejects(repository.createClient(clientInput({ specialistId: 'sp_demo_p2' })), /NOT_FOUND/)
   assert.equal(actions.length, 0)
+})
+
+test('demo refuses a canonical window with an active client assigned to an absent or inactive specialist', async () => {
+  for (const psychologists of [
+    [{ ...demoState().psychologists[0] }],
+    demoState().psychologists.map((item) => item.id === 'p1' ? { ...item, status: 'inactive' } : item),
+  ]) {
+    const state = { ...demoState(), psychologists }
+    const repository = createDemoWorkspaceRepository({ dispatch() {}, getState: () => state })
+    await assert.rejects(repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' }), /VALIDATION_FAILED\/client/)
+  }
+})
+
+test('demo contains hostile collection proxy failures as canonical validation errors', async () => {
+  const traps = [
+    (target) => new Proxy(target, { get(_target, key, receiver) { if (key === 'length') throw new Error('private length'); return Reflect.get(_target, key, receiver) } }),
+    (target) => new Proxy(target, { ownKeys() { throw new Error('private keys') } }),
+    (target) => new Proxy(target, { getOwnPropertyDescriptor() { throw new Error('private index') } }),
+    (target) => new Proxy(target, { get(_target, key, receiver) { if (key === Symbol.iterator) throw new Error('private iterator'); return Reflect.get(_target, key, receiver) } }),
+  ]
+  const areas = ['psychologists', 'clients', 'sessions']
+  for (let index = 0; index < traps.length; index += 1) {
+    const state = demoState()
+    const area = areas[index % areas.length]
+    state[area] = traps[index](state[area])
+    const repository = createDemoWorkspaceRepository({ dispatch() {}, getState: () => state })
+    await assert.rejects(repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' }), (error) => {
+      assert.match(error.message, /^VALIDATION_FAILED\/state$/)
+      assert.doesNotMatch(String(error), /private/)
+      return true
+    })
+  }
 })
 
 test('demo rejects coercive and descriptor-hostile legacy scalars without dispatch', async () => {

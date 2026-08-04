@@ -101,6 +101,34 @@ const deepFreeze = (value) => {
   return value
 }
 
+const captureCollection = (value, maximum) => {
+  try {
+    if (!Array.isArray(value)) fail('state')
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const ownKeys = Reflect.ownKeys(descriptors)
+    const length = descriptors.length?.value
+    if (!Number.isSafeInteger(length) || length < 0 || length > maximum
+      || ownKeys.length !== length + 1 || ownKeys.some((key) => (
+        key !== 'length' && (typeof key !== 'string' || !/^(0|[1-9]\d*)$/.test(key)
+          || Number(key) >= length)
+      ))) fail('state')
+    const captured = new Array(length)
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[index]
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) fail('state')
+      captured[index] = descriptor.value
+    }
+    const iterated = Array.from(value)
+    if (iterated.length !== captured.length
+      || iterated.some((item, index) => item !== captured[index])) fail('state')
+    return captured
+  } catch (error) {
+    if (error instanceof TypeError && typeof error.message === 'string'
+      && error.message.startsWith('VALIDATION_FAILED/')) throw error
+    fail('state')
+  }
+}
+
 const captureClient = (input) => validateClientInput(captureRecord(input, CLIENT_KEYS, 'body'))
 
 const captureAppointment = (input) => {
@@ -225,9 +253,7 @@ const stateSnapshot = (getState) => {
   try { raw = getState() } catch { fail('state') }
   const state = captureRecord(raw, STATE_KEYS, 'state', { allowAdditional: true })
   for (const key of STATE_KEYS) {
-    if (!Array.isArray(state[key]) || state[key].length > (key === 'sessions' ? 500 : 200)
-      || Array.from({ length: state[key].length }, (_, index) => index)
-        .some((index) => !Object.hasOwn(state[key], index))) fail('state')
+    state[key] = captureCollection(state[key], key === 'sessions' ? 500 : 200)
   }
   return state
 }
@@ -343,6 +369,7 @@ export function createDemoWorkspaceRepository(options) {
     for (const raw of state.clients) {
       const item = captureLegacyClient(raw)
       if (liveClientIds.has(item.id)) fail('client')
+      if (!specialists.has(demoId('sp', item.psychId))) fail('client')
       liveClientIds.add(item.id)
       const existing = [...clients.entries()].find(([, meta]) => meta.legacyId === item.id)
       if (!existing) {
@@ -448,7 +475,9 @@ export function createDemoWorkspaceRepository(options) {
       const state = currentState()
       const accepted = inspect(state)
       if (accepted !== null) return accepted
-      if (state[area] !== before) fail('state', 'DEMO_STATE_MISMATCH')
+      if (collectionSignature(area, state[area]) !== before) {
+        fail('state', 'DEMO_STATE_MISMATCH')
+      }
       if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 0))
     }
     fail('state', 'DEMO_STATE_NOT_APPLIED')
@@ -468,6 +497,19 @@ export function createDemoWorkspaceRepository(options) {
   const matchesPaymentPatch = (item, patch) => item.payment === patch.payment
     && item.paidAmount === patch.paidAmount && item.method === patch.method
     && item.paidDate === patch.paidDate
+
+  const collectionSignature = (area, rows) => JSON.stringify(rows.map((raw) => {
+    if (area === 'clients') {
+      const item = captureLegacyClient(raw)
+      return [item.id, item.name, item.age, item.psychId, item.since, item.status]
+    }
+    const item = captureLegacyAppointment(raw)
+    return [
+      item.id, item.clientId, item.psychId, item.service, item.date, item.time,
+      item.duration, item.expectedAmountGrosze, item.location, item.status, item.payment,
+      item.paidAmount, item.method, item.paidDate ?? null,
+    ]
+  }))
 
   const createdClient = (state, meta) => {
     const matches = state.clients.map(captureLegacyClient).filter((item) => (
@@ -608,7 +650,7 @@ export function createDemoWorkspaceRepository(options) {
       const state = currentState()
       const psychId = legacySpecialist(requested.specialistId)
       if (clients.size >= 200) fail('clients')
-      const before = state.clients
+      const before = collectionSignature('clients', state.clients)
       const createdAt = commandInstant()
       const coreId = newId('cl', clientSequence + 1)
       const meta = {
@@ -652,7 +694,7 @@ export function createDemoWorkspaceRepository(options) {
       if (raw.name === requested.name && raw.age === requested.age
         && raw.status === requested.status && !reassigned) fail('body')
       const updatedAt = commandInstant(meta.updatedAt)
-      const before = state.clients
+      const before = collectionSignature('clients', state.clients)
       dispatch({ type: 'UPDATE_CLIENT', id: meta.legacyId, patch: { name: requested.name, age: requested.age, status: requested.status, psychId } })
       const applied = await observeState({
         area: 'clients', before,
@@ -676,7 +718,7 @@ export function createDemoWorkspaceRepository(options) {
       assertDemoClientVersion(meta.version, expectedVersion)
       const raw = findClient(state, meta)
       const archivedAt = commandInstant(meta.updatedAt)
-      const before = state.clients
+      const before = collectionSignature('clients', state.clients)
       dispatch({ type: 'DELETE_CLIENT', id: meta.legacyId })
       await observeState({
         area: 'clients', before,
@@ -693,7 +735,7 @@ export function createDemoWorkspaceRepository(options) {
       const client = clientMeta(requested.clientId, state)
       const psychId = legacySpecialist(requested.specialistId)
       if (appointments.size >= 500) fail('appointments')
-      const before = state.sessions
+      const before = collectionSignature('sessions', state.sessions)
       const createdAt = commandInstant()
       const coreId = newId('apt', appointmentSequence + 1)
       const meta = {
@@ -741,7 +783,8 @@ export function createDemoWorkspaceRepository(options) {
         || raw.expectedAmountGrosze !== requested.expectedAmountGrosze
       const changed = raw.psychId !== psychId || chargeChanged
         || raw.date !== requested.date || raw.time !== requested.time
-        || raw.duration !== requested.durationMinutes || raw.status !== requested.status
+        || raw.duration !== requested.durationMinutes || raw.location !== requested.location
+        || raw.status !== requested.status
       if (!changed) fail('body')
       const aggregate = paymentAggregate({
         appointmentId: id, status: raw.status,
@@ -763,7 +806,7 @@ export function createDemoWorkspaceRepository(options) {
         duration: requested.durationMinutes, amount: requested.expectedAmountGrosze / 100,
         location: requested.location, status: requested.status,
       }
-      const before = state.sessions
+      const before = collectionSignature('sessions', state.sessions)
       dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
       const applied = await observeState({
         area: 'sessions', before,
@@ -790,7 +833,7 @@ export function createDemoWorkspaceRepository(options) {
       })
       if (aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
       const cancelledAt = commandInstant(meta.updatedAt)
-      const before = state.sessions
+      const before = collectionSignature('sessions', state.sessions)
       dispatch({ type: 'DELETE_SESSION', id: meta.legacyId })
       await observeState({
         area: 'sessions', before,
@@ -822,7 +865,7 @@ export function createDemoWorkspaceRepository(options) {
       })
       const updatedAt = commandInstant(meta.updatedAt)
       const patch = patchAggregate(id, raw, { ...meta, entries: proposed })
-      const before = state.sessions
+      const before = collectionSignature('sessions', state.sessions)
       dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
       const applied = await observeState({
         area: 'sessions', before,
@@ -872,7 +915,7 @@ export function createDemoWorkspaceRepository(options) {
       const patch = patchAggregate(link.appointmentId, raw, {
         ...meta, entries, corrections,
       })
-      const before = state.sessions
+      const before = collectionSignature('sessions', state.sessions)
       dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
       const applied = await observeState({
         area: 'sessions', before,
