@@ -1583,6 +1583,59 @@ describe('persistent appointment cancellation', () => {
       idempotencyKey: `${marker}-key`, ...overrides,
     })
   }
+  const cancellationRecordId = async (key) => {
+    const encoded = new TextEncoder().encode(
+      ['bwm:idempotency:record:v1', OWNER.id, 'appointments.cancel', key].join('\n'),
+    )
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded))
+    try { return `idem_${encodeBase64Url(digest)}` } finally {
+      encoded.fill(0)
+      digest.fill(0)
+    }
+  }
+  const cloneCancellationCandidate = async (
+    clientId, sourceKey, targetKey, { malformedResponse = false } = {},
+  ) => {
+    const [clientRow, stored] = await Promise.all([
+      env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?').bind(clientId).first(),
+      env.DB.prepare(`SELECT request_hash,response_envelope,created_at,expires_at
+        FROM idempotency_records WHERE actor_id=? AND operation='appointments.cancel'
+          AND idempotency_key=?`).bind(OWNER.id, sourceKey).first(),
+    ])
+    const scope = clientKeyScope(clientId)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
+    })
+    const keyring = await ring()
+    const sourceRecordId = await cancellationRecordId(sourceKey)
+    const targetRecordId = await cancellationRecordId(targetKey)
+    const requestDigest = await decryptForScope(keyring, dataKey, {
+      expectedScope: scope, recordId: sourceRecordId, field: 'idempotency_request_hash',
+      envelope: JSON.parse(stored.request_hash),
+    })
+    const response = await decryptForScope(keyring, dataKey, {
+      expectedScope: scope, recordId: sourceRecordId, field: 'idempotency_response',
+      envelope: JSON.parse(stored.response_envelope),
+    })
+    const requestEnvelope = await encryptForScope(keyring, dataKey, {
+      expectedScope: scope, recordId: targetRecordId, field: 'idempotency_request_hash',
+      plaintext: requestDigest,
+    })
+    const responseEnvelope = await encryptForScope(keyring, dataKey, {
+      expectedScope: scope, recordId: targetRecordId, field: 'idempotency_response',
+      plaintext: response,
+    })
+    const storedResponseEnvelope = malformedResponse
+      ? { ...responseEnvelope, ciphertext: 'A' }
+      : responseEnvelope
+    await env.DB.prepare(`INSERT INTO idempotency_records
+      (actor_id,operation,idempotency_key,request_hash,resource_type,resource_id,
+       response_envelope,created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(
+      OWNER.id, 'appointments.cancel', targetKey, JSON.stringify(requestEnvelope),
+      'client', clientId, JSON.stringify(storedResponseEnvelope),
+      stored.created_at, stored.expires_at,
+    ).run()
+  }
   const seedCollectedPaymentForCancellation = async (appointment, { corrected = false } = {}) => {
     const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
       .bind(appointment.clientId).first()
@@ -1962,6 +2015,9 @@ describe('persistent appointment cancellation', () => {
     const current = (await create(client, { body: {
       ...BODY, clientId: client.id, date: '2027-10-08',
     } })).body.data.appointment
+    const unrelated = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-08', time: '14:00',
+    } })).body.data.appointment
     const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
     let injected = false
     const db = {
@@ -1969,6 +2025,13 @@ describe('persistent appointment cancellation', () => {
       async batch(statements) {
         if (!injected) {
           injected = true
+          await cancelAppointment({
+            db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+            nowMs: NOW_MS + 500, correlationId: CORRELATION_ID,
+            idFactory: suffixes(`appointment_cancel_race_unrelated_${++sequence}`),
+            appointmentId: unrelated.id, body: { expectedVersion: 1 },
+            idempotencyKey: `appointment-cancel-race-unrelated-${sequence}`,
+          })
           await cancelAppointment({
             db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
             nowMs: NOW_MS + 500, correlationId: CORRELATION_ID,
@@ -1985,6 +2048,9 @@ describe('persistent appointment cancellation', () => {
       .rejects.toThrow('NOT_FOUND')
     expect((await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
       WHERE entity_id=? AND action='appointment.cancelled'`).bind(current.id).first()).count)
+      .toBe(1)
+    expect((await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE entity_id=? AND action='appointment.cancelled'`).bind(unrelated.id).first()).count)
       .toBe(1)
     expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
       used: 22, remaining: 28, workRemaining: 20,
@@ -2034,6 +2100,40 @@ describe('persistent appointment cancellation', () => {
       used: 16, remaining: 34, workRemaining: 26,
       totalLimit: 50, recoveryReserve: 8,
     })
+  })
+
+  it('rejects multiple target matches and malformed terminal candidates', async () => {
+    for (const malformedResponse of [false, true]) {
+      const client = await seedClient()
+      const current = (await create(client, { body: {
+        ...BODY, clientId: client.id, date: malformedResponse ? '2027-10-11' : '2027-10-10',
+      } })).body.data.appointment
+      const winnerKey = `appointment-cancel-hostile-winner-${++sequence}`
+      const hostileKey = `appointment-cancel-hostile-candidate-${sequence}`
+      let injected = false
+      const db = {
+        prepare: (sql) => env.DB.prepare(sql),
+        async batch(statements) {
+          if (!injected) {
+            injected = true
+            await cancelAppointment({
+              db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+              nowMs: NOW_MS + 500, correlationId: CORRELATION_ID,
+              idFactory: suffixes(`appointment_cancel_hostile_winner_${sequence}`),
+              appointmentId: current.id, body: { expectedVersion: 1 },
+              idempotencyKey: winnerKey,
+            })
+            await cloneCancellationCandidate(client.id, winnerKey, hostileKey, {
+              malformedResponse,
+            })
+          }
+          return env.DB.batch(statements)
+        },
+      }
+      await expect(cancel(current, { db,
+        idempotencyKey: `appointment-cancel-hostile-loser-${sequence}` }))
+        .rejects.toThrow(/core_directory_invariant_failed/)
+    }
   })
 
   it('rolls back when an assignment gains a cross-type version after preflight', async () => {

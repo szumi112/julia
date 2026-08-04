@@ -52,6 +52,7 @@ const CANCEL_OPERATION = 'appointments.cancel'
 const ROUTE_TARGET = 'POST /api/v1/appointments'
 const PROSPECTIVE_APPOINTMENT_ID = 'apt_authorization_target'
 const DAY_MS = 86_400_000
+const TERMINAL_CANCELLATION_CANDIDATE_CAP = 32
 const ownership = createOwnershipCapabilityBoundary()
 const versionBuilder = createRecordVersionBuilder(ownership.consumer)
 
@@ -2593,7 +2594,7 @@ const loadTerminalCancellationProof = (db, appointment, charge, dataKeyId) => db
      AND json_extract(stored.request_hash,'$.dataKeyVersion')=1
      AND json_extract(stored.response_envelope,'$.dataKeyId')=?
      AND json_extract(stored.response_envelope,'$.dataKeyVersion')=1
-   ORDER BY stored.actor_id,stored.idempotency_key LIMIT 2`
+   ORDER BY stored.actor_id,stored.idempotency_key LIMIT ?`
 ).bind(
   appointment.id,
   JSON.stringify({ appointmentVersion: appointment.version, chargeVersion: charge.version }),
@@ -2601,6 +2602,7 @@ const loadTerminalCancellationProof = (db, appointment, charge, dataKeyId) => db
   appointment.clientId,
   dataKeyId,
   dataKeyId,
+  TERMINAL_CANCELLATION_CANDIDATE_CAP + 1,
 ).all()
 
 const cancellationIdempotencyRecordId = async (actorId, idempotencyKey) => {
@@ -2618,45 +2620,76 @@ const cancellationIdempotencyRecordId = async (actorId, idempotencyKey) => {
 }
 
 const authenticateTerminalCancellationProof = async (
-  context, appointment, charge, value,
+  context, appointment, charge, payment, value,
 ) => {
-  const rows = resultRows(value, 2)
-  if (rows.length !== 1) cryptoFailure()
-  const row = captureExact(rows[0], [
-    'actor_id', 'idempotency_key', 'request_hash', 'response_envelope', 'created_at',
-  ], cryptoFailure)
-  if (typeof row.actor_id !== 'string' || !STAFF_ID.test(row.actor_id)
-    || typeof row.idempotency_key !== 'string' || !IDEMPOTENCY_KEY.test(row.idempotency_key)
-    || typeof row.request_hash !== 'string' || typeof row.response_envelope !== 'string'
-    || row.created_at !== appointment.updatedAt) cryptoFailure()
-  const recordId = await cancellationIdempotencyRecordId(
-    row.actor_id, row.idempotency_key,
-  )
+  const rows = resultRows(value, TERMINAL_CANCELLATION_CANDIDATE_CAP + 1)
+  if (rows.length < 1 || rows.length > TERMINAL_CANCELLATION_CANDIDATE_CAP) cryptoFailure()
   const expectedDigest = await digestCancelNormalized(appointment.id, {
     expectedVersion: appointment.version - 1,
   })
-  let storedDigest
-  let plaintext
-  try {
-    storedDigest = await decryptForScope(context.keyring, context.dataKey, {
-      expectedScope: context.scope, recordId, field: 'idempotency_request_hash',
-      envelope: JSON.parse(row.request_hash),
-    })
-    if (storedDigest !== expectedDigest) cryptoFailure()
-    plaintext = await decryptForScope(context.keyring, context.dataKey, {
-      expectedScope: context.scope, recordId, field: 'idempotency_response',
-      envelope: JSON.parse(row.response_envelope),
-    })
-    const parsed = JSON.parse(plaintext)
-    if (JSON.stringify(parsed) !== plaintext) cryptoFailure()
-    validateCancelReplay(parsed, appointment.id, {
-      expectedVersion: appointment.version - 1,
-    })
-    return true
-  } catch (error) {
-    if (error instanceof Error && error.message === 'CRYPTO_FAILURE') throw error
-    cryptoFailure()
+  const expectedResponse = Object.freeze({ status: 200, body: Object.freeze({
+    data: Object.freeze({
+      appointment: editAppointmentDto(appointment, charge, Object.freeze({
+        status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0,
+        latestMethod: null, latestReceivedAt: null, entries: payment.entries,
+      })),
+    }),
+  }) })
+  const expectedResponseJson = JSON.stringify(expectedResponse)
+  let matches = 0
+  for (const candidate of rows) {
+    try {
+      const row = captureExact(candidate, [
+        'actor_id', 'idempotency_key', 'request_hash', 'response_envelope', 'created_at',
+      ], cryptoFailure)
+      if (typeof row.actor_id !== 'string' || !STAFF_ID.test(row.actor_id)
+        || typeof row.idempotency_key !== 'string' || !IDEMPOTENCY_KEY.test(row.idempotency_key)
+        || typeof row.request_hash !== 'string' || typeof row.response_envelope !== 'string'
+        || row.created_at !== appointment.updatedAt) {
+        cryptoFailure()
+      }
+      const recordId = await cancellationIdempotencyRecordId(
+        row.actor_id, row.idempotency_key,
+      )
+      const storedDigest = await decryptForScope(context.keyring, context.dataKey, {
+        expectedScope: context.scope, recordId, field: 'idempotency_request_hash',
+        envelope: JSON.parse(row.request_hash),
+      })
+      const plaintext = await decryptForScope(context.keyring, context.dataKey, {
+        expectedScope: context.scope, recordId, field: 'idempotency_response',
+        envelope: JSON.parse(row.response_envelope),
+      })
+      const parsed = JSON.parse(plaintext)
+      if (JSON.stringify(parsed) !== plaintext) cryptoFailure()
+      const replay = replayObject(parsed, ['status', 'body'])
+      const body = replayObject(replay.body, ['data'])
+      const data = replayObject(body.data, ['appointment'])
+      const replayAppointment = replayObject(data.appointment, [
+        'id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone',
+        'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt',
+        'charge', 'payment', 'paymentEntries',
+      ])
+      if (!isAppointmentId(replayAppointment.id) || !isClientId(replayAppointment.clientId)
+        || replayAppointment.clientId !== appointment.clientId
+        || !Number.isSafeInteger(replayAppointment.version) || replayAppointment.version < 2
+        || replayAppointment.version > 257 || replayAppointment.updatedAt !== row.created_at) {
+        cryptoFailure()
+      }
+      const request = Object.freeze({ expectedVersion: replayAppointment.version - 1 })
+      const validated = validateCancelReplay(parsed, replayAppointment.id, request)
+      if (storedDigest !== await digestCancelNormalized(replayAppointment.id, request)) {
+        cryptoFailure()
+      }
+      if (replayAppointment.id === appointment.id
+        && storedDigest === expectedDigest
+        && JSON.stringify(validated) === expectedResponseJson) matches += 1
+    } catch (error) {
+      if (error instanceof Error && error.message === 'CRYPTO_FAILURE') throw error
+      cryptoFailure()
+    }
   }
+  if (matches !== 1) cryptoFailure()
+  return true
 }
 
 const reproveCancellationRace = async (command, actor, prior, originalError) => {
@@ -2668,7 +2701,7 @@ const reproveCancellationRace = async (command, actor, prior, originalError) => 
     }
     try {
       await authenticateTerminalCancellationProof(
-        terminal.context, terminal.appointment, terminal.charge,
+        terminal.context, terminal.appointment, terminal.charge, terminal.payment,
         await loadTerminalCancellationProof(
           command.db, terminal.appointment, terminal.charge,
           terminal.context.dataKey.id,
