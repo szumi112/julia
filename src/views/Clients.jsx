@@ -5,6 +5,7 @@ import { useReveal, useFlip } from '../anim.js'
 import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, usePagination, Pager } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
+import { ClientDrawer } from './ClientForm.jsx'
 import { ageLabel, fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, sessionsWord, toISODate, pad2, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
 import { clientMatchesQuery, clientsForRole, sessionsForRole } from '../workspace.js'
 import { serviceBadge, serviceShort } from '../services.js'
@@ -27,7 +28,7 @@ const nextSessionOf = (sessions, clientId) => {
 
 export function Clients({ params = {} }) {
   const { state } = useApp()
-  const { appMode, getViewState, openClientForm, patchViewState, role } = useShell()
+  const { appMode, capabilities, getViewState, openClientForm, patchViewState, role } = useShell()
   const isApp = appMode === 'app'
   const today = toISODate(new Date())
   const workspaceRange = useMemo(() => rollingWorkspaceRange(today), [today])
@@ -63,6 +64,12 @@ export function Clients({ params = {} }) {
   const [psychFilter, setPsychFilter] = useState(initialState.current.specialist)
   const [debtOnly, setDebtOnly] = useState(initialState.current.debtOnly)
   const [statusFilter, setStatusFilter] = useState(initialState.current.status)
+  const [clientForm, setClientForm] = useState(null)
+  const canManageClients = !isApp || capabilities.includes('client.manage')
+  const openClient = (opts = {}) => {
+    if (isApp) setClientForm({ ...opts, workspaceRange })
+    else openClientForm(opts)
+  }
 
   const scopedClients = useMemo(
     () => clientsForRole(state, role).filter((client) => client.status !== 'archived'),
@@ -149,8 +156,8 @@ export function Clients({ params = {} }) {
         </div>
         <div className="view-head__actions">
           <SearchInput value={query} onChange={setQuery} placeholder="Imię, e-mail lub telefon…" />
-          {!isApp && (
-            <Button icon="plus" magnetic onClick={() => openClientForm({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
+          {canManageClients && (
+            <Button icon="plus" magnetic onClick={() => openClient({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
               Dodaj klienta
             </Button>
           )}
@@ -219,14 +226,14 @@ export function Clients({ params = {} }) {
                       icon="clients"
                       title="Kartoteka jest jeszcze pusta"
                       hint="Dodaj pierwszego klienta, aby planować sesje i rozliczenia."
-                      action={!isApp && <Button size="sm" icon="plus" onClick={() => openClientForm()}>Dodaj klienta</Button>}
+                      action={canManageClients && <Button size="sm" icon="plus" onClick={() => openClient()}>Dodaj klienta</Button>}
                     />
                   ) : (
                     <EmptyState
                       icon="search"
                       title="Nie znaleziono klientów"
                       hint="Zmień wyszukiwanie lub filtry — albo dodaj nową osobę."
-                      action={!isApp && <Button size="sm" variant="soft" icon="plus" onClick={() => openClientForm()}>Dodaj klienta</Button>}
+                      action={canManageClients && <Button size="sm" variant="soft" icon="plus" onClick={() => openClient()}>Dodaj klienta</Button>}
                     />
                   )}
                 </td>
@@ -288,19 +295,21 @@ export function Clients({ params = {} }) {
         </div>
         <Pager page={page} pages={pages} onPage={setPage} />
       </div>
+      {clientForm && <ClientDrawer opts={clientForm} onClose={() => setClientForm(null)} />}
     </div>
   )
 }
 
 export function ClientDetail({ params }) {
   const { state, dispatch, toast } = useApp()
-  const { appMode, openSessionForm, openClientForm, role } = useShell()
+  const { appMode, capabilities, openSessionForm, openClientForm, role } = useShell()
   const isApp = appMode === 'app'
   const todayIso = toISODate(new Date())
   const workspaceRange = useMemo(() => rollingWorkspaceRange(todayIso), [todayIso])
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
+  const [clientForm, setClientForm] = useState(null)
   const client = clientsForRole(state, role).find((candidate) => candidate.id === params.id)
   const all = client
     ? sessionsForRole(state, role).filter((session) => session.clientId === client.id)
@@ -344,8 +353,14 @@ export function ClientDetail({ params }) {
     ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
     : []
   const canReadClinicalNotes = !isApp && role.scope === 'own' && client.psychId === role.psychId
+  const canEditClient = !client.readOnly && (!isApp || capabilities.includes('client.manage'))
+    && (role.scope !== 'own' || client.psychId === role.psychId)
   const canManageCare = !isApp && !client.readOnly
     && (role.scope !== 'own' || client.psychId === role.psychId)
+  const openClient = () => {
+    if (isApp) setClientForm({ client, workspaceRange })
+    else openClientForm({ client })
+  }
 
   const addNote = () => {
     if (!canReadClinicalNotes) return
@@ -391,13 +406,13 @@ export function ClientDetail({ params }) {
               <h1 className="display id-band__name">{client.name}</h1>
               <div className="id-band__meta">
                 {ageLabel(client.age, client.age) && <span>{ageLabel(client.age, client.age)}</span>}
-                {client.phone && (
+                {!isApp && client.phone && (
                   <span>
                     <Icon name="phone" size={14} />
                     <a href={`tel:${client.phone.replace(/\s/g, '')}`}>{client.phone}</a>
                   </span>
                 )}
-                {client.email && (
+                {!isApp && client.email && (
                   <span>
                     <Icon name="mail" size={14} />
                     <a href={`mailto:${client.email}`}>{client.email}</a>
@@ -414,12 +429,12 @@ export function ClientDetail({ params }) {
                 </Pill>
               </div>
             </div>
-            {canManageCare && (
+            {(canEditClient || canManageCare) && (
               <div className="id-band__actions">
-                <Button variant="ghost" icon="edit" onClick={() => openClientForm({ client })}>Edytuj</Button>
-                <Button icon="plus" onClick={() => openSessionForm({ clientId: client.id })}>
+                {canEditClient && <Button variant="ghost" icon="edit" onClick={openClient}>Edytuj</Button>}
+                {canManageCare && <Button icon="plus" onClick={() => openSessionForm({ clientId: client.id })}>
                   {role.scope === 'own' ? 'Przygotuj sesję' : 'Umów spotkanie'}
-                </Button>
+                </Button>}
               </div>
             )}
           </div>
@@ -441,7 +456,7 @@ export function ClientDetail({ params }) {
               <span>Saldo klienta</span>
               <b className={debt > 0 ? 'care-overview__debt' : ''}>{debt > 0 ? `Do rozliczenia ${fmtMoney(debt)}` : 'Rozliczony'}</b>
             </div>
-            <div className="care-overview__item">
+            {!isApp && <div className="care-overview__item">
               <span>Rodzina</span>
               {family.length > 0 ? (
                 <span className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
@@ -464,7 +479,7 @@ export function ClientDetail({ params }) {
                   })}
                 </span>
               ) : <b>—</b>}
-            </div>
+            </div>}
           </div>
         </section>
 
@@ -641,6 +656,7 @@ export function ClientDetail({ params }) {
           </div>
         </section>}
       </div>
+      {clientForm && <ClientDrawer opts={clientForm} onClose={() => setClientForm(null)} />}
     </div>
   )
 }

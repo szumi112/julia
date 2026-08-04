@@ -389,6 +389,13 @@ export const useWorkspaceWindow = (range, enabled = true) => {
   return workspaceRangeState(workspace.status, workspace.loadedRanges, range)
 }
 
+// Mutations invalidate no directory rows locally. Callers refresh the same bounded
+// canonical window after a successful command instead of applying command DTOs.
+export const useWorkspaceRefresh = () => {
+  const { workspace } = useApp()
+  return useCallback((range) => workspace.loadWindow(range), [workspace])
+}
+
 // ---------- selectors ----------
 
 export const sessionsInMonth = (sessions, ym) => sessions.filter((s) => monthKey(s.date) === ym)

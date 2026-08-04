@@ -1,18 +1,22 @@
 // Add/Edit client — slide-over drawer with validation and delete-with-confirm.
 import { useEffect, useRef, useState } from 'react'
-import { useApp, clientOutstanding } from '../store.jsx'
+import { useApp, clientOutstanding, useWorkspaceRefresh } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { clientsForRole } from '../workspace.js'
 import { Button, Field, Segmented, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, plural, fmtMoney } from '../format.js'
+import { ApiError } from '../api.js'
+import { validateClientInput } from '../core-records.js'
 
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export function ClientDrawer({ opts, onClose }) {
-  const { state, dispatch, toast } = useApp()
-  const { appMode, route, navigate, role, registerLeaveGuard } = useShell()
+  const { state, dispatch, toast, workspace } = useApp()
+  const { appMode, capabilities, route, navigate, role, registerLeaveGuard } = useShell()
+  const refreshWorkspace = useWorkspaceRefresh()
+  const isApp = appMode === 'app'
   const editing = opts.client || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
@@ -30,6 +34,8 @@ export function ClientDrawer({ opts, onClose }) {
   })
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
+  const [saveStatus, setSaveStatus] = useState('idle')
+  const [saveError, setSaveError] = useState(null)
   const [initialForm] = useState(form)
   const discardGuard = useDiscardGuard(JSON.stringify(form) !== JSON.stringify(initialForm))
   const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
@@ -37,7 +43,7 @@ export function ClientDrawer({ opts, onClose }) {
 
   // the drawer may unlink while open — read the live record, not the snapshot
   const current = editing ? state.clients.find((c) => c.id === editing.id) || editing : null
-  const familyMembers = current?.familyId
+  const familyMembers = !isApp && current?.familyId
     ? state.clients.filter((c) => c.familyId === current.familyId && c.id !== current.id)
     : []
   // therapists may link only within their own client list
@@ -51,11 +57,86 @@ export function ClientDrawer({ opts, onClose }) {
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
     setErrors((e) => ({ ...e, [k]: null }))
+    setSaveStatus('idle')
+    setSaveError(null)
+  }
+
+  const focusFirstError = () => {
+    shake()
+    requestAnimationFrame(() =>
+      drawerRef.current?.querySelector('.has-error input, .has-error select, .has-error textarea')?.focus()
+    )
+  }
+
+  const appErrors = (payload) => {
+    try {
+      validateClientInput(payload)
+      return {}
+    } catch (error) {
+      const field = error instanceof TypeError ? error.message.split('/').at(-1) : 'body'
+      return {
+        name: field === 'name' ? 'Podaj imię i nazwisko' : null,
+        age: field === 'age' ? 'Podaj wiek od 1 do 26 lat' : null,
+        psychId: field === 'specialistId' ? 'Wybierz specjalistkę' : null,
+        status: field === 'status' ? 'Wybierz status klienta' : null,
+        body: ['name', 'age', 'specialistId', 'status'].includes(field)
+          ? null
+          : 'Sprawdź dane klienta',
+      }
+    }
+  }
+
+  const appPayload = () => ({
+    name: form.name.trim().normalize('NFC'),
+    age: String(form.age).trim() === '' ? null : Number(form.age),
+    status: form.status,
+    specialistId: form.psychId,
+  })
+
+  const submitApp = async () => {
+    if (saveStatus === 'saving' || !capabilities.includes('client.manage')
+      || editing?.readOnly || editing?.status === 'archived') return
+    const payload = appPayload()
+    const nextErrors = appErrors(payload)
+    setErrors(nextErrors)
+    if (Object.values(nextErrors).some(Boolean)) {
+      focusFirstError()
+      return
+    }
+    setSaveStatus('saving')
+    setSaveError(null)
+    try {
+      if (editing) await workspace.editClient(editing.id, editing.version, payload)
+      else await workspace.createClient(payload)
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
+        forceClose()
+        try {
+          await refreshWorkspace(opts.workspaceRange)
+          toast('Dane klienta zostały odświeżone', 'alert')
+        } catch {
+          toast('Nie udało się odświeżyć danych klienta', 'alert')
+        }
+        return
+      }
+      setSaveStatus('error')
+      setSaveError('Nie udało się zapisać danych klienta.')
+      return
+    }
+    try {
+      await refreshWorkspace(opts.workspaceRange)
+    } catch {
+      setSaveStatus('error')
+      setSaveError('Dane zapisano, ale nie udało się odświeżyć kartoteki.')
+      return
+    }
+    toast(editing ? 'Dane klienta zapisane' : 'Nowy klient dodany do kartoteki')
+    forceClose()
   }
 
   const submit = (e) => {
-    e.preventDefault()
-    if (appMode === 'app') return
+    e?.preventDefault()
+    if (isApp) return submitApp()
     const errs = {}
     if (!form.name.trim()) errs.name = 'Podaj imię i nazwisko'
     if (!form.psychId) errs.psychId = 'Wybierz specjalistkę'
@@ -69,10 +150,7 @@ export function ClientDrawer({ opts, onClose }) {
     }
     setErrors(errs)
     if (Object.keys(errs).length) {
-      shake()
-      requestAnimationFrame(() =>
-        drawerRef.current?.querySelector('.has-error input, .has-error select, .has-error textarea')?.focus()
-      )
+      focusFirstError()
       return
     }
     const payload = {
@@ -114,14 +192,46 @@ export function ClientDrawer({ opts, onClose }) {
   const debt = editing ? clientOutstanding(state.sessions, editing.id) : 0
 
   const remove = () => {
-    if (appMode === 'app') return
+    if (isApp) return
     dispatch({ type: 'DELETE_CLIENT', id: editing.id })
     toast('Klient usunięty z kartoteki', 'close')
     if (route.name === 'client' && route.params?.id === editing.id) navigate('clients')
     forceClose()
   }
 
-  if (appMode === 'app') return null
+  const archive = async () => {
+    if (!isApp || saveStatus === 'saving' || !capabilities.includes('client.manage')
+      || !editing || editing.readOnly || editing.status === 'archived') return
+    setSaveStatus('saving')
+    setSaveError(null)
+    try {
+      await workspace.archiveClient(editing.id, editing.version)
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
+        forceClose()
+        try {
+          await refreshWorkspace(opts.workspaceRange)
+          toast('Dane klienta zostały odświeżone', 'alert')
+        } catch {
+          toast('Nie udało się odświeżyć danych klienta', 'alert')
+        }
+        return
+      }
+      setSaveStatus('error')
+      setSaveError('Nie udało się zarchiwizować klienta.')
+      return
+    }
+    try {
+      await refreshWorkspace(opts.workspaceRange)
+    } catch {
+      setSaveStatus('error')
+      setSaveError('Klienta zarchiwizowano, ale nie udało się odświeżyć kartoteki.')
+      return
+    }
+    toast('Klient zarchiwizowany', 'close')
+    if (route.name === 'client' && route.params?.id === editing.id) navigate('clients')
+    forceClose()
+  }
 
   return (
     <>
@@ -154,7 +264,7 @@ export function ClientDrawer({ opts, onClose }) {
               <select name="client-psych" autoComplete="off" className="select" value={form.psychId} onChange={(e) => set('psychId', e.target.value)}>
                 <option value="">— wybierz —</option>
                 {availablePsychologists.map((p) => (
-                  <option key={p.id} value={p.id}>{p.title} {p.name}</option>
+                  <option key={p.id} value={p.id}>{p.title ? `${p.title} ` : ''}{p.name}</option>
                 ))}
               </select>
             </Field>
@@ -175,7 +285,7 @@ export function ClientDrawer({ opts, onClose }) {
             </Field>
           </div>
 
-          <div className="form-grid">
+          {!isApp && <div className="form-grid">
             <Field label="E-mail" error={errors.email} hint="Kontakt do rodzica lub opiekuna.">
               <input
                 type="email"
@@ -199,10 +309,11 @@ export function ClientDrawer({ opts, onClose }) {
                 onChange={(e) => set('phone', e.target.value)}
               />
             </Field>
-          </div>
+          </div>}
 
           <Field
             label="Status"
+            error={errors.status || errors.body}
             hint="Wstrzymani klienci pozostają w kartotece, ale nie planujesz im nowych sesji."
           >
             <Segmented
@@ -216,7 +327,7 @@ export function ClientDrawer({ opts, onClose }) {
             />
           </Field>
 
-          <Field
+          {!isApp && <Field
             label="Rodzina"
             hint="Rodzic i dziecko bywają zapisani pod różnymi nazwiskami — powiązanie łączy ich karty."
           >
@@ -257,9 +368,9 @@ export function ClientDrawer({ opts, onClose }) {
                 ))}
               </select>
             </div>
-          </Field>
+          </Field>}
 
-          {(current?.familyId || form.familyOtherId) && (
+          {!isApp && (current?.familyId || form.familyOtherId) && (
             <Field label="Rola w rodzinie">
               <Segmented
                 ariaLabel="Rola w rodzinie"
@@ -274,7 +385,7 @@ export function ClientDrawer({ opts, onClose }) {
             </Field>
           )}
 
-          {!editing && (
+          {!isApp && !editing && (
             <Field label="Pierwsza notatka (opcjonalnie)">
               <textarea
                 name="client-note"
@@ -287,7 +398,7 @@ export function ClientDrawer({ opts, onClose }) {
             </Field>
           )}
 
-          {editing && confirmDel && (
+          {!isApp && editing && confirmDel && (
             <div className="form-warn form-warn--error" role="alert">
               <Icon name="alert" size={15} />
               <span>
@@ -300,6 +411,12 @@ export function ClientDrawer({ opts, onClose }) {
               </span>
             </div>
           )}
+          {saveError && (
+            <div className="form-warn form-warn--error" role="alert">
+              <Icon name="alert" size={15} />
+              <span>{saveError}</span>
+            </div>
+          )}
         </form>
 
         {discardGuard.confirming && (
@@ -307,7 +424,14 @@ export function ClientDrawer({ opts, onClose }) {
         )}
 
         <div className="drawer__foot">
-          {confirmDel ? (
+          {isApp && confirmDel ? (
+            <>
+              <Button variant="danger" onClick={archive} disabled={saveStatus === 'saving'}>
+                Tak, archiwizuj klienta
+              </Button>
+              <Button variant="ghost" onClick={() => setConfirmDel(false)} disabled={saveStatus === 'saving'}>Wróć</Button>
+            </>
+          ) : !isApp && confirmDel ? (
             <>
               <Button variant="danger" onClick={remove}>
                 Tak, usuń klienta
@@ -316,15 +440,20 @@ export function ClientDrawer({ opts, onClose }) {
             </>
           ) : (
             <>
-              <Button variant="primary" onClick={submit}>
+              <Button variant="primary" onClick={submit} disabled={isApp && saveStatus === 'saving'}>
                 {editing ? 'Zapisz zmiany' : 'Dodaj klienta'}
               </Button>
-              {editing && (
+              {editing && isApp && (
+                <Button variant="danger" onClick={() => setConfirmDel(true)} disabled={saveStatus === 'saving'}>
+                  Archiwizuj klienta
+                </Button>
+              )}
+              {editing && !isApp && (
                 <Button variant="danger" onClick={() => setConfirmDel(true)}>
                   Usuń
                 </Button>
               )}
-              <Button variant="ghost" onClick={close}>Anuluj</Button>
+              <Button variant="ghost" onClick={close} disabled={isApp && saveStatus === 'saving'}>Anuluj</Button>
             </>
           )}
         </div>

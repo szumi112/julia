@@ -117,7 +117,7 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await expect(page.getByText('Ola Aktywna', { exact: true })).toBeVisible()
   await expect(page.getByText('Zofia Historyczna', { exact: true })).toHaveCount(0)
   await expect(page.getByText('Nie powinna się pojawić', { exact: true })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Dodaj klienta' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Dodaj klienta' })).toHaveCount(1)
 
   await page.goto('./#/dashboard')
   const dashboard = page.getByRole('region', { name: 'Pulpit dnia' })
