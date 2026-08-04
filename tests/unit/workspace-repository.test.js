@@ -424,6 +424,27 @@ test('demo refuses a canonical window with an active client assigned to an absen
   }
 })
 
+test('demo excludes an unreferenced inactive specialist from an otherwise valid window', async () => {
+  const base = demoState()
+  const state = {
+    ...base,
+    psychologists: [...base.psychologists, { id: 'p9', name: 'Nieaktywna', rate: 190, status: 'inactive' }],
+  }
+  const repository = createDemoWorkspaceRepository({ dispatch() {}, getState: () => state })
+  const loaded = await repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' })
+  assert.deepEqual(loaded.specialists.map(({ id }) => id), ['sp_demo_p1', 'sp_demo_p2'])
+})
+
+test('demo rejects an appointment whose client is absent from the returned directory', async () => {
+  const base = demoState()
+  const state = {
+    ...base,
+    sessions: [{ ...base.sessions[0], id: 's_orphan', clientId: 'c_missing', date: '2026-08-04' }],
+  }
+  const repository = createDemoWorkspaceRepository({ dispatch() {}, getState: () => state })
+  await assert.rejects(repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' }), /VALIDATION_FAILED\/workspace/)
+})
+
 test('demo contains hostile collection proxy failures as canonical validation errors', async () => {
   const traps = [
     (target) => new Proxy(target, { get(_target, key, receiver) { if (key === 'length') throw new Error('private length'); return Reflect.get(_target, key, receiver) } }),

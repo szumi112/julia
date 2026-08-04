@@ -589,6 +589,17 @@ export function createDemoWorkspaceRepository(options) {
     })
   }
 
+  const assertWorkspaceIntegrity = ({ specialistDtos, clientDtos, appointmentDtos }) => {
+    const specialistIds = new Set(specialistDtos.map(({ id }) => id))
+    const clientIds = new Set(clientDtos.map(({ id }) => id))
+    if (specialistIds.size !== specialistDtos.length || clientIds.size !== clientDtos.length
+      || clientDtos.some((client) => client.assignment !== null
+        && !specialistIds.has(client.assignment.specialistId))
+      || appointmentDtos.some((appointment) => !clientIds.has(appointment.clientId))) {
+      fail('workspace')
+    }
+  }
+
   function findClient(state, meta) {
     for (const raw of state.clients) {
       const item = captureLegacyClient(raw)
@@ -624,7 +635,11 @@ export function createDemoWorkspaceRepository(options) {
     async loadWindow(input) {
       const requested = captureWindow(input)
       const state = currentState()
-      const specialistDtos = state.psychologists.map(specialistProjection)
+      const specialistDtos = state.psychologists
+        .map(captureLegacySpecialist)
+        .filter((item) => item.status !== 'inactive'
+          && specialists.has(demoId('sp', item.id)))
+        .map(specialistProjection)
         .toSorted((left, right) => collator.compare(left.displayName, right.displayName) || left.id.localeCompare(right.id))
       const clientDtos = []
       for (const [coreId, meta] of clients) {
@@ -640,6 +655,7 @@ export function createDemoWorkspaceRepository(options) {
         }
       }
       appointmentDtos.sort((left, right) => left.startsAt.localeCompare(right.startsAt) || left.id.localeCompare(right.id))
+      assertWorkspaceIntegrity({ specialistDtos, clientDtos, appointmentDtos })
       return deepFreeze({
         window: { ...requested, timeZone: 'Europe/Warsaw', complete: true },
         specialists: specialistDtos, clients: clientDtos, appointments: appointmentDtos,
