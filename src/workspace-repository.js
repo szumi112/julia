@@ -246,6 +246,15 @@ export function createApiWorkspaceRepository(options) {
 
 const demoId = (kind, legacyId) => `${kind}_demo_${legacyId}`
 const newId = (kind, sequence) => `${kind}_demo_new_${sequence}`
+const allocateDemoId = ({ kind, after, maximum, occupied }) => {
+  for (let offset = 1; offset <= maximum + 1; offset += 1) {
+    const sequence = after + offset
+    if (!Number.isSafeInteger(sequence)) fail(`${kind}Id`, 'DEMO_ID_EXHAUSTED')
+    const id = newId(kind, sequence)
+    if (!occupied(id)) return { id, sequence }
+  }
+  fail(`${kind}Id`, 'DEMO_ID_EXHAUSTED')
+}
 const legacyDate = (instant) => warsawDateTimeFromUtc(instant).date
 
 const stateSnapshot = (getState) => {
@@ -498,6 +507,9 @@ export function createDemoWorkspaceRepository(options) {
     && item.paidAmount === patch.paidAmount && item.method === patch.method
     && item.paidDate === patch.paidDate
 
+  const paymentIdOccupied = (id) => payments.has(id)
+    || [...appointments.values()].some((meta) => meta.entries.some((entry) => entry.id === id))
+
   const collectionSignature = (area, rows) => JSON.stringify(rows.map((raw) => {
     if (area === 'clients') {
       const item = captureLegacyClient(raw)
@@ -668,7 +680,11 @@ export function createDemoWorkspaceRepository(options) {
       if (clients.size >= 200) fail('clients')
       const before = collectionSignature('clients', state.clients)
       const createdAt = commandInstant()
-      const coreId = newId('cl', clientSequence + 1)
+      const allocated = allocateDemoId({
+        kind: 'cl', after: clientSequence, maximum: 200,
+        occupied: (id) => clients.has(id),
+      })
+      const coreId = allocated.id
       const meta = {
         legacyId: null, version: 1, createdAt, updatedAt: createdAt,
         archivedAt: null, assignmentId: `asg_${coreId.slice(3)}`,
@@ -692,7 +708,7 @@ export function createDemoWorkspaceRepository(options) {
           area: 'clients', before,
           inspect: (next) => createdClient(next, meta),
         })
-        clientSequence += 1
+        clientSequence = allocated.sequence
         return deepFreeze(clientProjection(coreId, added, meta))
       } catch (error) {
         clients.delete(coreId)
@@ -753,7 +769,11 @@ export function createDemoWorkspaceRepository(options) {
       if (appointments.size >= 500) fail('appointments')
       const before = collectionSignature('sessions', state.sessions)
       const createdAt = commandInstant()
-      const coreId = newId('apt', appointmentSequence + 1)
+      const allocated = allocateDemoId({
+        kind: 'apt', after: appointmentSequence, maximum: 500,
+        occupied: (id) => appointments.has(id),
+      })
+      const coreId = allocated.id
       const meta = {
         legacyId: null, version: 1, chargeVersion: 1, createdAt,
         updatedAt: createdAt, cancelledAt: null, entries: [], corrections: [],
@@ -781,7 +801,7 @@ export function createDemoWorkspaceRepository(options) {
           area: 'sessions', before,
           inspect: (next) => createdAppointment(next, meta),
         })
-        appointmentSequence += 1
+        appointmentSequence = allocated.sequence
         return appointmentProjection(coreId, added, meta)
       } catch (error) {
         appointments.delete(coreId)
@@ -872,7 +892,11 @@ export function createDemoWorkspaceRepository(options) {
       const raw = findAppointment(state, meta)
       if (!isBillable(raw)) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
       if (payments.size >= 1_000) fail('paymentEntries')
-      const entryId = newId('pay', paymentSequence + 1)
+      const allocated = allocateDemoId({
+        kind: 'pay', after: paymentSequence, maximum: 1_000,
+        occupied: paymentIdOccupied,
+      })
+      const entryId = allocated.id
       const entry = { id: entryId, appointmentId: id, ...canonical }
       const proposed = [...meta.entries, entry]
       paymentAggregate({
@@ -893,7 +917,7 @@ export function createDemoWorkspaceRepository(options) {
       meta.entries = proposed
       meta.version += 1
       meta.updatedAt = updatedAt
-      paymentSequence += 1
+      paymentSequence = allocated.sequence
       payments.set(entryId, { appointmentId: id, entryIndex: meta.entries.length - 1 })
       return appointmentProjection(id, applied, meta)
     },
@@ -910,8 +934,12 @@ export function createDemoWorkspaceRepository(options) {
       }
       const raw = findAppointment(state, meta)
       if (requested.replacement !== null && payments.size >= 1_000) fail('paymentEntries')
+      const allocated = requested.replacement === null ? null : allocateDemoId({
+        kind: 'pay', after: paymentSequence, maximum: 1_000,
+        occupied: paymentIdOccupied,
+      })
       const replacement = requested.replacement === null ? null : {
-        id: newId('pay', paymentSequence + 1), appointmentId: link.appointmentId,
+        id: allocated.id, appointmentId: link.appointmentId,
         amountGrosze: requested.replacement.amountGrosze,
         method: requested.replacement.method,
         receivedAt: warsawNoonToUtc(requested.replacement.paidDate),
@@ -945,7 +973,7 @@ export function createDemoWorkspaceRepository(options) {
       meta.version += 1
       meta.updatedAt = createdAt
       if (replacement) {
-        paymentSequence += 1
+        paymentSequence = allocated.sequence
         payments.set(replacement.id, { appointmentId: link.appointmentId, entryIndex: entries.length - 1 })
       }
       return appointmentProjection(link.appointmentId, applied, meta)
