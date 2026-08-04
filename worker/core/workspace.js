@@ -1,6 +1,7 @@
 import { AppError } from '../http/errors.js'
 import { authorize } from '../identity/policy.js'
 import { decryptForScope } from '../security/envelope.js'
+import { decodeBase64Url } from '../security/encoding.js'
 import { decryptClientIdentity } from './crypto.js'
 import {
   assertClientIdentity,
@@ -18,6 +19,7 @@ import { SERVICE_BY_ID } from '../../src/services.js'
 
 const validation = (field) => { throw new AppError('VALIDATION_FAILED', { field }) }
 const DATE = /^(\d{4})-(\d{2})-(\d{2})$/
+const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const dayFormatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Europe/Warsaw', year: 'numeric', month: '2-digit', day: '2-digit',
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
@@ -253,7 +255,7 @@ const appointmentSql = (specialist) => `
     : `specialists AS scope
        CROSS JOIN appointments AS appointment INDEXED BY appointments_specialist_starts_id_idx
          ON appointment.specialist_id=scope.id`}
-  JOIN session_charges AS charge ON charge.appointment_id=appointment.id
+  LEFT JOIN session_charges AS charge ON charge.appointment_id=appointment.id
   WHERE ${specialist ? 'appointment.specialist_id=? AND ' : ''}
         appointment.starts_at>=? AND appointment.starts_at<?
   ORDER BY appointment.starts_at,appointment.id
@@ -277,20 +279,27 @@ const clientSql = (specialist) => `
   FROM clients AS client
   LEFT JOIN client_assignments AS assignment
     ON assignment.client_id=client.id AND assignment.ends_at IS NULL
-  JOIN data_keys AS data_key
-    ON data_key.id=json_extract(client.identity_envelope,'$.dataKeyId')
-   AND data_key.dek_version=json_extract(client.identity_envelope,'$.dataKeyVersion')
+       ${specialist ? 'AND assignment.specialist_id=?' : ''}
+  LEFT JOIN data_keys AS data_key
+    ON data_key.id=CASE WHEN json_valid(client.identity_envelope)
+                        THEN json_extract(client.identity_envelope,'$.dataKeyId') END
+   AND data_key.dek_version=CASE WHEN json_valid(client.identity_envelope)
+                                 THEN json_extract(client.identity_envelope,'$.dataKeyVersion') END
    AND data_key.scope_type='client' AND data_key.scope_id=client.id
    AND data_key.purpose='identity'
   WHERE (
-    (client.status IN ('active','paused') AND assignment.id IS NOT NULL
-      ${specialist ? 'AND assignment.specialist_id=?' : ''})
-    OR (client.status='archived' AND assignment.id IS NULL AND EXISTS (
+    (client.status IN ('active','paused') AND assignment.id IS NOT NULL)
+    OR (assignment.id IS NULL
+      AND (client.status='archived' OR (client.status IN ('active','paused') AND EXISTS (
+        SELECT 1 FROM client_assignments AS current_assignment
+        WHERE current_assignment.client_id=client.id AND current_assignment.ends_at IS NULL
+      )))
+      AND EXISTS (
       SELECT 1 FROM appointments AS history
       WHERE history.client_id=client.id
         ${specialist ? 'AND history.specialist_id=?' : ''}
         AND history.starts_at>=? AND history.starts_at<?
-    ))
+      ))
   )
   ORDER BY client.id
   LIMIT ?`
@@ -335,6 +344,37 @@ const dataKeyFromClient = (row) => Object.freeze(Object.fromEntries(DATA_KEY_KEY
   return [key, row[source]]
 })))
 
+const decodedBytes = (value, length, minimum = false) => {
+  let decoded
+  try { decoded = decodeBase64Url(value) } catch { cryptoFailure() }
+  if ((minimum && decoded.byteLength < length) || (!minimum && decoded.byteLength !== length)) {
+    decoded.fill(0)
+    cryptoFailure()
+  }
+  decoded.fill(0)
+}
+
+const validatedClientKey = (row) => {
+  const envelope = captureExact(parseEnvelope(row.identity_envelope), [
+    'format', 'algorithm', 'dataKeyId', 'dataKeyVersion', 'nonce', 'ciphertext',
+  ], cryptoFailure)
+  if (envelope.format !== 1 || envelope.algorithm !== 'A256GCM'
+    || typeof envelope.dataKeyId !== 'string' || !OPAQUE_ID.test(envelope.dataKeyId)
+    || !positive(envelope.dataKeyVersion)) cryptoFailure()
+  decodedBytes(envelope.nonce, 12)
+  decodedBytes(envelope.ciphertext, 16, true)
+  const dataKey = dataKeyFromClient(row)
+  if (dataKey.id !== envelope.dataKeyId || dataKey.dek_version !== envelope.dataKeyVersion
+    || typeof dataKey.id !== 'string' || !OPAQUE_ID.test(dataKey.id)
+    || dataKey.scope_type !== 'client' || dataKey.scope_id !== row.id
+    || dataKey.purpose !== 'identity' || !positive(dataKey.dek_version)
+    || !positive(dataKey.kek_version) || !isCanonicalUtc(dataKey.created_at)
+    || !nullableInstant(dataKey.retired_at)) cryptoFailure()
+  decodedBytes(dataKey.wrapped_key_b64, 48)
+  decodedBytes(dataKey.wrap_nonce_b64, 12)
+  return dataKey
+}
+
 const specialistDto = async (row, context, decrypt) => {
   if (!isSpecialistId(row.id)
     || typeof row.staff_user_id !== 'string' || row.staff_user_id !== row.staff_id
@@ -371,12 +411,12 @@ const clientDto = async (row, actor, context, decrypt, appointmentByClient) => {
     || (row.status === 'archived') !== (row.archived_at !== null)
     || typeof row.identity_envelope !== 'string') invalid()
   const assignment = assignmentDto(row)
-  if ((row.status === 'archived') !== (assignment === null)) invalid()
+  if (row.status === 'archived' && assignment !== null) invalid()
   if ((row.archived_at !== null
       && (row.archived_at < row.created_at || row.archived_at > row.updated_at))
     || (assignment !== null
       && (assignment.startsAt < row.created_at || assignment.startsAt > row.updated_at))) invalid()
-  const fact = row.status === 'archived'
+  const fact = assignment === null
     ? (() => {
       const appointment = appointmentByClient.get(row.id)?.[0]
       return appointment ? {
@@ -392,7 +432,7 @@ const clientDto = async (row, actor, context, decrypt, appointmentByClient) => {
       },
     }
   if (!fact || !authorize(actor, 'client.operational.read', fact, { nowMs: 0 })) invalid()
-  const dataKey = dataKeyFromClient(row)
+  const dataKey = validatedClientKey(row)
   const decrypted = captureExact(await decrypt({
     clientId: row.id, envelope: row.identity_envelope, dataKey,
     keyring: context.keyring,
@@ -405,10 +445,11 @@ const clientDto = async (row, actor, context, decrypt, appointmentByClient) => {
   })
 }
 
-const appointmentBase = (row, actor) => {
+const appointmentBase = (row, actor, window) => {
   if (!isAppointmentId(row.id) || !isClientId(row.client_id)
     || !isSpecialistId(row.specialist_id) || !SERVICE_BY_ID[row.service_id]
     || !isCanonicalUtc(row.starts_at) || !isCanonicalUtc(row.ends_at)
+    || row.starts_at < window.lower || row.starts_at >= window.upper
     || row.ends_at <= row.starts_at || row.time_zone !== 'Europe/Warsaw'
     || !['scheduled', 'completed', 'cancelled', 'noshow'].includes(row.status)
     || row.source !== 'panel' || !positive(row.version)
@@ -459,7 +500,8 @@ const paymentDtos = (appointment, rows) => {
     if (row.replacement_entry_id !== null) {
       const replacement = rows.find((candidate) => candidate.id === row.replacement_entry_id)
       if (!replacement || replacement.appointment_id !== row.appointment_id
-        || replacement.id === row.id) invalid()
+        || replacement.id === row.id
+        || replacement.payment_created_at !== row.corrected_at) invalid()
     }
   }
   const links = new Map(rows.filter((row) => row.replacement_entry_id !== null)
@@ -531,13 +573,16 @@ export async function readWorkspace(input) {
   const specialistRows = limit(await query(
     db, DIRECTORY_SQL, [CAPS.specialists + 1], STAFF_KEYS,
   ), 'specialists')
+  if (new Set(specialistRows.map((row) => row.id)).size !== specialistRows.length
+    || new Set(specialistRows.map((row) => row.staff_id)).size !== specialistRows.length) invalid()
   const appointmentBindings = scoped
     ? [actor.specialistId, window.lower, window.upper, CAPS.appointments + 1]
     : [window.lower, window.upper, CAPS.appointments + 1]
   const appointmentRows = limit(await query(
     db, appointmentSql(scoped), appointmentBindings, APPOINTMENT_KEYS,
-  ), 'appointments').map((row) => appointmentBase(row, actor))
-  if (new Set(appointmentRows.map((row) => row.id)).size !== appointmentRows.length) invalid()
+  ), 'appointments').map((row) => appointmentBase(row, actor, window))
+  if (new Set(appointmentRows.map((row) => row.id)).size !== appointmentRows.length
+    || new Set(appointmentRows.map((row) => row.charge_id)).size !== appointmentRows.length) invalid()
   const clientBindings = scoped
     ? [actor.specialistId, actor.specialistId, window.lower, window.upper, CAPS.clients + 1]
     : [window.lower, window.upper, CAPS.clients + 1]
@@ -545,7 +590,7 @@ export async function readWorkspace(input) {
     db, clientSql(scoped), clientBindings, CLIENT_KEYS,
   ), 'clients')
   if (new Set(clientRows.map((row) => row.id)).size !== clientRows.length) invalid()
-  if (!scoped && appointmentRows.some((appointment) => (
+  if (appointmentRows.some((appointment) => (
     !clientRows.some((client) => client.id === appointment.client_id)
   ))) invalid()
   const paymentBindings = scoped
@@ -554,6 +599,7 @@ export async function readWorkspace(input) {
   const paymentRows = limit(await query(
     db, paymentSql(scoped), paymentBindings, PAYMENT_KEYS,
   ), 'paymentEntries')
+  if (new Set(paymentRows.map((row) => row.id)).size !== paymentRows.length) invalid()
 
   const appointmentByClient = new Map()
   for (const row of appointmentRows) {

@@ -48,7 +48,10 @@ const specialistRow = (id, staffId, version = 1) => ({
 })
 
 const clientRow = (id, status, assignment = null) => ({
-  id, identity_envelope: `client:${id}`, status, version: 2,
+  id, identity_envelope: JSON.stringify({
+    format: 1, algorithm: 'A256GCM', dataKeyId: `key_${id}`, dataKeyVersion: 1,
+    nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAA',
+  }), status, version: 2,
   archived_at: status === 'archived' ? instant('01') : null,
   created_at: instant('01'), updated_at: instant('02'),
   assignment_id: assignment?.id ?? null,
@@ -56,8 +59,8 @@ const clientRow = (id, status, assignment = null) => ({
   assignment_starts_at: assignment?.startsAt ?? null,
   assignment_version: assignment?.version ?? null,
   key_id: `key_${id}`, key_scope_type: 'client', key_scope_id: id,
-  key_purpose: 'identity', key_dek_version: 1, key_wrapped_key_b64: 'wrapped',
-  key_wrap_nonce_b64: 'nonce', key_kek_version: 1, key_created_at: instant('01'),
+  key_purpose: 'identity', key_dek_version: 1, key_wrapped_key_b64: 'A'.repeat(64),
+  key_wrap_nonce_b64: 'A'.repeat(16), key_kek_version: 1, key_created_at: instant('01'),
   key_retired_at: null,
 })
 
@@ -77,6 +80,13 @@ const paymentRow = (id, appointmentId, amount, receivedAt, correction = null) =>
   correction_id: correction?.id ?? null,
   corrected_at: correction?.correctedAt ?? null,
   replacement_entry_id: correction?.replacementEntryId ?? null,
+})
+
+const withoutClientKey = (row) => ({
+  ...row,
+  key_id: null, key_scope_type: null, key_scope_id: null, key_purpose: null,
+  key_dek_version: null, key_wrapped_key_b64: null, key_wrap_nonce_b64: null,
+  key_kek_version: null, key_created_at: null, key_retired_at: null,
 })
 
 describe('workspace read model', () => {
@@ -143,7 +153,10 @@ describe('workspace read model', () => {
         paymentRow('pay_original', 'apt_visit', 5000, instant('04', '09'), {
           id: 'cor_original', correctedAt: instant('05'), replacementEntryId: 'pay_replacement',
         }),
-        paymentRow('pay_replacement', 'apt_visit', 12000, instant('05', '09')),
+        {
+          ...paymentRow('pay_replacement', 'apt_visit', 12000, instant('05', '09')),
+          payment_created_at: instant('05'),
+        },
       ],
     })
     const decryptSpecialist = vi.fn(async ({ staffId }) => (
@@ -233,7 +246,7 @@ describe('workspace read model', () => {
       db,
       actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
-      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async () => 'Fikcyjna',
       decryptClient: async () => ({ name: 'Fikcyjna', age: null }),
     })).rejects.toMatchObject({
@@ -263,7 +276,7 @@ describe('workspace read model', () => {
       db,
       actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
-      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async ({ staffId }) => `Fikcyjna ${staffId}`,
       decryptClient: async ({ clientId }) => ({ name: `Fikcyjna ${clientId}`, age: null }),
     })
@@ -279,7 +292,7 @@ describe('workspace read model', () => {
     const common = {
       actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
-      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async () => 'Fikcyjna',
       decryptClient: async () => ({ name: 'Fikcyjna', age: null }),
     }
@@ -299,7 +312,7 @@ describe('workspace read model', () => {
     const common = {
       actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
-      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async () => 'Fikcyjna',
       decryptClient: async () => ({ name: 'Fikcyjna', age: null }),
     }
@@ -397,7 +410,7 @@ describe('workspace read model', () => {
       db: scriptedDb({ appointments: [appointment] }).db,
       actor: { id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec', version: 1 },
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
-      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist, decryptClient,
     })).rejects.toThrow(/^INTERNAL_ERROR$/)
     expect(decryptSpecialist).not.toHaveBeenCalled()
@@ -417,6 +430,135 @@ describe('workspace read model', () => {
     })).rejects.toThrow(/^INTERNAL_ERROR$/)
     expect(getterReads).toBe(0)
     expect(decryptSpecialist).not.toHaveBeenCalled()
+  })
+
+  it('fails as crypto when an authorized ordinary or history-only client key disappears', async () => {
+    const decryptClient = vi.fn(async () => ({ name: 'Must not decrypt', age: 10 }))
+    const common = {
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
+      decryptSpecialist: async () => 'Fikcyjna', decryptClient,
+    }
+    const ordinary = clientRow('cl_missing_key', 'active', {
+      id: 'asg_missing_key', specialistId: 'sp_owner', startsAt: instant('01'), version: 1,
+    })
+    for (const malformed of [
+      withoutClientKey(ordinary),
+      { ...ordinary, key_scope_id: 'cl_other' },
+      { ...ordinary, key_dek_version: 2 },
+      { ...ordinary, key_wrapped_key_b64: 'short' },
+      { ...ordinary, identity_envelope: '{' },
+    ]) {
+      await expect(readWorkspace({
+        ...common,
+        db: scriptedDb({ clients: [malformed] }).db,
+        actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      })).rejects.toThrow(/^CRYPTO_FAILURE$/)
+    }
+
+    const appointment = appointmentRow('apt_missing_history_key', 'cl_missing_history_key', 'sp_spec')
+    const history = withoutClientKey({
+      ...clientRow('cl_missing_history_key', 'active'),
+      assignment_id: null, assignment_specialist_id: null,
+      assignment_starts_at: null, assignment_version: null,
+    })
+    await expect(readWorkspace({
+      ...common,
+      db: scriptedDb({ appointments: [appointment], clients: [history] }).db,
+      actor: { id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec', version: 1 },
+    })).rejects.toThrow(/^CRYPTO_FAILURE$/)
+    expect(decryptClient).not.toHaveBeenCalled()
+  })
+
+  it('returns an own historical active client after reassignment without leaking the current assignment', async () => {
+    const appointment = appointmentRow('apt_own_history', 'cl_reassigned', 'sp_spec')
+    const history = {
+      ...clientRow('cl_reassigned', 'active'),
+      assignment_id: null, assignment_specialist_id: null,
+      assignment_starts_at: null, assignment_version: null,
+    }
+    const result = await readWorkspace({
+      db: scriptedDb({ appointments: [appointment], clients: [history] }).db,
+      actor: { id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec', version: 1 },
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
+      decryptSpecialist: async () => 'Fikcyjna',
+      decryptClient: async () => ({ name: 'Historia Fikcyjna', age: 14 }),
+    })
+    expect(result.data.clients).toEqual([{
+      id: 'cl_reassigned', name: 'Historia Fikcyjna', age: 14, status: 'active',
+      version: 2, archivedAt: null, createdAt: instant('01'), updatedAt: instant('02'),
+      readOnly: false, assignment: null,
+    }])
+    expect(result.data.appointments).toHaveLength(1)
+    expect(JSON.stringify(result)).not.toContain('sp_other')
+  })
+
+  it('requires replacement creation to be atomic with its correction while allowing later reversal', async () => {
+    const appointment = appointmentRow('apt_atomic_payment', 'cl_atomic_payment', 'sp_owner')
+    const client = clientRow('cl_atomic_payment', 'active', {
+      id: 'asg_atomic_payment', specialistId: 'sp_owner', startsAt: instant('01'), version: 1,
+    })
+    const read = (payments) => readWorkspace({
+      db: scriptedDb({ appointments: [appointment], clients: [client], payments }).db,
+      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
+      decryptSpecialist: async () => 'Fikcyjna',
+      decryptClient: async () => ({ name: 'Fikcyjna', age: null }),
+    })
+    for (const createdAt of [instant('04'), instant('06')]) {
+      const replacement = paymentRow('pay_atomic_replacement', appointment.id, 5000, instant('05'))
+      replacement.payment_created_at = createdAt
+      await expect(read([
+        paymentRow('pay_atomic_original', appointment.id, 5000, instant('04'), {
+          id: 'cor_atomic_original', correctedAt: instant('05'),
+          replacementEntryId: replacement.id,
+        }),
+        replacement,
+      ])).rejects.toThrow(/^INTERNAL_ERROR$/)
+    }
+    const original = paymentRow('pay_atomic_legal', appointment.id, 5000, instant('04'), {
+      id: 'cor_atomic_legal', correctedAt: instant('05'), replacementEntryId: 'pay_atomic_later',
+    })
+    const replacement = paymentRow('pay_atomic_later', appointment.id, 5000, instant('05'), {
+      id: 'cor_atomic_later', correctedAt: instant('06'), replacementEntryId: null,
+    })
+    replacement.payment_created_at = instant('05')
+    await expect(read([original, replacement])).resolves.toMatchObject({
+      data: { appointments: [{ payment: { status: 'unpaid', collectedGrosze: 0 } }] },
+    })
+  })
+
+  it('rejects duplicate specialists, reused charges, and appointments outside the captured window', async () => {
+    const common = {
+      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
+      decryptSpecialist: async () => 'Fikcyjna',
+      decryptClient: async () => ({ name: 'Fikcyjna', age: null }),
+    }
+    await expect(readWorkspace({
+      ...common,
+      db: scriptedDb({ specialists: [
+        specialistRow('sp_duplicate', 'stf_duplicate'),
+        specialistRow('sp_duplicate', 'stf_duplicate'),
+      ] }).db,
+    })).rejects.toThrow(/^INTERNAL_ERROR$/)
+
+    const first = appointmentRow('apt_charge_one', 'cl_charge', 'sp_owner')
+    const second = { ...appointmentRow('apt_charge_two', 'cl_charge', 'sp_owner'), charge_id: first.charge_id }
+    const client = clientRow('cl_charge', 'active', {
+      id: 'asg_charge', specialistId: 'sp_owner', startsAt: instant('01'), version: 1,
+    })
+    await expect(readWorkspace({
+      ...common, db: scriptedDb({ appointments: [first, second], clients: [client] }).db,
+    })).rejects.toThrow(/^INTERNAL_ERROR$/)
+
+    const outside = { ...appointmentRow('apt_outside', 'cl_charge', 'sp_owner'), starts_at: instant('03') }
+    await expect(readWorkspace({
+      ...common, db: scriptedDb({ appointments: [outside], clients: [client] }).db,
+    })).rejects.toThrow(/^INTERNAL_ERROR$/)
   })
 
   it('adapts the exact GET URL and work-budget view to the read model', async () => {
@@ -508,6 +650,131 @@ describe('workspace read model', () => {
     expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
       used: 7, remaining: 43, workRemaining: 35, totalLimit: 50, recoveryReserve: 8,
     })
+  })
+
+  it('real D1 preserves authorized rows when client keys or appointment charges disappear', async () => {
+    const createdAt = '2026-07-01T10:00:00.000Z'
+    const directoryStatements = [
+      ['stf_key_current', 'sp_key_current'],
+      ['stf_key_history', 'sp_key_history'],
+      ['stf_key_other', 'sp_key_other'],
+    ].flatMap(([staffId, specialistId]) => [
+      env.DB.prepare(
+        `INSERT INTO staff_users
+         (id,email_lookup,email_envelope,display_name_envelope,role,status,
+          access_subject,specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+         VALUES (?,?, '{}','{}','coordinator','disabled',?,?,1,?,?,?,?)`
+      ).bind(staffId, `${staffId}@example.test`, `access-${staffId}`, specialistId,
+        createdAt, createdAt, createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO specialists
+         (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+         VALUES (?,?,18000,'active',1,NULL,?,?)`
+      ).bind(specialistId, staffId, createdAt, createdAt),
+    ])
+    const missingEnvelope = (id) => JSON.stringify({
+      format: 1, algorithm: 'A256GCM', dataKeyId: `key_missing_${id}`,
+      dataKeyVersion: 1, nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAA',
+    })
+    await env.DB.batch([
+      ...directoryStatements,
+      env.DB.prepare(
+        `INSERT INTO clients
+         (id,identity_envelope,status,version,archived_at,created_at,updated_at)
+         VALUES (?,?, 'active',1,NULL,?,?)`
+      ).bind('cl_real_missing_key', missingEnvelope('ordinary'), createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO client_assignments
+         (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
+          version,created_at,updated_at)
+         VALUES ('asg_real_missing_key','cl_real_missing_key','sp_key_current',?,NULL,
+          'stf_key_current',1,?,?)`
+      ).bind(createdAt, createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO clients
+         (id,identity_envelope,status,version,archived_at,created_at,updated_at)
+         VALUES (?,?, 'active',1,NULL,?,?)`
+      ).bind('cl_real_history_key', missingEnvelope('history'), createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO client_assignments
+         (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
+          version,created_at,updated_at)
+         VALUES ('asg_real_history_key','cl_real_history_key','sp_key_other',?,NULL,
+          'stf_key_other',1,?,?)`
+      ).bind(createdAt, createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO appointments
+         (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+          status,source,version,cancelled_at,created_at,updated_at)
+         VALUES ('apt_real_history_key','cl_real_history_key','sp_key_history','zajecia',
+          '2026-09-04T10:00:00.000Z','2026-09-04T11:00:00.000Z','Europe/Warsaw',NULL,
+          'completed','panel',1,NULL,?,?)`
+      ).bind(createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO session_charges
+         (id,appointment_id,service_id,expected_amount_grosze,currency,version,created_at,updated_at)
+         VALUES ('chg_real_history_key','apt_real_history_key','zajecia',18000,'PLN',1,?,?)`
+      ).bind(createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO clients
+         (id,identity_envelope,status,version,archived_at,created_at,updated_at)
+         VALUES (?,?, 'active',1,NULL,?,?)`
+      ).bind('cl_real_missing_charge', missingEnvelope('charge'), createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO client_assignments
+         (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
+          version,created_at,updated_at)
+         VALUES ('asg_real_missing_charge','cl_real_missing_charge','sp_key_current',?,NULL,
+          'stf_key_current',1,?,?)`
+      ).bind(createdAt, createdAt, createdAt),
+      env.DB.prepare(
+        `INSERT INTO appointments
+         (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+          status,source,version,cancelled_at,created_at,updated_at)
+         VALUES ('apt_real_missing_charge','cl_real_missing_charge','sp_key_current','zajecia',
+          '2026-10-04T10:00:00.000Z','2026-10-04T11:00:00.000Z','Europe/Warsaw',NULL,
+          'completed','panel',1,NULL,?,?)`
+      ).bind(createdAt, createdAt),
+    ])
+    const read = (actor, from, to, decryptClient = vi.fn()) => {
+      const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+      return { budget, operation: readWorkspace({
+        db: budget.work, actor,
+        cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+        window: parseWorkspaceQuery(`https://panel.example/api/v1/workspace?from=${from}&to=${to}`),
+        decryptSpecialist: async () => 'Fikcyjna', decryptClient,
+      }) }
+    }
+    const ordinaryDecrypt = vi.fn()
+    await expect(read(
+      { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      '2026-08-01', '2026-08-31', ordinaryDecrypt,
+    ).operation).rejects.toThrow(/^CRYPTO_FAILURE$/)
+    expect(ordinaryDecrypt).not.toHaveBeenCalled()
+
+    const historyDecrypt = vi.fn()
+    await expect(read(
+      { id: 'stf_key_history', role: 'specialist', specialistId: 'sp_key_history', version: 1 },
+      '2026-09-01', '2026-09-30', historyDecrypt,
+    ).operation).rejects.toThrow(/^CRYPTO_FAILURE$/)
+    expect(historyDecrypt).not.toHaveBeenCalled()
+
+    await expect(read(
+      { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      '2026-10-01', '2026-10-31', vi.fn(),
+    ).operation).rejects.toThrow(/^INTERNAL_ERROR$/)
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE client_assignments SET ends_at='2026-11-01T10:00:00.000Z',
+         version=version+1,updated_at='2026-11-01T10:00:00.000Z'
+         WHERE id IN ('asg_real_missing_key','asg_real_history_key','asg_real_missing_charge')`
+      ),
+      env.DB.prepare(
+        `UPDATE clients SET status='archived',archived_at='2026-11-01T10:00:00.000Z',
+         version=version+1,updated_at='2026-11-01T10:00:00.000Z'
+         WHERE id IN ('cl_real_missing_key','cl_real_history_key','cl_real_missing_charge')`
+      ),
+    ])
   })
 
   it('uses bounded declared/automatic indexes for every workspace relationship', async () => {
