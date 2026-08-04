@@ -18,7 +18,13 @@ const CENTRE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const CLIENT_ID = /^cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const ASSIGNMENT_ID = /^asg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const APPOINTMENT_ID = /^apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const PAYMENT_ID = /^pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const CORRECTION_ID = /^cor_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const OUTBOX_TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CURSOR_MAC_PREFIX = 'bwm.security-audit.cursor.v1'
@@ -65,6 +71,15 @@ const AUDIT_ROW_KEYS = Object.freeze([
   'result', 'reason_envelope', 'correlation_id', 'metadata_json',
 ])
 const AUDIT_SCHEMAS = Object.freeze({
+  'client.created': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' }, reason: 'null' }),
+  'client.updated': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version' }, reason: 'null' }),
+  'client.assignment.changed': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' }, reason: 'null' }),
+  'client.archived': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' }, reason: 'null' }),
+  'appointment.created': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' }, reason: 'null' }),
+  'appointment.updated': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' }, reason: 'null' }),
+  'appointment.cancelled': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' }, reason: 'null' }),
+  'payment.recorded': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', paymentEntryId: 'paymentId' }, reason: 'null' }),
+  'payment.corrected': Object.freeze({ entityTypes: ['payment_entry'], entityId: PAYMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', correctionId: 'correctionId', reversedEntryId: 'paymentId', replacementEntryId: 'nullablePaymentId' }, reason: 'null' }),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' }, reason: 'encrypted' }),
   'backup.pruned': Object.freeze({ entityTypes: ['backup_run'], result: 'success', metadata: { backupVersion: 'version' }, reason: 'null', system: true }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: { newKekVersion: 'version', oldKekVersion: 'version' }, reason: 'null' }),
@@ -81,6 +96,11 @@ const AUDIT_SCHEMAS = Object.freeze({
   'specialist.backfilled': Object.freeze({ entityTypes: ['specialist'], result: 'success', metadata: { specialistVersion: 'version', stateVersion: 'version' }, reason: 'null', system: true }),
   'core_directory.upgrade.advanced': Object.freeze({ entityTypes: ['system_state'], result: 'success', metadata: { createdCount: 'count', processedCount: 'count', stateVersion: 'version' }, reason: 'null', system: true }),
 })
+const CORE_AUDIT_ACTIONS = new Set([
+  'appointment.cancelled', 'appointment.created', 'appointment.updated',
+  'client.archived', 'client.assignment.changed', 'client.created', 'client.updated',
+  'payment.corrected', 'payment.recorded',
+])
 const HEALTH_CHECKS = Object.freeze([
   Object.freeze({
     id: 'outbox.processing',
@@ -861,7 +881,12 @@ function auditMetadata(schema, text) {
   for (const [key, type] of Object.entries(types)) {
     if ((type === 'version' && !positive(shape[key]))
       || (type === 'nullableVersion' && shape[key] !== null && !positive(shape[key]))
-      || (type === 'count' && !safeCount(shape[key]))) invalidState()
+      || (type === 'count' && !safeCount(shape[key]))
+      || (type === 'assignmentId' && (typeof shape[key] !== 'string' || !ASSIGNMENT_ID.test(shape[key])))
+      || (type === 'paymentId' && (typeof shape[key] !== 'string' || !PAYMENT_ID.test(shape[key])))
+      || (type === 'correctionId' && (typeof shape[key] !== 'string' || !CORRECTION_ID.test(shape[key])))
+      || (type === 'nullablePaymentId' && shape[key] !== null
+        && (typeof shape[key] !== 'string' || !PAYMENT_ID.test(shape[key])))) invalidState()
   }
   return legacy ? { ...shape, specialistVersion: null } : shape
 }
@@ -874,6 +899,8 @@ function validateAuditEvent(input, value) {
     || !schema || !schema.entityTypes.includes(row.entity_type)
     || !validId(row.entity_id) || row.result !== schema.result
     || !validId(row.correlation_id)) invalidState()
+  if (CORE_AUDIT_ACTIONS.has(row.action) && !STAFF_ID.test(row.actor_staff_id ?? '')) invalidState()
+  if (schema.entityId && !schema.entityId.test(row.entity_id)) invalidState()
   if (schema.reason === 'encrypted') {
     const envelope = parseEnvelopeText(row.reason_envelope)
     if (envelope.dataKeyId !== input.cryptoContext.dataKey.id

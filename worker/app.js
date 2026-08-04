@@ -44,7 +44,41 @@ const STAFF_INVITATIONS_PATH = '/api/v1/staff/invitations'
 const STAFF_ID = /^\/api\/v1\/staff\/stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}\/deactivation$/
 const ACTION_RESOLUTION_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/resolution$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
-const CORE_BUDGET_FIXTURE_PATH = '/api/v1/__core-budget-fixture'
+const CLIENT_PATH_ID = 'cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}'
+const APPOINTMENT_PATH_ID = 'apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const PAYMENT_PATH_ID = 'pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const CORE_COMMAND_ALLOW = 'POST, OPTIONS'
+const CORE_READ_ALLOW = 'GET, HEAD, OPTIONS'
+const CORE_BUDGET = Object.freeze({ totalLimit: 50, recoveryReserve: 8 })
+const CORE_AUDIT_ACTIONS = new Set([
+  'appointment.cancelled', 'appointment.created', 'appointment.updated',
+  'client.archived', 'client.assignment.changed', 'client.created', 'client.updated',
+  'payment.corrected', 'payment.recorded',
+])
+const descriptor = (value) => Object.freeze({
+  ...value,
+  methods: Object.freeze([...value.methods]),
+  auditActions: Object.freeze([...value.auditActions]),
+  bodyKeys: value.bodyKeys ? Object.freeze([...value.bodyKeys]) : null,
+  sharedBudget: CORE_BUDGET,
+  core: true,
+  expected: 'human',
+})
+const CORE_ROUTES = Object.freeze([
+  descriptor({ id: 'workspace', path: '/api/v1/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'client.operational.read', auditActions: [], bodyKeys: null }),
+  descriptor({ id: 'clients.create', path: '/api/v1/clients', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'] }),
+  descriptor({ id: 'clients.edit', pattern: new RegExp(`^/api/v1/clients/${CLIENT_PATH_ID}/edits$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'] }),
+  descriptor({ id: 'clients.archive', pattern: new RegExp(`^/api/v1/clients/${CLIENT_PATH_ID}/archive$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'appointments.create', path: '/api/v1/appointments', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.created'], bodyKeys: ['clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'] }),
+  descriptor({ id: 'appointments.edit', pattern: new RegExp(`^/api/v1/appointments/${APPOINTMENT_PATH_ID}/edits$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.updated'], bodyKeys: ['expectedVersion', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'] }),
+  descriptor({ id: 'appointments.cancel', pattern: new RegExp(`^/api/v1/appointments/${APPOINTMENT_PATH_ID}/cancellation$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'appointments.payment', pattern: new RegExp(`^/api/v1/appointments/${APPOINTMENT_PATH_ID}/payments$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'] }),
+  descriptor({ id: 'payments.correct', pattern: new RegExp(`^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
+])
+export const CORE_ROUTE_DESCRIPTORS = CORE_ROUTES
+if (CORE_ROUTES.some((route) => route.auditActions.some((action) => !CORE_AUDIT_ACTIONS.has(action)))) {
+  throw new Error('CORE_ROUTE_REGISTRY_INVALID')
+}
 const OPERATION_SERVICES = Object.freeze({
   getOperationalHealth,
   listOpenOperationalActions,
@@ -52,7 +86,7 @@ const OPERATION_SERVICES = Object.freeze({
   resolveOperationalAction,
 })
 
-const routeFor = (request, coreBudgetFixtureEnabled = false) => {
+const routeFor = (request) => {
   const url = new URL(request.url)
   if (url.pathname === HEALTH_PATH && url.search === '') {
     return { id: 'health.live', expected: 'service', methods: ['GET', 'HEAD'] }
@@ -60,8 +94,9 @@ const routeFor = (request, coreBudgetFixtureEnabled = false) => {
   if (url.pathname === '/api/v1/session') {
     return { id: 'session', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
   }
-  if (coreBudgetFixtureEnabled && url.pathname === CORE_BUDGET_FIXTURE_PATH && url.search === '') {
-    return { id: 'core.budget-fixture', expected: 'human', methods: ['GET', 'HEAD'], core: true }
+  for (const route of CORE_ROUTES) {
+    const pathMatches = route.path ? url.pathname === route.path : route.pattern.test(url.pathname)
+    if (pathMatches && (route.bodyKeys === null || url.search === '')) return route
   }
   if (url.search === '' && url.pathname === STAFF_PATH) return { id: 'staff.list', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
   if (url.search === '' && url.pathname === STAFF_INVITATIONS_PATH) return { id: 'staff.invitations', expected: 'human', methods: ['POST', 'OPTIONS'] }
@@ -159,13 +194,6 @@ const readResponse = (c, result) => {
 
 export function createApp(deps = {}) {
   const app = new Hono()
-  let coreRouteFixture = null
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(deps, 'coreRouteFixture')
-    if (descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function') {
-      coreRouteFixture = descriptor.value
-    }
-  } catch { /* The inert test seam stays disabled for hostile dependency surfaces. */ }
 
   app.use('/api/*', async (c, next) => {
     const start = performance.now()
@@ -195,7 +223,7 @@ export function createApp(deps = {}) {
   app.use('/api/v1/*', async (c, next) => {
     const request = c.req.raw
     const method = request.method
-    const route = routeFor(request, coreRouteFixture !== null)
+    const route = routeFor(request)
     c.set('routeId', route.id)
     c.set('routeAllow', route.allow)
     c.set('routeActionId', route.actionId)
@@ -204,7 +232,7 @@ export function createApp(deps = {}) {
 
     if (route.core) {
       const rawDb = c.env?.DB ?? deps.db
-      const budget = createD1QueryBudget(rawDb, { totalLimit: 50, recoveryReserve: 8 })
+      const budget = createD1QueryBudget(rawDb, CORE_BUDGET)
       c.set('coreD1Budget', budget)
       c.set('coreWorkDb', budget.work)
       c.set('coreRecoveryDb', budget.recovery)
@@ -215,7 +243,7 @@ export function createApp(deps = {}) {
     c.set('nowMs', requestNowMs)
     if (isMutationMethod(method)) {
       validateMutationMetadata(request, config)
-      if (route.id === 'operations.action-resolution') validateResolutionIdempotency(request)
+      if (route.id === 'operations.action-resolution' || route.core) validateResolutionIdempotency(request)
     }
     else if (method === 'OPTIONS') validateOptionsOrigin(request, config)
 
@@ -268,10 +296,21 @@ export function createApp(deps = {}) {
 
     if (isMutationMethod(method)) {
       c.set('jsonBody', await (deps.readJsonBodyOnce ?? readJsonBodyOnce)(request, {
-        rejectDuplicateTopLevelKeys: route.id === 'staff.invitations'
+        rejectDuplicateTopLevelKeys: route.core || route.id === 'staff.invitations'
           || route.id === 'staff.deactivation'
           || route.id === 'operations.action-resolution',
       }))
+      if (route.core) {
+        let descriptors
+        try { descriptors = Object.getOwnPropertyDescriptors(c.get('jsonBody')) } catch {
+          throw new AppError('VALIDATION_FAILED', { field: 'body' })
+        }
+        const keys = Reflect.ownKeys(descriptors)
+        if (keys.length !== route.bodyKeys.length || keys.some((key) => (
+          typeof key !== 'string' || !route.bodyKeys.includes(key)
+          || !Object.hasOwn(descriptors[key], 'value') || !descriptors[key].enumerable
+        ))) throw new AppError('VALIDATION_FAILED', { field: 'body' })
+      }
     }
     await next()
   })
@@ -280,19 +319,6 @@ export function createApp(deps = {}) {
     if (c.get('routeId') !== 'health.live') throw new AppError('NOT_FOUND')
     return c.json({ data: { status: 'ok' } })
   })
-  if (coreRouteFixture) {
-    app.get(CORE_BUDGET_FIXTURE_PATH, async (c) => {
-      if (c.get('routeId') !== 'core.budget-fixture') throw new AppError('NOT_FOUND')
-      const result = await coreRouteFixture({
-        db: c.get('coreWorkDb'),
-        recoveryDb: c.get('coreRecoveryDb'),
-        budget: c.get('coreD1Budget'),
-        actor: c.get('actor'),
-        cryptoContext: c.get('cryptoContext'),
-      })
-      return readResponse(c, result)
-    })
-  }
   app.get('/api/v1/session', async (c) => {
     const config = runtimeConfig(c, deps)
     const result = deps.session
@@ -412,6 +438,11 @@ export function createApp(deps = {}) {
   app.options('/api/v1/operations/actions/:actionId/resolution', (c) => {
     if (c.get('routeId') !== 'operations.action-resolution') throw new AppError('NOT_FOUND')
     return new Response(null, { status: 204, headers: { Allow: OPERATIONS_MUTATION_ALLOW } })
+  })
+  app.options('/api/v1/*', (c) => {
+    const route = CORE_ROUTES.find(({ id }) => id === c.get('routeId'))
+    if (!route) throw new AppError('NOT_FOUND')
+    return new Response(null, { status: 204, headers: { Allow: route.allow } })
   })
   app.notFound((c) => {
     const correlationId = c.get('correlationId') || crypto.randomUUID()

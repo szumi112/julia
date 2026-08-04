@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createApp } from '../../worker/app.js'
-import { createD1QueryBudget } from '../../worker/db/query-budget.js'
+import { CORE_ROUTE_DESCRIPTORS, createApp } from '../../worker/app.js'
 import { safeLog } from '../../worker/logging/safe-log.js'
 
 const deps = (overrides = {}) => ({
@@ -123,151 +122,154 @@ describe('API shell', () => {
   })
 })
 
-describe('core route D1 budget boundary', () => {
-  const path = '/api/v1/__core-budget-fixture'
+describe('closed core route descriptors', () => {
+  const origin = 'https://panel.bearwithme.pl'
+  const commands = [
+    ['/api/v1/clients', { name: 'Ala', age: 12, status: 'active', specialistId: 'sp_one' }],
+    ['/api/v1/clients/cl_one/edits', { expectedVersion: 1, name: 'Ala', age: 12, status: 'active', specialistId: 'sp_one' }],
+    ['/api/v1/clients/cl_one/archive', { expectedVersion: 1 }],
+    ['/api/v1/appointments', { clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', date: '2026-08-04', time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20000, location: null, status: 'scheduled' }],
+    ['/api/v1/appointments/apt_one/edits', { expectedVersion: 1, specialistId: 'sp_one', serviceId: 'zajecia', date: '2026-08-04', time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20000, location: null, status: 'scheduled' }],
+    ['/api/v1/appointments/apt_one/cancellation', { expectedVersion: 1 }],
+    ['/api/v1/appointments/apt_one/payments', { expectedVersion: 1, amountGrosze: 10000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }],
+    ['/api/v1/payments/pay_one/corrections', { expectedVersion: 1, reason: 'Korekta', replacement: null }],
+  ]
+  const headers = {
+    origin,
+    'content-type': 'application/json',
+    'idempotency-key': 'core-command-key-0001',
+    'x-csrf-token': 'valid',
+  }
 
-  it('installs one 50/8 budget before identity crypto and shares its exact views', async () => {
-    const order = []
-    const db = coreBudgetDb(order)
-    let actorWork
-    let actorRecovery
-    const fixture = vi.fn(async ({ db: work, recoveryDb, budget }) => {
-      order.push('fixture')
-      expect(work).toBe(actorWork)
-      expect(recoveryDb).toBe(actorRecovery)
-      expect(budget.usage()).toEqual({
-        used: 3, remaining: 47, workRemaining: 39, totalLimit: 50, recoveryReserve: 8,
-      })
-      return { data: { usage: budget.usage() } }
-    })
-    const input = deps({
-      cryptoContext: undefined,
-      db,
-      keyring: {},
-      coreRouteFixture: fixture,
-      resolveAccessPrincipal: vi.fn(async () => { order.push('access'); return { kind: 'human', subject: 'access-core', normalizedEmail: 'core@example.test' } }),
-      resolveActor: vi.fn(async (work, _principal, _context, options) => {
-        order.push('actor')
-        actorWork = work
-        actorRecovery = options.recoveryDb
-        expect(work).not.toBe(db)
-        expect(actorRecovery).not.toBe(work)
-        await work.prepare('SELECT actor_one').first()
-        await work.prepare('SELECT actor_two').first()
-        return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
-      }),
-    })
-
-    const response = await createApp(input).request(path)
-
-    expect(response.status).toBe(200)
-    expect(fixture).toHaveBeenCalledOnce()
-    expect(order).toEqual([
-      'capture.prepare', 'capture.batch', 'access', 'query.data-key', 'actor', 'fixture',
+  it('publishes only immutable nonfunctional route metadata with registered audit actions', () => {
+    expect(CORE_ROUTE_DESCRIPTORS.map(({ id, capability, auditActions, bodyKeys, sharedBudget }) => ({
+      id, capability, auditActions, bodyKeys, sharedBudget,
+    }))).toEqual([
+      { id: 'workspace', capability: 'client.operational.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'clients.create', capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'clients.edit', capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'clients.archive', capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'appointments.create', capability: 'appointment.manage', auditActions: ['appointment.created'], bodyKeys: ['clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'appointments.edit', capability: 'appointment.manage', auditActions: ['appointment.updated'], bodyKeys: ['expectedVersion', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'appointments.cancel', capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'appointments.payment', capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'payments.correct', capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
     ])
-    expect(db.calls.map((call) => call.sql)).toEqual([
-      expect.stringContaining('FROM data_keys'), 'SELECT actor_one', 'SELECT actor_two',
-    ])
+    expect(Object.isFrozen(CORE_ROUTE_DESCRIPTORS)).toBe(true)
+    expect(CORE_ROUTE_DESCRIPTORS.every((route) => Object.isFrozen(route)
+      && !Object.hasOwn(route, 'handler') && !Object.hasOwn(route, 'service'))).toBe(true)
   })
 
-  it('keeps GET recovery unused and bounds a combined synthetic collision path at 50', async () => {
-    const getDb = coreBudgetDb()
-    const getFixture = vi.fn(async ({ budget }) => ({ data: { usage: budget.usage() } }))
-    const getResponse = await createApp(deps({
-      db: getDb, coreRouteFixture: getFixture,
-      resolveActor: vi.fn(async () => ({ id: 'stf_get', role: 'owner', specialistId: null, version: 1 })),
-    })).request(path)
-    expect(getResponse.status).toBe(200)
-    expect((await getResponse.json()).data.usage.used).toBe(0)
-
-    const db = coreBudgetDb()
-    const combined = vi.fn(async ({ db: work, recoveryDb, budget }) => {
-      await work.batch(Array.from({ length: 39 }, (_, index) => work.prepare(`SELECT domain_${index}`)))
-      expect(() => work.prepare('SELECT ordinary_over_ceiling').run())
-        .toThrow('D1_QUERY_BUDGET_EXCEEDED')
-      await recoveryDb.batch(Array.from({ length: 8 }, (_, index) => recoveryDb.prepare(`SELECT recovery_${index}`)))
-      expect(() => recoveryDb.prepare('SELECT total_over_ceiling').run())
-        .toThrow('D1_QUERY_BUDGET_EXCEEDED')
-      return { data: { usage: budget.usage() } }
+  it.each(commands)('validates the closed shell once and keeps %s nonfunctional', async (path, body) => {
+    const readJsonBodyOnce = vi.fn(async () => body)
+    const input = deps({ db: coreBudgetDb(), readJsonBodyOnce, verifyCsrfToken: vi.fn(async () => true) })
+    const response = await createApp(input).request(path, {
+      method: 'POST', headers, body: JSON.stringify(body),
     })
-    const response = await createApp(deps({
-      cryptoContext: undefined,
-      db,
-      keyring: {},
-      coreRouteFixture: combined,
-      resolveActor: vi.fn(async (work) => {
-        await work.prepare('SELECT actor_one').first()
-        await work.prepare('SELECT actor_two').first()
-        return { id: 'stf_combined', role: 'owner', specialistId: null, version: 1 }
-      }),
-    })).request(path)
-
-    expect(response.status).toBe(200)
-    expect((await response.json()).data.usage).toEqual({
-      used: 50, remaining: 0, workRemaining: 0, totalLimit: 50, recoveryReserve: 8,
-    })
-  })
-
-  it('does not activate the inert fixture from request or environment data', async () => {
-    const input = deps({ db: coreBudgetDb(), coreRouteFixture: undefined })
-    const response = await createApp(input).request(`${path}?coreRouteFixture=true`, {
-      headers: { 'x-core-route-fixture': 'true' },
-    }, { coreRouteFixture: true })
-
     expect(response.status).toBe(404)
+    expect((await response.json()).error.code).toBe('NOT_FOUND')
+    expect(readJsonBodyOnce).toHaveBeenCalledOnce()
+    expect(readJsonBodyOnce).toHaveBeenCalledWith(expect.any(Request), {
+      rejectDuplicateTopLevelKeys: true,
+    })
+    expect(input.resolveAccessPrincipal).toHaveBeenCalledOnce()
     expect(input.resolveActor).toHaveBeenCalledOnce()
   })
 
-  it('activates the inert fixture only from one own data-valued createApp dependency', async () => {
-    const inheritedFixture = vi.fn()
-    const inherited = Object.assign(Object.create({ coreRouteFixture: inheritedFixture }), deps())
-    const inheritedResponse = await createApp(inherited).request(path)
-    expect(inheritedResponse.status).toBe(404)
-    expect(inheritedFixture).not.toHaveBeenCalled()
-
-    let getterCalls = 0
-    const accessor = deps()
-    Object.defineProperty(accessor, 'coreRouteFixture', {
-      enumerable: true,
-      get() { getterCalls += 1; return vi.fn() },
+  it('rejects idempotency and exact body-shape failures in the frozen shell order', async () => {
+    const missingKey = deps({ db: coreBudgetDb(), resolveAccessPrincipal: vi.fn(), readJsonBodyOnce: vi.fn() })
+    const first = await createApp(missingKey).request('/api/v1/clients', {
+      method: 'POST',
+      headers: { origin, 'content-type': 'application/json', 'x-csrf-token': 'valid' },
+      body: '{}',
     })
-    const accessorResponse = await createApp(accessor).request(path)
-    expect(accessorResponse.status).toBe(404)
-    expect(getterCalls).toBe(0)
+    expect(first.status).toBe(400)
+    expect(missingKey.resolveAccessPrincipal).not.toHaveBeenCalled()
+    expect(missingKey.readJsonBodyOnce).not.toHaveBeenCalled()
+
+    for (const body of [
+      { name: 'Ala', age: 12, status: 'active' },
+      { name: 'Ala', age: 12, status: 'active', specialistId: 'sp_one', extra: true },
+    ]) {
+      const input = deps({
+        db: coreBudgetDb(),
+        verifyCsrfToken: vi.fn(async () => true),
+        readJsonBodyOnce: vi.fn(async () => body),
+      })
+      const response = await createApp(input).request('/api/v1/clients', {
+        method: 'POST', headers, body: JSON.stringify(body),
+      })
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({
+        error: { code: 'VALIDATION_FAILED', details: { field: 'body' } },
+      })
+      expect(input.readJsonBodyOnce).toHaveBeenCalledOnce()
+    }
   })
 
-  it.each([
-    ['missing batch', { prepare() {} }],
-    ['nested work view', createD1QueryBudget(coreBudgetDb(), { totalLimit: 50, recoveryReserve: 8 }).work],
-    ['hostile prepare', Object.defineProperty({ batch() {} }, 'prepare', { get() { throw new Error('private-db-marker') } })],
-  ])('fails closed before Access for a %s DB surface', async (_label, db) => {
-    const input = deps({ db, coreRouteFixture: vi.fn(), resolveAccessPrincipal: vi.fn(), resolveActor: vi.fn() })
-    const response = await createApp(input).request(path)
+  it('rejects every non-descriptor command method with exact Allow before Access', async () => {
+    for (const method of ['GET', 'HEAD', 'DELETE']) {
+      const input = deps({ resolveAccessPrincipal: vi.fn(), resolveActor: vi.fn(), db: coreBudgetDb() })
+      const response = await createApp(input).request('/api/v1/clients', { method })
+      expect(response.status).toBe(405)
+      expect(response.headers.get('allow')).toBe('POST, OPTIONS')
+      expect(input.resolveAccessPrincipal).not.toHaveBeenCalled()
+      expect(input.resolveActor).not.toHaveBeenCalled()
+    }
+  })
 
-    expect(response.status).toBe(500)
-    expect(await response.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } })
-    expect(input.resolveAccessPrincipal).not.toHaveBeenCalled()
-    expect(input.resolveActor).not.toHaveBeenCalled()
+  it('installs one shared budget before identity and keeps workspace nonfunctional', async () => {
+    const rawDb = coreBudgetDb()
+    let actorWork
+    let actorRecovery
+    const input = deps({
+      db: rawDb,
+      resolveActor: vi.fn(async (work, _principal, _context, options) => {
+        actorWork = work
+        actorRecovery = options.recoveryDb
+        return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
+      }),
+    })
+    const response = await createApp(input).request('/api/v1/workspace?from=2026-08-01&to=2026-08-31')
+    expect(response.status).toBe(404)
+    expect(actorWork).not.toBe(rawDb)
+    expect(actorRecovery).not.toBe(actorWork)
+  })
+
+  it.each(commands)('returns exact command Allow and authenticates OPTIONS without CSRF or body for %s', async (path) => {
+    const input = deps({ verifyCsrfToken: vi.fn(), readJsonBodyOnce: vi.fn(), db: coreBudgetDb() })
+    const response = await createApp(input).request(path, { method: 'OPTIONS', headers: { origin } })
+    expect(response.status).toBe(204)
+    expect(response.headers.get('allow')).toBe('POST, OPTIONS')
+    expect(input.resolveAccessPrincipal).toHaveBeenCalledOnce()
+    expect(input.resolveActor).toHaveBeenCalledOnce()
+    expect(input.verifyCsrfToken).not.toHaveBeenCalled()
+    expect(input.readJsonBodyOnce).not.toHaveBeenCalled()
+  })
+
+  it('returns exact workspace Allow and rejects aliases and mutation queries', async () => {
+    const options = await createApp(deps({ db: coreBudgetDb() })).request('/api/v1/workspace?from=2026-08-01&to=2026-08-31', { method: 'OPTIONS', headers: { origin } })
+    expect(options.status).toBe(204)
+    expect(options.headers.get('allow')).toBe('GET, HEAD, OPTIONS')
+    for (const path of [
+      '/api/v1/clients/cl_one/edits/',
+      '/api/v1/clients/%63l_one/edits',
+      '/api/v1/clients/client_one/edits',
+      '/api/v1/appointments/apt_one/edits/extra',
+      '/api/v1/payments/apt_one/corrections',
+      '/api/v1/clients?unexpected=1',
+    ]) {
+      const input = deps({ db: coreBudgetDb(), verifyCsrfToken: vi.fn(async () => true), readJsonBodyOnce: vi.fn(async () => ({})) })
+      const response = await createApp(input).request(path, { method: 'POST', headers, body: '{}' })
+      expect(response.status).toBe(404)
+    }
   })
 
   it('preserves raw D1 identity for an existing non-core route', async () => {
     const rawDb = coreBudgetDb()
-    const service = vi.fn(async ({ db }) => {
-      expect(db).toBe(rawDb)
-      return { data: { ok: true } }
-    })
-    const input = deps({
-      db: rawDb,
-      getOperationalHealth: service,
-      resolveActor: vi.fn(async (db) => {
-        expect(db).toBe(rawDb)
-        return { id: 'stf_non_core', role: 'owner', specialistId: null, version: 1 }
-      }),
-    })
-
-    const response = await createApp(input).request('/api/v1/operations/health')
-
-    expect(response.status).toBe(200)
+    const service = vi.fn(async ({ db }) => { expect(db).toBe(rawDb); return { data: { ok: true } } })
+    const input = deps({ db: rawDb, getOperationalHealth: service, resolveActor: vi.fn(async (db) => { expect(db).toBe(rawDb); return { id: 'stf_non_core', role: 'owner', specialistId: null, version: 1 } }) })
+    expect((await createApp(input).request('/api/v1/operations/health')).status).toBe(200)
     expect(service).toHaveBeenCalledOnce()
   })
 })

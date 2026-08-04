@@ -3,11 +3,26 @@ import { decodeBase64Url } from '../security/encoding.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const CLIENT_ID = /^cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const ASSIGNMENT_ID = /^asg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const APPOINTMENT_ID = /^apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const PAYMENT_ID = /^pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const CORRECTION_ID = /^cor_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const MAX_REASON_PLAINTEXT_BYTES = 2048
 const descriptors = new WeakMap()
 const fields = ['id', 'occurredAt', 'actorStaffId', 'action', 'entityType', 'entityId', 'result', 'correlationId', 'metadata', 'reasonEnvelope']
 const schemas = Object.freeze({
+  'client.created': Object.freeze({ entityTypes: ['client'], entityId: (value) => CLIENT_ID.test(value), result: 'success', metadata: Object.freeze({ clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' }), reasonPolicy: 'null', human: true }),
+  'client.updated': Object.freeze({ entityTypes: ['client'], entityId: (value) => CLIENT_ID.test(value), result: 'success', metadata: Object.freeze({ clientVersion: 'version' }), reasonPolicy: 'null', human: true }),
+  'client.assignment.changed': Object.freeze({ entityTypes: ['client'], entityId: (value) => CLIENT_ID.test(value), result: 'success', metadata: Object.freeze({ clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' }), reasonPolicy: 'null', human: true }),
+  'client.archived': Object.freeze({ entityTypes: ['client'], entityId: (value) => CLIENT_ID.test(value), result: 'success', metadata: Object.freeze({ clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' }), reasonPolicy: 'null', human: true }),
+  'appointment.created': Object.freeze({ entityTypes: ['appointment'], entityId: (value) => APPOINTMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', chargeVersion: 'version' }), reasonPolicy: 'null', human: true }),
+  'appointment.updated': Object.freeze({ entityTypes: ['appointment'], entityId: (value) => APPOINTMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', chargeVersion: 'version' }), reasonPolicy: 'null', human: true }),
+  'appointment.cancelled': Object.freeze({ entityTypes: ['appointment'], entityId: (value) => APPOINTMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', chargeVersion: 'version' }), reasonPolicy: 'null', human: true }),
+  'payment.recorded': Object.freeze({ entityTypes: ['appointment'], entityId: (value) => APPOINTMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', paymentEntryId: 'paymentId' }), reasonPolicy: 'null', human: true }),
+  'payment.corrected': Object.freeze({ entityTypes: ['payment_entry'], entityId: (value) => PAYMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', correctionId: 'correctionId', reversedEntryId: 'paymentId', replacementEntryId: 'nullablePaymentId' }), reasonPolicy: 'null', human: true }),
   'identity.activation': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
   'identity.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
   'identity.reindex': Object.freeze({ entityTypes: ['staff_user', 'staff_invitation'], result: 'success', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
@@ -41,7 +56,12 @@ function metadataJson(action, metadata) {
       || (type === 'nullableVersion' && value !== null
         && (!Number.isSafeInteger(value) || value < 1))
       || (type === 'count' && (!Number.isSafeInteger(value) || value < 0))
-      || (type === 'id' && !validId(value))) throw new Error('AUDIT_EVENT_INVALID')
+      || (type === 'id' && !validId(value))
+      || (type === 'assignmentId' && (typeof value !== 'string' || !ASSIGNMENT_ID.test(value)))
+      || (type === 'paymentId' && (typeof value !== 'string' || !PAYMENT_ID.test(value)))
+      || (type === 'correctionId' && (typeof value !== 'string' || !CORRECTION_ID.test(value)))
+      || (type === 'nullablePaymentId' && value !== null
+        && (typeof value !== 'string' || !PAYMENT_ID.test(value)))) throw new Error('AUDIT_EVENT_INVALID')
   }
   const text = JSON.stringify(Object.fromEntries(Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right))))
   if (text.length > 512) throw new Error('AUDIT_EVENT_INVALID')
@@ -84,6 +104,7 @@ export function auditEventStatement(db, event) {
     || !schema.entityTypes.includes(entityType) || schema.result !== result || !validId(entityId)
     || (schema.entityId && !schema.entityId(entityId))
     || (schema.system && actorStaffId !== null)
+    || (schema.human && (typeof actorStaffId !== 'string' || !STAFF_ID.test(actorStaffId)))
     || !validId(correlationId) || !reasonValid) throw new Error('AUDIT_EVENT_INVALID')
   const statement = db.prepare(
     `INSERT INTO audit_events

@@ -12,6 +12,14 @@ const STATUS_BY_CODE = Object.freeze({
   NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
   IDEMPOTENCY_CONFLICT: 409,
+  WORKSPACE_RESULT_LIMIT: 409,
+  CLIENT_STATUS_CONFLICT: 409,
+  CLIENT_ASSIGNMENT_CONFLICT: 409,
+  CLIENT_ARCHIVE_CONFLICT: 409,
+  APPOINTMENT_OVERLAP: 409,
+  APPOINTMENT_PAYMENT_CONFLICT: 409,
+  PAYMENT_AMOUNT_CONFLICT: 409,
+  PAYMENT_CORRECTION_CONFLICT: 409,
   STAFF_INVITATION_CONFLICT: 409,
   LAST_ACTIVE_OWNER: 409,
   VERSION_CONFLICT: 409,
@@ -22,19 +30,52 @@ const STATUS_BY_CODE = Object.freeze({
   INTERNAL_ERROR: 500,
 })
 
-const DETAIL_FIELDS = new Set(['displayName', 'email', 'role', 'version'])
+const VALIDATION_FIELDS = new Set([
+  'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
+  'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes',
+  'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt',
+  'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to',
+  'specialists', 'clients', 'appointments', 'paymentEntries',
+])
+const WORKSPACE_FIELDS = new Set(['specialists', 'clients', 'appointments', 'paymentEntries'])
 const EXACT_INTERNAL_MESSAGES = new Set(Object.keys(STATUS_BY_CODE))
 
-const safeDetails = (details) => {
-  if (!details || typeof details !== 'object' || Array.isArray(details)) return undefined
-  const result = {}
-  if (DETAIL_FIELDS.has(details.field)) result.field = details.field
-  if (Number.isSafeInteger(details.currentVersion) && details.currentVersion >= 0) result.currentVersion = details.currentVersion
-  if (Number.isSafeInteger(details.limit) && details.limit >= 0) result.limit = details.limit
-  if (Number.isSafeInteger(details.retryAfterSeconds) && details.retryAfterSeconds >= 0) {
-    result.retryAfterSeconds = details.retryAfterSeconds
+const safeDetails = (code, details) => {
+  try {
+    if (!details || typeof details !== 'object' || Array.isArray(details)
+      || Object.getPrototypeOf(details) !== Object.prototype) return undefined
+    const descriptors = Object.getOwnPropertyDescriptors(details)
+    const value = (key) => {
+      const descriptor = descriptors[key]
+      return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined
+    }
+    if (code === 'VALIDATION_FAILED') {
+      const field = value('field')
+      return VALIDATION_FIELDS.has(field) ? { field } : undefined
+    }
+    if (code === 'VERSION_CONFLICT') {
+      const currentVersion = value('currentVersion')
+      return Number.isSafeInteger(currentVersion) && currentVersion >= 0
+        ? { currentVersion }
+        : undefined
+    }
+    if (code === 'WORKSPACE_RESULT_LIMIT') {
+      const field = value('field')
+      const limit = value('limit')
+      return WORKSPACE_FIELDS.has(field) && Number.isSafeInteger(limit) && limit >= 0
+        ? { field, limit }
+        : undefined
+    }
+    if (code === 'RATE_LIMITED') {
+      const retryAfterSeconds = value('retryAfterSeconds')
+      return Number.isSafeInteger(retryAfterSeconds) && retryAfterSeconds >= 0
+        ? { retryAfterSeconds }
+        : undefined
+    }
+    return undefined
+  } catch {
+    return undefined
   }
-  return Object.keys(result).length ? result : undefined
 }
 
 export class AppError extends Error {
@@ -43,20 +84,29 @@ export class AppError extends Error {
     super(safeCode)
     this.code = safeCode
     this.status = STATUS_BY_CODE[safeCode]
-    this.details = safeDetails(details)
+    this.details = safeDetails(safeCode, details)
   }
 }
 
 export function publicError(error) {
-  if (error instanceof AppError) return error
-  if (error instanceof Error && EXACT_INTERNAL_MESSAGES.has(error.message)) {
-    return new AppError(error.message, error.details)
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(error)
+    const data = (key) => Object.hasOwn(descriptors[key] ?? {}, 'value')
+      ? descriptors[key].value
+      : undefined
+    if (error instanceof AppError) return new AppError(data('code'), data('details'))
+    const message = data('message')
+    if (error instanceof Error && EXACT_INTERNAL_MESSAGES.has(message)) {
+      return new AppError(message, data('details'))
+    }
+  } catch {
+    return new AppError('INTERNAL_ERROR')
   }
   return new AppError('INTERNAL_ERROR')
 }
 
 export const apiError = (error, correlationId, headers = undefined) => {
-  const mapped = error instanceof AppError ? error : publicError(error)
+  const mapped = publicError(error)
   return Response.json(
     {
       error: {

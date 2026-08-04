@@ -8,6 +8,11 @@ const CSRF_TOKEN = /^v1\.([1-9]\d*)\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const CLIENT_ID = /^cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const ASSIGNMENT_ID = /^asg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const APPOINTMENT_ID = /^apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const PAYMENT_ID = /^pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const CORRECTION_ID = /^cor_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const OUTBOX_TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const AUDIT_CURSOR = /^v1\.([1-9]\d*)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -27,6 +32,14 @@ const SERVER_STATUS = Object.freeze({
   NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
   IDEMPOTENCY_CONFLICT: 409,
+  WORKSPACE_RESULT_LIMIT: 409,
+  CLIENT_STATUS_CONFLICT: 409,
+  CLIENT_ASSIGNMENT_CONFLICT: 409,
+  CLIENT_ARCHIVE_CONFLICT: 409,
+  APPOINTMENT_OVERLAP: 409,
+  APPOINTMENT_PAYMENT_CONFLICT: 409,
+  PAYMENT_AMOUNT_CONFLICT: 409,
+  PAYMENT_CORRECTION_CONFLICT: 409,
   STAFF_INVITATION_CONFLICT: 409,
   LAST_ACTIVE_OWNER: 409,
   VERSION_CONFLICT: 409,
@@ -43,7 +56,14 @@ const CLIENT_CODES = new Set([
   'SESSION_REQUIRED',
 ])
 const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED'])
-const DETAIL_FIELDS = new Set(['displayName', 'email', 'role', 'version'])
+const VALIDATION_FIELDS = new Set([
+  'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
+  'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes',
+  'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt',
+  'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to',
+  'specialists', 'clients', 'appointments', 'paymentEntries',
+])
+const WORKSPACE_FIELDS = new Set(['specialists', 'clients', 'appointments', 'paymentEntries'])
 const CAPABILITIES = Object.freeze([
   'appointment.charge.read',
   'appointment.manage',
@@ -133,6 +153,15 @@ const HEALTH_CHECKS = Object.freeze([
   }),
 ])
 const AUDIT_SCHEMAS = Object.freeze({
+  'client.created': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' } }),
+  'client.updated': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version' } }),
+  'client.assignment.changed': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' } }),
+  'client.archived': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' } }),
+  'appointment.created': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' } }),
+  'appointment.updated': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' } }),
+  'appointment.cancelled': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' } }),
+  'payment.recorded': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', paymentEntryId: 'paymentId' } }),
+  'payment.corrected': Object.freeze({ entityTypes: ['payment_entry'], entityId: PAYMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', correctionId: 'correctionId', reversedEntryId: 'paymentId', replacementEntryId: 'nullablePaymentId' } }),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' } }),
   'backup.pruned': Object.freeze({ entityTypes: ['backup_run'], result: 'success', metadata: { backupVersion: 'version' }, system: true }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: { newKekVersion: 'version', oldKekVersion: 'version' } }),
@@ -149,6 +178,11 @@ const AUDIT_SCHEMAS = Object.freeze({
   'specialist.backfilled': Object.freeze({ entityTypes: ['specialist'], result: 'success', metadata: { specialistVersion: 'version', stateVersion: 'version' }, system: true }),
   'core_directory.upgrade.advanced': Object.freeze({ entityTypes: ['system_state'], result: 'success', metadata: { createdCount: 'count', processedCount: 'count', stateVersion: 'version' }, system: true }),
 })
+const CORE_AUDIT_ACTIONS = new Set([
+  'appointment.cancelled', 'appointment.created', 'appointment.updated',
+  'client.archived', 'client.assignment.changed', 'client.created', 'client.updated',
+  'payment.corrected', 'payment.recorded',
+])
 
 const plainObject = (value) => value !== null && typeof value === 'object'
   && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
@@ -205,25 +239,32 @@ const safeCode = (code) => Object.hasOwn(SERVER_STATUS, code) || CLIENT_CODES.ha
   ? code
   : 'INTERNAL_ERROR'
 
-const safeDetails = (details) => {
+const safeDetails = (code, details) => {
   try {
     if (!plainObject(details)) return undefined
-    const captured = {}
-    for (const key of ['field', 'currentVersion', 'limit', 'retryAfterSeconds']) {
-      if (Object.hasOwn(details, key)) captured[key] = details[key]
+    const value = (key) => Object.hasOwn(details, key) ? Reflect.get(details, key) : undefined
+    if (code === 'VALIDATION_FAILED') {
+      const field = value('field')
+      return VALIDATION_FIELDS.has(field) ? { field } : undefined
     }
-    const result = {}
-    if (DETAIL_FIELDS.has(captured.field)) result.field = captured.field
-    if (Number.isSafeInteger(captured.currentVersion) && captured.currentVersion >= 0) {
-      result.currentVersion = captured.currentVersion
+    if (code === 'VERSION_CONFLICT') {
+      const currentVersion = value('currentVersion')
+      return Number.isSafeInteger(currentVersion) && currentVersion >= 0 ? { currentVersion } : undefined
     }
-    if (Number.isSafeInteger(captured.limit) && captured.limit >= 0) {
-      result.limit = captured.limit
+    if (code === 'WORKSPACE_RESULT_LIMIT') {
+      const field = value('field')
+      const limit = value('limit')
+      return WORKSPACE_FIELDS.has(field) && Number.isSafeInteger(limit) && limit >= 0
+        ? { field, limit }
+        : undefined
     }
-    if (Number.isSafeInteger(captured.retryAfterSeconds) && captured.retryAfterSeconds >= 0) {
-      result.retryAfterSeconds = captured.retryAfterSeconds
+    if (code === 'RATE_LIMITED') {
+      const retryAfterSeconds = value('retryAfterSeconds')
+      return Number.isSafeInteger(retryAfterSeconds) && retryAfterSeconds >= 0
+        ? { retryAfterSeconds }
+        : undefined
     }
-    return Object.keys(result).length > 0 ? result : undefined
+    return undefined
   } catch {
     return undefined
   }
@@ -241,7 +282,7 @@ export class ApiError extends Error {
     this.name = 'ApiError'
     this.code = acceptedCode
     this.status = Number.isSafeInteger(status) && status >= 0 && status <= 599 ? status : 0
-    const acceptedDetails = safeDetails(details)
+    const acceptedDetails = safeDetails(acceptedCode, details)
     if (acceptedDetails) this.details = acceptedDetails
     if (UUID.test(correlationId ?? '')) this.correlationId = correlationId
     if (IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) this.idempotencyKey = idempotencyKey
@@ -540,7 +581,16 @@ const acceptedAuditMetadata = (value, schema) => {
       ? safeCount(metadata[key])
       : types[key] === 'nullableVersion'
         ? metadata[key] === null || positive(metadata[key])
-        : positive(metadata[key])
+        : types[key] === 'assignmentId'
+          ? typeof metadata[key] === 'string' && ASSIGNMENT_ID.test(metadata[key])
+          : types[key] === 'paymentId'
+            ? typeof metadata[key] === 'string' && PAYMENT_ID.test(metadata[key])
+            : types[key] === 'correctionId'
+              ? typeof metadata[key] === 'string' && CORRECTION_ID.test(metadata[key])
+              : types[key] === 'nullablePaymentId'
+                ? metadata[key] === null
+                  || (typeof metadata[key] === 'string' && PAYMENT_ID.test(metadata[key]))
+                : positive(metadata[key])
     if (!accepted) return null
   }
   return Object.freeze(legacy ? { ...metadata, specialistVersion: null } : metadata)
@@ -571,6 +621,8 @@ const acceptedAudit = (payload, limit) => {
       || (previous && (previous.occurredAt < value.occurredAt
         || (previous.occurredAt === value.occurredAt && previous.id <= value.id)))) return null
     if (schema.system && value.actorStaffId !== null) return null
+    if (CORE_AUDIT_ACTIONS.has(value.action) && !STAFF_ID.test(value.actorStaffId ?? '')) return null
+    if (schema.entityId && !schema.entityId.test(value.entityId)) return null
     if (value.action === 'backup.pruned' && !BACKUP_ID.test(value.entityId)) return null
     if (value.action === 'specialist.backfilled' && !SPECIALIST_ID.test(value.entityId)) return null
     if (value.action === 'core_directory.upgrade.advanced'

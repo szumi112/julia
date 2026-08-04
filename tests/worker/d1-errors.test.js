@@ -9,6 +9,20 @@ import {
 } from '../../worker/db/errors.js'
 import * as d1Errors from '../../worker/db/errors.js'
 
+it('maps only the exact unambiguous payment-correction guard and contains hostile messages', () => {
+  expect(d1Errors.classifyCoreConstraintError(
+    new Error('D1_ERROR: invalid_payment_correction: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')
+  )).toBe('PAYMENT_CORRECTION_CONFLICT')
+  for (const message of [
+    'charge_service_mismatch: SQLITE_CONSTRAINT',
+    'append_only: SQLITE_CONSTRAINT',
+    'transport invalid_payment_correction downstream',
+  ]) expect(d1Errors.classifyCoreConstraintError(new Error(message))).toBeNull()
+  const hostile = {}
+  Object.defineProperty(hostile, 'message', { get() { throw new Error('private-sql-marker') } })
+  expect(d1Errors.classifyCoreConstraintError(hostile)).toBeNull()
+})
+
 it('classifies only exact D1 guard errors', () => {
   expect(isD1IdentityCollision(new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT'))).toBe(true)
   expect(isD1LastActiveOwner(new Error('last_active_owner: SQLITE_CONSTRAINT'))).toBe(true)

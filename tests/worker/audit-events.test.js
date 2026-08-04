@@ -27,6 +27,46 @@ async function reasonFixture(auditEventId = 'aud_authorization_denied') {
 }
 
 describe('shared audit statement constructor', () => {
+  it.each([
+    ['client.created', 'client', 'cl_created', { clientVersion: 1, assignmentId: 'asg_created', assignmentVersion: 1 }],
+    ['client.updated', 'client', 'cl_updated', { clientVersion: 2 }],
+    ['client.assignment.changed', 'client', 'cl_assignment', { clientVersion: 2, closedAssignmentId: 'asg_old', closedAssignmentVersion: 2, newAssignmentId: 'asg_new', newAssignmentVersion: 1 }],
+    ['client.archived', 'client', 'cl_archived', { clientVersion: 3, assignmentId: 'asg_archived', assignmentVersion: 2 }],
+    ['appointment.created', 'appointment', 'apt_created', { appointmentVersion: 1, chargeVersion: 1 }],
+    ['appointment.updated', 'appointment', 'apt_updated', { appointmentVersion: 2, chargeVersion: 2 }],
+    ['appointment.cancelled', 'appointment', 'apt_cancelled', { appointmentVersion: 2, chargeVersion: 1 }],
+    ['payment.recorded', 'appointment', 'apt_paid', { appointmentVersion: 2, paymentEntryId: 'pay_recorded' }],
+    ['payment.corrected', 'payment_entry', 'pay_reversed', { appointmentVersion: 3, correctionId: 'cor_corrected', reversedEntryId: 'pay_reversed', replacementEntryId: null }],
+  ])('accepts only the exact core schema for %s/%s', async (action, entityType, entityId, metadata) => {
+    await env.DB.prepare(
+      `INSERT INTO staff_users
+       (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+        specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+       SELECT 'stf_core_actor','core_actor_lookup','{}','{}','owner','pending',NULL,
+              NULL,1,NULL,NULL,?,?
+       WHERE NOT EXISTS (SELECT 1 FROM staff_users WHERE id='stf_core_actor')`
+    ).bind(event.occurredAt, event.occurredAt).run()
+    const base = {
+      ...event,
+      id: `aud_${action.replaceAll('.', '_')}`,
+      actorStaffId: 'stf_core_actor',
+      action,
+      entityType,
+      entityId,
+      metadata,
+    }
+    await auditEventStatement(env.DB, base).run()
+    expect(JSON.parse((await env.DB.prepare(
+      'SELECT metadata_json FROM audit_events WHERE id=?'
+    ).bind(base.id).first()).metadata_json)).toEqual(metadata)
+    for (const malformed of [
+      {},
+      { ...metadata, extra: 1 },
+      { ...metadata, [Object.keys(metadata)[0]]: 0 },
+    ]) expect(() => auditEventStatement(env.DB, { ...base, id: `${base.id}_${Object.keys(malformed).length}`, metadata: malformed }))
+      .toThrow(/^AUDIT_EVENT_INVALID$/)
+  })
+
   it('accepts only the exact operational action resolution audit schema', async () => {
     const resolved = {
       ...event,

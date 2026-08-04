@@ -508,6 +508,15 @@ const AUDIT_FACTS = Object.freeze([
   Object.freeze({ action: 'staff.invited', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 1, specialistVersion: 1, staffVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'specialist.backfilled', entityType: 'specialist', entityId: 'sp_audit_backfilled', result: 'success', metadata: { specialistVersion: 1, stateVersion: 2 }, actorStaffId: null }),
   Object.freeze({ action: 'core_directory.upgrade.advanced', entityType: 'system_state', entityId: 'core_directory_specialist_backfill_v1', result: 'success', metadata: { createdCount: 0, processedCount: 1, stateVersion: 2 }, actorStaffId: null }),
+  Object.freeze({ action: 'client.created', entityType: 'client', entityId: 'cl_audit_created', result: 'success', metadata: { clientVersion: 1, assignmentId: 'asg_audit_created', assignmentVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'client.updated', entityType: 'client', entityId: 'cl_audit_updated', result: 'success', metadata: { clientVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'client.assignment.changed', entityType: 'client', entityId: 'cl_audit_assignment', result: 'success', metadata: { clientVersion: 2, closedAssignmentId: 'asg_audit_old', closedAssignmentVersion: 2, newAssignmentId: 'asg_audit_new', newAssignmentVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'client.archived', entityType: 'client', entityId: 'cl_audit_archived', result: 'success', metadata: { clientVersion: 3, assignmentId: 'asg_audit_archive', assignmentVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'appointment.created', entityType: 'appointment', entityId: 'apt_audit_created', result: 'success', metadata: { appointmentVersion: 1, chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'appointment.updated', entityType: 'appointment', entityId: 'apt_audit_updated', result: 'success', metadata: { appointmentVersion: 2, chargeVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'appointment.cancelled', entityType: 'appointment', entityId: 'apt_audit_cancelled', result: 'success', metadata: { appointmentVersion: 2, chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'payment.recorded', entityType: 'appointment', entityId: 'apt_audit_paid', result: 'success', metadata: { appointmentVersion: 2, paymentEntryId: 'pay_audit_recorded' }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'payment.corrected', entityType: 'payment_entry', entityId: 'pay_audit_reversed', result: 'success', metadata: { appointmentVersion: 3, correctionId: 'cor_audit_corrected', reversedEntryId: 'pay_audit_reversed', replacementEntryId: null }, actorStaffId: 'stf_audit_actor' }),
 ])
 
 const IDENTITY_AUDIT_ACTIONS = new Set([

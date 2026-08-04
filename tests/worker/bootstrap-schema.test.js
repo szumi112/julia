@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { expect, it } from 'vitest'
-import { inspectBootstrapSchema } from '../../scripts/bootstrap-core.js'
+import { inspectBootstrapSchema, normalizeBootstrapAuditEvent } from '../../scripts/bootstrap-core.js'
 import {
   applyCoreDirectoryStageB,
   completeCoreDirectoryStageA,
@@ -11,6 +11,29 @@ INSTEAD OF INSERT ON core_directory_invariant_failures
 BEGIN
   SELECT RAISE(ABORT, 'core_directory_invariant_failed');
 END`
+
+it('normalizes only the exact typed core audit metadata', () => {
+  const row = {
+    id: 'aud_bootstrap_core', occurred_at: '2027-01-15T10:00:00.000Z',
+    actor_staff_id: 'stf_bootstrap_core', action: 'payment.corrected',
+    entity_type: 'payment_entry', entity_id: 'pay_bootstrap_core', result: 'success',
+    reason_envelope: null, correlation_id: 'correlation_bootstrap_core',
+    metadata_json: '{"appointmentVersion":3,"correctionId":"cor_bootstrap_core","replacementEntryId":null,"reversedEntryId":"pay_bootstrap_core"}',
+  }
+  expect(normalizeBootstrapAuditEvent(row).metadata).toEqual({
+    appointmentVersion: 3,
+    correctionId: 'cor_bootstrap_core',
+    replacementEntryId: null,
+    reversedEntryId: 'pay_bootstrap_core',
+  })
+  for (const change of [
+    { actor_staff_id: null },
+    { entity_id: 'apt_wrong_prefix' },
+    { metadata_json: '{"appointmentVersion":3,"correctionId":"cor_bootstrap_core","replacementEntryId":null,"reversedEntryId":"apt_wrong"}' },
+    { metadata_json: '{"appointmentVersion":3,"correctionId":"cor_bootstrap_core","extra":1,"replacementEntryId":null,"reversedEntryId":"pay_bootstrap_core"}' },
+  ]) expect(() => normalizeBootstrapAuditEvent({ ...row, ...change }))
+    .toThrow(/^BOOTSTRAP_STATE_REFUSED$/)
+})
 
 it('requires completed stage B before passing exact schema preflight', async () => {
   await expect(inspectBootstrapSchema(env.DB)).resolves.toEqual({

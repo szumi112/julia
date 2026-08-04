@@ -30,6 +30,14 @@ const publicErrors = [
   ['NOT_FOUND', 404],
   ['METHOD_NOT_ALLOWED', 405],
   ['IDEMPOTENCY_CONFLICT', 409],
+  ['WORKSPACE_RESULT_LIMIT', 409],
+  ['CLIENT_STATUS_CONFLICT', 409],
+  ['CLIENT_ASSIGNMENT_CONFLICT', 409],
+  ['CLIENT_ARCHIVE_CONFLICT', 409],
+  ['APPOINTMENT_OVERLAP', 409],
+  ['APPOINTMENT_PAYMENT_CONFLICT', 409],
+  ['PAYMENT_AMOUNT_CONFLICT', 409],
+  ['PAYMENT_CORRECTION_CONFLICT', 409],
   ['LAST_ACTIVE_OWNER', 409],
   ['STAFF_INVITATION_CONFLICT', 409],
   ['VERSION_CONFLICT', 409],
@@ -632,7 +640,7 @@ describe('hardened API lifecycle', () => {
         error: {
           code,
           correlationId,
-          details: { field: 'email' },
+          ...(code === 'VALIDATION_FAILED' ? { details: { field: 'email' } } : {}),
         },
       })
       hasSecurityHeaders(response)
@@ -682,13 +690,48 @@ describe('closed public error map', () => {
     }
   })
 
-  it('does not expose specialistId as a generic validation field', async () => {
+  it('contains hostile error message and AppError property surfaces', async () => {
+    const hostileMessage = new Error('placeholder')
+    Object.defineProperty(hostileMessage, 'message', {
+      get() { throw new Error('private-message-marker') },
+    })
+    const hostileAppError = new Proxy(new AppError('VERSION_CONFLICT', {
+      currentVersion: 2,
+    }), {
+      get() { throw new Error('private-app-error-marker') },
+      getOwnPropertyDescriptor() { throw new Error('private-app-error-marker') },
+    })
+    for (const error of [hostileMessage, hostileAppError]) {
+      const response = apiError(error, correlationId)
+      expect(response.status).toBe(500)
+      expect(await response.json()).toEqual({
+        error: { code: 'INTERNAL_ERROR', correlationId },
+      })
+    }
+  })
+
+  it('exposes only code-specific safe detail shapes', async () => {
     const response = apiError(
       new AppError('VALIDATION_FAILED', { field: 'specialistId' }),
       correlationId,
     )
     expect(await response.json()).toEqual({
-      error: { code: 'VALIDATION_FAILED', correlationId },
+      error: { code: 'VALIDATION_FAILED', correlationId, details: { field: 'specialistId' } },
+    })
+    expect(await apiError(new AppError('VERSION_CONFLICT', {
+      currentVersion: 4, field: 'email', limit: 7,
+    }), correlationId).json()).toEqual({
+      error: { code: 'VERSION_CONFLICT', correlationId, details: { currentVersion: 4 } },
+    })
+    expect(await apiError(new AppError('WORKSPACE_RESULT_LIMIT', {
+      field: 'appointments', limit: 500, currentVersion: 4,
+    }), correlationId).json()).toEqual({
+      error: { code: 'WORKSPACE_RESULT_LIMIT', correlationId, details: { field: 'appointments', limit: 500 } },
+    })
+    expect(await apiError(new AppError('CLIENT_STATUS_CONFLICT', {
+      field: 'name', currentVersion: 4, limit: 7,
+    }), correlationId).json()).toEqual({
+      error: { code: 'CLIENT_STATUS_CONFLICT', correlationId },
     })
   })
 })
