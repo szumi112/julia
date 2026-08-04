@@ -131,7 +131,6 @@ describe('API shell', () => {
 describe('closed core route descriptors', () => {
   const origin = 'https://panel.bearwithme.pl'
   const commands = [
-    ['/api/v1/clients', { name: 'Ala', age: 12, status: 'active', specialistId: 'sp_one' }],
     ['/api/v1/clients/cl_one/edits', { expectedVersion: 1, name: 'Ala', age: 12, status: 'active', specialistId: 'sp_one' }],
     ['/api/v1/clients/cl_one/archive', { expectedVersion: 1 }],
     ['/api/v1/appointments', { clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', date: '2026-08-04', time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20000, location: null, status: 'scheduled' }],
@@ -178,7 +177,7 @@ describe('closed core route descriptors', () => {
     }).toThrow(TypeError)
   })
 
-  it.each(commands)('validates the closed shell once and keeps %s nonfunctional', async (path, body) => {
+  it.each(commands)('validates the closed shell once and keeps future route %s nonfunctional', async (path, body) => {
     const readJsonBodyOnce = vi.fn(async () => body)
     const input = deps({ db: coreBudgetDb(), readJsonBodyOnce, verifyCsrfToken: vi.fn(async () => true) })
     const response = await createApp(input).request(path, {
