@@ -14,8 +14,7 @@ import { SERVICE_BY_ID } from '../../src/services.js'
 import { encryptForScope } from '../security/envelope.js'
 import {
   assertClientKeyScope,
-  assertOwnershipConsumer,
-  verifyChargeOwnership,
+  createOwnershipBoundVersionFacade,
 } from './crypto.js'
 
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
@@ -188,38 +187,38 @@ function chargeSnapshot(entity) {
   }
 }
 
-function snapshotFor(entityType, entity, clientId, ownerFact, consumer) {
+function snapshotFor(entityType, entity, clientId, ownerFact, verifiedChargeOwner) {
   if (entityType === 'client') {
-    if (ownerFact !== null) fail()
+    if (ownerFact !== null || verifiedChargeOwner !== null) fail()
     const snapshot = clientSnapshot(entity)
     if (snapshot.id !== clientId) fail()
     return snapshot
   }
   if (entityType === 'client_assignment') {
-    if (ownerFact !== null) fail()
+    if (ownerFact !== null || verifiedChargeOwner !== null) fail()
     const snapshot = assignmentSnapshot(entity)
     if (snapshot.clientId !== clientId) fail()
     return snapshot
   }
   if (entityType === 'appointment') {
-    if (ownerFact !== null) fail()
+    if (ownerFact !== null || verifiedChargeOwner !== null) fail()
     const snapshot = appointmentSnapshot(entity)
     if (snapshot.clientId !== clientId) fail()
     return snapshot
   }
   if (entityType === 'session_charge') {
-    const owner = verifyChargeOwnership(consumer, ownerFact)
+    if (verifiedChargeOwner === null) fail()
     const snapshot = chargeSnapshot(entity)
-    if (owner.clientId !== clientId || owner.appointmentId !== snapshot.appointmentId) fail()
+    if (verifiedChargeOwner.clientId !== clientId
+      || verifiedChargeOwner.appointmentId !== snapshot.appointmentId) fail()
     return snapshot
   }
   fail()
 }
 
-export async function buildRecordVersion(db, context, consumer, input) {
+async function buildRecordVersion(db, context, input, verifiedChargeOwner) {
   try {
     if (!db?.prepare) fail()
-    assertOwnershipConsumer(consumer)
     const captured = captureExact(input, [
       'clientId', 'versionId', 'entityType', 'entity', 'changedByStaffId',
       'changedAt', 'correlationId', 'ownerFact',
@@ -232,7 +231,7 @@ export async function buildRecordVersion(db, context, consumer, input) {
     const current = requireContext(context, captured.clientId)
     const snapshot = snapshotFor(
       captured.entityType, captured.entity, captured.clientId, captured.ownerFact,
-      consumer,
+      verifiedChargeOwner,
     )
     const snapshotEnvelope = JSON.stringify(await encryptForScope(
       current.keyring,
@@ -264,5 +263,12 @@ export async function buildRecordVersion(db, context, consumer, input) {
       row.changed_by_staff_id, row.changed_at, row.correlation_id,
     )
     return Object.freeze({ row, statement })
+  } catch { fail() }
+}
+
+export function createRecordVersionBuilder(...args) {
+  try {
+    if (args.length !== 1) fail()
+    return createOwnershipBoundVersionFacade(args[0], buildRecordVersion)
   } catch { fail() }
 }

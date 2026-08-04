@@ -19,6 +19,7 @@ const DATA_KEY_KEYS = Object.freeze([
   'id', 'scope_type', 'scope_id', 'purpose', 'dek_version', 'wrapped_key_b64',
   'wrap_nonce_b64', 'kek_version', 'created_at', 'retired_at',
 ])
+const ownershipVerifiers = new WeakMap()
 
 const fail = () => { throw new Error('CRYPTO_FAILURE') }
 
@@ -38,6 +39,17 @@ const captureExact = (value, keys) => {
   } catch { fail() }
 }
 
+const sealedSurface = (entries) => {
+  const surface = Object.create(null)
+  for (const [key, value] of entries) Object.defineProperty(surface, key, {
+    configurable: false,
+    enumerable: true,
+    value,
+    writable: false,
+  })
+  return Object.freeze(surface)
+}
+
 export function clientKeyScope(clientId) {
   if (typeof clientId !== 'string' || !CLIENT_ID.test(clientId)) fail()
   return Object.freeze({ type: 'client', id: clientId, purpose: 'identity' })
@@ -51,47 +63,27 @@ export function assertClientKeyScope(scope) {
   return captured
 }
 
-class OwnershipConsumer {
-  #verifyCharge
-  #verifyPayment
-
-  constructor(verifyCharge, verifyPayment) {
-    this.#verifyCharge = verifyCharge
-    this.#verifyPayment = verifyPayment
-    Object.freeze(this)
-  }
-
-  verifyCharge(value) {
-    try { return this.#verifyCharge(value) } catch { fail() }
-  }
-
-  verifyPayment(value) {
-    try { return this.#verifyPayment(value) } catch { fail() }
-  }
-}
-
-const requireConsumer = (value) => {
+const requireOwnershipVerifiers = (value) => {
   try {
-    if (!(value instanceof OwnershipConsumer)) fail()
-    return value
+    if (value === null || typeof value !== 'object') fail()
+    const verifiers = ownershipVerifiers.get(value)
+    if (!verifiers) fail()
+    return verifiers
   } catch { fail() }
 }
 
-export function assertOwnershipConsumer(value) {
-  try { return requireConsumer(value) } catch { fail() }
+const verifyChargeOwnership = (consumer, value) => {
+  try { return requireOwnershipVerifiers(consumer).verifyCharge(value) } catch { fail() }
 }
 
-export function verifyChargeOwnership(consumer, value) {
-  try { return requireConsumer(consumer).verifyCharge(value) } catch { fail() }
-}
-
-export function verifyPaymentOwnership(consumer, value) {
-  try { return requireConsumer(consumer).verifyPayment(value) } catch { fail() }
+const verifyPaymentOwnership = (consumer, value) => {
+  try { return requireOwnershipVerifiers(consumer).verifyPayment(value) } catch { fail() }
 }
 
 // The composition root must inject `issuer` only into the repository that has just
-// authorized a joined ownership row, and inject `consumer` only into command/build
-// code. Issuance is deliberately pure here; this Task-8 boundary performs no D1 read.
+// authorized a joined ownership row. It uses the opaque `consumer` only to construct
+// bound command facades, then injects those facades into command code. Issuance is
+// deliberately pure here; this Task-8 boundary performs no D1 read.
 export function createOwnershipCapabilityBoundary(...args) {
   try {
     if (args.length !== 0) fail()
@@ -119,26 +111,59 @@ export function createOwnershipCapabilityBoundary(...args) {
       } catch { fail() }
     }
     const verifyCharge = (value) => {
-      if (!chargeFacts.has(value)) fail()
-      const fact = captureExact(value, ['clientId', 'appointmentId'])
-      if (typeof fact.clientId !== 'string' || !CLIENT_ID.test(fact.clientId)
-        || typeof fact.appointmentId !== 'string'
-        || !APPOINTMENT_ID.test(fact.appointmentId)) fail()
-      return fact
+      try {
+        if (!chargeFacts.has(value)) fail()
+        const fact = captureExact(value, ['clientId', 'appointmentId'])
+        if (typeof fact.clientId !== 'string' || !CLIENT_ID.test(fact.clientId)
+          || typeof fact.appointmentId !== 'string'
+          || !APPOINTMENT_ID.test(fact.appointmentId)) fail()
+        return fact
+      } catch { fail() }
     }
     const verifyPayment = (value) => {
-      if (!paymentFacts.has(value)) fail()
-      const fact = captureExact(value, ['clientId', 'appointmentId', 'paymentId'])
-      if (typeof fact.clientId !== 'string' || !CLIENT_ID.test(fact.clientId)
-        || typeof fact.appointmentId !== 'string'
-        || !APPOINTMENT_ID.test(fact.appointmentId)
-        || typeof fact.paymentId !== 'string' || !PAYMENT_ID.test(fact.paymentId)) fail()
-      return fact
+      try {
+        if (!paymentFacts.has(value)) fail()
+        const fact = captureExact(value, ['clientId', 'appointmentId', 'paymentId'])
+        if (typeof fact.clientId !== 'string' || !CLIENT_ID.test(fact.clientId)
+          || typeof fact.appointmentId !== 'string'
+          || !APPOINTMENT_ID.test(fact.appointmentId)
+          || typeof fact.paymentId !== 'string' || !PAYMENT_ID.test(fact.paymentId)) fail()
+        return fact
+      } catch { fail() }
     }
-    return Object.freeze({
-      issuer: Object.freeze({ issueCharge, issuePayment }),
-      consumer: new OwnershipConsumer(verifyCharge, verifyPayment),
-    })
+    const consumer = Object.freeze(Object.create(null))
+    ownershipVerifiers.set(consumer, sealedSurface([
+      ['verifyCharge', verifyCharge],
+      ['verifyPayment', verifyPayment],
+    ]))
+    const issuer = sealedSurface([
+      ['issueCharge', issueCharge],
+      ['issuePayment', issuePayment],
+    ])
+    return sealedSurface([['issuer', issuer], ['consumer', consumer]])
+  } catch { fail() }
+}
+
+export function createOwnershipBoundVersionFacade(...args) {
+  try {
+    if (args.length !== 2 || typeof args[1] !== 'function') fail()
+    const [consumer, operation] = args
+    requireOwnershipVerifiers(consumer)
+    const build = async (...buildArgs) => {
+      try {
+        if (buildArgs.length !== 3) fail()
+        const [db, context, input] = buildArgs
+        const captured = captureExact(input, [
+          'clientId', 'versionId', 'entityType', 'entity', 'changedByStaffId',
+          'changedAt', 'correlationId', 'ownerFact',
+        ])
+        const owner = captured.entityType === 'session_charge'
+          ? verifyChargeOwnership(consumer, captured.ownerFact)
+          : null
+        return await operation(db, context, captured, owner)
+      } catch { fail() }
+    }
+    return sealedSurface([['build', build]])
   } catch { fail() }
 }
 
@@ -243,7 +268,7 @@ export async function decryptClientIdentity(context, input) {
   } catch { fail() }
 }
 
-export async function encryptClientCorrectionReason(context, consumer, input) {
+async function encryptClientCorrectionReason(consumer, context, input) {
   try {
     const current = cryptoContext(context)
     const captured = captureExact(input, [
@@ -272,7 +297,7 @@ export async function encryptClientCorrectionReason(context, consumer, input) {
   } catch { fail() }
 }
 
-export async function decryptClientCorrectionReason(context, consumer, input) {
+async function decryptClientCorrectionReason(consumer, context, input) {
   try {
     const current = cryptoContext(context)
     const captured = captureExact(input, [
@@ -298,5 +323,26 @@ export async function decryptClientCorrectionReason(context, consumer, input) {
       },
     )
     return assertCorrectionReason(reason)
+  } catch { fail() }
+}
+
+export function createClientCorrectionCrypto(...args) {
+  try {
+    if (args.length !== 1) fail()
+    const [consumer] = args
+    requireOwnershipVerifiers(consumer)
+    const encrypt = async (...encryptArgs) => {
+      try {
+        if (encryptArgs.length !== 2) fail()
+        return await encryptClientCorrectionReason(consumer, ...encryptArgs)
+      } catch { fail() }
+    }
+    const decrypt = async (...decryptArgs) => {
+      try {
+        if (decryptArgs.length !== 2) fail()
+        return await decryptClientCorrectionReason(consumer, ...decryptArgs)
+      } catch { fail() }
+    }
+    return sealedSurface([['encrypt', encrypt], ['decrypt', decrypt]])
   } catch { fail() }
 }
