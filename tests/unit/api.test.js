@@ -553,6 +553,84 @@ test('recomputes payment aggregates and rejects incoherent correction relationsh
   }
 })
 
+test('workspace appointment lifecycle versions account for charges, payments, and corrections', async () => {
+  const edited = fullWorkspaceBody()
+  const editedAppointment = edited.data.appointments[0]
+  editedAppointment.version = 6
+  editedAppointment.charge.version = 2
+  editedAppointment.paymentEntries = [{
+    id: 'pay_chain_original', amountGrosze: 7_000, method: 'cash',
+    receivedAt: '2026-08-10T09:00:00.000Z',
+    correctedAt: '2026-08-10T10:00:00.000Z',
+    replacementEntryId: 'pay_chain_first',
+  }, {
+    id: 'pay_chain_first', amountGrosze: 8_000, method: 'card',
+    receivedAt: '2026-08-10T10:00:00.000Z',
+    correctedAt: '2026-08-10T11:00:00.000Z',
+    replacementEntryId: 'pay_chain_second',
+  }, {
+    id: 'pay_chain_second', amountGrosze: 18_000, method: 'transfer',
+    receivedAt: '2026-08-10T11:00:00.000Z', correctedAt: null,
+    replacementEntryId: null,
+  }]
+  editedAppointment.payment = {
+    status: 'paid', collectedGrosze: 18_000, outstandingGrosze: 0,
+    latestMethod: 'transfer', latestReceivedAt: '2026-08-10T11:00:00.000Z',
+  }
+  const accepted = queuedFetch(parsedResponse(edited))
+  const result = await createApiClient({ fetchImpl: accepted.fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+  assert.equal(result.appointments[0].version, 6)
+  assert.equal(result.appointments[0].charge.version, 2)
+
+  const invalid = [
+    (body) => {
+      const appointment = body.data.appointments[0]
+      appointment.version = 2
+      appointment.charge.version = 257
+      appointment.paymentEntries = []
+      appointment.payment = {
+        status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18_000,
+        latestMethod: null, latestReceivedAt: null,
+      }
+    },
+    (body) => { body.data.appointments[0].version = 2 },
+    (body) => {
+      const appointment = body.data.appointments[0]
+      appointment.version = 1
+      appointment.charge.version = 1
+      appointment.paymentEntries = []
+      appointment.payment = {
+        status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18_000,
+        latestMethod: null, latestReceivedAt: null,
+      }
+    },
+    (body) => {
+      const appointment = body.data.appointments[0]
+      appointment.version = 1
+      appointment.charge.version = 1
+      appointment.status = 'cancelled'
+      appointment.cancelledAt = appointment.updatedAt
+      appointment.paymentEntries = []
+      appointment.payment = {
+        status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0,
+        latestMethod: null, latestReceivedAt: null,
+      }
+    },
+  ]
+  for (const mutate of invalid) {
+    const body = fullWorkspaceBody()
+    mutate(body)
+    await rejectWorkspaceBody(body)
+  }
+
+  const equalChronology = structuredClone(edited)
+  equalChronology.data.appointments[0].paymentEntries[0].correctedAt =
+    equalChronology.data.appointments[0].paymentEntries[1].correctedAt
+  await rejectWorkspaceBody(equalChronology)
+})
+
 test('rejects duplicate IDs and noncanonical directory and appointment ordering', async () => {
   const cases = [
     (body) => { body.data.specialists.push(structuredClone(body.data.specialists[0])) },
@@ -652,6 +730,7 @@ test('accepts every workspace cap boundary and rejects overflow without truncati
     replacementEntryId: null,
   }))
   Object.assign(payments.data.appointments[0].charge, { expectedAmountGrosze: 1_000 })
+  payments.data.appointments[0].version = 1_001
   payments.data.appointments[0].paymentEntries = paymentEntries
   payments.data.appointments[0].payment = {
     status: 'paid', collectedGrosze: 1_000, outstandingGrosze: 0,
@@ -717,10 +796,12 @@ test('accepts every workspace cap boundary and rejects overflow without truncati
     replacementEntryId: null,
   }))
   first.charge.expectedAmountGrosze = 600
+  first.version = 601
   first.paymentEntries = entriesFor(0, 600)
   first.payment = { status: 'paid', collectedGrosze: 600, outstandingGrosze: 0,
     latestMethod: 'cash', latestReceivedAt: '2026-08-10T11:00:00.000Z' }
   second.charge.expectedAmountGrosze = 401
+  second.version = 402
   second.paymentEntries = entriesFor(600, 401)
   second.payment = { status: 'paid', collectedGrosze: 401, outstandingGrosze: 0,
     latestMethod: 'cash', latestReceivedAt: '2026-08-10T11:00:00.000Z' }
@@ -3468,7 +3549,8 @@ test('ledger response validation enforces binary payment graphs, aggregates, and
     },
     paymentEntries: [{
       id: 'pay_A-entry', amountGrosze: 100, method: 'cash',
-      receivedAt: '2026-08-04T10:00:00.000Z', correctedAt,
+      receivedAt: '2026-08-04T10:00:00.000Z',
+      correctedAt: '2026-08-04T11:00:00.000Z',
       replacementEntryId: 'pay_A_entry',
     }, {
       id: 'pay_A_entry', amountGrosze: 200, method: 'card',
@@ -3512,6 +3594,11 @@ test('ledger response validation enforces binary payment graphs, aggregates, and
       paymentEntries: valid.paymentEntries.map((entry, index) => index === 1
         ? { ...entry, receivedAt: '2026-08-04T09:59:00.000Z' } : entry),
     })],
+    ['equal correction chronology', appointmentEnvelope({
+      ...valid,
+      paymentEntries: valid.paymentEntries.map((entry, index) => index === 0
+        ? { ...entry, correctedAt } : entry),
+    })],
     ['cycle', appointmentEnvelope({
       ...valid,
       paymentEntries: valid.paymentEntries.map((entry, index) => index === 2
@@ -3538,6 +3625,39 @@ test('ledger response validation enforces binary payment graphs, aggregates, and
       })
     })
   }
+})
+
+test('ledger commands reject impossible charge and appointment lifecycle versions', async () => {
+  const editResponse = ledgerAppointment({
+    version: 2, updatedAt: '2026-08-04T09:00:00.000Z', charge: { version: 257 },
+  })
+  const correctionResponse = ledgerAppointment({
+    version: 2, status: 'completed', updatedAt: '2026-08-04T10:00:00.000Z',
+    payment: {
+      status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18_000,
+      latestMethod: null, latestReceivedAt: null,
+    },
+    paymentEntries: [{
+      id: 'pay_impossible', amountGrosze: 1_000, method: 'cash',
+      receivedAt: '2026-08-04T09:00:00.000Z',
+      correctedAt: '2026-08-04T10:00:00.000Z', replacementEntryId: null,
+    }],
+  })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()), jsonResponse(appointmentEnvelope(editResponse)),
+    jsonResponse(appointmentEnvelope(correctionResponse)),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+  await assert.rejects(client.editAppointment('apt_ola_august', 1, {
+    specialistId: 'sp_anna', serviceId: 'zajecia', date: '2026-08-10', time: '10:00',
+    durationMinutes: 50, expectedAmountGrosze: 18_000, location: 'Gabinet 1',
+    status: 'scheduled',
+  }, { idempotencyKey: 'ledger-charge-version-key-0001' }), assertInvalidResponse)
+  await assert.rejects(client.correctPayment('pay_impossible', 1, {
+    reason: 'Niemożliwa historia', replacement: null,
+  }, { idempotencyKey: 'ledger-correction-version-key-0002' }), assertInvalidResponse)
+  assert.equal(queued.calls.length, 3)
 })
 
 test('ledger commands reuse one key for one CSRF refresh and require explicit replay after uncertainty', async () => {

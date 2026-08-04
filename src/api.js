@@ -508,7 +508,8 @@ const captureWorkspaceAppointment = (raw, bounds = null) => {
   if (!charge || typeof charge.id !== 'string' || !CHARGE_ID.test(charge.id)
     || charge.serviceId !== value.serviceId
     || !workspacePositive(charge.expectedAmountGrosze, 1_000_000)
-    || charge.currency !== 'PLN' || !workspacePositive(charge.version, 257)) return null
+    || charge.currency !== 'PLN' || !workspacePositive(charge.version, 257)
+    || charge.version > value.version) return null
 
   const payment = captureDataObject(value.payment, [
     'status', 'collectedGrosze', 'outstandingGrosze', 'latestMethod', 'latestReceivedAt',
@@ -538,7 +539,7 @@ const captureWorkspaceAppointment = (raw, bounds = null) => {
     if (!replacement || entry.replacementEntryId === entry.id
       || replacementTargets.has(entry.replacementEntryId)
       || (replacement.correctedAt !== null
-        && replacement.correctedAt < entry.correctedAt)) return null
+        && replacement.correctedAt <= entry.correctedAt)) return null
     replacementTargets.add(entry.replacementEntryId)
     replacementLinks.set(entry.id, entry.replacementEntryId)
   }
@@ -551,6 +552,16 @@ const captureWorkspaceAppointment = (raw, bounds = null) => {
       current = replacementLinks.get(current)
     }
   }
+  const initialPaymentCount = entries.length - replacementTargets.size
+  const correctionCount = entries.reduce(
+    (count, entry) => count + (entry.correctedAt === null ? 0 : 1), 0,
+  )
+  const minimumVersion = 1 + initialPaymentCount + correctionCount
+  if (value.version < minimumVersion
+    || (value.version === 1 && (charge.version !== 1 || entries.length !== 0
+      || value.cancelledAt !== null || value.createdAt !== value.updatedAt))
+    || (value.version > 1 && value.updatedAt <= value.createdAt)
+    || (value.status === 'cancelled' && value.version < 2)) return null
   let collected = 0
   const effective = []
   for (const entry of entries) {
