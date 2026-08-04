@@ -1223,7 +1223,7 @@ const decryptRetainedSnapshot = async (context, entityId, envelope) => {
   }
 }
 
-const paymentAggregateFor = (status, amount, collected) => Object.freeze({
+export const paymentAggregateFor = (status, amount, collected) => Object.freeze({
   status: collected === 0 ? 'unpaid' : collected === amount ? 'paid' : 'partial',
   collectedGrosze: collected,
   outstandingGrosze: ['completed', 'noshow'].includes(status) ? amount - collected : 0,
@@ -1427,7 +1427,7 @@ const authenticatePaymentHistory = async (
   })
 }
 
-const editAppointmentDto = (appointment, charge, payment) => Object.freeze({
+export const appointmentLedgerDto = (appointment, charge, payment) => Object.freeze({
   id: appointment.id, clientId: appointment.clientId,
   specialistId: appointment.specialistId, serviceId: appointment.serviceId,
   startsAt: appointment.startsAt, endsAt: appointment.endsAt,
@@ -1550,7 +1550,7 @@ const validateEditReplay = (value, appointmentId, request) => {
     || (latest?.receivedAt ?? null) !== payment.latestReceivedAt) cryptoFailure()
   const normalizedPayment = Object.freeze({ ...payment, entries: Object.freeze(entries) })
   return Object.freeze({ status: 200, body: Object.freeze({
-    data: Object.freeze({ appointment: editAppointmentDto(appointment, charge, normalizedPayment) }),
+    data: Object.freeze({ appointment: appointmentLedgerDto(appointment, charge, normalizedPayment) }),
   }) })
 }
 
@@ -2024,7 +2024,7 @@ export async function editAppointment(input) {
   })
   const response = Object.freeze({ status: 200, body: Object.freeze({
     data: Object.freeze({
-      appointment: editAppointmentDto(appointment, charge, responsePayment),
+      appointment: appointmentLedgerDto(appointment, charge, responsePayment),
     }),
   }) })
   const idempotency = await createIdempotencyStatement(command.db, current.context, {
@@ -2290,7 +2290,9 @@ const cancellationScopedFact = (value, appointmentId, terminal = false) => {
   })
 }
 
-const retainedCancellationState = async (command, actor, terminal = false) => {
+const retainedCancellationState = async (
+  command, actor, terminal = false, capability = 'appointment.manage',
+) => {
   const retained = cancellationScopedFact(
     await loadScopedAppointmentForCancellation(
       command.db, command.appointmentId, actor, terminal,
@@ -2298,7 +2300,7 @@ const retainedCancellationState = async (command, actor, terminal = false) => {
     command.appointmentId,
     terminal,
   )
-  if (!authorize(actor, 'appointment.manage', {
+  if (!authorize(actor, capability, {
     kind: 'appointment', appointmentId: retained.appointment.id,
     specialistId: retained.appointment.specialistId,
   }, { nowMs: command.nowMs })) notFound()
@@ -2335,6 +2337,10 @@ const retainedCancellationState = async (command, actor, terminal = false) => {
     await loadEntityVersions(command.db, retained.charge.id),
   )
   return Object.freeze({ ...retained, context, payment })
+}
+
+export async function loadAuthenticatedAppointmentLedger(command, actor) {
+  return retainedCancellationState(command, actor, false, 'payment.manage')
 }
 
 const assertCancellationPaymentTransition = (current) => {
@@ -2423,7 +2429,7 @@ const validateCancelReplay = (value, appointmentId, request) => {
     }
   }
   return Object.freeze({ status: 200, body: Object.freeze({
-    data: Object.freeze({ appointment: editAppointmentDto(
+    data: Object.freeze({ appointment: appointmentLedgerDto(
       appointment, charge, Object.freeze({ ...payment, entries: Object.freeze(entries) }),
     ) }),
   }) })
@@ -2629,7 +2635,7 @@ const authenticateTerminalCancellationProof = async (
   })
   const expectedResponse = Object.freeze({ status: 200, body: Object.freeze({
     data: Object.freeze({
-      appointment: editAppointmentDto(appointment, charge, Object.freeze({
+      appointment: appointmentLedgerDto(appointment, charge, Object.freeze({
         status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0,
         latestMethod: null, latestReceivedAt: null, entries: payment.entries,
       })),
@@ -2772,7 +2778,7 @@ export async function cancelAppointment(input) {
   })
   const response = Object.freeze({ status: 200, body: Object.freeze({
     data: Object.freeze({
-      appointment: editAppointmentDto(appointment, current.charge, responsePayment),
+      appointment: appointmentLedgerDto(appointment, current.charge, responsePayment),
     }),
   }) })
   const appointmentVersion = await versionBuilder.build(command.db, current.context, {

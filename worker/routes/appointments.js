@@ -6,6 +6,10 @@ import {
   validateCreateAppointmentBody,
   validateEditAppointmentBody,
 } from '../core/appointments.js'
+import {
+  recordAppointmentPayment,
+  validateRecordPaymentBody,
+} from '../core/payments.js'
 import { AppError } from '../http/errors.js'
 
 const BASE_KEYS = Object.freeze([
@@ -103,6 +107,27 @@ export async function postAppointmentCancellation(input) {
     const message = validationMessage(error)
     const match = typeof message === 'string'
       ? /^VALIDATION_FAILED\/(body|appointmentId|expectedVersion)$/.exec(message)
+      : null
+    if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
+    throw error
+  }
+}
+
+export async function postAppointmentPayment(input) {
+  const captured = capture(input, EDIT_KEYS, 'recordPayment')
+  const service = captured.recordPayment ?? recordAppointmentPayment
+  if (typeof service !== 'function') throw new Error('INTERNAL_ERROR')
+  try {
+    if (typeof captured.appointmentId !== 'string'
+      || !APPOINTMENT_ID.test(captured.appointmentId)) {
+      throw new TypeError('VALIDATION_FAILED/appointmentId')
+    }
+    validateRecordPaymentBody(captured.body)
+    return await service(Object.fromEntries(EDIT_KEYS.map((key) => [key, captured[key]])))
+  } catch (error) {
+    const message = validationMessage(error)
+    const match = typeof message === 'string'
+      ? /^VALIDATION_FAILED\/(body|appointmentId|expectedVersion|amountGrosze|method|receivedAt)$/.exec(message)
       : null
     if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
     throw error
