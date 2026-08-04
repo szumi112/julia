@@ -5,6 +5,10 @@ import {
   inspectStoredScopeIdempotency,
   recoverStoredScopeIdempotencyAfterCollision,
 } from '../../worker/db/unit-of-work.js'
+import {
+  areSiblingD1QueryBudgetViews,
+  createD1QueryBudget,
+} from '../../worker/db/query-budget.js'
 import { buildClientDataKey } from '../../worker/core/crypto.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { decodeBase64Url, encodeBase64Url } from '../../worker/security/encoding.js'
@@ -236,6 +240,19 @@ describe('stored-client-scope idempotency', () => {
     ])
     expect(observed.calls.flatMap(({ values }) => values)).not.toContain('staff_directory')
     expect(observed.mutations()).toBe(0)
+  })
+
+  it('uses the exact sibling recovery view for bounded stored-scope collision replay', async () => {
+    const winner = await storeWinner('budgeted_recovery')
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+
+    expect(areSiblingD1QueryBudgetViews(budget.work, budget.recovery)).toBe(true)
+    await expect(recoverStoredScopeIdempotencyAfterCollision(
+      budget.recovery, winner.keyring, winner.input, collision(),
+    )).resolves.toEqual(winner.response)
+    expect(budget.usage()).toEqual({
+      used: 2, remaining: 48, workRemaining: 40, totalLimit: 50, recoveryReserve: 8,
+    })
   })
 
   it('uses one descriptor snapshot for hostile but stable input and authoritative-row proxies', async () => {

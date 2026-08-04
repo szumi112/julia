@@ -87,6 +87,59 @@ describe('D1-authoritative staff resolution', () => {
     expect((await env.DB.prepare('SELECT count(*) AS count FROM staff_users').first()).count).toBe(0)
   })
 
+  it('keeps a prepare-only legacy active path compatible when recovery is omitted', async () => {
+    const context = await cryptoContext()
+    const principal = { kind: 'human', subject: 'access-prepare-only', normalizedEmail: 'prepare-only@example.test' }
+    await seedPending(context, { staffId: 'stf_prepare_only', invitationId: 'inv_prepare_only', email: principal.normalizedEmail })
+    await resolveActor(env.DB, principal, context, {
+      nowMs: NOW_MS, correlationId: 'corr_prepare_only_seed', idFactory: ids('prepare_only_seed'),
+    })
+    const prepareOnly = { prepare: env.DB.prepare.bind(env.DB) }
+
+    await expect(resolveActor(prepareOnly, principal, context, {
+      nowMs: NOW_MS, correlationId: 'corr_prepare_only', idFactory: ids('prepare_only'),
+    })).resolves.toEqual({ id: 'stf_prepare_only', role: 'owner', specialistId: null, version: 2 })
+  })
+
+  it('rejects arbitrary, foreign, proxied, accessor, and inherited recovery views before D1', async () => {
+    const context = await cryptoContext()
+    const principal = { kind: 'human', subject: 'access-sibling', normalizedEmail: 'sibling@example.test' }
+    await seedPending(context, { staffId: 'stf_sibling', invitationId: 'inv_sibling', email: principal.normalizedEmail })
+    await resolveActor(env.DB, principal, context, {
+      nowMs: NOW_MS, correlationId: 'corr_sibling_seed', idFactory: ids('sibling_seed'),
+    })
+    const first = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    const second = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    const arbitrary = { prepare: env.DB.prepare.bind(env.DB), batch: env.DB.batch.bind(env.DB) }
+    const candidates = [arbitrary, second.recovery, new Proxy(first.recovery, {}), Object.create(first.recovery)]
+    for (const recoveryDb of candidates) {
+      await expect(resolveActor(first.work, principal, context, {
+        nowMs: NOW_MS, correlationId: 'corr_sibling_reject', idFactory: ids('sibling_reject'), recoveryDb,
+      })).rejects.toThrow(/^IDENTITY_FAILURE$/)
+      expect(first.usage().used).toBe(0)
+    }
+
+    let getterCalls = 0
+    const accessorOptions = {
+      nowMs: NOW_MS, correlationId: 'corr_sibling_accessor', idFactory: ids('sibling_accessor'),
+    }
+    Object.defineProperty(accessorOptions, 'recoveryDb', {
+      enumerable: true,
+      get() { getterCalls += 1; return first.recovery },
+    })
+    await expect(resolveActor(first.work, principal, context, accessorOptions))
+      .rejects.toThrow(/^IDENTITY_FAILURE$/)
+    expect(getterCalls).toBe(0)
+
+    const inheritedOptions = Object.create({ recoveryDb: first.recovery })
+    Object.assign(inheritedOptions, {
+      nowMs: NOW_MS, correlationId: 'corr_sibling_inherited', idFactory: ids('sibling_inherited'),
+    })
+    await expect(resolveActor(first.work, principal, context, inheritedOptions))
+      .rejects.toThrow(/^IDENTITY_FAILURE$/)
+    expect(first.usage().used).toBe(0)
+  })
+
   it('activates exactly the pending invited staff and returns no PII', async () => {
     const context = await cryptoContext()
     await seedPending(context)
@@ -168,14 +221,10 @@ describe('D1-authoritative staff resolution', () => {
     const context = await cryptoContext()
     await seedPending(context, { staffId: 'stf_frozen_race', invitationId: 'inv_frozen_race', email: 'frozen-race@example.test' })
     const loserGate = blockedBatchDb({ freezeError: true })
-    const recoverySql = []
-    const recoveryDb = {
-      prepare(sql) { recoverySql.push(sql); return env.DB.prepare(sql) },
-      batch() { throw new Error('recovery batch must not run') },
-    }
+    const budget = createD1QueryBudget(loserGate.db, { totalLimit: 50, recoveryReserve: 8 })
     const principal = { kind: 'human', subject: 'access-frozen-race', normalizedEmail: 'frozen-race@example.test' }
-    const loser = resolveActor(loserGate.db, principal, context, {
-      nowMs: NOW_MS, correlationId: 'corr_frozen_loser', idFactory: ids('frozen_loser'), recoveryDb,
+    const loser = resolveActor(budget.work, principal, context, {
+      nowMs: NOW_MS, correlationId: 'corr_frozen_loser', idFactory: ids('frozen_loser'), recoveryDb: budget.recovery,
     })
     const loserExpectation = expect(loser).resolves.toEqual({ id: 'stf_frozen_race', role: 'owner', specialistId: null, version: 2 })
     await loserGate.entered
@@ -183,8 +232,9 @@ describe('D1-authoritative staff resolution', () => {
     loserGate.release()
     await loserExpectation
     expect(winner).toEqual({ id: 'stf_frozen_race', role: 'owner', specialistId: null, version: 2 })
-    expect(recoverySql.length).toBeGreaterThan(0)
-    expect(recoverySql.every((sql) => /^SELECT\b/.test(sql.trim()))).toBe(true)
+    expect(budget.usage()).toEqual({
+      used: 20, remaining: 30, workRemaining: 22, totalLimit: 50, recoveryReserve: 8,
+    })
   })
 
   it.each([
@@ -288,17 +338,14 @@ describe('D1-authoritative staff resolution', () => {
       prepare: env.DB.prepare.bind(env.DB),
       batch: async () => { throw new Error('D1_ERROR: raw-sql-marker@example.test') },
     }
-    let recoveryCalls = 0
-    await expect(resolveActor(db, {
+    const budget = createD1QueryBudget(db, { totalLimit: 50, recoveryReserve: 8 })
+    await expect(resolveActor(budget.work, {
       kind: 'human', subject: 'access-sql-marker', normalizedEmail: 'sql-failure@example.test',
     }, context, {
       nowMs: NOW_MS, correlationId: 'corr_sql_failure', idFactory: ids('sql_failure'),
-      recoveryDb: {
-        prepare() { recoveryCalls += 1; throw new Error('recovery must remain unused') },
-        batch() { recoveryCalls += 1; throw new Error('recovery must remain unused') },
-      },
+      recoveryDb: budget.recovery,
     })).rejects.toThrow(/^IDENTITY_FAILURE$/)
-    expect(recoveryCalls).toBe(0)
+    expect(budget.usage().used).toBe(12)
   })
 
   it('keeps active, pending activation, and lazy reindex ordinary work below the 42-query ceiling', async () => {

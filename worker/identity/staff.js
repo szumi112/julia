@@ -1,5 +1,6 @@
 import { auditEventStatement } from '../audit/events.js'
 import { isD1IdentityCollision } from '../db/errors.js'
+import { areSiblingD1QueryBudgetViews } from '../db/query-budget.js'
 import { blindEmailCandidates, blindEmailIndex, decryptForScope, encryptForScope } from '../security/envelope.js'
 import {
   prepareSpecialistTransition,
@@ -25,6 +26,29 @@ const statementId = (factory) => {
 }
 const entityType = (table) => table === 'staff_users' ? 'staff_user' : 'staff_invitation'
 const collision = isD1IdentityCollision
+
+function recoveryDbFor(db, options) {
+  if (options === null || (typeof options !== 'object' && typeof options !== 'function')) throw failure()
+  let current = options
+  const seen = new Set()
+  try {
+    for (let depth = 0; current !== null && depth < 64; depth += 1) {
+      if (seen.has(current)) throw failure()
+      seen.add(current)
+      const descriptor = Object.getOwnPropertyDescriptor(current, 'recoveryDb')
+      if (descriptor) {
+        if (depth !== 0 || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')
+          || !areSiblingD1QueryBudgetViews(db, descriptor.value)) throw failure()
+        return descriptor.value
+      }
+      current = Object.getPrototypeOf(current)
+    }
+    if (current !== null) throw failure()
+    return db
+  } catch {
+    throw failure()
+  }
+}
 
 function requireContext(context) {
   if (!context?.keyring || !context?.dataKey || !context?.scope) throw failure()
@@ -264,20 +288,19 @@ async function activate(db, staff, invitation, principal, context, values, optio
   return asActor(staffNext)
 }
 
-async function reindexOne(db, context, table, row, activeLookup, options) {
-  const recoveryDb = options.recoveryDb ?? db
+async function reindexOne(db, context, table, row, activeLookup, options, recoveryDb = db, changedByStaffId = options.changedByStaffId ?? null) {
   if (row.email_lookup === activeLookup) return false
   const now = iso(options.nowMs)
   const next = { ...row, email_lookup: activeLookup, version: row.version + 1, updated_at: now }
   const update = db.prepare(`UPDATE ${table} SET email_lookup=?,version=version+1,updated_at=? WHERE id=? AND version=?`)
     .bind(activeLookup, now, row.id, row.version)
-  const version = await recordVersionStatement(db, context, table, row, next, { now, correlationId: options.correlationId, idFactory: options.idFactory, changedByStaffId: options.changedByStaffId ?? null })
+  const version = await recordVersionStatement(db, context, table, row, next, { now, correlationId: options.correlationId, idFactory: options.idFactory, changedByStaffId })
   const auditId = statementId(options.idFactory)
   const attempt = Object.freeze({ versionId: version.id, auditId })
   const statements = [
     update,
     version.statement,
-    (options.auditEventStatement ?? auditEventStatement)(db, { id: auditId, occurredAt: now, actorStaffId: options.changedByStaffId ?? null, action: 'identity.reindex', entityType: entityType(table), entityId: row.id, result: 'success', correlationId: options.correlationId, metadata: { version: next.version }, reasonEnvelope: null }),
+    (options.auditEventStatement ?? auditEventStatement)(db, { id: auditId, occurredAt: now, actorStaffId: changedByStaffId, action: 'identity.reindex', entityType: entityType(table), entityId: row.id, result: 'success', correlationId: options.correlationId, metadata: { version: next.version }, reasonEnvelope: null }),
     guardStatement(db, table, row, { email_lookup: activeLookup, version: next.version }),
   ]
   try {
@@ -294,11 +317,9 @@ async function reindexOne(db, context, table, row, activeLookup, options) {
   }
 }
 
-async function resolveActorInternal(db, principal, cryptoContext, options = {}) {
+async function resolveActorInternal(db, principal, cryptoContext, options, recoveryDb) {
   const context = requireContext(cryptoContext)
-  const recoveryDb = options.recoveryDb ?? db
   if (!db?.prepare || principal?.kind !== 'human' || typeof principal.subject !== 'string' || !principal.subject || typeof principal.normalizedEmail !== 'string' || !principal.normalizedEmail) throw denied()
-  if (!recoveryDb?.prepare || !recoveryDb?.batch) throw failure()
   const candidates = await blindEmailCandidates(principal.normalizedEmail, context.keyring)
   const now = iso(options.nowMs)
   const [rows, boundRows] = await Promise.all([matchingStaff(db, candidates), activeForSubject(db, principal.subject)])
@@ -319,7 +340,7 @@ async function resolveActorInternal(db, principal, cryptoContext, options = {}) 
       throw denied()
     }
     if (staff.email_lookup !== activeLookup) {
-      try { await reindexOne(db, context, 'staff_users', staff, activeLookup, { ...options, changedByStaffId: staff.id }) } catch { throw denied() }
+      try { await reindexOne(db, context, 'staff_users', staff, activeLookup, options, recoveryDb, staff.id) } catch { throw denied() }
       const current = await db.prepare('SELECT id,role,specialist_id,version,access_subject,status FROM staff_users WHERE id=?').bind(staff.id).first()
       if (!current || current.status !== 'active' || current.access_subject !== principal.subject) throw denied()
       return asActor(current)
@@ -357,7 +378,7 @@ async function resolveActorInternal(db, principal, cryptoContext, options = {}) 
 
 export async function resolveActor(db, principal, cryptoContext, options = {}) {
   try {
-    return await resolveActorInternal(db, principal, cryptoContext, options)
+    return await resolveActorInternal(db, principal, cryptoContext, options, recoveryDbFor(db, options))
   } catch (error) {
     if (error?.message === 'ACCESS_DENIED') throw denied()
     if (error?.message === 'IDENTITY_FAILURE') throw failure()

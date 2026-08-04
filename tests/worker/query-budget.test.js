@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   D1_QUERY_BUDGET_EXCEEDED,
+  areSiblingD1QueryBudgetViews,
   createD1QueryBudget,
 } from '../../worker/db/query-budget.js'
 
@@ -49,6 +50,118 @@ describe('invocation-scoped D1 query budget', () => {
         .toThrow('D1_QUERY_BUDGET_INVALID')
     }
     expect(db.calls).toEqual([])
+  })
+
+  it('rejects proxied and inherited nested views before touching visible DB methods', () => {
+    const db = fakeDb()
+    const budget = createD1QueryBudget(db, { totalLimit: 50, recoveryReserve: 8 })
+    const candidates = []
+    for (const view of [budget.work, budget.recovery]) {
+      candidates.push(new Proxy(view, {}), Object.create(view))
+      const inherited = Object.create(view)
+      Object.defineProperties(inherited, {
+        prepare: { get() { throw new Error('nested prepare marker') } },
+        batch: { get() { throw new Error('nested batch marker') } },
+      })
+      candidates.push(inherited)
+      candidates.push(new Proxy(view, {
+        ownKeys(target) {
+          return Reflect.ownKeys(target).filter((key) => typeof key !== 'symbol')
+        },
+      }))
+      candidates.push(new Proxy(Object.create(view), {
+        getPrototypeOf() { return null },
+      }))
+    }
+
+    for (const candidate of candidates) {
+      expect(() => createD1QueryBudget(candidate, { totalLimit: 50, recoveryReserve: 8 }))
+        .toThrow('D1_QUERY_BUDGET_INVALID')
+    }
+    expect(db.calls).toEqual([])
+  })
+
+  it('keeps an exact frozen enumerable view surface and unforgeable sibling provenance', () => {
+    const first = createD1QueryBudget(fakeDb(), { totalLimit: 50, recoveryReserve: 8 })
+    const second = createD1QueryBudget(fakeDb(), { totalLimit: 50, recoveryReserve: 8 })
+
+    expect(Object.keys(first.work)).toEqual(['prepare', 'batch'])
+    expect(Object.keys(first.recovery)).toEqual(['prepare', 'batch'])
+    expect(Object.isFrozen(first.work)).toBe(true)
+    expect(Object.isFrozen(first.recovery)).toBe(true)
+    expect(areSiblingD1QueryBudgetViews(first.work, first.recovery)).toBe(true)
+    for (const pair of [
+      [first.recovery, first.work],
+      [first.work, first.work],
+      [first.work, second.recovery],
+      [first.work, new Proxy(first.recovery, {})],
+      [Object.create(first.work), first.recovery],
+      [fakeDb(), first.recovery],
+    ]) expect(areSiblingD1QueryBudgetViews(...pair)).toBe(false)
+  })
+
+  it('snapshots one exact dense batch without calling caller methods or rereading it', async () => {
+    const db = fakeDb()
+    const budget = createD1QueryBudget(db, { totalLimit: 5, recoveryReserve: 1 })
+    const statements = [
+      budget.work.prepare('SELECT stable_1'),
+      budget.work.prepare('SELECT stable_2'),
+    ]
+    let mapCalls = 0
+    Object.defineProperty(statements, 'map', {
+      value() { mapCalls += 1; return [] },
+      enumerable: false,
+    })
+
+    expect(() => budget.work.batch(statements)).toThrow('D1_QUERY_BUDGET_INVALID')
+    expect(mapCalls).toBe(0)
+    expect(budget.usage().used).toBe(0)
+    expect(db.calls).toEqual([])
+
+    await budget.work.batch([
+      budget.work.prepare('SELECT exact_1'),
+      budget.work.prepare('SELECT exact_2'),
+    ])
+    expect(db.calls).toEqual([{ method: 'batch', statements: ['SELECT exact_1', 'SELECT exact_2'] }])
+    expect(budget.usage().used).toBe(2)
+  })
+
+  it.each([
+    ['hole', () => new Array(1)],
+    ['accessor', () => {
+      const value = []
+      Object.defineProperty(value, '0', { enumerable: true, get() { throw new Error('item marker') } })
+      return value
+    }],
+    ['extra key', (statement) => Object.assign([statement], { extra: true })],
+    ['symbol key', (statement) => Object.assign([statement], { [Symbol('extra')]: true })],
+    ['hostile proxy', (statement) => new Proxy([statement], { ownKeys() { throw new Error('batch marker') } })],
+  ])('rejects a malformed batch snapshot: %s', (_label, build) => {
+    const db = fakeDb()
+    const budget = createD1QueryBudget(db, { totalLimit: 5, recoveryReserve: 1 })
+    const statement = budget.work.prepare('SELECT member')
+
+    expect(() => budget.work.batch(build(statement))).toThrow('D1_QUERY_BUDGET_INVALID')
+    expect(budget.usage().used).toBe(0)
+    expect(db.calls).toEqual([])
+  })
+
+  it('rejects raw, foreign-budget, proxied, and cross-DB statements before admission', () => {
+    const db = fakeDb()
+    const budget = createD1QueryBudget(db, { totalLimit: 5, recoveryReserve: 1 })
+    const foreign = createD1QueryBudget(fakeDb(), { totalLimit: 5, recoveryReserve: 1 })
+    const own = budget.work.prepare('SELECT own')
+    const candidates = [
+      { bind() {}, run() {}, first() {}, all() {}, raw() {} },
+      foreign.work.prepare('SELECT foreign'),
+      new Proxy(own, {}),
+    ]
+
+    for (const candidate of candidates) {
+      expect(() => budget.work.batch([candidate])).toThrow('D1_QUERY_BUDGET_INVALID')
+      expect(budget.usage().used).toBe(0)
+      expect(db.calls).toEqual([])
+    }
   })
 
   it('captures the raw DB methods once and ignores later replacement', async () => {
