@@ -18,6 +18,7 @@ import {
   hasSpecialistOverlap,
   isAppointmentId,
   isClientId,
+  isWellFormedUnicode,
   paymentAggregate,
   clientDto,
   legacyAppointmentProjection,
@@ -175,4 +176,10 @@ test('canonical DTOs fail closed and separate legacy projections derive frontend
 test('string validation permits well-formed supplementary characters only', () => {
   assert.equal(assertNfcTrimmed('😀', { field: 'name', minBytes: 1, maxBytes: 120 }), '😀')
   assert.throws(() => assertNfcTrimmed('\uDFFF', { field: 'name', minBytes: 1, maxBytes: 120 }), /VALIDATION_FAILED\/name/)
+})
+
+test('Unicode fallback handles paired and terminal surrogate code units', () => {
+  assert.equal(isWellFormedUnicode('😀', { forceFallback: true }), true)
+  assert.equal(isWellFormedUnicode('\uD800', { forceFallback: true }), false)
+  assert.equal(isWellFormedUnicode('\uDFFF', { forceFallback: true }), false)
 })

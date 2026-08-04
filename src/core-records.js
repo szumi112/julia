@@ -28,11 +28,12 @@ const editableAppointmentStatuses = new Set(['scheduled', 'completed', 'noshow']
 const methods = new Set(['cash', 'card', 'transfer', 'monthly'])
 const durations = new Set([50, 60, 90, 120])
 
-const isWellFormedUnicode = (value) => {
-  if (typeof value.isWellFormed === 'function') return value.isWellFormed()
+export const isWellFormedUnicode = (value, { forceFallback = false } = {}) => {
+  if (!forceFallback && typeof value.isWellFormed === 'function') return value.isWellFormed()
   for (let index = 0; index < value.length; index++) {
     const code = value.charCodeAt(index)
     if (code >= 0xD800 && code <= 0xDBFF) {
+      if (index + 1 >= value.length) return false
       const next = value.charCodeAt(++index)
       if (next < 0xDC00 || next > 0xDFFF) return false
     } else if (code >= 0xDC00 && code <= 0xDFFF) return false
