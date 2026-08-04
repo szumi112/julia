@@ -10,8 +10,12 @@ import {
 } from '../../worker/core/clients.js'
 import { postClient, postClientEdit } from '../../worker/routes/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { decryptForScope, loadDataKey } from '../../worker/security/envelope.js'
-import { clientKeyScope } from '../../worker/core/crypto.js'
+import { decryptForScope, encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
+import {
+  buildClientDataKey,
+  clientKeyScope,
+  encryptClientIdentity,
+} from '../../worker/core/crypto.js'
 import { createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db/query-budget.js'
 import { createApp } from '../../worker/app.js'
 import {
@@ -696,6 +700,75 @@ describe('persistent client edit and reassignment', () => {
     })
     return created.body.data.client
   }
+  const seedMalformedHistory = async (kind) => {
+    fixtureSequence += 1
+    const marker = `malformed_history_${fixtureSequence}`
+    const clientId = `cl_${marker}`
+    const assignmentId = `asg_${marker}`
+    const keyring = await ring()
+    const now = new Date(NOW_MS).toISOString()
+    const built = await buildClientDataKey(env.DB, keyring, {
+      clientId, dataKeyId: `key_${marker}`, createdAt: now,
+    })
+    const context = { keyring, dataKey: built.row, scope: built.scope }
+    const identityEnvelope = await encryptClientIdentity(context, {
+      clientId, name: 'Historia Fikcyjna', age: 12,
+    })
+    const snapshot = async (recordId, dataKeyId = built.row.id) => {
+      const envelope = await encryptForScope(keyring, built.row, {
+        expectedScope: built.scope, recordId, field: 'record_version', plaintext: '{}',
+      })
+      return JSON.stringify({ ...envelope, dataKeyId })
+    }
+    const clientVersion = {
+      id: `ver_${marker}_client`, entityType: 'client', entityId: clientId,
+      version: 1, envelope: await snapshot(clientId),
+    }
+    const assignmentVersion = {
+      id: `ver_${marker}_assignment`, entityType: 'client_assignment',
+      entityId: assignmentId, version: 1, envelope: await snapshot(assignmentId),
+    }
+    const versions = [clientVersion, assignmentVersion]
+    if (kind === 'missing') versions.shift()
+    if (kind === 'duplicate') versions.push({
+      ...clientVersion, id: `ver_${marker}_client_extra`, version: 2,
+    })
+    if (kind === 'wrong-entity') clientVersion.entityType = 'client_assignment'
+    if (kind === 'wrong-id') clientVersion.entityId = `cl_${marker}_other`
+    if (kind === 'wrong-version') clientVersion.version = 2
+    if (kind === 'wrong-key') clientVersion.envelope = await snapshot(clientId, `key_${marker}_other`)
+    if (kind === 'malformed-envelope') clientVersion.envelope = '{}'
+    if (kind === 'tampered') {
+      const envelope = JSON.parse(clientVersion.envelope)
+      const last = envelope.ciphertext.at(-1)
+      envelope.ciphertext = `${envelope.ciphertext.slice(0, -1)}${last === 'A' ? 'B' : 'A'}`
+      clientVersion.envelope = JSON.stringify(envelope)
+    }
+    await env.DB.batch([
+      built.statement,
+      env.DB.prepare(
+        `INSERT INTO clients
+         (id,identity_envelope,status,version,archived_at,created_at,updated_at)
+         VALUES (?,?,?,1,NULL,?,?)`
+      ).bind(clientId, identityEnvelope, 'active', now, now),
+      env.DB.prepare(
+        `INSERT INTO client_assignments
+         (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
+          version,created_at,updated_at)
+         VALUES (?,?,?, ?,NULL,?,1,?,?)`
+      ).bind(assignmentId, clientId, 'sp_target', now, 'stf_client_owner', now, now),
+      ...versions.map((version) => env.DB.prepare(
+        `INSERT INTO record_versions
+         (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+          changed_at,correlation_id)
+         VALUES (?,?,?,?,?,?,?,?)`
+      ).bind(
+        version.id, version.entityType, version.entityId, version.version,
+        version.envelope, 'stf_client_owner', now, CORRELATION_ID,
+      )),
+    ])
+    return { clientId, assignmentId, keyring }
+  }
 
   it('strictly captures the exact edit target and five-key body', () => {
     expect(validateEditClientBody(editBody)).toEqual(editBody)
@@ -984,6 +1057,82 @@ describe('persistent client edit and reassignment', () => {
       expect(idFactory).not.toHaveBeenCalled()
     }
     expect(errors).toEqual(['NOT_FOUND', 'NOT_FOUND', 'NOT_FOUND'])
+  })
+
+  it('rejects malformed retained current histories identically before IDs or writes', async () => {
+    const envelopes = []
+    for (const kind of [
+      'missing', 'duplicate', 'wrong-entity', 'wrong-id', 'wrong-version',
+      'wrong-key', 'malformed-envelope', 'mismatched-snapshot', 'tampered',
+    ]) {
+      const fixture = await seedMalformedHistory(kind)
+      const retained = async () => ({
+        client: await env.DB.prepare('SELECT * FROM clients WHERE id=?')
+          .bind(fixture.clientId).first(),
+        assignments: (await env.DB.prepare(
+          'SELECT * FROM client_assignments WHERE client_id=? ORDER BY id'
+        ).bind(fixture.clientId).all()).results,
+        versions: (await env.DB.prepare(
+          'SELECT * FROM record_versions WHERE entity_id=? OR entity_id=? ORDER BY id'
+        ).bind(fixture.clientId, fixture.assignmentId).all()).results,
+        audits: (await env.DB.prepare(
+          'SELECT * FROM audit_events WHERE entity_id=? ORDER BY id'
+        ).bind(fixture.clientId).all()).results,
+        idempotency: (await env.DB.prepare(
+          'SELECT * FROM idempotency_records WHERE resource_id=? ORDER BY idempotency_key'
+        ).bind(fixture.clientId).all()).results,
+      })
+      const before = await retained()
+      const idFactory = vi.fn()
+      let message
+      try {
+        await editClient({
+          db: env.DB, recoveryDb: env.DB,
+          actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+          keyring: fixture.keyring, nowMs: NOW_MS + 1_000,
+          correlationId: CORRELATION_ID, idFactory, clientId: fixture.clientId,
+          body: { expectedVersion: 1, name: `Edycja ${kind}`, age: 12,
+            status: 'active', specialistId: 'sp_target' },
+          idempotencyKey: `client-edit-malformed-${kind}-0001`,
+        })
+      } catch (error) { message = error.message }
+      expect(message, kind).toBe('NOT_FOUND')
+      expect(idFactory, kind).not.toHaveBeenCalled()
+      expect(await retained(), kind).toEqual(before)
+      envelopes.push(message)
+    }
+    expect(new Set(envelopes)).toEqual(new Set(['NOT_FOUND']))
+  })
+
+  it('contains hostile retained-history row descriptors without reading values', async () => {
+    const getter = vi.fn(() => 'private-history')
+    const hostile = Object.defineProperty({ id: 'cl_hostile_history' }, 'identity_envelope', {
+      enumerable: true, get: getter,
+    })
+    let reads = 0
+    const db = {
+      prepare(sql) {
+        return { bind() { return { async first() {
+          reads += 1
+          return sql.includes('idempotency_records') ? null : hostile
+        } } } }
+      },
+      batch: vi.fn(),
+    }
+    const idFactory = vi.fn()
+    await expect(editClient({
+      db, recoveryDb: db,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: {}, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory, clientId: 'cl_hostile_history',
+      body: { expectedVersion: 1, name: 'Hostile', age: 12,
+        status: 'active', specialistId: 'sp_target' },
+      idempotencyKey: 'client-edit-hostile-history-0001',
+    })).rejects.toThrow('NOT_FOUND')
+    expect(reads).toBe(2)
+    expect(getter).not.toHaveBeenCalled()
+    expect(idFactory).not.toHaveBeenCalled()
+    expect(db.batch).not.toHaveBeenCalled()
   })
 
   it('enforces specialist ownership, active scope, and opaque non-reassignment', async () => {

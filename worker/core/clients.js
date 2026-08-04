@@ -1,4 +1,5 @@
 import { encodeBase64Url } from '../security/encoding.js'
+import { decryptForScope } from '../security/envelope.js'
 import {
   createIdempotencyStatement,
   createUnitOfWork,
@@ -377,19 +378,119 @@ const loadScopedClient = async (db, clientId, actor) => db.prepare(
           assignment.assigned_by_staff_id,
           assignment.version AS assignment_version,
           assignment.created_at AS assignment_created_at,
-          assignment.updated_at AS assignment_updated_at
+          assignment.updated_at AS assignment_updated_at,
+          client_key.id AS data_key_id,
+          client_key.scope_type AS data_key_scope_type,
+          client_key.scope_id AS data_key_scope_id,
+          client_key.purpose AS data_key_purpose,
+          client_key.dek_version AS data_key_version,
+          client_key.retired_at AS data_key_retired_at,
+          client_version.id AS client_record_version_id,
+          client_version.entity_type AS client_record_version_type,
+          client_version.entity_id AS client_record_version_entity_id,
+          client_version.version AS client_record_version_number,
+          client_version.snapshot_envelope AS client_record_version_envelope,
+          client_version.changed_by_staff_id AS client_record_version_actor,
+          client_version.changed_at AS client_record_version_changed_at,
+          client_version.correlation_id AS client_record_version_correlation,
+          assignment_version.id AS assignment_record_version_id,
+          assignment_version.entity_type AS assignment_record_version_type,
+          assignment_version.entity_id AS assignment_record_version_entity_id,
+          assignment_version.version AS assignment_record_version_number,
+          assignment_version.snapshot_envelope AS assignment_record_version_envelope,
+          assignment_version.changed_by_staff_id AS assignment_record_version_actor,
+          assignment_version.changed_at AS assignment_record_version_changed_at,
+          assignment_version.correlation_id AS assignment_record_version_correlation
    FROM clients AS client
    JOIN client_assignments AS assignment
      ON assignment.client_id=client.id AND assignment.ends_at IS NULL
+   JOIN data_keys AS client_key
+     ON client_key.id=json_extract(
+          CASE WHEN json_valid(client.identity_envelope)
+            THEN client.identity_envelope ELSE '{}' END,'$.dataKeyId')
+    AND client_key.dek_version=json_extract(
+          CASE WHEN json_valid(client.identity_envelope)
+            THEN client.identity_envelope ELSE '{}' END,'$.dataKeyVersion')
+    AND client_key.scope_type='client'
+    AND client_key.scope_id=client.id
+    AND client_key.purpose='identity'
+    AND client_key.dek_version=1
+    AND client_key.retired_at IS NULL
+   JOIN record_versions AS client_version
+     ON client_version.entity_type='client'
+    AND client_version.entity_id=client.id
+    AND client_version.version=client.version
+   JOIN record_versions AS assignment_version
+     ON assignment_version.entity_type='client_assignment'
+    AND assignment_version.entity_id=assignment.id
+    AND assignment_version.version=assignment.version
    WHERE client.id=?
      AND client.status IN ('active','paused')
      AND (
        ? IN ('owner','coordinator')
        OR (?='specialist' AND client.status='active' AND assignment.specialist_id=?)
      )
+     AND (SELECT count(*) FROM record_versions AS version
+       WHERE version.entity_type='client' AND version.entity_id=client.id)=client.version
+     AND (SELECT min(version.version) FROM record_versions AS version
+       WHERE version.entity_type='client' AND version.entity_id=client.id)=1
+     AND (SELECT max(version.version) FROM record_versions AS version
+       WHERE version.entity_type='client' AND version.entity_id=client.id)=client.version
+     AND NOT EXISTS (SELECT 1 FROM record_versions AS version
+       WHERE version.entity_id=client.id AND version.entity_type!='client')
+     AND NOT EXISTS (SELECT 1 FROM record_versions AS version
+       WHERE version.entity_type='client' AND version.entity_id=client.id
+         AND (
+           NOT json_valid(version.snapshot_envelope)
+           OR json_extract(CASE WHEN json_valid(version.snapshot_envelope)
+                THEN version.snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT client_key.id
+           OR json_extract(CASE WHEN json_valid(version.snapshot_envelope)
+                THEN version.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1
+         ))
+     AND (SELECT count(*) FROM record_versions AS version
+       WHERE version.entity_type='client_assignment'
+         AND version.entity_id=assignment.id)=assignment.version
+     AND (SELECT min(version.version) FROM record_versions AS version
+       WHERE version.entity_type='client_assignment'
+         AND version.entity_id=assignment.id)=1
+     AND (SELECT max(version.version) FROM record_versions AS version
+       WHERE version.entity_type='client_assignment'
+         AND version.entity_id=assignment.id)=assignment.version
+     AND NOT EXISTS (SELECT 1 FROM record_versions AS version
+       WHERE version.entity_id=assignment.id
+         AND version.entity_type!='client_assignment')
+     AND NOT EXISTS (SELECT 1 FROM record_versions AS version
+       WHERE version.entity_type='client_assignment'
+         AND version.entity_id=assignment.id
+         AND (
+           NOT json_valid(version.snapshot_envelope)
+           OR json_extract(CASE WHEN json_valid(version.snapshot_envelope)
+                THEN version.snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT client_key.id
+           OR json_extract(CASE WHEN json_valid(version.snapshot_envelope)
+                THEN version.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1
+         ))
    GROUP BY client.id
    HAVING count(assignment.id)=1`
 ).bind(clientId, actor.role, actor.role, actor.specialistId).first()
+
+const retainedSnapshotFact = (serialized, dataKeyId) => {
+  try {
+    if (typeof serialized !== 'string') notFound()
+    const envelope = replayObject(JSON.parse(serialized), [
+      'format', 'algorithm', 'dataKeyId', 'dataKeyVersion', 'nonce', 'ciphertext',
+    ])
+    if (envelope.format !== 1 || envelope.algorithm !== 'A256GCM'
+      || envelope.dataKeyId !== dataKeyId || envelope.dataKeyVersion !== 1
+      || typeof envelope.nonce !== 'string'
+      || !/^[A-Za-z0-9_-]{16}$/.test(envelope.nonce)
+      || typeof envelope.ciphertext !== 'string'
+      || !/^[A-Za-z0-9_-]{22,}$/.test(envelope.ciphertext)) notFound()
+    return serialized
+  } catch (error) {
+    if (error instanceof Error && error.message === 'NOT_FOUND') throw error
+    notFound()
+  }
+}
 
 const scopedClientFact = (value, clientId) => {
   try {
@@ -397,7 +498,17 @@ const scopedClientFact = (value, clientId) => {
       'id', 'identity_envelope', 'status', 'version', 'archived_at', 'created_at',
       'updated_at', 'assignment_id', 'specialist_id', 'starts_at', 'ends_at',
       'assigned_by_staff_id', 'assignment_version', 'assignment_created_at',
-      'assignment_updated_at',
+      'assignment_updated_at', 'data_key_id', 'data_key_scope_type',
+      'data_key_scope_id', 'data_key_purpose', 'data_key_version',
+      'data_key_retired_at', 'client_record_version_id',
+      'client_record_version_type', 'client_record_version_entity_id',
+      'client_record_version_number', 'client_record_version_envelope',
+      'client_record_version_actor', 'client_record_version_changed_at',
+      'client_record_version_correlation', 'assignment_record_version_id',
+      'assignment_record_version_type', 'assignment_record_version_entity_id',
+      'assignment_record_version_number', 'assignment_record_version_envelope',
+      'assignment_record_version_actor', 'assignment_record_version_changed_at',
+      'assignment_record_version_correlation',
     ])
     if (row.id !== clientId || typeof row.identity_envelope !== 'string'
       || !['active', 'paused'].includes(row.status)
@@ -411,7 +522,33 @@ const scopedClientFact = (value, clientId) => {
       || !Number.isSafeInteger(row.assignment_version) || row.assignment_version < 1
       || !canonicalInstant(row.assignment_created_at)
       || !canonicalInstant(row.assignment_updated_at)
-      || row.assignment_created_at > row.assignment_updated_at) notFound()
+      || row.assignment_created_at > row.assignment_updated_at
+      || typeof row.data_key_id !== 'string' || !ID.test(row.data_key_id)
+      || row.data_key_scope_type !== 'client' || row.data_key_scope_id !== clientId
+      || row.data_key_purpose !== 'identity' || row.data_key_version !== 1
+      || row.data_key_retired_at !== null
+      || typeof row.client_record_version_id !== 'string'
+      || !VERSION_ID.test(row.client_record_version_id)
+      || row.client_record_version_type !== 'client'
+      || row.client_record_version_entity_id !== clientId
+      || row.client_record_version_number !== row.version
+      || typeof row.client_record_version_actor !== 'string'
+      || !STAFF_ID.test(row.client_record_version_actor)
+      || !canonicalInstant(row.client_record_version_changed_at)
+      || typeof row.client_record_version_correlation !== 'string'
+      || !ID.test(row.client_record_version_correlation)
+      || typeof row.assignment_record_version_id !== 'string'
+      || !VERSION_ID.test(row.assignment_record_version_id)
+      || row.assignment_record_version_type !== 'client_assignment'
+      || row.assignment_record_version_entity_id !== row.assignment_id
+      || row.assignment_record_version_number !== row.assignment_version
+      || typeof row.assignment_record_version_actor !== 'string'
+      || !STAFF_ID.test(row.assignment_record_version_actor)
+      || !canonicalInstant(row.assignment_record_version_changed_at)
+      || typeof row.assignment_record_version_correlation !== 'string'
+      || !ID.test(row.assignment_record_version_correlation)) notFound()
+    retainedSnapshotFact(row.client_record_version_envelope, row.data_key_id)
+    retainedSnapshotFact(row.assignment_record_version_envelope, row.data_key_id)
     return Object.freeze({
       id: row.id,
       identityEnvelope: row.identity_envelope,
@@ -420,6 +557,8 @@ const scopedClientFact = (value, clientId) => {
       archivedAt: null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      currentClientVersionEnvelope: row.client_record_version_envelope,
+      currentAssignmentVersionEnvelope: row.assignment_record_version_envelope,
       assignment: Object.freeze({
         id: row.assignment_id,
         clientId: row.id,
@@ -473,6 +612,55 @@ const versionConflict = (currentVersion) => {
   throw error
 }
 
+const validateRetainedCurrentSnapshots = async (context, current, identity) => {
+  try {
+    const clientPlaintext = await decryptForScope(
+      context.keyring, context.dataKey, {
+        expectedScope: context.scope,
+        recordId: current.id,
+        field: 'record_version',
+        envelope: JSON.parse(current.currentClientVersionEnvelope),
+      },
+    )
+    const expectedClient = JSON.stringify({
+      age: identity.age,
+      archivedAt: current.archivedAt,
+      createdAt: current.createdAt,
+      id: current.id,
+      name: identity.name,
+      schema: 'client.v1',
+      status: current.status,
+      updatedAt: current.updatedAt,
+      version: current.version,
+    })
+    if (clientPlaintext !== expectedClient) notFound()
+    const assignmentPlaintext = await decryptForScope(
+      context.keyring, context.dataKey, {
+        expectedScope: context.scope,
+        recordId: current.assignment.id,
+        field: 'record_version',
+        envelope: JSON.parse(current.currentAssignmentVersionEnvelope),
+      },
+    )
+    const expectedAssignment = JSON.stringify({
+      assignedByStaffId: current.assignment.assignedByStaffId,
+      clientId: current.assignment.clientId,
+      createdAt: current.assignment.createdAt,
+      endsAt: current.assignment.endsAt,
+      id: current.assignment.id,
+      schema: 'client_assignment.v1',
+      specialistId: current.assignment.specialistId,
+      startsAt: current.assignment.startsAt,
+      updatedAt: current.assignment.updatedAt,
+      version: current.assignment.version,
+    })
+    if (assignmentPlaintext !== expectedAssignment) notFound()
+  } catch (error) {
+    if (error instanceof Error && error.message === 'NOT_FOUND') throw error
+    notFound()
+  }
+}
+
 const conditionalVersionStatement = (db, version, conditionSql, bindings) => db.prepare(
   `INSERT INTO record_versions
    (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
@@ -520,6 +708,61 @@ const editGuardStatement = (db, values) => {
         values.assignment.version, values.assignment.createdAt,
         values.assignment.updatedAt, values.client.id,
       ]
+  const assignmentHistorySql = values.reassigned
+    ? `AND (SELECT count(*) FROM record_versions AS history
+         WHERE history.entity_type='client_assignment'
+           AND history.entity_id=?)=?
+       AND (SELECT min(history.version) FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id=?)=1
+       AND (SELECT max(history.version) FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id=?)=?
+       AND (SELECT count(*) FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id=?)=1
+       AND (SELECT min(history.version) FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id=?)=1
+       AND (SELECT max(history.version) FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id=?)=1
+       AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+         WHERE history.entity_id IN (?,?) AND history.entity_type!='client_assignment')
+       AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id IN (?,?)
+           AND (
+             NOT json_valid(history.snapshot_envelope)
+             OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                  THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+             OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                  THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1
+           ))`
+    : `AND (SELECT count(*) FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id=?)=?
+       AND (SELECT min(history.version) FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id=?)=1
+       AND (SELECT max(history.version) FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id=?)=?
+       AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+         WHERE history.entity_id=? AND history.entity_type!='client_assignment')
+       AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+         WHERE history.entity_type='client_assignment' AND history.entity_id=?
+           AND (
+             NOT json_valid(history.snapshot_envelope)
+             OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                  THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+             OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                  THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1
+           ))`
+  const assignmentHistoryBindings = values.reassigned
+    ? [
+        values.oldAssignment.id, values.oldAssignment.version,
+        values.oldAssignment.id, values.oldAssignment.id, values.oldAssignment.version,
+        values.assignment.id, values.assignment.id, values.assignment.id,
+        values.oldAssignment.id, values.assignment.id,
+        values.oldAssignment.id, values.assignment.id, values.dataKeyId,
+      ]
+    : [
+        values.assignment.id, values.assignment.version,
+        values.assignment.id, values.assignment.id, values.assignment.version,
+        values.assignment.id, values.assignment.id, values.dataKeyId,
+      ]
   const versionIds = values.reassigned
     ? [values.clientVersionId, values.client.id, values.oldAssignmentVersionId,
         values.oldAssignment.id, values.assignmentVersionId, values.assignment.id]
@@ -554,6 +797,24 @@ const editGuardStatement = (db, values) => {
            AND changed_by_staff_id=? AND changed_at=? AND correlation_id=?
            AND json_extract(snapshot_envelope,'$.dataKeyId')=?
            AND json_extract(snapshot_envelope,'$.dataKeyVersion')=1)=?
+       AND (SELECT count(*) FROM record_versions AS history
+         WHERE history.entity_type='client' AND history.entity_id=?)=?
+       AND (SELECT min(history.version) FROM record_versions AS history
+         WHERE history.entity_type='client' AND history.entity_id=?)=1
+       AND (SELECT max(history.version) FROM record_versions AS history
+         WHERE history.entity_type='client' AND history.entity_id=?)=?
+       AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+         WHERE history.entity_id=? AND history.entity_type!='client')
+       AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+         WHERE history.entity_type='client' AND history.entity_id=?
+           AND (
+             NOT json_valid(history.snapshot_envelope)
+             OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                  THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+             OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+                  THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1
+           ))
+       ${assignmentHistorySql}
        AND EXISTS (SELECT 1 FROM audit_events
          WHERE id=? AND actor_staff_id=? AND action=? AND entity_type='client'
            AND entity_id=? AND result='success' AND reason_envelope IS NULL
@@ -584,6 +845,10 @@ const editGuardStatement = (db, values) => {
       : []),
     values.actorId, values.now, values.correlationId,
     values.dataKeyId, values.reassigned ? 3 : 1,
+    values.client.id, values.client.version,
+    values.client.id, values.client.id, values.client.version,
+    values.client.id, values.client.id, values.dataKeyId,
+    ...assignmentHistoryBindings,
     values.auditId, values.actorId,
     values.reassigned ? 'client.assignment.changed' : 'client.updated',
     values.client.id, values.correlationId, JSON.stringify(metadata),
@@ -631,6 +896,7 @@ export async function editClient(input) {
   const identity = await decryptClientIdentity(context, {
     clientId: current.id, envelope: current.identityEnvelope,
   })
+  await validateRetainedCurrentSnapshots(context, current, identity)
   const reassigned = command.body.specialistId !== current.assignment.specialistId
   if (reassigned && actor.role === 'specialist') throw new Error('CLIENT_ASSIGNMENT_CONFLICT')
   if (!reassigned && identity.name === command.body.name && identity.age === command.body.age
