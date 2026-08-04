@@ -139,6 +139,7 @@ describe('closed core route descriptors', () => {
     ['/api/v1/appointments/apt_one/payments', { expectedVersion: 1, amountGrosze: 10000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }],
     ['/api/v1/payments/pay_one/corrections', { expectedVersion: 1, reason: 'Korekta', replacement: null }],
   ]
+  const futureCommands = commands.slice(1)
   const headers = {
     origin,
     'content-type': 'application/json',
@@ -177,7 +178,7 @@ describe('closed core route descriptors', () => {
     }).toThrow(TypeError)
   })
 
-  it.each(commands)('validates the closed shell once and keeps future route %s nonfunctional', async (path, body) => {
+  it.each(futureCommands)('validates the closed shell once and keeps future route %s nonfunctional', async (path, body) => {
     const readJsonBodyOnce = vi.fn(async () => body)
     const input = deps({ db: coreBudgetDb(), readJsonBodyOnce, verifyCsrfToken: vi.fn(async () => true) })
     const response = await createApp(input).request(path, {
@@ -191,6 +192,36 @@ describe('closed core route descriptors', () => {
     })
     expect(input.resolveAccessPrincipal).toHaveBeenCalledOnce()
     expect(input.resolveActor).toHaveBeenCalledOnce()
+  })
+
+  it('dispatches client edit through the authentic shared command boundary', async () => {
+    let views
+    const editClient = vi.fn(async (input) => {
+      views = { work: input.db, recovery: input.recoveryDb }
+      expect(input).toMatchObject({
+        clientId: 'cl_one',
+        idempotencyKey: 'core-command-key-0001',
+        body: { expectedVersion: 1, name: 'Ala', age: 12, status: 'active', specialistId: 'sp_one' },
+      })
+      await input.db.prepare('SELECT edit_domain_1').first()
+      await input.db.prepare('SELECT edit_domain_2').first()
+      return { status: 200, body: { data: { client: { id: input.clientId } } } }
+    })
+    const input = deps({
+      db: coreBudgetDb(), editClient,
+      verifyCsrfToken: vi.fn(async () => true),
+      readJsonBodyOnce: vi.fn(async (request) => request.json()),
+    })
+    const response = await createApp(input).request('/api/v1/clients/cl_one/edits', {
+      method: 'POST', headers, body: JSON.stringify(commands[0][1]),
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ data: { client: { id: 'cl_one' } } })
+    expect(editClient).toHaveBeenCalledOnce()
+    expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
+    expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
+      used: 2, remaining: 48, workRemaining: 40, totalLimit: 50, recoveryReserve: 8,
+    })
   })
 
   it('rejects idempotency and exact body-shape failures in the frozen shell order', async () => {

@@ -3,12 +3,21 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   createClient,
   digestCreateClientRequest,
+  digestEditClientRequest,
+  editClient,
   validateCreateClientBody,
+  validateEditClientBody,
 } from '../../worker/core/clients.js'
-import { postClient } from '../../worker/routes/clients.js'
+import { postClient, postClientEdit } from '../../worker/routes/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { decryptForScope, loadDataKey } from '../../worker/security/envelope.js'
+import { clientKeyScope } from '../../worker/core/crypto.js'
 import { createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db/query-budget.js'
 import { createApp } from '../../worker/app.js'
+import {
+  applyCoreDirectoryStageB,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 
 const NOW_MS = 1_800_000_000_000
 const BODY = Object.freeze({
@@ -23,6 +32,8 @@ const ring = () => createKeyring(env, {
 })
 
 beforeAll(async () => {
+  expect(await completeCoreDirectoryStageA()).toMatchObject({ status: 'complete' })
+  await applyCoreDirectoryStageB()
   const instant = new Date(NOW_MS).toISOString()
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO staff_users
@@ -661,5 +672,816 @@ describe('persistent client creation', () => {
       error: { code: 'VALIDATION_FAILED', details: { field: 'name' } },
     })
     expect(prepare).not.toHaveBeenCalled()
+  })
+})
+
+describe('persistent client edit and reassignment', () => {
+  const editBody = Object.freeze({
+    expectedVersion: 1, name: 'Fikcyjna Zmieniona', age: 13,
+    status: 'paused', specialistId: 'sp_target',
+  })
+  let fixtureSequence = 0
+  const seedEditable = async ({ specialistId = 'sp_target', status = 'active', actor = {
+    id: 'stf_client_owner', role: 'owner', specialistId: null,
+  } } = {}) => {
+    fixtureSequence += 1
+    const marker = `edit_fixture_${fixtureSequence}`
+    const ids = [`${marker}_client`, `${marker}_assignment`, `${marker}_client_ver`,
+      `${marker}_assignment_ver`, `${marker}_audit`, `${marker}_key`]
+    const created = await createClient({
+      db: env.DB, recoveryDb: env.DB, actor, keyring: await ring(),
+      nowMs: NOW_MS, correlationId: CORRELATION_ID,
+      idFactory: () => ids.shift(), body: { ...BODY, status, specialistId },
+      idempotencyKey: `${marker}-create-key`,
+    })
+    return created.body.data.client
+  }
+
+  it('strictly captures the exact edit target and five-key body', () => {
+    expect(validateEditClientBody(editBody)).toEqual(editBody)
+    for (const [body, field] of [
+      [{ ...editBody, expectedVersion: 0 }, 'expectedVersion'],
+      [{ ...editBody, name: ' Zmieniona' }, 'name'],
+      [{ ...editBody, age: 27 }, 'age'],
+      [{ ...editBody, status: 'archived' }, 'status'],
+      [{ ...editBody, specialistId: 'staff_target' }, 'specialistId'],
+      [{ ...editBody, extra: true }, 'body'],
+    ]) expect(() => validateEditClientBody(body)).toThrow(`VALIDATION_FAILED/${field}`)
+
+    const getter = vi.fn(() => 1)
+    const hostile = Object.defineProperty({
+      name: editBody.name, age: editBody.age, status: editBody.status,
+      specialistId: editBody.specialistId,
+    }, 'expectedVersion', { enumerable: true, get: getter })
+    expect(() => validateEditClientBody(hostile)).toThrow('VALIDATION_FAILED/body')
+    expect(getter).not.toHaveBeenCalled()
+  })
+
+  it('binds the digest to the normalized target, version, and values', async () => {
+    const digest = await digestEditClientRequest('cl_edit_target', editBody)
+    expect(digest).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(await digestEditClientRequest('cl_edit_target', {
+      specialistId: 'sp_target', status: 'paused', age: 13,
+      name: 'Fikcyjna Zmieniona', expectedVersion: 1,
+    })).toBe(digest)
+    expect(await digestEditClientRequest('cl_other_target', editBody)).not.toBe(digest)
+    expect(await digestEditClientRequest('cl_edit_target', {
+      ...editBody, expectedVersion: 2,
+    })).not.toBe(digest)
+    await expect(digestEditClientRequest('bad', editBody)).rejects
+      .toThrow('VALIDATION_FAILED/clientId')
+  })
+
+  it('keeps the edit adapter exact and maps safe semantic fields', async () => {
+    const service = vi.fn(async () => ({ status: 200, body: { data: { client: {} } } }))
+    const input = {
+      db: {}, recoveryDb: {}, actor: { id: 'stf_owner' }, keyring: {},
+      nowMs: NOW_MS, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      clientId: 'cl_edit_target', body: editBody,
+      idempotencyKey: 'client-edit-adapter-0001', edit: service,
+    }
+    expect(await postClientEdit(input)).toEqual({
+      status: 200, body: { data: { client: {} } },
+    })
+    expect(service).toHaveBeenCalledWith(expect.objectContaining({
+      clientId: 'cl_edit_target', body: editBody,
+    }))
+    await expect(postClientEdit({ ...input, clientId: 'wrong' }))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: { field: 'clientId' } })
+    await expect(postClientEdit({
+      ...input, body: { ...editBody, expectedVersion: 0 },
+    })).rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: { field: 'expectedVersion' } })
+  })
+
+  it('checks client-scoped replay before scope reads or generated IDs', async () => {
+    const calls = []
+    const db = {
+      prepare(sql) {
+        calls.push(sql)
+        return { bind() { return { first: async () => null } } }
+      },
+      batch: vi.fn(),
+    }
+    const idFactory = vi.fn()
+    await expect(editClient({
+      db, recoveryDb: db,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: {}, nowMs: NOW_MS, correlationId: CORRELATION_ID, idFactory,
+      clientId: 'cl_missing_edit', body: editBody,
+      idempotencyKey: 'client-edit-replay-first-0001',
+    })).rejects.toThrow('NOT_FOUND')
+    expect(calls[0]).toContain('FROM idempotency_records')
+    expect(calls[1]).toContain('FROM clients')
+    expect(idFactory).not.toHaveBeenCalled()
+    expect(db.batch).not.toHaveBeenCalled()
+  })
+
+  it('atomically edits encrypted identity/status with only the client audit schema', async () => {
+    const original = await seedEditable()
+    const values = ['identity_client_version', 'identity_audit']
+    const body = {
+      expectedVersion: 1, name: 'Fikcyjna Po Edycji', age: null,
+      status: 'paused', specialistId: 'sp_target',
+    }
+    const result = await editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 1_000,
+      correlationId: CORRELATION_ID, idFactory: () => values.shift(),
+      clientId: original.id, body, idempotencyKey: 'client-edit-identity-success-0001',
+    })
+    expect(result).toEqual({ status: 200, body: { data: { client: {
+      ...original, name: body.name, age: null, status: 'paused', version: 2,
+      updatedAt: new Date(NOW_MS + 1_000).toISOString(),
+    } } } })
+    const row = await env.DB.prepare(
+      'SELECT identity_envelope,status,version FROM clients WHERE id=?'
+    ).bind(original.id).first()
+    expect(row.status).toBe('paused')
+    expect(row.version).toBe(2)
+    expect(row.identity_envelope).not.toContain(body.name)
+    expect(await env.DB.prepare(
+      "SELECT count(*) AS count FROM record_versions WHERE entity_id=? AND entity_type='client'"
+    ).bind(original.id).first()).toEqual({ count: 2 })
+    const scope = clientKeyScope(original.id)
+    const versions = (await env.DB.prepare(
+      `SELECT version,snapshot_envelope FROM record_versions
+       WHERE entity_type='client' AND entity_id=? ORDER BY version`
+    ).bind(original.id).all()).results
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(versions[0].snapshot_envelope), expectedScope: scope,
+    })
+    const snapshots = await Promise.all(versions.map(async (version) => JSON.parse(
+      await decryptForScope(await ring(), dataKey, {
+        expectedScope: scope, recordId: original.id, field: 'record_version',
+        envelope: JSON.parse(version.snapshot_envelope),
+      })
+    )))
+    expect(snapshots.map(({ schema, name, age, status, version }) => ({
+      schema, name, age, status, version,
+    }))).toEqual([
+      { schema: 'client.v1', name: 'Fikcyjna', age: 12, status: 'active', version: 1 },
+      { schema: 'client.v1', name: body.name, age: null, status: 'paused', version: 2 },
+    ])
+    expect(await env.DB.prepare(
+      "SELECT action,metadata_json FROM audit_events WHERE entity_id=? AND action LIKE 'client.%' ORDER BY occurred_at DESC LIMIT 1"
+    ).bind(original.id).first()).toEqual({
+      action: 'client.updated', metadata_json: JSON.stringify({ clientVersion: 2 }),
+    })
+
+    const replayFactory = vi.fn()
+    expect(await editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 2_000,
+      correlationId: CORRELATION_ID, idFactory: replayFactory,
+      clientId: original.id, body, idempotencyKey: 'client-edit-identity-success-0001',
+    })).toEqual(result)
+    expect(replayFactory).not.toHaveBeenCalled()
+  })
+
+  it('closes the exact assignment and inserts a new encrypted v1 without overwriting history', async () => {
+    const original = await seedEditable()
+    const values = ['new_assignment', 'reassign_client_ver', 'closed_assignment_ver',
+      'new_assignment_ver', 'reassign_audit']
+    const body = {
+      expectedVersion: 1, name: original.name, age: original.age,
+      status: 'active', specialistId: 'sp_client_self',
+    }
+    const result = await editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 2_000,
+      correlationId: CORRELATION_ID, idFactory: () => values.shift(),
+      clientId: original.id, body, idempotencyKey: 'client-edit-reassign-success-0001',
+    })
+    expect(result.body.data.client).toMatchObject({
+      id: original.id, version: 2,
+      assignment: { id: 'asg_new_assignment', specialistId: 'sp_client_self', version: 1 },
+    })
+    expect((await env.DB.prepare(
+      `SELECT id,specialist_id,ends_at,version FROM client_assignments
+       WHERE client_id=? ORDER BY created_at,id`
+    ).bind(original.id).all()).results).toEqual([
+      {
+        id: original.assignment.id, specialist_id: 'sp_target',
+        ends_at: new Date(NOW_MS + 2_000).toISOString(), version: 2,
+      },
+      { id: 'asg_new_assignment', specialist_id: 'sp_client_self', ends_at: null, version: 1 },
+    ])
+    expect(await env.DB.prepare(
+      "SELECT count(*) AS count FROM record_versions WHERE entity_id IN (?,?) AND entity_type='client_assignment'"
+    ).bind(original.assignment.id, 'asg_new_assignment').first()).toEqual({ count: 3 })
+    expect(await env.DB.prepare(
+      "SELECT action,metadata_json FROM audit_events WHERE entity_id=? AND action='client.assignment.changed'"
+    ).bind(original.id).first()).toEqual({
+      action: 'client.assignment.changed',
+      metadata_json: JSON.stringify({
+        clientVersion: 2,
+        closedAssignmentId: original.assignment.id,
+        closedAssignmentVersion: 2,
+        newAssignmentId: 'asg_new_assignment',
+        newAssignmentVersion: 1,
+      }),
+    })
+  })
+
+  it('rejects stale and complete no-op edits without side effects', async () => {
+    const original = await seedEditable()
+    const count = async (table) => (await env.DB.prepare(
+      `SELECT count(*) AS count FROM ${table} WHERE ${table === 'clients' ? 'id' : 'entity_id'}=?`
+    ).bind(original.id).first()).count
+    const before = {
+      clients: await count('clients'),
+      versions: await count('record_versions'),
+      audits: (await env.DB.prepare(
+        'SELECT count(*) AS count FROM audit_events WHERE entity_id=?'
+      ).bind(original.id).first()).count,
+    }
+    const common = {
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 1_000,
+      correlationId: CORRELATION_ID, idFactory: vi.fn(), clientId: original.id,
+    }
+    const stale = editClient({
+      ...common,
+      body: { expectedVersion: 2, name: original.name, age: original.age,
+        status: original.status, specialistId: original.assignment.specialistId },
+      idempotencyKey: 'client-edit-stale-0001',
+    })
+    await expect(stale).rejects.toMatchObject({
+      message: 'VERSION_CONFLICT', details: { currentVersion: 1 },
+    })
+    const noOp = editClient({
+      ...common,
+      body: { expectedVersion: 1, name: original.name, age: original.age,
+        status: original.status, specialistId: original.assignment.specialistId },
+      idempotencyKey: 'client-edit-noop-0001',
+    })
+    await expect(noOp).rejects.toThrow('VALIDATION_FAILED/body')
+    expect(common.idFactory).not.toHaveBeenCalled()
+    expect({
+      clients: await count('clients'),
+      versions: await count('record_versions'),
+      audits: (await env.DB.prepare(
+        'SELECT count(*) AS count FROM audit_events WHERE entity_id=?'
+      ).bind(original.id).first()).count,
+    }).toEqual(before)
+    expect(await env.DB.prepare(
+      "SELECT count(*) AS count FROM idempotency_records WHERE idempotency_key IN ('client-edit-stale-0001','client-edit-noop-0001')"
+    ).first()).toEqual({ count: 0 })
+  })
+
+  it('allows a coordinator to edit a centre-scoped paused client', async () => {
+    const client = await seedEditable({ status: 'paused' })
+    const ids = ['coordinator_edit_client_ver_unique', 'coordinator_edit_audit_unique']
+    const result = await editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_coord', role: 'coordinator', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => ids.shift(), clientId: client.id,
+      body: { expectedVersion: 1, name: 'Koordynowana', age: client.age,
+        status: 'active', specialistId: 'sp_target' },
+      idempotencyKey: 'client-edit-coordinator-paused-0001',
+    })
+    expect(result.body.data.client).toMatchObject({
+      id: client.id, name: 'Koordynowana', status: 'active', version: 2,
+    })
+  })
+
+  it('makes absent, archived, and closed-assignment targets identically opaque', async () => {
+    const archived = await seedEditable()
+    const closed = await seedEditable()
+    const closedAt = new Date(NOW_MS + 1_000).toISOString()
+    await env.DB.prepare(
+      `UPDATE client_assignments SET ends_at=?,version=2,updated_at=?
+       WHERE client_id=? AND ends_at IS NULL`
+    ).bind(closedAt, closedAt, closed.id).run()
+    await env.DB.prepare(
+      `UPDATE client_assignments SET ends_at=?,version=2,updated_at=?
+       WHERE client_id=? AND ends_at IS NULL`
+    ).bind(closedAt, closedAt, archived.id).run()
+    await env.DB.prepare(
+      "UPDATE clients SET status='archived',archived_at=?,version=2,updated_at=? WHERE id=?"
+    ).bind(closedAt, closedAt, archived.id).run()
+    const errors = []
+    for (const [label, clientId] of [
+      ['absent', 'cl_edit_absent'], ['archived', archived.id], ['closed', closed.id],
+    ]) {
+      const idFactory = vi.fn()
+      try {
+        await editClient({
+          db: env.DB, recoveryDb: env.DB,
+          actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+          keyring: await ring(), nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+          idFactory, clientId,
+          body: { expectedVersion: 1, name: 'Nieujawniona', age: 12,
+            status: 'active', specialistId: 'sp_target' },
+          idempotencyKey: `client-edit-opaque-${label}-0001`,
+        })
+      } catch (error) { errors.push(error.message) }
+      expect(idFactory).not.toHaveBeenCalled()
+    }
+    expect(errors).toEqual(['NOT_FOUND', 'NOT_FOUND', 'NOT_FOUND'])
+  })
+
+  it('enforces specialist ownership, active scope, and opaque non-reassignment', async () => {
+    const owned = await seedEditable({
+      specialistId: 'sp_client_self',
+      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+    })
+    const values = ['edit_owned_specialist_client_version_unique', 'edit_owned_specialist_audit_unique']
+    const result = await editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+      keyring: await ring(), nowMs: NOW_MS + 1_000,
+      correlationId: CORRELATION_ID, idFactory: () => values.shift(), clientId: owned.id,
+      body: { expectedVersion: 1, name: 'Własny Klient', age: 12,
+        status: 'active', specialistId: 'sp_client_self' },
+      idempotencyKey: 'client-edit-specialist-own-0001',
+    })
+    expect(result.body.data.client.name).toBe('Własny Klient')
+
+    const paused = await seedEditable({
+      status: 'paused',
+      specialistId: 'sp_client_self',
+      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+    })
+    const cross = await seedEditable()
+    for (const [label, clientId, body] of [
+      ['paused', paused.id, { expectedVersion: 1, name: paused.name, age: paused.age,
+        status: 'active', specialistId: 'sp_client_self' }],
+      ['cross', cross.id, { expectedVersion: 1, name: 'X', age: 12,
+        status: 'active', specialistId: 'sp_target' }],
+    ]) {
+      const factory = vi.fn()
+      await expect(editClient({
+        db: env.DB, recoveryDb: env.DB,
+        actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+        keyring: await ring(), nowMs: NOW_MS + 2_000,
+        correlationId: CORRELATION_ID, idFactory: factory, clientId,
+        body, idempotencyKey: `client-edit-specialist-${label}-0001`,
+      })).rejects.toThrow('NOT_FOUND')
+      expect(factory).not.toHaveBeenCalled()
+    }
+
+    const reassignTarget = await seedEditable({
+      specialistId: 'sp_client_self',
+      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+    })
+    await expect(editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+      keyring: await ring(), nowMs: NOW_MS + 2_000,
+      correlationId: CORRELATION_ID, idFactory: vi.fn(), clientId: reassignTarget.id,
+      body: { expectedVersion: 1, name: reassignTarget.name, age: reassignTarget.age,
+        status: 'active', specialistId: 'sp_target' },
+      idempotencyKey: 'client-edit-specialist-reassign-0001',
+    })).rejects.toThrow('CLIENT_ASSIGNMENT_CONFLICT')
+  })
+
+  it('blocks future old-practitioner visits but allows cancelled and past visits', async () => {
+    const insertAppointment = async (clientId, id, startsAt, status) => {
+      const endsAt = new Date(Date.parse(startsAt) + 50 * 60 * 1000).toISOString()
+      await env.DB.prepare(
+        `INSERT INTO appointments
+         (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
+          status,source,version,cancelled_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        id, clientId, 'sp_target', 'zajecia', startsAt, endsAt, 'Europe/Warsaw', null,
+        status, 'panel', 1, status === 'cancelled' ? startsAt : null,
+        new Date(NOW_MS - 10_000).toISOString(), new Date(NOW_MS - 10_000).toISOString(),
+      ).run()
+    }
+    const blocked = await seedEditable()
+    await insertAppointment(
+      blocked.id, 'apt_edit_future_block', new Date(NOW_MS + 60_000).toISOString(), 'scheduled',
+    )
+    const bodyFor = (client) => ({
+      expectedVersion: 1, name: client.name, age: client.age, status: 'active',
+      specialistId: 'sp_client_self',
+    })
+    await expect(editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: vi.fn(), clientId: blocked.id, body: bodyFor(blocked),
+      idempotencyKey: 'client-edit-future-block-0001',
+    })).rejects.toThrow('CLIENT_ASSIGNMENT_CONFLICT')
+
+    for (const [label, offset, status] of [
+      ['cancelled', 60_000, 'cancelled'],
+      ['past', -60_000, 'completed'],
+    ]) {
+      const client = await seedEditable()
+      await insertAppointment(
+        client.id, `apt_edit_${label}_allow`, new Date(NOW_MS + offset).toISOString(), status,
+      )
+      const ids = [`${label}_new_asg`, `${label}_client_ver`, `${label}_old_asg_ver`,
+        `${label}_new_asg_ver`, `${label}_audit`]
+      expect((await editClient({
+        db: env.DB, recoveryDb: env.DB,
+        actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+        keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+        idFactory: () => ids.shift(), clientId: client.id, body: bodyFor(client),
+        idempotencyKey: `client-edit-${label}-allow-0001`,
+      })).status).toBe(200)
+    }
+  })
+
+  it('keeps normal and reassignment work within exact measured budgets', async () => {
+    const keyring = await ring()
+    const normalClient = await seedEditable()
+    const normalBudget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    const normalIds = ['budget_normal_client_ver', 'budget_normal_audit']
+    await editClient({
+      db: normalBudget.work, recoveryDb: normalBudget.recovery,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => normalIds.shift(), clientId: normalClient.id,
+      body: { expectedVersion: 1, name: 'Budżet Zwykły', age: 12,
+        status: 'active', specialistId: 'sp_target' },
+      idempotencyKey: 'client-edit-budget-normal-0001',
+    })
+    expect(usageForD1QueryBudgetViews(normalBudget.work, normalBudget.recovery)).toEqual({
+      used: 8, remaining: 42, workRemaining: 34,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+
+    const reassignedClient = await seedEditable()
+    const reassignedBudget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    const reassignIds = ['budget_new_asg', 'budget_reassign_client_ver',
+      'budget_reassign_old_ver', 'budget_reassign_new_ver', 'budget_reassign_audit']
+    await editClient({
+      db: reassignedBudget.work, recoveryDb: reassignedBudget.recovery,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => reassignIds.shift(), clientId: reassignedClient.id,
+      body: { expectedVersion: 1, name: reassignedClient.name, age: 12,
+        status: 'active', specialistId: 'sp_client_self' },
+      idempotencyKey: 'client-edit-budget-reassign-0001',
+    })
+    expect(usageForD1QueryBudgetViews(reassignedBudget.work, reassignedBudget.recovery)).toEqual({
+      used: 14, remaining: 36, workRemaining: 28,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('builds the exact ordered five- and nine-statement optimistic UOWs', async () => {
+    const keyring = await ring()
+    for (const reassigned of [false, true]) {
+      const client = await seedEditable()
+      let batchSql
+      const innerByStatement = new WeakMap()
+      const statement = (sql, inner) => {
+        const wrapped = {
+          sql,
+          bind(...bindings) { return statement(sql, inner.bind(...bindings)) },
+          first: (...args) => inner.first(...args),
+          all: (...args) => inner.all(...args),
+          raw: (...args) => inner.raw(...args),
+          run: (...args) => inner.run(...args),
+        }
+        innerByStatement.set(wrapped, inner)
+        return wrapped
+      }
+      const db = {
+        prepare: (sql) => statement(sql, env.DB.prepare(sql)),
+        batch: async (statements) => {
+          batchSql = statements.map(({ sql }) => sql.replace(/\s+/g, ' ').trim())
+          return env.DB.batch(statements.map((current) => innerByStatement.get(current)))
+        },
+      }
+      const marker = reassigned ? 'ordered_reassign' : 'ordered_normal'
+      const ids = reassigned
+        ? [`${marker}_asg`, `${marker}_client_ver`, `${marker}_old_ver`,
+            `${marker}_new_ver`, `${marker}_audit`]
+        : [`${marker}_client_ver`, `${marker}_audit`]
+      await editClient({
+        db, recoveryDb: env.DB,
+        actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+        keyring, nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID,
+        idFactory: () => ids.shift(), clientId: client.id,
+        body: { expectedVersion: 1, name: reassigned ? client.name : 'Uporządkowana',
+          age: client.age, status: 'active',
+          specialistId: reassigned ? 'sp_client_self' : 'sp_target' },
+        idempotencyKey: `client-edit-${marker}-key`,
+      })
+      expect(batchSql).toEqual(reassigned ? [
+        expect.stringMatching(/^UPDATE clients /),
+        expect.stringMatching(/^UPDATE client_assignments /),
+        expect.stringMatching(/^INSERT INTO client_assignments /),
+        expect.stringMatching(/^INSERT INTO record_versions /),
+        expect.stringMatching(/^INSERT INTO record_versions /),
+        expect.stringMatching(/^INSERT INTO record_versions /),
+        expect.stringMatching(/^INSERT INTO audit_events /),
+        expect.stringMatching(/^INSERT INTO idempotency_records /),
+        expect.stringMatching(/^INSERT INTO core_directory_invariant_failures /),
+      ] : [
+        expect.stringMatching(/^UPDATE clients /),
+        expect.stringMatching(/^INSERT INTO record_versions /),
+        expect.stringMatching(/^INSERT INTO audit_events /),
+        expect.stringMatching(/^INSERT INTO idempotency_records /),
+        expect.stringMatching(/^INSERT INTO core_directory_invariant_failures /),
+      ])
+    }
+  })
+
+  it.each([
+    ['normal', 5, false],
+    ['reassignment', 9, true],
+  ])('rolls back every %s edit statement position byte-for-byte', async (_label, size, reassigned) => {
+    const keyring = await ring()
+    for (let failedAt = 0; failedAt < size; failedAt += 1) {
+      const client = await seedEditable()
+      const marker = `${reassigned ? 'reassign' : 'normal'}_rollback_${failedAt}`
+      const tables = async () => ({
+        client: await env.DB.prepare('SELECT * FROM clients WHERE id=?').bind(client.id).first(),
+        assignments: (await env.DB.prepare(
+          'SELECT * FROM client_assignments WHERE client_id=? ORDER BY id'
+        ).bind(client.id).all()).results,
+        versions: (await env.DB.prepare(
+          'SELECT * FROM record_versions WHERE entity_id=? OR entity_id=? ORDER BY id'
+        ).bind(client.id, client.assignment.id).all()).results,
+        audits: (await env.DB.prepare(
+          'SELECT * FROM audit_events WHERE entity_id=? ORDER BY id'
+        ).bind(client.id).all()).results,
+        idempotency: (await env.DB.prepare(
+          'SELECT * FROM idempotency_records WHERE resource_id=? ORDER BY idempotency_key'
+        ).bind(client.id).all()).results,
+      })
+      const before = await tables()
+      const db = {
+        prepare: (sql) => env.DB.prepare(sql),
+        batch: (statements) => env.DB.batch(statements.map((statement, index) => (
+          index === failedAt
+            ? env.DB.prepare("INSERT INTO core_directory_invariant_failures (failure_kind) VALUES ('forced')")
+            : statement
+        ))),
+      }
+      const ids = reassigned
+        ? [`${marker}_asg`, `${marker}_client_ver`, `${marker}_old_ver`,
+            `${marker}_new_ver`, `${marker}_audit`]
+        : [`${marker}_client_ver`, `${marker}_audit`]
+      await expect(editClient({
+        db, recoveryDb: env.DB,
+        actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+        keyring, nowMs: NOW_MS + 5_000, correlationId: CORRELATION_ID,
+        idFactory: () => ids.shift(), clientId: client.id,
+        body: {
+          expectedVersion: 1,
+          name: reassigned ? client.name : `Rollback ${failedAt}`,
+          age: client.age, status: 'active',
+          specialistId: reassigned ? 'sp_client_self' : 'sp_target',
+        },
+        idempotencyKey: `client-edit-${marker}-key`,
+      })).rejects.toThrow()
+      expect(await tables()).toEqual(before)
+    }
+  })
+
+  it('recovers the exact concurrent idempotency winner with two reserved reads', async () => {
+    const keyring = await ring()
+    const client = await seedEditable()
+    const key = 'client-edit-concurrent-replay-0001'
+    const body = { expectedVersion: 1, name: 'Wygrana', age: 12,
+      status: 'active', specialistId: 'sp_target' }
+    let raced = false
+    let budget
+    let usageBeforeRecovery
+    const rawDb = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch() {
+        usageBeforeRecovery = budget.usage()
+        if (!raced) {
+          raced = true
+          const winnerIds = ['concurrent_winner_client_ver', 'concurrent_winner_audit']
+          await editClient({
+            db: env.DB, recoveryDb: env.DB,
+            actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+            keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+            idFactory: () => winnerIds.shift(), clientId: client.id, body,
+            idempotencyKey: key,
+          })
+        }
+        throw new Error('identity_collision: SQLITE_CONSTRAINT')
+      },
+    }
+    budget = createD1QueryBudget(rawDb, { totalLimit: 50, recoveryReserve: 8 })
+    const loserIds = ['concurrent_loser_client_ver', 'concurrent_loser_audit']
+    const result = await editClient({
+      db: budget.work, recoveryDb: budget.recovery,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => loserIds.shift(), clientId: client.id, body,
+      idempotencyKey: key,
+    })
+    expect(result.body.data.client.name).toBe('Wygrana')
+    expect(usageBeforeRecovery.used).toBe(8)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery).used).toBe(10)
+    expect(await env.DB.prepare(
+      "SELECT count(*) AS count FROM record_versions WHERE id='ver_concurrent_loser_client_ver'"
+    ).first()).toEqual({ count: 0 })
+  })
+
+  it('rejects a reused edit key with a different resource-bound digest', async () => {
+    const client = await seedEditable()
+    const ids = ['digest_conflict_client_ver', 'digest_conflict_audit']
+    const body = { expectedVersion: 1, name: 'Pierwsza Treść', age: 12,
+      status: 'active', specialistId: 'sp_target' }
+    await editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => ids.shift(), clientId: client.id, body,
+      idempotencyKey: 'client-edit-digest-conflict-0001',
+    })
+    await expect(editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: vi.fn(), clientId: client.id,
+      body: { ...body, name: 'Druga Treść' },
+      idempotencyKey: 'client-edit-digest-conflict-0001',
+    })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+  })
+
+  it('rejects duplicate generated reassignment IDs before any write', async () => {
+    const client = await seedEditable()
+    const before = await env.DB.prepare('SELECT * FROM clients WHERE id=?').bind(client.id).first()
+    await expect(editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => 'duplicate', clientId: client.id,
+      body: { expectedVersion: 1, name: client.name, age: client.age,
+        status: 'active', specialistId: 'sp_client_self' },
+      idempotencyKey: 'client-edit-duplicate-helper-0001',
+    })).rejects.toThrow('INTERNAL_ERROR')
+    expect(await env.DB.prepare('SELECT * FROM clients WHERE id=?').bind(client.id).first())
+      .toEqual(before)
+    expect(await env.DB.prepare(
+      "SELECT count(*) AS count FROM idempotency_records WHERE idempotency_key='client-edit-duplicate-helper-0001'"
+    ).first()).toEqual({ count: 0 })
+  })
+
+  it('contains a concurrent different-key loser as a version conflict', async () => {
+    const keyring = await ring()
+    const client = await seedEditable()
+    const winnerBody = { expectedVersion: 1, name: 'Pierwszy Zapis', age: 12,
+      status: 'active', specialistId: 'sp_target' }
+    const loserBody = { ...winnerBody, name: 'Drugi Zapis' }
+    let raced = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!raced) {
+          raced = true
+          const winnerIds = ['different_winner_client_ver', 'different_winner_audit']
+          await editClient({
+            db: env.DB, recoveryDb: env.DB,
+            actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+            keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+            idFactory: () => winnerIds.shift(), clientId: client.id,
+            body: winnerBody, idempotencyKey: 'client-edit-different-winner-0001',
+          })
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    const loserIds = ['different_loser_client_ver', 'different_loser_audit']
+    await expect(editClient({
+      db, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => loserIds.shift(), clientId: client.id,
+      body: loserBody, idempotencyKey: 'client-edit-different-loser-0001',
+    })).rejects.toMatchObject({
+      message: 'VERSION_CONFLICT', details: { currentVersion: 2 },
+    })
+    expect(await env.DB.prepare(
+      'SELECT version FROM clients WHERE id=?'
+    ).bind(client.id).first()).toEqual({ version: 2 })
+    expect(await env.DB.prepare(
+      "SELECT count(*) AS count FROM record_versions WHERE id='ver_different_loser_client_ver'"
+    ).first()).toEqual({ count: 0 })
+  })
+
+  it('contains a concurrent different reassignment without extra open history', async () => {
+    const keyring = await ring()
+    const client = await seedEditable()
+    const winnerBody = { expectedVersion: 1, name: client.name, age: 12,
+      status: 'active', specialistId: 'sp_client_self' }
+    const loserBody = { ...winnerBody, name: 'Przegrana Zmiana' }
+    let raced = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!raced) {
+          raced = true
+          const winnerIds = ['reassign_race_winner_asg', 'reassign_race_winner_client_ver',
+            'reassign_race_winner_old_ver', 'reassign_race_winner_new_ver',
+            'reassign_race_winner_audit']
+          await editClient({
+            db: env.DB, recoveryDb: env.DB,
+            actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+            keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+            idFactory: () => winnerIds.shift(), clientId: client.id,
+            body: winnerBody, idempotencyKey: 'client-edit-reassign-race-winner-0001',
+          })
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    const loserIds = ['reassign_race_loser_asg', 'reassign_race_loser_client_ver',
+      'reassign_race_loser_old_ver', 'reassign_race_loser_new_ver',
+      'reassign_race_loser_audit']
+    await expect(editClient({
+      db, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => loserIds.shift(), clientId: client.id,
+      body: loserBody, idempotencyKey: 'client-edit-reassign-race-loser-0001',
+    })).rejects.toMatchObject({
+      message: 'VERSION_CONFLICT', details: { currentVersion: 2 },
+    })
+    expect(await env.DB.prepare(
+      'SELECT count(*) AS count FROM client_assignments WHERE client_id=? AND ends_at IS NULL'
+    ).bind(client.id).first()).toEqual({ count: 1 })
+    expect(await env.DB.prepare(
+      "SELECT count(*) AS count FROM client_assignments WHERE id='asg_reassign_race_loser_asg'"
+    ).first()).toEqual({ count: 0 })
+    expect(await env.DB.prepare(
+      'SELECT count(*) AS count FROM client_assignments WHERE client_id=?'
+    ).bind(client.id).first()).toEqual({ count: 2 })
+  })
+
+  it('fails closed when the owning client KEK is retired before replay', async () => {
+    const client = await seedEditable()
+    const ids = ['retired_replay_client_ver', 'retired_replay_audit']
+    const body = { expectedVersion: 1, name: 'Klucz Retired', age: 12,
+      status: 'active', specialistId: 'sp_target' }
+    await editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => ids.shift(), clientId: client.id, body,
+      idempotencyKey: 'client-edit-retired-replay-0001',
+    })
+    await expect(editClient({
+      db: env.DB, recoveryDb: env.DB,
+      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      keyring: {}, nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID,
+      idFactory: vi.fn(), clientId: client.id, body,
+      idempotencyKey: 'client-edit-retired-replay-0001',
+    })).rejects.toThrow('CRYPTO_FAILURE')
+  })
+
+  it('serves edit through the real HTTP security and shared-budget path', async () => {
+    const client = await seedEditable()
+    const ids = ['http_edit_client_ver_unique', 'http_edit_audit_unique']
+    let usage
+    const service = async (options) => {
+      try { return await editClient(options) } finally {
+        usage = usageForD1QueryBudgetViews(options.db, options.recoveryDb)
+      }
+    }
+    const app = createApp({
+      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+      db: env.DB,
+      cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
+      resolveAccessPrincipal: vi.fn(async () => ({
+        kind: 'human', subject: 'access-client-edit-http', normalizedEmail: 'edit-http@example.test',
+      })),
+      resolveActor: vi.fn(async () => ({
+        id: 'stf_client_owner', role: 'owner', specialistId: null, version: 1,
+      })),
+      verifyCsrfToken: vi.fn(async () => true),
+      readJsonBodyOnce: vi.fn(async (request) => request.json()),
+      editClient: service,
+      idFactory: vi.fn(() => ids.shift()),
+      safeLog: vi.fn(),
+      now: () => NOW_MS + 1_000,
+    })
+    const response = await app.request(`/api/v1/clients/${client.id}/edits`, {
+      method: 'POST',
+      headers: {
+        origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+        'idempotency-key': 'client-edit-http-success-0001', 'x-csrf-token': 'valid',
+        'x-correlation-id': CORRELATION_ID,
+      },
+      body: JSON.stringify({ expectedVersion: 1, name: 'HTTP Edycja', age: 12,
+        status: 'paused', specialistId: 'sp_target' }),
+    })
+    expect(response.status).toBe(200)
+    expect((await response.json()).data.client).toMatchObject({
+      id: client.id, name: 'HTTP Edycja', status: 'paused', version: 2,
+    })
+    expect(usage).toEqual({
+      used: 8, remaining: 42, workRemaining: 34,
+      totalLimit: 50, recoveryReserve: 8,
+    })
   })
 })
