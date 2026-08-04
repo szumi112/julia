@@ -368,6 +368,37 @@ describe('closed core route descriptors', () => {
     expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
   })
 
+  it('dispatches payment correction through the authentic shared command boundary', async () => {
+    let views
+    const correctAppointmentPayment = vi.fn(async (input) => {
+      views = { work: input.db, recovery: input.recoveryDb }
+      expect(input).toMatchObject({
+        paymentId: 'pay_one', idempotencyKey: 'core-command-key-0001',
+        body: commands[6][1],
+      })
+      await input.db.prepare('SELECT payment_correction_domain_1').first()
+      return { status: 200, body: { data: { appointment: {
+        id: 'apt_one', payment: { status: 'unpaid' },
+      } } } }
+    })
+    const input = deps({
+      db: coreBudgetDb(), correctAppointmentPayment,
+      verifyCsrfToken: vi.fn(async () => true),
+      readJsonBodyOnce: vi.fn(async (request) => request.json()),
+    })
+    const response = await createApp(input).request(
+      '/api/v1/payments/pay_one/corrections', {
+        method: 'POST', headers, body: JSON.stringify(commands[6][1]),
+      },
+    )
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ data: { appointment: {
+      id: 'apt_one', payment: { status: 'unpaid' },
+    } } })
+    expect(correctAppointmentPayment).toHaveBeenCalledOnce()
+    expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
+  })
+
   it('rejects idempotency and exact body-shape failures in the frozen shell order', async () => {
     const missingKey = deps({ db: coreBudgetDb(), resolveAccessPrincipal: vi.fn(), readJsonBodyOnce: vi.fn() })
     const first = await createApp(missingKey).request('/api/v1/clients', {

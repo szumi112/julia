@@ -1,15 +1,19 @@
 import { env } from 'cloudflare:workers'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  correctAppointmentPayment,
+  digestCorrectPaymentRequest,
   digestRecordPaymentRequest,
   recordAppointmentPayment,
+  validateCorrectPaymentBody,
   validateRecordPaymentBody,
 } from '../../worker/core/payments.js'
 import { postAppointmentPayment } from '../../worker/routes/appointments.js'
+import { postPaymentCorrection } from '../../worker/routes/payments.js'
 import { cancelAppointment, createAppointment } from '../../worker/core/appointments.js'
 import { createClient } from '../../worker/core/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
+import { decryptForScope, encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
 import { clientKeyScope } from '../../worker/core/crypto.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import {
@@ -29,6 +33,15 @@ const BODY = Object.freeze({
   method: 'card',
   receivedAt: '2027-01-15T08:30:00.000Z',
 })
+const CORRECTION_BODY = Object.freeze({
+  expectedVersion: 2,
+  reason: 'Błędna metoda płatności',
+  replacement: Object.freeze({
+    amountGrosze: 10_000,
+    method: 'transfer',
+    receivedAt: '2027-01-15T08:30:00.000Z',
+  }),
+})
 const BASE = Object.freeze({
   db: {}, recoveryDb: {},
   actor: { id: 'stf_payment_owner', role: 'owner', specialistId: null },
@@ -37,6 +50,9 @@ const BASE = Object.freeze({
   idFactory: () => 'fixture', appointmentId: 'apt_payment_fixture',
   body: BODY, idempotencyKey: 'payment-command-key-0001',
 })
+const CORRECTION_BASE = Object.freeze(Object.fromEntries(
+  Object.entries(BASE).filter(([key]) => key !== 'appointmentId'),
+))
 const NOW_MS = BASE.nowMs
 const OWNER = BASE.actor
 const ring = () => createKeyring(env, {
@@ -60,6 +76,14 @@ beforeAll(async () => {
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       OWNER.id, 'lookup_payment_owner', '{}', '{}', 'owner', 'active',
       'access-payment-owner', null, 1, now, null, now, now,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_payment_coordinator', 'lookup_payment_coordinator', '{}', '{}',
+      'coordinator', 'active', 'access-payment-coordinator', null, 1,
+      now, null, now, now,
     ),
     env.DB.prepare(`INSERT INTO staff_users
       (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
@@ -112,6 +136,17 @@ const paymentInput = async (appointment, overrides = {}) => {
     nowMs: NOW_MS + sequence * 1_000, correlationId: BASE.correlationId,
     idFactory: suffixes(marker), appointmentId: appointment.id,
     body: { ...BODY, expectedVersion: appointment.version },
+    idempotencyKey: `${marker}-key`, ...overrides,
+  }
+}
+
+const correctionInput = async (appointment, paymentId, overrides = {}) => {
+  const marker = `payment_correction_${++sequence}`
+  return {
+    db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+    nowMs: NOW_MS + sequence * 1_000, correlationId: BASE.correlationId,
+    idFactory: suffixes(marker), paymentId,
+    body: { ...CORRECTION_BODY, expectedVersion: appointment.version },
     idempotencyKey: `${marker}-key`, ...overrides,
   }
 }
@@ -355,6 +390,502 @@ const withCorruptedAll = (needle, mutate) => ({
 })
 
 describe('appointment payment capture', () => {
+  it('strictly captures correction reason and optional replacement with a canonical digest', async () => {
+    expect(validateCorrectPaymentBody(CORRECTION_BODY)).toEqual(CORRECTION_BODY)
+    expect(validateCorrectPaymentBody({ ...CORRECTION_BODY, replacement: null }))
+      .toEqual({ ...CORRECTION_BODY, replacement: null })
+    expect(validateCorrectPaymentBody({ ...CORRECTION_BODY,
+      reason: `${'ą'.repeat(250)}`, replacement: null }).reason).toHaveLength(250)
+    expect(validateCorrectPaymentBody({ ...CORRECTION_BODY,
+      reason: 'A\u0000B', replacement: null }).reason).toBe('A\u0000B')
+    await expect(digestCorrectPaymentRequest('pay_correction_fixture', CORRECTION_BODY))
+      .resolves.toMatch(/^[A-Za-z0-9_-]{43}$/)
+    for (const [field, value] of [
+      ['expectedVersion', 0], ['expectedVersion', 4_096], ['reason', ''],
+      ['reason', ' whitespace '],
+      ['reason', 'e\u0301'], ['reason', '\uD800'], ['reason', 'ą'.repeat(251)],
+      ['replacement', {}],
+    ]) {
+      expect(() => validateCorrectPaymentBody({ ...CORRECTION_BODY, [field]: value }))
+        .toThrow(`VALIDATION_FAILED/${field}`)
+    }
+    for (const [field, value] of [
+      ['amountGrosze', 0], ['amountGrosze', 1_000_001], ['method', 'blik'],
+      ['receivedAt', '2027-01-15T08:30:00Z'],
+    ]) {
+      expect(() => validateCorrectPaymentBody({ ...CORRECTION_BODY, replacement: {
+        ...CORRECTION_BODY.replacement, [field]: value,
+      } })).toThrow(`VALIDATION_FAILED/${field}`)
+    }
+    expect(() => validateCorrectPaymentBody({ ...CORRECTION_BODY, extra: true }))
+      .toThrow('VALIDATION_FAILED/body')
+    const getter = vi.fn(() => CORRECTION_BODY.reason)
+    const hostile = { ...CORRECTION_BODY }
+    Object.defineProperty(hostile, 'reason', { enumerable: true, get: getter })
+    expect(() => validateCorrectPaymentBody(hostile)).toThrow('VALIDATION_FAILED/body')
+    expect(getter).not.toHaveBeenCalled()
+  })
+
+  it('maps only closed correction validation fields through the route adapter', async () => {
+    const service = vi.fn(async () => ({ status: 200, body: { data: { appointment: {} } } }))
+    await expect(postPaymentCorrection({
+      ...CORRECTION_BASE, paymentId: 'pay_correction_fixture', body: CORRECTION_BODY,
+      correctPayment: service,
+    })).resolves.toMatchObject({ status: 200 })
+    expect(service).toHaveBeenCalledOnce()
+    await expect(postPaymentCorrection({
+      ...CORRECTION_BASE, paymentId: 'pay_correction_fixture', body: {
+        ...CORRECTION_BODY, reason: '',
+      }, correctPayment: service,
+    })).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED', details: { field: 'reason' },
+    })
+  })
+
+  it('atomically reverses a payment, encrypts its reason, advances appointment only, and replays first', async () => {
+    const created = await seedAppointment()
+    const recorded = await recordAppointmentPayment(await paymentInput(created))
+    const appointment = recorded.body.data.appointment
+    const target = appointment.paymentEntries[0]
+    const input = await correctionInput(appointment, target.id, {
+      body: { expectedVersion: appointment.version, reason: 'Błędny wpis', replacement: null },
+    })
+    const chargeBefore = await env.DB.prepare('SELECT * FROM session_charges WHERE id=?')
+      .bind(appointment.charge.id).first()
+    const result = await correctAppointmentPayment(input)
+    expect(result).toMatchObject({ status: 200, body: { data: { appointment: {
+      id: appointment.id, version: appointment.version + 1,
+      charge: { id: appointment.charge.id, version: appointment.charge.version },
+      payment: { status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 19_500,
+        latestMethod: null, latestReceivedAt: null },
+      paymentEntries: [{ id: target.id, correctedAt: new Date(input.nowMs).toISOString(),
+        replacementEntryId: null }],
+    } } } })
+    expect(await env.DB.prepare('SELECT * FROM session_charges WHERE id=?')
+      .bind(appointment.charge.id).first()).toEqual(chargeBefore)
+    const correction = await env.DB.prepare(`SELECT id,reversed_entry_id,replacement_entry_id,
+      reason_envelope,recorded_by_staff_id,created_at FROM payment_corrections
+      WHERE reversed_entry_id=?`).bind(target.id).first()
+    expect(correction).toMatchObject({ reversed_entry_id: target.id,
+      replacement_entry_id: null, recorded_by_staff_id: OWNER.id,
+      created_at: new Date(input.nowMs).toISOString() })
+    expect(correction.reason_envelope).not.toContain('Błędny wpis')
+    const client = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(appointment.clientId).first()
+    const scope = clientKeyScope(appointment.clientId)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(client.identity_envelope), expectedScope: scope,
+    })
+    await expect(decryptForScope(await ring(), dataKey, {
+      expectedScope: scope, recordId: correction.id, field: 'reason',
+      envelope: JSON.parse(correction.reason_envelope),
+    })).resolves.toBe('Błędny wpis')
+    await expect(decryptForScope(await ring(), dataKey, {
+      expectedScope: scope, recordId: `${correction.id}_wrong`, field: 'reason',
+      envelope: JSON.parse(correction.reason_envelope),
+    })).rejects.toThrow('CRYPTO_FAILURE')
+    const audit = await env.DB.prepare(`SELECT action,entity_type,entity_id,
+      reason_envelope,metadata_json FROM audit_events WHERE action='payment.corrected'
+      AND entity_id=?`).bind(target.id).first()
+    expect(audit).toEqual({ action: 'payment.corrected', entity_type: 'payment_entry',
+      entity_id: target.id, reason_envelope: null, metadata_json: JSON.stringify({
+        appointmentVersion: appointment.version + 1,
+        correctionId: correction.id,
+        replacementEntryId: null,
+        reversedEntryId: target.id,
+      }) })
+    expect(JSON.stringify(result)).not.toContain('Błędny wpis')
+    const replayFactory = vi.fn()
+    await expect(correctAppointmentPayment({ ...input, idFactory: replayFactory,
+      nowMs: input.nowMs + 1 })).resolves.toEqual(result)
+    expect(replayFactory).not.toHaveBeenCalled()
+  })
+
+  it('replaces a payment immutably on the same appointment and recomputes latest effective money', async () => {
+    const created = await seedAppointment('noshow')
+    const first = await recordAppointmentPayment(await paymentInput(created, { body: {
+      ...BODY, expectedVersion: 1, amountGrosze: 5_000, method: 'cash',
+      receivedAt: '2027-01-15T08:45:00.000Z',
+    } }))
+    const appointment = first.body.data.appointment
+    const target = appointment.paymentEntries[0]
+    const input = await correctionInput(appointment, target.id, { body: {
+      expectedVersion: appointment.version, reason: 'Zmiana metody', replacement: {
+        amountGrosze: 6_000, method: 'transfer', receivedAt: '2027-01-15T08:15:00.000Z',
+      },
+    } })
+    const result = await correctAppointmentPayment(input)
+    const next = result.body.data.appointment
+    expect(next.version).toBe(appointment.version + 1)
+    expect(next.payment).toEqual({ status: 'partial', collectedGrosze: 6_000,
+      outstandingGrosze: 13_500, latestMethod: 'transfer',
+      latestReceivedAt: '2027-01-15T08:15:00.000Z' })
+    expect(next.paymentEntries).toHaveLength(2)
+    expect(next.paymentEntries.find(({ id }) => id === target.id)).toMatchObject({
+      correctedAt: new Date(input.nowMs).toISOString(),
+      replacementEntryId: expect.stringMatching(/^pay_/),
+    })
+    const replacement = next.paymentEntries.find(({ id }) => id !== target.id)
+    expect(replacement).toMatchObject({ amountGrosze: 6_000, method: 'transfer',
+      receivedAt: '2027-01-15T08:15:00.000Z', correctedAt: null,
+      replacementEntryId: null })
+    const stored = await env.DB.prepare(`SELECT appointment_id,amount_grosze,method,
+      received_at,recorded_by_staff_id,external_reference_envelope,created_at
+      FROM payment_entries WHERE id=?`).bind(replacement.id).first()
+    expect(stored).toEqual({ appointment_id: appointment.id, amount_grosze: 6_000,
+      method: 'transfer', received_at: '2027-01-15T08:15:00.000Z',
+      recorded_by_staff_id: OWNER.id, external_reference_envelope: null,
+      created_at: new Date(input.nowMs).toISOString() })
+  })
+
+  it('orders correction scope, opacity, authorization, stale, and total conflicts before IDs', async () => {
+    const created = await seedAppointment()
+    const recorded = await recordAppointmentPayment(await paymentInput(created, { body: {
+      ...BODY, expectedVersion: 1, amountGrosze: 5_000,
+    } }))
+    const appointment = recorded.body.data.appointment
+    const target = appointment.paymentEntries[0]
+    for (const overrides of [
+      { paymentId: 'pay_absent' },
+      { actor: { id: 'stf_payment_target', role: 'specialist', specialistId: 'sp_other' } },
+    ]) {
+      const idFactory = vi.fn()
+      await expect(correctAppointmentPayment(await correctionInput(
+        appointment, target.id, { ...overrides, idFactory },
+      ))).rejects.toThrow('NOT_FOUND')
+      expect(idFactory).not.toHaveBeenCalled()
+    }
+    const staleFactory = vi.fn()
+    await expect(correctAppointmentPayment(await correctionInput(
+      appointment, target.id, { idFactory: staleFactory,
+        body: { ...CORRECTION_BODY, expectedVersion: appointment.version + 1 } },
+    ))).rejects.toMatchObject({ message: 'VERSION_CONFLICT',
+      details: { currentVersion: appointment.version } })
+    expect(staleFactory).not.toHaveBeenCalled()
+
+    const ownerResult = await correctAppointmentPayment(await correctionInput(
+      appointment, target.id, { body: {
+        expectedVersion: appointment.version, reason: 'Usunięcie', replacement: null,
+      } },
+    ))
+    const alreadyFactory = vi.fn()
+    await expect(correctAppointmentPayment(await correctionInput(
+      ownerResult.body.data.appointment, target.id, { idFactory: alreadyFactory },
+    ))).rejects.toThrow('NOT_FOUND')
+    expect(alreadyFactory).not.toHaveBeenCalled()
+
+    const conflictCreated = await seedAppointment()
+    const first = await recordAppointmentPayment(await paymentInput(conflictCreated, { body: {
+      ...BODY, expectedVersion: 1, amountGrosze: 5_000,
+    } }))
+    const second = await recordAppointmentPayment(await paymentInput(
+      first.body.data.appointment, { body: {
+        ...BODY, expectedVersion: 2, amountGrosze: 14_500,
+        receivedAt: '2027-01-15T08:45:00.000Z',
+      } },
+    ))
+    const conflictTarget = second.body.data.appointment.paymentEntries
+      .find(({ amountGrosze }) => amountGrosze === 5_000)
+    const conflictFactory = vi.fn()
+    await expect(correctAppointmentPayment(await correctionInput(
+      second.body.data.appointment, conflictTarget.id, { idFactory: conflictFactory,
+        body: { expectedVersion: 3, reason: 'Za duża zamiana', replacement: {
+          amountGrosze: 5_001, method: 'card', receivedAt: BODY.receivedAt,
+        } } },
+    ))).rejects.toThrow('PAYMENT_CORRECTION_CONFLICT')
+    expect(conflictFactory).not.toHaveBeenCalled()
+  })
+
+  it('allows the owning specialist and keeps correction reasons out of replay and audit', async () => {
+    const created = await seedAppointment()
+    const recorded = await recordAppointmentPayment(await paymentInput(created))
+    const appointment = recorded.body.data.appointment
+    const target = appointment.paymentEntries[0]
+    const input = await correctionInput(appointment, target.id, {
+      actor: { id: 'stf_payment_target', role: 'specialist',
+        specialistId: 'sp_payment_target' },
+      body: { expectedVersion: appointment.version,
+        reason: 'Poufna fikcyjna przyczyna', replacement: null },
+    })
+    const result = await correctAppointmentPayment(input)
+    expect(JSON.stringify(result)).not.toContain('Poufna fikcyjna przyczyna')
+    const rows = (await env.DB.prepare(`SELECT metadata_json,reason_envelope
+      FROM audit_events WHERE action='payment.corrected' AND entity_id=?`)
+      .bind(target.id).all()).results
+    expect(rows).toHaveLength(1)
+    expect(JSON.stringify(rows)).not.toContain('Poufna fikcyjna przyczyna')
+    await expect(correctAppointmentPayment({ ...input, idFactory: vi.fn(),
+      nowMs: input.nowMs + 1 })).resolves.toEqual(result)
+    await expect(correctAppointmentPayment({ ...input, idFactory: vi.fn(), body: {
+      ...input.body, reason: 'Inna przyczyna',
+    } })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+    const client = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(appointment.clientId).first()
+    await env.DB.prepare('UPDATE data_keys SET retired_at=? WHERE id=?').bind(
+      new Date(input.nowMs + 2).toISOString(), JSON.parse(client.identity_envelope).dataKeyId,
+    ).run()
+    await expect(correctAppointmentPayment({ ...input, idFactory: vi.fn(),
+      nowMs: input.nowMs + 2 })).resolves.toEqual(result)
+  })
+
+  it('allows a coordinator to correct any authenticated scoped payment', async () => {
+    const created = await seedAppointment()
+    const recorded = await recordAppointmentPayment(await paymentInput(created))
+    const appointment = recorded.body.data.appointment
+    const target = appointment.paymentEntries[0]
+    const result = await correctAppointmentPayment(await correctionInput(
+      appointment, target.id, {
+        actor: { id: 'stf_payment_coordinator', role: 'coordinator', specialistId: null },
+        body: { expectedVersion: appointment.version,
+          reason: 'Korekta koordynatora', replacement: null },
+      },
+    ))
+    expect(result.body.data.appointment.payment.collectedGrosze).toBe(0)
+  })
+
+  it('fails correction replay closed for missing keys, wrong scope, and tampered envelopes', async () => {
+    for (const mode of ['missing-key', 'wrong-scope', 'tampered-envelope']) {
+      const created = await seedAppointment()
+      const recorded = await recordAppointmentPayment(await paymentInput(created))
+      const appointment = recorded.body.data.appointment
+      const target = appointment.paymentEntries[0]
+      const input = await correctionInput(appointment, target.id, { body: {
+        expectedVersion: appointment.version, reason: 'Replay poufny', replacement: null,
+      } })
+      await correctAppointmentPayment(input)
+      const db = { prepare(sql) {
+        const prepared = env.DB.prepare(sql)
+        if (mode === 'missing-key' && sql.includes('FROM data_keys')) {
+          return { bind() { return { first: async () => null } } }
+        }
+        if (!sql.includes('SELECT request_hash,resource_type,resource_id,response_envelope')) {
+          return prepared
+        }
+        return { bind(...bindings) {
+          const bound = prepared.bind(...bindings)
+          return { async first() {
+            const row = await bound.first()
+            if (mode === 'wrong-scope') return { ...row, resource_id: created.id }
+            if (mode === 'tampered-envelope') return { ...row, response_envelope: '{}' }
+            return row
+          } }
+        } }
+      }, batch: (statements) => env.DB.batch(statements) }
+      await expect(correctAppointmentPayment({ ...input, db, idFactory: vi.fn() }))
+        .rejects.toThrow('CRYPTO_FAILURE')
+    }
+  })
+
+  it('keeps payment and correction rows append-only and rolls back every UOW position in both shapes', async () => {
+    const appendCreated = await seedAppointment()
+    const appendRecorded = await recordAppointmentPayment(await paymentInput(appendCreated))
+    const appendTarget = appendRecorded.body.data.appointment.paymentEntries[0]
+    const appendResult = await correctAppointmentPayment(await correctionInput(
+      appendRecorded.body.data.appointment, appendTarget.id, { body: {
+        expectedVersion: 2, reason: 'Test niezmienności', replacement: null,
+      } },
+    ))
+    await expect(env.DB.prepare('UPDATE payment_entries SET amount_grosze=1 WHERE id=?')
+      .bind(appendTarget.id).run()).rejects.toThrow()
+    await expect(env.DB.prepare('DELETE FROM payment_entries WHERE id=?')
+      .bind(appendTarget.id).run()).rejects.toThrow()
+    const correction = await env.DB.prepare(
+      'SELECT id FROM payment_corrections WHERE reversed_entry_id=?',
+    ).bind(appendTarget.id).first()
+    await expect(env.DB.prepare('UPDATE payment_corrections SET created_at=? WHERE id=?')
+      .bind(appendResult.body.data.appointment.updatedAt, correction.id).run()).rejects.toThrow()
+    await expect(env.DB.prepare('DELETE FROM payment_corrections WHERE id=?')
+      .bind(correction.id).run()).rejects.toThrow()
+
+    for (const replacement of [null, CORRECTION_BODY.replacement]) {
+      const positions = replacement === null ? 6 : 7
+      for (let failedAt = 0; failedAt < positions; failedAt += 1) {
+        const created = await seedAppointment()
+        const recorded = await recordAppointmentPayment(await paymentInput(created))
+        const appointment = recorded.body.data.appointment
+        const target = appointment.paymentEntries[0]
+        const before = await ledgerSnapshot()
+        const db = {
+          prepare: (sql) => env.DB.prepare(sql),
+          batch: (statements) => env.DB.batch(statements.map((statement, index) => (
+            index === failedAt
+              ? env.DB.prepare("INSERT INTO core_directory_invariant_failures (failure_kind) VALUES ('forced')")
+              : statement
+          ))),
+        }
+        await expect(correctAppointmentPayment(await correctionInput(
+          appointment, target.id, { db, body: {
+            expectedVersion: appointment.version, reason: 'Wymuszony rollback', replacement,
+          } },
+        ))).rejects.toThrow()
+        expect(await ledgerSnapshot()).toEqual(before)
+      }
+    }
+  })
+
+  it('allows null reversal at 1,000 entries but rejects replacement before IDs', async () => {
+    const entriesFor = (marker) => Array.from({ length: 1_000 }, (_, index) => ({
+      id: `pay_cap_${marker}_${String(index).padStart(4, '0')}`,
+      amountGrosze: 1, method: 'cash',
+      receivedAt: `2027-01-15T08:${String(Math.floor(index / 60)).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.000Z`,
+    }))
+    const nullCreated = await seedAppointment()
+    const nullEntries = entriesFor(`null_${sequence}`)
+    const nullAppointment = await seedPaymentGraph(nullCreated, nullEntries)
+    const nullTarget = nullEntries[0]
+    const reversed = await correctAppointmentPayment(await correctionInput(
+      nullAppointment, nullTarget.id, { body: {
+        expectedVersion: 2, reason: 'Korekta na granicy', replacement: null,
+      } },
+    ))
+    expect(reversed.body.data.appointment.paymentEntries).toHaveLength(1_000)
+    expect(reversed.body.data.appointment.payment.collectedGrosze).toBe(999)
+
+    const replacementCreated = await seedAppointment()
+    const replacementEntries = entriesFor(`replacement_${sequence}`)
+    const replacementAppointment = await seedPaymentGraph(
+      replacementCreated, replacementEntries,
+    )
+    const idFactory = vi.fn()
+    await expect(correctAppointmentPayment(await correctionInput(
+      replacementAppointment, replacementEntries[0].id, { idFactory, body: {
+        expectedVersion: 2, reason: 'Brak miejsca',
+        replacement: { amountGrosze: 1, method: 'cash',
+          receivedAt: '2027-01-15T08:00:00.000Z' },
+      } },
+    ))).rejects.toThrow('PAYMENT_CORRECTION_CONFLICT')
+    expect(idFactory).not.toHaveBeenCalled()
+  })
+
+  it('recovers an injected same-key correction winner with exactly two reserve reads', async () => {
+    const created = await seedAppointment()
+    const recorded = await recordAppointmentPayment(await paymentInput(created))
+    const appointment = recorded.body.data.appointment
+    const target = appointment.paymentEntries[0]
+    const commandNow = Date.parse(appointment.updatedAt) + 1_000
+    const key = `correction-injected-winner-${sequence}`
+    const body = { expectedVersion: appointment.version,
+      reason: 'Jedna korekta', replacement: null }
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    let recoveryReads = 0
+    const recoveryDb = { prepare(sql) {
+      recoveryReads += 1
+      return budget.recovery.prepare(sql)
+    } }
+    let injected = false
+    let winner
+    const db = {
+      prepare: (sql) => budget.work.prepare(sql),
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          winner = await correctAppointmentPayment({
+            db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+            nowMs: commandNow, correlationId: BASE.correlationId,
+            idFactory: suffixes(`correction_injected_winner_${++sequence}`),
+            paymentId: target.id, body, idempotencyKey: key,
+          })
+        }
+        return budget.work.batch(statements)
+      },
+    }
+    const loser = await correctAppointmentPayment({
+      db, recoveryDb, actor: OWNER, keyring: await ring(), nowMs: commandNow,
+      correlationId: BASE.correlationId,
+      idFactory: suffixes(`correction_injected_loser_${++sequence}`),
+      paymentId: target.id, body, idempotencyKey: key,
+    })
+    expect(loser).toEqual(winner)
+    expect(recoveryReads).toBe(2)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 18, remaining: 32, workRemaining: 24,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('classifies a different-key correction loser as opaque not found after reproof', async () => {
+    const created = await seedAppointment()
+    const recorded = await recordAppointmentPayment(await paymentInput(created))
+    const appointment = recorded.body.data.appointment
+    const target = appointment.paymentEntries[0]
+    const commandNow = Date.parse(appointment.updatedAt) + 1_000
+    let injected = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          await correctAppointmentPayment(await correctionInput(
+            appointment, target.id, { nowMs: commandNow,
+              body: { expectedVersion: appointment.version,
+                reason: 'Wygrywająca korekta', replacement: null } },
+          ))
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    await expect(correctAppointmentPayment(await correctionInput(
+      appointment, target.id, { db, nowMs: commandNow,
+        body: { expectedVersion: appointment.version,
+          reason: 'Przegrywająca korekta', replacement: null } },
+    ))).rejects.toThrow('NOT_FOUND')
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM payment_corrections
+      WHERE reversed_entry_id=?`).bind(target.id).first()).toEqual({ count: 1 })
+  })
+
+  it('stays within exact correction domain and full-route budgets', async () => {
+    const created = await seedAppointment()
+    const recorded = await recordAppointmentPayment(await paymentInput(created))
+    const appointment = recorded.body.data.appointment
+    const target = appointment.paymentEntries[0]
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    await correctAppointmentPayment(await correctionInput(
+      appointment, target.id, { db: budget.work, recoveryDb: budget.recovery,
+        body: { expectedVersion: appointment.version,
+          reason: 'Pomiar budżetu', replacement: null } },
+    ))
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 15, remaining: 35, workRemaining: 27,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+
+    const httpCreated = await seedAppointment()
+    const httpRecorded = await recordAppointmentPayment(await paymentInput(httpCreated))
+    const httpAppointment = httpRecorded.body.data.appointment
+    const httpTarget = httpAppointment.paymentEntries[0]
+    let views
+    const app = createApp({
+      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl',
+        dataMode: 'fictional' },
+      db: env.DB, cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
+      resolveAccessPrincipal: vi.fn(async () => ({ kind: 'human',
+        subject: 'access-payment-owner', normalizedEmail: 'owner@example.test' })),
+      resolveActor: vi.fn(async () => ({ ...OWNER, version: 1 })),
+      verifyCsrfToken: vi.fn(async () => true),
+      readJsonBodyOnce: vi.fn(async (request) => request.json()),
+      postPaymentCorrection: async (input) => {
+        views = { work: input.db, recovery: input.recoveryDb }
+        return postPaymentCorrection(input)
+      },
+      idFactory: suffixes(`correction_http_${++sequence}`),
+      now: () => Date.parse(httpAppointment.updatedAt) + 1_000,
+    })
+    const response = await app.request(`/api/v1/payments/${httpTarget.id}/corrections`, {
+      method: 'POST', headers: {
+        origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+        'idempotency-key': `correction-http-${sequence}-key`, 'x-csrf-token': 'valid',
+        'x-correlation-id': BASE.correlationId,
+      }, body: JSON.stringify({ expectedVersion: httpAppointment.version,
+        reason: 'Korekta HTTP', replacement: null }),
+    })
+    expect(response.status).toBe(200)
+    expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
+    expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
+      used: 15, remaining: 35, workRemaining: 27,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
   it('strictly captures the exact payment body and canonical digest', async () => {
     expect(validateRecordPaymentBody(BODY)).toEqual(BODY)
     await expect(digestRecordPaymentRequest(BASE.appointmentId, BODY))

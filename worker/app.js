@@ -35,6 +35,7 @@ import {
   postAppointmentEdit,
   postAppointmentPayment,
 } from './routes/appointments.js'
+import { postPaymentCorrection } from './routes/payments.js'
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
 import { loadDataKey } from './security/envelope.js'
 import { createKeyring } from './security/keyring.js'
@@ -468,6 +469,21 @@ export function createApp(deps = {}) {
         ? { recordPayment: deps.recordAppointmentPayment } : {}),
     }
     const result = await (deps.postAppointmentPayment ?? postAppointmentPayment)(input)
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/payments/:paymentId/corrections', async (c) => {
+    if (c.get('routeId') !== 'payments.correct') throw new AppError('NOT_FOUND')
+    const input = {
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+      paymentId: c.req.param('paymentId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.correctAppointmentPayment
+        ? { correctPayment: deps.correctAppointmentPayment } : {}),
+    }
+    const result = await (deps.postPaymentCorrection ?? postPaymentCorrection)(input)
     return c.json(result.body, result.status)
   })
   app.options('/api/v1/session', (c) => new Response(null, {
