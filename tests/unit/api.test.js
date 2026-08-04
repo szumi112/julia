@@ -2711,3 +2711,420 @@ test('security audit ignores polluted inherited options and reads present own op
     delete Object.prototype.limit
   }
 })
+
+const clientInput = (overrides = {}) => ({
+  name: 'Ola Żuraw',
+  age: 12,
+  status: 'active',
+  specialistId: 'sp_anna',
+  ...overrides,
+})
+
+const clientDto = (overrides = {}) => ({
+  id: 'cl_ola',
+  name: 'Ola Żuraw',
+  age: 12,
+  status: 'active',
+  version: 1,
+  archivedAt: null,
+  createdAt: '2026-08-04T08:00:00.000Z',
+  updatedAt: '2026-08-04T08:00:00.000Z',
+  readOnly: false,
+  assignment: {
+    id: 'asg_ola_anna',
+    specialistId: 'sp_anna',
+    startsAt: '2026-08-04T08:00:00.000Z',
+    version: 1,
+  },
+  ...overrides,
+})
+
+const clientEnvelope = (client) => ({ data: { client } })
+
+test('exposes client commands and sends canonical create, edit, and archive requests', async () => {
+  assert.equal(typeof apiClient.createClient, 'function')
+  assert.equal(typeof apiClient.editClient, 'function')
+  assert.equal(typeof apiClient.archiveClient, 'function')
+
+  const created = clientDto()
+  const edited = clientDto({
+    name: 'Ola Nowak',
+    age: null,
+    status: 'paused',
+    version: 2,
+    updatedAt: '2026-08-04T09:00:00.000Z',
+    assignment: {
+      id: 'asg_ola_beata',
+      specialistId: 'sp_beata',
+      startsAt: '2026-08-04T09:00:00.000Z',
+      version: 1,
+    },
+  })
+  const archived = clientDto({
+    name: 'Ola Nowak',
+    age: null,
+    status: 'archived',
+    version: 3,
+    archivedAt: '2026-08-04T10:00:00.000Z',
+    updatedAt: '2026-08-04T10:00:00.000Z',
+    readOnly: true,
+    assignment: null,
+  })
+  const generated = ['client-create-key-0001', 'client-archive-key-0003']
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse(clientEnvelope(created), 201),
+    jsonResponse(clientEnvelope(edited)),
+    jsonResponse(clientEnvelope(archived)),
+  )
+  const client = createApiClient({
+    fetchImpl,
+    idempotencyKeyFactory: () => generated.shift(),
+  })
+  await client.getSession()
+
+  const createSource = {
+    specialistId: 'sp_anna', status: 'active', age: 12, name: 'Ola Żuraw',
+  }
+  const createResult = await client.createClient(createSource)
+  const editResult = await client.editClient('cl_ola', 1, clientInput({
+    name: 'Ola Nowak', age: null, status: 'paused', specialistId: 'sp_beata',
+  }), { idempotencyKey: 'client-edit-key-0002' })
+  const archiveResult = await client.archiveClient('cl_ola', 2)
+
+  assert.deepEqual(createResult, created)
+  assert.deepEqual(editResult, edited)
+  assert.deepEqual(archiveResult, archived)
+  for (const result of [createResult, editResult, archiveResult]) assertDeepFrozen(result)
+  assert.notEqual(createResult, created)
+  assert.notEqual(createResult.assignment, created.assignment)
+  created.name = 'private source mutation'
+  created.assignment.specialistId = 'sp_private'
+  assert.equal(createResult.name, 'Ola Żuraw')
+  assert.equal(createResult.assignment.specialistId, 'sp_anna')
+  assert.deepEqual(createSource, clientInput())
+
+  assert.deepEqual(calls.slice(1).map((call) => call.url), [
+    '/api/v1/clients',
+    '/api/v1/clients/cl_ola/edits',
+    '/api/v1/clients/cl_ola/archive',
+  ])
+  assert.deepEqual(calls.slice(1).map((call) => call.init.body), [
+    '{"name":"Ola Żuraw","age":12,"status":"active","specialistId":"sp_anna"}',
+    '{"expectedVersion":1,"name":"Ola Nowak","age":null,"status":"paused","specialistId":"sp_beata"}',
+    '{"expectedVersion":2}',
+  ])
+  assert.deepEqual(calls.slice(1).map((call) => header(call, 'Idempotency-Key')), [
+    'client-create-key-0001', 'client-edit-key-0002', 'client-archive-key-0003',
+  ])
+  for (const call of calls.slice(1)) {
+    assert.equal(call.init.method, 'POST')
+    assert.equal(call.init.credentials, 'same-origin')
+    assert.equal(header(call, 'Accept'), 'application/json')
+    assert.equal(header(call, 'Content-Type'), 'application/json')
+    assert.equal(header(call, 'X-CSRF-Token'), TOKEN_A)
+    assert.equal(header(call, 'Authorization'), null)
+    assert.deepEqual(Object.keys(call.init.headers).sort(), [
+      'Accept', 'Content-Type', 'Idempotency-Key', 'X-CSRF-Token',
+    ])
+  }
+  assert.equal(generated.length, 0)
+})
+
+test('client commands reject malformed and hostile inputs before fetch or key generation', async () => {
+  let generated = 0
+  let gets = 0
+  let coercions = 0
+  const keyFactory = () => { generated += 1; return 'unused-client-key-0001' }
+  const hostile = new Proxy(clientInput(), {
+    get() { gets += 1; throw new Error('private client getter') },
+    ownKeys() { throw new Error('private client keys') },
+  })
+  const coercibleId = {
+    toString() { coercions += 1; return 'cl_ola' },
+    valueOf() { coercions += 1; return 'cl_ola' },
+  }
+  const accessor = Object.defineProperty(clientInput(), 'name', {
+    enumerable: true,
+    get() { gets += 1; throw new Error('private identity') },
+  })
+  const hidden = Object.defineProperty(clientInput(), 'extra', { value: true })
+  const symbol = { ...clientInput(), [Symbol('private')]: true }
+  const badInputs = [
+    null, [], {}, hostile, accessor, hidden, symbol,
+    clientInput({ name: ' Ola Żuraw' }),
+    clientInput({ name: 'Ola Z\u0307uraw' }),
+    clientInput({ name: '\uD800' }),
+    clientInput({ name: 'a'.repeat(121) }),
+    clientInput({ age: 0 }),
+    clientInput({ age: 27 }),
+    clientInput({ age: 12.5 }),
+    clientInput({ status: 'archived' }),
+    clientInput({ specialistId: 'stf_anna' }),
+  ]
+  for (const input of badInputs) {
+    const { calls, fetchImpl } = queuedFetch()
+    const client = createApiClient({ fetchImpl, idempotencyKeyFactory: keyFactory })
+    await assert.rejects(Promise.resolve().then(() => client.createClient(input)), assertClientInput)
+    assert.equal(calls.length, 0)
+  }
+
+  const invalidCalls = [
+    (client) => client.editClient('', 1, clientInput()),
+    (client) => client.editClient(coercibleId, 1, clientInput()),
+    (client) => client.editClient('cl_ola', 0, clientInput()),
+    (client) => client.editClient('cl_ola', Number.MAX_SAFE_INTEGER, clientInput()),
+    (client) => client.archiveClient('cl_ola', 0),
+    (client) => client.archiveClient('cl_ola', 1, null),
+    (client) => client.createClient(clientInput(), { idempotencyKey: 'bad key' }),
+    (client) => client.createClient(clientInput(), { idempotencyKey: 'valid-key-0001', extra: true }),
+    (client) => client.createClient(clientInput(), Object.defineProperty({}, 'idempotencyKey', {
+      enumerable: true, get() { gets += 1; throw new Error('private option') },
+    })),
+  ]
+  for (const invoke of invalidCalls) {
+    const { calls, fetchImpl } = queuedFetch()
+    const client = createApiClient({ fetchImpl, idempotencyKeyFactory: keyFactory })
+    await assert.rejects(Promise.resolve().then(() => invoke(client)), (error) => {
+      assertClientInput(error)
+      assert.doesNotMatch(JSON.stringify(error), /private client|private identity|private option/)
+      return true
+    })
+    assert.equal(calls.length, 0)
+  }
+  const missingSession = queuedFetch()
+  await assert.rejects(createApiClient({
+    fetchImpl: missingSession.fetchImpl,
+    idempotencyKeyFactory: keyFactory,
+  }).createClient(clientInput()), { code: 'SESSION_REQUIRED' })
+  assert.equal(missingSession.calls.length, 0)
+  assert.equal(generated, 0)
+  assert.equal(coercions, 0)
+  assert.equal(gets, 0)
+})
+
+test('client command success validators enforce exact operation relationships', async () => {
+  const cases = [
+    ['create extra envelope key', 'create', (body) => { body.extra = true }],
+    ['create wrong identity', 'create', (body) => { body.data.client.name = 'Private Name' }],
+    ['create wrong version', 'create', (body) => { body.data.client.version = 2 }],
+    ['create incoherent assignment', 'create', (body) => { body.data.client.assignment.startsAt = '2026-08-04T08:00:01.000Z' }],
+    ['create malformed Unicode', 'create', (body) => { body.data.client.name = '\uD800' }],
+    ['create noncanonical instant', 'create', (body) => { body.data.client.createdAt = '2026-08-04T08:00:00Z' }],
+    ['edit wrong target', 'edit', (body) => { body.data.client.id = 'cl_other' }],
+    ['edit wrong version', 'edit', (body) => { body.data.client.version = 3 }],
+    ['edit wrong specialist', 'edit', (body) => { body.data.client.assignment.specialistId = 'sp_other' }],
+    ['edit noncurrent assignment version', 'edit', (body) => { body.data.client.assignment.version = 2 }],
+    ['archive remains writable', 'archive', (body) => { body.data.client.readOnly = false }],
+    ['archive retains assignment', 'archive', (body) => { body.data.client.assignment = clientDto().assignment }],
+    ['archive time differs from update', 'archive', (body) => { body.data.client.updatedAt = '2026-08-04T09:59:59.000Z' }],
+  ]
+  for (const [name, operation, mutate] of cases) {
+    await test(name, async () => {
+      const base = operation === 'archive'
+        ? clientDto({
+          status: 'archived', version: 2, archivedAt: '2026-08-04T10:00:00.000Z',
+          updatedAt: '2026-08-04T10:00:00.000Z', readOnly: true, assignment: null,
+        })
+        : clientDto(operation === 'edit' ? { version: 2 } : {})
+      const body = clientEnvelope(base)
+      mutate(body)
+      const { calls, fetchImpl } = queuedFetch(
+        jsonResponse(sessionBody()), jsonResponse(body, operation === 'create' ? 201 : 200),
+      )
+      const client = createApiClient({ fetchImpl })
+      await client.getSession()
+      const invoke = operation === 'create'
+        ? () => client.createClient(clientInput(), { idempotencyKey: 'malformed-client-key-0001' })
+        : operation === 'edit'
+          ? () => client.editClient('cl_ola', 1, clientInput(), { idempotencyKey: 'malformed-client-key-0001' })
+          : () => client.archiveClient('cl_ola', 1, { idempotencyKey: 'malformed-client-key-0001' })
+      await assert.rejects(invoke(), (error) => {
+        assertInvalidResponse(error)
+        assert.equal(error.idempotencyKey, 'malformed-client-key-0001')
+        assert.doesNotMatch(JSON.stringify(error), /Private Name|sp_other/)
+        return true
+      })
+      assert.equal(calls.length, 2)
+    })
+  }
+})
+
+test('client commands contain hostile success values and preserve valid CSRF after rejection', async () => {
+  const secret = 'private client response Ola ciphertext'
+  let reads = 0
+  const hostile = clientEnvelope(clientDto())
+  Object.defineProperty(hostile.data.client, 'name', {
+    enumerable: true,
+    get() { reads += 1; throw new Error(secret) },
+  })
+  const wrongStatus = clientEnvelope(clientDto())
+  const archived = clientDto({
+    status: 'archived', version: 2, archivedAt: '2026-08-04T10:00:00.000Z',
+    updatedAt: '2026-08-04T10:00:00.000Z', readOnly: true, assignment: null,
+  })
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    parsedResponse(hostile, 201),
+    parsedResponse(wrongStatus, 200),
+    jsonResponse(clientEnvelope(archived)),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  for (const key of ['hostile-client-key-0001', 'status-client-key-0002']) {
+    await assert.rejects(client.createClient(clientInput(), { idempotencyKey: key }), (error) => {
+      assertInvalidResponse(error)
+      assert.equal(error.idempotencyKey, key)
+      assert.doesNotMatch(JSON.stringify(error), /private client|Ola|ciphertext/)
+      return true
+    })
+  }
+  assert.equal(reads, 0)
+
+  await client.archiveClient('cl_ola', 1, { idempotencyKey: 'after-invalid-key-0003' })
+  assert.equal(header(calls[3], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(calls.length, 4)
+})
+
+test('client create refreshes CSRF exactly once while preserving key, path, and body', async () => {
+  let generated = 0
+  const refreshed = sessionBody({ csrfToken: TOKEN_B, csrfExpiresAt: '2033-05-18T03:33:18.000Z' })
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    errorResponse('CSRF_EXPIRED', 403),
+    jsonResponse(refreshed),
+    jsonResponse(clientEnvelope(clientDto()), 201),
+  )
+  const client = createApiClient({
+    fetchImpl,
+    idempotencyKeyFactory: () => { generated += 1; return 'csrf-client-key-0001' },
+  })
+  await client.getSession()
+  await client.createClient(clientInput())
+
+  assert.equal(generated, 1)
+  assert.deepEqual(calls.map((call) => call.url), [
+    '/api/v1/session', '/api/v1/clients', '/api/v1/session', '/api/v1/clients',
+  ])
+  assert.equal(calls[1].init.body, calls[3].init.body)
+  assert.equal(header(calls[1], 'Idempotency-Key'), 'csrf-client-key-0001')
+  assert.equal(header(calls[3], 'Idempotency-Key'), 'csrf-client-key-0001')
+  assert.equal(header(calls[1], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(calls[3], 'X-CSRF-Token'), TOKEN_B)
+})
+
+test('client mutations never automatically retry a second CSRF or non-CSRF outcome', async () => {
+  const outcomes = [
+    [errorResponse('CSRF_EXPIRED', 403), jsonResponse(sessionBody()), errorResponse('CSRF_EXPIRED', 403), 4, 'CSRF_EXPIRED'],
+    [errorResponse('FORBIDDEN', 403), null, null, 2, 'FORBIDDEN'],
+    [errorResponse('INTERNAL_ERROR', 500), null, null, 2, 'INTERNAL_ERROR'],
+    [jsonResponse({ data: { client: { private: 'ciphertext' } } }, 201), null, null, 2, 'INVALID_RESPONSE'],
+  ]
+  for (const [first, refresh, second, callCount, code] of outcomes) {
+    const queued = queuedFetch(
+      jsonResponse(sessionBody()),
+      first,
+      ...(refresh ? [refresh, second] : []),
+    )
+    const client = createApiClient({ fetchImpl: queued.fetchImpl })
+    await client.getSession()
+    await assert.rejects(client.createClient(clientInput(), {
+      idempotencyKey: 'no-client-retry-key-0001',
+    }), (error) => {
+      assert.equal(error.code, code)
+      assert.doesNotMatch(JSON.stringify(error), /ciphertext/)
+      return true
+    })
+    assert.equal(queued.calls.length, callCount)
+    assert.equal(queued.calls.filter((call) => call.init.method === 'POST').length,
+      code === 'CSRF_EXPIRED' ? 2 : 1)
+  }
+})
+
+test('uncertain client transport is not retried and supports explicit identical replay', async () => {
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    new Error('private transport identity Ola'),
+    jsonResponse(clientEnvelope(clientDto()), 201),
+  )
+  const client = createApiClient({
+    fetchImpl,
+    idempotencyKeyFactory: () => 'uncertain-client-key-0001',
+  })
+  await client.getSession()
+  let actionKey
+  await assert.rejects(client.createClient(clientInput()), (error) => {
+    assert.equal(error.code, 'NETWORK_ERROR')
+    assert.equal(error.idempotencyKey, 'uncertain-client-key-0001')
+    assert.doesNotMatch(JSON.stringify(error), /private transport|Ola/)
+    actionKey = error.idempotencyKey
+    return true
+  })
+  assert.equal(calls.length, 2)
+
+  const result = await client.createClient(clientInput(), { idempotencyKey: actionKey })
+  assert.equal(result.id, 'cl_ola')
+  assert.equal(calls.length, 3)
+  assert.equal(calls[1].url, calls[2].url)
+  assert.equal(calls[1].init.body, calls[2].init.body)
+  assert.equal(header(calls[1], 'Idempotency-Key'), header(calls[2], 'Idempotency-Key'))
+})
+
+test('client conflicts expose only safe details and authentication denials clear the session', async () => {
+  const conflictCodes = [
+    'CLIENT_STATUS_CONFLICT', 'CLIENT_ASSIGNMENT_CONFLICT', 'CLIENT_ARCHIVE_CONFLICT',
+  ]
+  for (const code of conflictCodes) {
+    const { fetchImpl } = queuedFetch(
+      jsonResponse(sessionBody()),
+      errorResponse(code, 409, { details: { name: 'Private Ola', currentVersion: 3 } }),
+    )
+    const client = createApiClient({ fetchImpl })
+    await client.getSession()
+    await assert.rejects(client.archiveClient('cl_ola', 1, {
+      idempotencyKey: 'client-conflict-key-0001',
+    }), (error) => {
+      assert.equal(error.code, code)
+      assert.equal(Object.hasOwn(error, 'details'), false)
+      assert.doesNotMatch(JSON.stringify(error), /Private Ola/)
+      return true
+    })
+  }
+
+  for (const currentVersion of [3, 0, Number.MAX_SAFE_INTEGER + 1]) {
+    const { fetchImpl } = queuedFetch(
+      jsonResponse(sessionBody()),
+      errorResponse('VERSION_CONFLICT', 409, {
+        details: { currentVersion, name: 'Private Ola' },
+      }),
+    )
+    const client = createApiClient({ fetchImpl })
+    await client.getSession()
+    await assert.rejects(client.archiveClient('cl_ola', 1, {
+      idempotencyKey: 'client-version-key-0001',
+    }), (error) => {
+      assert.equal(error.code, 'VERSION_CONFLICT')
+      assert.deepEqual(error.details, currentVersion === 3 ? { currentVersion: 3 } : undefined)
+      assert.doesNotMatch(JSON.stringify(error), /Private Ola/)
+      return true
+    })
+  }
+
+  const auth = queuedFetch(
+    jsonResponse(sessionBody()),
+    errorResponse('ACCESS_DENIED', 403),
+  )
+  const client = createApiClient({ fetchImpl: auth.fetchImpl })
+  const observed = []
+  client.subscribeSession((session) => observed.push(session))
+  await client.getSession()
+  await assert.rejects(client.createClient(clientInput(), {
+    idempotencyKey: 'client-auth-key-0001',
+  }), { code: 'ACCESS_DENIED' })
+  assert.deepEqual(observed, [publicSession(), null])
+  await assert.rejects(client.archiveClient('cl_ola', 1, {
+    idempotencyKey: 'client-auth-key-0002',
+  }), { code: 'SESSION_REQUIRED' })
+  assert.equal(auth.calls.length, 2)
+})

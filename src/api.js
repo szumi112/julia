@@ -386,6 +386,71 @@ const captureWorkspaceClient = (raw) => {
   })
 }
 
+const CLIENT_INPUT_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'])
+const CLIENT_STATUSES = new Set(['active', 'paused'])
+
+const captureClientInput = (raw) => {
+  const value = captureDataObject(raw, CLIENT_INPUT_KEYS)
+  if (!value || !workspaceIdentity(value.name, value.age)
+    || !CLIENT_STATUSES.has(value.status)
+    || typeof value.specialistId !== 'string' || !SPECIALIST_ID.test(value.specialistId)) {
+    return null
+  }
+  return Object.freeze({
+    name: value.name,
+    age: value.age,
+    status: value.status,
+    specialistId: value.specialistId,
+  })
+}
+
+const captureClientOptions = (raw) => {
+  const empty = captureDataObject(raw, [])
+  if (empty) return Object.freeze({ idempotencyKey: undefined })
+  const value = captureDataObject(raw, ['idempotencyKey'])
+  return value && acceptedKey(value.idempotencyKey)
+    ? Object.freeze({ idempotencyKey: value.idempotencyKey })
+    : null
+}
+
+const captureClientEnvelope = (payload) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['client'])
+  return data ? captureWorkspaceClient(data.client) : null
+}
+
+const acceptedCreatedClient = (payload, status, requested) => {
+  const client = status === 201 ? captureClientEnvelope(payload) : null
+  if (!client || client.name !== requested.name || client.age !== requested.age
+    || client.status !== requested.status || client.version !== 1
+    || client.archivedAt !== null || client.readOnly !== false
+    || client.updatedAt !== client.createdAt || client.assignment === null
+    || client.assignment.specialistId !== requested.specialistId
+    || client.assignment.startsAt !== client.createdAt
+    || client.assignment.version !== 1) return null
+  return client
+}
+
+const acceptedEditedClient = (payload, status, clientId, expectedVersion, requested) => {
+  const client = status === 200 ? captureClientEnvelope(payload) : null
+  if (!client || client.id !== clientId || client.name !== requested.name
+    || client.age !== requested.age || client.status !== requested.status
+    || client.version !== expectedVersion + 1 || client.archivedAt !== null
+    || client.readOnly !== false || client.assignment === null
+    || client.assignment.specialistId !== requested.specialistId
+    || client.assignment.version !== 1) return null
+  return client
+}
+
+const acceptedArchivedClient = (payload, status, clientId, expectedVersion) => {
+  const client = status === 200 ? captureClientEnvelope(payload) : null
+  if (!client || client.id !== clientId || client.version !== expectedVersion + 1
+    || client.status !== 'archived' || client.archivedAt === null
+    || client.updatedAt !== client.archivedAt || client.createdAt >= client.archivedAt
+    || client.readOnly !== true || client.assignment !== null) return null
+  return client
+}
+
 const captureWorkspacePaymentEntry = (raw) => {
   const value = captureDataObject(raw, [
     'id', 'amountGrosze', 'method', 'receivedAt', 'correctedAt', 'replacementEntryId',
@@ -635,7 +700,7 @@ const safeDetails = (code, details) => {
     }
     if (code === 'VERSION_CONFLICT') {
       const currentVersion = value('currentVersion')
-      return Number.isSafeInteger(currentVersion) && currentVersion >= 0 ? { currentVersion } : undefined
+      return positive(currentVersion) ? { currentVersion } : undefined
     }
     if (code === 'WORKSPACE_RESULT_LIMIT') {
       const field = value('field')
@@ -1175,7 +1240,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     }
     let result
     try {
-      result = validate(payload)
+      result = validate(payload, status)
     } catch {
       throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     }
@@ -1311,6 +1376,64 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     await getSession()
     return send()
   }
+  const createClient = (input, options = {}) => {
+    const requested = captureClientInput(input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    const body = JSON.stringify({
+      name: requested.name,
+      age: requested.age,
+      status: requested.status,
+      specialistId: requested.specialistId,
+    })
+    return mutation(
+      `${API_ROOT}/clients`,
+      body,
+      (payload, status) => acceptedCreatedClient(payload, status, requested),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const editClient = (clientId, expectedVersion, input, options = {}) => {
+    const requested = captureClientInput(input)
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof clientId !== 'string' || !CLIENT_ID.test(clientId)
+      || !positive(expectedVersion) || expectedVersion >= Number.MAX_SAFE_INTEGER
+      || !requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    const body = JSON.stringify({
+      expectedVersion,
+      name: requested.name,
+      age: requested.age,
+      status: requested.status,
+      specialistId: requested.specialistId,
+    })
+    return mutation(
+      `${API_ROOT}/clients/${clientId}/edits`,
+      body,
+      (payload, status) => acceptedEditedClient(
+        payload, status, clientId, expectedVersion, requested,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const archiveClient = (clientId, expectedVersion, options = {}) => {
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof clientId !== 'string' || !CLIENT_ID.test(clientId)
+      || !positive(expectedVersion) || expectedVersion >= Number.MAX_SAFE_INTEGER
+      || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/clients/${clientId}/archive`,
+      JSON.stringify({ expectedVersion }),
+      (payload, status) => acceptedArchivedClient(payload, status, clientId, expectedVersion),
+      acceptedOptions.idempotencyKey,
+    )
+  }
   const inviteStaff = (input, options = {}) => {
     const acceptedOptions = idempotencyOptions(options)
     if (!acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
@@ -1386,6 +1509,9 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     getOperationsHealth,
     getOperationalActions,
     getSecurityAudit,
+    createClient,
+    editClient,
+    archiveClient,
     inviteStaff,
     deactivateStaff,
     resolveOperationalAction,
