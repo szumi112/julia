@@ -118,6 +118,16 @@ test('package keeps the complete script regression suite addressable', () => {
   )
 })
 
+test('workspace repositories remain pure and exclude persistence, queues, logging, and backend bindings', () => {
+  const source = readFileSync(new URL('../../src/workspace-repository.js', import.meta.url), 'utf8')
+  for (const forbidden of [
+    /from ['"]react/, /localStorage/, /sessionStorage/, /indexedDB/, /CacheStorage/,
+    /BroadcastChannel/, /serviceWorker/, /navigator/, /document\./, /window\./,
+    /console\./, /analytics/i, /\benv\./, /\bDB\b/, /\bARCHIVE\b/,
+    /retry/i, /queue/i,
+  ]) assert.doesNotMatch(source, forbidden)
+})
+
 test('runtime HTML rejects external fonts and CDN scripts', () => {
   assert.doesNotThrow(() => assertRuntimeIndex('<!doctype html><script type="module" src="/assets/app.js"></script>'))
 
