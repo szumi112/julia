@@ -12,7 +12,11 @@ import {
 } from '../../src/core-records.js'
 import { SERVICE_BY_ID } from '../../src/services.js'
 import { encryptForScope } from '../security/envelope.js'
-import { assertChargeOwnershipFact, assertClientKeyScope } from './crypto.js'
+import {
+  assertClientKeyScope,
+  assertOwnershipConsumer,
+  verifyChargeOwnership,
+} from './crypto.js'
 
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const CLIENT_STATUSES = new Set(['active', 'paused', 'archived'])
@@ -90,7 +94,8 @@ function assignmentSnapshot(entity) {
     'version', 'createdAt', 'updatedAt',
   ])
   if (!isAssignmentId(row.id) || !isClientId(row.clientId)
-    || !isSpecialistId(row.specialistId) || !STAFF_ID.test(row.assignedByStaffId ?? '')
+    || !isSpecialistId(row.specialistId) || typeof row.assignedByStaffId !== 'string'
+    || !STAFF_ID.test(row.assignedByStaffId)
     || !instant(row.startsAt) || (row.endsAt !== null
       && (!instant(row.endsAt) || row.endsAt <= row.startsAt))
     || !positive(row.version) || !instant(row.createdAt) || !instant(row.updatedAt)
@@ -183,7 +188,7 @@ function chargeSnapshot(entity) {
   }
 }
 
-function snapshotFor(entityType, entity, clientId, ownerFact) {
+function snapshotFor(entityType, entity, clientId, ownerFact, consumer) {
   if (entityType === 'client') {
     if (ownerFact !== null) fail()
     const snapshot = clientSnapshot(entity)
@@ -203,7 +208,7 @@ function snapshotFor(entityType, entity, clientId, ownerFact) {
     return snapshot
   }
   if (entityType === 'session_charge') {
-    const owner = assertChargeOwnershipFact(ownerFact)
+    const owner = verifyChargeOwnership(consumer, ownerFact)
     const snapshot = chargeSnapshot(entity)
     if (owner.clientId !== clientId || owner.appointmentId !== snapshot.appointmentId) fail()
     return snapshot
@@ -211,19 +216,23 @@ function snapshotFor(entityType, entity, clientId, ownerFact) {
   fail()
 }
 
-export async function buildRecordVersion(db, context, input) {
+export async function buildRecordVersion(db, context, consumer, input) {
   try {
     if (!db?.prepare) fail()
+    assertOwnershipConsumer(consumer)
     const captured = captureExact(input, [
       'clientId', 'versionId', 'entityType', 'entity', 'changedByStaffId',
       'changedAt', 'correlationId', 'ownerFact',
     ])
     if (!isClientId(captured.clientId) || !isVersionId(captured.versionId)
-      || (captured.changedByStaffId !== null && !STAFF_ID.test(captured.changedByStaffId ?? ''))
+      || (captured.changedByStaffId !== null
+        && (typeof captured.changedByStaffId !== 'string'
+          || !STAFF_ID.test(captured.changedByStaffId)))
       || !instant(captured.changedAt) || !isOpaqueId(captured.correlationId)) fail()
     const current = requireContext(context, captured.clientId)
     const snapshot = snapshotFor(
       captured.entityType, captured.entity, captured.clientId, captured.ownerFact,
+      consumer,
     )
     const snapshotEnvelope = JSON.stringify(await encryptForScope(
       current.keyring,

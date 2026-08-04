@@ -6,14 +6,13 @@ import { decodeBase64Url, encodeBase64Url } from '../../worker/security/encoding
 import {
   assertClientKeyScope,
   buildClientDataKey,
-  chargeOwnershipFact,
   clientKeyScope,
+  createOwnershipCapabilityBoundary,
   decryptClientCorrectionReason,
   decryptClientIdentity,
   encryptClientCorrectionReason,
   encryptClientIdentity,
   loadClientCryptoContext,
-  paymentOwnershipFact,
 } from '../../worker/core/crypto.js'
 import { buildRecordVersion } from '../../worker/core/versions.js'
 
@@ -58,11 +57,15 @@ const contextFor = async (clientId, suffix) => {
   return { keyring, built, context: { keyring, dataKey: built.row, scope: built.scope } }
 }
 
-const chargeOwner = (clientId, appointmentId) => chargeOwnershipFact({
+const ownership = createOwnershipCapabilityBoundary()
+const repositoryIssuer = ownership.issuer
+const commandConsumer = ownership.consumer
+
+const chargeOwner = (clientId, appointmentId) => repositoryIssuer.issueCharge({
   clientId, appointmentId,
 })
 
-const paymentOwner = (clientId, appointmentId, paymentId) => paymentOwnershipFact({
+const paymentOwner = (clientId, appointmentId, paymentId) => repositoryIssuer.issuePayment({
   clientId, appointmentId, paymentId,
 })
 
@@ -283,24 +286,24 @@ describe('client crypto boundary', () => {
     const ownerFact = paymentOwner(
       'cl_crypto_reason', 'apt_crypto_reason', 'pay_crypto_reason',
     )
-    const envelope = await encryptClientCorrectionReason(context, {
+    const envelope = await encryptClientCorrectionReason(context, commandConsumer, {
       correctionId: 'cor_crypto_reason', appointmentId: 'apt_crypto_reason',
       paymentId: 'pay_crypto_reason', reason: 'Korekta fikcyjnej wpłaty', ownerFact,
     })
     expect(envelope).not.toContain('Korekta fikcyjnej wpłaty')
-    await expect(decryptClientCorrectionReason(context, {
+    await expect(decryptClientCorrectionReason(context, commandConsumer, {
       correctionId: 'cor_crypto_reason', appointmentId: 'apt_crypto_reason',
       paymentId: 'pay_crypto_reason', envelope, ownerFact,
     })).resolves.toBe('Korekta fikcyjnej wpłaty')
-    await cryptoFailure(decryptClientCorrectionReason(context, {
+    await cryptoFailure(decryptClientCorrectionReason(context, commandConsumer, {
       correctionId: 'cor_crypto_other', appointmentId: 'apt_crypto_reason',
       paymentId: 'pay_crypto_reason', envelope, ownerFact,
     }))
-    await cryptoFailure(encryptClientCorrectionReason(context, {
+    await cryptoFailure(encryptClientCorrectionReason(context, commandConsumer, {
       correctionId: 'apt_wrong', appointmentId: 'apt_crypto_reason',
       paymentId: 'pay_crypto_reason', reason: 'Korekta fikcyjnej wpłaty', ownerFact,
     }))
-    await cryptoFailure(encryptClientCorrectionReason(context, {
+    await cryptoFailure(encryptClientCorrectionReason(context, commandConsumer, {
       correctionId: 'cor_crypto_reason', appointmentId: 'apt_crypto_reason',
       paymentId: 'pay_crypto_reason', reason: ' Korekta fikcyjnej wpłaty', ownerFact,
     }))
@@ -319,21 +322,111 @@ describe('client crypto boundary', () => {
       paymentOwner('cl_foreign', 'apt_crypto_reason_owner', 'pay_crypto_reason_owner'),
       paymentOwner('cl_crypto_reason_owner', 'apt_foreign', 'pay_crypto_reason_owner'),
       paymentOwner('cl_crypto_reason_owner', 'apt_crypto_reason_owner', 'pay_foreign'),
-    ]) await cryptoFailure(encryptClientCorrectionReason(context, {
+    ]) await cryptoFailure(encryptClientCorrectionReason(context, commandConsumer, {
       correctionId: 'cor_crypto_reason_owner', appointmentId: 'apt_crypto_reason_owner',
       paymentId: 'pay_crypto_reason_owner', reason: 'Powód fikcyjny', ownerFact,
     }))
     for (const target of [
       { appointmentId: 'apt_foreign', paymentId: 'pay_crypto_reason_owner' },
       { appointmentId: 'apt_crypto_reason_owner', paymentId: 'pay_foreign' },
-    ]) await cryptoFailure(encryptClientCorrectionReason(context, {
+    ]) await cryptoFailure(encryptClientCorrectionReason(context, commandConsumer, {
       correctionId: 'cor_crypto_reason_owner', reason: 'Powód fikcyjny',
       ownerFact: valid, ...target,
     }))
-    await expect(encryptClientCorrectionReason(context, {
+    await expect(encryptClientCorrectionReason(context, commandConsumer, {
       correctionId: 'cor_crypto_reason_owner', appointmentId: 'apt_crypto_reason_owner',
       paymentId: 'pay_crypto_reason_owner', reason: 'Powód fikcyjny', ownerFact: valid,
     })).resolves.toEqual(expect.any(String))
+  })
+
+  it('splits repository issuance from command consumption per ownership boundary', async () => {
+    const { context } = await contextFor('cl_crypto_capability', 'crypto_capability')
+    const foreign = createOwnershipCapabilityBoundary()
+    const localFact = repositoryIssuer.issuePayment({
+      clientId: 'cl_crypto_capability', appointmentId: 'apt_crypto_capability',
+      paymentId: 'pay_crypto_capability',
+    })
+    const foreignFact = foreign.issuer.issuePayment({
+      clientId: 'cl_crypto_capability', appointmentId: 'apt_crypto_capability',
+      paymentId: 'pay_crypto_capability',
+    })
+    expect(Object.isFrozen(ownership)).toBe(true)
+    expect(Object.isFrozen(repositoryIssuer)).toBe(true)
+    expect(Object.isFrozen(commandConsumer)).toBe(true)
+    expect(commandConsumer).not.toHaveProperty('issueCharge')
+    expect(commandConsumer).not.toHaveProperty('issuePayment')
+    expect(typeof commandConsumer.verifyCharge).toBe('function')
+    expect(typeof commandConsumer.verifyPayment).toBe('function')
+
+    const input = {
+      correctionId: 'cor_crypto_capability', appointmentId: 'apt_crypto_capability',
+      paymentId: 'pay_crypto_capability', reason: 'Rozdzielona zdolność',
+      ownerFact: localFact,
+    }
+    await expect(encryptClientCorrectionReason(
+      context, commandConsumer, input,
+    )).resolves.toEqual(expect.any(String))
+    await cryptoFailure(encryptClientCorrectionReason(
+      context, commandConsumer, { ...input, ownerFact: foreignFact },
+    ))
+    await cryptoFailure(encryptClientCorrectionReason(
+      context,
+      Object.freeze({ verifyPayment: () => localFact, verifyCharge: () => localFact }),
+      input,
+    ))
+    await cryptoFailure(encryptClientCorrectionReason(
+      context, foreign.consumer, input,
+    ))
+  })
+
+  it('rejects non-primitive issuer IDs without coercion and closes revoked proxies', () => {
+    let coercions = 0
+    const hostileId = {
+      [Symbol.toPrimitive]() {
+        coercions += 1
+        throw new Error('coercion escaped')
+      },
+    }
+    expect(() => repositoryIssuer.issueCharge({
+      clientId: hostileId, appointmentId: 'apt_crypto_primitive',
+    })).toThrow(/^CRYPTO_FAILURE$/)
+    expect(() => repositoryIssuer.issuePayment({
+      clientId: 'cl_crypto_primitive', appointmentId: hostileId,
+      paymentId: 'pay_crypto_primitive',
+    })).toThrow(/^CRYPTO_FAILURE$/)
+    expect(() => repositoryIssuer.issuePayment({
+      clientId: 'cl_crypto_primitive', appointmentId: 'apt_crypto_primitive',
+      paymentId: hostileId,
+    })).toThrow(/^CRYPTO_FAILURE$/)
+    expect(coercions).toBe(0)
+
+    const { proxy, revoke } = Proxy.revocable({}, {})
+    revoke()
+    expect(() => repositoryIssuer.issueCharge(proxy)).toThrow(/^CRYPTO_FAILURE$/)
+  })
+
+  it('rejects non-primitive correction and version IDs before regex coercion', async () => {
+    const { context } = await contextFor('cl_crypto_target_primitive', 'crypto_target_primitive')
+    const fact = paymentOwner(
+      'cl_crypto_target_primitive', 'apt_crypto_target_primitive',
+      'pay_crypto_target_primitive',
+    )
+    let coercions = 0
+    const hostileId = {
+      [Symbol.toPrimitive]() {
+        coercions += 1
+        throw new Error('coercion escaped')
+      },
+    }
+    await cryptoFailure(encryptClientCorrectionReason(context, commandConsumer, {
+      correctionId: 'cor_crypto_target_primitive', appointmentId: hostileId,
+      paymentId: 'pay_crypto_target_primitive', reason: 'Typ prosty', ownerFact: fact,
+    }))
+    await cryptoFailure(encryptClientCorrectionReason(context, commandConsumer, {
+      correctionId: 'cor_crypto_target_primitive', appointmentId: 'apt_crypto_target_primitive',
+      paymentId: hostileId, reason: 'Typ prosty', ownerFact: fact,
+    }))
+    expect(coercions).toBe(0)
   })
 
   it('clears observable plaintext and raw-key buffers after successful encrypt and decrypt', async () => {
@@ -405,10 +498,10 @@ describe('client crypto boundary', () => {
     await cryptoFailure(encryptClientIdentity(context, accessorObject({
       clientId: 'cl_crypto_accessors', name: 'Getter Fikcyjna', age: 8,
     }, 'name', getter)))
-    expect(() => chargeOwnershipFact(accessorObject({
+    expect(() => repositoryIssuer.issueCharge(accessorObject({
       clientId: 'cl_crypto_accessors', appointmentId: 'apt_crypto_accessors',
     }, 'appointmentId', getter))).toThrow(/^CRYPTO_FAILURE$/)
-    expect(() => paymentOwnershipFact(accessorObject({
+    expect(() => repositoryIssuer.issuePayment(accessorObject({
       clientId: 'cl_crypto_accessors', appointmentId: 'apt_crypto_accessors',
       paymentId: 'pay_crypto_accessors',
     }, 'paymentId', getter))).toThrow(/^CRYPTO_FAILURE$/)
@@ -443,7 +536,7 @@ describe('client crypto boundary', () => {
     ])
 
     let ownerReads = 0
-    const owner = paymentOwnershipFact(stableDescriptorProxy({
+    const owner = repositoryIssuer.issuePayment(stableDescriptorProxy({
       clientId: 'cl_crypto_descriptor', appointmentId: 'apt_crypto_descriptor',
       paymentId: 'pay_crypto_descriptor',
     }, () => { ownerReads += 1 }))
@@ -508,7 +601,7 @@ describe('core record version encryption', () => {
 
     const statements = [key.statement]
     for (const [entityType, entity, versionId, expected] of cases) {
-      const result = await buildRecordVersion(db, context, {
+      const result = await buildRecordVersion(db, context, commandConsumer, {
         clientId: client.id, versionId, entityType, entity,
         changedByStaffId: null, changedAt: now, correlationId,
         ownerFact: entityType === 'session_charge'
@@ -582,7 +675,9 @@ describe('core record version encryption', () => {
       { changedAt: '2026-08-04T10:00:00Z' },
       { correlationId: '' },
       { extra: true },
-    ]) await cryptoFailure(buildRecordVersion(db, context, { ...valid, ...overrides }))
+    ]) await cryptoFailure(buildRecordVersion(
+      db, context, commandConsumer, { ...valid, ...overrides },
+    ))
     expect(db.calls).toEqual([])
   })
 
@@ -602,10 +697,25 @@ describe('core record version encryption', () => {
       { clientId: client.id, appointmentId: charge.appointmentId },
       chargeOwner('cl_foreign', charge.appointmentId),
       chargeOwner(client.id, 'apt_foreign'),
-    ]) await cryptoFailure(buildRecordVersion(db, context, { ...valid, ownerFact }))
+    ]) await cryptoFailure(buildRecordVersion(
+      db, context, commandConsumer, { ...valid, ownerFact },
+    ))
+    const foreign = createOwnershipCapabilityBoundary()
+    const foreignFact = foreign.issuer.issueCharge({
+      clientId: client.id, appointmentId: charge.appointmentId,
+    })
+    await cryptoFailure(buildRecordVersion(
+      db, context, commandConsumer, { ...valid, ownerFact: foreignFact },
+    ))
+    await cryptoFailure(buildRecordVersion(
+      db, context, foreign.consumer, valid,
+    ))
+    await cryptoFailure(buildRecordVersion(
+      db, context, Object.freeze({ verifyCharge: () => valid.ownerFact }), valid,
+    ))
     expect(db.calls).toEqual([])
 
-    const built = await buildRecordVersion(db, context, valid)
+    const built = await buildRecordVersion(db, context, commandConsumer, valid)
     expect(built.row.changed_by_staff_id).toBe(actorId)
     expect(db.calls[0].values).toEqual([
       valid.versionId, 'session_charge', charge.id, charge.version,
@@ -616,11 +726,35 @@ describe('core record version encryption', () => {
   it('refuses record-version encryption with a retired client key', async () => {
     const { context } = await contextFor(client.id, 'version_retired')
     const retired = { ...context, dataKey: { ...context.dataKey, retired_at: now } }
-    await cryptoFailure(buildRecordVersion(env.DB, retired, {
+    await cryptoFailure(buildRecordVersion(env.DB, retired, commandConsumer, {
       clientId: client.id, versionId: 'ver_version_retired', entityType: 'client',
       entity: client, changedByStaffId: null, changedAt: now,
       correlationId: 'corr_version_retired', ownerFact: null,
     }))
+  })
+
+  it('rejects non-primitive version actor and assignment staff IDs without coercion', async () => {
+    const { context } = await contextFor(client.id, 'version_primitive')
+    let coercions = 0
+    const hostileId = {
+      [Symbol.toPrimitive]() {
+        coercions += 1
+        throw new Error('coercion escaped')
+      },
+    }
+    const base = {
+      clientId: client.id, versionId: 'ver_version_primitive', entityType: 'client',
+      entity: client, changedByStaffId: hostileId, changedAt: now,
+      correlationId: 'corr_version_primitive', ownerFact: null,
+    }
+    await cryptoFailure(buildRecordVersion(
+      env.DB, context, commandConsumer, base,
+    ))
+    await cryptoFailure(buildRecordVersion(env.DB, context, commandConsumer, {
+      ...base, versionId: 'ver_assignment_primitive', entityType: 'client_assignment',
+      changedByStaffId: null, entity: { ...assignment, assignedByStaffId: hostileId },
+    }))
+    expect(coercions).toBe(0)
   })
 
   it('rejects accessors in version context, metadata, every entity, aggregate, and owner input', async () => {
@@ -638,12 +772,12 @@ describe('core record version encryption', () => {
     }
     await cryptoFailure(buildRecordVersion(env.DB, {
       ...context, scope: accessorObject(context.scope, 'id', getter),
-    }, base))
+    }, commandConsumer, base))
     await cryptoFailure(buildRecordVersion(env.DB, {
       ...context, dataKey: accessorObject(context.dataKey, 'scope_id', getter),
-    }, base))
+    }, commandConsumer, base))
     await cryptoFailure(buildRecordVersion(
-      env.DB, context, accessorObject(base, 'changedAt', getter),
+      env.DB, context, commandConsumer, accessorObject(base, 'changedAt', getter),
     ))
     const entities = [
       ['client', client, null],
@@ -652,12 +786,12 @@ describe('core record version encryption', () => {
       ['session_charge', charge, chargeOwner(client.id, charge.appointmentId)],
     ]
     for (const [entityType, entity, ownerFact] of entities) {
-      await cryptoFailure(buildRecordVersion(env.DB, context, {
+      await cryptoFailure(buildRecordVersion(env.DB, context, commandConsumer, {
         ...base, versionId: `ver_accessor_${entityType}`, entityType,
         entity: accessorObject(entity, 'id', getter), ownerFact,
       }))
     }
-    await cryptoFailure(buildRecordVersion(env.DB, context, {
+    await cryptoFailure(buildRecordVersion(env.DB, context, commandConsumer, {
       ...base,
       versionId: 'ver_accessor_aggregate',
       entityType: 'appointment',
@@ -668,7 +802,7 @@ describe('core record version encryption', () => {
         ),
       },
     }))
-    expect(() => chargeOwnershipFact(accessorObject({
+    expect(() => repositoryIssuer.issueCharge(accessorObject({
       clientId: client.id, appointmentId: charge.appointmentId,
     }, 'clientId', getter))).toThrow(/^CRYPTO_FAILURE$/)
     expect(getterCalls).toBe(0)
@@ -685,7 +819,7 @@ describe('core record version encryption', () => {
     const proxiedAppointment = stableDescriptorProxy({
       ...appointment, paymentAggregate: proxiedAggregate,
     }, () => { directReads += 1 })
-    const built = await buildRecordVersion(db, context, stableDescriptorProxy({
+    const built = await buildRecordVersion(db, context, commandConsumer, stableDescriptorProxy({
       clientId: client.id, versionId: 'ver_version_descriptors',
       entityType: 'appointment', entity: proxiedAppointment,
       changedByStaffId: actorId, changedAt: now,

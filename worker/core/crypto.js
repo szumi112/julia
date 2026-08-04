@@ -19,8 +19,6 @@ const DATA_KEY_KEYS = Object.freeze([
   'id', 'scope_type', 'scope_id', 'purpose', 'dek_version', 'wrapped_key_b64',
   'wrap_nonce_b64', 'kek_version', 'created_at', 'retired_at',
 ])
-const chargeFacts = new WeakSet()
-const paymentFacts = new WeakSet()
 
 const fail = () => { throw new Error('CRYPTO_FAILURE') }
 
@@ -53,29 +51,95 @@ export function assertClientKeyScope(scope) {
   return captured
 }
 
-export function chargeOwnershipFact(input) {
-  const fact = captureExact(input, ['clientId', 'appointmentId'])
-  if (!CLIENT_ID.test(fact.clientId ?? '') || !APPOINTMENT_ID.test(fact.appointmentId ?? '')) fail()
-  chargeFacts.add(fact)
-  return fact
+class OwnershipConsumer {
+  #verifyCharge
+  #verifyPayment
+
+  constructor(verifyCharge, verifyPayment) {
+    this.#verifyCharge = verifyCharge
+    this.#verifyPayment = verifyPayment
+    Object.freeze(this)
+  }
+
+  verifyCharge(value) {
+    try { return this.#verifyCharge(value) } catch { fail() }
+  }
+
+  verifyPayment(value) {
+    try { return this.#verifyPayment(value) } catch { fail() }
+  }
 }
 
-export function paymentOwnershipFact(input) {
-  const fact = captureExact(input, ['clientId', 'appointmentId', 'paymentId'])
-  if (!CLIENT_ID.test(fact.clientId ?? '') || !APPOINTMENT_ID.test(fact.appointmentId ?? '')
-    || !PAYMENT_ID.test(fact.paymentId ?? '')) fail()
-  paymentFacts.add(fact)
-  return fact
+const requireConsumer = (value) => {
+  try {
+    if (!(value instanceof OwnershipConsumer)) fail()
+    return value
+  } catch { fail() }
 }
 
-export function assertChargeOwnershipFact(value) {
-  if (!chargeFacts.has(value)) fail()
-  return captureExact(value, ['clientId', 'appointmentId'])
+export function assertOwnershipConsumer(value) {
+  try { return requireConsumer(value) } catch { fail() }
 }
 
-export function assertPaymentOwnershipFact(value) {
-  if (!paymentFacts.has(value)) fail()
-  return captureExact(value, ['clientId', 'appointmentId', 'paymentId'])
+export function verifyChargeOwnership(consumer, value) {
+  try { return requireConsumer(consumer).verifyCharge(value) } catch { fail() }
+}
+
+export function verifyPaymentOwnership(consumer, value) {
+  try { return requireConsumer(consumer).verifyPayment(value) } catch { fail() }
+}
+
+// The composition root must inject `issuer` only into the repository that has just
+// authorized a joined ownership row, and inject `consumer` only into command/build
+// code. Issuance is deliberately pure here; this Task-8 boundary performs no D1 read.
+export function createOwnershipCapabilityBoundary(...args) {
+  try {
+    if (args.length !== 0) fail()
+    const chargeFacts = new WeakSet()
+    const paymentFacts = new WeakSet()
+    const issueCharge = (input) => {
+      try {
+        const fact = captureExact(input, ['clientId', 'appointmentId'])
+        if (typeof fact.clientId !== 'string' || !CLIENT_ID.test(fact.clientId)
+          || typeof fact.appointmentId !== 'string'
+          || !APPOINTMENT_ID.test(fact.appointmentId)) fail()
+        chargeFacts.add(fact)
+        return fact
+      } catch { fail() }
+    }
+    const issuePayment = (input) => {
+      try {
+        const fact = captureExact(input, ['clientId', 'appointmentId', 'paymentId'])
+        if (typeof fact.clientId !== 'string' || !CLIENT_ID.test(fact.clientId)
+          || typeof fact.appointmentId !== 'string'
+          || !APPOINTMENT_ID.test(fact.appointmentId)
+          || typeof fact.paymentId !== 'string' || !PAYMENT_ID.test(fact.paymentId)) fail()
+        paymentFacts.add(fact)
+        return fact
+      } catch { fail() }
+    }
+    const verifyCharge = (value) => {
+      if (!chargeFacts.has(value)) fail()
+      const fact = captureExact(value, ['clientId', 'appointmentId'])
+      if (typeof fact.clientId !== 'string' || !CLIENT_ID.test(fact.clientId)
+        || typeof fact.appointmentId !== 'string'
+        || !APPOINTMENT_ID.test(fact.appointmentId)) fail()
+      return fact
+    }
+    const verifyPayment = (value) => {
+      if (!paymentFacts.has(value)) fail()
+      const fact = captureExact(value, ['clientId', 'appointmentId', 'paymentId'])
+      if (typeof fact.clientId !== 'string' || !CLIENT_ID.test(fact.clientId)
+        || typeof fact.appointmentId !== 'string'
+        || !APPOINTMENT_ID.test(fact.appointmentId)
+        || typeof fact.paymentId !== 'string' || !PAYMENT_ID.test(fact.paymentId)) fail()
+      return fact
+    }
+    return Object.freeze({
+      issuer: Object.freeze({ issueCharge, issuePayment }),
+      consumer: new OwnershipConsumer(verifyCharge, verifyPayment),
+    })
+  } catch { fail() }
 }
 
 const canonicalInstant = (value) => typeof value === 'string' && INSTANT.test(value)
@@ -179,16 +243,18 @@ export async function decryptClientIdentity(context, input) {
   } catch { fail() }
 }
 
-export async function encryptClientCorrectionReason(context, input) {
+export async function encryptClientCorrectionReason(context, consumer, input) {
   try {
     const current = cryptoContext(context)
     const captured = captureExact(input, [
       'correctionId', 'appointmentId', 'paymentId', 'reason', 'ownerFact',
     ])
-    const owner = assertPaymentOwnershipFact(captured.ownerFact)
+    const owner = verifyPaymentOwnership(consumer, captured.ownerFact)
     if (!isCorrectionId(captured.correctionId)
-      || !APPOINTMENT_ID.test(captured.appointmentId ?? '')
-      || !PAYMENT_ID.test(captured.paymentId ?? '')
+      || typeof captured.appointmentId !== 'string'
+      || !APPOINTMENT_ID.test(captured.appointmentId)
+      || typeof captured.paymentId !== 'string'
+      || !PAYMENT_ID.test(captured.paymentId)
       || owner.clientId !== current.scope.id
       || owner.appointmentId !== captured.appointmentId
       || owner.paymentId !== captured.paymentId) fail()
@@ -206,16 +272,18 @@ export async function encryptClientCorrectionReason(context, input) {
   } catch { fail() }
 }
 
-export async function decryptClientCorrectionReason(context, input) {
+export async function decryptClientCorrectionReason(context, consumer, input) {
   try {
     const current = cryptoContext(context)
     const captured = captureExact(input, [
       'correctionId', 'appointmentId', 'paymentId', 'envelope', 'ownerFact',
     ])
-    const owner = assertPaymentOwnershipFact(captured.ownerFact)
+    const owner = verifyPaymentOwnership(consumer, captured.ownerFact)
     if (!isCorrectionId(captured.correctionId)
-      || !APPOINTMENT_ID.test(captured.appointmentId ?? '')
-      || !PAYMENT_ID.test(captured.paymentId ?? '')
+      || typeof captured.appointmentId !== 'string'
+      || !APPOINTMENT_ID.test(captured.appointmentId)
+      || typeof captured.paymentId !== 'string'
+      || !PAYMENT_ID.test(captured.paymentId)
       || owner.clientId !== current.scope.id
       || owner.appointmentId !== captured.appointmentId
       || owner.paymentId !== captured.paymentId) fail()
