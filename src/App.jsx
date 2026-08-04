@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AppProvider, useApp, useToasts } from './store.jsx'
 import { Shell } from './layout.jsx'
 import { Login } from './views/Login.jsx'
@@ -44,11 +44,20 @@ function MotionSync() {
   return null
 }
 
-function DemoRoot({ authed, onAuthenticatedChange }) {
+function DemoRoot({ authed, initialDemoRoleId, onAuthenticatedChange }) {
+  const { state, dispatch } = useApp()
   const { clearToasts } = useToasts()
+  const restoredRole = useRef(false)
+  useEffect(() => {
+    if (restoredRole.current) return
+    restoredRole.current = true
+    if (state.demoRoleId !== initialDemoRoleId) {
+      dispatch({ type: 'SET_DEMO_ROLE', roleId: initialDemoRoleId })
+    }
+  }, [dispatch, initialDemoRoleId, state.demoRoleId])
   const setAuthenticated = (value) => {
     clearToasts()
-    onAuthenticatedChange(value)
+    onAuthenticatedChange(value, state.demoRoleId)
   }
   return (
     <>
@@ -65,15 +74,15 @@ function DemoRoot({ authed, onAuthenticatedChange }) {
 }
 
 function DemoApp() {
-  const [auth, setAuth] = useState({ authed: false, generation: 0 })
+  const [auth, setAuth] = useState({ authed: false, generation: 0, demoRoleId: DEMO_ROLES[0].id })
   const authorityKeyForState = useMemo(
     () => demoAuthorityKeyFor(auth.generation),
     [auth.generation]
   )
-  const setAuthenticated = (authed) => setAuth((current) => (
+  const setAuthenticated = (authed, demoRoleId) => setAuth((current) => (
     current.authed === authed
       ? current
-      : { authed, generation: current.generation + 1 }
+      : { authed, generation: current.generation + 1, demoRoleId }
   ))
   return (
     <AppProvider
@@ -81,7 +90,11 @@ function DemoApp() {
       repositoryFactory={demoRepositoryFactory}
       authorityKey={authorityKeyForState}
     >
-      <DemoRoot authed={auth.authed} onAuthenticatedChange={setAuthenticated} />
+      <DemoRoot
+        authed={auth.authed}
+        initialDemoRoleId={auth.demoRoleId}
+        onAuthenticatedChange={setAuthenticated}
+      />
     </AppProvider>
   )
 }
