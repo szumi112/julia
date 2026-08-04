@@ -10,7 +10,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { materializeCoreMigrationStage } from '../../scripts/apply-core-migration-stage.js'
+import { materializeCoreMigrationStageA } from '../../scripts/apply-core-migration-stage.js'
 import {
   buildLocalHarnessWranglerConfig,
   LOCAL_HARNESS_RUNNER_MODE,
@@ -255,9 +255,8 @@ test('real fictional CLI completes fresh stage A and reruns as an aggregate-only
   const migrationsPath = join(root, 'migrations')
   const configPath = join(root, LOCAL_HARNESS_WRANGLER_NAME)
   mkdirSync(statePath, { mode: 0o700 })
-  materializeCoreMigrationStage({
+  materializeCoreMigrationStageA({
     sourceDirectory: join(PROJECT_ROOT, 'migrations'),
-    stage: 'stage-a',
     targetDirectory: migrationsPath,
   })
   writeFileSync(

@@ -121,12 +121,7 @@ async function hasDirectoryRows(db) {
 const globalFailureCaseSql = `CASE
   WHEN EXISTS (
     SELECT 1 FROM staff_users AS staff
-    WHERE (staff.role='specialist' AND staff.specialist_id IS NULL)
-       OR (staff.specialist_id IS NOT NULL AND NOT EXISTS (
-         SELECT 1 FROM specialists AS specialist
-         WHERE specialist.id=staff.specialist_id
-           AND specialist.staff_user_id=staff.id
-       ))
+    WHERE staff.role='specialist' AND staff.specialist_id IS NULL
   ) THEN 'missing_profile'
   WHEN EXISTS (
     SELECT 1 FROM specialists AS specialist
@@ -141,6 +136,14 @@ const globalFailureCaseSql = `CASE
     JOIN staff_users AS staff ON staff.id=specialist.staff_user_id
     WHERE staff.specialist_id IS NOT specialist.id
   ) THEN 'pointer_mismatch'
+  WHEN EXISTS (
+    SELECT 1 FROM staff_users AS staff
+    WHERE staff.specialist_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM specialists AS specialist
+      WHERE specialist.id=staff.specialist_id
+        AND specialist.staff_user_id=staff.id
+    )
+  ) THEN 'missing_profile'
   WHEN EXISTS (
     SELECT 1 FROM specialists AS specialist
     JOIN staff_users AS staff

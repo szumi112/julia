@@ -28,11 +28,22 @@ const validGuardBinding = (value) => value === null || typeof value === 'string'
   || (typeof value === 'number' && Number.isFinite(value))
 
 export function rateLimitGuardStatement(db, input = {}) {
+  const identityPostcondition = ownObject(input) && (
+    Object.hasOwn(input, 'identityPostconditionSql')
+    || Object.hasOwn(input, 'identityPostconditionBindings')
+  )
+  const expectedKeys = identityPostcondition
+    ? [
+        'auditId', 'actorId', 'action', 'limit', 'since',
+        'postconditionSql', 'postconditionBindings',
+        'identityPostconditionSql', 'identityPostconditionBindings',
+      ]
+    : [
+        'auditId', 'actorId', 'action', 'limit', 'since',
+        'postconditionSql', 'postconditionBindings',
+      ]
   if (!db?.prepare || !ownObject(input)
-    || !exactKeys(input, [
-      'auditId', 'actorId', 'action', 'limit', 'since',
-      'postconditionSql', 'postconditionBindings',
-    ])
+    || !exactKeys(input, expectedKeys)
     || !validId(input.auditId) || !validId(input.actorId)
     || !OPERATION.test(input.action ?? '')
     || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 10_000
@@ -43,25 +54,62 @@ export function rateLimitGuardStatement(db, input = {}) {
     || /;|--|\/\*|\*\//.test(input.postconditionSql)
     || !Array.isArray(input.postconditionBindings)
     || input.postconditionBindings.length > 32
-    || !input.postconditionBindings.every(validGuardBinding)) fail()
-  const statement = db.prepare(
-    `INSERT INTO rate_limit_guard_failures (audit_id)
-     SELECT id
-     FROM audit_events
-     WHERE id=?
-       AND NOT (
-         (${input.postconditionSql})
-         AND (SELECT count(*) FROM audit_events
-              WHERE actor_staff_id=? AND action=? AND occurred_at>=?)<=?
-       )`
-  ).bind(
-    input.auditId,
-    ...input.postconditionBindings,
-    input.actorId,
-    input.action,
-    input.since,
-    input.limit,
-  )
+    || !input.postconditionBindings.every(validGuardBinding)
+    || (identityPostcondition && (
+      typeof input.identityPostconditionSql !== 'string'
+      || input.identityPostconditionSql.length < 1
+      || input.identityPostconditionSql.length > 4096
+      || input.identityPostconditionSql !== input.identityPostconditionSql.trim()
+      || /;|--|\/\*|\*\//.test(input.identityPostconditionSql)
+      || !Array.isArray(input.identityPostconditionBindings)
+      || input.postconditionBindings.length + input.identityPostconditionBindings.length > 32
+      || !input.identityPostconditionBindings.every(validGuardBinding)
+    ))) fail()
+  const statement = identityPostcondition
+    ? db.prepare(
+        `INSERT INTO core_directory_invariant_failures (failure_kind)
+         SELECT failure_kind
+         FROM (
+           SELECT CASE
+             WHEN NOT (${input.identityPostconditionSql}) THEN 'missing_profile'
+             WHEN NOT (
+               (${input.postconditionSql})
+               AND (SELECT count(*) FROM audit_events
+                    WHERE actor_staff_id=? AND action=? AND occurred_at>=?)<=?
+             ) THEN 'rate_limit_guard_failed'
+             ELSE NULL
+           END AS failure_kind
+           FROM audit_events
+           WHERE id=?
+         )
+         WHERE failure_kind IS NOT NULL`
+      ).bind(
+        ...input.identityPostconditionBindings,
+        ...input.postconditionBindings,
+        input.actorId,
+        input.action,
+        input.since,
+        input.limit,
+        input.auditId,
+      )
+    : db.prepare(
+        `INSERT INTO rate_limit_guard_failures (audit_id)
+         SELECT id
+         FROM audit_events
+         WHERE id=?
+           AND NOT (
+             (${input.postconditionSql})
+             AND (SELECT count(*) FROM audit_events
+                  WHERE actor_staff_id=? AND action=? AND occurred_at>=?)<=?
+           )`
+      ).bind(
+        input.auditId,
+        ...input.postconditionBindings,
+        input.actorId,
+        input.action,
+        input.since,
+        input.limit,
+      )
   rateLimitGuards.set(statement, Object.freeze({
     auditId: input.auditId,
     actorId: input.actorId,

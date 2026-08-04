@@ -153,6 +153,13 @@ async function lifecycleState() {
     ['audits', 'SELECT * FROM audit_events ORDER BY id'],
     ['outbox', 'SELECT * FROM outbox_jobs ORDER BY id'],
     [
+      'schema',
+      `SELECT name,sql FROM sqlite_schema
+       WHERE type='trigger'
+         AND name IN ('specialists_no_delete','staff_users_version_increment')
+       ORDER BY name`,
+    ],
+    [
       'idempotency',
       'SELECT * FROM idempotency_records ORDER BY actor_id,operation,idempotency_key',
     ],
@@ -192,6 +199,81 @@ const corruptBeforeFinalGuardDb = (corruptionStatements) => ({
     ])
   },
 })
+
+async function lifecycleCorruptionCases(staffId, specialistId, prefix) {
+  const staffVersionTrigger = await env.DB.prepare(
+    "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='staff_users_version_increment'"
+  ).first()
+  const specialistDeleteTrigger = await env.DB.prepare(
+    "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='specialists_no_delete'"
+  ).first()
+  expect(staffVersionTrigger?.sql).toMatch(/^CREATE TRIGGER staff_users_version_increment/)
+  expect(specialistDeleteTrigger?.sql).toMatch(/^CREATE TRIGGER specialists_no_delete/)
+  return [
+    [
+      'pointer',
+      [
+        env.DB.prepare('DROP TRIGGER staff_users_version_increment'),
+        env.DB.prepare(
+          'UPDATE staff_users SET specialist_id=? WHERE id=?'
+        ).bind(`sp_${prefix}_pointer`, staffId),
+        env.DB.prepare(staffVersionTrigger.sql),
+      ],
+    ],
+    [
+      'profile',
+      [
+        env.DB.prepare('DROP TRIGGER specialists_no_delete'),
+        env.DB.prepare('DELETE FROM specialists WHERE id=?').bind(specialistId),
+        env.DB.prepare(specialistDeleteTrigger.sql),
+      ],
+    ],
+    [
+      'status',
+      [
+        env.DB.prepare(
+          `INSERT INTO record_versions
+           (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+            changed_at,correlation_id)
+           SELECT ?,entity_type,entity_id,version+1,snapshot_envelope,
+                  changed_by_staff_id,changed_at,correlation_id
+           FROM record_versions
+           WHERE entity_type='specialist' AND entity_id=?
+             AND version=(SELECT version FROM specialists WHERE id=?)`
+        ).bind(`rv_${prefix}_status`, specialistId, specialistId),
+        env.DB.prepare(
+          `UPDATE specialists
+           SET status=CASE status WHEN 'active' THEN 'pending' ELSE 'active' END,
+               archived_at=NULL,version=version+1
+           WHERE id=?`
+        ).bind(specialistId),
+      ],
+    ],
+    [
+      'current snapshot',
+      [env.DB.prepare(
+        `UPDATE specialists
+         SET standard_rate_grosze=standard_rate_grosze+1,version=version+1
+         WHERE id=?`
+      ).bind(specialistId)],
+    ],
+  ]
+}
+
+async function expectLifecycleGuardMatrix({
+  before,
+  invoke,
+  specialistId,
+  staffId,
+  prefix,
+}) {
+  const cases = await lifecycleCorruptionCases(staffId, specialistId, prefix)
+  for (const [label, corruptionStatements] of cases) {
+    await expect(invoke(corruptBeforeFinalGuardDb(corruptionStatements), label))
+      .rejects.toThrow(/^IDENTITY_FAILURE$/)
+    expect(await lifecycleState(), label).toEqual(before)
+  }
+}
 
 async function pendingPractitioner(cryptoContext, prefix) {
   const email = `${prefix}-${serial}@example.test`
@@ -568,7 +650,31 @@ describe('retained specialist lifecycle', () => {
     }
   })
 
-  it('final supported-writer guard rolls back lifecycle invariant corruption', async () => {
+  it('first invite guard rolls back every lifecycle invariant corruption class', async () => {
+    const cryptoContext = await context()
+    const prefix = `guarded_first_invite_${serial}`
+    const staffId = `stf_${prefix}_1`
+    const specialistId = `sp_${prefix}_1`
+    const before = await lifecycleState()
+
+    await expectLifecycleGuardMatrix({
+      before,
+      staffId,
+      specialistId,
+      prefix,
+      invoke: (db, label) => invite(cryptoContext, {
+        displayName: 'Guarded First Practitioner',
+        email: `guarded-first-${serial}@example.test`,
+        role: 'specialist',
+      }, {
+        db,
+        idempotencyKey: `guarded-first-${label.replaceAll(' ', '-')}-${serial}`,
+        idFactory: ids(prefix),
+      }),
+    })
+  })
+
+  it('activation guard rolls back every lifecycle invariant corruption class', async () => {
     const cryptoContext = await context()
     const { created, email } = await pendingPractitioner(
       cryptoContext,
@@ -577,52 +683,17 @@ describe('retained specialist lifecycle', () => {
     const staffId = created.data.staff.id
     const specialistId = created.data.staff.specialistId
     const before = await lifecycleState()
-    const cases = [
-      [
-        'pointer/profile',
-        [env.DB.prepare(
-          `UPDATE staff_users
-           SET role='owner',specialist_id=NULL,version=version+1
-           WHERE id=?`
-        ).bind(staffId)],
-      ],
-      [
-        'status',
-        [
-          env.DB.prepare(
-            `INSERT INTO record_versions
-             (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
-              changed_at,correlation_id)
-             SELECT ?,entity_type,entity_id,version+1,snapshot_envelope,
-                    changed_by_staff_id,changed_at,correlation_id
-             FROM record_versions
-             WHERE entity_type='specialist' AND entity_id=? AND version=2`
-          ).bind(`rv_guard_status_${serial}`, specialistId),
-          env.DB.prepare(
-            `UPDATE specialists
-             SET status='archived',version=version+1,archived_at=?
-             WHERE id=?`
-          ).bind(NOW, specialistId),
-        ],
-      ],
-      [
-        'current snapshot',
-        [env.DB.prepare(
-          `UPDATE specialists
-           SET standard_rate_grosze=standard_rate_grosze+1,version=version+1
-           WHERE id=?`
-        ).bind(specialistId)],
-      ],
-    ]
-
-    for (const [label, corruptionStatements] of cases) {
-      await expect(activate(cryptoContext, email, {
-        db: corruptBeforeFinalGuardDb(corruptionStatements),
+    await expectLifecycleGuardMatrix({
+      before,
+      staffId,
+      specialistId,
+      prefix: `guarded_activation_${serial}`,
+      invoke: (db, label) => activate(cryptoContext, email, {
+        db,
         subject: `guarded_activation_${label.replaceAll(' ', '_')}_${serial}`,
         idFactory: ids(`guarded_activation_${label.replaceAll(/[ /]/g, '_')}_${serial}`),
-      })).rejects.toThrow(/^IDENTITY_FAILURE$/)
-      expect(await lifecycleState(), label).toEqual(before)
-    }
+      }),
+    })
   })
 
   it('rolls back practitioner deactivation at every injected batch statement failure', async () => {
@@ -646,6 +717,26 @@ describe('retained specialist lifecycle', () => {
       })).rejects.toThrow()
       expect(await lifecycleState()).toEqual(before)
     }
+  })
+
+  it('deactivation guard rolls back every lifecycle invariant corruption class', async () => {
+    const cryptoContext = await context()
+    const { active } = await activePractitioner(cryptoContext, 'guarded_deactivation')
+    const staffId = active.id
+    const specialistId = active.specialistId
+    const before = await lifecycleState()
+
+    await expectLifecycleGuardMatrix({
+      before,
+      staffId,
+      specialistId,
+      prefix: `guarded_deactivation_${serial}`,
+      invoke: (db, label) => deactivate(cryptoContext, staffId, active.version, {
+        db,
+        idempotencyKey: `guarded-deactivation-${label.replaceAll(' ', '-')}-${serial}`,
+        idFactory: ids(`guarded_deactivation_${label.replaceAll(' ', '_')}_${serial}`),
+      }),
+    })
   })
 
   it('rolls back retained-profile reinvite at every injected batch statement failure', async () => {
@@ -680,5 +771,33 @@ describe('retained specialist lifecycle', () => {
       })).rejects.toThrow()
       expect(await lifecycleState()).toEqual(before)
     }
+  })
+
+  it('retained-profile reinvite guard rolls back every lifecycle invariant corruption class', async () => {
+    const cryptoContext = await context()
+    const { active, email } = await activePractitioner(cryptoContext, 'guarded_reinvite')
+    await deactivate(cryptoContext, active.id, active.version, {
+      idempotencyKey: `guarded-reinvite-disable-${serial}`,
+      idFactory: ids(`guarded_reinvite_disable_${serial}`),
+    })
+    const before = await lifecycleState()
+    const input = {
+      displayName: 'Guarded Retained Practitioner',
+      email,
+      role: 'owner',
+    }
+
+    await expectLifecycleGuardMatrix({
+      before,
+      staffId: active.id,
+      specialistId: active.specialistId,
+      prefix: `guarded_reinvite_${serial}`,
+      invoke: (db, label) => invite(cryptoContext, input, {
+        db,
+        idempotencyKey: `guarded-reinvite-${label.replaceAll(' ', '-')}-${serial}`,
+        correlationId: REINVITE_CORRELATION,
+        idFactory: ids(`guarded_reinvite_${label.replaceAll(' ', '_')}_${serial}`),
+      }),
+    })
   })
 })

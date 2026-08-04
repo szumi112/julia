@@ -76,7 +76,7 @@ const migrationFixtures = (sourceDirectory) => readdirSync(sourceDirectory, {
   })
   .sort((left, right) => left.name.localeCompare(right.name))
 
-export function materializeCoreMigrationStage({
+function materializeCoreMigrationStage({
   sourceDirectory,
   stage,
   targetDirectory,
@@ -116,7 +116,7 @@ export function materializeCoreMigrationStage({
   })
 }
 
-export function generateCoreMigrationStage({
+function generateCoreMigrationStage({
   configPath,
   outputRoot,
   sourceDirectory,
@@ -172,29 +172,30 @@ export function generateCoreMigrationStage({
   })
 }
 
-export function exposeCoreMigrationStage({
-  configPath,
-  outputRoot,
-  preflightStageB,
-  sourceDirectory,
-  stage,
-}) {
-  if (stage === 'stage-b') {
-    if (typeof preflightStageB !== 'function') fail()
-    const result = preflightStageB()
-    if (!result
-      || typeof result !== 'object'
-      || Array.isArray(result)
-      || Object.keys(result).length !== 1
-      || result.ready !== true) fail('CORE_MIGRATION_STAGE_PREFLIGHT_FAILED')
-  } else if (stage !== 'stage-a' || preflightStageB !== undefined) {
-    fail()
-  }
+export function materializeCoreMigrationStageA(input) {
+  if (!input
+    || typeof input !== 'object'
+    || Array.isArray(input)
+    || Object.keys(input).length !== 2
+    || !Object.hasOwn(input, 'sourceDirectory')
+    || !Object.hasOwn(input, 'targetDirectory')) fail()
+  return materializeCoreMigrationStage({
+    ...input,
+    stage: 'stage-a',
+  })
+}
+
+export function generateCoreMigrationStageA(input) {
+  if (!input
+    || typeof input !== 'object'
+    || Array.isArray(input)
+    || Object.keys(input).length !== 3
+    || !Object.hasOwn(input, 'configPath')
+    || !Object.hasOwn(input, 'outputRoot')
+    || !Object.hasOwn(input, 'sourceDirectory')) fail()
   return generateCoreMigrationStage({
-    configPath,
-    outputRoot,
-    sourceDirectory,
-    stage,
+    ...input,
+    stage: 'stage-a',
   })
 }
 
@@ -310,33 +311,27 @@ export function runCoreMigrationStage({
 } = {}) {
   const input = normalizeCoreMigrationStageInput(env, argv)
   const target = runnerTarget(env, input)
-  const preflightStageB = input.stage === 'stage-b'
-    ? () => preflightCoreMigrationStageB({
-        configPath: target.configPath,
-        env,
-        input,
-        persistencePath: target.persistencePath,
-      })
-    : undefined
+  if (input.stage === 'stage-b') {
+    const ready = preflightCoreMigrationStageB({
+      configPath: target.configPath,
+      env,
+      input,
+      persistencePath: target.persistencePath,
+    })
+    if (ready.ready !== true) fail('CORE_MIGRATION_STAGE_PREFLIGHT_FAILED')
+  }
   const generated = target.migrationsDirectory
-    ? (() => {
-        if (input.stage === 'stage-b') {
-          const ready = preflightStageB()
-          if (ready.ready !== true) fail('CORE_MIGRATION_STAGE_PREFLIGHT_FAILED')
-        }
-        return {
-          configPath: target.configPath,
-          ...materializeCoreMigrationStage({
-            sourceDirectory: SOURCE_DIRECTORY,
-            stage: input.stage,
-            targetDirectory: target.migrationsDirectory,
-          }),
-        }
-      })()
-    : exposeCoreMigrationStage({
+    ? {
+        configPath: target.configPath,
+        ...materializeCoreMigrationStage({
+          sourceDirectory: SOURCE_DIRECTORY,
+          stage: input.stage,
+          targetDirectory: target.migrationsDirectory,
+        }),
+      }
+    : generateCoreMigrationStage({
         configPath: target.configPath,
         outputRoot: target.outputRoot,
-        preflightStageB,
         sourceDirectory: SOURCE_DIRECTORY,
         stage: input.stage,
       })

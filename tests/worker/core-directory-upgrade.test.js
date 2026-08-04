@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { CORE_DIRECTORY_INVARIANT_FAILURE_SQL } from '../../scripts/core-migration-stages.js'
 import { advanceCoreDirectoryUpgrade } from '../../scripts/upgrade-core-directory-core.js'
 import { createWrappedDataKey, encryptForScope } from '../../worker/security/envelope.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
@@ -752,10 +753,6 @@ describe('bounded core directory upgrade', () => {
       await insertStaff({ id: 'stf_upgrade_anomaly', specialistId: null })
       await insertProfile(context, profileFor('stf_upgrade_anomaly', 'sp_upgrade_anomaly'))
     }],
-    ['pointer_mismatch', async (context) => {
-      await insertStaff({ id: 'stf_upgrade_anomaly', specialistId: 'sp_upgrade_expected' })
-      await insertProfile(context, profileFor('stf_upgrade_anomaly', 'sp_upgrade_other'))
-    }],
     ['status_mismatch', async (context) => {
       await insertStaff({ id: 'stf_upgrade_anomaly', specialistId: 'sp_upgrade_anomaly' })
       await insertProfile(context, profileFor('stf_upgrade_anomaly', 'sp_upgrade_anomaly', {
@@ -791,5 +788,35 @@ describe('bounded core directory upgrade', () => {
     })).rejects.toThrow('CORE_DIRECTORY_UPGRADE_INVALID')
     expect(await stateRow()).toEqual(before)
     expect((await auditRows('upgrade_global_anomaly')).results).toHaveLength(0)
+  })
+
+  it('classifies pointer mismatch distinctly and rolls Task-4 completion back', async () => {
+    const context = await cryptoContext()
+    await setUpgradeState({
+      afterStaffId: 'stf_zzzz',
+      createdCount: 0,
+      processedCount: 1,
+      status: 'running',
+    })
+    await insertStaff({
+      id: 'stf_upgrade_pointer_mismatch',
+      specialistId: 'sp_upgrade_pointer_expected',
+    })
+    await insertProfile(
+      context,
+      profileFor('stf_upgrade_pointer_mismatch', 'sp_upgrade_pointer_other'),
+    )
+    expect(await env.DB.prepare(CORE_DIRECTORY_INVARIANT_FAILURE_SQL).first()).toEqual({
+      failure_kind: 'pointer_mismatch',
+    })
+    const before = await stateRow()
+
+    await expect(advance({
+      correlationId: 'upgrade_pointer_mismatch',
+      cryptoContext: context,
+      idFactory: ids('aud_upgrade_pointer_mismatch'),
+    })).rejects.toThrow('CORE_DIRECTORY_UPGRADE_INVALID')
+    expect(await stateRow()).toEqual(before)
+    expect((await auditRows('upgrade_pointer_mismatch')).results).toHaveLength(0)
   })
 })

@@ -168,7 +168,7 @@ const TRIGGER_HASHES = Object.freeze({
   clients_no_delete: '529d05614952a610b3d9433e0adf09c0f7f573089c5c2ec794b4d6b7b73e03ac',
   clients_valid_transition: '3e7236734f88594b4d2dd1fa017ebf1f68353e25b15e6a11c39a2f0b7579da9a',
   clients_version_increment: 'afe74455b38730f59b613d60d0bc8f42ddaf473d0fc9fc6d7f52d3b1f0072aa2',
-  core_directory_invariant_failure: 'ec6314a1dc791670e337122215153a35da2300c48dcc7373e38c8bca7ec8f5ee',
+  core_directory_invariant_failure: 'ebb07d6df71acf307ab5661a395c093b3fc2ee837b98d2565ad98d630f6f07a9',
   data_keys_identity_collision: '61bd71c00bb44d3c36bf3ff9284850cad5451d1b4749dc42d1cc9ea160b9965a',
   data_keys_immutable_identity: 'ca7342a503f8a1c9c6b9df32974918949337ecf1403bf6c1574914a665797ec5',
   data_keys_immutable_retirement: '72a9c9a2f0b3fcf198c24aed3ef11072db52ea7d9d81b784ecace3b295a979d6',

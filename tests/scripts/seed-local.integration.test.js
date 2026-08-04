@@ -19,7 +19,7 @@ import {
 } from '../../scripts/seed-core.js'
 import { LOCAL_SEED_MANIFEST, runLocalSeed } from '../../scripts/seed-local.mjs'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { materializeCoreMigrationStage } from '../../scripts/apply-core-migration-stage.js'
+import { materializeCoreMigrationStageA } from '../../scripts/apply-core-migration-stage.js'
 import {
   buildLocalHarnessWranglerConfig,
   LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
@@ -76,9 +76,8 @@ const applyMigrations = (root) => {
     migrationsDirectory,
     LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
   )
-  materializeCoreMigrationStage({
+  materializeCoreMigrationStageA({
     sourceDirectory: join(PROJECT_ROOT, 'migrations'),
-    stage: 'stage-a',
     targetDirectory: activeMigrationsDirectory,
   })
   writeFileSync(

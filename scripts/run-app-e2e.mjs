@@ -40,7 +40,7 @@ import {
   LOCAL_HARNESS_RUNNER_MODE,
   LOCAL_HARNESS_WRANGLER_NAME,
 } from './local-harness-core.js'
-import { materializeCoreMigrationStage } from './apply-core-migration-stage.js'
+import { materializeCoreMigrationStageA } from './apply-core-migration-stage.js'
 import {
   CORE_MIGRATION_STAGE_A_NAMES,
   CORE_MIGRATION_STAGE_B_NAMES,
@@ -1481,9 +1481,8 @@ const defaultPrepareHarness = async (path, expectedFence) => {
     migrations.path,
     LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
   )
-  materializeCoreMigrationStage({
+  materializeCoreMigrationStageA({
     sourceDirectory: join(PROJECT_ROOT, 'migrations'),
-    stage: 'stage-a',
     targetDirectory: migrationsPath,
   })
   const state = directory(PRIVATE_STATE_NAME)

@@ -2,13 +2,14 @@ import { env } from 'cloudflare:workers'
 import { expect, it } from 'vitest'
 import {
   classifyOwnerTransitionError,
+  isD1CoreDirectoryInvariantFailure,
   isD1IdentityCollision,
   isD1LastActiveOwner,
   isD1RateLimitGuardFailure,
 } from '../../worker/db/errors.js'
 import * as d1Errors from '../../worker/db/errors.js'
 
-it('classifies only exact D1 identity and last-owner errors', () => {
+it('classifies only exact D1 guard errors', () => {
   expect(isD1IdentityCollision(new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT'))).toBe(true)
   expect(isD1LastActiveOwner(new Error('last_active_owner: SQLITE_CONSTRAINT'))).toBe(true)
   expect(isD1IdentityCollision(new Error('transport identity_collision downstream'))).toBe(false)
@@ -17,6 +18,12 @@ it('classifies only exact D1 identity and last-owner errors', () => {
     new Error('D1_ERROR: rate_limit_guard_failed: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')
   )).toBe(true)
   expect(isD1RateLimitGuardFailure(new Error('transport rate_limit_guard_failed downstream'))).toBe(false)
+  expect(isD1CoreDirectoryInvariantFailure(
+    new Error('D1_ERROR: core_directory_invariant_failed: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')
+  )).toBe(true)
+  expect(isD1CoreDirectoryInvariantFailure(
+    new Error('transport core_directory_invariant_failed downstream')
+  )).toBe(false)
   expect(typeof d1Errors.isD1OutboxOperationGuardFailure).toBe('function')
   expect(d1Errors.isD1OutboxOperationGuardFailure(
     new Error('D1_ERROR: outbox_operation_guard_failed: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')

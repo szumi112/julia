@@ -1,5 +1,9 @@
 import { auditEventStatement, encryptAuditReason } from '../audit/events.js'
-import { isD1IdentityCollision, isD1LastActiveOwner } from '../db/errors.js'
+import {
+  isD1CoreDirectoryInvariantFailure,
+  isD1IdentityCollision,
+  isD1LastActiveOwner,
+} from '../db/errors.js'
 import {
   commitRateLimitedMutation,
   createIdempotencyStatement,
@@ -471,8 +475,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
         SELECT 1 FROM idempotency_records
         WHERE actor_id=? AND operation='staff.invite' AND idempotency_key=?
           AND resource_type='staff_invitation' AND resource_id=?
-      )
-      AND ${specialistProof.sql}${expiredOpen ? `\n      ${expiredOpenPostcondition}` : ''}`,
+      )${expiredOpen ? `\n      ${expiredOpenPostcondition}` : ''}`,
     postconditionBindings: [
       staffId,
       staff.email_lookup,
@@ -496,9 +499,10 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       owner.id,
       idempotencyKey,
       invitationId,
-      ...specialistProof.bindings,
       ...expiredOpenBindings,
     ],
+    identityPostconditionSql: specialistProof.sql,
+    identityPostconditionBindings: specialistProof.bindings,
   }))
   try {
     await commitRateLimitedMutation(db, uow, {
@@ -511,6 +515,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     })
     return body
   } catch (error) {
+    if (isD1CoreDirectoryInvariantFailure(error)) throw new Error('IDENTITY_FAILURE')
     if (isD1IdentityCollision(error)) {
       try {
         const recovered = await recoverIdempotencyAfterCollision(db, cryptoContext, idem, error)
@@ -731,13 +736,8 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
   const specialistProof = specialistPostcondition(staffId)
   uow.guard(
     db.prepare(
-      `INSERT INTO audit_events
-       (id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
-        reason_envelope,correlation_id,metadata_json)
-       SELECT id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
-              reason_envelope,correlation_id,metadata_json
-       FROM audit_events
-       WHERE id=? AND NOT (
+      `INSERT INTO core_directory_invariant_failures (failure_kind)
+       SELECT 'missing_profile' WHERE NOT (
          EXISTS (
            SELECT 1 FROM staff_users
            WHERE id=? AND status='disabled' AND disabled_at=? AND version=? AND updated_at=?
@@ -763,7 +763,6 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
          ${invitationPostcondition}
        )`
     ).bind(
-      auditId,
       staffId,
       now,
       staff.version,
@@ -786,6 +785,7 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
     await uow.commit()
     return body
   } catch (error) {
+    if (isD1CoreDirectoryInvariantFailure(error)) throw new Error('IDENTITY_FAILURE')
     if (isD1LastActiveOwner(error)) throw new Error('LAST_ACTIVE_OWNER')
     if (isD1IdentityCollision(error)) {
       const recovered = await recoverIdempotencyAfterCollision(

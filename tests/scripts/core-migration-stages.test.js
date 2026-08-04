@@ -129,11 +129,10 @@ test('stage generation configures only a private directory containing stage A fi
     vars: { APP_ENV: 'development', DATA_MODE: 'fictional' },
   }))
 
-  const generated = module.generateCoreMigrationStage({
+  const generated = module.generateCoreMigrationStageA({
     configPath,
     outputRoot,
     sourceDirectory,
-    stage: 'stage-a',
   })
 
   assert.deepEqual(readdirSync(generated.migrationsDirectory).sort(), STAGE_A_NAMES)
@@ -144,7 +143,7 @@ test('stage generation configures only a private directory containing stage A fi
   assert.notEqual(config.d1_databases[0].migrations_dir, sourceDirectory)
 })
 
-test('stage generation replaces stage A exposure with only stage B', async (t) => {
+test('public fixture helpers can expose only stage A', async (t) => {
   const module = await loadApplyModule()
   assert.ok(module, 'core migration stage generator must exist')
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'bwm-core-stage-b-')))
@@ -161,22 +160,30 @@ test('stage generation replaces stage A exposure with only stage B', async (t) =
     main: './worker/index.js',
     vars: { APP_ENV: 'development', DATA_MODE: 'fictional' },
   }))
-  module.generateCoreMigrationStage({
+  const generated = module.generateCoreMigrationStageA({
     configPath,
     outputRoot,
     sourceDirectory,
-    stage: 'stage-a',
   })
-
-  const generated = module.generateCoreMigrationStage({
+  assert.deepEqual(readdirSync(generated.migrationsDirectory).sort(), STAGE_A_NAMES)
+  assert.deepEqual(generated.names, STAGE_A_NAMES)
+  assert.equal(module.materializeCoreMigrationStage, undefined)
+  assert.equal(module.generateCoreMigrationStage, undefined)
+  assert.equal(module.exposeCoreMigrationStage, undefined)
+  assert.equal(typeof module.materializeCoreMigrationStageA, 'function')
+  assert.equal(typeof module.generateCoreMigrationStageA, 'function')
+  assert.throws(() => module.generateCoreMigrationStageA({
     configPath,
     outputRoot,
     sourceDirectory,
     stage: 'stage-b',
-  })
-
-  assert.deepEqual(readdirSync(generated.migrationsDirectory), STAGE_B_NAMES)
-  assert.deepEqual(generated.names, STAGE_B_NAMES)
+  }), /CORE_MIGRATION_STAGE_INVALID/)
+  assert.throws(() => module.materializeCoreMigrationStageA({
+    sourceDirectory,
+    stage: 'stage-b',
+    targetDirectory: join(outputRoot, 'bypass'),
+  }), /CORE_MIGRATION_STAGE_INVALID/)
+  assert.deepEqual(readdirSync(generated.migrationsDirectory).sort(), STAGE_A_NAMES)
 })
 
 test('stage commands accept only fictional non-production execution', async () => {
@@ -239,60 +246,6 @@ test('stage-B preflight accepts only an exact empty Wrangler result', async () =
   )
 })
 
-test('stage B remains unexposed until its preflight succeeds', async (t) => {
-  const module = await loadApplyModule()
-  assert.ok(module, 'core migration stage command must exist')
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'bwm-core-stage-preflight-')))
-  t.after(() => rmSync(root, { force: true, recursive: true }))
-  const sourceDirectory = join(root, 'source')
-  const outputRoot = join(root, 'private')
-  mkdirSync(sourceDirectory)
-  for (const name of [...STAGE_A_NAMES, ...STAGE_B_NAMES]) {
-    writeFileSync(join(sourceDirectory, name), `-- ${name}\nSELECT 1;\n`)
-  }
-  const configPath = join(root, 'wrangler.json')
-  writeFileSync(configPath, JSON.stringify({
-    d1_databases: [{ binding: 'DB', migrations_dir: 'migrations' }],
-    main: './worker/index.js',
-    vars: { APP_ENV: 'development', DATA_MODE: 'fictional' },
-  }))
-  module.generateCoreMigrationStage({
-    configPath,
-    outputRoot,
-    sourceDirectory,
-    stage: 'stage-a',
-  })
-  const active = join(outputRoot, 'active')
-  let preflightCalls = 0
-
-  assert.throws(() => module.exposeCoreMigrationStage({
-    configPath,
-    outputRoot,
-    preflightStageB: () => {
-      preflightCalls += 1
-      throw new Error('CORE_MIGRATION_STAGE_PREFLIGHT_FAILED')
-    },
-    sourceDirectory,
-    stage: 'stage-b',
-  }), /CORE_MIGRATION_STAGE_PREFLIGHT_FAILED/)
-  assert.equal(preflightCalls, 1)
-  assert.deepEqual(readdirSync(active).sort(), STAGE_A_NAMES)
-
-  const exposed = module.exposeCoreMigrationStage({
-    configPath,
-    outputRoot,
-    preflightStageB: () => {
-      preflightCalls += 1
-      return { ready: true }
-    },
-    sourceDirectory,
-    stage: 'stage-b',
-  })
-  assert.equal(preflightCalls, 2)
-  assert.deepEqual(exposed.names, STAGE_B_NAMES)
-  assert.deepEqual(readdirSync(active), STAGE_B_NAMES)
-})
-
 test('stage generation rejects a symlinked private output root', async (t) => {
   const module = await loadApplyModule()
   assert.ok(module, 'core migration stage generator must exist')
@@ -314,11 +267,10 @@ test('stage generation rejects a symlinked private output root', async (t) => {
     vars: { APP_ENV: 'development', DATA_MODE: 'fictional' },
   }))
 
-  assert.throws(() => module.generateCoreMigrationStage({
+  assert.throws(() => module.generateCoreMigrationStageA({
     configPath,
     outputRoot,
     sourceDirectory,
-    stage: 'stage-a',
   }), /CORE_MIGRATION_STAGE_INVALID/)
   assert.deepEqual(readdirSync(external), [])
 })

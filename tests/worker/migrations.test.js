@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
+import { CORE_DIRECTORY_INVARIANT_FAILURE_SQL } from '../../scripts/core-migration-stages.js'
 import {
   applyCoreDirectoryStageB,
   completeCoreDirectoryStageA,
@@ -167,7 +168,10 @@ describe('foundation migrations', () => {
   })
 
   it('seals stage B only after audited completion and rejects every fixed anomaly class', async () => {
-    const assertStageBAbort = async () => {
+    const assertStageBAbort = async (expectedFailureKind) => {
+      expect(await env.DB.prepare(CORE_DIRECTORY_INVARIANT_FAILURE_SQL).first()).toEqual({
+        failure_kind: expectedFailureKind,
+      })
       await expect(applyCoreDirectoryStageB())
         .rejects.toThrow(/core_directory_invariant_failed/)
       expect((await env.DB.prepare(
@@ -203,18 +207,52 @@ describe('foundation migrations', () => {
       `correlation_assert_${suffix}_${version}`,
     )
 
-    await assertStageBAbort()
+    await assertStageBAbort('upgrade_incomplete')
     await expect(completeCoreDirectoryStageA()).resolves.toEqual({
       createdCount: 0,
       processedCount: 0,
       status: 'complete',
     })
 
+    const updateUpgradeState = (valueJson, version) => run(
+      `UPDATE system_state SET value_json=?,version=?,updated_at=?
+       WHERE key='core_directory_specialist_backfill_v1'`,
+      valueJson,
+      version,
+      later,
+    )
+    for (const malformed of [
+      {
+        valueJson: '{"afterStaffId":null,"createdCount":0,"processedCount":1,"status":"complete"}',
+        version: 3,
+      },
+      {
+        valueJson: '{"status":"complete","processedCount":3,"createdCount":0,"afterStaffId":"stf_state"}',
+        version: 5,
+      },
+      {
+        valueJson: '{"afterStaffId":"stf_state","createdCount":0,"processedCount":5,"status":"complete","unexpected":true}',
+        version: 7,
+      },
+      {
+        valueJson: '{"afterStaffId":"stf_state","createdCount":0,"processedCount":6,"status":"complete"}',
+        version: 9,
+      },
+    ]) {
+      await updateUpgradeState(malformed.valueJson, malformed.version)
+      await assertStageBAbort('upgrade_incomplete')
+      const restoredVersion = malformed.version + 1
+      await updateUpgradeState(
+        `{"afterStaffId":"stf_state","createdCount":0,"processedCount":${restoredVersion - 2},"status":"complete"}`,
+        restoredVersion,
+      )
+    }
+
     await insertStaff('stf_assert_missing', {
       role: 'coordinator',
       specialist_id: 'sp_assert_missing',
     })
-    await assertStageBAbort()
+    await assertStageBAbort('missing_profile')
     await insertProfile({
       specialistId: 'sp_assert_missing',
       staffId: 'stf_assert_missing',
@@ -230,7 +268,7 @@ describe('foundation migrations', () => {
       staffId: 'stf_assert_orphan',
     })
     await insertSpecialistVersion('sp_assert_orphan', 1, 'orphan')
-    await assertStageBAbort()
+    await assertStageBAbort('orphan_profile')
     await run(
       `UPDATE staff_users SET specialist_id='sp_assert_orphan',version=2,updated_at=?
        WHERE id='stf_assert_orphan' AND version=1`,
@@ -246,7 +284,7 @@ describe('foundation migrations', () => {
       staffId: 'stf_assert_pointer',
     })
     await insertSpecialistVersion('sp_assert_pointer', 1, 'pointer')
-    await assertStageBAbort()
+    await assertStageBAbort('pointer_mismatch')
     await run(
       `UPDATE staff_users SET specialist_id='sp_assert_pointer',version=2,updated_at=?
        WHERE id='stf_assert_pointer' AND version=1`,
@@ -263,7 +301,7 @@ describe('foundation migrations', () => {
       status: 'pending',
     })
     await insertSpecialistVersion('sp_assert_status', 1, 'status')
-    await assertStageBAbort()
+    await assertStageBAbort('status_mismatch')
     await run(
       `UPDATE specialists
        SET status='active',version=2,updated_at=?
@@ -280,7 +318,7 @@ describe('foundation migrations', () => {
       specialistId: 'sp_assert_missing_version',
       staffId: 'stf_assert_missing_version',
     })
-    await assertStageBAbort()
+    await assertStageBAbort('missing_version')
     await insertSpecialistVersion('sp_assert_missing_version', 1, 'missing_version')
 
     await insertStaff('stf_assert_noncontiguous', {
@@ -293,9 +331,10 @@ describe('foundation migrations', () => {
       version: 2,
     })
     await insertSpecialistVersion('sp_assert_noncontiguous', 2, 'noncontiguous')
-    await assertStageBAbort()
+    await assertStageBAbort('noncontiguous_versions')
     await insertSpecialistVersion('sp_assert_noncontiguous', 1, 'noncontiguous')
 
+    expect(await env.DB.prepare(CORE_DIRECTORY_INVARIANT_FAILURE_SQL).first()).toBeNull()
     await expect(applyCoreDirectoryStageB()).resolves.toBeUndefined()
     expect(await one(
       "SELECT name FROM d1_migrations WHERE name='0010_specialist_lifecycle_assertion.sql'"
@@ -508,6 +547,9 @@ describe('foundation migrations', () => {
         failureKind,
       )).rejects.toThrow(/core_directory_invariant_failed/)
     }
+    await expect(run(
+      "INSERT INTO core_directory_invariant_failures (failure_kind) VALUES ('rate_limit_guard_failed')"
+    )).rejects.toThrow(/rate_limit_guard_failed/)
     expect(await one(
       'SELECT count(*) AS count FROM core_directory_invariant_failures'
     )).toEqual({ count: 0 })
