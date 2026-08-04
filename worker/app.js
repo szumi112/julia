@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { isCoreAuditAction } from '../src/core-audit-contract.js'
 import { auditEventStatement } from './audit/events.js'
 import { loadConfig } from './config.js'
 import { createD1QueryBudget } from './db/query-budget.js'
@@ -50,33 +51,36 @@ const PAYMENT_PATH_ID = 'pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const CORE_COMMAND_ALLOW = 'POST, OPTIONS'
 const CORE_READ_ALLOW = 'GET, HEAD, OPTIONS'
 const CORE_BUDGET = Object.freeze({ totalLimit: 50, recoveryReserve: 8 })
-const CORE_AUDIT_ACTIONS = new Set([
-  'appointment.cancelled', 'appointment.created', 'appointment.updated',
-  'client.archived', 'client.assignment.changed', 'client.created', 'client.updated',
-  'payment.corrected', 'payment.recorded',
-])
-const descriptor = (value) => Object.freeze({
-  ...value,
-  methods: Object.freeze([...value.methods]),
-  auditActions: Object.freeze([...value.auditActions]),
-  bodyKeys: value.bodyKeys ? Object.freeze([...value.bodyKeys]) : null,
-  sharedBudget: CORE_BUDGET,
-  core: true,
-  expected: 'human',
-})
+const coreRouteMatchers = new WeakMap()
+const descriptor = (value) => {
+  const route = Object.freeze({
+    ...value,
+    methods: Object.freeze([...value.methods]),
+    auditActions: Object.freeze([...value.auditActions]),
+    bodyKeys: value.bodyKeys ? Object.freeze([...value.bodyKeys]) : null,
+    sharedBudget: CORE_BUDGET,
+    core: true,
+    expected: 'human',
+  })
+  const matcher = value.path
+    ? (pathname) => pathname === value.path
+    : new RegExp(value.pathPattern)
+  coreRouteMatchers.set(route, matcher)
+  return route
+}
 const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'workspace', path: '/api/v1/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'client.operational.read', auditActions: [], bodyKeys: null }),
   descriptor({ id: 'clients.create', path: '/api/v1/clients', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'] }),
-  descriptor({ id: 'clients.edit', pattern: new RegExp(`^/api/v1/clients/${CLIENT_PATH_ID}/edits$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'] }),
-  descriptor({ id: 'clients.archive', pattern: new RegExp(`^/api/v1/clients/${CLIENT_PATH_ID}/archive$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'clients.edit', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'] }),
+  descriptor({ id: 'clients.archive', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/archive$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'] }),
   descriptor({ id: 'appointments.create', path: '/api/v1/appointments', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.created'], bodyKeys: ['clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'] }),
-  descriptor({ id: 'appointments.edit', pattern: new RegExp(`^/api/v1/appointments/${APPOINTMENT_PATH_ID}/edits$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.updated'], bodyKeys: ['expectedVersion', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'] }),
-  descriptor({ id: 'appointments.cancel', pattern: new RegExp(`^/api/v1/appointments/${APPOINTMENT_PATH_ID}/cancellation$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'] }),
-  descriptor({ id: 'appointments.payment', pattern: new RegExp(`^/api/v1/appointments/${APPOINTMENT_PATH_ID}/payments$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'] }),
-  descriptor({ id: 'payments.correct', pattern: new RegExp(`^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`), methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
+  descriptor({ id: 'appointments.edit', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.updated'], bodyKeys: ['expectedVersion', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'] }),
+  descriptor({ id: 'appointments.cancel', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/cancellation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'appointments.payment', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/payments$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'] }),
+  descriptor({ id: 'payments.correct', pathPattern: `^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
 ])
 export const CORE_ROUTE_DESCRIPTORS = CORE_ROUTES
-if (CORE_ROUTES.some((route) => route.auditActions.some((action) => !CORE_AUDIT_ACTIONS.has(action)))) {
+if (CORE_ROUTES.some((route) => route.auditActions.some((action) => !isCoreAuditAction(action)))) {
   throw new Error('CORE_ROUTE_REGISTRY_INVALID')
 }
 const OPERATION_SERVICES = Object.freeze({
@@ -95,7 +99,10 @@ const routeFor = (request) => {
     return { id: 'session', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
   }
   for (const route of CORE_ROUTES) {
-    const pathMatches = route.path ? url.pathname === route.path : route.pattern.test(url.pathname)
+    const matcher = coreRouteMatchers.get(route)
+    const pathMatches = typeof matcher === 'function'
+      ? matcher(url.pathname)
+      : matcher.test(url.pathname)
     if (pathMatches && (route.bodyKeys === null || url.search === '')) return route
   }
   if (url.search === '' && url.pathname === STAFF_PATH) return { id: 'staff.list', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }

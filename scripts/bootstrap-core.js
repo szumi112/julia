@@ -7,6 +7,12 @@ import {
 import { accessDesiredFingerprint } from '../worker/jobs/access-reconciliation.js'
 import { retryDelayMs } from '../worker/jobs/outbox.js'
 import { CORE_DIRECTORY_INVARIANT_FAILURE_SQL } from './core-migration-stages.js'
+import {
+  captureCoreAuditEvent,
+  captureCoreAuditMetadata,
+  CORE_AUDIT_SCHEMAS,
+  isCoreAuditAction,
+} from '../src/core-audit-contract.js'
 
 const DAY_MS = 86_400_000
 const OUTBOX_LEASE_MS = 60_000
@@ -466,15 +472,9 @@ const OTHER_EMPTY_TABLES = Object.freeze([
   'specialists',
 ])
 const AUDIT_SCHEMAS = Object.freeze({
-  'client.created': Object.freeze({ entityType: 'client', entityId: CLIENT_ID, metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' } }),
-  'client.updated': Object.freeze({ entityType: 'client', entityId: CLIENT_ID, metadata: { clientVersion: 'version' } }),
-  'client.assignment.changed': Object.freeze({ entityType: 'client', entityId: CLIENT_ID, metadata: { clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' } }),
-  'client.archived': Object.freeze({ entityType: 'client', entityId: CLIENT_ID, metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' } }),
-  'appointment.created': Object.freeze({ entityType: 'appointment', entityId: APPOINTMENT_ID, metadata: { appointmentVersion: 'version', chargeVersion: 'version' } }),
-  'appointment.updated': Object.freeze({ entityType: 'appointment', entityId: APPOINTMENT_ID, metadata: { appointmentVersion: 'version', chargeVersion: 'version' } }),
-  'appointment.cancelled': Object.freeze({ entityType: 'appointment', entityId: APPOINTMENT_ID, metadata: { appointmentVersion: 'version', chargeVersion: 'version' } }),
-  'payment.recorded': Object.freeze({ entityType: 'appointment', entityId: APPOINTMENT_ID, metadata: { appointmentVersion: 'version', paymentEntryId: 'paymentId' } }),
-  'payment.corrected': Object.freeze({ entityType: 'payment_entry', entityId: PAYMENT_ID, metadata: { appointmentVersion: 'version', correctionId: 'correctionId', reversedEntryId: 'paymentId', replacementEntryId: 'nullablePaymentId' } }),
+  ...Object.fromEntries(Object.entries(CORE_AUDIT_SCHEMAS).map(([action, schema]) => [action,
+    Object.freeze({ entityType: schema.entityType, metadata: schema.metadata })
+  ])),
   'identity.activation': Object.freeze({ entityType: 'staff_user', metadata: { invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { invitationVersion: 'version', staffVersion: 'version' } }),
   'staff.bootstrap': Object.freeze({ entityType: 'staff_user', metadata: { desiredGeneration: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
   'staff.deactivated': Object.freeze({ entityType: 'staff_user', metadata: { desiredGeneration: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', staffVersion: 'version' } }),
@@ -483,11 +483,6 @@ const AUDIT_SCHEMAS = Object.freeze({
   'specialist.backfilled': Object.freeze({ entityType: 'specialist', metadata: { specialistVersion: 'version', stateVersion: 'version' }, system: true }),
   'core_directory.upgrade.advanced': Object.freeze({ entityType: 'system_state', metadata: { createdCount: 'count', processedCount: 'count', stateVersion: 'version' }, system: true }),
 })
-const CORE_AUDIT_ACTIONS = new Set([
-  'appointment.cancelled', 'appointment.created', 'appointment.updated',
-  'client.archived', 'client.assignment.changed', 'client.created', 'client.updated',
-  'payment.corrected', 'payment.recorded',
-])
 
 const ownObject = (value) => value !== null
   && typeof value === 'object'
@@ -1330,7 +1325,6 @@ export function normalizeBootstrapAuditEvent(row) {
     || row.reason_envelope !== null
     || !ID.test(row.correlation_id ?? '')
     || typeof row.metadata_json !== 'string') aggregateRefused()
-  if (CORE_AUDIT_ACTIONS.has(row.action) && row.actor_staff_id === null) aggregateRefused()
   if (schema.entityId && !schema.entityId.test(row.entity_id)) aggregateRefused()
   if (row.action === 'specialist.backfilled'
     && !SPECIALIST_ID.test(row.entity_id)) aggregateRefused()
@@ -1344,6 +1338,18 @@ export function normalizeBootstrapAuditEvent(row) {
     aggregateRefused()
   }
   if (!ownObject(parsed) || canonicalJson(parsed) !== row.metadata_json) aggregateRefused()
+  if (isCoreAuditAction(row.action)) {
+    const metadata = captureCoreAuditMetadata(row.action, parsed)
+    if (!metadata || !bootstrapCoreAuditEvent({
+      action: row.action,
+      actorStaffId: row.actor_staff_id,
+      entityType: row.entity_type,
+      entityId: row.entity_id,
+      result: row.result,
+      metadata,
+    })) aggregateRefused()
+    return Object.freeze({ ...row, metadata })
+  }
   const metadataKeys = Object.keys(schema.metadata)
   const legacyKeys = Object.keys(schema.legacyMetadata ?? {})
   const exact = exactKeys(parsed, metadataKeys)
@@ -1369,6 +1375,9 @@ export function normalizeBootstrapAuditEvent(row) {
     : Object.freeze({ ...parsed })
   return Object.freeze({ ...row, metadata })
 }
+
+export const BOOTSTRAP_CORE_AUDIT_SCHEMAS = CORE_AUDIT_SCHEMAS
+export const bootstrapCoreAuditEvent = captureCoreAuditEvent
 
 const exactReleasedLease = (row) => exactKeys(
   row,

@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { CORE_ROUTE_DESCRIPTORS, createApp } from '../../worker/app.js'
+import {
+  areSiblingD1QueryBudgetViews,
+  createD1QueryBudget,
+  D1_QUERY_BUDGET_EXCEEDED,
+  usageForD1QueryBudgetViews,
+} from '../../worker/db/query-budget.js'
 import { safeLog } from '../../worker/logging/safe-log.js'
 
 const deps = (overrides = {}) => ({
@@ -158,6 +164,18 @@ describe('closed core route descriptors', () => {
     expect(Object.isFrozen(CORE_ROUTE_DESCRIPTORS)).toBe(true)
     expect(CORE_ROUTE_DESCRIPTORS.every((route) => Object.isFrozen(route)
       && !Object.hasOwn(route, 'handler') && !Object.hasOwn(route, 'service'))).toBe(true)
+    const assertDeeplyFrozen = (value) => {
+      if (!value || typeof value !== 'object') return
+      expect(value).not.toBeInstanceOf(RegExp)
+      expect(Object.isFrozen(value)).toBe(true)
+      for (const child of Object.values(value)) assertDeeplyFrozen(child)
+    }
+    assertDeeplyFrozen(CORE_ROUTE_DESCRIPTORS)
+    expect(CORE_ROUTE_DESCRIPTORS.filter(({ pathPattern }) => pathPattern)
+      .every(({ pathPattern }) => typeof pathPattern === 'string')).toBe(true)
+    expect(() => {
+      CORE_ROUTE_DESCRIPTORS[0].sharedBudget.totalLimit = 1
+    }).toThrow(TypeError)
   })
 
   it.each(commands)('validates the closed shell once and keeps %s nonfunctional', async (path, body) => {
@@ -219,14 +237,31 @@ describe('closed core route descriptors', () => {
   })
 
   it('installs one shared budget before identity and keeps workspace nonfunctional', async () => {
-    const rawDb = coreBudgetDb()
+    const order = []
+    const rawDb = coreBudgetDb(order)
     let actorWork
     let actorRecovery
     const input = deps({
       db: rawDb,
+      cryptoContext: undefined,
+      keyring: {},
+      resolveAccessPrincipal: vi.fn(async () => {
+        order.push('access')
+        return { kind: 'human', subject: 'access-shell', normalizedEmail: 'shell@example.test' }
+      }),
       resolveActor: vi.fn(async (work, _principal, _context, options) => {
+        order.push('actor')
         actorWork = work
         actorRecovery = options.recoveryDb
+        expect(areSiblingD1QueryBudgetViews(work, options.recoveryDb)).toBe(true)
+        expect(usageForD1QueryBudgetViews(work, options.recoveryDb)).toEqual({
+          used: 1, remaining: 49, workRemaining: 41, totalLimit: 50, recoveryReserve: 8,
+        })
+        await work.prepare('SELECT actor_one').first()
+        await work.prepare('SELECT actor_two').first()
+        expect(usageForD1QueryBudgetViews(work, options.recoveryDb)).toEqual({
+          used: 3, remaining: 47, workRemaining: 39, totalLimit: 50, recoveryReserve: 8,
+        })
         return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
       }),
     })
@@ -234,6 +269,66 @@ describe('closed core route descriptors', () => {
     expect(response.status).toBe(404)
     expect(actorWork).not.toBe(rawDb)
     expect(actorRecovery).not.toBe(actorWork)
+    expect(order).toEqual(['capture.prepare', 'capture.batch', 'access', 'query.data-key', 'actor'])
+  })
+
+  it('keeps a core GET at zero recovery usage when identity needs no database work', async () => {
+    let views
+    const input = deps({
+      db: coreBudgetDb(),
+      resolveActor: vi.fn(async (work, _principal, _context, { recoveryDb }) => {
+        views = { work, recoveryDb }
+        return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
+      }),
+    })
+    const response = await createApp(input).request('/api/v1/workspace?from=2026-08-01&to=2026-08-31')
+    expect(response.status).toBe(404)
+    expect(usageForD1QueryBudgetViews(views.work, views.recoveryDb)).toEqual({
+      used: 0, remaining: 50, workRemaining: 42, totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('enforces the exact 42 work plus 8 recovery ceilings at the core boundary', async () => {
+    let finalUsage
+    const input = deps({
+      db: coreBudgetDb(),
+      resolveActor: vi.fn(async (work, _principal, _context, { recoveryDb }) => {
+        expect(usageForD1QueryBudgetViews(work, recoveryDb)).toEqual({
+          used: 0, remaining: 50, workRemaining: 42, totalLimit: 50, recoveryReserve: 8,
+        })
+        for (let index = 0; index < 42; index += 1) await work.prepare(`SELECT work_${index}`).first()
+        expect(() => work.prepare('SELECT work_over').first()).toThrow(D1_QUERY_BUDGET_EXCEEDED)
+        for (let index = 0; index < 8; index += 1) await recoveryDb.prepare(`SELECT recovery_${index}`).first()
+        expect(() => recoveryDb.prepare('SELECT recovery_over').first()).toThrow(D1_QUERY_BUDGET_EXCEEDED)
+        finalUsage = usageForD1QueryBudgetViews(work, recoveryDb)
+        return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
+      }),
+    })
+    const response = await createApp(input).request('/api/v1/workspace?from=2026-08-01&to=2026-08-31')
+    expect(response.status).toBe(404)
+    expect(finalUsage).toEqual({
+      used: 50, remaining: 0, workRemaining: 0, totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('rejects malformed, nested, and hostile core databases before Access', async () => {
+    let hostileReads = 0
+    const baseBudget = createD1QueryBudget(coreBudgetDb(), { totalLimit: 50, recoveryReserve: 8 })
+    const candidates = [
+      { prepare() {}, batch: null },
+      baseBudget.work,
+      Object.defineProperties({}, {
+        prepare: { get() { hostileReads += 1; throw new Error('private prepare') } },
+        batch: { get() { hostileReads += 1; throw new Error('private batch') } },
+      }),
+    ]
+    for (const db of candidates) {
+      const input = deps({ db, resolveAccessPrincipal: vi.fn() })
+      const response = await createApp(input).request('/api/v1/workspace?from=2026-08-01&to=2026-08-31')
+      expect(response.status).toBe(500)
+      expect(input.resolveAccessPrincipal).not.toHaveBeenCalled()
+    }
+    expect(hostileReads).toBe(1)
   })
 
   it.each(commands)('returns exact command Allow and authenticates OPTIONS without CSRF or body for %s', async (path) => {

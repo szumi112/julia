@@ -3,6 +3,7 @@ export const D1_QUERY_BUDGET_EXCEEDED = 'D1_QUERY_BUDGET_EXCEEDED'
 const invalid = () => { throw new Error('D1_QUERY_BUDGET_INVALID') }
 const exceeded = () => { throw new Error(D1_QUERY_BUDGET_EXCEEDED) }
 const recoveryForWork = new WeakMap()
+const usageForWork = new WeakMap()
 const issuedViewMethods = new WeakSet()
 const VIEW_PROVENANCE = Symbol('D1_QUERY_BUDGET_VIEW')
 
@@ -53,6 +54,11 @@ export const areSiblingD1QueryBudgetViews = (work, recovery) => (
   (typeof work === 'object' || typeof work === 'function') && work !== null
   && recoveryForWork.get(work) === recovery
 )
+
+export const usageForD1QueryBudgetViews = (work, recovery) => {
+  if (!areSiblingD1QueryBudgetViews(work, recovery)) return null
+  return usageForWork.get(work)?.() ?? null
+}
 
 export function createD1QueryBudget(db, options = {}) {
   const totalLimit = options.totalLimit ?? 50
@@ -128,16 +134,18 @@ export function createD1QueryBudget(db, options = {}) {
 
   const work = view(workLimit)
   const recovery = view(totalLimit)
+  const usage = () => Object.freeze({
+    used,
+    remaining: totalLimit - used,
+    workRemaining: Math.max(0, workLimit - used),
+    totalLimit,
+    recoveryReserve,
+  })
   recoveryForWork.set(work, recovery)
+  usageForWork.set(work, usage)
   return Object.freeze({
     work,
     recovery,
-    usage: () => Object.freeze({
-      used,
-      remaining: totalLimit - used,
-      workRemaining: Math.max(0, workLimit - used),
-      totalLimit,
-      recoveryReserve,
-    }),
+    usage,
   })
 }

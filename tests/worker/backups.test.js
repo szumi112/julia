@@ -1099,7 +1099,7 @@ describe('backup validation and closed errors', () => {
       })
 
       await expect(processNextBackupCreate(input)).rejects.toThrow(/^BACKUP_STATE_INVALID$/)
-      expect(hostileReads).toBe(1)
+      expect(hostileReads).toBe(0)
     },
   )
 

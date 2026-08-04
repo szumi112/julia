@@ -1,4 +1,10 @@
 import { APP_MODE } from './app-mode.js'
+import {
+  captureCoreAuditEvent,
+  captureCoreAuditMetadata,
+  CORE_AUDIT_SCHEMAS,
+  isCoreAuditAction,
+} from './core-audit-contract.js'
 
 const API_ROOT = '/api/v1'
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -153,15 +159,9 @@ const HEALTH_CHECKS = Object.freeze([
   }),
 ])
 const AUDIT_SCHEMAS = Object.freeze({
-  'client.created': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' } }),
-  'client.updated': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version' } }),
-  'client.assignment.changed': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' } }),
-  'client.archived': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' } }),
-  'appointment.created': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' } }),
-  'appointment.updated': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' } }),
-  'appointment.cancelled': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' } }),
-  'payment.recorded': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', paymentEntryId: 'paymentId' } }),
-  'payment.corrected': Object.freeze({ entityTypes: ['payment_entry'], entityId: PAYMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', correctionId: 'correctionId', reversedEntryId: 'paymentId', replacementEntryId: 'nullablePaymentId' } }),
+  ...Object.fromEntries(Object.entries(CORE_AUDIT_SCHEMAS).map(([action, schema]) => [action,
+    Object.freeze({ entityTypes: Object.freeze([schema.entityType]), result: 'success', metadata: schema.metadata })
+  ])),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' } }),
   'backup.pruned': Object.freeze({ entityTypes: ['backup_run'], result: 'success', metadata: { backupVersion: 'version' }, system: true }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: { newKekVersion: 'version', oldKekVersion: 'version' } }),
@@ -178,11 +178,6 @@ const AUDIT_SCHEMAS = Object.freeze({
   'specialist.backfilled': Object.freeze({ entityTypes: ['specialist'], result: 'success', metadata: { specialistVersion: 'version', stateVersion: 'version' }, system: true }),
   'core_directory.upgrade.advanced': Object.freeze({ entityTypes: ['system_state'], result: 'success', metadata: { createdCount: 'count', processedCount: 'count', stateVersion: 'version' }, system: true }),
 })
-const CORE_AUDIT_ACTIONS = new Set([
-  'appointment.cancelled', 'appointment.created', 'appointment.updated',
-  'client.archived', 'client.assignment.changed', 'client.created', 'client.updated',
-  'payment.corrected', 'payment.recorded',
-])
 
 const plainObject = (value) => value !== null && typeof value === 'object'
   && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
@@ -564,7 +559,8 @@ const acceptedResolution = (payload, actionId, version) => {
   })
 }
 
-const acceptedAuditMetadata = (value, schema) => {
+const acceptedAuditMetadata = (action, value, schema) => {
+  if (isCoreAuditAction(action)) return captureCoreAuditMetadata(action, value)
   const schemaKeys = Object.keys(schema.metadata)
   const legacyKeys = Object.keys(schema.legacyMetadata ?? {})
   let types = schema.metadata
@@ -621,14 +617,21 @@ const acceptedAudit = (payload, limit) => {
       || (previous && (previous.occurredAt < value.occurredAt
         || (previous.occurredAt === value.occurredAt && previous.id <= value.id)))) return null
     if (schema.system && value.actorStaffId !== null) return null
-    if (CORE_AUDIT_ACTIONS.has(value.action) && !STAFF_ID.test(value.actorStaffId ?? '')) return null
     if (schema.entityId && !schema.entityId.test(value.entityId)) return null
     if (value.action === 'backup.pruned' && !BACKUP_ID.test(value.entityId)) return null
     if (value.action === 'specialist.backfilled' && !SPECIALIST_ID.test(value.entityId)) return null
     if (value.action === 'core_directory.upgrade.advanced'
       && value.entityId !== 'core_directory_specialist_backfill_v1') return null
-    const metadata = acceptedAuditMetadata(value.metadata, schema)
+    const metadata = acceptedAuditMetadata(value.action, value.metadata, schema)
     if (!metadata) return null
+    if (isCoreAuditAction(value.action) && !browserCoreAuditEvent({
+      action: value.action,
+      actorStaffId: value.actorStaffId,
+      entityType: value.entityType,
+      entityId: value.entityId,
+      result: value.result,
+      metadata,
+    })) return null
     ids.add(value.id)
     previous = value
     events.push(Object.freeze({
@@ -648,6 +651,9 @@ const acceptedAudit = (payload, limit) => {
     nextCursor: data.nextCursor,
   })
 }
+
+export const BROWSER_CORE_AUDIT_SCHEMAS = CORE_AUDIT_SCHEMAS
+export const browserCoreAuditEvent = captureCoreAuditEvent
 
 const acceptedInviteInput = (input) => plainObject(input)
   && Object.keys(input).length === 3

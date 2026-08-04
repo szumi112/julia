@@ -3,6 +3,7 @@ import {
   D1_QUERY_BUDGET_EXCEEDED,
   areSiblingD1QueryBudgetViews,
   createD1QueryBudget,
+  usageForD1QueryBudgetViews,
 } from '../../worker/db/query-budget.js'
 
 function fakeDb() {
@@ -90,6 +91,13 @@ describe('invocation-scoped D1 query budget', () => {
     expect(Object.isFrozen(first.work)).toBe(true)
     expect(Object.isFrozen(first.recovery)).toBe(true)
     expect(areSiblingD1QueryBudgetViews(first.work, first.recovery)).toBe(true)
+    expect(usageForD1QueryBudgetViews(first.work, first.recovery)).toEqual({
+      used: 0,
+      remaining: 50,
+      workRemaining: 42,
+      totalLimit: 50,
+      recoveryReserve: 8,
+    })
     for (const pair of [
       [first.recovery, first.work],
       [first.work, first.work],
@@ -98,6 +106,7 @@ describe('invocation-scoped D1 query budget', () => {
       [Object.create(first.work), first.recovery],
       [fakeDb(), first.recovery],
     ]) expect(areSiblingD1QueryBudgetViews(...pair)).toBe(false)
+    expect(usageForD1QueryBudgetViews(first.work, second.recovery)).toBeNull()
   })
 
   it('snapshots one exact dense batch without calling caller methods or rereading it', async () => {

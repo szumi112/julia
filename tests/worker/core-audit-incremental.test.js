@@ -60,9 +60,10 @@ it('keeps the same fictional incremental core rows append-only across all four r
       reasonEnvelope: null,
     }).run()
   }
-  const firstStored = await env.DB.prepare(
-    "SELECT metadata_json FROM audit_events WHERE id='aud_core_incremental_0'"
-  ).first()
+  const storedBeforeReads = (await env.DB.prepare(
+    `SELECT id,metadata_json FROM audit_events
+     WHERE id LIKE 'aud_core_incremental_%' ORDER BY id`
+  ).all()).results
   const keyring = await createKeyring(env, {
     activeBackupKekVersion: 1, activeDataKekVersion: 1, activeLookupKeyVersion: 1,
   })
@@ -93,9 +94,10 @@ it('keeps the same fictional incremental core rows append-only across all four r
   await browser.getSession()
   const browserAudit = await browser.getSecurityAudit()
   expect(browserAudit.events).toEqual(worker.data.events)
-  expect(await env.DB.prepare(
-    "SELECT metadata_json FROM audit_events WHERE id='aud_core_incremental_0'"
-  ).first()).toEqual(firstStored)
+  expect((await env.DB.prepare(
+    `SELECT id,metadata_json FROM audit_events
+     WHERE id LIKE 'aud_core_incremental_%' ORDER BY id`
+  ).all()).results).toEqual(storedBeforeReads)
   expect(JSON.stringify({ worker, browserAudit, raw })).not.toMatch(
     /Fikcyjna Właścicielka|kontakt|notatka|powód|lokalizacja|kwota|workbook/i,
   )

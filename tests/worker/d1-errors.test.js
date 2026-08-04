@@ -11,6 +11,9 @@ import * as d1Errors from '../../worker/db/errors.js'
 
 it('maps only the exact unambiguous payment-correction guard and contains hostile messages', () => {
   expect(d1Errors.classifyCoreConstraintError(
+    new Error('invalid_payment_correction: SQLITE_CONSTRAINT')
+  )).toBe('PAYMENT_CORRECTION_CONFLICT')
+  expect(d1Errors.classifyCoreConstraintError(
     new Error('D1_ERROR: invalid_payment_correction: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')
   )).toBe('PAYMENT_CORRECTION_CONFLICT')
   for (const message of [
@@ -18,9 +21,29 @@ it('maps only the exact unambiguous payment-correction guard and contains hostil
     'append_only: SQLITE_CONSTRAINT',
     'transport invalid_payment_correction downstream',
   ]) expect(d1Errors.classifyCoreConstraintError(new Error(message))).toBeNull()
-  const hostile = {}
-  Object.defineProperty(hostile, 'message', { get() { throw new Error('private-sql-marker') } })
+  let hostileReads = 0
+  const hostile = Object.defineProperty(new Error(), 'message', {
+    configurable: true,
+    get() {
+      hostileReads += 1
+      return 'invalid_payment_correction: SQLITE_CONSTRAINT'
+    },
+  })
   expect(d1Errors.classifyCoreConstraintError(hostile)).toBeNull()
+  expect(hostileReads).toBe(0)
+
+  const forged = new Proxy(new Error('transport failure'), {
+    getOwnPropertyDescriptor(target, key) {
+      if (key === 'message') return {
+        configurable: true,
+        enumerable: false,
+        value: 'invalid_payment_correction: SQLITE_CONSTRAINT',
+        writable: true,
+      }
+      return Reflect.getOwnPropertyDescriptor(target, key)
+    },
+  })
+  expect(d1Errors.classifyCoreConstraintError(forged)).toBeNull()
 })
 
 it('classifies only exact D1 guard errors', () => {

@@ -2,6 +2,12 @@ import {
   auditEventStatement,
   encryptAuditReason,
 } from '../audit/events.js'
+import {
+  captureCoreAuditEvent,
+  captureCoreAuditMetadata,
+  CORE_AUDIT_SCHEMAS,
+  isCoreAuditAction,
+} from '../../src/core-audit-contract.js'
 import { isD1IdentityCollision } from '../db/errors.js'
 import { createUnitOfWork } from '../db/unit-of-work.js'
 import { authorize } from '../identity/policy.js'
@@ -71,15 +77,9 @@ const AUDIT_ROW_KEYS = Object.freeze([
   'result', 'reason_envelope', 'correlation_id', 'metadata_json',
 ])
 const AUDIT_SCHEMAS = Object.freeze({
-  'client.created': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' }, reason: 'null' }),
-  'client.updated': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version' }, reason: 'null' }),
-  'client.assignment.changed': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' }, reason: 'null' }),
-  'client.archived': Object.freeze({ entityTypes: ['client'], entityId: CLIENT_ID, result: 'success', metadata: { clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' }, reason: 'null' }),
-  'appointment.created': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' }, reason: 'null' }),
-  'appointment.updated': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' }, reason: 'null' }),
-  'appointment.cancelled': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', chargeVersion: 'version' }, reason: 'null' }),
-  'payment.recorded': Object.freeze({ entityTypes: ['appointment'], entityId: APPOINTMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', paymentEntryId: 'paymentId' }, reason: 'null' }),
-  'payment.corrected': Object.freeze({ entityTypes: ['payment_entry'], entityId: PAYMENT_ID, result: 'success', metadata: { appointmentVersion: 'version', correctionId: 'correctionId', reversedEntryId: 'paymentId', replacementEntryId: 'nullablePaymentId' }, reason: 'null' }),
+  ...Object.fromEntries(Object.entries(CORE_AUDIT_SCHEMAS).map(([action, schema]) => [action,
+    Object.freeze({ entityTypes: Object.freeze([schema.entityType]), result: 'success', metadata: schema.metadata, reason: 'null' })
+  ])),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' }, reason: 'encrypted' }),
   'backup.pruned': Object.freeze({ entityTypes: ['backup_run'], result: 'success', metadata: { backupVersion: 'version' }, reason: 'null', system: true }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: { newKekVersion: 'version', oldKekVersion: 'version' }, reason: 'null' }),
@@ -96,11 +96,6 @@ const AUDIT_SCHEMAS = Object.freeze({
   'specialist.backfilled': Object.freeze({ entityTypes: ['specialist'], result: 'success', metadata: { specialistVersion: 'version', stateVersion: 'version' }, reason: 'null', system: true }),
   'core_directory.upgrade.advanced': Object.freeze({ entityTypes: ['system_state'], result: 'success', metadata: { createdCount: 'count', processedCount: 'count', stateVersion: 'version' }, reason: 'null', system: true }),
 })
-const CORE_AUDIT_ACTIONS = new Set([
-  'appointment.cancelled', 'appointment.created', 'appointment.updated',
-  'client.archived', 'client.assignment.changed', 'client.created', 'client.updated',
-  'payment.corrected', 'payment.recorded',
-])
 const HEALTH_CHECKS = Object.freeze([
   Object.freeze({
     id: 'outbox.processing',
@@ -864,9 +859,14 @@ async function parseAuditQuery(input) {
   }
 }
 
-function auditMetadata(schema, text) {
+function auditMetadata(action, schema, text) {
   const metadata = parseCanonicalJson(text)
   if (!plainObject(metadata)) invalidState()
+  if (isCoreAuditAction(action)) {
+    const captured = captureCoreAuditMetadata(action, metadata)
+    if (!captured) invalidState()
+    return captured
+  }
   const keys = Object.keys(metadata)
   const schemaKeys = Object.keys(schema.metadata)
   const legacyKeys = Object.keys(schema.legacyMetadata ?? {})
@@ -899,14 +899,21 @@ function validateAuditEvent(input, value) {
     || !schema || !schema.entityTypes.includes(row.entity_type)
     || !validId(row.entity_id) || row.result !== schema.result
     || !validId(row.correlation_id)) invalidState()
-  if (CORE_AUDIT_ACTIONS.has(row.action) && !STAFF_ID.test(row.actor_staff_id ?? '')) invalidState()
   if (schema.entityId && !schema.entityId.test(row.entity_id)) invalidState()
   if (schema.reason === 'encrypted') {
     const envelope = parseEnvelopeText(row.reason_envelope)
     if (envelope.dataKeyId !== input.cryptoContext.dataKey.id
       || envelope.dataKeyVersion !== input.cryptoContext.dataKey.dek_version) invalidState()
   } else if (row.reason_envelope !== null) invalidState()
-  const metadata = auditMetadata(schema, row.metadata_json)
+  const metadata = auditMetadata(row.action, schema, row.metadata_json)
+  if (isCoreAuditAction(row.action) && !readerCoreAuditEvent({
+    action: row.action,
+    actorStaffId: row.actor_staff_id,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    result: row.result,
+    metadata,
+  })) invalidState()
   if (schema.system && row.actor_staff_id !== null) invalidState()
   if (row.action === 'backup.pruned'
     && (row.entity_type !== 'backup_run'
@@ -918,6 +925,9 @@ function validateAuditEvent(input, value) {
     && row.entity_id !== 'core_directory_specialist_backfill_v1') invalidState()
   return { row, metadata }
 }
+
+export const READER_CORE_AUDIT_SCHEMAS = CORE_AUDIT_SCHEMAS
+export const readerCoreAuditEvent = captureCoreAuditEvent
 
 const publicAuditEvent = ({ row, metadata }) => ({
   id: row.id,

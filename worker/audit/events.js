@@ -1,5 +1,11 @@
 import { encryptForScope } from '../security/envelope.js'
 import { decodeBase64Url } from '../security/encoding.js'
+import {
+  captureCoreAuditEvent,
+  captureCoreAuditMetadata,
+  CORE_AUDIT_SCHEMAS,
+  isCoreAuditAction,
+} from '../../src/core-audit-contract.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
@@ -14,15 +20,9 @@ const MAX_REASON_PLAINTEXT_BYTES = 2048
 const descriptors = new WeakMap()
 const fields = ['id', 'occurredAt', 'actorStaffId', 'action', 'entityType', 'entityId', 'result', 'correlationId', 'metadata', 'reasonEnvelope']
 const schemas = Object.freeze({
-  'client.created': Object.freeze({ entityTypes: ['client'], entityId: (value) => CLIENT_ID.test(value), result: 'success', metadata: Object.freeze({ clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' }), reasonPolicy: 'null', human: true }),
-  'client.updated': Object.freeze({ entityTypes: ['client'], entityId: (value) => CLIENT_ID.test(value), result: 'success', metadata: Object.freeze({ clientVersion: 'version' }), reasonPolicy: 'null', human: true }),
-  'client.assignment.changed': Object.freeze({ entityTypes: ['client'], entityId: (value) => CLIENT_ID.test(value), result: 'success', metadata: Object.freeze({ clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' }), reasonPolicy: 'null', human: true }),
-  'client.archived': Object.freeze({ entityTypes: ['client'], entityId: (value) => CLIENT_ID.test(value), result: 'success', metadata: Object.freeze({ clientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version' }), reasonPolicy: 'null', human: true }),
-  'appointment.created': Object.freeze({ entityTypes: ['appointment'], entityId: (value) => APPOINTMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', chargeVersion: 'version' }), reasonPolicy: 'null', human: true }),
-  'appointment.updated': Object.freeze({ entityTypes: ['appointment'], entityId: (value) => APPOINTMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', chargeVersion: 'version' }), reasonPolicy: 'null', human: true }),
-  'appointment.cancelled': Object.freeze({ entityTypes: ['appointment'], entityId: (value) => APPOINTMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', chargeVersion: 'version' }), reasonPolicy: 'null', human: true }),
-  'payment.recorded': Object.freeze({ entityTypes: ['appointment'], entityId: (value) => APPOINTMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', paymentEntryId: 'paymentId' }), reasonPolicy: 'null', human: true }),
-  'payment.corrected': Object.freeze({ entityTypes: ['payment_entry'], entityId: (value) => PAYMENT_ID.test(value), result: 'success', metadata: Object.freeze({ appointmentVersion: 'version', correctionId: 'correctionId', reversedEntryId: 'paymentId', replacementEntryId: 'nullablePaymentId' }), reasonPolicy: 'null', human: true }),
+  ...Object.fromEntries(Object.entries(CORE_AUDIT_SCHEMAS).map(([action, schema]) => [action,
+    Object.freeze({ entityTypes: Object.freeze([schema.entityType]), result: 'success', metadata: schema.metadata, reasonPolicy: 'null', human: true })
+  ])),
   'identity.activation': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
   'identity.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
   'identity.reindex': Object.freeze({ entityTypes: ['staff_user', 'staff_invitation'], result: 'success', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
@@ -48,6 +48,12 @@ const exactObject = (value, keys) => value && typeof value === 'object' && !Arra
   && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).length === keys.length && keys.every((key) => own(value, key))
 
 function metadataJson(action, metadata) {
+  if (isCoreAuditAction(action)) {
+    const captured = captureCoreAuditMetadata(action, metadata)
+    if (!captured) throw new Error('AUDIT_EVENT_INVALID')
+    return JSON.stringify(Object.fromEntries(Object.entries(captured)
+      .sort(([left], [right]) => left.localeCompare(right))))
+  }
   const schema = schemas[action]?.metadata
   if (!exactObject(metadata, Object.keys(schema ?? {})) || Object.keys(metadata).length > 8) throw new Error('AUDIT_EVENT_INVALID')
   for (const [key, type] of Object.entries(schema)) {
@@ -97,6 +103,9 @@ export function auditEventStatement(db, event) {
   if (!exactObject(event, fields) || !db?.prepare) throw new Error('AUDIT_EVENT_INVALID')
   const { id, occurredAt, actorStaffId, action, entityType, entityId, result, correlationId, metadata, reasonEnvelope } = event
   const schema = schemas[action]
+  if (isCoreAuditAction(action) && !writerCoreAuditEvent({
+    action, actorStaffId, entityType, entityId, result, metadata,
+  })) throw new Error('AUDIT_EVENT_INVALID')
   const reasonValid = schema?.reasonPolicy === 'null'
     ? reasonEnvelope === null
     : schema?.reasonPolicy === 'encrypted' && validReasonEnvelope(reasonEnvelope)
@@ -114,6 +123,9 @@ export function auditEventStatement(db, event) {
   descriptors.set(statement, Object.freeze({ id, action, entityType, entityId, result, actorStaffId, correlationId }))
   return statement
 }
+
+export const WRITER_CORE_AUDIT_SCHEMAS = CORE_AUDIT_SCHEMAS
+export const writerCoreAuditEvent = captureCoreAuditEvent
 
 export async function encryptAuditReason(input = {}) {
   const keys = ['keyring', 'dataKey', 'expectedScope', 'auditEventId', 'plaintext']

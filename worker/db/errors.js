@@ -1,8 +1,12 @@
 const messageOf = (error) => {
   try {
-    if (!error || (typeof error !== 'object' && typeof error !== 'function')) return ''
-    const message = Reflect.get(error, 'message')
-    return typeof message === 'string' ? message : String(message)
+    if (!(error instanceof Error)) return ''
+    const descriptor = Object.getOwnPropertyDescriptor(error, 'message')
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string') return ''
+    const snapshot = structuredClone(error)
+    const snapshotDescriptor = Object.getOwnPropertyDescriptor(snapshot, 'message')
+    if (!snapshotDescriptor || !Object.hasOwn(snapshotDescriptor, 'value')) return ''
+    return snapshotDescriptor.value === descriptor.value ? descriptor.value : ''
   } catch {
     return ''
   }
