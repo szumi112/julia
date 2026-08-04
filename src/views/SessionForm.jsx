@@ -33,6 +33,7 @@ export function SessionDrawer({ opts, onClose }) {
   const availablePsychologists = role.scope === 'own'
     ? state.psychologists.filter((psych) => psych.id === role.psychId)
     : state.psychologists
+  const statusOptions = Object.entries(STATUS_LABELS).filter(([value]) => !isApp || value !== 'cancelled')
 
   // a new session opens priced: the service and the specialist are both known
   // up front, so the cennik can fill the amount before anything is typed
@@ -406,7 +407,7 @@ export function SessionDrawer({ opts, onClose }) {
               ariaLabel="Status sesji"
               value={form.status}
               onChange={(v) => set('status', v)}
-              options={Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))}
+              options={statusOptions.map(([value, label]) => ({ value, label }))}
             />
           </Field>
 
