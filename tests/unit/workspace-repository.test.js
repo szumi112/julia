@@ -466,6 +466,103 @@ test('demo releases a failed payment reservation for deterministic reuse', async
   assert.equal(corrected.paymentEntries.at(-1).id, 'pay_demo_new_2')
 })
 
+test('demo serializes same-version payment and correction mutations without losing history', async () => {
+  let state = demoState()
+  const repository = createDemoWorkspaceRepository({
+    dispatch(action) {
+      setTimeout(() => {
+        state = { ...state, sessions: state.sessions.map((item) => (
+          item.id === action.id ? { ...item, ...action.patch } : item
+        )) }
+      }, 0)
+    },
+    getState: () => state,
+  })
+  const input = { amountGrosze: 100, method: 'card', paidDate: '2026-08-06' }
+  const identical = await Promise.allSettled([
+    repository.recordPayment('apt_demo_s1', 1, input),
+    repository.recordPayment('apt_demo_s1', 1, input),
+  ])
+  assert.deepEqual(identical.map(({ status }) => status).sort(), ['fulfilled', 'rejected'])
+  assert.match(identical.find(({ status }) => status === 'rejected').reason.message, /VERSION_CONFLICT/)
+  const first = identical.find(({ status }) => status === 'fulfilled').value
+  assert.equal(first.version, 2)
+  assert.equal(first.paymentEntries.at(-1).id, 'pay_demo_new_1')
+
+  const differing = await Promise.allSettled([
+    repository.recordPayment('apt_demo_s1', 2, { ...input, amountGrosze: 90 }),
+    repository.recordPayment('apt_demo_s1', 2, { ...input, amountGrosze: 80 }),
+  ])
+  assert.deepEqual(differing.map(({ status }) => status).sort(), ['fulfilled', 'rejected'])
+  const second = differing.find(({ status }) => status === 'fulfilled').value
+  assert.equal(second.version, 3)
+  assert.equal(second.paymentEntries.at(-1).id, 'pay_demo_new_2')
+
+  const corrections = await Promise.allSettled([
+    repository.correctPayment('pay_demo_new_1', 3, {
+      reason: 'Korekta A', replacement: { amountGrosze: 70, method: 'cash', paidDate: '2026-08-07' },
+    }),
+    repository.correctPayment('pay_demo_new_1', 3, {
+      reason: 'Korekta B', replacement: { amountGrosze: 60, method: 'transfer', paidDate: '2026-08-07' },
+    }),
+  ])
+  assert.deepEqual(corrections.map(({ status }) => status).sort(), ['fulfilled', 'rejected'])
+  assert.match(corrections.find(({ status }) => status === 'rejected').reason.message, /VERSION_CONFLICT/)
+  const corrected = corrections.find(({ status }) => status === 'fulfilled').value
+  assert.equal(corrected.version, 4)
+  assert.equal(corrected.paymentEntries.length, 4)
+  assert.equal(new Set(corrected.paymentEntries.map(({ id }) => id)).size, 4)
+})
+
+test('demo serializes client and appointment edits against terminal mutations', async () => {
+  const harness = demoHarness()
+  const repository = createDemoWorkspaceRepository({ dispatch: harness.dispatch, getState: harness.getState })
+  const clientResults = await Promise.allSettled([
+    repository.editClient('cl_demo_c1', 1, clientInput({ name: 'Ada Nowak', age: 8, specialistId: 'sp_demo_p1' })),
+    repository.archiveClient('cl_demo_c1', 1),
+  ])
+  assert.deepEqual(clientResults.map(({ status }) => status), ['fulfilled', 'rejected'])
+  assert.match(clientResults[1].reason.message, /VERSION_CONFLICT/)
+  const archived = await repository.archiveClient('cl_demo_c1', 2)
+  assert.equal(archived.status, 'archived')
+
+  const appointmentResults = await Promise.allSettled([
+    repository.editAppointment('apt_demo_s2', 1, {
+      specialistId: 'sp_demo_p2', serviceId: 'zajecia', date: '2026-09-01',
+      time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20_000,
+      location: 'Gabinet 4', status: 'scheduled',
+    }),
+    repository.cancelAppointment('apt_demo_s2', 1),
+  ])
+  assert.deepEqual(appointmentResults.map(({ status }) => status), ['fulfilled', 'rejected'])
+  assert.match(appointmentResults[1].reason.message, /VERSION_CONFLICT/)
+  const cancelled = await repository.cancelAppointment('apt_demo_s2', 2)
+  assert.equal(cancelled.status, 'cancelled')
+})
+
+test('demo permits concurrent mutations for different clients and appointments', async () => {
+  const harness = demoHarness()
+  const repository = createDemoWorkspaceRepository({ dispatch: harness.dispatch, getState: harness.getState })
+  const clients = await Promise.all([
+    repository.editClient('cl_demo_c1', 1, clientInput({ name: 'Ada A', age: 8, specialistId: 'sp_demo_p1' })),
+    repository.editClient('cl_demo_c2', 1, clientInput({ name: 'Zenon B', age: 10, status: 'paused', specialistId: 'sp_demo_p2' })),
+  ])
+  assert.deepEqual(clients.map(({ version }) => version), [2, 2])
+  const appointments = await Promise.all([
+    repository.editAppointment('apt_demo_s1', 1, {
+      specialistId: 'sp_demo_p1', serviceId: 'zajecia', date: '2026-08-04',
+      time: '09:00', durationMinutes: 50, expectedAmountGrosze: 18_000,
+      location: 'Gabinet 2', status: 'completed',
+    }),
+    repository.editAppointment('apt_demo_s2', 1, {
+      specialistId: 'sp_demo_p2', serviceId: 'zajecia', date: '2026-09-01',
+      time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20_000,
+      location: 'Gabinet 4', status: 'scheduled',
+    }),
+  ])
+  assert.deepEqual(appointments.map(({ version }) => version), [2, 2])
+})
+
 test('demo rejects two matching created rows instead of choosing one nondeterministically', async () => {
   let state = demoState()
   const repository = createDemoWorkspaceRepository({

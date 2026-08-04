@@ -354,6 +354,8 @@ export function createDemoWorkspaceRepository(options) {
   const payments = new Map()
   const paymentReservations = new Set()
   const correctionReservations = new Set()
+  const clientMutationReservations = new Set()
+  const appointmentMutationReservations = new Set()
   let clientSequence = 0
   let appointmentSequence = 0
   let paymentSequence = 0
@@ -518,6 +520,20 @@ export function createDemoWorkspaceRepository(options) {
 
   const correctionCount = () => [...appointments.values()]
     .reduce((total, meta) => total + meta.corrections.length, correctionReservations.size)
+
+  const assertMutationAvailable = (reservations, id) => {
+    if (reservations.has(id)) fail('expectedVersion', 'VERSION_CONFLICT')
+  }
+
+  const serializeMutation = async (reservations, id, operation) => {
+    assertMutationAvailable(reservations, id)
+    reservations.add(id)
+    try {
+      return await operation()
+    } finally {
+      reservations.delete(id)
+    }
+  }
 
   const collectionSignature = (area, rows) => JSON.stringify(rows.map((raw) => {
     if (area === 'clients') {
@@ -732,49 +748,55 @@ export function createDemoWorkspaceRepository(options) {
     },
     async editClient(id, expectedVersion, input) {
       const requested = captureClient(input)
+      assertMutationAvailable(clientMutationReservations, id)
       const state = currentState()
       const meta = clientMeta(id, state)
       assertDemoClientVersion(meta.version, expectedVersion)
-      const psychId = legacySpecialist(requested.specialistId)
-      const raw = findClient(state, meta)
-      const reassigned = raw.psychId !== psychId
-      if (raw.name === requested.name && raw.age === requested.age
-        && raw.status === requested.status && !reassigned) fail('body')
-      const updatedAt = commandInstant(meta.updatedAt)
-      const before = collectionSignature('clients', state.clients)
-      dispatch({ type: 'UPDATE_CLIENT', id: meta.legacyId, patch: { name: requested.name, age: requested.age, status: requested.status, psychId } })
-      const applied = await observeState({
-        area: 'clients', before,
-        inspect: (next) => {
-          const item = findClient(next, meta)
-          return item && matchesClient(item, requested, psychId) ? item : null
-        },
+      return serializeMutation(clientMutationReservations, id, async () => {
+        const psychId = legacySpecialist(requested.specialistId)
+        const raw = findClient(state, meta)
+        const reassigned = raw.psychId !== psychId
+        if (raw.name === requested.name && raw.age === requested.age
+          && raw.status === requested.status && !reassigned) fail('body')
+        const updatedAt = commandInstant(meta.updatedAt)
+        const before = collectionSignature('clients', state.clients)
+        dispatch({ type: 'UPDATE_CLIENT', id: meta.legacyId, patch: { name: requested.name, age: requested.age, status: requested.status, psychId } })
+        const applied = await observeState({
+          area: 'clients', before,
+          inspect: (next) => {
+            const item = findClient(next, meta)
+            return item && matchesClient(item, requested, psychId) ? item : null
+          },
+        })
+        meta.version += 1
+        meta.updatedAt = updatedAt
+        if (reassigned) {
+          meta.assignmentId = `asg_${id.slice(3)}_${meta.version}`
+          meta.assignmentStartsAt = updatedAt
+          meta.assignmentVersion = 1
+        }
+        return deepFreeze(clientProjection(id, applied, meta))
       })
-      meta.version += 1
-      meta.updatedAt = updatedAt
-      if (reassigned) {
-        meta.assignmentId = `asg_${id.slice(3)}_${meta.version}`
-        meta.assignmentStartsAt = updatedAt
-        meta.assignmentVersion = 1
-      }
-      return deepFreeze(clientProjection(id, applied, meta))
     },
     async archiveClient(id, expectedVersion) {
+      assertMutationAvailable(clientMutationReservations, id)
       const state = currentState()
       const meta = clientMeta(id, state)
       assertDemoClientVersion(meta.version, expectedVersion)
-      const raw = findClient(state, meta)
-      const archivedAt = commandInstant(meta.updatedAt)
-      const before = collectionSignature('clients', state.clients)
-      dispatch({ type: 'DELETE_CLIENT', id: meta.legacyId })
-      await observeState({
-        area: 'clients', before,
-        inspect: (next) => findClient(next, meta) === undefined ? true : null,
+      return serializeMutation(clientMutationReservations, id, async () => {
+        const raw = findClient(state, meta)
+        const archivedAt = commandInstant(meta.updatedAt)
+        const before = collectionSignature('clients', state.clients)
+        dispatch({ type: 'DELETE_CLIENT', id: meta.legacyId })
+        await observeState({
+          area: 'clients', before,
+          inspect: (next) => findClient(next, meta) === undefined ? true : null,
+        })
+        meta.version += 1
+        meta.updatedAt = archivedAt
+        meta.archivedAt = archivedAt
+        return deepFreeze(clientProjection(id, raw, meta))
       })
-      meta.version += 1
-      meta.updatedAt = archivedAt
-      meta.archivedAt = archivedAt
-      return deepFreeze(clientProjection(id, raw, meta))
     },
     async createAppointment(input) {
       const requested = captureAppointment(input)
@@ -825,75 +847,81 @@ export function createDemoWorkspaceRepository(options) {
     },
     async editAppointment(id, expectedVersion, input) {
       const requested = captureAppointmentEdit(input)
+      assertMutationAvailable(appointmentMutationReservations, id)
       const state = currentState()
       const meta = appointmentMeta(id, state)
       assertVersion(meta.version, expectedVersion)
-      const psychId = legacySpecialist(requested.specialistId)
-      const raw = findAppointment(state, meta)
-      const chargeChanged = raw.service !== requested.serviceId
-        || raw.expectedAmountGrosze !== requested.expectedAmountGrosze
-      const changed = raw.psychId !== psychId || chargeChanged
-        || raw.date !== requested.date || raw.time !== requested.time
-        || raw.duration !== requested.durationMinutes || raw.location !== requested.location
-        || raw.status !== requested.status
-      if (!changed) fail('body')
-      const aggregate = paymentAggregate({
-        appointmentId: id, status: raw.status,
-        expectedAmountGrosze: raw.expectedAmountGrosze, paymentEntries: meta.entries,
-        corrections: meta.corrections,
-      })
-      if (raw.status !== requested.status) {
-        assertAppointmentPaymentTransition({
-          fromStatus: raw.status, toStatus: requested.status,
-          previousAmountGrosze: raw.expectedAmountGrosze,
-          nextAmountGrosze: requested.expectedAmountGrosze,
-          collectedGrosze: aggregate.collectedGrosze,
+      return serializeMutation(appointmentMutationReservations, id, async () => {
+        const psychId = legacySpecialist(requested.specialistId)
+        const raw = findAppointment(state, meta)
+        const chargeChanged = raw.service !== requested.serviceId
+          || raw.expectedAmountGrosze !== requested.expectedAmountGrosze
+        const changed = raw.psychId !== psychId || chargeChanged
+          || raw.date !== requested.date || raw.time !== requested.time
+          || raw.duration !== requested.durationMinutes || raw.location !== requested.location
+          || raw.status !== requested.status
+        if (!changed) fail('body')
+        const aggregate = paymentAggregate({
+          appointmentId: id, status: raw.status,
+          expectedAmountGrosze: raw.expectedAmountGrosze, paymentEntries: meta.entries,
+          corrections: meta.corrections,
         })
-      } else if (requested.expectedAmountGrosze < raw.expectedAmountGrosze
-        && aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
-      const updatedAt = commandInstant(meta.updatedAt)
-      const patch = {
-        psychId, service: requested.serviceId, date: requested.date, time: requested.time,
-        duration: requested.durationMinutes, amount: requested.expectedAmountGrosze / 100,
-        location: requested.location, status: requested.status,
-      }
-      const before = collectionSignature('sessions', state.sessions)
-      dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
-      const applied = await observeState({
-        area: 'sessions', before,
-        inspect: (next) => {
-          const item = findAppointment(next, meta)
-          return item && matchesAppointment(
-            item, requested, raw.clientId, psychId,
-          ) ? item : null
-        },
+        if (raw.status !== requested.status) {
+          assertAppointmentPaymentTransition({
+            fromStatus: raw.status, toStatus: requested.status,
+            previousAmountGrosze: raw.expectedAmountGrosze,
+            nextAmountGrosze: requested.expectedAmountGrosze,
+            collectedGrosze: aggregate.collectedGrosze,
+          })
+        } else if (requested.expectedAmountGrosze < raw.expectedAmountGrosze
+          && aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
+        const updatedAt = commandInstant(meta.updatedAt)
+        const patch = {
+          psychId, service: requested.serviceId, date: requested.date, time: requested.time,
+          duration: requested.durationMinutes, amount: requested.expectedAmountGrosze / 100,
+          location: requested.location, status: requested.status,
+        }
+        const before = collectionSignature('sessions', state.sessions)
+        dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
+        const applied = await observeState({
+          area: 'sessions', before,
+          inspect: (next) => {
+            const item = findAppointment(next, meta)
+            return item && matchesAppointment(
+              item, requested, raw.clientId, psychId,
+            ) ? item : null
+          },
+        })
+        meta.version += 1
+        if (chargeChanged) meta.chargeVersion += 1
+        meta.updatedAt = updatedAt
+        return appointmentProjection(id, applied, meta)
       })
-      meta.version += 1
-      if (chargeChanged) meta.chargeVersion += 1
-      meta.updatedAt = updatedAt
-      return appointmentProjection(id, applied, meta)
     },
     async cancelAppointment(id, expectedVersion) {
+      assertMutationAvailable(appointmentMutationReservations, id)
       const state = currentState()
       const meta = appointmentMeta(id, state)
       assertVersion(meta.version, expectedVersion)
-      const raw = findAppointment(state, meta)
-      const aggregate = paymentAggregate({
-        appointmentId: id, status: raw.status, expectedAmountGrosze: raw.expectedAmountGrosze,
-        paymentEntries: meta.entries, corrections: meta.corrections,
+      return serializeMutation(appointmentMutationReservations, id, async () => {
+        const raw = findAppointment(state, meta)
+        const aggregate = paymentAggregate({
+          appointmentId: id, status: raw.status, expectedAmountGrosze: raw.expectedAmountGrosze,
+          paymentEntries: meta.entries, corrections: meta.corrections,
+        })
+        if (aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
+        const cancelledAt = commandInstant(meta.updatedAt)
+        const before = collectionSignature('sessions', state.sessions)
+        dispatch({ type: 'DELETE_SESSION', id: meta.legacyId })
+        await observeState({
+          area: 'sessions', before,
+          inspect: (next) => findAppointment(next, meta) === undefined ? true : null,
+        })
+        meta.version += 1
+        meta.updatedAt = cancelledAt
+        meta.cancelledAt = cancelledAt
+        return appointmentProjection(id, { ...raw, status: 'cancelled' }, meta)
       })
-      if (aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
-      const cancelledAt = commandInstant(meta.updatedAt)
-      const before = collectionSignature('sessions', state.sessions)
-      dispatch({ type: 'DELETE_SESSION', id: meta.legacyId })
-      await observeState({
-        area: 'sessions', before,
-        inspect: (next) => findAppointment(next, meta) === undefined ? true : null,
-      })
-      meta.version += 1
-      meta.updatedAt = cancelledAt
-      meta.cancelledAt = cancelledAt
-      return appointmentProjection(id, { ...raw, status: 'cancelled' }, meta)
     },
     async recordPayment(id, expectedVersion, input) {
       const requested = capturePayment(input)
@@ -901,47 +929,50 @@ export function createDemoWorkspaceRepository(options) {
         amountGrosze: requested.amountGrosze, method: requested.method,
         receivedAt: warsawNoonToUtc(requested.paidDate),
       })
+      assertMutationAvailable(appointmentMutationReservations, id)
       const state = currentState()
       const meta = appointmentMeta(id, state)
       assertVersion(meta.version, expectedVersion)
-      const raw = findAppointment(state, meta)
-      if (!isBillable(raw)) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
-      if (payments.size + paymentReservations.size >= 1_000) fail('paymentEntries')
-      const allocated = allocateDemoId({
-        kind: 'pay', after: paymentSequence, maximum: 1_000,
-        occupied: paymentIdOccupied,
+      return serializeMutation(appointmentMutationReservations, id, async () => {
+        const raw = findAppointment(state, meta)
+        if (!isBillable(raw)) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
+        if (payments.size + paymentReservations.size >= 1_000) fail('paymentEntries')
+        const allocated = allocateDemoId({
+          kind: 'pay', after: paymentSequence, maximum: 1_000,
+          occupied: paymentIdOccupied,
+        })
+        const entryId = allocated.id
+        paymentReservations.add(entryId)
+        try {
+          const entry = { id: entryId, appointmentId: id, ...canonical }
+          const proposed = [...meta.entries, entry]
+          paymentAggregate({
+            appointmentId: id, status: raw.status, expectedAmountGrosze: raw.expectedAmountGrosze,
+            paymentEntries: proposed, corrections: meta.corrections,
+          })
+          const updatedAt = commandInstant(meta.updatedAt)
+          const patch = patchAggregate(id, raw, { ...meta, entries: proposed })
+          const before = collectionSignature('sessions', state.sessions)
+          dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
+          const applied = await observeState({
+            area: 'sessions', before,
+            inspect: (next) => {
+              const item = findAppointment(next, meta)
+              return item && matchesPaymentPatch(item, patch) ? item : null
+            },
+          })
+          meta.entries = proposed
+          meta.version += 1
+          meta.updatedAt = updatedAt
+          paymentSequence = Math.max(paymentSequence, allocated.sequence)
+          payments.set(entryId, { appointmentId: id, entryIndex: meta.entries.length - 1 })
+          paymentReservations.delete(entryId)
+          return appointmentProjection(id, applied, meta)
+        } catch (error) {
+          paymentReservations.delete(entryId)
+          throw error
+        }
       })
-      const entryId = allocated.id
-      paymentReservations.add(entryId)
-      try {
-        const entry = { id: entryId, appointmentId: id, ...canonical }
-        const proposed = [...meta.entries, entry]
-        paymentAggregate({
-          appointmentId: id, status: raw.status, expectedAmountGrosze: raw.expectedAmountGrosze,
-          paymentEntries: proposed, corrections: meta.corrections,
-        })
-        const updatedAt = commandInstant(meta.updatedAt)
-        const patch = patchAggregate(id, raw, { ...meta, entries: proposed })
-        const before = collectionSignature('sessions', state.sessions)
-        dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
-        const applied = await observeState({
-          area: 'sessions', before,
-          inspect: (next) => {
-            const item = findAppointment(next, meta)
-            return item && matchesPaymentPatch(item, patch) ? item : null
-          },
-        })
-        meta.entries = proposed
-        meta.version += 1
-        meta.updatedAt = updatedAt
-        paymentSequence = Math.max(paymentSequence, allocated.sequence)
-        payments.set(entryId, { appointmentId: id, entryIndex: meta.entries.length - 1 })
-        paymentReservations.delete(entryId)
-        return appointmentProjection(id, applied, meta)
-      } catch (error) {
-        paymentReservations.delete(entryId)
-        throw error
-      }
     },
     async correctPayment(id, expectedVersion, input) {
       capturedId(id, 'payment')
@@ -949,75 +980,78 @@ export function createDemoWorkspaceRepository(options) {
       const state = currentState()
       const link = payments.get(id)
       if (!link) fail('paymentId', 'NOT_FOUND')
+      assertMutationAvailable(appointmentMutationReservations, link.appointmentId)
       const meta = appointmentMeta(link.appointmentId, state)
       assertVersion(meta.version, expectedVersion)
-      if (meta.corrections.some((item) => item.reversedEntryId === id)) {
-        fail('payment', 'PAYMENT_CORRECTION_CONFLICT')
-      }
-      const raw = findAppointment(state, meta)
-      if (correctionCount() >= 1_000) fail('paymentEntries')
-      const correctionAllocated = allocateDemoId({
-        kind: 'cor', after: correctionSequence, maximum: 1_000,
-        occupied: correctionIdOccupied,
-      })
-      correctionReservations.add(correctionAllocated.id)
-      let allocated = null
-      try {
-        if (requested.replacement !== null) {
-          if (payments.size + paymentReservations.size >= 1_000) fail('paymentEntries')
-          allocated = allocateDemoId({
-            kind: 'pay', after: paymentSequence, maximum: 1_000,
-            occupied: paymentIdOccupied,
+      return serializeMutation(appointmentMutationReservations, link.appointmentId, async () => {
+        if (meta.corrections.some((item) => item.reversedEntryId === id)) {
+          fail('payment', 'PAYMENT_CORRECTION_CONFLICT')
+        }
+        const raw = findAppointment(state, meta)
+        if (correctionCount() >= 1_000) fail('paymentEntries')
+        const correctionAllocated = allocateDemoId({
+          kind: 'cor', after: correctionSequence, maximum: 1_000,
+          occupied: correctionIdOccupied,
+        })
+        correctionReservations.add(correctionAllocated.id)
+        let allocated = null
+        try {
+          if (requested.replacement !== null) {
+            if (payments.size + paymentReservations.size >= 1_000) fail('paymentEntries')
+            allocated = allocateDemoId({
+              kind: 'pay', after: paymentSequence, maximum: 1_000,
+              occupied: paymentIdOccupied,
+            })
+            paymentReservations.add(allocated.id)
+          }
+          const replacement = requested.replacement === null ? null : {
+            id: allocated.id, appointmentId: link.appointmentId,
+            amountGrosze: requested.replacement.amountGrosze,
+            method: requested.replacement.method,
+            receivedAt: warsawNoonToUtc(requested.replacement.paidDate),
+          }
+          const createdAt = commandInstant(meta.updatedAt)
+          const correction = {
+            id: correctionAllocated.id, reversedEntryId: id,
+            replacementEntryId: replacement?.id ?? null, createdAt,
+          }
+          const entries = replacement === null ? meta.entries : [...meta.entries, replacement]
+          const corrections = [...meta.corrections, correction]
+          paymentAggregate({
+            appointmentId: link.appointmentId, status: raw.status,
+            expectedAmountGrosze: raw.expectedAmountGrosze, paymentEntries: entries,
+            corrections,
           })
-          paymentReservations.add(allocated.id)
+          const patch = patchAggregate(link.appointmentId, raw, {
+            ...meta, entries, corrections,
+          })
+          const before = collectionSignature('sessions', state.sessions)
+          dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
+          const applied = await observeState({
+            area: 'sessions', before,
+            inspect: (next) => {
+              const item = findAppointment(next, meta)
+              return item && matchesPaymentPatch(item, patch) ? item : null
+            },
+          })
+          meta.entries = entries
+          meta.corrections = corrections
+          meta.version += 1
+          meta.updatedAt = createdAt
+          correctionSequence = Math.max(correctionSequence, correctionAllocated.sequence)
+          correctionReservations.delete(correction.id)
+          if (replacement) {
+            paymentSequence = Math.max(paymentSequence, allocated.sequence)
+            payments.set(replacement.id, { appointmentId: link.appointmentId, entryIndex: entries.length - 1 })
+            paymentReservations.delete(replacement.id)
+          }
+          return appointmentProjection(link.appointmentId, applied, meta)
+        } catch (error) {
+          correctionReservations.delete(correctionAllocated.id)
+          if (allocated) paymentReservations.delete(allocated.id)
+          throw error
         }
-        const replacement = requested.replacement === null ? null : {
-          id: allocated.id, appointmentId: link.appointmentId,
-          amountGrosze: requested.replacement.amountGrosze,
-          method: requested.replacement.method,
-          receivedAt: warsawNoonToUtc(requested.replacement.paidDate),
-        }
-        const createdAt = commandInstant(meta.updatedAt)
-        const correction = {
-          id: correctionAllocated.id, reversedEntryId: id,
-          replacementEntryId: replacement?.id ?? null, createdAt,
-        }
-        const entries = replacement === null ? meta.entries : [...meta.entries, replacement]
-        const corrections = [...meta.corrections, correction]
-        paymentAggregate({
-          appointmentId: link.appointmentId, status: raw.status,
-          expectedAmountGrosze: raw.expectedAmountGrosze, paymentEntries: entries,
-          corrections,
-        })
-        const patch = patchAggregate(link.appointmentId, raw, {
-          ...meta, entries, corrections,
-        })
-        const before = collectionSignature('sessions', state.sessions)
-        dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
-        const applied = await observeState({
-          area: 'sessions', before,
-          inspect: (next) => {
-            const item = findAppointment(next, meta)
-            return item && matchesPaymentPatch(item, patch) ? item : null
-          },
-        })
-        meta.entries = entries
-        meta.corrections = corrections
-        meta.version += 1
-        meta.updatedAt = createdAt
-        correctionSequence = Math.max(correctionSequence, correctionAllocated.sequence)
-        correctionReservations.delete(correction.id)
-        if (replacement) {
-          paymentSequence = Math.max(paymentSequence, allocated.sequence)
-          payments.set(replacement.id, { appointmentId: link.appointmentId, entryIndex: entries.length - 1 })
-          paymentReservations.delete(replacement.id)
-        }
-        return appointmentProjection(link.appointmentId, applied, meta)
-      } catch (error) {
-        correctionReservations.delete(correctionAllocated.id)
-        if (allocated) paymentReservations.delete(allocated.id)
-        throw error
-      }
+      })
     },
   })
 }
