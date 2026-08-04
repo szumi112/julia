@@ -16,7 +16,7 @@ const REPOSITORY_METHODS = Object.freeze([
 ])
 const WORKSPACE_METHODS = Object.freeze(REPOSITORY_METHODS.filter((name) => name !== 'loadWindow'))
 const CLIENT_MUTATION_METHODS = new Set(['createClient', 'editClient', 'archiveClient'])
-const APPOINTMENT_MUTATION_METHODS = new Set(['createAppointment', 'editAppointment'])
+const APPOINTMENT_MUTATION_METHODS = new Set(['createAppointment', 'editAppointment', 'cancelAppointment'])
 const AUTHORITY_ACTION_KEY_LIMIT = 32
 const INFRASTRUCTURE_CODES = new Set([
   'ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'CSRF_INVALID', 'CSRF_EXPIRED',

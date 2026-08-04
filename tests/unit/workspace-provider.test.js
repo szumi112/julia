@@ -389,7 +389,7 @@ test('successful client commands stay locked until canonical reconciliation or a
   assert.equal(controller.getSnapshot().clientMutationLocked, false)
 })
 
-test('successful appointment create and edit stay locked until canonical reconciliation', async () => {
+test('successful appointment create, edit, and cancellation stay locked until canonical reconciliation', async () => {
   const controller = makeController(() => repositoryWith())
   await controller.getSnapshot().workspace.createAppointment({ id: 'draft' })
   assert.equal(controller.getSnapshot().appointmentMutationLocked, true)
@@ -403,6 +403,10 @@ test('successful appointment create and edit stay locked until canonical reconci
 
   await controller.getSnapshot().workspace.editAppointment('apt_ola', 1, { id: 'draft' })
   assert.equal(controller.getSnapshot().appointmentMutationLocked, true)
+  await assert.rejects(
+    controller.getSnapshot().workspace.cancelAppointment('apt_ola', 1),
+    { code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
+  )
   controller.resetAuthority('authority-two')
   assert.equal(controller.getSnapshot().appointmentMutationLocked, false)
 })

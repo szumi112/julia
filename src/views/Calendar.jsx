@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, useAppointmentMutationLock, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
+import { useApp, useAppointmentMutationLock, useWorkspaceRefresh, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip, motionOK } from '../anim.js'
 import { useIsPhone, useMediaQuery, desktopMQ } from '../responsive.js'
@@ -20,6 +20,7 @@ import {
   specialistIdentityFor,
   weekWorkspaceRange,
 } from '../workspace-view.js'
+import { ApiError } from '../api.js'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
 const STRIP_DOW = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
@@ -116,6 +117,18 @@ function monthGrid(ym) {
   return cells
 }
 
+const appointmentEditInput = (session, patch = {}) => ({
+  specialistId: session.psychId,
+  serviceId: session.service,
+  date: session.date,
+  time: session.time,
+  durationMinutes: session.duration,
+  expectedAmountGrosze: Math.round(session.amount * 100),
+  location: session.location ?? null,
+  status: session.status,
+  ...patch,
+})
+
 // Seven-day, Monday-first strip. The toolbar above owns week navigation, so the
 // strip is purely the day picker. Keyboard movement updates selection and focus
 // together so only the active date participates in the tab order.
@@ -195,8 +208,9 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
 }
 
 export function CalendarView({ params = {} }) {
-  const { state, dispatch, toast } = useApp()
+  const { state, dispatch, toast, workspace } = useApp()
   const { locked: appointmentMutationLocked } = useAppointmentMutationLock()
+  const refreshWorkspace = useWorkspaceRefresh()
   const { appMode, capabilities, getViewState, openSessionForm, patchViewState, role } = useShell()
   const isApp = appMode === 'app'
   const today = toISODate(new Date())
@@ -210,7 +224,7 @@ export function CalendarView({ params = {} }) {
   const isPhone = useIsPhone()
   // dragging an agenda row or a month-grid chip would trap touch scrolling,
   // so it stays a fine-pointer affordance (reschedule via the session form)
-  const canDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`) && !isApp
+  const dragPointer = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
   const gridRef = useRef(null)
   const dayPanelRef = useRef(null)
   const agendaPanelRef = useRef(null)
@@ -336,7 +350,7 @@ export function CalendarView({ params = {} }) {
       d.dropEl = dropEl
     }
 
-    const finish = (ev) => {
+    const finish = async (ev) => {
       if (ev && ev.pointerId !== pid) return
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', finish)
@@ -349,7 +363,37 @@ export function CalendarView({ params = {} }) {
       const ghost = d.ghost
       if (d.dropIso) {
         const target = d.dropEl
-        dispatch({ type: 'UPDATE_SESSION', id: s.id, patch: { date: d.dropIso } })
+        if (isApp) {
+          let commandAccepted = false
+          try {
+            await workspace.editAppointment(s.id, s.version, appointmentEditInput(s, { date: d.dropIso }))
+            commandAccepted = true
+            await refreshWorkspace(workspaceRange)
+          } catch (error) {
+            if (!commandAccepted && error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
+              try {
+                await refreshWorkspace(workspaceRange)
+                toast('Termin został zmieniony. Odświeżono kalendarz.', 'alert')
+              } catch {
+                toast('Termin został zmieniony, ale nie udało się odświeżyć kalendarza.', 'alert')
+              }
+            } else if (commandAccepted) {
+              toast('Sesję przeniesiono, ale nie udało się odświeżyć kalendarza.', 'alert')
+            } else {
+              toast('Nie udało się przenieść sesji.', 'alert')
+            }
+            const r = chip.getBoundingClientRect()
+            if (motionOK()) {
+              window.gsap.to(ghost, {
+                x: r.left, y: r.top, scale: 1, rotation: 0, autoAlpha: 0.3,
+                duration: 0.3, ease: 'power3.inOut', onComplete: () => ghost.remove(),
+              })
+            } else ghost.remove()
+            return
+          }
+        } else {
+          dispatch({ type: 'UPDATE_SESSION', id: s.id, patch: { date: d.dropIso } })
+        }
         // same non-blocking overlap check as the session form
         const start = timeToMin(s.time)
         const end = start + s.duration
@@ -511,6 +555,37 @@ export function CalendarView({ params = {} }) {
     && workspaceState === 'ready'
     && !appointmentMutationLocked
   )
+  const canDrag = dragPointer && canManageAppointments
+
+  const changeAppointmentStatus = async (session, status) => {
+    let commandAccepted = false
+    try {
+      if (status === 'cancelled') {
+        await workspace.cancelAppointment(session.id, session.version)
+      } else {
+        await workspace.editAppointment(session.id, session.version, appointmentEditInput(session, { status }))
+      }
+      commandAccepted = true
+      await refreshWorkspace(workspaceRange)
+    } catch (error) {
+      if (!commandAccepted && error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
+        try {
+          await refreshWorkspace(workspaceRange)
+          toast('Termin został zmieniony. Odświeżono kalendarz.', 'alert')
+        } catch {
+          toast('Termin został zmieniony, ale nie udało się odświeżyć kalendarza.', 'alert')
+        }
+      } else if (commandAccepted) {
+        toast('Status sesji zapisano, ale nie udało się odświeżyć kalendarza.', 'alert')
+      } else {
+        toast('Nie udało się zmienić statusu sesji.', 'alert')
+      }
+      return
+    }
+    toast(status === 'cancelled'
+      ? 'Sesja odwołana — nie jest fakturowana'
+      : `Status zmieniony: ${STATUS_LABELS[status].toLowerCase()}`)
+  }
 
   // One navigator per view: Plan dnia moves by week, Miesiąc by month, and the
   // toolbar counts whatever the user is actually looking at.
@@ -626,6 +701,8 @@ export function CalendarView({ params = {} }) {
             <StatusPicker
               session={s}
               accessibleLabel={`Status: ${STATUS_LABELS[s.status]} — ${clientName}, ${s.time}`}
+              canChange={canManageAppointments}
+              onStatusChange={(status) => changeAppointmentStatus(s, status)}
             />
             <PaymentPicker
               session={s}

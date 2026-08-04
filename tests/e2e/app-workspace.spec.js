@@ -6,6 +6,8 @@ const json = (status, body) => ({
   body: JSON.stringify(body),
 })
 
+const errorEnvelope = (status, code) => json(status, { error: { code } })
+
 const freezeTime = async (page, iso) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.addInitScript((frozen) => {
@@ -83,6 +85,34 @@ const scheduledAppointment = {
   },
   paymentEntries: [],
 }
+
+const cancelledAppointment = {
+  ...scheduledAppointment,
+  status: 'cancelled',
+  version: 2,
+  cancelledAt: '2026-07-16T10:00:00.000Z',
+  updatedAt: '2026-07-16T10:00:00.000Z',
+}
+
+const completedAppointment = {
+  ...scheduledAppointment,
+  status: 'completed',
+  version: 2,
+  updatedAt: '2026-07-16T10:00:00.000Z',
+  payment: {
+    ...scheduledAppointment.payment,
+    outstandingGrosze: 18_000,
+  },
+}
+
+const workspaceEnvelope = (from, to, appointment) => json(200, {
+  data: {
+    window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
+    specialists: [activeSpecialist],
+    clients: [activeClient],
+    appointments: [appointment],
+  },
+})
 
 const containsHistory = (from, to) => from <= '2026-07-15' && to >= '2026-07-15'
 
@@ -173,4 +203,156 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await expect(page.getByText('W tym kompletnym zakresie nie ma zaplanowanych sesji.', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Poprzedni miesiąc' })).toBeEnabled()
   expect(pageErrors).toEqual([])
+})
+
+test('@owner cancels a Calendar appointment through the canonical command and refreshes its covered range', async ({ page }) => {
+  const cancellations = []
+  let workspaceReads = 0
+  let appointment = scheduledAppointment
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    workspaceReads += 1
+    const url = new URL(route.request().url())
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'),
+      url.searchParams.get('to'),
+      appointment,
+    ))
+  })
+  await page.route('**/api/v1/appointments/apt_scheduled/cancellation', async (route) => {
+    cancellations.push({ method: route.request().method(), body: route.request().postData() })
+    appointment = cancelledAppointment
+    await route.fulfill(json(200, { data: { appointment: cancelledAppointment } }))
+  })
+
+  await page.goto('./#/calendar?date=2026-07-15')
+  const plan = page.getByRole('region', { name: 'Plan dnia' })
+  const status = plan.getByRole('button', { name: 'Status: Zaplanowana — Ola Aktywna, 13:00' })
+  await expect(status).toBeVisible()
+  await status.click()
+  await plan.getByRole('menuitemradio', { name: 'Odwołaj' }).click()
+
+  await expect(plan.getByRole('button', { name: 'Status: Odwołana — Ola Aktywna, 13:00' })).toBeVisible()
+  expect(cancellations).toEqual([{ method: 'POST', body: JSON.stringify({ expectedVersion: 1 }) }])
+  await expect.poll(() => workspaceReads).toBe(2)
+})
+
+test('@owner changes a Calendar status through the canonical edit command and refreshes its covered range', async ({ page }) => {
+  const edits = []
+  let workspaceReads = 0
+  let appointment = scheduledAppointment
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    workspaceReads += 1
+    const url = new URL(route.request().url())
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'),
+      url.searchParams.get('to'),
+      appointment,
+    ))
+  })
+  await page.route('**/api/v1/appointments/apt_scheduled/edits', async (route) => {
+    edits.push({ method: route.request().method(), body: route.request().postData() })
+    appointment = completedAppointment
+    await route.fulfill(json(200, { data: { appointment: completedAppointment } }))
+  })
+
+  await page.goto('./#/calendar?date=2026-07-15')
+  const plan = page.getByRole('region', { name: 'Plan dnia' })
+  await plan.getByRole('button', { name: 'Status: Zaplanowana — Ola Aktywna, 13:00' }).click()
+  await plan.getByRole('menuitemradio', { name: 'Odbyta' }).click()
+
+  await expect(plan.getByRole('button', { name: 'Status: Odbyta — Ola Aktywna, 13:00' })).toBeVisible()
+  expect(edits).toEqual([{
+    method: 'POST',
+    body: JSON.stringify({
+      expectedVersion: 1,
+      specialistId: 'sp_anna',
+      serviceId: 'zajecia',
+      date: '2026-07-15',
+      time: '13:00',
+      durationMinutes: 50,
+      expectedAmountGrosze: 18_000,
+      location: 'Gabinet 1',
+      status: 'completed',
+    }),
+  }])
+  await expect.poll(() => workspaceReads).toBe(2)
+})
+
+test('@owner keeps the Calendar on canonical data after a cancellation conflict', async ({ page }) => {
+  let workspaceReads = 0
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    workspaceReads += 1
+    const url = new URL(route.request().url())
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'),
+      url.searchParams.get('to'),
+      scheduledAppointment,
+    ))
+  })
+  await page.route('**/api/v1/appointments/apt_scheduled/cancellation', (route) => (
+    route.fulfill(errorEnvelope(409, 'VERSION_CONFLICT'))
+  ))
+
+  await page.goto('./#/calendar?date=2026-07-15')
+  const plan = page.getByRole('region', { name: 'Plan dnia' })
+  await plan.getByRole('button', { name: 'Status: Zaplanowana — Ola Aktywna, 13:00' }).click()
+  await plan.getByRole('menuitemradio', { name: 'Odwołaj' }).click()
+
+  await expect(plan.getByRole('button', { name: 'Status: Zaplanowana — Ola Aktywna, 13:00' })).toBeVisible()
+  await expect(page.getByText('Termin został zmieniony. Odświeżono kalendarz.', { exact: true })).toBeVisible()
+  expect(workspaceReads).toBe(2)
+})
+
+test('@owner rolls a Calendar drag back after the canonical reschedule command conflicts', async ({ page }) => {
+  const edits = []
+  let workspaceReads = 0
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    workspaceReads += 1
+    const url = new URL(route.request().url())
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'),
+      url.searchParams.get('to'),
+      scheduledAppointment,
+    ))
+  })
+  await page.route('**/api/v1/appointments/apt_scheduled/edits', async (route) => {
+    edits.push({ method: route.request().method(), body: route.request().postData() })
+    await route.fulfill(errorEnvelope(409, 'VERSION_CONFLICT'))
+  })
+
+  await page.goto('./#/calendar?date=2026-07-15&ym=2026-07&mode=cal')
+  const source = page.locator('.cal__day[data-iso="2026-07-15"] .cal__item', { hasText: 'Ola' })
+  const target = page.locator('.cal__day[data-iso="2026-07-16"]')
+  await expect(source).toBeVisible()
+  await expect(target).toBeVisible()
+  const sourceBox = await source.boundingBox()
+  const targetBox = await target.boundingBox()
+  if (!sourceBox || !targetBox) throw new Error('Calendar drag target is unavailable')
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 5 })
+  await page.mouse.up()
+
+  await expect.poll(() => edits.length).toBe(1)
+  expect(edits).toEqual([{
+    method: 'POST',
+    body: JSON.stringify({
+      expectedVersion: 1,
+      specialistId: 'sp_anna',
+      serviceId: 'zajecia',
+      date: '2026-07-16',
+      time: '13:00',
+      durationMinutes: 50,
+      expectedAmountGrosze: 18_000,
+      location: 'Gabinet 1',
+      status: 'scheduled',
+    }),
+  }])
+  await expect.poll(() => workspaceReads).toBe(2)
+  await expect(source).toBeVisible()
+  await expect(target.locator('.cal__item', { hasText: 'Ola' })).toHaveCount(0)
 })
