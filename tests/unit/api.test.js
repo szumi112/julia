@@ -3218,3 +3218,402 @@ test('client conflicts expose only safe details and authentication denials clear
   }), { code: 'SESSION_REQUIRED' })
   assert.equal(auth.calls.length, 2)
 })
+
+const appointmentInput = (overrides = {}) => ({
+  clientId: 'cl_ola',
+  specialistId: 'sp_anna',
+  serviceId: 'zajecia',
+  date: '2026-08-10',
+  time: '10:00',
+  durationMinutes: 50,
+  expectedAmountGrosze: 18_000,
+  location: 'Gabinet 1',
+  status: 'scheduled',
+  ...overrides,
+})
+
+const ledgerAppointment = (overrides = {}) => {
+  const base = {
+    id: 'apt_ola_august',
+    clientId: 'cl_ola',
+    specialistId: 'sp_anna',
+    serviceId: 'zajecia',
+    startsAt: '2026-08-10T08:00:00.000Z',
+    endsAt: '2026-08-10T08:50:00.000Z',
+    timeZone: 'Europe/Warsaw',
+    location: 'Gabinet 1',
+    status: 'scheduled',
+    source: 'panel',
+    version: 1,
+    cancelledAt: null,
+    createdAt: '2026-08-04T08:00:00.000Z',
+    updatedAt: '2026-08-04T08:00:00.000Z',
+    charge: {
+      id: 'chg_ola_august', serviceId: 'zajecia', expectedAmountGrosze: 18_000,
+      currency: 'PLN', version: 1,
+    },
+    payment: {
+      status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0,
+      latestMethod: null, latestReceivedAt: null,
+    },
+    paymentEntries: [],
+  }
+  return {
+    ...base,
+    ...overrides,
+    charge: { ...base.charge, ...(overrides.charge ?? {}) },
+    payment: { ...base.payment, ...(overrides.payment ?? {}) },
+    paymentEntries: overrides.paymentEntries ?? base.paymentEntries,
+  }
+}
+
+const appointmentEnvelope = (appointment) => ({ data: { appointment } })
+
+test('ledger commands expose the public API and send exact canonical requests', async () => {
+  for (const name of [
+    'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
+    'correctPayment',
+  ]) assert.equal(typeof apiClient[name], 'function')
+
+  const created = ledgerAppointment()
+  const edited = ledgerAppointment({
+    specialistId: 'sp_beata', serviceId: 'konsultacja',
+    startsAt: '2026-08-11T09:30:00.000Z', endsAt: '2026-08-11T11:00:00.000Z',
+    location: null, status: 'completed', version: 2,
+    updatedAt: '2026-08-04T09:00:00.000Z',
+    charge: { serviceId: 'konsultacja', expectedAmountGrosze: 25_000, version: 2 },
+    payment: { outstandingGrosze: 25_000 },
+  })
+  const cancelled = ledgerAppointment({
+    version: 3, status: 'cancelled', cancelledAt: '2026-08-04T10:00:00.000Z',
+    updatedAt: '2026-08-04T10:00:00.000Z',
+  })
+  const recorded = ledgerAppointment({
+    version: 4, status: 'completed', updatedAt: '2026-08-04T11:00:00.000Z',
+    payment: {
+      status: 'partial', collectedGrosze: 7_000, outstandingGrosze: 11_000,
+      latestMethod: 'card', latestReceivedAt: '2026-08-04T10:30:00.000Z',
+    },
+    paymentEntries: [{
+      id: 'pay_original', amountGrosze: 7_000, method: 'card',
+      receivedAt: '2026-08-04T10:30:00.000Z', correctedAt: null,
+      replacementEntryId: null,
+    }],
+  })
+  const corrected = ledgerAppointment({
+    version: 5, status: 'completed', updatedAt: '2026-08-04T12:00:00.000Z',
+    payment: {
+      status: 'partial', collectedGrosze: 6_000, outstandingGrosze: 12_000,
+      latestMethod: 'transfer', latestReceivedAt: '2026-08-04T10:45:00.000Z',
+    },
+    paymentEntries: [{
+      id: 'pay_original', amountGrosze: 7_000, method: 'card',
+      receivedAt: '2026-08-04T10:30:00.000Z',
+      correctedAt: '2026-08-04T12:00:00.000Z', replacementEntryId: 'pay_replacement',
+    }, {
+      id: 'pay_replacement', amountGrosze: 6_000, method: 'transfer',
+      receivedAt: '2026-08-04T10:45:00.000Z', correctedAt: null,
+      replacementEntryId: null,
+    }],
+  })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse(appointmentEnvelope(created), 201),
+    jsonResponse(appointmentEnvelope(edited)),
+    jsonResponse(appointmentEnvelope(cancelled)),
+    jsonResponse(appointmentEnvelope(recorded)),
+    jsonResponse(appointmentEnvelope(corrected)),
+  )
+  const keys = ['ledger-create-key-0001', 'ledger-cancel-key-0003']
+  const client = createApiClient({
+    fetchImpl: queued.fetchImpl, idempotencyKeyFactory: () => keys.shift(),
+  })
+  await client.getSession()
+  const createSource = appointmentInput()
+  const editSource = {
+    specialistId: 'sp_beata', serviceId: 'konsultacja', date: '2026-08-11',
+    time: '11:30', durationMinutes: 90, expectedAmountGrosze: 25_000,
+    location: null, status: 'completed',
+  }
+  const paymentSource = {
+    amountGrosze: 7_000, method: 'card', receivedAt: '2026-08-04T10:30:00.000Z',
+  }
+  const correctionSource = {
+    reason: 'Zmiana metody', replacement: {
+      amountGrosze: 6_000, method: 'transfer', receivedAt: '2026-08-04T10:45:00.000Z',
+    },
+  }
+  const results = [
+    await client.createAppointment(createSource),
+    await client.editAppointment('apt_ola_august', 1, editSource,
+      { idempotencyKey: 'ledger-edit-key-0002' }),
+    await client.cancelAppointment('apt_ola_august', 2),
+    await client.recordPayment('apt_ola_august', 3, paymentSource,
+      { idempotencyKey: 'ledger-record-key-0004' }),
+    await client.correctPayment('pay_original', 4, correctionSource,
+      { idempotencyKey: 'ledger-correct-key-0005' }),
+  ]
+  assert.deepEqual(results, [created, edited, cancelled, recorded, corrected])
+  for (const result of results) assertDeepFrozen(result)
+  assert.deepEqual(createSource, appointmentInput())
+  assert.deepEqual(queued.calls.slice(1).map(({ url }) => url), [
+    '/api/v1/appointments',
+    '/api/v1/appointments/apt_ola_august/edits',
+    '/api/v1/appointments/apt_ola_august/cancellation',
+    '/api/v1/appointments/apt_ola_august/payments',
+    '/api/v1/payments/pay_original/corrections',
+  ])
+  assert.deepEqual(queued.calls.slice(1).map(({ init }) => init.body), [
+    '{"clientId":"cl_ola","specialistId":"sp_anna","serviceId":"zajecia","date":"2026-08-10","time":"10:00","durationMinutes":50,"expectedAmountGrosze":18000,"location":"Gabinet 1","status":"scheduled"}',
+    '{"expectedVersion":1,"specialistId":"sp_beata","serviceId":"konsultacja","date":"2026-08-11","time":"11:30","durationMinutes":90,"expectedAmountGrosze":25000,"location":null,"status":"completed"}',
+    '{"expectedVersion":2}',
+    '{"expectedVersion":3,"amountGrosze":7000,"method":"card","receivedAt":"2026-08-04T10:30:00.000Z"}',
+    '{"expectedVersion":4,"reason":"Zmiana metody","replacement":{"amountGrosze":6000,"method":"transfer","receivedAt":"2026-08-04T10:45:00.000Z"}}',
+  ])
+  assert.deepEqual(queued.calls.slice(1).map((call) => header(call, 'Idempotency-Key')), [
+    'ledger-create-key-0001', 'ledger-edit-key-0002', 'ledger-cancel-key-0003',
+    'ledger-record-key-0004', 'ledger-correct-key-0005',
+  ])
+  for (const call of queued.calls.slice(1)) {
+    assert.equal(call.init.method, 'POST')
+    assert.equal(call.init.credentials, 'same-origin')
+    assert.equal(header(call, 'Accept'), 'application/json')
+    assert.equal(header(call, 'Content-Type'), 'application/json')
+    assert.equal(header(call, 'X-CSRF-Token'), TOKEN_A)
+    assert.deepEqual(Object.keys(call.init.headers).sort(), [
+      'Accept', 'Content-Type', 'Idempotency-Key', 'X-CSRF-Token',
+    ])
+  }
+})
+
+test('ledger commands reject invalid hostile inputs and options before session, key, or fetch', async () => {
+  let generated = 0
+  let reads = 0
+  const hostileInput = new Proxy(appointmentInput(), {
+    ownKeys() { throw new Error('private appointment keys') },
+    get() { reads += 1; throw new Error('private appointment value') },
+  })
+  const accessor = Object.defineProperty(appointmentInput(), 'location', {
+    enumerable: true, get() { reads += 1; throw new Error('private location') },
+  })
+  const badCreateInputs = [
+    null, [], {}, hostileInput, accessor,
+    { ...appointmentInput(), extra: true },
+    { ...appointmentInput(), [Symbol('private')]: true },
+    appointmentInput({ clientId: 'apt_wrong' }),
+    appointmentInput({ specialistId: 'stf_wrong' }),
+    appointmentInput({ serviceId: 'unknown' }),
+    appointmentInput({ date: '2026-02-29' }),
+    appointmentInput({ time: '24:00' }),
+    appointmentInput({ durationMinutes: 60 }),
+    appointmentInput({ expectedAmountGrosze: 0 }),
+    appointmentInput({ expectedAmountGrosze: 1_000_001 }),
+    appointmentInput({ location: ' Gabinet' }),
+    appointmentInput({ location: 'a'.repeat(81) }),
+    appointmentInput({ location: '\uD800' }),
+    appointmentInput({ status: 'cancelled' }),
+  ]
+  const malformedOptions = [
+    null, {}, { idempotencyKey: 'bad key' },
+    { idempotencyKey: 'ledger-option-key-0001', extra: true },
+    Object.defineProperty({}, 'idempotencyKey', {
+      enumerable: true, get() { reads += 1; throw new Error('private key') },
+    }),
+  ]
+  for (const invoke of [
+    ...badCreateInputs.map((input) => (client) => client.createAppointment(input)),
+    (client) => client.editAppointment('apt_ola_august', 0, appointmentInput()),
+    (client) => client.cancelAppointment('cl_wrong', 1),
+    (client) => client.recordPayment('apt_ola_august', 4_096, {
+      amountGrosze: 1, method: 'cash', receivedAt: '2026-08-04T10:00:00.000Z',
+    }),
+    (client) => client.recordPayment('apt_ola_august', 1, {
+      amountGrosze: 1, method: 'blik', receivedAt: '2026-08-04T10:00:00.000Z',
+    }),
+    (client) => client.recordPayment('apt_ola_august', 1, {
+      amountGrosze: 1, method: 'cash', receivedAt: '2026-08-04T10:00:00Z',
+    }),
+    (client) => client.correctPayment('apt_wrong', 1, {
+      reason: 'Korekta', replacement: null,
+    }),
+    (client) => client.correctPayment('pay_original', 1, {
+      reason: ' Korekta', replacement: null,
+    }),
+    (client) => client.correctPayment('pay_original', 1, {
+      reason: 'ą'.repeat(251), replacement: null,
+    }),
+    ...malformedOptions.map((options) => (client) => (
+      client.cancelAppointment('apt_ola_august', 1, options)
+    )),
+  ]) {
+    const queued = queuedFetch()
+    const client = createApiClient({
+      fetchImpl: queued.fetchImpl,
+      idempotencyKeyFactory: () => { generated += 1; return 'unused-ledger-key-0001' },
+    })
+    await assert.rejects(Promise.resolve().then(() => invoke(client)), assertClientInput)
+    assert.equal(queued.calls.length, 0)
+  }
+  assert.equal(generated, 0)
+  assert.equal(reads, 0)
+})
+
+test('ledger response validation enforces binary payment graphs, aggregates, and command relationships', async () => {
+  const correctedAt = '2026-08-04T12:00:00.000Z'
+  const valid = ledgerAppointment({
+    version: 5, status: 'completed', updatedAt: correctedAt,
+    payment: {
+      status: 'partial', collectedGrosze: 300, outstandingGrosze: 17_700,
+      latestMethod: 'transfer', latestReceivedAt: '2026-08-04T10:30:00.000Z',
+    },
+    paymentEntries: [{
+      id: 'pay_A-entry', amountGrosze: 100, method: 'cash',
+      receivedAt: '2026-08-04T10:00:00.000Z', correctedAt,
+      replacementEntryId: 'pay_A_entry',
+    }, {
+      id: 'pay_A_entry', amountGrosze: 200, method: 'card',
+      receivedAt: '2026-08-04T10:00:00.000Z', correctedAt,
+      replacementEntryId: 'pay_a-entry',
+    }, {
+      id: 'pay_a-entry', amountGrosze: 300, method: 'transfer',
+      receivedAt: '2026-08-04T10:30:00.000Z', correctedAt: null,
+      replacementEntryId: null,
+    }],
+  })
+  const acceptedQueue = queuedFetch(
+    jsonResponse(sessionBody()), jsonResponse(appointmentEnvelope(valid)),
+  )
+  const acceptedClient = createApiClient({ fetchImpl: acceptedQueue.fetchImpl })
+  await acceptedClient.getSession()
+  const accepted = await acceptedClient.correctPayment('pay_A_entry', 4, {
+    reason: 'Łańcuch korekt', replacement: {
+      amountGrosze: 300, method: 'transfer', receivedAt: '2026-08-04T10:30:00.000Z',
+    },
+  }, { idempotencyKey: 'ledger-graph-key-0001' })
+  assert.equal(accepted.paymentEntries[2].id, 'pay_a-entry')
+  assertDeepFrozen(accepted)
+
+  const cases = [
+    ['wrong envelope', { appointment: valid }],
+    ['wrong target', appointmentEnvelope({
+      ...valid,
+      paymentEntries: valid.paymentEntries.map((entry) => entry.id === 'pay_A_entry'
+        ? { ...entry, id: 'pay_other' } : entry),
+    })],
+    ['wrong version', appointmentEnvelope({ ...valid, version: 6 })],
+    ['wrong aggregate', appointmentEnvelope({
+      ...valid, payment: { ...valid.payment, collectedGrosze: 301 },
+    })],
+    ['locale rather than binary order', appointmentEnvelope({
+      ...valid, paymentEntries: [valid.paymentEntries[1], valid.paymentEntries[0], valid.paymentEntries[2]],
+    })],
+    ['reverse-time link', appointmentEnvelope({
+      ...valid,
+      paymentEntries: valid.paymentEntries.map((entry, index) => index === 1
+        ? { ...entry, receivedAt: '2026-08-04T09:59:00.000Z' } : entry),
+    })],
+    ['cycle', appointmentEnvelope({
+      ...valid,
+      paymentEntries: valid.paymentEntries.map((entry, index) => index === 2
+        ? { ...entry, correctedAt, replacementEntryId: 'pay_A-entry' } : entry),
+      payment: {
+        status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18_000,
+        latestMethod: null, latestReceivedAt: null,
+      },
+    })],
+  ]
+  for (const [name, body] of cases) {
+    await test(name, async () => {
+      const queued = queuedFetch(jsonResponse(sessionBody()), parsedResponse(body))
+      const client = createApiClient({ fetchImpl: queued.fetchImpl })
+      await client.getSession()
+      await assert.rejects(client.correctPayment('pay_A_entry', 4, {
+        reason: 'Łańcuch korekt', replacement: {
+          amountGrosze: 300, method: 'transfer', receivedAt: '2026-08-04T10:30:00.000Z',
+        },
+      }, { idempotencyKey: 'ledger-invalid-key-0001' }), (error) => {
+        assertInvalidResponse(error)
+        assert.equal(error.idempotencyKey, 'ledger-invalid-key-0001')
+        return true
+      })
+    })
+  }
+})
+
+test('ledger commands reuse one key for one CSRF refresh and require explicit replay after uncertainty', async () => {
+  let generated = 0
+  const refreshed = sessionBody({
+    csrfToken: TOKEN_B, csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const created = ledgerAppointment()
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()), errorResponse('CSRF_EXPIRED', 403),
+    jsonResponse(refreshed), jsonResponse(appointmentEnvelope(created), 201),
+    new Error('private uncertain ledger transport'),
+    jsonResponse(appointmentEnvelope(created), 201),
+  )
+  const client = createApiClient({
+    fetchImpl: queued.fetchImpl,
+    idempotencyKeyFactory: () => `ledger-generated-key-000${++generated}`,
+  })
+  await client.getSession()
+  await client.createAppointment(appointmentInput())
+  assert.equal(generated, 1)
+  assert.equal(header(queued.calls[1], 'Idempotency-Key'), 'ledger-generated-key-0001')
+  assert.equal(header(queued.calls[3], 'Idempotency-Key'), 'ledger-generated-key-0001')
+  assert.equal(header(queued.calls[1], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(queued.calls[3], 'X-CSRF-Token'), TOKEN_B)
+
+  let retryKey
+  await assert.rejects(client.createAppointment(appointmentInput()), (error) => {
+    assert.equal(error.code, 'NETWORK_ERROR')
+    assert.equal(error.idempotencyKey, 'ledger-generated-key-0002')
+    assert.doesNotMatch(JSON.stringify(error), /private uncertain/)
+    retryKey = error.idempotencyKey
+    return true
+  })
+  assert.equal(queued.calls.length, 5)
+  await client.createAppointment(appointmentInput(), { idempotencyKey: retryKey })
+  assert.equal(queued.calls.length, 6)
+  assert.equal(queued.calls[4].init.body, queued.calls[5].init.body)
+  assert.equal(header(queued.calls[4], 'Idempotency-Key'), retryKey)
+  assert.equal(header(queued.calls[5], 'Idempotency-Key'), retryKey)
+})
+
+test('ledger create accepts the exact zero-collected billable aggregate', async () => {
+  const completed = ledgerAppointment({
+    status: 'completed', payment: { outstandingGrosze: 18_000 },
+  })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()), jsonResponse(appointmentEnvelope(completed), 201),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+  const result = await client.createAppointment(appointmentInput({ status: 'completed' }), {
+    idempotencyKey: 'ledger-billable-key-0001',
+  })
+  assert.equal(result.payment.outstandingGrosze, 18_000)
+})
+
+test('ledger correction responses must prove a post-creation mutation instant', async () => {
+  const instant = '2026-08-04T08:00:00.000Z'
+  const malformed = ledgerAppointment({
+    version: 2, status: 'completed', createdAt: instant, updatedAt: instant,
+    payment: {
+      status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18_000,
+      latestMethod: null, latestReceivedAt: null,
+    },
+    paymentEntries: [{
+      id: 'pay_original', amountGrosze: 1, method: 'cash', receivedAt: instant,
+      correctedAt: instant, replacementEntryId: null,
+    }],
+  })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()), jsonResponse(appointmentEnvelope(malformed)),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+  await assert.rejects(client.correctPayment('pay_original', 1, {
+    reason: 'Usunięcie wpisu', replacement: null,
+  }, { idempotencyKey: 'ledger-instant-key-0001' }), assertInvalidResponse)
+})

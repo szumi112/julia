@@ -1,5 +1,5 @@
 import { APP_MODE } from './app-mode.js'
-import { isWellFormedUnicode } from './core-records.js'
+import { isWellFormedUnicode, validateAppointmentInput } from './core-records.js'
 import { SERVICE_BY_ID } from './services.js'
 import {
   captureCoreAuditEvent,
@@ -317,6 +317,7 @@ const workspaceNullableInstant = (value) => value === null || validInstant(value
 const validWorkspaceText = (value, maxBytes) => typeof value === 'string'
   && isWellFormedUnicode(value) && validText(value, maxBytes)
 const workspaceLocation = (value) => value === null || validWorkspaceText(value, 80)
+const binaryCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0
 const validClientIdentityText = (value) => typeof value === 'string'
   && isWellFormedUnicode(value) && value.length > 0
   && value === value.trim() && value === value.normalize('NFC')
@@ -476,7 +477,7 @@ const captureWorkspacePaymentEntry = (raw) => {
   })
 }
 
-const captureWorkspaceAppointment = (raw, bounds) => {
+const captureWorkspaceAppointment = (raw, bounds = null) => {
   const value = captureDataObject(raw, [
     'id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone',
     'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt',
@@ -487,15 +488,17 @@ const captureWorkspaceAppointment = (raw, bounds) => {
     || typeof value.specialistId !== 'string' || !SPECIALIST_ID.test(value.specialistId)
     || typeof value.serviceId !== 'string' || !WORKSPACE_SERVICE_IDS.has(value.serviceId)
     || !validInstant(value.startsAt) || !validInstant(value.endsAt)
-    || value.startsAt < bounds.lower || value.startsAt >= bounds.upper
+    || (bounds !== null && (value.startsAt < bounds.lower || value.startsAt >= bounds.upper))
     || value.endsAt <= value.startsAt || value.timeZone !== 'Europe/Warsaw'
     || !workspaceLocation(value.location)
     || !['scheduled', 'completed', 'cancelled', 'noshow'].includes(value.status)
-    || value.source !== 'panel' || !workspacePositive(value.version)
+    || value.source !== 'panel' || !workspacePositive(value.version, 4_096)
     || !workspaceNullableInstant(value.cancelledAt)
     || (value.status === 'cancelled') !== (value.cancelledAt !== null)
     || !validInstant(value.createdAt) || !validInstant(value.updatedAt)
     || value.createdAt > value.updatedAt
+    || new Date(value.endsAt).getTime() - new Date(value.startsAt).getTime()
+      !== SERVICE_BY_ID[value.serviceId].duration * 60_000
     || (value.cancelledAt !== null
       && (value.cancelledAt < value.createdAt || value.cancelledAt > value.updatedAt))) return null
 
@@ -505,7 +508,7 @@ const captureWorkspaceAppointment = (raw, bounds) => {
   if (!charge || typeof charge.id !== 'string' || !CHARGE_ID.test(charge.id)
     || charge.serviceId !== value.serviceId
     || !workspacePositive(charge.expectedAmountGrosze, 1_000_000)
-    || charge.currency !== 'PLN' || !workspacePositive(charge.version)) return null
+    || charge.currency !== 'PLN' || !workspacePositive(charge.version, 257)) return null
 
   const payment = captureDataObject(value.payment, [
     'status', 'collectedGrosze', 'outstandingGrosze', 'latestMethod', 'latestReceivedAt',
@@ -520,7 +523,7 @@ const captureWorkspaceAppointment = (raw, bounds) => {
     if (ids.has(entry.id)
       || (previous && (previous.receivedAt > entry.receivedAt
         || (previous.receivedAt === entry.receivedAt
-          && previous.id.localeCompare(entry.id) >= 0)))) return null
+          && binaryCompare(previous.id, entry.id) >= 0)))) return null
     ids.add(entry.id)
     previous = entry
     if (entry.correctedAt !== null
@@ -528,10 +531,14 @@ const captureWorkspaceAppointment = (raw, bounds) => {
   }
   const replacementTargets = new Set()
   const replacementLinks = new Map()
+  const entriesById = new Map(entries.map((entry) => [entry.id, entry]))
   for (const entry of entries) {
     if (entry.replacementEntryId === null) continue
-    if (entry.replacementEntryId === entry.id || !ids.has(entry.replacementEntryId)
-      || replacementTargets.has(entry.replacementEntryId)) return null
+    const replacement = entriesById.get(entry.replacementEntryId)
+    if (!replacement || entry.replacementEntryId === entry.id
+      || replacementTargets.has(entry.replacementEntryId)
+      || (replacement.correctedAt !== null
+        && replacement.correctedAt < entry.correctedAt)) return null
     replacementTargets.add(entry.replacementEntryId)
     replacementLinks.set(entry.id, entry.replacementEntryId)
   }
@@ -595,6 +602,150 @@ const captureWorkspaceAppointment = (raw, bounds) => {
   })
 }
 
+const APPOINTMENT_INPUT_KEYS = Object.freeze([
+  'clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes',
+  'expectedAmountGrosze', 'location', 'status',
+])
+const APPOINTMENT_EDIT_KEYS = Object.freeze(APPOINTMENT_INPUT_KEYS.slice(1))
+const PAYMENT_INPUT_KEYS = Object.freeze(['amountGrosze', 'method', 'receivedAt'])
+const CORRECTION_INPUT_KEYS = Object.freeze(['reason', 'replacement'])
+const PAYMENT_METHODS = new Set(['cash', 'card', 'transfer', 'monthly'])
+
+const captureAppointmentInput = (raw, editing = false) => {
+  const keys = editing ? APPOINTMENT_EDIT_KEYS : APPOINTMENT_INPUT_KEYS
+  const value = captureDataObject(raw, keys)
+  if (!value) return null
+  const candidate = editing
+    ? Object.freeze({ clientId: 'cl_command_validation', ...value })
+    : Object.freeze({ ...value })
+  try {
+    validateAppointmentInput(candidate)
+  } catch {
+    return null
+  }
+  return Object.freeze(Object.fromEntries(keys.map((key) => [key, value[key]])))
+}
+
+const capturePaymentInput = (raw) => {
+  const value = captureDataObject(raw, PAYMENT_INPUT_KEYS)
+  if (!value || !workspacePositive(value.amountGrosze, 1_000_000)
+    || !PAYMENT_METHODS.has(value.method) || !validInstant(value.receivedAt)) return null
+  return Object.freeze({
+    amountGrosze: value.amountGrosze,
+    method: value.method,
+    receivedAt: value.receivedAt,
+  })
+}
+
+const validCorrectionReason = (value) => typeof value === 'string'
+  && isWellFormedUnicode(value) && value.length > 0 && value === value.trim()
+  && value === value.normalize('NFC')
+  && new TextEncoder().encode(value).byteLength <= 500
+
+const captureCorrectionInput = (raw) => {
+  const value = captureDataObject(raw, CORRECTION_INPUT_KEYS)
+  if (!value || !validCorrectionReason(value.reason)) return null
+  const replacement = value.replacement === null ? null : capturePaymentInput(value.replacement)
+  if (value.replacement !== null && !replacement) return null
+  return Object.freeze({ reason: value.reason, replacement })
+}
+
+const captureAppointmentEnvelope = (payload) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['appointment'])
+  return data ? captureWorkspaceAppointment(data.appointment) : null
+}
+
+const acceptedCreatedAppointment = (payload, status, requested) => {
+  const appointment = status === 201 ? captureAppointmentEnvelope(payload) : null
+  let normalized
+  try { normalized = validateAppointmentInput(requested) } catch { return null }
+  if (!appointment || appointment.clientId !== requested.clientId
+    || appointment.specialistId !== requested.specialistId
+    || appointment.serviceId !== requested.serviceId
+    || appointment.startsAt !== normalized.startsAt || appointment.endsAt !== normalized.endsAt
+    || appointment.location !== requested.location || appointment.status !== requested.status
+    || appointment.version !== 1 || appointment.cancelledAt !== null
+    || appointment.createdAt !== appointment.updatedAt || appointment.charge.version !== 1
+    || appointment.charge.serviceId !== requested.serviceId
+    || appointment.charge.expectedAmountGrosze !== requested.expectedAmountGrosze
+    || appointment.paymentEntries.length !== 0
+    || appointment.payment.collectedGrosze !== 0
+    || appointment.payment.latestMethod !== null
+    || appointment.payment.latestReceivedAt !== null) return null
+  return appointment
+}
+
+const acceptedEditedAppointment = (
+  payload, status, appointmentId, expectedVersion, requested,
+) => {
+  const appointment = status === 200 ? captureAppointmentEnvelope(payload) : null
+  let normalized
+  try {
+    normalized = validateAppointmentInput({ clientId: 'cl_command_validation', ...requested })
+  } catch {
+    return null
+  }
+  if (!appointment || appointment.id !== appointmentId
+    || appointment.specialistId !== requested.specialistId
+    || appointment.serviceId !== requested.serviceId
+    || appointment.startsAt !== normalized.startsAt || appointment.endsAt !== normalized.endsAt
+    || appointment.location !== requested.location || appointment.status !== requested.status
+    || appointment.version !== expectedVersion + 1 || appointment.cancelledAt !== null
+    || appointment.updatedAt <= appointment.createdAt
+    || appointment.charge.serviceId !== requested.serviceId
+    || appointment.charge.expectedAmountGrosze !== requested.expectedAmountGrosze) return null
+  return appointment
+}
+
+const acceptedCancelledAppointment = (payload, status, appointmentId, expectedVersion) => {
+  const appointment = status === 200 ? captureAppointmentEnvelope(payload) : null
+  if (!appointment || appointment.id !== appointmentId
+    || appointment.version !== expectedVersion + 1 || appointment.status !== 'cancelled'
+    || appointment.cancelledAt === null || appointment.cancelledAt !== appointment.updatedAt
+    || appointment.updatedAt <= appointment.createdAt
+    || appointment.payment.collectedGrosze !== 0
+    || appointment.payment.outstandingGrosze !== 0
+    || appointment.payment.latestMethod !== null
+    || appointment.payment.latestReceivedAt !== null) return null
+  return appointment
+}
+
+const acceptedRecordedPayment = (
+  payload, status, appointmentId, expectedVersion, requested,
+) => {
+  const appointment = status === 200 ? captureAppointmentEnvelope(payload) : null
+  if (!appointment || appointment.id !== appointmentId
+    || appointment.version !== expectedVersion + 1
+    || appointment.updatedAt <= appointment.createdAt
+    || !['completed', 'noshow'].includes(appointment.status)) return null
+  const matches = appointment.paymentEntries.filter((entry) => entry.correctedAt === null
+    && entry.amountGrosze === requested.amountGrosze && entry.method === requested.method
+    && entry.receivedAt === requested.receivedAt)
+  return matches.length === 1 ? appointment : null
+}
+
+const acceptedCorrectedPayment = (
+  payload, status, paymentId, expectedVersion, requested,
+) => {
+  const appointment = status === 200 ? captureAppointmentEnvelope(payload) : null
+  if (!appointment || appointment.version !== expectedVersion + 1
+    || appointment.updatedAt <= appointment.createdAt) return null
+  const target = appointment.paymentEntries.find((entry) => entry.id === paymentId)
+  if (!target || target.correctedAt !== appointment.updatedAt) return null
+  if (requested.replacement === null) {
+    return target.replacementEntryId === null ? appointment : null
+  }
+  const replacement = appointment.paymentEntries.find(
+    (entry) => entry.id === target.replacementEntryId,
+  )
+  return replacement && replacement.correctedAt === null
+    && replacement.amountGrosze === requested.replacement.amountGrosze
+    && replacement.method === requested.replacement.method
+    && replacement.receivedAt === requested.replacement.receivedAt
+    ? appointment : null
+}
+
 const acceptedWorkspace = (payload, requested) => {
   const outer = captureDataObject(payload, ['data'])
   const data = outer && captureDataObject(outer.data, [
@@ -624,7 +775,7 @@ const acceptedWorkspace = (payload, requested) => {
         previousSpecialist.displayName, specialist.displayName,
       ) > 0 || (workspaceCollator.compare(
         previousSpecialist.displayName, specialist.displayName,
-      ) === 0 && previousSpecialist.id.localeCompare(specialist.id) >= 0)))) return null
+      ) === 0 && binaryCompare(previousSpecialist.id, specialist.id) >= 0)))) return null
     specialistIds.add(specialist.id)
     previousSpecialist = specialist
   }
@@ -634,7 +785,7 @@ const acceptedWorkspace = (payload, requested) => {
     if (clientIds.has(client.id)
       || (previousClient && (workspaceCollator.compare(previousClient.name, client.name) > 0
         || (workspaceCollator.compare(previousClient.name, client.name) === 0
-          && previousClient.id.localeCompare(client.id) >= 0)))
+          && binaryCompare(previousClient.id, client.id) >= 0)))
       || (client.assignment !== null && !specialistIds.has(client.assignment.specialistId))) return null
     clientIds.add(client.id)
     previousClient = client
@@ -650,7 +801,7 @@ const acceptedWorkspace = (payload, requested) => {
       || !clientIds.has(appointment.clientId)
       || (previousAppointment && (previousAppointment.startsAt > appointment.startsAt
         || (previousAppointment.startsAt === appointment.startsAt
-          && previousAppointment.id.localeCompare(appointment.id) >= 0)))) return null
+          && binaryCompare(previousAppointment.id, appointment.id) >= 0)))) return null
     appointmentIds.add(appointment.id)
     chargeIds.add(appointment.charge.id)
     referencedClients.add(appointment.clientId)
@@ -1437,6 +1588,123 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
+  const createAppointment = (input, options) => {
+    const requested = captureAppointmentInput(input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/appointments`,
+      JSON.stringify({
+        clientId: requested.clientId,
+        specialistId: requested.specialistId,
+        serviceId: requested.serviceId,
+        date: requested.date,
+        time: requested.time,
+        durationMinutes: requested.durationMinutes,
+        expectedAmountGrosze: requested.expectedAmountGrosze,
+        location: requested.location,
+        status: requested.status,
+      }),
+      (payload, status) => acceptedCreatedAppointment(payload, status, requested),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const editAppointment = (appointmentId, expectedVersion, input, options) => {
+    const requested = captureAppointmentInput(input, true)
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof appointmentId !== 'string' || !APPOINTMENT_ID.test(appointmentId)
+      || !positive(expectedVersion) || expectedVersion >= 4_096
+      || !requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/appointments/${appointmentId}/edits`,
+      JSON.stringify({
+        expectedVersion,
+        specialistId: requested.specialistId,
+        serviceId: requested.serviceId,
+        date: requested.date,
+        time: requested.time,
+        durationMinutes: requested.durationMinutes,
+        expectedAmountGrosze: requested.expectedAmountGrosze,
+        location: requested.location,
+        status: requested.status,
+      }),
+      (payload, status) => acceptedEditedAppointment(
+        payload, status, appointmentId, expectedVersion, requested,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const cancelAppointment = (appointmentId, expectedVersion, options) => {
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof appointmentId !== 'string' || !APPOINTMENT_ID.test(appointmentId)
+      || !positive(expectedVersion) || expectedVersion >= 4_096 || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/appointments/${appointmentId}/cancellation`,
+      JSON.stringify({ expectedVersion }),
+      (payload, status) => acceptedCancelledAppointment(
+        payload, status, appointmentId, expectedVersion,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const recordPayment = (appointmentId, expectedVersion, input, options) => {
+    const requested = capturePaymentInput(input)
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof appointmentId !== 'string' || !APPOINTMENT_ID.test(appointmentId)
+      || !positive(expectedVersion) || expectedVersion >= 4_096
+      || !requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/appointments/${appointmentId}/payments`,
+      JSON.stringify({
+        expectedVersion,
+        amountGrosze: requested.amountGrosze,
+        method: requested.method,
+        receivedAt: requested.receivedAt,
+      }),
+      (payload, status) => acceptedRecordedPayment(
+        payload, status, appointmentId, expectedVersion, requested,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const correctPayment = (paymentId, expectedVersion, input, options) => {
+    const requested = captureCorrectionInput(input)
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof paymentId !== 'string' || !PAYMENT_ID.test(paymentId)
+      || !positive(expectedVersion) || expectedVersion >= 4_096
+      || !requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/payments/${paymentId}/corrections`,
+      JSON.stringify({
+        expectedVersion,
+        reason: requested.reason,
+        replacement: requested.replacement === null ? null : {
+          amountGrosze: requested.replacement.amountGrosze,
+          method: requested.replacement.method,
+          receivedAt: requested.replacement.receivedAt,
+        },
+      }),
+      (payload, status) => acceptedCorrectedPayment(
+        payload, status, paymentId, expectedVersion, requested,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
   const inviteStaff = (input, options = {}) => {
     const acceptedOptions = idempotencyOptions(options)
     if (!acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
@@ -1515,6 +1783,11 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     createClient,
     editClient,
     archiveClient,
+    createAppointment,
+    editAppointment,
+    cancelAppointment,
+    recordPayment,
+    correctPayment,
     inviteStaff,
     deactivateStaff,
     resolveOperationalAction,
