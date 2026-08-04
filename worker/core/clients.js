@@ -888,7 +888,6 @@ export async function editClient(input) {
       specialistId: current.assignment.specialistId, status: 'active',
     },
   }, { nowMs: command.nowMs })) notFound()
-  if (command.body.expectedVersion !== current.version) versionConflict(current.version)
 
   const context = await loadClientCryptoContext(command.db, command.keyring, {
     clientId: current.id, envelope: current.identityEnvelope,
@@ -897,6 +896,7 @@ export async function editClient(input) {
     clientId: current.id, envelope: current.identityEnvelope,
   })
   await validateRetainedCurrentSnapshots(context, current, identity)
+  if (command.body.expectedVersion !== current.version) versionConflict(current.version)
   const reassigned = command.body.specialistId !== current.assignment.specialistId
   if (reassigned && actor.role === 'specialist') throw new Error('CLIENT_ASSIGNMENT_CONFLICT')
   if (!reassigned && identity.name === command.body.name && identity.age === command.body.age

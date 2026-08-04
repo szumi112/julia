@@ -1104,6 +1104,108 @@ describe('persistent client edit and reassignment', () => {
     expect(new Set(envelopes)).toEqual(new Set(['NOT_FOUND']))
   })
 
+  it('authenticates stale retained heads before disclosing their current version', async () => {
+    const messages = []
+    for (const kind of ['mismatched-snapshot', 'tampered']) {
+      const fixture = await seedMalformedHistory(kind)
+      const retained = async () => ({
+        client: await env.DB.prepare('SELECT * FROM clients WHERE id=?')
+          .bind(fixture.clientId).first(),
+        assignment: await env.DB.prepare('SELECT * FROM client_assignments WHERE id=?')
+          .bind(fixture.assignmentId).first(),
+        versions: (await env.DB.prepare(
+          'SELECT * FROM record_versions WHERE entity_id=? OR entity_id=? ORDER BY id'
+        ).bind(fixture.clientId, fixture.assignmentId).all()).results,
+        audits: (await env.DB.prepare(
+          'SELECT * FROM audit_events WHERE entity_id=? ORDER BY id'
+        ).bind(fixture.clientId).all()).results,
+        idempotency: (await env.DB.prepare(
+          'SELECT * FROM idempotency_records WHERE resource_id=? ORDER BY idempotency_key'
+        ).bind(fixture.clientId).all()).results,
+      })
+      const before = await retained()
+      const idFactory = vi.fn()
+      let failure
+      try {
+        await editClient({
+          db: env.DB, recoveryDb: env.DB,
+          actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+          keyring: fixture.keyring, nowMs: NOW_MS + 1_000,
+          correlationId: CORRELATION_ID, idFactory, clientId: fixture.clientId,
+          body: { expectedVersion: 2, name: `Stale ${kind}`, age: 12,
+            status: 'active', specialistId: 'sp_target' },
+          idempotencyKey: `client-edit-stale-history-${kind}-0001`,
+        })
+      } catch (error) { failure = { message: error.message, details: error.details } }
+      expect(failure, kind).toEqual({ message: 'NOT_FOUND', details: undefined })
+      expect(idFactory, kind).not.toHaveBeenCalled()
+      expect(await retained(), kind).toEqual(before)
+      messages.push(failure.message)
+    }
+    expect(new Set(messages)).toEqual(new Set(['NOT_FOUND']))
+  })
+
+  it('unwraps the owning key before returning a stale version conflict', async () => {
+    const messages = []
+    for (const kind of ['missing-kek', 'unwrappable-key']) {
+      const client = await seedEditable()
+      let keyring = {}
+      const dataKeyId = JSON.parse((await env.DB.prepare(
+        'SELECT identity_envelope FROM clients WHERE id=?'
+      ).bind(client.id).first()).identity_envelope).dataKeyId
+      if (kind === 'unwrappable-key') {
+        const row = await env.DB.prepare(
+          'SELECT wrapped_key_b64,wrap_nonce_b64 FROM data_keys WHERE id=?'
+        ).bind(dataKeyId).first()
+        const flip = (value) => `${value.slice(0, -1)}${value.at(-1) === 'A' ? 'B' : 'A'}`
+        await env.DB.prepare(
+          'UPDATE data_keys SET wrapped_key_b64=?,wrap_nonce_b64=?,kek_version=2 WHERE id=?'
+        ).bind(flip(row.wrapped_key_b64), flip(row.wrap_nonce_b64), dataKeyId).run()
+        const base = await ring()
+        keyring = Object.freeze({
+          ...base,
+          getDataKek: (version) => version === 2 ? base.getDataKek(1) : base.getDataKek(version),
+        })
+      }
+      const retained = async () => ({
+        client: await env.DB.prepare('SELECT * FROM clients WHERE id=?').bind(client.id).first(),
+        assignment: (await env.DB.prepare(
+          'SELECT * FROM client_assignments WHERE client_id=? ORDER BY id'
+        ).bind(client.id).all()).results,
+        key: await env.DB.prepare('SELECT * FROM data_keys WHERE id=?').bind(dataKeyId).first(),
+        versions: (await env.DB.prepare(
+          'SELECT * FROM record_versions WHERE entity_id=? OR entity_id=? ORDER BY id'
+        ).bind(client.id, client.assignment.id).all()).results,
+        audits: (await env.DB.prepare(
+          'SELECT * FROM audit_events WHERE entity_id=? ORDER BY id'
+        ).bind(client.id).all()).results,
+        idempotency: (await env.DB.prepare(
+          'SELECT * FROM idempotency_records WHERE resource_id=? ORDER BY idempotency_key'
+        ).bind(client.id).all()).results,
+      })
+      const before = await retained()
+      const idFactory = vi.fn()
+      let failure
+      try {
+        await editClient({
+          db: env.DB, recoveryDb: env.DB,
+          actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+          keyring,
+          nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+          idFactory, clientId: client.id,
+          body: { expectedVersion: 2, name: client.name, age: client.age,
+            status: client.status, specialistId: client.assignment.specialistId },
+          idempotencyKey: `client-edit-stale-key-${kind}-0001`,
+        })
+      } catch (error) { failure = { message: error.message, details: error.details } }
+      expect(failure, kind).toEqual({ message: 'CRYPTO_FAILURE', details: undefined })
+      expect(idFactory, kind).not.toHaveBeenCalled()
+      expect(await retained(), kind).toEqual(before)
+      messages.push(failure.message)
+    }
+    expect(new Set(messages)).toEqual(new Set(['CRYPTO_FAILURE']))
+  })
+
   it('contains hostile retained-history row descriptors without reading values', async () => {
     const getter = vi.fn(() => 'private-history')
     const hostile = Object.defineProperty({ id: 'cl_hostile_history' }, 'identity_envelope', {
