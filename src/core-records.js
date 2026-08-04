@@ -28,6 +28,18 @@ const editableAppointmentStatuses = new Set(['scheduled', 'completed', 'noshow']
 const methods = new Set(['cash', 'card', 'transfer', 'monthly'])
 const durations = new Set([50, 60, 90, 120])
 
+const isWellFormedUnicode = (value) => {
+  if (typeof value.isWellFormed === 'function') return value.isWellFormed()
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index)
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(++index)
+      if (next < 0xDC00 || next > 0xDFFF) return false
+    } else if (code >= 0xDC00 && code <= 0xDFFF) return false
+  }
+  return true
+}
+
 const fail = (field, code = 'VALIDATION_FAILED') => {
   throw new TypeError(`${code}/${field}`)
 }
@@ -66,7 +78,7 @@ export const assertId = (value, kind, field = `${kind}Id`) => {
 }
 
 export const assertNfcTrimmed = (value, { field = 'string', minBytes = 1, maxBytes }) => {
-  if (typeof value !== 'string' || /[\uD800-\uDFFF]/.test(value) || value !== value.trim() || value !== value.normalize('NFC')) fail(field)
+  if (typeof value !== 'string' || !isWellFormedUnicode(value) || value !== value.trim() || value !== value.normalize('NFC')) fail(field)
   const bytes = encoder.encode(value).byteLength
   if (bytes < minBytes || bytes > maxBytes) fail(field)
   return value
@@ -136,7 +148,7 @@ export const assertAppointmentPaymentTransition = ({ fromStatus, toStatus, previ
   assertInteger(previousAmountGrosze, 'expectedAmountGrosze', 1, MAX_GROSZE)
   assertInteger(nextAmountGrosze, 'expectedAmountGrosze', 1, MAX_GROSZE)
   if (!Number.isSafeInteger(collectedGrosze) || collectedGrosze < 0) fail('amountGrosze')
-  if ((!isBillable({ status: toStatus }) || nextAmountGrosze < collectedGrosze) && collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
+  if ((!isBillable({ status: toStatus }) || nextAmountGrosze < previousAmountGrosze || nextAmountGrosze < collectedGrosze) && collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
   assertAppointmentTransition(fromStatus, toStatus, { cancellation })
   return toStatus
 }
@@ -295,8 +307,16 @@ export const assertReassignment = ({ assignments, appointments, clientId, newSpe
   if (!Array.isArray(assignments) || !Array.isArray(appointments)) fail('assignment')
   const open = assignments.map(assertAssignment).filter((item) => item.clientId === clientId && item.endsAt === null)
   if (open.length !== 1) fail('assignment', 'CLIENT_ASSIGNMENT_CONFLICT')
-  if (open[0].specialistId === newSpecialistId
-    || appointments.some((appointment) => appointment.specialistId === open[0].specialistId && appointment.status !== 'cancelled' && appointment.startsAt >= commandNow)) {
+  const futureOldSpecialistAppointment = appointments.some((appointment) => {
+    assertExactObject(appointment, ['clientId', 'specialistId', 'startsAt', 'endsAt', 'status'], 'appointment')
+    assertId(appointment.clientId, 'client')
+    assertId(appointment.specialistId, 'specialist')
+    assertCanonicalUtc(appointment.startsAt, 'startsAt')
+    assertCanonicalUtc(appointment.endsAt, 'endsAt')
+    if (appointment.endsAt <= appointment.startsAt || !appointmentStatuses.has(appointment.status)) fail('appointment')
+    return appointment.clientId === clientId && appointment.specialistId === open[0].specialistId && appointment.status !== 'cancelled' && appointment.startsAt >= commandNow
+  })
+  if (open[0].specialistId === newSpecialistId || futureOldSpecialistAppointment) {
     fail('assignment', 'CLIENT_ASSIGNMENT_CONFLICT')
   }
   return { closedAssignmentId: open[0].id, endsAt: commandNow, specialistId: newSpecialistId, startsAt: commandNow }
@@ -392,7 +412,10 @@ export const paymentAggregate = ({ appointmentId, status, expectedAmountGrosze, 
   const collectedGrosze = effective.reduce((total, entry) => total + entry.amountGrosze, 0)
   if (collectedGrosze > expectedAmountGrosze) fail('amountGrosze', 'PAYMENT_AMOUNT_CONFLICT')
   const latest = effective.toSorted((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.id.localeCompare(b.id)).at(-1) ?? null
-  if (!isBillable({ status })) return { status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0, latestMethod: null, latestReceivedAt: null }
+  if (!isBillable({ status })) {
+    if (collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
+    return { status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0, latestMethod: null, latestReceivedAt: null }
+  }
   return {
     status: collectedGrosze === 0 ? 'unpaid' : collectedGrosze === expectedAmountGrosze ? 'paid' : 'partial',
     collectedGrosze,
@@ -477,7 +500,8 @@ export const toAppointmentDto = appointmentDto
 
 export const safeValidationDetails = (run) => {
   try { run() } catch (error) {
-    const field = String(error?.message ?? '').split('/')[1]
+    const [code, field] = String(error?.message ?? '').split('/')
+    if (code !== 'VALIDATION_FAILED') return null
     const allowed = new Set(['body', 'name', 'age', 'status', 'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes', 'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt', 'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to', 'specialists', 'clients', 'appointments', 'paymentEntries'])
     return allowed.has(field) ? { field } : null
   }
