@@ -236,7 +236,7 @@ describe('closed core route descriptors', () => {
     }
   })
 
-  it('installs one shared budget before identity and keeps workspace nonfunctional', async () => {
+  it('installs one shared budget before identity and passes it to workspace', async () => {
     const order = []
     const rawDb = coreBudgetDb(order)
     let actorWork
@@ -264,9 +264,13 @@ describe('closed core route descriptors', () => {
         })
         return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
       }),
+      getWorkspace: vi.fn(async ({ db }) => {
+        expect(db).toBe(actorWork)
+        return { data: { window: { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true }, specialists: [], clients: [], appointments: [] } }
+      }),
     })
     const response = await createApp(input).request('/api/v1/workspace?from=2026-08-01&to=2026-08-31')
-    expect(response.status).toBe(404)
+    expect(response.status).toBe(200)
     expect(actorWork).not.toBe(rawDb)
     expect(actorRecovery).not.toBe(actorWork)
     expect(order).toEqual(['capture.prepare', 'capture.batch', 'access', 'query.data-key', 'actor'])
@@ -280,9 +284,10 @@ describe('closed core route descriptors', () => {
         views = { work, recoveryDb }
         return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
       }),
+      getWorkspace: vi.fn(async () => ({ data: { window: { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true }, specialists: [], clients: [], appointments: [] } })),
     })
     const response = await createApp(input).request('/api/v1/workspace?from=2026-08-01&to=2026-08-31')
-    expect(response.status).toBe(404)
+    expect(response.status).toBe(200)
     expect(usageForD1QueryBudgetViews(views.work, views.recoveryDb)).toEqual({
       used: 0, remaining: 50, workRemaining: 42, totalLimit: 50, recoveryReserve: 8,
     })
@@ -303,9 +308,10 @@ describe('closed core route descriptors', () => {
         finalUsage = usageForD1QueryBudgetViews(work, recoveryDb)
         return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
       }),
+      getWorkspace: vi.fn(async () => ({ data: { window: { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true }, specialists: [], clients: [], appointments: [] } })),
     })
     const response = await createApp(input).request('/api/v1/workspace?from=2026-08-01&to=2026-08-31')
-    expect(response.status).toBe(404)
+    expect(response.status).toBe(200)
     expect(finalUsage).toEqual({
       used: 50, remaining: 0, workRemaining: 0, totalLimit: 50, recoveryReserve: 8,
     })

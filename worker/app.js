@@ -27,6 +27,7 @@ import {
 } from './routes/operations.js'
 import { getSession } from './routes/session.js'
 import { getStaff, postDeactivation, postInvitation } from './routes/staff.js'
+import { getWorkspace } from './routes/workspace.js'
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
 import { loadDataKey } from './security/envelope.js'
 import { createKeyring } from './security/keyring.js'
@@ -346,6 +347,16 @@ export function createApp(deps = {}) {
         nowMs: c.get('nowMs'),
       })
     return c.json(result)
+  })
+  app.get('/api/v1/workspace', async (c) => {
+    if (c.get('routeId') !== 'workspace') throw new AppError('NOT_FOUND')
+    const result = await (deps.getWorkspace ?? getWorkspace)({
+      db: c.get('coreWorkDb'),
+      actor: c.get('actor'),
+      cryptoContext: c.get('cryptoContext'),
+      url: c.req.url,
+    })
+    return readResponse(c, result)
   })
   app.options('/api/v1/session', (c) => new Response(null, {
     status: 204,
