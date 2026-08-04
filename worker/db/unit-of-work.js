@@ -2,8 +2,9 @@ import { auditDescriptorFor, enforceAuditRateLimit } from '../audit/events.js'
 import { isD1IdentityCollision, isD1RateLimitGuardFailure } from './errors.js'
 import { outboxStatementDescriptorFor } from '../jobs/outbox.js'
 import { isCorrelationId } from '../logging/safe-log.js'
-import { decryptForScope, encryptForScope } from '../security/envelope.js'
-import { encodeBase64Url } from '../security/encoding.js'
+import { decryptForScope, encryptForScope, loadDataKey } from '../security/envelope.js'
+import { decodeBase64Url, encodeBase64Url } from '../security/encoding.js'
+import { clientKeyScope } from '../core/crypto.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const OPERATION = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
@@ -348,4 +349,127 @@ export async function recoverIdempotencyAfterCollision(db, cryptoContext, input,
   const row = await exactRow(db, input)
   if (!row) throw originalError
   return inspectRow(row, cryptoContext, input)
+}
+
+const STORED_SCOPE_INPUT_KEYS = Object.freeze([
+  'actorId', 'operation', 'idempotencyKey', 'requestDigest',
+  'resourceType', 'scopeType', 'scopePurpose',
+])
+const STORED_ROW_KEYS = Object.freeze([
+  'request_hash', 'resource_type', 'resource_id', 'response_envelope',
+])
+
+const storedInputInvalid = () => { throw new Error('IDEMPOTENCY_INVALID') }
+const storedCryptoFailure = () => { throw new Error('CRYPTO_FAILURE') }
+
+const captureStoredObject = (value, keys, invalid) => {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) invalid()
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const actual = Reflect.ownKeys(descriptors)
+    if (actual.length !== keys.length || !keys.every((key) => actual.includes(key))) invalid()
+    const captured = {}
+    for (const key of keys) {
+      const descriptor = descriptors[key]
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) invalid()
+      captured[key] = descriptor.value
+    }
+    return Object.freeze(captured)
+  } catch {
+    invalid()
+  }
+}
+
+const canonicalCoreDigest = (value) => {
+  if (typeof value !== 'string') storedInputInvalid()
+  let decoded
+  try {
+    decoded = decodeBase64Url(value)
+    if (decoded.byteLength !== 32 || encodeBase64Url(decoded) !== value) storedInputInvalid()
+    return value
+  } catch {
+    storedInputInvalid()
+  } finally {
+    decoded?.fill(0)
+  }
+}
+
+const captureStoredScopeInput = (input) => {
+  const captured = captureStoredObject(input, STORED_SCOPE_INPUT_KEYS, storedInputInvalid)
+  if (!validId(captured.actorId) || !OPERATION.test(captured.operation ?? '')
+    || !IDEMPOTENCY_KEY.test(captured.idempotencyKey ?? '')
+    || canonicalCoreDigest(captured.requestDigest) !== captured.requestDigest
+    || captured.resourceType !== 'client'
+    || captured.scopeType !== 'client'
+    || captured.scopePurpose !== 'identity') storedInputInvalid()
+  return captured
+}
+
+const exactStoredScopeRow = async (db, input) => db.prepare(
+  `SELECT request_hash,resource_type,resource_id,response_envelope
+   FROM idempotency_records
+   WHERE actor_id=? AND operation=? AND idempotency_key=?`
+).bind(input.actorId, input.operation, input.idempotencyKey).first()
+
+const parseStoredEnvelope = (serialized) => {
+  if (typeof serialized !== 'string') storedCryptoFailure()
+  try { return JSON.parse(serialized) } catch { storedCryptoFailure() }
+}
+
+async function inspectStoredScopeRow(db, keyring, opaqueRow, input) {
+  const conflict = new Error('IDEMPOTENCY_CONFLICT')
+  try {
+    const row = captureStoredObject(opaqueRow, STORED_ROW_KEYS, storedCryptoFailure)
+    if (row.resource_type !== 'client') storedCryptoFailure()
+    const expectedScope = clientKeyScope(row.resource_id)
+    const requestEnvelope = parseStoredEnvelope(row.request_hash)
+    const dataKey = await loadDataKey(db, { envelope: requestEnvelope, expectedScope })
+    const responseEnvelope = parseStoredEnvelope(row.response_envelope)
+    if (responseEnvelope?.dataKeyId !== requestEnvelope?.dataKeyId
+      || responseEnvelope?.dataKeyVersion !== requestEnvelope?.dataKeyVersion) {
+      storedCryptoFailure()
+    }
+    const recordId = await stableRecordId(input)
+    const storedDigest = await decryptForScope(keyring, dataKey, {
+      expectedScope,
+      recordId,
+      field: 'idempotency_request_hash',
+      envelope: requestEnvelope,
+    })
+    if (storedDigest !== input.requestDigest) throw conflict
+    const responsePlaintext = await decryptForScope(keyring, dataKey, {
+      expectedScope,
+      recordId,
+      field: 'idempotency_response',
+      envelope: responseEnvelope,
+    })
+    const response = JSON.parse(responsePlaintext)
+    if (!ownObject(response) || !exactKeys(response, ['status', 'body'])
+      || !Number.isSafeInteger(response.status)
+      || response.status < 200 || response.status > 299
+      || canonicalJson(response) !== responsePlaintext) storedCryptoFailure()
+    return Object.freeze({ status: response.status, body: canonicalize(response.body) })
+  } catch (error) {
+    if (error === conflict) throw error
+    storedCryptoFailure()
+  }
+}
+
+export async function inspectStoredScopeIdempotency(db, keyring, input) {
+  const captured = captureStoredScopeInput(input)
+  const row = await exactStoredScopeRow(db, captured)
+  return row ? inspectStoredScopeRow(db, keyring, row, captured) : null
+}
+
+export async function recoverStoredScopeIdempotencyAfterCollision(
+  db, keyring, input, originalError,
+) {
+  let collision
+  try { collision = isD1IdentityCollision(originalError) } catch { throw originalError }
+  if (!collision) throw originalError
+  const captured = captureStoredScopeInput(input)
+  const row = await exactStoredScopeRow(db, captured)
+  if (!row) throw originalError
+  return inspectStoredScopeRow(db, keyring, row, captured)
 }
