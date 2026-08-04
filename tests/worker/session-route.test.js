@@ -80,8 +80,11 @@ describe('/api/v1/session route', () => {
       displayName: 'Julia owner',
       role: 'owner',
       specialistId: null,
+      version: 3,
     })
     expect(result.data.capabilities).toEqual([...result.data.capabilities].sort())
+    expect(Object.isFrozen(result.data.actor)).toBe(true)
+    expect(Object.isFrozen(result.data.capabilities)).toBe(true)
     expect(result.data.environment).toBe('staging')
     expect(result.data.dataMode).toBe('fictional')
     expect(result.data.csrfExpiresAt).toBe(new Date((Math.floor((NOW_MS + 999) / 1000) + 900) * 1000).toISOString())
@@ -121,12 +124,13 @@ describe('/api/v1/session route', () => {
     ['owner', CAPABILITIES],
     ['coordinator', [
       'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-      'client.operational.read', 'finance.centre.read', 'operations.health.read',
-      'payment.manage', 'tus.manage',
+      'client.manage', 'client.operational.read', 'finance.centre.read', 'operations.health.read',
+      'payment.manage', 'specialist.directory.read', 'tus.manage',
     ]],
     ['specialist', [
       'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-      'client.operational.read', 'clinical.read', 'payment.manage', 'tus.manage',
+      'client.manage', 'client.operational.read', 'clinical.read', 'payment.manage',
+      'specialist.directory.read', 'tus.manage',
     ]],
   ])('returns the exact sorted %s capability hints', async (role, expected) => {
     const context = await fixture(`role_${role}`, { role })

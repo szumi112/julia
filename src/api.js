@@ -44,21 +44,37 @@ const CLIENT_CODES = new Set([
 ])
 const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED'])
 const DETAIL_FIELDS = new Set(['displayName', 'email', 'role', 'version'])
-const CAPABILITIES = new Set([
+const CAPABILITIES = Object.freeze([
   'appointment.charge.read',
   'appointment.manage',
   'centre.manage',
   'chat.direct',
   'chat.general',
+  'client.manage',
   'client.operational.read',
   'clinical.read',
   'finance.centre.read',
   'operations.health.read',
   'payment.manage',
   'security.audit.read',
+  'specialist.directory.read',
   'staff.manage',
   'tus.manage',
 ])
+const CAPABILITY_VOCABULARY = new Set(CAPABILITIES)
+const ROLE_CAPABILITIES = Object.freeze({
+  owner: CAPABILITIES,
+  coordinator: Object.freeze([
+    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
+    'client.manage', 'client.operational.read', 'finance.centre.read',
+    'operations.health.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
+  ]),
+  specialist: Object.freeze([
+    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
+    'client.manage', 'client.operational.read', 'clinical.read', 'payment.manage',
+    'specialist.directory.read', 'tus.manage',
+  ]),
+})
 const ROLES = new Set(['owner', 'coordinator', 'specialist'])
 const STAFF_STATUSES = new Set(['active', 'disabled', 'pending'])
 const INVITATION_STATUSES = new Set(['pending', 'provisioning'])
@@ -235,49 +251,56 @@ export class ApiError extends Error {
 const clientError = (code, options) => new ApiError(code, options)
 
 const acceptedActor = (value) => {
-  if (!plainObject(value) || !validId(value.id) || !validText(value.displayName, 120)
-    || !ROLES.has(value.role)
-    || (value.specialistId !== null && !validId(value.specialistId))
-    || (value.role === 'specialist' && !validId(value.specialistId))) {
+  const actor = captureExactObject(value, [
+    'id', 'displayName', 'role', 'specialistId', 'version',
+  ])
+  if (!actor || !validId(actor.id) || !validText(actor.displayName, 120)
+    || !ROLES.has(actor.role) || !positive(actor.version)
+    || (actor.specialistId !== null && !validId(actor.specialistId))
+    || (actor.role === 'specialist' && !validId(actor.specialistId))) {
     return null
   }
   return Object.freeze({
-    id: value.id,
-    displayName: value.displayName,
-    role: value.role,
-    specialistId: value.specialistId,
+    id: actor.id,
+    displayName: actor.displayName,
+    role: actor.role,
+    specialistId: actor.specialistId,
+    version: actor.version,
   })
 }
 
 const acceptedSession = (payload) => {
-  const value = plainObject(payload) && plainObject(payload.data) ? payload.data : null
-  const actor = acceptedActor(value?.actor)
-  if (!actor || !Array.isArray(value.capabilities) || value.capabilities.length === 0
-    || value.capabilities.some((capability) => (
-      typeof capability !== 'string' || !CAPABILITIES.has(capability)
-    ))
-    || new Set(value.capabilities).size !== value.capabilities.length
-    || !ENVIRONMENTS.has(value.environment) || value.dataMode !== 'fictional'
-    || !validIso(value.csrfExpiresAt)) {
+  try {
+    const envelope = captureExactObject(payload, ['data'])
+    const value = captureExactObject(envelope?.data, [
+      'actor', 'capabilities', 'csrfToken', 'csrfExpiresAt', 'environment', 'dataMode',
+    ])
+    const actor = acceptedActor(value?.actor)
+    const capabilities = captureArray(value?.capabilities, CAPABILITIES.length)
+    const expectedCapabilities = actor ? ROLE_CAPABILITIES[actor.role] : null
+    if (!actor || !capabilities || capabilities.length !== expectedCapabilities.length
+      || capabilities.some((capability) => (
+        typeof capability !== 'string' || !CAPABILITY_VOCABULARY.has(capability)
+      ))
+      || new Set(capabilities).size !== capabilities.length
+      || capabilities.some((capability, index) => capability !== expectedCapabilities[index])
+      || !ENVIRONMENTS.has(value.environment) || value.dataMode !== 'fictional'
+      || !validIso(value.csrfExpiresAt)) return null
+    const match = typeof value.csrfToken === 'string' ? CSRF_TOKEN.exec(value.csrfToken) : null
+    const expiresUnix = Number(match?.[1])
+    if (!match || !Number.isSafeInteger(expiresUnix)
+      || Date.parse(value.csrfExpiresAt) / 1000 !== expiresUnix) return null
+    const session = Object.freeze({
+      actor,
+      capabilities: Object.freeze(capabilities),
+      csrfExpiresAt: value.csrfExpiresAt,
+      environment: value.environment,
+      dataMode: value.dataMode,
+    })
+    return Object.freeze({ csrfToken: value.csrfToken, session })
+  } catch {
     return null
   }
-  const match = typeof value.csrfToken === 'string' ? CSRF_TOKEN.exec(value.csrfToken) : null
-  const expiresUnix = Number(match?.[1])
-  if (!match || !Number.isSafeInteger(expiresUnix)
-    || Date.parse(value.csrfExpiresAt) / 1000 !== expiresUnix) {
-    return null
-  }
-  const session = Object.freeze({
-    actor,
-    capabilities: Object.freeze([...value.capabilities]),
-    csrfExpiresAt: value.csrfExpiresAt,
-    environment: value.environment,
-    dataMode: value.dataMode,
-  })
-  return Object.freeze({
-    csrfToken: value.csrfToken,
-    session,
-  })
 }
 
 const acceptedInvitation = (value) => {

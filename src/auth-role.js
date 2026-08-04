@@ -22,34 +22,51 @@ const acceptedSpecialistId = (value, required) => {
 
 const acceptedShellRole = (sessionUser) => {
   if (!sessionUser || typeof sessionUser !== 'object' || Array.isArray(sessionUser)) denied()
-  const name = acceptedName(sessionUser.displayName)
+  const descriptors = Object.getOwnPropertyDescriptors(sessionUser)
+  const keys = ['id', 'displayName', 'role', 'specialistId', 'version']
+  const actual = Reflect.ownKeys(descriptors)
+  if (actual.length !== keys.length
+    || actual.some((key) => typeof key !== 'string' || !keys.includes(key))) denied()
+  const actor = {}
+  for (const key of keys) {
+    const descriptor = descriptors[key]
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) denied()
+    actor[key] = descriptor.value
+  }
+  if (typeof actor.id !== 'string' || !ID.test(actor.id)
+    || !Number.isSafeInteger(actor.version) || actor.version < 1) denied()
+  const name = acceptedName(actor.displayName)
+  const shared = { authorityVersion: actor.version }
 
-  if (sessionUser.role === 'owner') {
-    return {
+  if (actor.role === 'owner') {
+    return Object.freeze({
+      ...shared,
       id: 'owner',
       label: 'Właściciel',
       name,
-      psychId: acceptedSpecialistId(sessionUser.specialistId, false),
+      psychId: acceptedSpecialistId(actor.specialistId, false),
       scope: 'centre',
-    }
+    })
   }
-  if (sessionUser.role === 'coordinator') {
-    return {
+  if (actor.role === 'coordinator') {
+    return Object.freeze({
+      ...shared,
       id: 'coordinator',
       label: 'Koordynator',
       name,
-      psychId: acceptedSpecialistId(sessionUser.specialistId, false),
+      psychId: acceptedSpecialistId(actor.specialistId, false),
       scope: 'centre',
-    }
+    })
   }
-  if (sessionUser.role === 'specialist') {
-    return {
+  if (actor.role === 'specialist') {
+    return Object.freeze({
+      ...shared,
       id: 'therapist',
       label: 'Specjalista',
       name,
-      psychId: acceptedSpecialistId(sessionUser.specialistId, true),
+      psychId: acceptedSpecialistId(actor.specialistId, true),
       scope: 'own',
-    }
+    })
   }
   denied()
 }

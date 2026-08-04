@@ -48,15 +48,18 @@ export async function getSession({
     ttlSeconds: 900,
   })
   const expiresUnix = Math.floor(nowMs / 1000) + 900
+  const sessionActor = Object.freeze({
+    id: actor.id,
+    displayName,
+    role: actor.role,
+    specialistId: actor.specialistId,
+    version: actor.version,
+  })
+  const capabilities = Object.freeze([...capabilitiesForActor(actor)].sort())
   return {
     data: {
-      actor: {
-        id: actor.id,
-        displayName,
-        role: actor.role,
-        specialistId: actor.specialistId,
-      },
-      capabilities: [...capabilitiesForActor(actor)].sort(),
+      actor: sessionActor,
+      capabilities,
       csrfToken,
       csrfExpiresAt: new Date(expiresUnix * 1000).toISOString(),
       environment: config.appEnv,

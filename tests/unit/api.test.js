@@ -2,10 +2,16 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { ApiError, createApiClient } from '../../src/api.js'
+import { capabilitiesForActor } from '../../worker/identity/policy.js'
 
 const CORRELATION_ID = '77777777-7777-4777-8777-777777777777'
 const TOKEN_A = 'v1.1999999999.AAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'
 const TOKEN_B = 'v1.1999999998.CCCCCCCCCCCCCCCCCCCCCC.DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD'
+const coordinatorCapabilities = [
+  'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
+  'client.manage', 'client.operational.read', 'finance.centre.read',
+  'operations.health.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
+]
 
 const sessionBody = (overrides = {}) => ({
   data: {
@@ -14,10 +20,24 @@ const sessionBody = (overrides = {}) => ({
       displayName: 'Julia Właścicielka',
       role: 'owner',
       specialistId: null,
+      version: 3,
     },
     capabilities: [
+      'appointment.charge.read',
       'appointment.manage',
+      'centre.manage',
+      'chat.direct',
+      'chat.general',
+      'client.manage',
+      'client.operational.read',
+      'clinical.read',
+      'finance.centre.read',
+      'operations.health.read',
+      'payment.manage',
+      'security.audit.read',
+      'specialist.directory.read',
       'staff.manage',
+      'tus.manage',
     ],
     csrfToken: TOKEN_A,
     csrfExpiresAt: '2033-05-18T03:33:19.000Z',
@@ -181,7 +201,9 @@ test('invalidates an in-flight session read when authentication is cleared', asy
       displayName: 'Karolina Koordynatorka',
       role: 'coordinator',
       specialistId: null,
+      version: 4,
     },
+    capabilities: coordinatorCapabilities,
     csrfToken: TOKEN_B,
     csrfExpiresAt: '2033-05-18T03:33:18.000Z',
   })
@@ -237,7 +259,9 @@ test('contains a stale authentication denial after a newer session succeeds', as
       displayName: 'Karolina Koordynatorka',
       role: 'coordinator',
       specialistId: null,
+      version: 4,
     },
+    capabilities: coordinatorCapabilities,
     csrfToken: TOKEN_B,
     csrfExpiresAt: '2033-05-18T03:33:18.000Z',
   })
@@ -612,6 +636,51 @@ test('classifies an out-of-range CSRF expiry as a fixed invalid response', async
     message: 'INVALID_RESPONSE',
     status: 200,
   })
+})
+
+test('requires and freezes the exact positive authority revision actor shape', async () => {
+  const accepted = sessionBody()
+  const { fetchImpl } = queuedFetch(jsonResponse(accepted))
+  const session = await createApiClient({ fetchImpl }).getSession()
+  assert.equal(session.actor.version, 3)
+  assert.equal(Object.isFrozen(session.actor), true)
+  assert.deepEqual(Reflect.ownKeys(session.actor).sort(), ['displayName', 'id', 'role', 'specialistId', 'version'])
+
+  for (const mutate of [
+    (actor) => { delete actor.version },
+    (actor) => { actor.version = 0 },
+    (actor) => { actor.version = 1.5 },
+    (actor) => { actor.extra = true },
+  ]) {
+    const body = structuredClone(sessionBody())
+    mutate(body.data.actor)
+    const queued = queuedFetch(jsonResponse(body))
+    await assert.rejects(createApiClient({ fetchImpl: queued.fetchImpl }).getSession(), {
+      code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE', status: 200,
+    })
+  }
+})
+
+test('keeps browser session role registries byte-for-byte equal to Worker policy', async () => {
+  const actors = [
+    { id: 'stf_owner_1', displayName: 'Ola', role: 'owner', specialistId: 'sp_owner', version: 2 },
+    { id: 'stf_coord_1', displayName: 'Ela', role: 'coordinator', specialistId: null, version: 3 },
+    { id: 'stf_spec_1', displayName: 'Anna', role: 'specialist', specialistId: 'sp_spec', version: 4 },
+  ]
+  for (const actor of actors) {
+    const capabilities = [...capabilitiesForActor(actor)]
+    const body = sessionBody({ actor, capabilities })
+    const queued = queuedFetch(jsonResponse(body))
+    const session = await createApiClient({ fetchImpl: queued.fetchImpl }).getSession()
+    assert.deepEqual(session.capabilities, capabilities)
+    assert.equal(Object.isFrozen(session.capabilities), true)
+
+    const reordered = sessionBody({ actor, capabilities: [...capabilities].reverse() })
+    const invalid = queuedFetch(jsonResponse(reordered))
+    await assert.rejects(createApiClient({ fetchImpl: invalid.fetchImpl }).getSession(), {
+      code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE', status: 200,
+    })
+  }
 })
 
 test('sanitizes throwing response and envelope getters as fixed API errors', async (t) => {

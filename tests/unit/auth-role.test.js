@@ -6,10 +6,13 @@ const AUTHORIZATION_ERROR = 'AUTHORIZATION_INVALID'
 
 test('maps each accepted backend role to the exact shell role', () => {
   assert.deepEqual(shellRoleFor({
+    id: 'stf_owner',
     displayName: 'Ola Właścicielka',
     role: 'owner',
     specialistId: 'sp_owner',
+    version: 7,
   }), {
+    authorityVersion: 7,
     id: 'owner',
     label: 'Właściciel',
     name: 'Ola Właścicielka',
@@ -17,10 +20,13 @@ test('maps each accepted backend role to the exact shell role', () => {
     scope: 'centre',
   })
   assert.deepEqual(shellRoleFor({
+    id: 'stf_coordinator',
     displayName: 'Ela Koordynatorka',
     role: 'coordinator',
     specialistId: null,
+    version: 4,
   }), {
+    authorityVersion: 4,
     id: 'coordinator',
     label: 'Koordynator',
     name: 'Ela Koordynatorka',
@@ -28,10 +34,13 @@ test('maps each accepted backend role to the exact shell role', () => {
     scope: 'centre',
   })
   assert.deepEqual(shellRoleFor({
+    id: 'stf_specialist',
     displayName: 'Anna Specjalistka',
     role: 'specialist',
     specialistId: 'sp_specialist',
+    version: 9,
   }), {
+    authorityVersion: 9,
     id: 'therapist',
     label: 'Specjalista',
     name: 'Anna Specjalistka',
@@ -41,6 +50,7 @@ test('maps each accepted backend role to the exact shell role', () => {
 })
 
 test('fails closed with one fixed authorization error for malformed actors', () => {
+  const valid = { id: 'stf_owner', displayName: 'Anna Nowak', role: 'owner', specialistId: null, version: 1 }
   const invalidActors = [
     null,
     [],
@@ -53,6 +63,9 @@ test('fails closed with one fixed authorization error for malformed actors', () 
     { displayName: 'Anna Nowak', role: 'specialist', specialistId: null },
     { displayName: 'Anna Nowak', role: 'specialist', specialistId: '' },
     { displayName: 'Anna Nowak', role: 'specialist', specialistId: '../owner' },
+    { ...valid, version: 0 },
+    { ...valid, version: 1.5 },
+    { ...valid, extra: true },
   ]
 
   for (const actor of invalidActors) {
@@ -65,8 +78,10 @@ test('fails closed with one fixed authorization error for malformed actors', () 
 test('contains throwing actor accessors and proxies as the same authorization error', () => {
   const rawSecret = 'actor-getter anna@example.test'
   const actorWithGetter = {
+    id: 'stf_owner',
     role: 'owner',
     specialistId: null,
+    version: 1,
   }
   Object.defineProperty(actorWithGetter, 'displayName', {
     enumerable: true,
@@ -87,4 +102,14 @@ test('contains throwing actor accessors and proxies as the same authorization er
       return true
     })
   }
+})
+
+test('freezes the exact shell projection and exposes authority revision changes', () => {
+  const actor = { id: 'stf_owner', displayName: 'Ola', role: 'owner', specialistId: null, version: 2 }
+  const first = shellRoleFor(actor)
+  const second = shellRoleFor({ ...actor, version: 3 })
+  assert.equal(Object.isFrozen(first), true)
+  assert.deepEqual(Reflect.ownKeys(first).sort(), ['authorityVersion', 'id', 'label', 'name', 'psychId', 'scope'])
+  assert.equal(first.authorityVersion, 2)
+  assert.equal(second.authorityVersion, 3)
 })
