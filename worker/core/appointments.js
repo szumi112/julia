@@ -2191,7 +2191,9 @@ const loadScopedAppointmentForCancellation = (db, appointmentId, actor, terminal
    JOIN session_charges AS charge ON charge.appointment_id=appointment.id
    JOIN clients AS client ON client.id=appointment.client_id
    JOIN client_assignments AS assignment ON assignment.client_id=client.id
-     AND assignment.ends_at IS NULL
+     AND assignment.specialist_id=appointment.specialist_id
+     AND assignment.starts_at<=appointment.starts_at
+     AND (assignment.ends_at IS NULL OR appointment.starts_at<assignment.ends_at)
    WHERE appointment.id=? AND ${terminal
     ? "appointment.status='cancelled' AND appointment.cancelled_at IS NOT NULL"
     : "appointment.status IN ('scheduled','completed','noshow') AND appointment.cancelled_at IS NULL"}
@@ -2200,8 +2202,11 @@ const loadScopedAppointmentForCancellation = (db, appointmentId, actor, terminal
        OR (?='specialist' AND ?=appointment.specialist_id))
      AND (SELECT count(*) FROM session_charges AS exact_charge
        WHERE exact_charge.appointment_id=appointment.id)=1
-     AND (SELECT count(*) FROM client_assignments AS open_assignment
-       WHERE open_assignment.client_id=client.id AND open_assignment.ends_at IS NULL)=1`
+     AND (SELECT count(*) FROM client_assignments AS effective
+       WHERE effective.client_id=client.id
+         AND effective.starts_at<=appointment.starts_at
+         AND (effective.ends_at IS NULL
+           OR appointment.starts_at<effective.ends_at))=1`
 ).bind(appointmentId, actor.role, actor.role, actor.specialistId).first()
 
 const cancellationScopedFact = (value, appointmentId, terminal = false) => {
@@ -2244,9 +2249,16 @@ const cancellationScopedFact = (value, appointmentId, terminal = false) => {
     || !canonicalInstant(row.client_updated_at)
     || !isAssignmentId(row.assignment_id)
     || !isSpecialistId(row.assignment_specialist_id)
-    || !canonicalInstant(row.assignment_starts_at) || row.assignment_ends_at !== null
+    || !canonicalInstant(row.assignment_starts_at)
+    || (row.assignment_ends_at !== null
+      && (!canonicalInstant(row.assignment_ends_at)
+        || row.assignment_ends_at <= row.assignment_starts_at))
+    || !(row.assignment_starts_at <= row.starts_at
+      && (row.assignment_ends_at === null || row.starts_at < row.assignment_ends_at))
+    || row.assignment_specialist_id !== row.specialist_id
     || typeof row.assigned_by_staff_id !== 'string' || !STAFF_ID.test(row.assigned_by_staff_id)
-    || row.assignment_version !== 1 || !canonicalInstant(row.assignment_created_at)
+    || row.assignment_version !== (row.assignment_ends_at === null ? 1 : 2)
+    || !canonicalInstant(row.assignment_created_at)
     || !canonicalInstant(row.assignment_updated_at)) notFound()
   return Object.freeze({
     appointment: Object.freeze({
@@ -2269,7 +2281,7 @@ const cancellationScopedFact = (value, appointmentId, terminal = false) => {
       assignment: Object.freeze({
         id: row.assignment_id, clientId: row.client_id,
         specialistId: row.assignment_specialist_id, startsAt: row.assignment_starts_at,
-        endsAt: null, assignedByStaffId: row.assigned_by_staff_id,
+        endsAt: row.assignment_ends_at, assignedByStaffId: row.assigned_by_staff_id,
         version: row.assignment_version, createdAt: row.assignment_created_at,
         updatedAt: row.assignment_updated_at,
       }),
@@ -2418,8 +2430,8 @@ const validateCancelReplay = (value, appointmentId, request) => {
 
 const cancellationGuardStatement = (db, values) => {
   const assignmentChain = assignmentChainPostcondition(
-    values.client.id, values.client.assignment.specialistId,
-    values.client.assignment.startsAt,
+    values.client.id, values.appointment.specialistId,
+    values.appointment.startsAt,
   )
   return db.prepare(
     `INSERT INTO core_directory_invariant_failures (failure_kind)
@@ -2491,6 +2503,9 @@ const cancellationGuardStatement = (db, values) => {
            OR (SELECT max(history.version) FROM record_versions AS history
              WHERE history.entity_type='client_assignment'
                AND history.entity_id=retained.id)!=retained.version))
+       AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+         JOIN client_assignments AS retained ON retained.id=history.entity_id
+         WHERE retained.client_id=? AND history.entity_type!='client_assignment')
        AND (${assignmentChain.sql})
        AND (SELECT count(*) FROM payment_entries WHERE appointment_id=?)=?
        AND NOT EXISTS (SELECT 1 FROM payment_entries AS payment
@@ -2543,6 +2558,7 @@ const cancellationGuardStatement = (db, values) => {
     values.client.id, values.client.identityEnvelope, values.client.status,
     values.client.version, values.client.createdAt, values.client.updatedAt,
     values.client.id, values.client.version, values.client.id, values.client.id,
+    values.client.id,
     ...assignmentChain.bindings,
     values.appointment.id, values.payment.entries.length,
     values.appointment.id, values.appointment.id, values.dataKeyId,
@@ -2562,19 +2578,86 @@ const cancellationCollisionProof = (db, values) => db.prepare(
   values.appointmentVersionId, values.auditId,
 ).first()
 
-const loadTerminalCancellationProof = (db, appointment, charge) => db.prepare(
-  `SELECT (SELECT count(*) FROM audit_events
-     WHERE action='appointment.cancelled' AND entity_type='appointment'
-       AND entity_id=? AND result='success' AND reason_envelope IS NULL
-       AND metadata_json=?) AS audits,
-   (SELECT count(*) FROM idempotency_records
-     WHERE operation=? AND resource_type='client' AND resource_id=?) AS stored`
+const loadTerminalCancellationProof = (db, appointment, charge, dataKeyId) => db.prepare(
+  `SELECT stored.actor_id,stored.idempotency_key,stored.request_hash,
+          stored.response_envelope,stored.created_at
+   FROM audit_events AS audit
+   JOIN idempotency_records AS stored
+     ON stored.actor_id=audit.actor_staff_id
+    AND stored.created_at=audit.occurred_at
+   WHERE audit.action='appointment.cancelled' AND audit.entity_type='appointment'
+     AND audit.entity_id=? AND audit.result='success' AND audit.reason_envelope IS NULL
+     AND audit.metadata_json=?
+     AND stored.operation=? AND stored.resource_type='client' AND stored.resource_id=?
+     AND json_extract(stored.request_hash,'$.dataKeyId')=?
+     AND json_extract(stored.request_hash,'$.dataKeyVersion')=1
+     AND json_extract(stored.response_envelope,'$.dataKeyId')=?
+     AND json_extract(stored.response_envelope,'$.dataKeyVersion')=1
+   ORDER BY stored.actor_id,stored.idempotency_key LIMIT 2`
 ).bind(
   appointment.id,
   JSON.stringify({ appointmentVersion: appointment.version, chargeVersion: charge.version }),
   CANCEL_OPERATION,
   appointment.clientId,
-).first()
+  dataKeyId,
+  dataKeyId,
+).all()
+
+const cancellationIdempotencyRecordId = async (actorId, idempotencyKey) => {
+  const encoded = new TextEncoder().encode(
+    ['bwm:idempotency:record:v1', actorId, CANCEL_OPERATION, idempotencyKey].join('\n'),
+  )
+  let digest
+  try {
+    digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded))
+    return `idem_${encodeBase64Url(digest)}`
+  } finally {
+    encoded.fill(0)
+    digest?.fill(0)
+  }
+}
+
+const authenticateTerminalCancellationProof = async (
+  context, appointment, charge, value,
+) => {
+  const rows = resultRows(value, 2)
+  if (rows.length !== 1) cryptoFailure()
+  const row = captureExact(rows[0], [
+    'actor_id', 'idempotency_key', 'request_hash', 'response_envelope', 'created_at',
+  ], cryptoFailure)
+  if (typeof row.actor_id !== 'string' || !STAFF_ID.test(row.actor_id)
+    || typeof row.idempotency_key !== 'string' || !IDEMPOTENCY_KEY.test(row.idempotency_key)
+    || typeof row.request_hash !== 'string' || typeof row.response_envelope !== 'string'
+    || row.created_at !== appointment.updatedAt) cryptoFailure()
+  const recordId = await cancellationIdempotencyRecordId(
+    row.actor_id, row.idempotency_key,
+  )
+  const expectedDigest = await digestCancelNormalized(appointment.id, {
+    expectedVersion: appointment.version - 1,
+  })
+  let storedDigest
+  let plaintext
+  try {
+    storedDigest = await decryptForScope(context.keyring, context.dataKey, {
+      expectedScope: context.scope, recordId, field: 'idempotency_request_hash',
+      envelope: JSON.parse(row.request_hash),
+    })
+    if (storedDigest !== expectedDigest) cryptoFailure()
+    plaintext = await decryptForScope(context.keyring, context.dataKey, {
+      expectedScope: context.scope, recordId, field: 'idempotency_response',
+      envelope: JSON.parse(row.response_envelope),
+    })
+    const parsed = JSON.parse(plaintext)
+    if (JSON.stringify(parsed) !== plaintext) cryptoFailure()
+    validateCancelReplay(parsed, appointment.id, {
+      expectedVersion: appointment.version - 1,
+    })
+    return true
+  } catch (error) {
+    if (error instanceof Error && error.message === 'CRYPTO_FAILURE') throw error
+    cryptoFailure()
+  }
+}
 
 const reproveCancellationRace = async (command, actor, prior, originalError) => {
   let fresh
@@ -2583,18 +2666,16 @@ const reproveCancellationRace = async (command, actor, prior, originalError) => 
     try { terminal = await retainedCancellationState(command, actor, true) } catch {
       throw originalError
     }
-    let proof
     try {
-      proof = captureExact(
+      await authenticateTerminalCancellationProof(
+        terminal.context, terminal.appointment, terminal.charge,
         await loadTerminalCancellationProof(
           command.db, terminal.appointment, terminal.charge,
+          terminal.context.dataKey.id,
         ),
-        ['audits', 'stored'],
-        cryptoFailure,
       )
     } catch { throw originalError }
-    if (proof.audits === 1 && proof.stored === 1
-      && terminal.appointment.version === prior.appointment.version + 1
+    if (terminal.appointment.version === prior.appointment.version + 1
       && terminal.appointment.clientId === prior.appointment.clientId
       && terminal.appointment.specialistId === prior.appointment.specialistId
       && terminal.appointment.serviceId === prior.appointment.serviceId

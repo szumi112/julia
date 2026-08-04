@@ -1792,6 +1792,93 @@ describe('persistent appointment cancellation', () => {
     expect(ids).not.toHaveBeenCalled()
   })
 
+  it('authenticates the one historical assignment effective at the appointment start', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-01-15', time: '14:00',
+      status: 'completed',
+    } })).body.data.appointment
+    await editClient({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 8 * 60 * 60 * 1000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(`appointment_cancel_reassign_${++sequence}`),
+      clientId: client.id,
+      body: { expectedVersion: 1, name: client.name, age: 12,
+        status: 'active', specialistId: 'sp_appointment_second' },
+      idempotencyKey: `appointment-cancel-reassign-${sequence}-key`,
+    })
+    const result = await cancel(current, { nowMs: NOW_MS + 9 * 60 * 60 * 1000 })
+    expect(result.body.data.appointment).toMatchObject({
+      id: current.id, specialistId: 'sp_appointment_target', status: 'cancelled',
+    })
+  })
+
+  it('rejects mismatched, gapped, and duplicate effective assignment facts opaquely', async () => {
+    const fixtures = []
+    for (let index = 0; index < 3; index += 1) {
+      const client = await seedClient()
+      const appointment = (await create(client, { body: {
+        ...BODY, clientId: client.id, date: `2027-11-0${index + 1}`,
+      } })).body.data.appointment
+      fixtures.push({ client, appointment })
+    }
+    await env.DB.prepare(`UPDATE appointments SET specialist_id=?,version=2,updated_at=?
+      WHERE id=? AND version=1`).bind(
+      'sp_appointment_second', new Date(NOW_MS + 500).toISOString(),
+      fixtures[0].appointment.id,
+    ).run()
+    await env.DB.prepare(`UPDATE client_assignments SET ends_at=?,version=2,updated_at=?
+      WHERE client_id=? AND ends_at IS NULL`).bind(
+      '2027-11-01T00:00:00.000Z', '2027-11-01T00:00:00.000Z', fixtures[1].client.id,
+    ).run()
+    const duplicateClientRow = await env.DB.prepare(
+      'SELECT identity_envelope FROM clients WHERE id=?',
+    ).bind(fixtures[2].client.id).first()
+    const duplicateScope = clientKeyScope(fixtures[2].client.id)
+    const duplicateKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(duplicateClientRow.identity_envelope),
+      expectedScope: duplicateScope,
+    })
+    const duplicateId = `asg_cancel_duplicate_${++sequence}`
+    const duplicateSnapshots = [1, 2].map((version) => ({
+      assignedByStaffId: OWNER.id, clientId: fixtures[2].client.id,
+      createdAt: fixtures[2].appointment.createdAt,
+      endsAt: version === 1 ? null : fixtures[2].appointment.endsAt, id: duplicateId,
+      schema: 'client_assignment.v1', specialistId: 'sp_appointment_target',
+      startsAt: fixtures[2].appointment.createdAt,
+      updatedAt: version === 1
+        ? fixtures[2].appointment.createdAt : fixtures[2].appointment.endsAt,
+      version,
+    }))
+    const duplicateRing = await ring()
+    const duplicateEnvelopes = await Promise.all(duplicateSnapshots.map((snapshot) =>
+      encryptForScope(duplicateRing, duplicateKey, {
+        expectedScope: duplicateScope, recordId: duplicateId, field: 'record_version',
+        plaintext: JSON.stringify(snapshot),
+      })))
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO client_assignments
+        (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
+         version,created_at,updated_at) VALUES (?,?,?,?,?,?,2,?,?)`).bind(
+        duplicateId, fixtures[2].client.id, 'sp_appointment_target',
+        fixtures[2].appointment.createdAt, fixtures[2].appointment.endsAt, OWNER.id,
+        fixtures[2].appointment.createdAt, fixtures[2].appointment.endsAt,
+      ),
+      ...duplicateEnvelopes.map((envelope, index) => env.DB.prepare(`INSERT INTO record_versions
+        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+         changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+        `ver_cancel_duplicate_${sequence}_${index + 1}`, 'client_assignment', duplicateId,
+        index + 1, JSON.stringify(envelope), OWNER.id,
+        duplicateSnapshots[index].updatedAt, CORRELATION_ID,
+      )),
+    ])
+    for (const { appointment } of fixtures) {
+      const ids = vi.fn()
+      await expect(cancel(appointment, { idFactory: ids })).rejects.toThrow('NOT_FOUND')
+      expect(ids).not.toHaveBeenCalled()
+    }
+  })
+
   it('replays before retained facts or IDs and releases its half-open interval', async () => {
     const client = await seedClient()
     const current = (await create(client, { body: {
@@ -1947,6 +2034,138 @@ describe('persistent appointment cancellation', () => {
       used: 16, remaining: 34, workRemaining: 26,
       totalLimit: 50, recoveryReserve: 8,
     })
+  })
+
+  it('rolls back when an assignment gains a cross-type version after preflight', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-11-04',
+    } })).body.data.appointment
+    const assignment = await env.DB.prepare(
+      'SELECT id FROM client_assignments WHERE client_id=? AND ends_at IS NULL',
+    ).bind(client.id).first()
+    let injected = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          await env.DB.prepare(`INSERT INTO record_versions
+            (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+             changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+            `ver_cancel_cross_type_${++sequence}`, 'client', assignment.id, 99, '{}',
+            OWNER.id, new Date(NOW_MS + 500).toISOString(), CORRELATION_ID,
+          ).run()
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    await expect(cancel(current, { db })).rejects.toThrow(/core_directory_invariant_failed/)
+    expect(await env.DB.prepare('SELECT status,version FROM appointments WHERE id=?')
+      .bind(current.id).first()).toEqual({ status: 'scheduled', version: 1 })
+    expect((await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE entity_id=? AND action='appointment.cancelled'`).bind(current.id).first()).count)
+      .toBe(0)
+  })
+
+  it('preserves invariant precedence when assignment corruption combines with a payment race', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-11-05', status: 'completed',
+    } })).body.data.appointment
+    const assignment = await env.DB.prepare(
+      'SELECT id FROM client_assignments WHERE client_id=? AND ends_at IS NULL',
+    ).bind(client.id).first()
+    let injected = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          await seedCollectedPaymentForCancellation(current)
+          await env.DB.prepare(`INSERT INTO record_versions
+            (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+             changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+            `ver_cancel_combined_${++sequence}`, 'client', assignment.id, 99, '{}',
+            OWNER.id, new Date(NOW_MS + 600).toISOString(), CORRELATION_ID,
+          ).run()
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    let failure
+    try { await cancel(current, { db }) } catch (error) { failure = error }
+    expect(failure?.message).toMatch(/core_directory_invariant_failed/)
+    expect(failure?.message).not.toBe('VERSION_CONFLICT')
+    expect(failure?.message).not.toBe('APPOINTMENT_PAYMENT_CONFLICT')
+    expect((await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE entity_id=? AND action='appointment.cancelled'`).bind(current.id).first()).count)
+      .toBe(0)
+  })
+
+  it('does not authenticate terminal corruption with an unrelated same-client cancellation key', async () => {
+    const client = await seedClient()
+    const target = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-11-06', time: '10:00',
+    } })).body.data.appointment
+    const unrelated = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-11-06', time: '12:00',
+    } })).body.data.appointment
+    await cancel(unrelated, { nowMs: NOW_MS + 500,
+      idempotencyKey: `appointment-cancel-unrelated-${sequence}` })
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(client.id).first()
+    const scope = clientKeyScope(client.id)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
+    })
+    const corruptedAt = new Date(NOW_MS + 500).toISOString()
+    const corruptedSnapshot = {
+      cancelledAt: corruptedAt, clientId: client.id, createdAt: target.createdAt,
+      endsAt: target.endsAt, id: target.id, location: target.location,
+      paymentAggregate: { collectedGrosze: 0, outstandingGrosze: 0, status: 'unpaid' },
+      schema: 'appointment.v1', serviceId: target.serviceId, source: target.source,
+      specialistId: target.specialistId, startsAt: target.startsAt, status: 'cancelled',
+      timeZone: target.timeZone, updatedAt: corruptedAt, version: 2,
+    }
+    const corruptedEnvelope = await encryptForScope(await ring(), dataKey, {
+      expectedScope: scope, recordId: target.id, field: 'record_version',
+      plaintext: JSON.stringify(corruptedSnapshot),
+    })
+    let injected = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          await env.DB.batch([
+            env.DB.prepare(`UPDATE appointments SET status='cancelled',version=2,
+              cancelled_at=?,updated_at=? WHERE id=? AND version=1`).bind(
+              corruptedAt, corruptedAt, target.id,
+            ),
+            env.DB.prepare(`INSERT INTO record_versions
+              (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+               changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+              `ver_cancel_terminal_corrupt_${++sequence}`, 'appointment', target.id, 2,
+              JSON.stringify(corruptedEnvelope), OWNER.id, corruptedAt, CORRELATION_ID,
+            ),
+            env.DB.prepare(`INSERT INTO audit_events
+              (id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
+               correlation_id,metadata_json,reason_envelope)
+              VALUES (?,?,?,?,?,?,?,?,?,NULL)`).bind(
+              `aud_cancel_terminal_corrupt_${sequence}`, corruptedAt, OWNER.id,
+              'appointment.cancelled', 'appointment', target.id, 'success',
+              CORRELATION_ID,
+              JSON.stringify({ appointmentVersion: 2, chargeVersion: 1 }),
+            ),
+          ])
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    await expect(cancel(target, { db, nowMs: NOW_MS + 1_000,
+      idempotencyKey: `appointment-cancel-terminal-corrupt-${sequence}` }))
+      .rejects.toThrow(/core_directory_invariant_failed/)
   })
 
   it('keeps replay client-scoped across retired, conflicting, and malformed scope state', async () => {
