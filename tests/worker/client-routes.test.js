@@ -36,6 +36,13 @@ beforeAll(async () => {
       (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
        specialist_id,version,activated_at,disabled_at,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_client_coord', 'lookup_client_coord', '{}', '{}', 'coordinator', 'active',
+      'access-client-coord', null, 1, instant, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
       'stf_client_target', 'lookup_client_target', '{}', '{}', 'owner', 'active',
       'access-client-target', 'sp_target', 1, instant, null, instant, instant,
     ),
@@ -50,6 +57,104 @@ beforeAll(async () => {
       VALUES (?,?,?,?,?,?,?,?)`).bind(
       'ver_client_target_specialist', 'specialist', 'sp_target', 1, '{}', null,
       instant, CORRELATION_ID,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_client_self', 'lookup_client_self', '{}', '{}', 'specialist', 'active',
+      'access-client-self', 'sp_client_self', 1, instant, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'sp_client_self', 'stf_client_self', 18000, 'active', 1, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'ver_client_self_specialist', 'specialist', 'sp_client_self', 1, '{}', null,
+      instant, CORRELATION_ID,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_client_pending', 'lookup_client_pending', '{}', '{}', 'specialist', 'pending',
+      null, 'sp_client_pending', 1, null, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'sp_client_pending', 'stf_client_pending', 18000, 'pending', 1, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_client_archived', 'lookup_client_archived', '{}', '{}', 'specialist', 'disabled',
+      'access-client-archived', 'sp_client_archived', 1, instant, instant, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'sp_client_archived', 'stf_client_archived', 18000, 'archived', 1, instant, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_client_disabled_active', 'lookup_client_disabled_active', '{}', '{}', 'owner', 'disabled',
+      'access-client-disabled-active', 'sp_client_disabled_active', 1, instant, instant, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'sp_client_disabled_active', 'stf_client_disabled_active', 18000, 'active', 1, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_client_pending_active', 'lookup_client_pending_active', '{}', '{}', 'owner', 'pending',
+      null, 'sp_client_pending_active', 1, null, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'sp_client_pending_active', 'stf_client_pending_active', 18000, 'active', 1, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_client_forward', 'lookup_client_forward', '{}', '{}', 'owner', 'active',
+      'access-client-forward', 'sp_client_forward_other', 1, instant, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'sp_client_forward', 'stf_client_forward', 18000, 'active', 1, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_client_backlink_pointer', 'lookup_client_backlink_pointer', '{}', '{}', 'owner', 'active',
+      'access-client-backlink-pointer', 'sp_client_backlink', 1, instant, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO staff_users
+      (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+       specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      'stf_client_backlink_profile', 'lookup_client_backlink_profile', '{}', '{}', 'owner', 'active',
+      'access-client-backlink-profile', null, 1, instant, null, instant, instant,
+    ),
+    env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?)`).bind(
+      'sp_client_backlink', 'stf_client_backlink_profile', 18000, 'active', 1, null, instant, instant,
     ),
   ])
 })
@@ -117,7 +222,7 @@ describe('persistent client creation', () => {
       idFactory,
       body: BODY,
       idempotencyKey: 'client-create-key-0001',
-    })).rejects.toThrow('FORBIDDEN')
+    })).rejects.toThrow('NOT_FOUND')
     expect(calls[0]).toContain('FROM idempotency_records')
     expect(calls[1]).toContain('FROM specialists')
     expect(idFactory).not.toHaveBeenCalled()
@@ -287,9 +392,119 @@ describe('persistent client creation', () => {
       body: { ...BODY, specialistId }, idempotencyKey: `client-role-${actor.role}-0001`,
     })
     if (allowed) await expect(operation).rejects.toThrow('CRYPTO_FAILURE')
-    else await expect(operation).rejects.toThrow('FORBIDDEN')
+    else await expect(operation).rejects.toThrow('NOT_FOUND')
     expect(calls).toHaveLength(2)
     expect(idFactory).toHaveBeenCalledTimes(allowed ? 6 : 0)
+  })
+
+  it('scopes the real D1 practitioner lookup and makes every opaque miss the same HTTP 404', async () => {
+    const opaque = [
+      ['missing', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_absent'],
+      ['guessed', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_guessed'],
+      ['pending profile', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_pending'],
+      ['archived profile', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_archived'],
+      ['disabled staff', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_disabled_active'],
+      ['pending staff', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_pending_active'],
+      ['forward mismatch', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_forward'],
+      ['backlink mismatch', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_backlink'],
+      ['other specialist', { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' }, 'sp_target'],
+    ]
+    const envelopes = []
+    for (const [label, actor, specialistId] of opaque) {
+      const idFactory = vi.fn(() => `forbidden_${label.replaceAll(' ', '_')}`)
+      let usage
+      const service = async (options) => {
+        try { return await createClient(options) } finally {
+          usage = usageForD1QueryBudgetViews(options.db, options.recoveryDb)
+        }
+      }
+      const app = createApp({
+        config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+        db: env.DB,
+        cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
+        resolveAccessPrincipal: vi.fn(async () => ({
+          kind: 'human', subject: `access-${label}`, normalizedEmail: `${label.replaceAll(' ', '-')}@example.test`,
+        })),
+        resolveActor: vi.fn(async () => ({ ...actor, version: 1 })),
+        verifyCsrfToken: vi.fn(async () => true),
+        readJsonBodyOnce: vi.fn(async (request) => request.json()),
+        createClient: service,
+        idFactory,
+        safeLog: vi.fn(),
+        now: () => NOW_MS,
+      })
+      const idempotencyKey = `client-opaque-${label.replaceAll(' ', '-')}-0001`
+      const response = await app.request('/api/v1/clients', {
+        method: 'POST',
+        headers: {
+          origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+          'idempotency-key': idempotencyKey, 'x-csrf-token': 'valid',
+          'x-correlation-id': CORRELATION_ID,
+        },
+        body: JSON.stringify({ ...BODY, specialistId }),
+      })
+      expect(response.status, label).toBe(404)
+      const envelope = await response.json()
+      expect(envelope, label).toEqual({
+        error: { code: 'NOT_FOUND', correlationId: CORRELATION_ID },
+      })
+      envelopes.push(envelope)
+      expect(usage, label).toEqual({
+        used: 2, remaining: 48, workRemaining: 40,
+        totalLimit: 50, recoveryReserve: 8,
+      })
+      expect(idFactory, label).not.toHaveBeenCalled()
+      expect(await env.DB.prepare(
+        'SELECT count(*) AS count FROM idempotency_records WHERE idempotency_key=?'
+      ).bind(idempotencyKey).first(), label).toEqual({ count: 0 })
+    }
+    expect(envelopes.every((value) => JSON.stringify(value) === JSON.stringify(envelopes[0])))
+      .toBe(true)
+  })
+
+  it.each([
+    ['owner', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_target'],
+    ['coordinator', { id: 'stf_client_coord', role: 'coordinator', specialistId: null }, 'sp_target'],
+    ['specialist', { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' }, 'sp_client_self'],
+  ])('allows %s through the real HTTP and D1 path for an exact active retained profile', async (label, actor, specialistId) => {
+    const ids = [`${label}_client`, `${label}_assignment`, `${label}_client_ver`,
+      `${label}_assignment_ver`, `${label}_audit`, `${label}_key`]
+    let usage
+    const service = async (options) => {
+      try { return await createClient(options) } finally {
+        usage = usageForD1QueryBudgetViews(options.db, options.recoveryDb)
+      }
+    }
+    const app = createApp({
+      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+      db: env.DB,
+      cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
+      resolveAccessPrincipal: vi.fn(async () => ({
+        kind: 'human', subject: `access-${label}-positive`, normalizedEmail: `${label}@example.test`,
+      })),
+      resolveActor: vi.fn(async () => ({ ...actor, version: 1 })),
+      verifyCsrfToken: vi.fn(async () => true),
+      readJsonBodyOnce: vi.fn(async (request) => request.json()),
+      createClient: service,
+      idFactory: vi.fn(() => ids.shift()),
+      safeLog: vi.fn(),
+      now: () => NOW_MS,
+    })
+    const response = await app.request('/api/v1/clients', {
+      method: 'POST',
+      headers: {
+        origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+        'idempotency-key': `client-positive-${label}-0001`, 'x-csrf-token': 'valid',
+        'x-correlation-id': CORRELATION_ID,
+      },
+      body: JSON.stringify({ ...BODY, specialistId }),
+    })
+    expect(response.status).toBe(201)
+    expect((await response.json()).data.client.assignment.specialistId).toBe(specialistId)
+    expect(usage).toEqual({
+      used: 10, remaining: 40, workRemaining: 32,
+      totalLimit: 50, recoveryReserve: 8,
+    })
   })
 
   it('rolls back every mutation statement position with no residue', async () => {

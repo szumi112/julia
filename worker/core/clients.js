@@ -40,6 +40,7 @@ const versionBuilder = createRecordVersionBuilder(ownership.consumer)
 
 const validation = (field) => { throw new TypeError(`VALIDATION_FAILED/${field}`) }
 const forbidden = () => { throw new Error('FORBIDDEN') }
+const notFound = () => { throw new Error('NOT_FOUND') }
 
 const captureExact = (value, keys, field = 'body') => {
   try {
@@ -136,18 +137,18 @@ const actorFact = (value) => {
 
 const practitionerFact = (value) => {
   try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) forbidden()
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) notFound()
     const descriptors = Object.getOwnPropertyDescriptors(value)
-    if (Reflect.ownKeys(descriptors).length !== 2) forbidden()
+    if (Reflect.ownKeys(descriptors).length !== 2) notFound()
     const id = descriptors.id
     const staff = descriptors.staff_user_id
     if (!id || !staff || !Object.hasOwn(id, 'value') || !Object.hasOwn(staff, 'value')
       || typeof id.value !== 'string' || !SPECIALIST_ID.test(id.value)
-      || typeof staff.value !== 'string' || !STAFF_ID.test(staff.value)) forbidden()
+      || typeof staff.value !== 'string' || !STAFF_ID.test(staff.value)) notFound()
     return Object.freeze({ id: id.value, staffUserId: staff.value })
   } catch (error) {
-    if (error instanceof Error && error.message === 'FORBIDDEN') throw error
-    forbidden()
+    if (error instanceof Error && error.message === 'NOT_FOUND') throw error
+    notFound()
   }
 }
 
@@ -292,15 +293,19 @@ const guardStatement = (db, values) => {
   )
 }
 
-const loadActivePractitioner = async (db, specialistId) => db.prepare(
+const loadActivePractitioner = async (db, specialistId, actor) => db.prepare(
   `SELECT specialist.id, specialist.staff_user_id
    FROM specialists AS specialist
    JOIN staff_users AS staff
      ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
    WHERE specialist.id=?
      AND specialist.status='active'
-     AND staff.status='active'`
-).bind(specialistId).first()
+     AND staff.status='active'
+     AND (
+       ? IN ('owner','coordinator')
+       OR (?='specialist' AND specialist.id=?)
+     )`
+).bind(specialistId, actor.role, actor.role, actor.specialistId).first()
 
 export async function createClient(input) {
   const command = captureCommand(input)
@@ -318,7 +323,7 @@ export async function createClient(input) {
   const replay = await inspectStoredScopeIdempotency(command.db, command.keyring, idem)
   if (replay) return validateCreateReplay(replay, command.body)
   const practitioner = practitionerFact(
-    await loadActivePractitioner(command.db, command.body.specialistId)
+    await loadActivePractitioner(command.db, command.body.specialistId, actor)
   )
   if (practitioner.id !== command.body.specialistId
     || !authorize(actor, 'client.manage', {
@@ -328,7 +333,7 @@ export async function createClient(input) {
         kind: 'client_assignment', clientId: PROSPECTIVE_CLIENT_ID,
         specialistId: command.body.specialistId, status: 'active',
       },
-    }, { nowMs: command.nowMs })) forbidden()
+    }, { nowMs: command.nowMs })) notFound()
 
   let now
   try { now = new Date(command.nowMs).toISOString() } catch { throw new Error('INTERNAL_ERROR') }
