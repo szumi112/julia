@@ -130,7 +130,8 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
 
 export function Team() {
   const { state } = useApp()
-  const { getViewState, openPsychForm, patchViewState } = useShell()
+  const { appMode, getViewState, openPsychForm, patchViewState } = useShell()
+  const isApp = appMode === 'app'
   const ref = useReveal()
   const now = useMinuteNow()
   const today = toISODate(now)
@@ -186,11 +187,11 @@ export function Team() {
             Obłożenie od poniedziałku do niedzieli{firstLoad ? ` · ${fmtDayMonth(firstLoad.start)} – ${fmtDayMonth(firstLoad.end)}` : ''}. Konflikty prowadzą prosto do właściwych sesji.
           </p>
         </div>
-        <div className="view-head__actions">
+        {!isApp && <div className="view-head__actions">
           <Button icon="plus" magnetic onClick={() => openPsychForm()}>
             Dodaj specjalistkę
           </Button>
-        </div>
+        </div>}
       </div>
 
       {state.psychologists.length === 0 && (
@@ -199,7 +200,7 @@ export function Team() {
             icon="team"
             title="Zespół jest jeszcze pusty"
             hint="Dodaj pierwszą specjalistkę, aby przypisywać jej klientów i sesje."
-            action={<Button size="sm" icon="plus" onClick={() => openPsychForm()}>Dodaj specjalistkę</Button>}
+            action={!isApp && <Button size="sm" icon="plus" onClick={() => openPsychForm()}>Dodaj specjalistkę</Button>}
           />
         </div>
       )}
@@ -250,7 +251,8 @@ export function Team() {
 
 export function PsychDetail({ params }) {
   const { state } = useApp()
-  const { openSessionForm, openPsychForm } = useShell()
+  const { appMode, openSessionForm, openPsychForm } = useShell()
+  const isApp = appMode === 'app'
   const ref = useReveal([params.id])
   const [debtOnly, setDebtOnly] = useState(false)
   const psych = state.psychologists.find((p) => p.id === params.id)
@@ -297,10 +299,10 @@ export function PsychDetail({ params }) {
             <Pill tone="amber">{fmtMoney(psych.rate)} / sesja</Pill>
           </div>
         </div>
-        <div className="id-band__actions">
+        {!isApp && <div className="id-band__actions">
           <Button variant="ghost" icon="edit" onClick={() => openPsychForm({ psych })}>Edytuj profil</Button>
           <Button icon="plus" onClick={() => openSessionForm({ psychId: psych.id })}>Nowa sesja</Button>
-        </div>
+        </div>}
       </div>
 
       <div className="stats-row stats-row--4">
@@ -393,20 +395,23 @@ export function PsychDetail({ params }) {
                 compact
                 icon="calendar"
                 title="Brak zaplanowanych sesji"
-                action={<Button size="sm" variant="soft" icon="plus" onClick={() => openSessionForm({ psychId: psych.id })}>Nowa sesja</Button>}
+                action={!isApp && <Button size="sm" variant="soft" icon="plus" onClick={() => openSessionForm({ psychId: psych.id })}>Nowa sesja</Button>}
               />
             )}
-            {upcoming.map((s) => (
-              <button key={s.id} className="agenda__row hover-row" style={{ width: '100%', textAlign: 'left' }}
-                onClick={() => openSessionForm({ session: s })}>
-                <span className="agenda__time">{s.time}</span>
-                <span className="agenda__main">
-                  <span className="agenda__client">{clientOf(s.clientId)?.name}</span>
-                  <span className="agenda__meta">{fmtDayMonth(s.date)} · {s.duration} min</span>
-                </span>
-                <Icon name="chevR" size={15} className="faint" />
-              </button>
-            ))}
+            {upcoming.map((s) => {
+              const Row = isApp ? 'div' : 'button'
+              return (
+                <Row key={s.id} className={`agenda__row ${isApp ? '' : 'hover-row'}`} style={{ width: '100%', textAlign: 'left' }}
+                  onClick={isApp ? undefined : () => openSessionForm({ session: s })}>
+                  <span className="agenda__time">{s.time}</span>
+                  <span className="agenda__main">
+                    <span className="agenda__client">{clientOf(s.clientId)?.name}</span>
+                    <span className="agenda__meta">{fmtDayMonth(s.date)} · {s.duration} min</span>
+                  </span>
+                  <Icon name="chevR" size={15} className="faint" />
+                </Row>
+              )
+            })}
           </div>
         </div>
       </div>

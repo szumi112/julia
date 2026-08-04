@@ -11,7 +11,7 @@ import { SERVICES, SERVICE_BY_ID, STANDARD_SERVICE, amountFor, durationFor } fro
 
 export function SessionDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
-  const { role, registerLeaveGuard } = useShell()
+  const { appMode, role, registerLeaveGuard } = useShell()
   const editing = opts.session || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
@@ -152,6 +152,7 @@ export function SessionDrawer({ opts, onClose }) {
 
   const submit = (e) => {
     e.preventDefault()
+    if (appMode === 'app') return
     const errs = {}
     if (!form.clientId) errs.clientId = 'Wybierz klienta'
     if (!form.psychId) errs.psychId = 'Wybierz specjalistkę'
@@ -205,12 +206,15 @@ export function SessionDrawer({ opts, onClose }) {
   }
 
   const remove = () => {
+    if (appMode === 'app') return
     dispatch({ type: 'DELETE_SESSION', id: editing.id })
     toast('Sesja usunięta', 'close')
     forceClose()
   }
 
   const client = state.clients.find((c) => c.id === form.clientId)
+
+  if (appMode === 'app') return null
 
   return (
     <>

@@ -12,7 +12,7 @@ const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export function ClientDrawer({ opts, onClose }) {
   const { state, dispatch, toast } = useApp()
-  const { route, navigate, role, registerLeaveGuard } = useShell()
+  const { appMode, route, navigate, role, registerLeaveGuard } = useShell()
   const editing = opts.client || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
@@ -55,6 +55,7 @@ export function ClientDrawer({ opts, onClose }) {
 
   const submit = (e) => {
     e.preventDefault()
+    if (appMode === 'app') return
     const errs = {}
     if (!form.name.trim()) errs.name = 'Podaj imię i nazwisko'
     if (!form.psychId) errs.psychId = 'Wybierz specjalistkę'
@@ -113,11 +114,14 @@ export function ClientDrawer({ opts, onClose }) {
   const debt = editing ? clientOutstanding(state.sessions, editing.id) : 0
 
   const remove = () => {
+    if (appMode === 'app') return
     dispatch({ type: 'DELETE_CLIENT', id: editing.id })
     toast('Klient usunięty z kartoteki', 'close')
     if (route.name === 'client' && route.params?.id === editing.id) navigate('clients')
     forceClose()
   }
+
+  if (appMode === 'app') return null
 
   return (
     <>

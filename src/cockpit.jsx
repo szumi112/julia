@@ -48,7 +48,8 @@ function useTodayModel() {
 
 function CockpitBody({ m, onClose }) {
   const { state } = useApp()
-  const { openSessionForm, openClientForm } = useShell()
+  const { appMode, openSessionForm, openClientForm } = useShell()
+  const isApp = appMode === 'app'
   const clientOf = (id) => state.clients.find((c) => c.id === id)
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
   const go = (fn) => { onClose(); fn() }
@@ -57,6 +58,7 @@ function CockpitBody({ m, onClose }) {
   const focusPsych = focus ? psychOf(focus.psychId) : null
   const total = m.total
   const pct = total ? Math.round((m.done / total) * 100) : 0
+  const FocusRow = isApp ? 'div' : 'button'
 
   return (
     <>
@@ -69,7 +71,7 @@ function CockpitBody({ m, onClose }) {
       </div>
 
       {focus ? (
-        <button className="cockpit__next" onClick={() => go(() => openSessionForm({ session: focus }))}>
+        <FocusRow className="cockpit__next" onClick={isApp ? undefined : () => go(() => openSessionForm({ session: focus }))}>
           <span className="cockpit__next-time">{focus.time}</span>
           <span className="cockpit__next-main">
             <b>{clientOf(focus.clientId)?.name}</b>
@@ -83,16 +85,16 @@ function CockpitBody({ m, onClose }) {
               ? `trwa · do ${minToTime(timeToMin(focus.time) + focus.duration)}`
               : untilLabel(timeToMin(focus.time) - m.nowMin)}
           </span>
-        </button>
+        </FocusRow>
       ) : m.future ? (
-        <button className="cockpit__next" onClick={() => go(() => openSessionForm({ session: m.future }))}>
+        <FocusRow className="cockpit__next" onClick={isApp ? undefined : () => go(() => openSessionForm({ session: m.future }))}>
           <span className="cockpit__next-time">{m.future.time}</span>
           <span className="cockpit__next-main">
             <b>{clientOf(m.future.clientId)?.name}</b>
             <span><span className="cockpit__next-sub">najbliższa sesja · {fmtDayMonth(m.future.date)}</span></span>
           </span>
           <Icon name="chevR" size={15} className="faint" />
-        </button>
+        </FocusRow>
       ) : (
         <EmptyState compact icon="sparkle" title="Brak zaplanowanych sesji" hint="Kalendarz jest wolny — czas na oddech." />
       )}
@@ -121,18 +123,19 @@ function CockpitBody({ m, onClose }) {
               const nowHere = !m.running &&
                 timeToMin(s.time) > m.nowMin &&
                 (i === 0 || timeToMin(m.todays[i - 1].time) <= m.nowMin)
+              const Row = isApp ? 'div' : 'button'
               return (
                 <Fragment key={s.id}>
                   {nowHere && <div className="spine__now" aria-hidden="true">teraz</div>}
-                  <button
+                  <Row
                     className={`spine__row ${s.status === 'completed' ? 'is-done' : ''} ${live ? 'is-live' : ''}`}
                     style={{ '--node-color': p?.color }}
-                    onClick={() => go(() => openSessionForm({ session: s }))}
+                    onClick={isApp ? undefined : () => go(() => openSessionForm({ session: s }))}
                   >
                     <span className="spine__time">{s.time}</span>
                     <span className="spine__name">{clientOf(s.clientId)?.name}</span>
                     <Icon name={s.status === 'completed' ? 'check' : live ? 'wave' : 'clock'} size={14} className="faint" />
-                  </button>
+                  </Row>
                 </Fragment>
               )
             })}
@@ -157,12 +160,12 @@ function CockpitBody({ m, onClose }) {
       ))}
 
       <div className="cockpit__actions">
-        <Button size="sm" icon="plus" onClick={() => go(() => openSessionForm({ date: m.today }))}>
+        {!isApp && <Button size="sm" icon="plus" onClick={() => go(() => openSessionForm({ date: m.today }))}>
           Nowa sesja
-        </Button>
-        <Button size="sm" variant="soft" icon="user" onClick={() => go(() => openClientForm())}>
+        </Button>}
+        {!isApp && <Button size="sm" variant="soft" icon="user" onClick={() => go(() => openClientForm())}>
           Nowy klient
-        </Button>
+        </Button>}
         <EntityLink route="calendar" className="btn btn--ghost btn--sm" onClick={onClose}>
           <Icon name="calendar" size={17} />
           <span>Kalendarz</span>

@@ -428,9 +428,11 @@ function MobileTabbar({ route, navigate, onAdd, onMenu }) {
       <div className="tabbar__side">
         {PHONE_TABS.slice(0, 2).map(tab)}
       </div>
-      <button className="tabbar__fab" onClick={onAdd} aria-label="Nowa sesja">
-        <Icon name="plus" size={22} />
-      </button>
+      {onAdd && (
+        <button className="tabbar__fab" onClick={onAdd} aria-label="Nowa sesja">
+          <Icon name="plus" size={22} />
+        </button>
+      )}
       <div className="tabbar__side">
         {PHONE_TABS.slice(2).map(tab)}
         <button
@@ -904,9 +906,21 @@ export function Shell({
     }
     setRoleMenuOpen(open)
   }, [])
-  const openSessionForm = useCallback((opts = {}) => { setDrawer({ kind: 'session', opts }); openOverlay('drawer') }, [openOverlay])
-  const openClientForm = useCallback((opts = {}) => { setDrawer({ kind: 'client', opts }); openOverlay('drawer') }, [openOverlay])
-  const openPsychForm = useCallback((opts = {}) => { setDrawer({ kind: 'psych', opts }); openOverlay('drawer') }, [openOverlay])
+  const openSessionForm = useCallback((opts = {}) => {
+    if (isApp) return
+    setDrawer({ kind: 'session', opts })
+    openOverlay('drawer')
+  }, [isApp, openOverlay])
+  const openClientForm = useCallback((opts = {}) => {
+    if (isApp) return
+    setDrawer({ kind: 'client', opts })
+    openOverlay('drawer')
+  }, [isApp, openOverlay])
+  const openPsychForm = useCallback((opts = {}) => {
+    if (isApp) return
+    setDrawer({ kind: 'psych', opts })
+    openOverlay('drawer')
+  }, [isApp, openOverlay])
   const openTusGroupForm = useCallback((opts = {}) => { setDrawer({ kind: 'tusGroup', opts }); openOverlay('drawer') }, [openOverlay])
   const openTusKidForm = useCallback((opts = {}) => { setDrawer({ kind: 'tusKid', opts }); openOverlay('drawer') }, [openOverlay])
   const openTusClassForm = useCallback((opts = {}) => { setDrawer({ kind: 'tusClass', opts }); openOverlay('drawer') }, [openOverlay])
@@ -1020,7 +1034,7 @@ export function Shell({
           <MobileTabbar
             route={route}
             navigate={navigate}
-            onAdd={openNewSession}
+            onAdd={isApp ? undefined : openNewSession}
             onMenu={openNavigation}
           />
         </div>
@@ -1038,9 +1052,9 @@ export function Shell({
           onClose={closeNavigation}
         />
       )}
-      {overlay === 'drawer' && drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {overlay === 'drawer' && drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {overlay === 'drawer' && drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {!isApp && overlay === 'drawer' && drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {!isApp && overlay === 'drawer' && drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {!isApp && overlay === 'drawer' && drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'tusGroup' && <TusGroupDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'tusKid' && <TusKidDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'tusClass' && <TusClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
