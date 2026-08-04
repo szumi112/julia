@@ -4,6 +4,7 @@ import {
   createApiWorkspaceRepository,
   createDemoWorkspaceRepository,
 } from '../../src/workspace-repository.js'
+import { warsawDateFromUtc } from '../../src/core-records.js'
 
 const METHODS = [
   'archiveClient', 'cancelAppointment', 'correctPayment', 'createAppointment',
@@ -199,7 +200,7 @@ test('demo client lifecycle dispatches legacy actions and keeps core IDs and ver
   assert.equal(created.version, 1)
   assert.deepEqual(harness.actions[0], {
     type: 'ADD_CLIENT',
-    client: { name: 'Ola Nowak', age: 12, status: 'active', psychId: 'p1', since: created.createdAt.slice(0, 10), email: '', phone: '', notes: [], familyId: null, familyRole: null },
+    client: { name: 'Ola Nowak', age: 12, status: 'active', psychId: 'p1', since: warsawDateFromUtc(created.createdAt), email: '', phone: '', notes: [], familyId: null, familyRole: null },
   })
   const edited = await repository.editClient(created.id, 1, clientInput({ name: 'Ola Kowalska', specialistId: 'sp_demo_p2' }))
   assert.equal(edited.version, 2)
