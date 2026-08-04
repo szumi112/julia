@@ -153,6 +153,34 @@ describe('stored-client-scope idempotency', () => {
     }])
   })
 
+  it.each([undefined, false, 0, '', NaN])(
+    'treats the non-null first() result %s as malformed in inspect and recovery',
+    async (malformed) => {
+      const input = await baseInput(`absence_${String(malformed)}`.replaceAll('NaN', 'nan'))
+      for (const recovery of [false, true]) {
+        let queries = 0
+        let mutations = 0
+        const db = {
+          prepare: () => ({
+            bind: () => ({
+              first: async () => { queries += 1; return malformed },
+              run: async () => { mutations += 1 },
+            }),
+          }),
+          batch: async () => { mutations += 1 },
+        }
+        const operation = recovery
+          ? recoverStoredScopeIdempotencyAfterCollision(
+            db, {}, input, collision(),
+          )
+          : inspectStoredScopeIdempotency(db, {}, input)
+        await expectCryptoFailure(operation)
+        expect(queries).toBe(1)
+        expect(mutations).toBe(0)
+      }
+    },
+  )
+
   it('captures only exact data properties and rejects every mixed or hostile input before D1', async () => {
     const valid = await baseInput('input')
     let prepares = 0
@@ -241,6 +269,59 @@ describe('stored-client-scope idempotency', () => {
       ...winner.input,
       requestDigest: await digestFor('different-request'),
     })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+    expect(observed.calls).toHaveLength(2)
+    expect(observed.mutations()).toBe(0)
+  })
+
+  it('authenticates and validates the response before deciding a valid digest conflict', async () => {
+    const winner = await storeWinner('conflict_response')
+    const recordId = await recordIdFor(winner.input)
+    const malformedPlaintext = JSON.stringify(await encryptForScope(
+      winner.keyring, winner.built.row, {
+        expectedScope: winner.built.scope,
+        recordId,
+        field: 'idempotency_response',
+        plaintext: 'not-json',
+      },
+    ))
+    const different = {
+      ...winner.input,
+      requestDigest: await digestFor('different-conflict-response-request'),
+    }
+    for (const response_envelope of [
+      tamperEnvelope((await env.DB.prepare(
+        'SELECT response_envelope FROM idempotency_records WHERE actor_id=? AND operation=? AND idempotency_key=?'
+      ).bind(
+        winner.input.actorId, winner.input.operation, winner.input.idempotencyKey,
+      ).first()).response_envelope),
+      malformedPlaintext,
+    ]) {
+      const observed = observeDb({ mapRow: (row) => ({ ...row, response_envelope }) })
+      await expectCryptoFailure(inspectStoredScopeIdempotency(
+        observed.db, winner.keyring, different,
+      ))
+      expect(observed.calls).toHaveLength(2)
+      expect(observed.mutations()).toBe(0)
+    }
+  })
+
+  it('rejects authenticated malformed stored digest plaintext as crypto corruption', async () => {
+    const winner = await storeWinner('malformed_digest')
+    const recordId = await recordIdFor(winner.input)
+    const malformedDigest = JSON.stringify(await encryptForScope(
+      winner.keyring, winner.built.row, {
+        expectedScope: winner.built.scope,
+        recordId,
+        field: 'idempotency_request_hash',
+        plaintext: 'authenticated-but-not-a-sha256-digest',
+      },
+    ))
+    const observed = observeDb({
+      mapRow: (row) => ({ ...row, request_hash: malformedDigest }),
+    })
+    await expectCryptoFailure(inspectStoredScopeIdempotency(
+      observed.db, winner.keyring, winner.input,
+    ))
     expect(observed.calls).toHaveLength(2)
     expect(observed.mutations()).toBe(0)
   })

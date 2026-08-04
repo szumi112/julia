@@ -437,7 +437,7 @@ async function inspectStoredScopeRow(db, keyring, opaqueRow, input) {
       field: 'idempotency_request_hash',
       envelope: requestEnvelope,
     })
-    if (storedDigest !== input.requestDigest) throw conflict
+    canonicalCoreDigest(storedDigest)
     const responsePlaintext = await decryptForScope(keyring, dataKey, {
       expectedScope,
       recordId,
@@ -449,7 +449,9 @@ async function inspectStoredScopeRow(db, keyring, opaqueRow, input) {
       || !Number.isSafeInteger(response.status)
       || response.status < 200 || response.status > 299
       || canonicalJson(response) !== responsePlaintext) storedCryptoFailure()
-    return Object.freeze({ status: response.status, body: canonicalize(response.body) })
+    const replay = Object.freeze({ status: response.status, body: canonicalize(response.body) })
+    if (storedDigest !== input.requestDigest) throw conflict
+    return replay
   } catch (error) {
     if (error === conflict) throw error
     storedCryptoFailure()
@@ -459,7 +461,7 @@ async function inspectStoredScopeRow(db, keyring, opaqueRow, input) {
 export async function inspectStoredScopeIdempotency(db, keyring, input) {
   const captured = captureStoredScopeInput(input)
   const row = await exactStoredScopeRow(db, captured)
-  return row ? inspectStoredScopeRow(db, keyring, row, captured) : null
+  return row === null ? null : inspectStoredScopeRow(db, keyring, row, captured)
 }
 
 export async function recoverStoredScopeIdempotencyAfterCollision(
@@ -470,6 +472,6 @@ export async function recoverStoredScopeIdempotencyAfterCollision(
   if (!collision) throw originalError
   const captured = captureStoredScopeInput(input)
   const row = await exactStoredScopeRow(db, captured)
-  if (!row) throw originalError
+  if (row === null) throw originalError
   return inspectStoredScopeRow(db, keyring, row, captured)
 }
