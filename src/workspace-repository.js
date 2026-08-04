@@ -5,6 +5,8 @@ import {
   assertCivilDate,
   assertCorrectionReason,
   assertId,
+  assertLocation,
+  assertWallTime,
   clientDto,
   paymentAggregate,
   specialistDto,
@@ -17,6 +19,7 @@ import {
   warsawNoonToUtc,
 } from './core-records.js'
 import { isBillable } from './format.js'
+import { SERVICE_BY_ID } from './services.js'
 
 const API_METHODS = Object.freeze([
   'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
@@ -38,6 +41,10 @@ const CORRECTION_KEYS = Object.freeze(['reason', 'replacement'])
 const STATE_KEYS = Object.freeze(['psychologists', 'clients', 'sessions'])
 const collator = new Intl.Collator('pl-PL', { sensitivity: 'base', usage: 'sort' })
 const actionKey = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
+const legacyIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const demoStatuses = new Set(['scheduled', 'completed', 'cancelled', 'noshow'])
+const demoPaymentStatuses = new Set(['paid', 'partial', 'unpaid'])
+const demoMethods = new Set(['cash', 'card', 'transfer', 'monthly'])
 
 const fail = (field, code = 'VALIDATION_FAILED') => {
   throw new TypeError(`${code}/${field}`)
@@ -62,7 +69,8 @@ const captureRecord = (value, keys, field, { allowAdditional = false } = {}) => 
     }
     return captured
   } catch (error) {
-    if (error instanceof TypeError && String(error.message).startsWith('VALIDATION_FAILED/')) throw error
+    if (error instanceof TypeError && typeof error.message === 'string'
+      && error.message.startsWith('VALIDATION_FAILED/')) throw error
     fail(field)
   }
 }
@@ -73,8 +81,15 @@ const captureFunctionRecord = (value, keys, field) => {
   return captured
 }
 
-const positiveVersion = (value) => {
+const appointmentVersion = (value) => {
   if (!Number.isSafeInteger(value) || value < 1 || value >= 4_096) fail('expectedVersion')
+  return value
+}
+
+const clientVersion = (value) => {
+  if (!Number.isSafeInteger(value) || value < 1 || value >= Number.MAX_SAFE_INTEGER) {
+    fail('expectedVersion')
+  }
   return value
 }
 
@@ -149,13 +164,13 @@ export function createApiWorkspaceRepository(options) {
     },
     async editClient(id, expectedVersion, input) {
       capturedId(id, 'client')
-      positiveVersion(expectedVersion)
+      clientVersion(expectedVersion)
       const requested = captureClient(input)
       return action((options) => api.editClient(id, expectedVersion, requested, options))
     },
     async archiveClient(id, expectedVersion) {
       capturedId(id, 'client')
-      positiveVersion(expectedVersion)
+      clientVersion(expectedVersion)
       return action((options) => api.archiveClient(id, expectedVersion, options))
     },
     async createAppointment(input) {
@@ -164,18 +179,18 @@ export function createApiWorkspaceRepository(options) {
     },
     async editAppointment(id, expectedVersion, input) {
       capturedId(id, 'appointment')
-      positiveVersion(expectedVersion)
+      appointmentVersion(expectedVersion)
       const requested = captureAppointmentEdit(input)
       return action((options) => api.editAppointment(id, expectedVersion, requested, options))
     },
     async cancelAppointment(id, expectedVersion) {
       capturedId(id, 'appointment')
-      positiveVersion(expectedVersion)
+      appointmentVersion(expectedVersion)
       return action((options) => api.cancelAppointment(id, expectedVersion, options))
     },
     async recordPayment(id, expectedVersion, input) {
       capturedId(id, 'appointment')
-      positiveVersion(expectedVersion)
+      appointmentVersion(expectedVersion)
       const requested = capturePayment(input)
       const canonical = validatePaymentInput({
         amountGrosze: requested.amountGrosze,
@@ -186,7 +201,7 @@ export function createApiWorkspaceRepository(options) {
     },
     async correctPayment(id, expectedVersion, input) {
       capturedId(id, 'payment')
-      positiveVersion(expectedVersion)
+      appointmentVersion(expectedVersion)
       const requested = captureCorrection(input)
       const canonical = {
         reason: requested.reason,
@@ -221,6 +236,69 @@ const legacyRecord = (value, required, field) => captureRecord(
   value, required, field, { allowAdditional: true },
 )
 
+const assertLegacyId = (value, field) => {
+  if (typeof value !== 'string' || !legacyIdPattern.test(value)) fail(field)
+  return value
+}
+
+const groszeFromLegacy = (value, field) => {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) fail(field)
+  const grosze = value * 100
+  if (!Number.isSafeInteger(grosze) || grosze > 1_000_000) fail(field)
+  return grosze
+}
+
+const captureLegacySpecialist = (raw) => {
+  const item = legacyRecord(raw, ['id', 'name', 'rate'], 'specialist')
+  assertLegacyId(item.id, 'specialist')
+  if (typeof item.name !== 'string') fail('specialist')
+  groszeFromLegacy(item.rate, 'specialist')
+  if (item.status !== undefined && item.status !== 'active' && item.status !== 'inactive') {
+    fail('specialist')
+  }
+  return item
+}
+
+const captureLegacyClient = (raw) => {
+  const item = legacyRecord(raw, ['id', 'name', 'age', 'psychId', 'since', 'status'], 'client')
+  assertLegacyId(item.id, 'client')
+  assertLegacyId(item.psychId, 'client')
+  assertCivilDate(item.since, 'client')
+  validateClientInput({
+    name: item.name, age: item.age, status: item.status,
+    specialistId: demoId('sp', item.psychId),
+  })
+  return item
+}
+
+const captureLegacyAppointment = (raw) => {
+  const item = legacyRecord(raw, [
+    'id', 'clientId', 'psychId', 'service', 'date', 'time', 'duration', 'amount',
+    'status', 'payment', 'method',
+  ], 'appointment')
+  assertLegacyId(item.id, 'appointment')
+  assertLegacyId(item.clientId, 'appointment')
+  assertLegacyId(item.psychId, 'appointment')
+  if (!demoStatuses.has(item.status) || !demoPaymentStatuses.has(item.payment)) fail('appointment')
+  const expectedAmountGrosze = groszeFromLegacy(item.amount, 'appointment')
+  const location = item.location === undefined ? null : assertLocation(item.location)
+  assertCivilDate(item.date, 'appointment')
+  assertWallTime(item.time, 'appointment')
+  if (typeof item.service !== 'string' || !SERVICE_BY_ID[item.service]
+    || !Number.isSafeInteger(item.duration)
+    || item.duration !== SERVICE_BY_ID[item.service].duration) fail('appointment')
+  const paidAmount = item.paidAmount === undefined ? 0 : item.paidAmount
+  if (typeof paidAmount !== 'number' || !Number.isFinite(paidAmount) || paidAmount < 0) {
+    fail('appointment')
+  }
+  const paidGrosze = Math.round(paidAmount * 100)
+  if (!Number.isSafeInteger(paidGrosze)
+    || Math.abs(paidAmount - paidGrosze / 100) > Number.EPSILON * 100) fail('appointment')
+  if (item.method !== null && !demoMethods.has(item.method)) fail('appointment')
+  if (item.paidDate !== undefined && item.paidDate !== null) assertCivilDate(item.paidDate, 'appointment')
+  return { ...item, expectedAmountGrosze, location, paidAmount }
+}
+
 const initialInstant = (date) => warsawNoonToUtc(assertCivilDate(date, 'date'))
 const sameClientRequest = (pending, item) => pending !== null
   && pending.name === item.name && pending.age === item.age
@@ -230,6 +308,7 @@ const sameAppointmentRequest = (pending, item) => pending !== null
   && pending.service === item.service && pending.date === item.date
   && pending.time === item.time && pending.duration === item.duration
   && pending.amount === item.amount && pending.status === item.status
+  && pending.location === item.location
 
 export function createDemoWorkspaceRepository(options) {
   const dependencies = captureFunctionRecord(options, ['dispatch', 'getState'], 'repository')
@@ -249,24 +328,27 @@ export function createDemoWorkspaceRepository(options) {
   }
 
   const syncDirectories = (state) => {
+    const liveSpecialists = new Map()
     for (const raw of state.psychologists) {
-      const item = legacyRecord(raw, ['id', 'name', 'rate'], 'specialist')
-      if (typeof item.id !== 'string' || item.id.length === 0) fail('specialist')
+      const item = captureLegacySpecialist(raw)
+      if (item.status === 'inactive') continue
       const coreId = demoId('sp', item.id)
-      specialists.set(coreId, { legacyId: item.id })
+      if (liveSpecialists.has(coreId)) fail('specialist')
+      liveSpecialists.set(coreId, { legacyId: item.id })
     }
+    specialists.clear()
+    for (const [id, value] of liveSpecialists) specialists.set(id, value)
+
+    const liveClientIds = new Set()
     for (const raw of state.clients) {
-      const item = legacyRecord(raw, ['id', 'name', 'age', 'psychId', 'since', 'status'], 'client')
-      if (typeof item.id !== 'string' || item.id.length === 0) fail('client')
+      const item = captureLegacyClient(raw)
+      if (liveClientIds.has(item.id)) fail('client')
+      liveClientIds.add(item.id)
       const existing = [...clients.entries()].find(([, meta]) => meta.legacyId === item.id)
       if (!existing) {
         const awaiting = [...clients.values()].find((meta) => meta.legacyId === null
-          && sameClientRequest(meta.pending, item))
-        if (awaiting) {
-          awaiting.legacyId = item.id
-          awaiting.pending = null
-          continue
-        }
+          && !meta.pending.knownIds.has(item.id) && sameClientRequest(meta.pending, item))
+        if (awaiting) continue
         if (clients.size >= 200) fail('clients')
         const coreId = demoId('cl', item.id)
         const createdAt = initialInstant(item.since)
@@ -277,21 +359,20 @@ export function createDemoWorkspaceRepository(options) {
         })
       }
     }
+    for (const [id, meta] of clients) {
+      if (meta.legacyId !== null && !liveClientIds.has(meta.legacyId)) clients.delete(id)
+    }
+
+    const liveAppointmentIds = new Set()
     for (const raw of state.sessions) {
-      const item = legacyRecord(raw, [
-        'id', 'clientId', 'psychId', 'service', 'date', 'time', 'duration', 'amount',
-        'status', 'payment', 'method',
-      ], 'appointment')
-      if (typeof item.id !== 'string' || item.id.length === 0) fail('appointment')
+      const item = captureLegacyAppointment(raw)
+      if (liveAppointmentIds.has(item.id)) fail('appointment')
+      liveAppointmentIds.add(item.id)
       const existing = [...appointments.entries()].find(([, meta]) => meta.legacyId === item.id)
       if (!existing) {
         const awaiting = [...appointments.values()].find((meta) => meta.legacyId === null
-          && sameAppointmentRequest(meta.pending, item))
-        if (awaiting) {
-          awaiting.legacyId = item.id
-          awaiting.pending = null
-          continue
-        }
+          && !meta.pending.knownIds.has(item.id) && sameAppointmentRequest(meta.pending, item))
+        if (awaiting) continue
         if (appointments.size >= 500) fail('appointments')
         const coreId = demoId('apt', item.id)
         const createdAt = warsawDateTimeToUtc(item.date, item.time)
@@ -300,17 +381,23 @@ export function createDemoWorkspaceRepository(options) {
           updatedAt: createdAt, cancelledAt: item.status === 'cancelled' ? createdAt : null,
           entries: [], corrections: [], pending: null,
         }
-        const paidAmount = Number(item.paidAmount) || 0
+        const paidAmount = item.paidAmount
         if (paidAmount > 0) {
           const paymentId = demoId('pay', `${item.id}_1`)
           const receivedAt = initialInstant(typeof item.paidDate === 'string' ? item.paidDate : item.date)
           meta.entries.push({
-            id: paymentId, appointmentId: coreId, amountGrosze: Math.round(paidAmount * 100),
+            id: paymentId, appointmentId: coreId, amountGrosze: paidAmount * 100,
             method: item.method, receivedAt,
           })
           payments.set(paymentId, { appointmentId: coreId, entryIndex: 0 })
         }
         appointments.set(coreId, meta)
+      }
+    }
+    for (const [id, meta] of appointments) {
+      if (meta.legacyId !== null && !liveAppointmentIds.has(meta.legacyId)) {
+        for (const entry of meta.entries) payments.delete(entry.id)
+        appointments.delete(id)
       }
     }
   }
@@ -347,21 +434,75 @@ export function createDemoWorkspaceRepository(options) {
   }
 
   const assertVersion = (actual, expected) => {
-    positiveVersion(expected)
+    appointmentVersion(expected)
     if (actual !== expected) fail('expectedVersion', 'VERSION_CONFLICT')
   }
 
+  const assertDemoClientVersion = (actual, expected) => {
+    clientVersion(expected)
+    if (actual !== expected) fail('expectedVersion', 'VERSION_CONFLICT')
+  }
+
+  const observeState = async ({ area, before, inspect }) => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const state = currentState()
+      const accepted = inspect(state)
+      if (accepted !== null) return accepted
+      if (state[area] !== before) fail('state', 'DEMO_STATE_MISMATCH')
+      if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    fail('state', 'DEMO_STATE_NOT_APPLIED')
+  }
+
+  const matchesClient = (item, requested, psychId) => item.name === requested.name
+    && item.age === requested.age && item.status === requested.status
+    && item.psychId === psychId
+
+  const matchesAppointment = (item, requested, clientId, psychId) => item.clientId === clientId
+    && item.psychId === psychId && item.service === requested.serviceId
+    && item.date === requested.date && item.time === requested.time
+    && item.duration === requested.durationMinutes
+    && item.expectedAmountGrosze === requested.expectedAmountGrosze
+    && item.location === requested.location && item.status === requested.status
+
+  const matchesPaymentPatch = (item, patch) => item.payment === patch.payment
+    && item.paidAmount === patch.paidAmount && item.method === patch.method
+    && item.paidDate === patch.paidDate
+
+  const createdClient = (state, meta) => {
+    const matches = state.clients.map(captureLegacyClient).filter((item) => (
+      !meta.pending.knownIds.has(item.id)
+      && sameClientRequest(meta.pending, item)
+    ))
+    if (matches.length !== 1) return null
+    meta.legacyId = matches[0].id
+    meta.pending = null
+    return matches[0]
+  }
+
+  const createdAppointment = (state, meta) => {
+    const matches = state.sessions.map(captureLegacyAppointment).filter((item) => (
+      !meta.pending.knownIds.has(item.id)
+      && sameAppointmentRequest(meta.pending, item)
+    ))
+    if (matches.length !== 1) return null
+    meta.legacyId = matches[0].id
+    meta.pending = null
+    return matches[0]
+  }
+
   const specialistProjection = (raw) => {
-    const item = legacyRecord(raw, ['id', 'name', 'rate'], 'specialist')
+    const item = captureLegacySpecialist(raw)
+    if (item.status === 'inactive') fail('specialist')
     return specialistDto({
       id: demoId('sp', item.id), displayName: item.name,
-      standardRateGrosze: Math.round(item.rate * 100), status: 'active',
+      standardRateGrosze: groszeFromLegacy(item.rate, 'specialist'), status: 'active',
       version: 1, staffVersion: 1,
     })
   }
 
   const clientProjection = (coreId, raw, meta) => {
-    const item = legacyRecord(raw, ['name', 'age', 'psychId', 'status'], 'client')
+    const item = captureLegacyClient(raw)
     const archived = meta.archivedAt !== null
     return clientDto({
       id: coreId, name: item.name, age: item.age,
@@ -376,12 +517,10 @@ export function createDemoWorkspaceRepository(options) {
   }
 
   const appointmentProjection = (coreId, raw, meta) => {
-    const item = legacyRecord(raw, [
-      'clientId', 'psychId', 'service', 'date', 'time', 'duration', 'amount', 'status',
-    ], 'appointment')
+    const item = captureLegacyAppointment(raw)
     const startsAt = warsawDateTimeToUtc(item.date, item.time)
     const status = meta.cancelledAt === null ? item.status : 'cancelled'
-    const expectedAmountGrosze = Math.round(item.amount * 100)
+    const expectedAmountGrosze = item.expectedAmountGrosze
     const payment = paymentAggregate({
       appointmentId: coreId, status, expectedAmountGrosze,
       paymentEntries: meta.entries, corrections: meta.corrections,
@@ -400,7 +539,7 @@ export function createDemoWorkspaceRepository(options) {
     return deepFreeze({
       id: coreId, clientId: demoId('cl', item.clientId), specialistId: demoId('sp', item.psychId),
       serviceId: item.service, startsAt, endsAt: addElapsedMinutes(startsAt, item.duration),
-      timeZone: 'Europe/Warsaw', location: null, status, source: 'panel',
+      timeZone: 'Europe/Warsaw', location: item.location, status, source: 'panel',
       version: meta.version, cancelledAt: meta.cancelledAt, createdAt: meta.createdAt,
       updatedAt: meta.updatedAt,
       charge: { id: `chg_${coreId.slice(4)}`, serviceId: item.service, expectedAmountGrosze, currency: 'PLN', version: meta.chargeVersion },
@@ -410,7 +549,7 @@ export function createDemoWorkspaceRepository(options) {
 
   function findClient(state, meta) {
     for (const raw of state.clients) {
-      const item = legacyRecord(raw, ['id'], 'client')
+      const item = captureLegacyClient(raw)
       if (item.id === meta.legacyId) return item
     }
     return undefined
@@ -418,24 +557,17 @@ export function createDemoWorkspaceRepository(options) {
 
   function findAppointment(state, meta) {
     for (const raw of state.sessions) {
-      const item = legacyRecord(raw, ['id'], 'appointment')
+      const item = captureLegacyAppointment(raw)
       if (item.id === meta.legacyId) return item
     }
     return undefined
   }
 
-  const locateAdded = (before, after, key) => {
-    const ids = new Set(before.map((item) => legacyRecord(item, ['id'], key).id))
-    const added = after.map((item) => legacyRecord(item, ['id'], key))
-      .filter((item) => !ids.has(item.id))
-    if (added.length > 1) fail(key)
-    return added[0] ?? null
-  }
-
   const patchAggregate = (coreId, raw, meta) => {
-    const amount = Math.round(Number(raw.amount) * 100)
+    const item = captureLegacyAppointment(raw)
+    const amount = item.expectedAmountGrosze
     const aggregate = paymentAggregate({
-      appointmentId: coreId, status: raw.status, expectedAmountGrosze: amount,
+      appointmentId: coreId, status: item.status, expectedAmountGrosze: amount,
       paymentEntries: meta.entries, corrections: meta.corrections,
     })
     return {
@@ -476,41 +608,59 @@ export function createDemoWorkspaceRepository(options) {
       const state = currentState()
       const psychId = legacySpecialist(requested.specialistId)
       if (clients.size >= 200) fail('clients')
-      const before = [...state.clients]
+      const before = state.clients
       const createdAt = commandInstant()
-      dispatch({
-        type: 'ADD_CLIENT',
-        client: {
-          name: requested.name, age: requested.age, status: requested.status, psychId,
-          since: legacyDate(createdAt), email: '', phone: '', notes: [], familyId: null,
-          familyRole: null,
-        },
-      })
-      const after = stateSnapshot(getState)
-      const added = locateAdded(before, after.clients, 'client')
-      const coreId = newId('cl', ++clientSequence)
+      const coreId = newId('cl', clientSequence + 1)
       const meta = {
-        legacyId: added?.id ?? null, version: 1, createdAt, updatedAt: createdAt,
+        legacyId: null, version: 1, createdAt, updatedAt: createdAt,
         archivedAt: null, assignmentId: `asg_${coreId.slice(3)}`,
         assignmentStartsAt: createdAt, assignmentVersion: 1,
-        pending: added ? null : { ...requested, psychId },
+        pending: {
+          ...requested, psychId,
+          knownIds: new Set(state.clients.map((item) => captureLegacyClient(item).id)),
+        },
       }
       clients.set(coreId, meta)
-      const projected = added ?? { ...requested, psychId }
-      return deepFreeze(clientProjection(coreId, projected, meta))
+      try {
+        dispatch({
+          type: 'ADD_CLIENT',
+          client: {
+            name: requested.name, age: requested.age, status: requested.status, psychId,
+            since: legacyDate(createdAt), email: '', phone: '', notes: [], familyId: null,
+            familyRole: null,
+          },
+        })
+        const added = await observeState({
+          area: 'clients', before,
+          inspect: (next) => createdClient(next, meta),
+        })
+        clientSequence += 1
+        return deepFreeze(clientProjection(coreId, added, meta))
+      } catch (error) {
+        clients.delete(coreId)
+        throw error
+      }
     },
     async editClient(id, expectedVersion, input) {
       const requested = captureClient(input)
       const state = currentState()
       const meta = clientMeta(id, state)
-      assertVersion(meta.version, expectedVersion)
+      assertDemoClientVersion(meta.version, expectedVersion)
       const psychId = legacySpecialist(requested.specialistId)
       const raw = findClient(state, meta)
       const reassigned = raw.psychId !== psychId
       if (raw.name === requested.name && raw.age === requested.age
         && raw.status === requested.status && !reassigned) fail('body')
       const updatedAt = commandInstant(meta.updatedAt)
+      const before = state.clients
       dispatch({ type: 'UPDATE_CLIENT', id: meta.legacyId, patch: { name: requested.name, age: requested.age, status: requested.status, psychId } })
+      const applied = await observeState({
+        area: 'clients', before,
+        inspect: (next) => {
+          const item = findClient(next, meta)
+          return item && matchesClient(item, requested, psychId) ? item : null
+        },
+      })
       meta.version += 1
       meta.updatedAt = updatedAt
       if (reassigned) {
@@ -518,15 +668,20 @@ export function createDemoWorkspaceRepository(options) {
         meta.assignmentStartsAt = updatedAt
         meta.assignmentVersion = 1
       }
-      return deepFreeze(clientProjection(id, { ...raw, ...requested, psychId }, meta))
+      return deepFreeze(clientProjection(id, applied, meta))
     },
     async archiveClient(id, expectedVersion) {
       const state = currentState()
       const meta = clientMeta(id, state)
-      assertVersion(meta.version, expectedVersion)
+      assertDemoClientVersion(meta.version, expectedVersion)
       const raw = findClient(state, meta)
       const archivedAt = commandInstant(meta.updatedAt)
+      const before = state.clients
       dispatch({ type: 'DELETE_CLIENT', id: meta.legacyId })
+      await observeState({
+        area: 'clients', before,
+        inspect: (next) => findClient(next, meta) === undefined ? true : null,
+      })
       meta.version += 1
       meta.updatedAt = archivedAt
       meta.archivedAt = archivedAt
@@ -538,36 +693,42 @@ export function createDemoWorkspaceRepository(options) {
       const client = clientMeta(requested.clientId, state)
       const psychId = legacySpecialist(requested.specialistId)
       if (appointments.size >= 500) fail('appointments')
-      const before = [...state.sessions]
+      const before = state.sessions
       const createdAt = commandInstant()
-      dispatch({
-        type: 'ADD_SESSION',
-        session: {
-          clientId: client.legacyId, psychId, service: requested.serviceId,
-          date: requested.date, time: requested.time, duration: requested.durationMinutes,
-          amount: requested.expectedAmountGrosze / 100, status: requested.status,
-          payment: 'unpaid', paidAmount: 0, method: null, paidDate: null, note: '',
-        },
-      })
-      const after = stateSnapshot(getState)
-      const added = locateAdded(before, after.sessions, 'appointment')
-      const coreId = newId('apt', ++appointmentSequence)
+      const coreId = newId('apt', appointmentSequence + 1)
       const meta = {
-        legacyId: added?.id ?? null, version: 1, chargeVersion: 1, createdAt,
+        legacyId: null, version: 1, chargeVersion: 1, createdAt,
         updatedAt: createdAt, cancelledAt: null, entries: [], corrections: [],
-        pending: added ? null : {
+        pending: {
           clientId: client.legacyId, psychId, service: requested.serviceId,
           date: requested.date, time: requested.time, duration: requested.durationMinutes,
-          amount: requested.expectedAmountGrosze / 100, status: requested.status,
+          amount: requested.expectedAmountGrosze / 100, location: requested.location,
+          status: requested.status,
+          knownIds: new Set(state.sessions.map((item) => captureLegacyAppointment(item).id)),
         },
       }
       appointments.set(coreId, meta)
-      const projected = added ?? {
-        clientId: client.legacyId, psychId, service: requested.serviceId,
-        date: requested.date, time: requested.time, duration: requested.durationMinutes,
-        amount: requested.expectedAmountGrosze / 100, status: requested.status,
+      try {
+        dispatch({
+          type: 'ADD_SESSION',
+          session: {
+            clientId: client.legacyId, psychId, service: requested.serviceId,
+            date: requested.date, time: requested.time, duration: requested.durationMinutes,
+            amount: requested.expectedAmountGrosze / 100, location: requested.location,
+            status: requested.status, payment: 'unpaid', paidAmount: 0, method: null,
+            paidDate: null, note: '',
+          },
+        })
+        const added = await observeState({
+          area: 'sessions', before,
+          inspect: (next) => createdAppointment(next, meta),
+        })
+        appointmentSequence += 1
+        return appointmentProjection(coreId, added, meta)
+      } catch (error) {
+        appointments.delete(coreId)
+        throw error
       }
-      return appointmentProjection(coreId, projected, meta)
     },
     async editAppointment(id, expectedVersion, input) {
       const requested = captureAppointmentEdit(input)
@@ -577,36 +738,46 @@ export function createDemoWorkspaceRepository(options) {
       const psychId = legacySpecialist(requested.specialistId)
       const raw = findAppointment(state, meta)
       const chargeChanged = raw.service !== requested.serviceId
-        || Math.round(raw.amount * 100) !== requested.expectedAmountGrosze
+        || raw.expectedAmountGrosze !== requested.expectedAmountGrosze
       const changed = raw.psychId !== psychId || chargeChanged
         || raw.date !== requested.date || raw.time !== requested.time
         || raw.duration !== requested.durationMinutes || raw.status !== requested.status
       if (!changed) fail('body')
       const aggregate = paymentAggregate({
         appointmentId: id, status: raw.status,
-        expectedAmountGrosze: Math.round(raw.amount * 100), paymentEntries: meta.entries,
+        expectedAmountGrosze: raw.expectedAmountGrosze, paymentEntries: meta.entries,
         corrections: meta.corrections,
       })
       if (raw.status !== requested.status) {
         assertAppointmentPaymentTransition({
           fromStatus: raw.status, toStatus: requested.status,
-          previousAmountGrosze: Math.round(raw.amount * 100),
+          previousAmountGrosze: raw.expectedAmountGrosze,
           nextAmountGrosze: requested.expectedAmountGrosze,
           collectedGrosze: aggregate.collectedGrosze,
         })
-      } else if (requested.expectedAmountGrosze < Math.round(raw.amount * 100)
+      } else if (requested.expectedAmountGrosze < raw.expectedAmountGrosze
         && aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
       const updatedAt = commandInstant(meta.updatedAt)
       const patch = {
         psychId, service: requested.serviceId, date: requested.date, time: requested.time,
         duration: requested.durationMinutes, amount: requested.expectedAmountGrosze / 100,
-        status: requested.status,
+        location: requested.location, status: requested.status,
       }
+      const before = state.sessions
       dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
+      const applied = await observeState({
+        area: 'sessions', before,
+        inspect: (next) => {
+          const item = findAppointment(next, meta)
+          return item && matchesAppointment(
+            item, requested, raw.clientId, psychId,
+          ) ? item : null
+        },
+      })
       meta.version += 1
       if (chargeChanged) meta.chargeVersion += 1
       meta.updatedAt = updatedAt
-      return appointmentProjection(id, { ...raw, ...patch }, meta)
+      return appointmentProjection(id, applied, meta)
     },
     async cancelAppointment(id, expectedVersion) {
       const state = currentState()
@@ -614,12 +785,17 @@ export function createDemoWorkspaceRepository(options) {
       assertVersion(meta.version, expectedVersion)
       const raw = findAppointment(state, meta)
       const aggregate = paymentAggregate({
-        appointmentId: id, status: raw.status, expectedAmountGrosze: Math.round(raw.amount * 100),
+        appointmentId: id, status: raw.status, expectedAmountGrosze: raw.expectedAmountGrosze,
         paymentEntries: meta.entries, corrections: meta.corrections,
       })
       if (aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
       const cancelledAt = commandInstant(meta.updatedAt)
+      const before = state.sessions
       dispatch({ type: 'DELETE_SESSION', id: meta.legacyId })
+      await observeState({
+        area: 'sessions', before,
+        inspect: (next) => findAppointment(next, meta) === undefined ? true : null,
+      })
       meta.version += 1
       meta.updatedAt = cancelledAt
       meta.cancelledAt = cancelledAt
@@ -641,22 +817,26 @@ export function createDemoWorkspaceRepository(options) {
       const entry = { id: entryId, appointmentId: id, ...canonical }
       const proposed = [...meta.entries, entry]
       paymentAggregate({
-        appointmentId: id, status: raw.status, expectedAmountGrosze: Math.round(raw.amount * 100),
+        appointmentId: id, status: raw.status, expectedAmountGrosze: raw.expectedAmountGrosze,
         paymentEntries: proposed, corrections: meta.corrections,
       })
       const updatedAt = commandInstant(meta.updatedAt)
-      const previousEntries = meta.entries
+      const patch = patchAggregate(id, raw, { ...meta, entries: proposed })
+      const before = state.sessions
+      dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
+      const applied = await observeState({
+        area: 'sessions', before,
+        inspect: (next) => {
+          const item = findAppointment(next, meta)
+          return item && matchesPaymentPatch(item, patch) ? item : null
+        },
+      })
       meta.entries = proposed
-      const patch = patchAggregate(id, raw, meta)
-      try { dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch }) } catch (error) {
-        meta.entries = previousEntries
-        throw error
-      }
       meta.version += 1
       meta.updatedAt = updatedAt
       paymentSequence += 1
       payments.set(entryId, { appointmentId: id, entryIndex: meta.entries.length - 1 })
-      return appointmentProjection(id, { ...raw, ...patch }, meta)
+      return appointmentProjection(id, applied, meta)
     },
     async correctPayment(id, expectedVersion, input) {
       capturedId(id, 'payment')
@@ -686,26 +866,30 @@ export function createDemoWorkspaceRepository(options) {
       const corrections = [...meta.corrections, correction]
       paymentAggregate({
         appointmentId: link.appointmentId, status: raw.status,
-        expectedAmountGrosze: Math.round(raw.amount * 100), paymentEntries: entries,
+        expectedAmountGrosze: raw.expectedAmountGrosze, paymentEntries: entries,
         corrections,
       })
-      const previousEntries = meta.entries
-      const previousCorrections = meta.corrections
+      const patch = patchAggregate(link.appointmentId, raw, {
+        ...meta, entries, corrections,
+      })
+      const before = state.sessions
+      dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch })
+      const applied = await observeState({
+        area: 'sessions', before,
+        inspect: (next) => {
+          const item = findAppointment(next, meta)
+          return item && matchesPaymentPatch(item, patch) ? item : null
+        },
+      })
       meta.entries = entries
       meta.corrections = corrections
-      const patch = patchAggregate(link.appointmentId, raw, meta)
-      try { dispatch({ type: 'UPDATE_SESSION', id: meta.legacyId, patch }) } catch (error) {
-        meta.entries = previousEntries
-        meta.corrections = previousCorrections
-        throw error
-      }
       meta.version += 1
       meta.updatedAt = createdAt
       if (replacement) {
         paymentSequence += 1
         payments.set(replacement.id, { appointmentId: link.appointmentId, entryIndex: entries.length - 1 })
       }
-      return appointmentProjection(link.appointmentId, { ...raw, ...patch }, meta)
+      return appointmentProjection(link.appointmentId, applied, meta)
     },
   })
 }

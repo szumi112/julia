@@ -129,6 +129,17 @@ test('API repository rejects a malformed generated action key before invoking a 
   assert.deepEqual(calls, [])
 })
 
+test('API client versions above the appointment ceiling still delegate', async () => {
+  const { api, calls } = apiDouble()
+  const repository = createApiWorkspaceRepository({ api })
+  await repository.editClient('cl_ola', 4_096, clientInput())
+  await repository.archiveClient('cl_ola', 9_001)
+  assert.deepEqual(calls.map((call) => call.slice(0, 3)), [
+    ['editClient', 'cl_ola', 4_096],
+    ['archiveClient', 'cl_ola', 9_001],
+  ])
+})
+
 const demoState = () => ({
   psychologists: [
     { id: 'p2', name: 'Żaneta', rate: 200 },
@@ -140,7 +151,7 @@ const demoState = () => ({
   ],
   sessions: [
     { id: 's2', clientId: 'c2', psychId: 'p2', service: 'zajecia', date: '2026-09-01', time: '10:00', duration: 50, amount: 200, status: 'scheduled', payment: 'unpaid', paidAmount: 0, method: null, note: 'secret' },
-    { id: 's1', clientId: 'c1', psychId: 'p1', service: 'zajecia', date: '2026-08-04', time: '09:00', duration: 50, amount: 180, status: 'completed', payment: 'partial', paidAmount: 70, method: 'cash', paidDate: '2026-08-05', note: 'secret' },
+    { id: 's1', clientId: 'c1', psychId: 'p1', service: 'zajecia', date: '2026-08-04', time: '09:00', duration: 50, amount: 180, location: 'Gabinet 1', status: 'completed', payment: 'partial', paidAmount: 70, method: 'cash', paidDate: '2026-08-05', note: 'secret' },
   ],
 })
 
@@ -171,6 +182,7 @@ test('demo load projects a complete ordered canonical window without excluded fi
   assert.equal(result.appointments[0].id, 'apt_demo_s1')
   assert.equal(result.appointments[0].clientId, 'cl_demo_c1')
   assert.equal(result.appointments[0].charge.expectedAmountGrosze, 18_000)
+  assert.equal(result.appointments[0].location, 'Gabinet 1')
   assert.equal(result.appointments[0].payment.collectedGrosze, 7_000)
   assert.equal(result.appointments[0].paymentEntries[0].receivedAt, '2026-08-05T10:00:00.000Z')
   assert.equal(JSON.stringify(result).includes('private@example.test'), false)
@@ -204,20 +216,23 @@ test('demo client lifecycle dispatches legacy actions and keeps core IDs and ver
 test('demo appointment and payment lifecycle preserves cents, versions, reversal links, and reducer actions', async () => {
   const harness = demoHarness()
   const repository = createDemoWorkspaceRepository({ dispatch: harness.dispatch, getState: harness.getState })
-  const created = await repository.createAppointment(appointmentInput({ clientId: 'cl_demo_c1', specialistId: 'sp_demo_p1' }))
+  const created = await repository.createAppointment(appointmentInput({ clientId: 'cl_demo_c1', specialistId: 'sp_demo_p1', location: 'Gabinet 2' }))
   assert.equal(created.id, 'apt_demo_new_1')
   assert.equal(created.charge.expectedAmountGrosze, 18_000)
   assert.equal(harness.actions[0].type, 'ADD_SESSION')
   assert.equal(harness.actions[0].session.amount, 180)
+  assert.equal(harness.actions[0].session.location, 'Gabinet 2')
   assert.equal(harness.actions[0].session.note, '')
 
-  const editInput = { ...appointmentInput({ specialistId: 'sp_demo_p2', status: 'completed', expectedAmountGrosze: 20_000 }) }
+  const editInput = { ...appointmentInput({ specialistId: 'sp_demo_p2', status: 'completed', expectedAmountGrosze: 20_000, location: 'Sala TUS' }) }
   delete editInput.clientId
   const edited = await repository.editAppointment(created.id, 1, editInput)
   assert.equal(edited.version, 2)
   assert.equal(edited.charge.version, 2)
   assert.equal(harness.actions[1].type, 'UPDATE_SESSION')
   assert.equal(harness.actions[1].patch.amount, 200)
+  assert.equal(harness.actions[1].patch.location, 'Sala TUS')
+  assert.equal(edited.location, 'Sala TUS')
 
   const recorded = await repository.recordPayment(created.id, 2, { amountGrosze: 7_001, method: 'card', paidDate: '2026-08-12' })
   assert.equal(recorded.version, 3)
@@ -256,15 +271,143 @@ test('demo rejects stale and missing targets before dispatch and never mutates c
 
 test('demo reconciles delayed reducer IDs to command-returned core IDs', async () => {
   let state = demoState()
-  let pending = null
   const repository = createDemoWorkspaceRepository({
-    dispatch(action) { pending = structuredClone(action) },
+    dispatch(action) {
+      queueMicrotask(() => { state = { ...state, clients: [...state.clients, { ...action.client, id: 'c99' }] } })
+    },
     getState: () => state,
   })
   const created = await repository.createClient(clientInput({ specialistId: 'sp_demo_p1' }))
   assert.equal(created.id, 'cl_demo_new_1')
-  state = { ...state, clients: [...state.clients, { ...pending.client, id: 'c99' }] }
   const loaded = await repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' })
   assert.equal(loaded.clients.find(({ name }) => name === 'Ola Nowak').id, created.id)
   assert.equal(loaded.clients.some(({ id }) => id === 'cl_demo_c99'), false)
+})
+
+test('demo pending reconciliation cannot capture an identical pre-existing row', async () => {
+  let state = demoState()
+  state = { ...state, clients: [...state.clients, {
+    id: 'c_old', name: 'Ola Nowak', age: 12, psychId: 'p1', since: '2026-01-03',
+    status: 'active', email: '', phone: '', notes: [], familyId: null, familyRole: null,
+  }] }
+  const repository = createDemoWorkspaceRepository({
+    dispatch(action) {
+      queueMicrotask(() => { state = { ...state, clients: [...state.clients, { ...action.client, id: 'c_new' }] } })
+    },
+    getState: () => state,
+  })
+  const created = await repository.createClient(clientInput({ specialistId: 'sp_demo_p1' }))
+  const loaded = await repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' })
+  assert.equal(created.id, 'cl_demo_new_1')
+  assert.equal(loaded.clients.find(({ id }) => id === created.id).createdAt, created.createdAt)
+  assert.equal(loaded.clients.some(({ id }) => id === 'cl_demo_c_old'), true)
+})
+
+test('demo rejects two matching created rows instead of choosing one nondeterministically', async () => {
+  let state = demoState()
+  const repository = createDemoWorkspaceRepository({
+    dispatch(action) {
+      state = { ...state, clients: [
+        ...state.clients, { ...action.client, id: 'c_new_a' }, { ...action.client, id: 'c_new_b' },
+      ] }
+    },
+    getState: () => state,
+  })
+  await assert.rejects(repository.createClient(clientInput({ specialistId: 'sp_demo_p1' })), /DEMO_STATE_MISMATCH/)
+})
+
+test('demo awaits delayed reducer application and rejects persistent no-op or wrong-row dispatches', async () => {
+  let delayedState = demoState()
+  const delayed = createDemoWorkspaceRepository({
+    dispatch(action) {
+      setTimeout(() => {
+        delayedState = { ...delayedState, clients: [...delayedState.clients, { ...action.client, id: 'c88' }] }
+      }, 0)
+    },
+    getState: () => delayedState,
+  })
+  const created = await delayed.createClient(clientInput({ specialistId: 'sp_demo_p1' }))
+  assert.equal(created.id, 'cl_demo_new_1')
+  assert.equal(delayedState.clients.some(({ id }) => id === 'c88'), true)
+
+  const unchanged = demoState()
+  const noClient = createDemoWorkspaceRepository({ dispatch() {}, getState: () => unchanged })
+  await assert.rejects(noClient.createClient(clientInput({ specialistId: 'sp_demo_p1' })), /DEMO_STATE_/)
+
+  let wrongState = demoState()
+  const wrongAppointment = createDemoWorkspaceRepository({
+    dispatch() { wrongState = { ...wrongState, sessions: [...wrongState.sessions, { ...wrongState.sessions[0], id: 's_wrong' }] } },
+    getState: () => wrongState,
+  })
+  await assert.rejects(wrongAppointment.createAppointment(appointmentInput({ clientId: 'cl_demo_c1', specialistId: 'sp_demo_p1' })), /DEMO_STATE_MISMATCH/)
+
+  const unchangedPayment = demoState()
+  const noPayment = createDemoWorkspaceRepository({ dispatch() {}, getState: () => unchangedPayment })
+  await assert.rejects(noPayment.recordPayment('apt_demo_s1', 1, { amountGrosze: 1, method: 'cash', paidDate: '2026-08-06' }), /DEMO_STATE_/)
+})
+
+test('demo awaits delayed appointment and payment reducer applications', async () => {
+  let appointmentState = demoState()
+  const appointments = createDemoWorkspaceRepository({
+    dispatch(action) {
+      setTimeout(() => {
+        appointmentState = { ...appointmentState, sessions: [
+          ...appointmentState.sessions, { ...action.session, id: 's_delayed' },
+        ] }
+      }, 0)
+    },
+    getState: () => appointmentState,
+  })
+  const appointment = await appointments.createAppointment(appointmentInput({
+    clientId: 'cl_demo_c1', specialistId: 'sp_demo_p1', location: 'Gabinet 3',
+  }))
+  assert.equal(appointment.location, 'Gabinet 3')
+  assert.equal(appointmentState.sessions.some(({ id }) => id === 's_delayed'), true)
+
+  let paymentState = demoState()
+  const payments = createDemoWorkspaceRepository({
+    dispatch(action) {
+      setTimeout(() => {
+        paymentState = { ...paymentState, sessions: paymentState.sessions.map((item) => (
+          item.id === action.id ? { ...item, ...action.patch } : item
+        )) }
+      }, 0)
+    },
+    getState: () => paymentState,
+  })
+  const paid = await payments.recordPayment('apt_demo_s1', 1, {
+    amountGrosze: 100, method: 'card', paidDate: '2026-08-06',
+  })
+  assert.equal(paid.payment.collectedGrosze, 7_100)
+  assert.equal(paymentState.sessions.find(({ id }) => id === 's1').paidAmount, 71)
+})
+
+test('demo rebuilds live indexes and rejects removed or inactive specialists before dispatch', async () => {
+  let state = demoState()
+  const actions = []
+  const repository = createDemoWorkspaceRepository({ dispatch: (action) => actions.push(action), getState: () => state })
+  await repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' })
+  state = { ...state, psychologists: [{ ...state.psychologists[0], status: 'inactive' }] }
+  await assert.rejects(repository.createClient(clientInput({ specialistId: 'sp_demo_p1' })), /NOT_FOUND/)
+  await assert.rejects(repository.createClient(clientInput({ specialistId: 'sp_demo_p2' })), /NOT_FOUND/)
+  assert.equal(actions.length, 0)
+})
+
+test('demo rejects coercive and descriptor-hostile legacy scalars without dispatch', async () => {
+  const coercive = { valueOf() { throw new Error('private value') }, toString() { throw new Error('private text') }, [Symbol.toPrimitive]() { throw new Error('private primitive') } }
+  const mutations = [
+    (state) => { state.psychologists[0].rate = coercive },
+    (state) => { state.clients[0].age = coercive },
+    (state) => { state.sessions[0].amount = coercive },
+    (state) => { state.sessions[0].paidAmount = coercive },
+    (state) => Object.defineProperty(state.sessions[0], 'date', { enumerable: true, get() { throw new Error('private date') } }),
+  ]
+  for (const mutate of mutations) {
+    const state = demoState()
+    mutate(state)
+    let dispatched = 0
+    const repository = createDemoWorkspaceRepository({ dispatch() { dispatched += 1 }, getState: () => state })
+    await assert.rejects(repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' }), /VALIDATION_FAILED/)
+    assert.equal(dispatched, 0)
+  }
 })
