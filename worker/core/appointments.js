@@ -56,8 +56,8 @@ const TERMINAL_CANCELLATION_CANDIDATE_CAP = 32
 // A full ledger can retain 1,000 entries and later correct each entry once. The
 // appointment stream therefore needs room for create + both mutation classes,
 // while client/assignment/charge streams retain their existing tighter bounds.
-const APPOINTMENT_VERSION_CAP = 4_096
-const CHARGE_VERSION_CAP = 257
+export const APPOINTMENT_VERSION_CAP = 4_096
+export const CHARGE_VERSION_CAP = 257
 const ownership = createOwnershipCapabilityBoundary()
 const versionBuilder = createRecordVersionBuilder(ownership.consumer)
 

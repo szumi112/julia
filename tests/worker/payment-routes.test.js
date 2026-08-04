@@ -240,6 +240,52 @@ const seedContiguousPayments = async (appointment, count) => {
   return Object.freeze({ ...appointment, version: count + 1, updatedAt })
 }
 
+const seedContiguousAppointmentVersions = async (appointment, finalVersion) => {
+  const client = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+    .bind(appointment.clientId).first()
+  const scope = clientKeyScope(appointment.clientId)
+  const keyring = await ring()
+  const dataKey = await loadDataKey(env.DB, {
+    envelope: JSON.parse(client.identity_envelope), expectedScope: scope,
+  })
+  const statements = []
+  let updatedAt = appointment.updatedAt
+  for (let version = 2; version <= finalVersion; version += 1) {
+    updatedAt = new Date(NOW_MS + version).toISOString()
+    const snapshot = {
+      cancelledAt: null, clientId: appointment.clientId, createdAt: appointment.createdAt,
+      endsAt: appointment.endsAt, id: appointment.id, location: appointment.location,
+      paymentAggregate: { collectedGrosze: 0,
+        outstandingGrosze: appointment.charge.expectedAmountGrosze, status: 'unpaid' },
+      schema: 'appointment.v1', serviceId: appointment.serviceId, source: 'panel',
+      specialistId: appointment.specialistId, startsAt: appointment.startsAt,
+      status: appointment.status, timeZone: 'Europe/Warsaw', updatedAt, version,
+    }
+    const envelope = await encryptForScope(keyring, dataKey, {
+      expectedScope: scope, recordId: appointment.id, field: 'record_version',
+      plaintext: JSON.stringify(snapshot),
+    })
+    statements.push(
+      env.DB.prepare('UPDATE appointments SET version=?,updated_at=? WHERE id=? AND version=?')
+        .bind(version, updatedAt, appointment.id, version - 1),
+      env.DB.prepare(`INSERT INTO record_versions
+        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+         changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+        `ver_bound_${sequence}_${String(version).padStart(4, '0')}`,
+        'appointment', appointment.id, version, JSON.stringify(envelope), OWNER.id,
+        updatedAt, BASE.correlationId,
+      ),
+    )
+  }
+  for (let offset = 0; offset < statements.length; offset += ninetyStatements) {
+    await env.DB.batch(statements.slice(offset, offset + ninetyStatements))
+  }
+  return Object.freeze({
+    appointment: Object.freeze({ ...appointment, version: finalVersion, updatedAt }),
+    dataKey, keyring, scope,
+  })
+}
+
 const ninetyStatements = 90
 
 const canonicalJson = (value) => JSON.stringify(value === null
@@ -248,7 +294,9 @@ const canonicalJson = (value) => JSON.stringify(value === null
     : Object.fromEntries(Object.keys(value).sort()
       .map((key) => [key, JSON.parse(canonicalJson(value[key]))])))
 
-const withEncryptedPaymentReplay = async (clientId, idempotencyKey, response) => {
+const withEncryptedPaymentReplay = async (
+  clientId, idempotencyKey, response, requestDigest = null,
+) => {
   const client = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
     .bind(clientId).first()
   const scope = clientKeyScope(clientId)
@@ -266,6 +314,11 @@ const withEncryptedPaymentReplay = async (clientId, idempotencyKey, response) =>
     expectedScope: scope, recordId, field: 'idempotency_response',
     plaintext: canonicalJson(response),
   }))
+  const requestEnvelope = requestDigest === null ? null
+    : JSON.stringify(await encryptForScope(await ring(), dataKey, {
+      expectedScope: scope, recordId, field: 'idempotency_request_hash',
+      plaintext: requestDigest,
+    }))
   return { prepare(sql) {
     const prepared = env.DB.prepare(sql)
     if (!sql.includes('SELECT request_hash,resource_type,resource_id,response_envelope')) {
@@ -275,7 +328,10 @@ const withEncryptedPaymentReplay = async (clientId, idempotencyKey, response) =>
       const bound = prepared.bind(...bindings)
       return { async first() {
         const row = await bound.first()
-        return row === null ? null : { ...row, response_envelope: responseEnvelope }
+        return row === null ? null : {
+          ...row, response_envelope: responseEnvelope,
+          ...(requestEnvelope === null ? {} : { request_hash: requestEnvelope }),
+        }
       } }
     } }
   }, batch: (statements) => env.DB.batch(statements) }
@@ -410,8 +466,11 @@ describe('appointment payment capture', () => {
       { ...original, timeZone: 'UTC' },
       { ...original, location: ' bad ' },
       { ...original, createdAt: '2027-01-15T09:00:00Z' },
+      { ...original, updatedAt: original.createdAt },
       { ...original, charge: { ...original.charge, serviceId: 'konsultacja' } },
       { ...original, charge: { ...original.charge, id: 'not-a-charge' } },
+      { ...original, charge: { ...original.charge, version: 258 } },
+      { ...original, charge: { ...original.charge, version: Number.MAX_SAFE_INTEGER } },
       { ...original, version: input.body.expectedVersion + 2 },
       { ...original, paymentEntries: [...correctedPrefix, ...original.paymentEntries] },
       { ...original, paymentEntries: [{ ...correctedPrefix[0],
@@ -426,6 +485,18 @@ describe('appointment payment capture', () => {
       )
       await expect(recordAppointmentPayment({ ...input, db, idFactory: vi.fn() }))
         .rejects.toThrow('CRYPTO_FAILURE')
+    }
+    for (const expectedVersion of [4_096, Number.MAX_SAFE_INTEGER]) {
+      const request = { ...input.body, expectedVersion }
+      const requestDigest = await digestRecordPaymentRequest(input.appointmentId, request)
+      const malformed = { ...original,
+        version: expectedVersion === 4_096 ? 4_097 : Number.MAX_SAFE_INTEGER }
+      const db = await withEncryptedPaymentReplay(
+        appointment.clientId, input.idempotencyKey,
+        { status: 200, body: { data: { appointment: malformed } } }, requestDigest,
+      )
+      await expect(recordAppointmentPayment({ ...input, db, body: request,
+        idFactory: vi.fn() })).rejects.toThrow('CRYPTO_FAILURE')
     }
   })
 
@@ -499,6 +570,48 @@ describe('appointment payment capture', () => {
         body: { ...BODY, expectedVersion: 1_001, amountGrosze: 1 },
       },
     ))).rejects.toThrow('NOT_FOUND')
+  })
+
+  it('treats 4,096 as terminal and rejects a valid-looking contiguous 4,097th sentinel', async () => {
+    const created = await seedAppointment()
+    const retained = await seedContiguousAppointmentVersions(created, 4_096)
+    const idFactory = vi.fn()
+    await expect(recordAppointmentPayment(await paymentInput(retained.appointment, {
+      nowMs: NOW_MS + 10_000, idFactory,
+      body: { ...BODY, expectedVersion: 4_096, amountGrosze: 1 },
+    }))).rejects.toThrow('NOT_FOUND')
+    expect(idFactory).not.toHaveBeenCalled()
+    expect(await env.DB.prepare('SELECT max(version) AS version FROM record_versions WHERE entity_id=?')
+      .bind(created.id).first()).toEqual({ version: 4_096 })
+
+    const sentinelAt = new Date(NOW_MS + 4_097).toISOString()
+    const sentinel = {
+      cancelledAt: null, clientId: created.clientId, createdAt: created.createdAt,
+      endsAt: created.endsAt, id: created.id, location: created.location,
+      paymentAggregate: { collectedGrosze: 0,
+        outstandingGrosze: created.charge.expectedAmountGrosze, status: 'unpaid' },
+      schema: 'appointment.v1', serviceId: created.serviceId, source: 'panel',
+      specialistId: created.specialistId, startsAt: created.startsAt,
+      status: created.status, timeZone: 'Europe/Warsaw', updatedAt: sentinelAt,
+      version: 4_097,
+    }
+    const envelope = await encryptForScope(retained.keyring, retained.dataKey, {
+      expectedScope: retained.scope, recordId: created.id, field: 'record_version',
+      plaintext: JSON.stringify(sentinel),
+    })
+    await env.DB.prepare(`INSERT INTO record_versions
+      (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+       changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+      `ver_bound_sentinel_${sequence}`, 'appointment', created.id, 4_097,
+      JSON.stringify(envelope), OWNER.id, sentinelAt, BASE.correlationId,
+    ).run()
+    await expect(recordAppointmentPayment(await paymentInput(retained.appointment, {
+      nowMs: NOW_MS + 11_000, idFactory: vi.fn(),
+      body: { ...BODY, expectedVersion: 4_096, amountGrosze: 1 },
+    }))).rejects.toThrow('NOT_FOUND')
+    expect((await env.DB.prepare(`SELECT count(*) AS count FROM record_versions
+      WHERE entity_id=? AND version BETWEEN 1 AND 4097`).bind(created.id).first()).count)
+      .toBe(4_097)
   })
 
   it('rejects stale, nonbillable, overpay, guessed, and unauthorized targets before IDs', async () => {

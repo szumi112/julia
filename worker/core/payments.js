@@ -10,7 +10,9 @@ import { auditEventStatement } from '../audit/events.js'
 import { createOwnershipCapabilityBoundary } from './crypto.js'
 import { createRecordVersionBuilder } from './versions.js'
 import {
+  APPOINTMENT_VERSION_CAP,
   appointmentLedgerDto,
+  CHARGE_VERSION_CAP,
   loadAuthenticatedAppointmentLedger,
   paymentAggregateFor,
 } from './appointments.js'
@@ -181,14 +183,18 @@ const validateReplay = (value, appointmentId, request) => {
     || !isSpecialistId(appointment.specialistId) || !SERVICE_BY_ID[appointment.serviceId]
     || !canonicalInstant(appointment.startsAt) || !canonicalInstant(appointment.endsAt)
     || appointment.endsAt <= appointment.startsAt || appointment.timeZone !== 'Europe/Warsaw'
+    || !Number.isSafeInteger(appointment.version) || appointment.version < 2
+    || request.expectedVersion >= APPOINTMENT_VERSION_CAP
+    || appointment.version > APPOINTMENT_VERSION_CAP
     || appointment.version !== request.expectedVersion + 1
     || !['completed', 'noshow'].includes(appointment.status)
     || appointment.cancelledAt !== null || appointment.source !== 'panel'
     || !canonicalInstant(appointment.createdAt) || !canonicalInstant(appointment.updatedAt)
-    || appointment.updatedAt < appointment.createdAt
+    || appointment.updatedAt <= appointment.createdAt
     || !isChargeId(charge.id) || charge.serviceId !== appointment.serviceId
     || !SERVICE_BY_ID[charge.serviceId] || charge.currency !== 'PLN'
     || !Number.isSafeInteger(charge.version) || charge.version < 1
+    || charge.version > CHARGE_VERSION_CAP
     || !Number.isSafeInteger(charge.expectedAmountGrosze)
     || charge.expectedAmountGrosze < 1 || charge.expectedAmountGrosze > 1_000_000
     || !Array.isArray(appointment.paymentEntries) || appointment.paymentEntries.length < 1
@@ -288,7 +294,8 @@ const paymentGuard = (db, values) => db.prepare(
      AND EXISTS (SELECT 1 FROM appointments WHERE id=? AND client_id=?
        AND specialist_id=? AND service_id=? AND starts_at=? AND ends_at=?
        AND time_zone='Europe/Warsaw' AND location IS ? AND status=? AND source='panel'
-       AND version=? AND cancelled_at IS NULL AND created_at=? AND updated_at=?)
+       AND version=? AND version<=? AND cancelled_at IS NULL
+       AND created_at=? AND updated_at=?)
      AND EXISTS (SELECT 1 FROM session_charges WHERE id=? AND appointment_id=?
        AND service_id=? AND expected_amount_grosze=? AND currency='PLN' AND version=?
        AND created_at=? AND updated_at=?)
@@ -380,7 +387,7 @@ const paymentGuard = (db, values) => db.prepare(
   values.appointment.id, values.client.id, values.appointment.specialistId,
   values.appointment.serviceId, values.appointment.startsAt, values.appointment.endsAt,
   values.appointment.location, values.appointment.status, values.appointment.version,
-  values.appointment.createdAt, values.now,
+  APPOINTMENT_VERSION_CAP, values.appointment.createdAt, values.now,
   values.charge.id, values.appointment.id, values.charge.serviceId,
   values.charge.expectedAmountGrosze, values.charge.version,
   values.charge.createdAt, values.charge.updatedAt, values.appointment.id,
@@ -463,6 +470,7 @@ export async function recordAppointmentPayment(input) {
   if (command.body.expectedVersion !== current.appointment.version) {
     versionConflict(current.appointment.version)
   }
+  if (current.appointment.version >= APPOINTMENT_VERSION_CAP) notFound()
   if (!['completed', 'noshow'].includes(current.appointment.status)
     || current.payment.entries.length >= 1_000
     || current.payment.collectedGrosze + command.body.amountGrosze
@@ -528,7 +536,8 @@ export async function recordAppointmentPayment(input) {
        JOIN session_charges AS charge ON charge.appointment_id=appointment.id
        WHERE appointment.id=? AND appointment.client_id=?
          AND appointment.specialist_id=? AND appointment.status IN ('completed','noshow')
-         AND appointment.version=? AND appointment.cancelled_at IS NULL
+         AND appointment.version=? AND appointment.version<?
+         AND appointment.cancelled_at IS NULL
          AND charge.id=? AND charge.version=? AND charge.expected_amount_grosze=?
          AND (SELECT count(*) FROM session_charges WHERE appointment_id=appointment.id)=1
          AND (SELECT count(*) FROM payment_entries WHERE appointment_id=appointment.id)<1000
@@ -540,12 +549,14 @@ export async function recordAppointmentPayment(input) {
     paymentId, appointment.id, command.body.amountGrosze, command.body.method,
     command.body.receivedAt, actor.id, now,
     current.appointment.id, current.client.id, current.appointment.specialistId,
-    current.appointment.version, current.charge.id, current.charge.version,
+    current.appointment.version, APPOINTMENT_VERSION_CAP,
+    current.charge.id, current.charge.version,
     current.charge.expectedAmountGrosze, command.body.amountGrosze,
   ))
   uow.domain(command.db.prepare(
     `UPDATE appointments SET version=?,updated_at=? WHERE id=? AND client_id=?
-       AND version=? AND status IN ('completed','noshow') AND cancelled_at IS NULL
+       AND version=? AND version<? AND ?<=? AND status IN ('completed','noshow')
+       AND cancelled_at IS NULL
        AND EXISTS (SELECT 1 FROM payment_entries WHERE id=? AND appointment_id=appointments.id)
        AND (SELECT coalesce(sum(payment.amount_grosze),0)
          FROM payment_entries AS payment WHERE payment.appointment_id=appointments.id
@@ -553,7 +564,8 @@ export async function recordAppointmentPayment(input) {
              WHERE reversed_entry_id=payment.id))=?`
   ).bind(
     appointment.version, now, appointment.id, current.client.id,
-    current.appointment.version, paymentId, collectedGrosze,
+    current.appointment.version, APPOINTMENT_VERSION_CAP,
+    appointment.version, APPOINTMENT_VERSION_CAP, paymentId, collectedGrosze,
   ))
   uow.version(conditionalVersionStatement(command.db, appointmentVersion, appointment))
   uow.audit(auditEventStatement(command.db, {
