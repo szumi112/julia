@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, clientOutstanding, lastSessionOf } from '../store.jsx'
+import { useApp, useWorkspaceWindow, clientOutstanding, lastSessionOf } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
 import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, usePagination, Pager } from '../ui.jsx'
@@ -9,6 +9,10 @@ import { ageLabel, fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday,
 import { clientMatchesQuery, clientsForRole, sessionsForRole } from '../workspace.js'
 import { serviceBadge, serviceShort } from '../services.js'
 import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
+import {
+  rollingWorkspaceRange,
+  specialistIdentityFor,
+} from '../workspace-view.js'
 
 // the client's next scheduled visit — sessions stay sorted by date+time
 const nextSessionOf = (sessions, clientId) => {
@@ -23,7 +27,11 @@ const nextSessionOf = (sessions, clientId) => {
 
 export function Clients({ params = {} }) {
   const { state } = useApp()
-  const { getViewState, openClientForm, patchViewState, role } = useShell()
+  const { appMode, getViewState, openClientForm, patchViewState, role } = useShell()
+  const isApp = appMode === 'app'
+  const today = toISODate(new Date())
+  const workspaceRange = useMemo(() => rollingWorkspaceRange(today), [today])
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const ref = useReveal()
   const initialState = useRef(null)
   if (!initialState.current) {
@@ -56,7 +64,10 @@ export function Clients({ params = {} }) {
   const [debtOnly, setDebtOnly] = useState(initialState.current.debtOnly)
   const [statusFilter, setStatusFilter] = useState(initialState.current.status)
 
-  const scopedClients = useMemo(() => clientsForRole(state, role), [state, role])
+  const scopedClients = useMemo(
+    () => clientsForRole(state, role).filter((client) => client.status !== 'archived'),
+    [state, role]
+  )
   const filtered = useMemo(() => {
     return scopedClients.filter((c) => {
       if (role.scope !== 'own' && psychFilter && c.psychId !== psychFilter) return false
@@ -107,6 +118,20 @@ export function Clients({ params = {} }) {
     setStatusFilter('all')
   }
 
+  if (isApp && workspaceState !== 'ready') {
+    return (
+      <section role="status" aria-label="Stan kartoteki">
+        <EmptyState
+          icon="clients"
+          title={workspaceState === 'loading' ? 'Wczytywanie kartoteki…' : 'Kartoteka jest teraz niedostępna'}
+          hint={workspaceState === 'loading'
+            ? 'Pobieramy uprawniony zakres klientów i historii spotkań.'
+            : 'Dane pozostają tylko do odczytu. Spróbuj ponownie po odświeżeniu strony.'}
+        />
+      </section>
+    )
+  }
+
   return (
     <div ref={ref}>
       <div className="view-head" data-reveal>
@@ -124,9 +149,11 @@ export function Clients({ params = {} }) {
         </div>
         <div className="view-head__actions">
           <SearchInput value={query} onChange={setQuery} placeholder="Imię, e-mail lub telefon…" />
-          <Button icon="plus" magnetic onClick={() => openClientForm({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
-            Dodaj klienta
-          </Button>
+          {!isApp && (
+            <Button icon="plus" magnetic onClick={() => openClientForm({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
+              Dodaj klienta
+            </Button>
+          )}
         </div>
       </div>
 
@@ -192,14 +219,14 @@ export function Clients({ params = {} }) {
                       icon="clients"
                       title="Kartoteka jest jeszcze pusta"
                       hint="Dodaj pierwszego klienta, aby planować sesje i rozliczenia."
-                      action={<Button size="sm" icon="plus" onClick={() => openClientForm()}>Dodaj klienta</Button>}
+                      action={!isApp && <Button size="sm" icon="plus" onClick={() => openClientForm()}>Dodaj klienta</Button>}
                     />
                   ) : (
                     <EmptyState
                       icon="search"
                       title="Nie znaleziono klientów"
                       hint="Zmień wyszukiwanie lub filtry — albo dodaj nową osobę."
-                      action={<Button size="sm" variant="soft" icon="plus" onClick={() => openClientForm()}>Dodaj klienta</Button>}
+                      action={!isApp && <Button size="sm" variant="soft" icon="plus" onClick={() => openClientForm()}>Dodaj klienta</Button>}
                     />
                   )}
                 </td>
@@ -207,6 +234,7 @@ export function Clients({ params = {} }) {
             )}
             {pageItems.map((c) => {
               const p = psychOf(c.psychId)
+              const specialist = specialistIdentityFor(state.psychologists, c.psychId)
               const last = lastSessionOf(state.sessions, c.id)
               const next = nextSessionOf(state.sessions, c.id)
               const debt = clientOutstanding(state.sessions, c.id)
@@ -235,7 +263,7 @@ export function Clients({ params = {} }) {
                   <td data-th="Opieka">
                     <span className="row" style={{ gap: 8 }}>
                       <span style={{ width: 8, height: 8, borderRadius: 99, background: p?.color, display: 'inline-block' }} />
-                      <span className="muted">{p?.name}</span>
+                      <span className="muted">{specialist.name}</span>
                     </span>
                   </td>
                   <td className="num-cell muted" data-th="Ostatnia sesja">{last ? fmtShortDate(last.date) : '—'}</td>
@@ -266,7 +294,11 @@ export function Clients({ params = {} }) {
 
 export function ClientDetail({ params }) {
   const { state, dispatch, toast } = useApp()
-  const { openSessionForm, openClientForm, role } = useShell()
+  const { appMode, openSessionForm, openClientForm, role } = useShell()
+  const isApp = appMode === 'app'
+  const todayIso = toISODate(new Date())
+  const workspaceRange = useMemo(() => rollingWorkspaceRange(todayIso), [todayIso])
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
   const client = clientsForRole(state, role).find((candidate) => candidate.id === params.id)
@@ -275,7 +307,6 @@ export function ClientDetail({ params }) {
     : []
   // upcoming care first, everything else newest-first below it
   const now = new Date()
-  const todayIso = toISODate(now)
   const nowTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
   const upcoming = all.filter(
     (s) => s.status === 'scheduled' && (s.date > todayIso || (s.date === todayIso && s.time >= nowTime))
@@ -283,6 +314,17 @@ export function ClientDetail({ params }) {
   const upcomingIds = new Set(upcoming.map((s) => s.id))
   const history = all.filter((s) => !upcomingIds.has(s.id)).slice().reverse()
   const historyPages = usePagination(history, { pageSize: 10, resetKey: params.id })
+  if (isApp && workspaceState !== 'ready') {
+    return (
+      <section role="status" aria-label="Stan karty klienta">
+        <EmptyState
+          icon="clients"
+          title={workspaceState === 'loading' ? 'Wczytywanie karty klienta…' : 'Karta klienta jest teraz niedostępna'}
+          hint="Wyświetlimy wyłącznie dane z uprawnionego, kompletnego zakresu."
+        />
+      </section>
+    )
+  }
   if (!client) {
     return (
       <EmptyState
@@ -301,8 +343,9 @@ export function ClientDetail({ params }) {
   const family = client.familyId
     ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
     : []
-  const canReadClinicalNotes = role.scope === 'own' && client.psychId === role.psychId
-  const canManageCare = role.scope !== 'own' || client.psychId === role.psychId
+  const canReadClinicalNotes = !isApp && role.scope === 'own' && client.psychId === role.psychId
+  const canManageCare = !isApp && !client.readOnly
+    && (role.scope !== 'own' || client.psychId === role.psychId)
 
   const addNote = () => {
     if (!canReadClinicalNotes) return
@@ -365,7 +408,9 @@ export function ClientDetail({ params }) {
               </div>
               <div className="id-band__pills">
                 <Pill tone={client.status === 'active' ? 'sage' : 'pink'} dot>
-                  {client.status === 'active' ? 'Aktywny' : 'Wstrzymany'}
+                  {client.status === 'archived'
+                    ? 'Archiwalny'
+                    : client.status === 'active' ? 'Aktywny' : 'Wstrzymany'}
                 </Pill>
               </div>
             </div>
@@ -382,11 +427,11 @@ export function ClientDetail({ params }) {
           <div className="care-overview" aria-label="Podsumowanie opieki">
             <div className="care-overview__item">
               <span>Specjalistka prowadząca</span>
-              {psych && role.scope !== 'own' ? (
+              {psych && role.scope !== 'own' && !isApp ? (
                 <EntityLink route="psych" params={{ id: psych.id }} className="link care-overview__value">
                   {psych.title} {psych.name}
                 </EntityLink>
-              ) : <b>{psych ? `${psych.title} ${psych.name}` : 'Nieprzypisana'}</b>}
+              ) : <b>{psych?.name || 'Specjalistka niedostępna'}</b>}
             </div>
             <div className="care-overview__item">
               <span>Następne spotkanie</span>
@@ -485,6 +530,11 @@ export function ClientDetail({ params }) {
                 {history.length} {sessionsWord(history.length)}
               </span>
             </h2>
+            {isApp && (
+              <p className="faint">
+                Zakres historii: {fmtFullDate(workspaceRange.from)} – {fmtFullDate(workspaceRange.to)}
+              </p>
+            )}
             {history.length > 0 ? (
               <>
               <div className="table-scroll table-scroll--until-tablet">
@@ -542,7 +592,7 @@ export function ClientDetail({ params }) {
           </div>
         </section>
 
-        <section className="client-record__section" aria-labelledby="clinical-notes-title" data-reveal>
+        {!isApp && <section className="client-record__section" aria-labelledby="clinical-notes-title" data-reveal>
           <div className="card card--pad">
             <h2 className="card-title" id="clinical-notes-title">Notatki kliniczne</h2>
             {canReadClinicalNotes ? (
@@ -589,7 +639,7 @@ export function ClientDetail({ params }) {
               <p className="clinical-notes__restricted">Notatki są dostępne w widoku specjalistki.</p>
             )}
           </div>
-        </section>
+        </section>}
       </div>
     </div>
   )

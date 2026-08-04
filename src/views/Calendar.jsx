@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
+import { useApp, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip, motionOK } from '../anim.js'
 import { useIsPhone, useMediaQuery, desktopMQ } from '../responsive.js'
@@ -14,6 +14,12 @@ import {
   fmtWeekday, fmtDayMonth, fmtWeekRange, fmtMoney, sessionsWord, timeToMin,
   STATUS_LABELS, PAY_LABELS,
 } from '../format.js'
+import {
+  clientIdentityFor,
+  monthWorkspaceRange,
+  specialistIdentityFor,
+  weekWorkspaceRange,
+} from '../workspace-view.js'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
 const STRIP_DOW = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
@@ -190,7 +196,8 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
 
 export function CalendarView({ params = {} }) {
   const { state, dispatch, toast } = useApp()
-  const { getViewState, openSessionForm, patchViewState, role } = useShell()
+  const { appMode, getViewState, openSessionForm, patchViewState, role } = useShell()
+  const isApp = appMode === 'app'
   const today = toISODate(new Date())
   const curYm = monthKey(new Date())
   const [initialViewState] = useState(() => initialCalendarViewState(getViewState, params, today))
@@ -202,7 +209,7 @@ export function CalendarView({ params = {} }) {
   const isPhone = useIsPhone()
   // dragging an agenda row or a month-grid chip would trap touch scrolling,
   // so it stays a fine-pointer affordance (reschedule via the session form)
-  const canDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
+  const canDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`) && !isApp
   const gridRef = useRef(null)
   const dayPanelRef = useRef(null)
   const agendaPanelRef = useRef(null)
@@ -493,6 +500,11 @@ export function CalendarView({ params = {} }) {
     [byDate, agendaSel]
   )
   const weekDays = useMemo(() => weekDaysFor(agendaSel), [agendaSel])
+  const workspaceRange = useMemo(
+    () => mode === 'agenda' ? weekWorkspaceRange(agendaSel) : monthWorkspaceRange(ym),
+    [agendaSel, mode, ym]
+  )
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
 
   // One navigator per view: Plan dnia moves by week, Miesiąc by month, and the
   // toolbar counts whatever the user is actually looking at.
@@ -505,8 +517,8 @@ export function CalendarView({ params = {} }) {
       nextLabel: 'Następny tydzień',
       prev: () => selectDay(addDays(agendaSel, -7)),
       next: () => selectDay(addDays(agendaSel, 7)),
-      prevOff: monthKey(addDays(weekDays[0], -7)) < firstMonth,
-      nextOff: monthKey(addDays(weekDays[6], 7)) > lastMonth,
+      prevOff: !isApp && monthKey(addDays(weekDays[0], -7)) < firstMonth,
+      nextOff: !isApp && monthKey(addDays(weekDays[6], 7)) > lastMonth,
       atToday: agendaSel === today,
       count: `${agendaSessions.length} ${sessionsWord(agendaSessions.length)} tego dnia`,
     }
@@ -516,8 +528,8 @@ export function CalendarView({ params = {} }) {
       nextLabel: 'Następny miesiąc',
       prev: () => changeMonth(-1),
       next: () => changeMonth(1),
-      prevOff: ym <= firstMonth,
-      nextOff: ym >= lastMonth,
+      prevOff: !isApp && ym <= firstMonth,
+      nextOff: !isApp && ym >= lastMonth,
       atToday: ym === curYm,
       count: `${monthSessions.length} ${sessionsWord(monthSessions.length)} w tym miesiącu`,
     }
@@ -555,12 +567,28 @@ export function CalendarView({ params = {} }) {
     )
   }, [agendaSel, mode])
 
+  if (isApp && workspaceState !== 'ready') {
+    return (
+      <section role="status" aria-label="Stan kalendarza">
+        <EmptyState
+          icon="calendar"
+          title={workspaceState === 'loading' ? 'Wczytywanie kalendarza…' : 'Kalendarz jest teraz niedostępny'}
+          hint={workspaceState === 'loading'
+            ? 'Pobieramy kompletny widoczny zakres kalendarza.'
+            : 'Nie pokazujemy niepełnych ani demonstracyjnych danych.'}
+        />
+      </section>
+    )
+  }
+
   // one session row — shared by the desktop day panel and the phone agenda
   const dayRow = (s, dragOk) => {
     const c = clientOf(s.clientId)
     const p = psychOf(s.psychId)
+    const clientIdentity = clientIdentityFor(state.clients, s.clientId)
+    const specialistIdentity = specialistIdentityFor(state.psychologists, s.psychId)
     const draggable = dragOk && s.status === 'scheduled'
-    const clientName = c?.name || 'Klient'
+    const clientName = clientIdentity.name
     const highlighted = highlightedSessionIds.has(s.id)
     // settled sessions stay in time order, dimmed — the day reads as one list
     const terminal = s.status === 'completed' || s.status === 'cancelled'
@@ -583,11 +611,12 @@ export function CalendarView({ params = {} }) {
         <span className="agenda__main">
           <span className="agenda__client">{clientName}</span>
           <span className="agenda__meta">
-            <Avatar name={p?.name || '?'} color={p?.color} size={16} />
-            {p?.name} · {fmtMoney(s.amount)}
+            <Avatar name={specialistIdentity.name} color={specialistIdentity.color} size={16} />
+            {specialistIdentity.name} · {fmtMoney(s.amount)}
           </span>
           <span className="agenda__pills">
             {serviceBadge(s.service) && <Pill tone="sky">{serviceBadge(s.service)}</Pill>}
+            {c?.readOnly && <Pill tone="ink">Archiwalny</Pill>}
             <StatusPicker
               session={s}
               accessibleLabel={`Status: ${STATUS_LABELS[s.status]} — ${clientName}, ${s.time}`}
@@ -598,12 +627,14 @@ export function CalendarView({ params = {} }) {
             />
           </span>
         </span>
-        <IconBtn
-          name="edit"
-          label={`Edytuj sesję — ${clientName}, ${s.time}`}
-          size={16}
-          onClick={() => openSessionForm({ session: s })}
-        />
+        {!isApp && !s.readOnly && (
+          <IconBtn
+            name="edit"
+            label={`Edytuj sesję — ${clientName}, ${s.time}`}
+            size={16}
+            onClick={() => openSessionForm({ session: s })}
+          />
+        )}
       </div>
     )
   }
@@ -649,7 +680,7 @@ export function CalendarView({ params = {} }) {
             ]}
           />
           {/* the phone's raised tabbar action already covers "new session" */}
-          {!isPhone && (
+          {!isPhone && !isApp && (
             <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: rolePsychId })}>
               Nowa sesja
             </Button>
@@ -737,15 +768,15 @@ export function CalendarView({ params = {} }) {
                 compact
                 icon="calendar"
                 title="Brak sesji tego dnia"
-                hint="Dodaj pierwszą sesję przyciskiem poniżej."
+                hint={isApp ? 'W tym kompletnym zakresie nie ma zaplanowanych sesji.' : 'Dodaj pierwszą sesję przyciskiem poniżej.'}
               />
             ) : (
               dayThread(agendaSessions, false, agendaSel, agendaFlipRef, true)
             )}
-            <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
+            {!isApp && <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
               onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId })}>
               Dodaj sesję tego dnia
-            </Button>
+            </Button>}
           </section>
         </>
       ) : (
@@ -802,7 +833,7 @@ export function CalendarView({ params = {} }) {
                             title={s.status === 'scheduled' && canDrag ? 'Przeciągnij, aby przełożyć sesję' : undefined}
                           >
                             <span className="cal__item-time">{s.time}</span>
-                            <span className="cal__item-name">{clientOf(s.clientId)?.name.split(' ')[0]}</span>
+                            <span className="cal__item-name">{clientIdentityFor(state.clients, s.clientId).name.split(' ')[0]}</span>
                           </span>
                         ))}
                         {items.length > 3 && <span className="cal__more">+{items.length - 3} więcej</span>}
@@ -843,13 +874,13 @@ export function CalendarView({ params = {} }) {
                     compact
                     icon="calendar"
                     title="Brak sesji tego dnia"
-                    hint="Dodaj pierwszą sesję przyciskiem poniżej."
+                    hint={isApp ? 'W tym kompletnym zakresie nie ma zaplanowanych sesji.' : 'Dodaj pierwszą sesję przyciskiem poniżej.'}
                   />
                 )}
                 {daySessions.length > 0 &&
                   dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), canDrag, selected)}
               </div>
-              {selected && (
+              {selected && !isApp && (
                 <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
                   onClick={() => openSessionForm({ date: selected, psychId: rolePsychId })}>
                   Dodaj sesję tego dnia

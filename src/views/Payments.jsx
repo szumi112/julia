@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
+import { useApp, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
 import {
-  Avatar, Chip, IconBtn, Button, InfoTip, EmptyState, Figure, Field, Popover,
+  Avatar, Chip, IconBtn, Button, InfoTip, EmptyState, Figure, Field, Pill, Popover,
   usePagination, Pager,
 } from '../ui.jsx'
 import { FilterGroup, useRouteParamsSync } from '../ux-patterns.jsx'
@@ -15,6 +15,11 @@ import {
   isBillable, collectedOf, outstandingOf, sessionsWord, METHOD_LABELS, toISODate,
 } from '../format.js'
 import { paymentEntryFor, paymentSnapshotOf, scopedBillingSummary } from '../workspace.js'
+import {
+  clientIdentityFor,
+  monthWorkspaceRange,
+  specialistIdentityFor,
+} from '../workspace-view.js'
 
 const validMonth = (value) => /^\d{4}-\d{2}$/.test(value || '')
 
@@ -144,7 +149,8 @@ function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
 
 export function Payments() {
   const { state, dispatch, toast } = useApp()
-  const { getViewState, openSessionForm, patchViewState, route } = useShell()
+  const { appMode, getViewState, openSessionForm, patchViewState, route } = useShell()
+  const isApp = appMode === 'app'
   const ref = useReveal()
   const ledgerTitleRef = useRef(null)
   const maxYm = monthKey(new Date())
@@ -157,9 +163,9 @@ export function Payments() {
       page: 1,
     })
     return {
-      allPeriods: typeof route.params?.allPeriods === 'boolean'
+      allPeriods: !isApp && typeof route.params?.allPeriods === 'boolean'
         ? route.params.allPeriods
-        : saved.allPeriods === true,
+        : !isApp && saved.allPeriods === true,
       // URL params win over the registry — a shared link must reproduce its scope
       ym: validMonth(route.params?.ym)
         ? route.params.ym
@@ -179,6 +185,8 @@ export function Payments() {
   const [allPeriods, setAllPeriods] = useState(initial.allPeriods)
   const [psychFilter, setPsychFilter] = useState(initial.specialist)
   const [unpaidOnly, setUnpaidOnly] = useState(initial.unpaidOnly)
+  const workspaceRange = useMemo(() => monthWorkspaceRange(ym), [ym])
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
 
   const months = useMemo(() => availableMonths(state.sessions), [state.sessions])
   const psychologists = useMemo(
@@ -222,7 +230,7 @@ export function Payments() {
 
   // the whole ledger scope lives in the URL, so a filtered month can be shared
   useRouteParamsSync('payments', {
-    allPeriods: allPeriods || undefined,
+    allPeriods: !isApp && allPeriods || undefined,
     unpaidOnly: unpaidOnly || undefined,
     specialist: psychFilter || undefined,
     ym: allPeriods ? undefined : ym,
@@ -266,6 +274,20 @@ export function Payments() {
     })
   }
 
+  if (isApp && workspaceState !== 'ready') {
+    return (
+      <section role="status" aria-label="Stan rozliczeń">
+        <EmptyState
+          icon="payments"
+          title={workspaceState === 'loading' ? 'Wczytywanie rozliczeń…' : 'Rozliczenia są teraz niedostępne'}
+          hint={workspaceState === 'loading'
+            ? 'Pobieramy kompletny wybrany miesiąc.'
+            : 'Nie pokazujemy sum ani pustych wyników dla niepełnego okresu.'}
+        />
+      </section>
+    )
+  }
+
   return (
     <div ref={ref}>
       <div className="view-head" data-reveal>
@@ -283,10 +305,10 @@ export function Payments() {
         <div className="finance-scope__controls">
           <FilterGroup label="Okres">
             <Chip on={!allPeriods} onClick={() => setAllPeriods(false)}>Wybrany miesiąc</Chip>
-            <Chip on={allPeriods} onClick={() => setAllPeriods(true)}>Wszystkie okresy</Chip>
+            {!isApp && <Chip on={allPeriods} onClick={() => setAllPeriods(true)}>Wszystkie okresy</Chip>}
             {!allPeriods && (
               <div className="month-nav">
-                <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={ym <= months[0]} onClick={() => setYm(addMonths(ym, -1))} />
+                <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={!isApp && ym <= months[0]} onClick={() => setYm(addMonths(ym, -1))} />
                 <span className="month-nav__label">{fmtMonthYear(ym)}</span>
                 <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= maxYm} onClick={() => setYm(addMonths(ym, 1))} />
               </div>
@@ -438,6 +460,8 @@ export function Payments() {
                 {pageItems.map((session) => {
                   const psychologist = psychOf(session.psychId)
                   const client = clientOf(session.clientId)
+                  const clientIdentity = clientIdentityFor(state.clients, session.clientId)
+                  const specialistIdentity = specialistIdentityFor(state.psychologists, session.psychId)
                   const outstanding = outstandingOf(session)
                   return (
                     <tr
@@ -452,11 +476,16 @@ export function Payments() {
                       className={outstanding > 0 ? 'is-due' : ''}
                     >
                       <td style={{ fontWeight: 600 }}>{fmtShortDate(session.date)}</td>
-                      <td>{client?.name}</td>
+                      <td>
+                        {clientIdentity.name}
+                        {client?.readOnly && <> <Pill tone="ink">Archiwalny</Pill></>}
+                      </td>
                       <td>
                         <span className="row" style={{ gap: 8 }}>
-                          <span className="finance-ledger__swatch" style={{ background: psychologist?.color }} />
-                          <span className="muted">{psychologist ? psychologist.name.split(' ')[0] : '—'}</span>
+                          <span className="finance-ledger__swatch" style={{ background: specialistIdentity.color }} />
+                          <span className="muted">{specialistIdentity.available
+                            ? specialistIdentity.name.split(' ')[0]
+                            : specialistIdentity.name}</span>
                         </span>
                       </td>
                       <td className="right num-cell">{fmtMoney(session.amount)}</td>
@@ -464,7 +493,9 @@ export function Payments() {
                       <td className="muted">{METHOD_LABELS[session.method] || '—'}</td>
                       <td><PaymentPicker session={session} readOnly /></td>
                       <td className="right">
-                        {outstanding > 0 ? (
+                        {isApp ? (
+                          <span className="faint">—</span>
+                        ) : outstanding > 0 ? (
                           <PaymentEntry
                             session={session}
                             client={client}

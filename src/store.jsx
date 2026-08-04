@@ -14,6 +14,11 @@ import {
   createAuthorityBoundDispatch,
   createWorkspaceProviderController,
 } from './workspace-provider.js'
+import {
+  isWorkspaceRangeCovered,
+  projectLoadedWorkspace,
+  workspaceRangeState,
+} from './workspace-view.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -287,6 +292,26 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
     workspaceController.getSnapshot,
     workspaceController.getSnapshot,
   )
+  const protectedRecords = useMemo(() => {
+    try {
+      return JSON.parse(effectiveAuthorityKey)?.[0] === 'api'
+    } catch {
+      return false
+    }
+  }, [effectiveAuthorityKey])
+  const viewState = useMemo(() => {
+    if (!protectedRecords) return state
+    const records = projectLoadedWorkspace(workspaceSnapshot.loadedState)
+    return {
+      ...state,
+      ...records,
+      posts: [],
+      tusGroups: [],
+      tusKids: [],
+      tusClasses: [],
+      tusPayments: [],
+    }
+  }, [protectedRecords, state, workspaceSnapshot.loadedState])
 
   // Toast actions can mutate scoped data. A role boundary invalidates both
   // their visible context and their authority, so never carry them across it.
@@ -328,8 +353,8 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
   const dismissToast = useCallback((id) => leave(id, 0), [leave])
 
   const value = useMemo(
-    () => ({ state, dispatch: authorityDispatch, toast, workspace: workspaceSnapshot.workspace }),
-    [authorityDispatch, state, toast, workspaceSnapshot.workspace]
+    () => ({ state: viewState, dispatch: authorityDispatch, toast, workspace: workspaceSnapshot.workspace }),
+    [authorityDispatch, toast, viewState, workspaceSnapshot.workspace]
   )
   const toastValue = useMemo(
     () => ({ toasts, dismissToast, clearToasts }),
@@ -344,6 +369,25 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
 
 export const useApp = () => useContext(AppCtx)
 export const useToasts = () => useContext(ToastCtx)
+
+export const useWorkspaceWindow = (range, enabled = true) => {
+  const { workspace } = useApp()
+  const requested = useRef(new Set())
+  const key = range ? `${range.from}|${range.to}` : ''
+  const covered = range
+    ? isWorkspaceRangeCovered(workspace.loadedRanges, range)
+    : false
+
+  useEffect(() => {
+    if (!enabled || !range || covered || workspace.status === 'read-only-error'
+      || requested.current.has(key)) return
+    requested.current.add(key)
+    Promise.resolve(workspace.loadWindow(range)).catch(() => {})
+  }, [covered, enabled, key, range, workspace])
+
+  if (!enabled || !range) return 'ready'
+  return workspaceRangeState(workspace.status, workspace.loadedRanges, range)
+}
 
 // ---------- selectors ----------
 
