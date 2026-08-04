@@ -93,6 +93,20 @@ export function ClientDrawer({ opts, onClose }) {
     specialistId: form.psychId,
   })
 
+  const refreshAfterAppMutation = async (failureMessage) => {
+    opts.onMutationCommitted?.()
+    try {
+      await refreshWorkspace(opts.workspaceRange)
+    } catch {
+      // The write has already succeeded, so this drawer must never offer it again.
+      forceClose()
+      toast(failureMessage, 'alert')
+      return false
+    }
+    opts.onMutationReconciled?.()
+    return true
+  }
+
   const submitApp = async () => {
     if (saveStatus === 'saving' || !capabilities.includes('client.manage')
       || editing?.readOnly || editing?.status === 'archived') return
@@ -123,13 +137,7 @@ export function ClientDrawer({ opts, onClose }) {
       setSaveError('Nie udało się zapisać danych klienta.')
       return
     }
-    try {
-      await refreshWorkspace(opts.workspaceRange)
-    } catch {
-      setSaveStatus('error')
-      setSaveError('Dane zapisano, ale nie udało się odświeżyć kartoteki.')
-      return
-    }
+    if (!await refreshAfterAppMutation('Dane zapisano, ale nie udało się odświeżyć kartoteki.')) return
     toast(editing ? 'Dane klienta zapisane' : 'Nowy klient dodany do kartoteki')
     forceClose()
   }
@@ -221,13 +229,7 @@ export function ClientDrawer({ opts, onClose }) {
       setSaveError('Nie udało się zarchiwizować klienta.')
       return
     }
-    try {
-      await refreshWorkspace(opts.workspaceRange)
-    } catch {
-      setSaveStatus('error')
-      setSaveError('Klienta zarchiwizowano, ale nie udało się odświeżyć kartoteki.')
-      return
-    }
+    if (!await refreshAfterAppMutation('Klienta zarchiwizowano, ale nie udało się odświeżyć kartoteki.')) return
     toast('Klient zarchiwizowany', 'close')
     if (route.name === 'client' && route.params?.id === editing.id) navigate('clients')
     forceClose()

@@ -65,9 +65,19 @@ export function Clients({ params = {} }) {
   const [debtOnly, setDebtOnly] = useState(initialState.current.debtOnly)
   const [statusFilter, setStatusFilter] = useState(initialState.current.status)
   const [clientForm, setClientForm] = useState(null)
+  const [clientMutationCommitted, setClientMutationCommitted] = useState(false)
   const canManageClients = !isApp || capabilities.includes('client.manage')
+  const clientActionsLocked = isApp && clientMutationCommitted
   const openClient = (opts = {}) => {
-    if (isApp) setClientForm({ ...opts, workspaceRange })
+    if (isApp) {
+      if (clientActionsLocked) return
+      setClientForm({
+        ...opts,
+        workspaceRange,
+        onMutationCommitted: () => setClientMutationCommitted(true),
+        onMutationReconciled: () => setClientMutationCommitted(false),
+      })
+    }
     else openClientForm(opts)
   }
 
@@ -157,7 +167,7 @@ export function Clients({ params = {} }) {
         <div className="view-head__actions">
           <SearchInput value={query} onChange={setQuery} placeholder="Imię, e-mail lub telefon…" />
           {canManageClients && (
-            <Button icon="plus" magnetic onClick={() => openClient({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
+            <Button icon="plus" magnetic disabled={clientActionsLocked} onClick={() => openClient({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
               Dodaj klienta
             </Button>
           )}
@@ -226,14 +236,14 @@ export function Clients({ params = {} }) {
                       icon="clients"
                       title="Kartoteka jest jeszcze pusta"
                       hint="Dodaj pierwszego klienta, aby planować sesje i rozliczenia."
-                      action={canManageClients && <Button size="sm" icon="plus" onClick={() => openClient()}>Dodaj klienta</Button>}
+                      action={canManageClients && <Button size="sm" icon="plus" disabled={clientActionsLocked} onClick={() => openClient()}>Dodaj klienta</Button>}
                     />
                   ) : (
                     <EmptyState
                       icon="search"
                       title="Nie znaleziono klientów"
                       hint="Zmień wyszukiwanie lub filtry — albo dodaj nową osobę."
-                      action={canManageClients && <Button size="sm" variant="soft" icon="plus" onClick={() => openClient()}>Dodaj klienta</Button>}
+                      action={canManageClients && <Button size="sm" variant="soft" icon="plus" disabled={clientActionsLocked} onClick={() => openClient()}>Dodaj klienta</Button>}
                     />
                   )}
                 </td>
@@ -310,6 +320,7 @@ export function ClientDetail({ params }) {
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
   const [clientForm, setClientForm] = useState(null)
+  const [clientMutationCommitted, setClientMutationCommitted] = useState(false)
   const client = clientsForRole(state, role).find((candidate) => candidate.id === params.id)
   const all = client
     ? sessionsForRole(state, role).filter((session) => session.clientId === client.id)
@@ -353,12 +364,20 @@ export function ClientDetail({ params }) {
     ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
     : []
   const canReadClinicalNotes = !isApp && role.scope === 'own' && client.psychId === role.psychId
-  const canEditClient = !client.readOnly && (!isApp || capabilities.includes('client.manage'))
+  const canEditClient = !clientMutationCommitted && !client.readOnly && (!isApp || capabilities.includes('client.manage'))
     && (role.scope !== 'own' || client.psychId === role.psychId)
   const canManageCare = !isApp && !client.readOnly
     && (role.scope !== 'own' || client.psychId === role.psychId)
   const openClient = () => {
-    if (isApp) setClientForm({ client, workspaceRange })
+    if (isApp) {
+      if (clientMutationCommitted) return
+      setClientForm({
+        client,
+        workspaceRange,
+        onMutationCommitted: () => setClientMutationCommitted(true),
+        onMutationReconciled: () => setClientMutationCommitted(false),
+      })
+    }
     else openClientForm({ client })
   }
 

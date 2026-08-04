@@ -194,6 +194,116 @@ test('@owner retains a client draft after a non-stale workspace failure', async 
   await expect(drawer.getByRole('alert')).toContainText('Nie udało się zapisać danych klienta.')
 })
 
+test('@owner closes and disables a successful client create when canonical reload fails', async ({ page }) => {
+  await freezeTime(page, '2026-08-04T08:00:00.000Z')
+  const records = [client({ id: 'cl_ola', name: 'Ola Aktywna', age: 12, version: 2 })]
+  const writes = []
+  let workspaceReads = 0
+  await page.route('**/api/v1/workspace?*', (route) => {
+    workspaceReads += 1
+    if (workspaceReads > 1) {
+      return route.fulfill(json(409, { error: { code: 'VERSION_CONFLICT' } }))
+    }
+    const url = new URL(route.request().url())
+    return route.fulfill(workspace(url.searchParams.get('from'), url.searchParams.get('to'), records))
+  })
+  await page.route('**/api/v1/clients', async (route) => {
+    writes.push(route.request().postDataJSON())
+    await route.fulfill(json(201, {
+      data: {
+        client: client({
+          id: 'cl_iga', name: 'Iga Nowa', age: 8,
+          createdAt: '2026-08-04T08:00:00.000Z',
+        }),
+      },
+    }))
+  })
+
+  await page.goto('./#/clients')
+  await page.getByRole('button', { name: 'Dodaj klienta' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowy klient' })
+  await drawer.getByLabel('Imię i nazwisko').fill('Iga Nowa')
+  await drawer.getByLabel('Specjalistka prowadząca').selectOption('sp_anna')
+  await drawer.getByLabel('Wiek').fill('8')
+  await drawer.getByRole('button', { name: 'Dodaj klienta' }).click()
+
+  await expect(drawer).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Dodaj klienta' })).toBeDisabled()
+  await expect(page.getByText('Dane zapisano, ale nie udało się odświeżyć kartoteki.')).toBeVisible()
+  expect(writes).toHaveLength(1)
+})
+
+test('@owner closes and disables a successful client edit when canonical reload fails', async ({ page }) => {
+  await freezeTime(page, '2026-08-04T08:00:00.000Z')
+  const records = [client({ id: 'cl_ola', name: 'Ola Aktywna', age: 12, version: 2 })]
+  const writes = []
+  let workspaceReads = 0
+  await page.route('**/api/v1/workspace?*', (route) => {
+    workspaceReads += 1
+    if (workspaceReads > 1) {
+      return route.fulfill(json(409, { error: { code: 'VERSION_CONFLICT' } }))
+    }
+    const url = new URL(route.request().url())
+    return route.fulfill(workspace(url.searchParams.get('from'), url.searchParams.get('to'), records))
+  })
+  await page.route('**/api/v1/clients/cl_ola/edits', async (route) => {
+    writes.push(route.request().postDataJSON())
+    await route.fulfill(json(200, {
+      data: {
+        client: client({ id: 'cl_ola', name: 'Ola Zmieniona', age: 12, version: 3 }),
+      },
+    }))
+  })
+
+  await page.goto('./#/client?id=cl_ola')
+  await page.getByRole('button', { name: 'Edytuj' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Edycja klienta' })
+  await drawer.getByLabel('Imię i nazwisko').fill('Ola Zmieniona')
+  await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()
+
+  await expect(drawer).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Edytuj' })).toHaveCount(0)
+  await expect(page.getByText('Dane zapisano, ale nie udało się odświeżyć kartoteki.')).toBeVisible()
+  expect(writes).toHaveLength(1)
+})
+
+test('@owner closes and disables a successful client archive when canonical reload fails', async ({ page }) => {
+  await freezeTime(page, '2026-08-04T08:00:00.000Z')
+  const records = [client({ id: 'cl_ola', name: 'Ola Aktywna', age: 12, version: 2 })]
+  const writes = []
+  let workspaceReads = 0
+  await page.route('**/api/v1/workspace?*', (route) => {
+    workspaceReads += 1
+    if (workspaceReads > 1) {
+      return route.fulfill(json(409, { error: { code: 'VERSION_CONFLICT' } }))
+    }
+    const url = new URL(route.request().url())
+    return route.fulfill(workspace(url.searchParams.get('from'), url.searchParams.get('to'), records))
+  })
+  await page.route('**/api/v1/clients/cl_ola/archive', async (route) => {
+    writes.push(route.request().postDataJSON())
+    await route.fulfill(json(200, {
+      data: {
+        client: client({
+          id: 'cl_ola', name: 'Ola Aktywna', age: 12, status: 'archived', version: 3,
+          archivedAt: '2026-08-04T08:10:00.000Z', updatedAt: '2026-08-04T08:10:00.000Z',
+        }),
+      },
+    }))
+  })
+
+  await page.goto('./#/client?id=cl_ola')
+  await page.getByRole('button', { name: 'Edytuj' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Edycja klienta' })
+  await drawer.getByRole('button', { name: 'Archiwizuj klienta' }).click()
+  await drawer.getByRole('button', { name: 'Tak, archiwizuj klienta' }).click()
+
+  await expect(drawer).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Edytuj' })).toHaveCount(0)
+  await expect(page.getByText('Klienta zarchiwizowano, ale nie udało się odświeżyć kartoteki.')).toBeVisible()
+  expect(writes).toHaveLength(1)
+})
+
 test('@owner reloads the canonical client after a stale version conflict', async ({ page }) => {
   await freezeTime(page, '2026-08-04T08:00:00.000Z')
   const records = [client({ id: 'cl_ola', name: 'Ola Aktywna', age: 12, version: 2 })]
