@@ -277,7 +277,7 @@ test('role actions reject unauthenticated role descriptors without state or redu
   assert.deepEqual(calls, { dispatch: 0, getState: 0, getter: 0, reset: 0 })
 })
 
-test('authenticated ordinary actions and extra inert descriptors preserve reducer behavior', () => {
+test('authority dispatch forwards one plain shallow snapshot and never the caller action', () => {
   const actions = []
   const dispatch = workspaceProvider.createAuthorityBoundDispatch({
     dispatch: (action) => { actions.push(action); return 'forwarded' },
@@ -286,11 +286,70 @@ test('authenticated ordinary actions and extra inert descriptors preserve reduce
     authorityKeyFor: () => { throw new Error('ordinary action key') },
     demoRoleIds: ['owner', 'coordinator', 'therapist'],
   })
-  const symbol = Symbol('inert')
-  const action = { type: 'UPDATE_CLIENT', [symbol]: 'preserved' }
-  Object.defineProperty(action, 'unused', { enumerable: true, get() { throw new Error('unused') } })
+  const nested = { patch: true }
+  const action = { nested, type: 'UPDATE_CLIENT' }
   assert.equal(dispatch(action), 'forwarded')
-  assert.equal(actions[0], action)
+  assert.notEqual(actions[0], action)
+  assert.equal(Object.getPrototypeOf(actions[0]), Object.prototype)
+  assert.deepEqual(actions[0], { nested, type: 'UPDATE_CLIENT' })
+  assert.equal(actions[0].nested, nested)
+  action.type = 'SET_DEMO_ROLE'
+  assert.equal(actions[0].type, 'UPDATE_CLIENT')
+})
+
+test('authority dispatch defeats an equivocal proxy without invoking its get trap', () => {
+  const actions = []
+  let gets = 0
+  let resets = 0
+  const dispatch = workspaceProvider.createAuthorityBoundDispatch({
+    dispatch: (action) => { actions.push(action) },
+    getState: () => { throw new Error('proxy read state') },
+    resetAuthority: () => { resets += 1 },
+    authorityKeyFor: () => { throw new Error('proxy authority key') },
+    demoRoleIds: ['owner', 'coordinator', 'therapist'],
+  })
+  const source = { type: 'UPDATE_CLIENT', id: 'cl_one' }
+  const action = new Proxy(source, {
+    get(target, key, receiver) {
+      gets += 1
+      if (key === 'type') return 'SET_DEMO_ROLE'
+      if (key === 'roleId') return 'therapist'
+      return Reflect.get(target, key, receiver)
+    },
+  })
+  dispatch(action)
+  assert.equal(gets, 0)
+  assert.equal(resets, 0)
+  assert.equal(actions.length, 1)
+  assert.notEqual(actions[0], action)
+  assert.deepEqual(actions[0], { type: 'UPDATE_CLIENT', id: 'cl_one' })
+})
+
+test('authority dispatch rejects malformed extra descriptors and oversized snapshots', () => {
+  let reducerCalls = 0
+  let getterCalls = 0
+  const dispatch = workspaceProvider.createAuthorityBoundDispatch({
+    dispatch: () => { reducerCalls += 1 },
+    getState: () => ({ demoRoleId: 'owner' }),
+    resetAuthority: () => {},
+    authorityKeyFor: () => 'next',
+    demoRoleIds: ['owner', 'coordinator', 'therapist'],
+  })
+  const accessor = { type: 'UPDATE_CLIENT' }
+  Object.defineProperty(accessor, 'unused', {
+    enumerable: true,
+    get() { getterCalls += 1; return 'private' },
+  })
+  const hidden = { type: 'UPDATE_CLIENT' }
+  Object.defineProperty(hidden, 'unused', { enumerable: false, value: true })
+  const symbol = { type: 'UPDATE_CLIENT', [Symbol('private')]: true }
+  const oversized = { type: 'UPDATE_CLIENT' }
+  for (let index = 0; index < 32; index += 1) oversized[`field${index}`] = index
+  for (const action of [accessor, hidden, symbol, oversized]) {
+    assert.throws(() => dispatch(action), { name: 'TypeError', message: 'Invalid authority action' })
+  }
+  assert.equal(getterCalls, 0)
+  assert.equal(reducerCalls, 0)
 })
 
 test('a successful write invalidates a captured load and causes one exact bounded refetch', async () => {

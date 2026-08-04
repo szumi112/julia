@@ -15,6 +15,7 @@ const REPOSITORY_METHODS = Object.freeze([
   'editAppointment', 'cancelAppointment', 'recordPayment', 'correctPayment',
 ])
 const WORKSPACE_METHODS = Object.freeze(REPOSITORY_METHODS.filter((name) => name !== 'loadWindow'))
+const AUTHORITY_ACTION_KEY_LIMIT = 32
 const INFRASTRUCTURE_CODES = new Set([
   'ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'CSRF_INVALID', 'CSRF_EXPIRED',
   'FORBIDDEN', 'INTERNAL_ERROR', 'INVALID_RESPONSE', 'NETWORK_ERROR', 'ORIGIN_INVALID',
@@ -119,21 +120,34 @@ export const createAuthorityBoundDispatch = (options) => {
     } catch {
       fail('Invalid authority action')
     }
-    const type = descriptors?.type
-    if (!type?.enumerable || !Object.hasOwn(type, 'value') || typeof type.value !== 'string') {
+    const keys = Reflect.ownKeys(descriptors)
+    if (keys.length < 1 || keys.length > AUTHORITY_ACTION_KEY_LIMIT
+      || keys.some((key) => typeof key !== 'string')) fail('Invalid authority action')
+    const snapshot = {}
+    for (const key of keys) {
+      const descriptor = descriptors[key]
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) {
+        fail('Invalid authority action')
+      }
+      Object.defineProperty(snapshot, key, {
+        value: descriptor.value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      })
+    }
+    if (typeof snapshot.type !== 'string') {
       fail('Invalid authority action')
     }
-    if (type.value === 'SET_DEMO_ROLE') {
-      const roleId = descriptors.roleId
-      if (!roleId?.enumerable || !Object.hasOwn(roleId, 'value')
-        || typeof roleId.value !== 'string') fail('Invalid authority action')
-      if (!demoRoleIds.has(roleId.value)) return captured.dispatch(action)
+    if (snapshot.type === 'SET_DEMO_ROLE') {
+      if (typeof snapshot.roleId !== 'string') fail('Invalid authority action')
+      if (!demoRoleIds.has(snapshot.roleId)) return captured.dispatch(snapshot)
       const state = captured.getState()
-      if (state?.demoRoleId !== roleId.value) {
-        captured.resetAuthority(captured.authorityKeyFor({ ...state, demoRoleId: roleId.value }))
+      if (state?.demoRoleId !== snapshot.roleId) {
+        captured.resetAuthority(captured.authorityKeyFor({ ...state, demoRoleId: snapshot.roleId }))
       }
     }
-    return captured.dispatch(action)
+    return captured.dispatch(snapshot)
   })
 }
 
