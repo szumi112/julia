@@ -1,6 +1,6 @@
 // Add/Edit client — slide-over drawer with validation and delete-with-confirm.
 import { useEffect, useRef, useState } from 'react'
-import { useApp, clientOutstanding, useWorkspaceRefresh } from '../store.jsx'
+import { useApp, clientOutstanding, useClientMutationLock, useWorkspaceRefresh } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { clientsForRole } from '../workspace.js'
 import { Button, Field, Segmented, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
@@ -14,6 +14,7 @@ const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export function ClientDrawer({ opts, onClose }) {
   const { state, dispatch, toast, workspace } = useApp()
+  const { locked: clientMutationLocked } = useClientMutationLock()
   const { appMode, capabilities, route, navigate, role, registerLeaveGuard } = useShell()
   const refreshWorkspace = useWorkspaceRefresh()
   const isApp = appMode === 'app'
@@ -94,7 +95,6 @@ export function ClientDrawer({ opts, onClose }) {
   })
 
   const refreshAfterAppMutation = async (failureMessage) => {
-    opts.onMutationCommitted?.()
     try {
       await refreshWorkspace(opts.workspaceRange)
     } catch {
@@ -103,12 +103,11 @@ export function ClientDrawer({ opts, onClose }) {
       toast(failureMessage, 'alert')
       return false
     }
-    opts.onMutationReconciled?.()
     return true
   }
 
   const submitApp = async () => {
-    if (saveStatus === 'saving' || !capabilities.includes('client.manage')
+    if (saveStatus === 'saving' || clientMutationLocked || !capabilities.includes('client.manage')
       || editing?.readOnly || editing?.status === 'archived') return
     const payload = appPayload()
     const nextErrors = appErrors(payload)
@@ -208,7 +207,7 @@ export function ClientDrawer({ opts, onClose }) {
   }
 
   const archive = async () => {
-    if (!isApp || saveStatus === 'saving' || !capabilities.includes('client.manage')
+    if (!isApp || saveStatus === 'saving' || clientMutationLocked || !capabilities.includes('client.manage')
       || !editing || editing.readOnly || editing.status === 'archived') return
     setSaveStatus('saving')
     setSaveError(null)

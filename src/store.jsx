@@ -24,6 +24,7 @@ const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
 // recreate the app context value and re-render all of its consumers
 const ToastCtx = createContext([])
+const ClientMutationCtx = createContext(Object.freeze({ locked: false }))
 
 let nextId = 10000
 
@@ -360,15 +361,22 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
     () => ({ toasts, dismissToast, clearToasts }),
     [clearToasts, dismissToast, toasts]
   )
+  const clientMutationValue = useMemo(
+    () => Object.freeze({ locked: workspaceSnapshot.clientMutationLocked }),
+    [workspaceSnapshot.clientMutationLocked]
+  )
   return (
-    <AppCtx.Provider value={value}>
-      <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
-    </AppCtx.Provider>
+    <ClientMutationCtx.Provider value={clientMutationValue}>
+      <AppCtx.Provider value={value}>
+        <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
+      </AppCtx.Provider>
+    </ClientMutationCtx.Provider>
   )
 }
 
 export const useApp = () => useContext(AppCtx)
 export const useToasts = () => useContext(ToastCtx)
+export const useClientMutationLock = () => useContext(ClientMutationCtx)
 
 export const useWorkspaceWindow = (range, enabled = true) => {
   const { workspace } = useApp()

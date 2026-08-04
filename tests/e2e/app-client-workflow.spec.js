@@ -230,6 +230,9 @@ test('@owner closes and disables a successful client create when canonical reloa
   await expect(drawer).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Dodaj klienta' })).toBeDisabled()
   await expect(page.getByText('Dane zapisano, ale nie udało się odświeżyć kartoteki.')).toBeVisible()
+  await page.goto('./#/dashboard')
+  await page.goto('./#/clients')
+  await expect(page.getByRole('button', { name: 'Dodaj klienta' })).toBeDisabled()
   expect(writes).toHaveLength(1)
 })
 
@@ -264,6 +267,9 @@ test('@owner closes and disables a successful client edit when canonical reload 
   await expect(drawer).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Edytuj' })).toHaveCount(0)
   await expect(page.getByText('Dane zapisano, ale nie udało się odświeżyć kartoteki.')).toBeVisible()
+  await page.goto('./#/dashboard')
+  await page.goto('./#/client?id=cl_ola')
+  await expect(page.getByRole('button', { name: 'Edytuj' })).toHaveCount(0)
   expect(writes).toHaveLength(1)
 })
 
@@ -301,6 +307,9 @@ test('@owner closes and disables a successful client archive when canonical relo
   await expect(drawer).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Edytuj' })).toHaveCount(0)
   await expect(page.getByText('Klienta zarchiwizowano, ale nie udało się odświeżyć kartoteki.')).toBeVisible()
+  await page.goto('./#/dashboard')
+  await page.goto('./#/client?id=cl_ola')
+  await expect(page.getByRole('button', { name: 'Edytuj' })).toHaveCount(0)
   expect(writes).toHaveLength(1)
 })
 

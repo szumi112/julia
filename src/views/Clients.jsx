@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, useWorkspaceWindow, clientOutstanding, lastSessionOf } from '../store.jsx'
+import { useApp, useClientMutationLock, useWorkspaceWindow, clientOutstanding, lastSessionOf } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
 import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, usePagination, Pager } from '../ui.jsx'
@@ -65,18 +65,13 @@ export function Clients({ params = {} }) {
   const [debtOnly, setDebtOnly] = useState(initialState.current.debtOnly)
   const [statusFilter, setStatusFilter] = useState(initialState.current.status)
   const [clientForm, setClientForm] = useState(null)
-  const [clientMutationCommitted, setClientMutationCommitted] = useState(false)
+  const { locked: clientMutationLocked } = useClientMutationLock()
   const canManageClients = !isApp || capabilities.includes('client.manage')
-  const clientActionsLocked = isApp && clientMutationCommitted
+  const clientActionsLocked = isApp && clientMutationLocked
   const openClient = (opts = {}) => {
     if (isApp) {
       if (clientActionsLocked) return
-      setClientForm({
-        ...opts,
-        workspaceRange,
-        onMutationCommitted: () => setClientMutationCommitted(true),
-        onMutationReconciled: () => setClientMutationCommitted(false),
-      })
+      setClientForm({ ...opts, workspaceRange })
     }
     else openClientForm(opts)
   }
@@ -320,7 +315,7 @@ export function ClientDetail({ params }) {
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
   const [clientForm, setClientForm] = useState(null)
-  const [clientMutationCommitted, setClientMutationCommitted] = useState(false)
+  const { locked: clientMutationLocked } = useClientMutationLock()
   const client = clientsForRole(state, role).find((candidate) => candidate.id === params.id)
   const all = client
     ? sessionsForRole(state, role).filter((session) => session.clientId === client.id)
@@ -364,19 +359,14 @@ export function ClientDetail({ params }) {
     ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
     : []
   const canReadClinicalNotes = !isApp && role.scope === 'own' && client.psychId === role.psychId
-  const canEditClient = !clientMutationCommitted && !client.readOnly && (!isApp || capabilities.includes('client.manage'))
+  const canEditClient = !clientMutationLocked && !client.readOnly && (!isApp || capabilities.includes('client.manage'))
     && (role.scope !== 'own' || client.psychId === role.psychId)
   const canManageCare = !isApp && !client.readOnly
     && (role.scope !== 'own' || client.psychId === role.psychId)
   const openClient = () => {
     if (isApp) {
-      if (clientMutationCommitted) return
-      setClientForm({
-        client,
-        workspaceRange,
-        onMutationCommitted: () => setClientMutationCommitted(true),
-        onMutationReconciled: () => setClientMutationCommitted(false),
-      })
+      if (clientMutationLocked) return
+      setClientForm({ client, workspaceRange })
     }
     else openClientForm({ client })
   }

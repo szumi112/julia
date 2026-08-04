@@ -371,6 +371,24 @@ test('a successful write invalidates a captured load and causes one exact bounde
   assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [requested])
 })
 
+test('successful client commands stay locked until canonical reconciliation or authority reset', async () => {
+  const controller = makeController(() => repositoryWith())
+  await controller.getSnapshot().workspace.createClient({ name: 'Ola' })
+  assert.equal(controller.getSnapshot().clientMutationLocked, true)
+  await assert.rejects(
+    controller.getSnapshot().workspace.createClient({ name: 'Ola ponownie' }),
+    { code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
+  )
+
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-04'))
+  assert.equal(controller.getSnapshot().clientMutationLocked, false)
+
+  await controller.getSnapshot().workspace.archiveClient('cl_ola', 1)
+  assert.equal(controller.getSnapshot().clientMutationLocked, true)
+  controller.resetAuthority('authority-two')
+  assert.equal(controller.getSnapshot().clientMutationLocked, false)
+})
+
 test('business errors do not advance the epoch or make the workspace read-only', async () => {
   const conflict = Object.assign(new Error('conflict'), { code: 'VERSION_CONFLICT', status: 409 })
   const controller = makeController(() => repositoryWith({
