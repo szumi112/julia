@@ -1,4 +1,10 @@
-import { createClient, editClient, validateEditClientBody } from '../core/clients.js'
+import {
+  archiveClient,
+  createClient,
+  editClient,
+  validateArchiveClientBody,
+  validateEditClientBody,
+} from '../core/clients.js'
 import { AppError } from '../http/errors.js'
 
 const BASE_KEYS = Object.freeze([
@@ -71,6 +77,32 @@ export async function postClientEdit(input) {
     } catch { throw new Error('INTERNAL_ERROR') }
     const match = typeof message === 'string'
       ? /^VALIDATION_FAILED\/(body|name|age|status|specialistId|clientId|expectedVersion)$/.exec(message)
+      : null
+    if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
+    throw error
+  }
+}
+
+export async function postClientArchive(input) {
+  const captured = capture(input, EDIT_KEYS, 'archive')
+  const service = captured.archive ?? archiveClient
+  if (typeof service !== 'function') throw new Error('INTERNAL_ERROR')
+  try {
+    if (typeof captured.clientId !== 'string' || !CLIENT_ID.test(captured.clientId)) {
+      throw new TypeError('VALIDATION_FAILED/clientId')
+    }
+    validateArchiveClientBody(captured.body)
+    return await service(Object.fromEntries(EDIT_KEYS.map((key) => [key, captured[key]])))
+  } catch (error) {
+    let message
+    try {
+      if (error instanceof TypeError) {
+        const descriptor = Object.getOwnPropertyDescriptor(error, 'message')
+        if (descriptor && Object.hasOwn(descriptor, 'value')) message = descriptor.value
+      }
+    } catch { throw new Error('INTERNAL_ERROR') }
+    const match = typeof message === 'string'
+      ? /^VALIDATION_FAILED\/(body|clientId|expectedVersion)$/.exec(message)
       : null
     if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
     throw error

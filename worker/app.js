@@ -28,7 +28,7 @@ import {
 import { getSession } from './routes/session.js'
 import { getStaff, postDeactivation, postInvitation } from './routes/staff.js'
 import { getWorkspace } from './routes/workspace.js'
-import { postClient, postClientEdit } from './routes/clients.js'
+import { postClient, postClientArchive, postClientEdit } from './routes/clients.js'
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
 import { loadDataKey } from './security/envelope.js'
 import { createKeyring } from './security/keyring.js'
@@ -392,6 +392,19 @@ export function createApp(deps = {}) {
       ...(deps.editClient ? { edit: deps.editClient } : {}),
     }
     const result = await (deps.postClientEdit ?? postClientEdit)(input)
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/clients/:clientId/archive', async (c) => {
+    if (c.get('routeId') !== 'clients.archive') throw new AppError('NOT_FOUND')
+    const input = {
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory, clientId: c.req.param('clientId'),
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.archiveClient ? { archive: deps.archiveClient } : {}),
+    }
+    const result = await (deps.postClientArchive ?? postClientArchive)(input)
     return c.json(result.body, result.status)
   })
   app.options('/api/v1/session', (c) => new Response(null, {

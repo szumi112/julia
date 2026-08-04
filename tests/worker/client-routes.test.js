@@ -1,14 +1,17 @@
 import { env } from 'cloudflare:workers'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  archiveClient,
   createClient,
+  digestArchiveClientRequest,
   digestCreateClientRequest,
   digestEditClientRequest,
   editClient,
+  validateArchiveClientBody,
   validateCreateClientBody,
   validateEditClientBody,
 } from '../../worker/core/clients.js'
-import { postClient, postClientEdit } from '../../worker/routes/clients.js'
+import { postClient, postClientArchive, postClientEdit } from '../../worker/routes/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { decryptForScope, encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
 import {
@@ -26,6 +29,270 @@ import {
 const NOW_MS = 1_800_000_000_000
 const BODY = Object.freeze({
   name: 'Fikcyjna', age: 12, status: 'active', specialistId: 'sp_target',
+})
+
+describe('persistent client archive', () => {
+  let sequence = 0
+  const actor = Object.freeze({ id: 'stf_client_owner', role: 'owner', specialistId: null })
+  const seed = async ({ status = 'active', specialistId = 'sp_target', createdBy = actor } = {}) => {
+    sequence += 1
+    const marker = `archive_fixture_${sequence}`
+    const ids = [`${marker}_client`, `${marker}_assignment`, `${marker}_client_ver`,
+      `${marker}_assignment_ver`, `${marker}_audit`, `${marker}_key`]
+    return (await createClient({
+      db: env.DB, recoveryDb: env.DB, actor: createdBy, keyring: await ring(),
+      nowMs: NOW_MS, correlationId: CORRELATION_ID, idFactory: () => ids.shift(),
+      body: { ...BODY, status, specialistId }, idempotencyKey: `${marker}-create-key`,
+    })).body.data.client
+  }
+  const archive = async (client, overrides = {}) => {
+    const marker = `archive_command_${++sequence}`
+    const ids = [`${marker}_client_ver`, `${marker}_assignment_ver`, `${marker}_audit`]
+    return archiveClient({
+      db: env.DB, recoveryDb: env.DB, actor, keyring: await ring(),
+      nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => ids.shift(), clientId: client.id,
+      body: { expectedVersion: client.version },
+      idempotencyKey: `${marker}-key`, ...overrides,
+    })
+  }
+
+  it('strictly captures one expected version and binds its digest to the target', async () => {
+    expect(validateArchiveClientBody({ expectedVersion: 1 })).toEqual({ expectedVersion: 1 })
+    for (const body of [{ expectedVersion: 0 }, { expectedVersion: 1, extra: true }]) {
+      expect(() => validateArchiveClientBody(body)).toThrow('VALIDATION_FAILED')
+    }
+    const getter = vi.fn(() => 1)
+    const hostile = Object.defineProperty({}, 'expectedVersion', { enumerable: true, get: getter })
+    expect(() => validateArchiveClientBody(hostile)).toThrow('VALIDATION_FAILED/body')
+    expect(getter).not.toHaveBeenCalled()
+    const digest = await digestArchiveClientRequest('cl_archive_digest', { expectedVersion: 1 })
+    expect(digest).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(await digestArchiveClientRequest('cl_archive_digest', { expectedVersion: 2 }))
+      .not.toBe(digest)
+    expect(await digestArchiveClientRequest('cl_archive_other', { expectedVersion: 1 }))
+      .not.toBe(digest)
+  })
+
+  it('archives active and paused centre clients while closing only the current assignment', async () => {
+    for (const status of ['active', 'paused']) {
+      const client = await seed({ status })
+      const beforeLedger = {
+        appointments: (await env.DB.prepare('SELECT * FROM appointments WHERE client_id=?').bind(client.id).all()).results,
+        charges: (await env.DB.prepare(`SELECT charge.* FROM session_charges charge JOIN appointments appointment ON appointment.id=charge.appointment_id WHERE appointment.client_id=?`).bind(client.id).all()).results,
+        payments: (await env.DB.prepare(`SELECT payment.* FROM payment_entries payment JOIN appointments appointment ON appointment.id=payment.appointment_id WHERE appointment.client_id=?`).bind(client.id).all()).results,
+        corrections: (await env.DB.prepare(`SELECT correction.* FROM payment_corrections correction JOIN payment_entries payment ON payment.id=correction.reversed_entry_id JOIN appointments appointment ON appointment.id=payment.appointment_id WHERE appointment.client_id=?`).bind(client.id).all()).results,
+      }
+      const result = await archive(client)
+      expect(result).toEqual({ status: 200, body: { data: { client: {
+        ...client, status: 'archived', version: 2,
+        archivedAt: new Date(NOW_MS + 1_000).toISOString(),
+        updatedAt: new Date(NOW_MS + 1_000).toISOString(), readOnly: true, assignment: null,
+      } } } })
+      expect(await env.DB.prepare('SELECT status,version,archived_at FROM clients WHERE id=?').bind(client.id).first())
+        .toEqual({ status: 'archived', version: 2, archived_at: new Date(NOW_MS + 1_000).toISOString() })
+      expect(await env.DB.prepare('SELECT ends_at,version FROM client_assignments WHERE id=?').bind(client.assignment.id).first())
+        .toEqual({ ends_at: new Date(NOW_MS + 1_000).toISOString(), version: 2 })
+      expect((await env.DB.prepare('SELECT version FROM record_versions WHERE entity_id=? ORDER BY version').bind(client.id).all()).results)
+        .toEqual([{ version: 1 }, { version: 2 }])
+      expect((await env.DB.prepare('SELECT version FROM record_versions WHERE entity_id=? ORDER BY version').bind(client.assignment.id).all()).results)
+        .toEqual([{ version: 1 }, { version: 2 }])
+      const audit = await env.DB.prepare("SELECT action,metadata_json FROM audit_events WHERE entity_id=? AND action='client.archived'").bind(client.id).first()
+      expect(audit).toEqual({ action: 'client.archived', metadata_json: JSON.stringify({ assignmentId: client.assignment.id, assignmentVersion: 2, clientVersion: 2 }) })
+      const afterLedger = {
+        appointments: (await env.DB.prepare('SELECT * FROM appointments WHERE client_id=?').bind(client.id).all()).results,
+        charges: (await env.DB.prepare(`SELECT charge.* FROM session_charges charge JOIN appointments appointment ON appointment.id=charge.appointment_id WHERE appointment.client_id=?`).bind(client.id).all()).results,
+        payments: (await env.DB.prepare(`SELECT payment.* FROM payment_entries payment JOIN appointments appointment ON appointment.id=payment.appointment_id WHERE appointment.client_id=?`).bind(client.id).all()).results,
+        corrections: (await env.DB.prepare(`SELECT correction.* FROM payment_corrections correction JOIN payment_entries payment ON payment.id=correction.reversed_entry_id JOIN appointments appointment ON appointment.id=payment.appointment_id WHERE appointment.client_id=?`).bind(client.id).all()).results,
+      }
+      expect(afterLedger).toEqual(beforeLedger)
+    }
+  })
+
+  it('blocks exact-time and future non-cancelled appointments but permits past and cancelled', async () => {
+    for (const [offset, status, blocked] of [[1_000, 'scheduled', true], [60_000, 'completed', true], [-1, 'completed', false], [60_000, 'cancelled', false]]) {
+      const client = await seed()
+      const startsAt = new Date(NOW_MS + offset).toISOString()
+      const endsAt = new Date(NOW_MS + offset + 60_000).toISOString()
+      await env.DB.prepare(`INSERT INTO appointments (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,status,source,version,cancelled_at,created_at,updated_at) VALUES (?,?,?,?,? ,?,'Europe/Warsaw',NULL,?,'panel',1,?,?,?)`).bind(
+        `apt_archive_${sequence}_${status}`, client.id, 'sp_target', 'zajecia', startsAt, endsAt,
+        status, status === 'cancelled' ? startsAt : null, new Date(NOW_MS).toISOString(), new Date(NOW_MS).toISOString(),
+      ).run()
+      const operation = archive(client)
+      if (blocked) await expect(operation).rejects.toThrow('CLIENT_ARCHIVE_CONFLICT')
+      else expect((await operation).status).toBe(200)
+    }
+  })
+
+  it('keeps stale, archived, absent, cross-specialist, and paused specialist targets opaque', async () => {
+    const stale = await seed()
+    await expect(archive(stale, { body: { expectedVersion: 2 } })).rejects.toMatchObject({
+      message: 'VERSION_CONFLICT', details: { currentVersion: 1 },
+    })
+    const archived = await seed(); await archive(archived)
+    const cross = await seed()
+    const paused = await seed({ status: 'paused' })
+    const specialist = { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' }
+    for (const client of [archived, { id: 'cl_archive_absent', version: 1 }, cross, paused]) {
+      await expect(archive(client, { actor: specialist, idFactory: vi.fn(),
+        idempotencyKey: `archive-opaque-${++sequence}-key` })).rejects.toThrow('NOT_FOUND')
+    }
+  })
+
+  it('allows a specialist to archive only their active singly assigned client', async () => {
+    const specialist = { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' }
+    const client = await seed({ specialistId: 'sp_client_self', createdBy: specialist })
+    expect((await archive(client, { actor: specialist })).body.data.client.status).toBe('archived')
+  })
+
+  it('allows the coordinator centre role to archive an assigned client', async () => {
+    const client = await seed()
+    const coordinator = { id: 'stf_client_coord', role: 'coordinator', specialistId: null }
+    expect((await archive(client, { actor: coordinator })).body.data.client.status).toBe('archived')
+  })
+
+  it('checks replay before target facts and generated IDs', async () => {
+    const client = await seed()
+    const key = `archive-replay-${++sequence}-key`
+    const first = await archive(client, { idempotencyKey: key })
+    const idFactory = vi.fn()
+    expect(await archive(client, { idempotencyKey: key, idFactory })).toEqual(first)
+    expect(idFactory).not.toHaveBeenCalled()
+  })
+
+  it('fails closed on replay key loss and rejects a changed archive digest', async () => {
+    const client = await seed()
+    const key = `archive-crypto-${++sequence}-key`
+    await archive(client, { idempotencyKey: key })
+    await expect(archive(client, { idempotencyKey: key, keyring: {}, idFactory: vi.fn() }))
+      .rejects.toThrow('CRYPTO_FAILURE')
+    await expect(archive(client, {
+      idempotencyKey: key, body: { expectedVersion: 2 }, idFactory: vi.fn(),
+    })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+  })
+
+  it('builds exactly the ordered seven-statement archive UOW', async () => {
+    const client = await seed()
+    let batchSql
+    const innerByStatement = new WeakMap()
+    const statement = (sql, inner) => {
+      const wrapped = {
+        sql, bind(...bindings) { return statement(sql, inner.bind(...bindings)) },
+        first: (...args) => inner.first(...args), all: (...args) => inner.all(...args),
+        raw: (...args) => inner.raw(...args), run: (...args) => inner.run(...args),
+      }
+      innerByStatement.set(wrapped, inner)
+      return wrapped
+    }
+    const db = {
+      prepare: (sql) => statement(sql, env.DB.prepare(sql)),
+      batch: (statements) => {
+        batchSql = statements.map(({ sql }) => sql.replace(/\s+/g, ' ').trim())
+        return env.DB.batch(statements.map((current) => innerByStatement.get(current)))
+      },
+    }
+    await archive(client, { db })
+    expect(batchSql).toEqual([
+      expect.stringMatching(/^UPDATE clients /),
+      expect.stringMatching(/^UPDATE client_assignments /),
+      expect.stringMatching(/^INSERT INTO record_versions /),
+      expect.stringMatching(/^INSERT INTO record_versions /),
+      expect.stringMatching(/^INSERT INTO audit_events /),
+      expect.stringMatching(/^INSERT INTO idempotency_records /),
+      expect.stringMatching(/^INSERT INTO core_directory_invariant_failures /),
+    ])
+    expect(batchSql.join(' ')).not.toMatch(/(?:UPDATE|DELETE FROM) (?:appointments|session_charges|payment_entries|payment_corrections)/)
+  })
+
+  it('recovers a concurrent same-key winner with exactly two reserved reads', async () => {
+    const client = await seed()
+    const keyring = await ring()
+    const key = `archive-race-same-${++sequence}-key`
+    let raced = false
+    let budget
+    let beforeRecovery
+    const rawDb = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch() {
+        beforeRecovery = budget.usage()
+        if (!raced) {
+          raced = true
+          await archive(client, { keyring, idempotencyKey: key })
+        }
+        throw new Error('identity_collision: SQLITE_CONSTRAINT')
+      },
+    }
+    budget = createD1QueryBudget(rawDb, { totalLimit: 50, recoveryReserve: 8 })
+    const result = await archive(client, {
+      db: budget.work, recoveryDb: budget.recovery, keyring, idempotencyKey: key,
+    })
+    expect(result.body.data.client.status).toBe('archived')
+    expect(beforeRecovery.used).toBe(12)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery).used).toBe(14)
+  })
+
+  it('contains a concurrent different-key loser as a version conflict with no residue', async () => {
+    const client = await seed()
+    const keyring = await ring()
+    let raced = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!raced) {
+          raced = true
+          await archive(client, { keyring, idempotencyKey: `archive-winner-${sequence}-key` })
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    await expect(archive(client, {
+      db, keyring, idempotencyKey: `archive-loser-${sequence}-key`,
+    })).rejects.toMatchObject({ message: 'VERSION_CONFLICT', details: { currentVersion: 2 } })
+    expect(await env.DB.prepare('SELECT count(*) AS count FROM audit_events WHERE entity_id=? AND action=?').bind(client.id, 'client.archived').first())
+      .toEqual({ count: 1 })
+    expect(await env.DB.prepare('SELECT count(*) AS count FROM idempotency_records WHERE resource_id=? AND operation=?').bind(client.id, 'clients.archive').first())
+      .toEqual({ count: 1 })
+  })
+
+  it('rolls back each ordered seven-statement archive position byte-for-byte', async () => {
+    for (let failedAt = 0; failedAt < 7; failedAt += 1) {
+      const client = await seed()
+      const tables = async () => ({
+        client: await env.DB.prepare('SELECT * FROM clients WHERE id=?').bind(client.id).first(),
+        assignments: (await env.DB.prepare('SELECT * FROM client_assignments WHERE client_id=? ORDER BY id').bind(client.id).all()).results,
+        versions: (await env.DB.prepare('SELECT * FROM record_versions WHERE entity_id IN (?,?) ORDER BY id').bind(client.id, client.assignment.id).all()).results,
+        audits: (await env.DB.prepare('SELECT * FROM audit_events WHERE entity_id=? ORDER BY id').bind(client.id).all()).results,
+        idem: (await env.DB.prepare('SELECT * FROM idempotency_records WHERE resource_id=? ORDER BY idempotency_key').bind(client.id).all()).results,
+        appointments: (await env.DB.prepare('SELECT * FROM appointments WHERE client_id=? ORDER BY id').bind(client.id).all()).results,
+        charges: (await env.DB.prepare(`SELECT charge.* FROM session_charges charge JOIN appointments appointment ON appointment.id=charge.appointment_id WHERE appointment.client_id=? ORDER BY charge.id`).bind(client.id).all()).results,
+        payments: (await env.DB.prepare(`SELECT payment.* FROM payment_entries payment JOIN appointments appointment ON appointment.id=payment.appointment_id WHERE appointment.client_id=? ORDER BY payment.id`).bind(client.id).all()).results,
+        corrections: (await env.DB.prepare(`SELECT correction.* FROM payment_corrections correction JOIN payment_entries payment ON payment.id=correction.reversed_entry_id JOIN appointments appointment ON appointment.id=payment.appointment_id WHERE appointment.client_id=? ORDER BY correction.id`).bind(client.id).all()).results,
+      })
+      const before = await tables()
+      const db = { prepare: (sql) => env.DB.prepare(sql), batch: (statements) => env.DB.batch(statements.map((statement, index) => index === failedAt ? env.DB.prepare("INSERT INTO core_directory_invariant_failures (failure_kind) VALUES ('forced')") : statement)) }
+      await expect(archive(client, { db, idempotencyKey: `archive-rollback-${sequence}-${failedAt}` })).rejects.toThrow()
+      expect(await tables()).toEqual(before)
+    }
+  })
+
+  it('stays inside the archive work and route budgets', async () => {
+    const client = await seed()
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    await archive(client, { db: budget.work, recoveryDb: budget.recovery })
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 12, remaining: 38, workRemaining: 30, totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('keeps the archive adapter exact', async () => {
+    const service = vi.fn(async () => ({ status: 200, body: { data: { client: {} } } }))
+    const input = { db: {}, recoveryDb: {}, actor, keyring: {}, nowMs: NOW_MS,
+      correlationId: CORRELATION_ID, idFactory: vi.fn(), clientId: 'cl_archive_adapter',
+      body: { expectedVersion: 1 }, idempotencyKey: 'archive-adapter-key-0001', archive: service }
+    expect((await postClientArchive(input)).status).toBe(200)
+    await expect(postClientArchive({ ...input, body: { expectedVersion: 0 } }))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: { field: 'expectedVersion' } })
+  })
 })
 const CORRELATION_ID = '00000000-0000-4000-8000-000000000015'
 
@@ -597,7 +864,7 @@ describe('persistent client creation', () => {
       .toEqual({ count: 0 })
   })
 
-  it('wires only POST clients through the authenticated shell and preserves future 404s', async () => {
+  it('wires POST clients without dispatching archive to the create service', async () => {
     const create = vi.fn(async () => ({
       status: 201, body: { data: { client: { id: 'cl_shell' } } },
     }))
@@ -620,6 +887,9 @@ describe('persistent client creation', () => {
       verifyCsrfToken: vi.fn(async () => true),
       readJsonBodyOnce: vi.fn(async (request) => request.json()),
       createClient: create,
+      archiveClient: vi.fn(async () => ({ status: 200, body: { data: { client: {
+        id: 'cl_shell', status: 'archived',
+      } } } })),
       now: () => NOW_MS,
     })
     const headers = {
@@ -643,7 +913,7 @@ describe('persistent client creation', () => {
     const future = await app.request('/api/v1/clients/cl_shell/archive', {
       method: 'POST', headers, body: JSON.stringify({ expectedVersion: 1 }),
     })
-    expect(future.status).toBe(404)
+    expect(future.status).toBe(200)
     expect(create).toHaveBeenCalledOnce()
   })
 

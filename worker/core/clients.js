@@ -22,16 +22,19 @@ import { isWellFormedUnicode } from '../../src/core-records.js'
 
 const BODY_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'])
 const EDIT_BODY_KEYS = Object.freeze(['expectedVersion', ...BODY_KEYS])
+const ARCHIVE_BODY_KEYS = Object.freeze(['expectedVersion'])
 const INPUT_KEYS = Object.freeze([
   'db', 'recoveryDb', 'actor', 'keyring', 'nowMs', 'correlationId', 'idFactory',
   'body', 'idempotencyKey',
 ])
 const EDIT_INPUT_KEYS = Object.freeze([...INPUT_KEYS.slice(0, 7), 'clientId', ...INPUT_KEYS.slice(7)])
+const ARCHIVE_INPUT_KEYS = EDIT_INPUT_KEYS
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const OPERATION = 'clients.create'
 const EDIT_OPERATION = 'clients.edit'
+const ARCHIVE_OPERATION = 'clients.archive'
 const ROUTE_TARGET = 'POST /api/v1/clients'
 const PROSPECTIVE_CLIENT_ID = 'cl_authorization_target'
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -100,6 +103,14 @@ export function validateEditClientBody(value) {
   return body
 }
 
+export function validateArchiveClientBody(value) {
+  const body = captureExact(value, ARCHIVE_BODY_KEYS)
+  if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 1) {
+    validation('expectedVersion')
+  }
+  return body
+}
+
 export async function digestCreateClientRequest(value) {
   const body = validateCreateClientBody(value)
   const plaintext = JSON.stringify({
@@ -136,6 +147,23 @@ export async function digestEditClientRequest(clientId, value) {
     },
   })
   const encoded = new TextEncoder().encode(plaintext)
+  let digest
+  try {
+    digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded))
+    return encodeBase64Url(digest)
+  } finally {
+    encoded.fill(0)
+    digest?.fill(0)
+  }
+}
+
+export async function digestArchiveClientRequest(clientId, value) {
+  if (typeof clientId !== 'string' || !CLIENT_ID.test(clientId)) validation('clientId')
+  const body = validateArchiveClientBody(value)
+  const encoded = new TextEncoder().encode(JSON.stringify({
+    route: `POST /api/v1/clients/${clientId}/archive`,
+    body: { expectedVersion: body.expectedVersion },
+  }))
   let digest
   try {
     digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded))
@@ -222,6 +250,12 @@ const clientDto = (client, assignment) => Object.freeze({
     startsAt: assignment.startsAt,
     version: assignment.version,
   }),
+})
+
+const archivedClientDto = (client) => Object.freeze({
+  id: client.id, name: client.name, age: client.age, status: 'archived',
+  version: client.version, archivedAt: client.archivedAt, createdAt: client.createdAt,
+  updatedAt: client.updatedAt, readOnly: true, assignment: null,
 })
 
 const replayFailure = () => { throw new Error('CRYPTO_FAILURE') }
@@ -604,6 +638,26 @@ const validateEditReplay = (value, clientId, request) => {
   })
 }
 
+const validateArchiveReplay = (value, clientId, request) => {
+  const replay = replayObject(value, ['status', 'body'])
+  const body = replayObject(replay.body, ['data'])
+  const data = replayObject(body.data, ['client'])
+  const client = replayObject(data.client, [
+    'id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt',
+    'readOnly', 'assignment',
+  ])
+  if (replay.status !== 200 || client.id !== clientId || !validName(client.name)
+    || (client.age !== null && (!Number.isSafeInteger(client.age) || client.age < 1 || client.age > 26))
+    || client.status !== 'archived' || client.version !== request.expectedVersion + 1
+    || !canonicalInstant(client.archivedAt) || client.updatedAt !== client.archivedAt
+    || !canonicalInstant(client.createdAt) || client.createdAt >= client.archivedAt
+    || client.readOnly !== true || client.assignment !== null) replayFailure()
+  return Object.freeze({
+    status: 200,
+    body: Object.freeze({ data: Object.freeze({ client: archivedClientDto(client) }) }),
+  })
+}
+
 const versionConflict = (currentVersion) => {
   const error = new Error('VERSION_CONFLICT')
   Object.defineProperty(error, 'details', {
@@ -672,6 +726,108 @@ const conditionalVersionStatement = (db, version, conditionSql, bindings) => db.
   version.row.snapshot_envelope, version.row.changed_by_staff_id,
   version.row.changed_at, version.row.correlation_id, ...bindings,
 )
+
+const captureArchiveCommand = (input) => {
+  const captured = captureExact(input, ARCHIVE_INPUT_KEYS)
+  if (!captured.db?.prepare || !captured.db?.batch || !captured.recoveryDb?.prepare
+    || !captured.keyring || typeof captured.idFactory !== 'function'
+    || !Number.isSafeInteger(captured.nowMs) || captured.nowMs < 0
+    || typeof captured.correlationId !== 'string'
+    || !CORRELATION_ID.test(captured.correlationId)
+    || !IDEMPOTENCY_KEY.test(captured.idempotencyKey ?? '')) validation('body')
+  if (typeof captured.clientId !== 'string' || !CLIENT_ID.test(captured.clientId)) validation('clientId')
+  return Object.freeze({ ...captured, body: validateArchiveClientBody(captured.body) })
+}
+
+const archiveGuardStatement = (db, values) => {
+  const lifecycle = specialistPostcondition(values.practitionerStaffId)
+  return db.prepare(
+    `INSERT INTO core_directory_invariant_failures (failure_kind)
+     SELECT 'client_archive_postcondition'
+     WHERE NOT (
+       EXISTS (SELECT 1 FROM data_keys
+         WHERE id=? AND scope_type='client' AND scope_id=? AND purpose='identity'
+           AND dek_version=1 AND retired_at IS NULL)
+       AND EXISTS (SELECT 1 FROM clients
+         WHERE id=? AND identity_envelope=? AND status='archived' AND version=?
+           AND archived_at=? AND created_at=? AND updated_at=?)
+       AND EXISTS (SELECT 1 FROM client_assignments
+         WHERE id=? AND client_id=? AND specialist_id=? AND starts_at=? AND ends_at=?
+           AND assigned_by_staff_id=? AND version=? AND created_at=? AND updated_at=?)
+       AND NOT EXISTS (SELECT 1 FROM client_assignments WHERE client_id=? AND ends_at IS NULL)
+       AND (SELECT count(*) FROM record_versions
+         WHERE entity_type='client' AND entity_id=?)=?
+       AND (SELECT min(version) FROM record_versions
+         WHERE entity_type='client' AND entity_id=?)=1
+       AND (SELECT max(version) FROM record_versions
+         WHERE entity_type='client' AND entity_id=?)=?
+       AND (SELECT count(*) FROM record_versions
+         WHERE entity_type='client_assignment' AND entity_id=?)=?
+       AND (SELECT min(version) FROM record_versions
+         WHERE entity_type='client_assignment' AND entity_id=?)=1
+       AND (SELECT max(version) FROM record_versions
+         WHERE entity_type='client_assignment' AND entity_id=?)=?
+       AND NOT EXISTS (SELECT 1 FROM record_versions
+         WHERE entity_id IN (?,?) AND entity_type NOT IN ('client','client_assignment'))
+       AND NOT EXISTS (SELECT 1 FROM record_versions
+         WHERE ((entity_type='client' AND entity_id=?)
+           OR (entity_type='client_assignment' AND entity_id=?))
+           AND (NOT json_valid(snapshot_envelope)
+             OR json_extract(CASE WHEN json_valid(snapshot_envelope)
+                  THEN snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+             OR json_extract(CASE WHEN json_valid(snapshot_envelope)
+                  THEN snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1))
+       AND EXISTS (SELECT 1 FROM record_versions
+         WHERE id=? AND entity_type='client' AND entity_id=? AND version=?
+           AND changed_by_staff_id=? AND changed_at=? AND correlation_id=?)
+       AND EXISTS (SELECT 1 FROM record_versions
+         WHERE id=? AND entity_type='client_assignment' AND entity_id=? AND version=?
+           AND changed_by_staff_id=? AND changed_at=? AND correlation_id=?)
+       AND EXISTS (SELECT 1 FROM audit_events
+         WHERE id=? AND actor_staff_id=? AND action='client.archived'
+           AND entity_type='client' AND entity_id=? AND result='success'
+           AND reason_envelope IS NULL AND correlation_id=? AND metadata_json=?)
+       AND EXISTS (SELECT 1 FROM idempotency_records
+         WHERE actor_id=? AND operation=? AND idempotency_key=?
+           AND resource_type='client' AND resource_id=?
+           AND json_extract(request_hash,'$.dataKeyId')=?
+           AND json_extract(request_hash,'$.dataKeyVersion')=1
+           AND json_extract(response_envelope,'$.dataKeyId')=?
+           AND json_extract(response_envelope,'$.dataKeyVersion')=1)
+       AND NOT EXISTS (SELECT 1 FROM appointments
+         WHERE client_id=? AND starts_at>=? AND status!='cancelled')
+       AND (${lifecycle.sql})
+     )`
+  ).bind(
+    values.dataKeyId, values.client.id,
+    values.client.id, values.identityEnvelope, values.client.version, values.now,
+    values.client.createdAt, values.now,
+    values.assignment.id, values.client.id, values.assignment.specialistId,
+    values.assignment.startsAt, values.now, values.assignment.assignedByStaffId,
+    values.assignment.version, values.assignment.createdAt, values.now,
+    values.client.id,
+    values.client.id, values.client.version,
+    values.client.id, values.client.id, values.client.version,
+    values.assignment.id, values.assignment.version,
+    values.assignment.id, values.assignment.id, values.assignment.version,
+    values.client.id, values.assignment.id,
+    values.client.id, values.assignment.id, values.dataKeyId,
+    values.clientVersionId, values.client.id, values.client.version,
+    values.actorId, values.now, values.correlationId,
+    values.assignmentVersionId, values.assignment.id, values.assignment.version,
+    values.actorId, values.now, values.correlationId,
+    values.auditId, values.actorId, values.client.id, values.correlationId,
+    JSON.stringify({
+      assignmentId: values.assignment.id,
+      assignmentVersion: values.assignment.version,
+      clientVersion: values.client.version,
+    }),
+    values.actorId, ARCHIVE_OPERATION, values.idempotencyKey, values.client.id,
+    values.dataKeyId, values.dataKeyId,
+    values.client.id, values.now,
+    ...lifecycle.bindings,
+  )
+}
 
 const editGuardStatement = (db, values) => {
   const targetLifecycle = values.reassigned
@@ -1063,6 +1219,154 @@ export async function editClient(input) {
       const fact = replayObject(row, ['version'])
       if (Number.isSafeInteger(fact.version) && fact.version > current.version) {
         versionConflict(fact.version)
+      }
+    }
+    throw originalError
+  }
+}
+
+export async function archiveClient(input) {
+  const command = captureArchiveCommand(input)
+  const actor = actorFact(command.actor)
+  const requestDigest = await digestArchiveClientRequest(command.clientId, command.body)
+  const idem = Object.freeze({
+    actorId: actor.id, operation: ARCHIVE_OPERATION,
+    idempotencyKey: command.idempotencyKey, requestDigest,
+    resourceType: 'client', scopeType: 'client', scopePurpose: 'identity',
+  })
+  const replay = await inspectStoredScopeIdempotency(command.db, command.keyring, idem)
+  if (replay) return validateArchiveReplay(replay, command.clientId, command.body)
+  let now
+  try { now = new Date(command.nowMs).toISOString() } catch { throw new Error('INTERNAL_ERROR') }
+  const current = scopedClientFact(
+    await loadScopedClient(command.db, command.clientId, actor), command.clientId,
+  )
+  if (!authorize(actor, 'client.manage', {
+    kind: 'client', clientId: current.id,
+    assignment: {
+      kind: 'client_assignment', clientId: current.id,
+      specialistId: current.assignment.specialistId, status: 'active',
+    },
+  }, { nowMs: command.nowMs })) notFound()
+  const practitioner = practitionerFact(
+    await loadActivePractitioner(command.db, current.assignment.specialistId, actor),
+  )
+  const context = await loadClientCryptoContext(command.db, command.keyring, {
+    clientId: current.id, envelope: current.identityEnvelope,
+  })
+  const identity = await decryptClientIdentity(context, {
+    clientId: current.id, envelope: current.identityEnvelope,
+  })
+  await validateRetainedCurrentSnapshots(context, current, identity)
+  if (command.body.expectedVersion !== current.version) versionConflict(current.version)
+  const blocked = await command.db.prepare(
+    `SELECT 1 AS blocked FROM appointments
+     WHERE client_id=? AND starts_at>=? AND status!='cancelled' LIMIT 1`
+  ).bind(current.id, now).first()
+  if (blocked) {
+    const fact = replayObject(blocked, ['blocked'])
+    if (fact.blocked !== 1) throw new Error('INTERNAL_ERROR')
+    throw new Error('CLIENT_ARCHIVE_CONFLICT')
+  }
+  if (now <= current.assignment.startsAt) throw new Error('CLIENT_ARCHIVE_CONFLICT')
+
+  const used = new Set()
+  const clientVersionId = generated(command.idFactory, 'ver', VERSION_ID, used)
+  const assignmentVersionId = generated(command.idFactory, 'ver', VERSION_ID, used)
+  const auditId = generated(command.idFactory, 'aud', AUDIT_ID, used)
+  const client = Object.freeze({
+    id: current.id, name: identity.name, age: identity.age, status: 'archived',
+    version: current.version + 1, archivedAt: now, createdAt: current.createdAt,
+    updatedAt: now,
+  })
+  const assignment = Object.freeze({
+    ...current.assignment, endsAt: now, version: current.assignment.version + 1,
+    updatedAt: now,
+  })
+  const clientVersion = await versionBuilder.build(command.db, context, {
+    clientId: current.id, versionId: clientVersionId, entityType: 'client', entity: client,
+    changedByStaffId: actor.id, changedAt: now, correlationId: command.correlationId,
+    ownerFact: null,
+  })
+  const assignmentVersion = await versionBuilder.build(command.db, context, {
+    clientId: current.id, versionId: assignmentVersionId,
+    entityType: 'client_assignment', entity: assignment,
+    changedByStaffId: actor.id, changedAt: now, correlationId: command.correlationId,
+    ownerFact: null,
+  })
+  const response = Object.freeze({ status: 200, body: Object.freeze({
+    data: Object.freeze({ client: archivedClientDto(client) }),
+  }) })
+  const idempotency = await createIdempotencyStatement(command.db, context, {
+    actorId: actor.id, operation: ARCHIVE_OPERATION,
+    idempotencyKey: command.idempotencyKey, requestDigest,
+    expectedScope: context.scope, resourceType: 'client', resourceId: current.id,
+    response, createdAt: now, expiresAt: new Date(command.nowMs + 7 * DAY_MS).toISOString(),
+  })
+  const uow = createUnitOfWork(command.db, {
+    mode: 'mutation', actorId: actor.id, correlationId: command.correlationId,
+  })
+  uow.domain(command.db.prepare(
+    `UPDATE clients SET status='archived',version=?,archived_at=?,updated_at=?
+     WHERE id=? AND version=? AND status IN ('active','paused') AND archived_at IS NULL`
+  ).bind(client.version, now, now, current.id, current.version))
+  uow.domain(command.db.prepare(
+    `UPDATE client_assignments SET ends_at=?,version=?,updated_at=?
+     WHERE id=? AND client_id=? AND specialist_id=? AND version=? AND ends_at IS NULL
+       AND EXISTS (SELECT 1 FROM clients
+         WHERE id=? AND status='archived' AND version=? AND archived_at=? AND updated_at=?)`
+  ).bind(
+    now, assignment.version, now, assignment.id, current.id, assignment.specialistId,
+    current.assignment.version, current.id, client.version, now, now,
+  ))
+  uow.version(conditionalVersionStatement(
+    command.db, clientVersion,
+    "EXISTS (SELECT 1 FROM clients WHERE id=? AND status='archived' AND version=? AND archived_at=?)",
+    [current.id, client.version, now],
+  ))
+  uow.version(conditionalVersionStatement(
+    command.db, assignmentVersion,
+    'EXISTS (SELECT 1 FROM record_versions WHERE id=?) AND EXISTS (SELECT 1 FROM client_assignments WHERE id=? AND version=? AND ends_at=?)',
+    [clientVersionId, assignment.id, assignment.version, now],
+  ))
+  uow.audit(auditEventStatement(command.db, {
+    id: auditId, occurredAt: now, actorStaffId: actor.id, action: 'client.archived',
+    entityType: 'client', entityId: current.id, result: 'success',
+    correlationId: command.correlationId,
+    metadata: {
+      clientVersion: client.version, assignmentId: assignment.id,
+      assignmentVersion: assignment.version,
+    },
+    reasonEnvelope: null,
+  }))
+  uow.idempotency(idempotency)
+  uow.guard(archiveGuardStatement(command.db, {
+    client, assignment, now, actorId: actor.id, identityEnvelope: current.identityEnvelope,
+    clientVersionId, assignmentVersionId, auditId,
+    correlationId: command.correlationId, idempotencyKey: command.idempotencyKey,
+    dataKeyId: context.dataKey.id, practitionerStaffId: practitioner.staffUserId,
+  }))
+  try {
+    await uow.commit()
+    return response
+  } catch (originalError) {
+    if (isD1IdentityCollision(originalError)) {
+      try {
+        const recovered = await recoverStoredScopeIdempotencyAfterCollision(
+          command.recoveryDb, command.keyring, idem, originalError,
+        )
+        return validateArchiveReplay(recovered, command.clientId, command.body)
+      } catch (recoveryError) {
+        if (recoveryError !== originalError) throw recoveryError
+      }
+    }
+    if (isD1IdentityCollision(originalError) || isD1CoreDirectoryInvariantFailure(originalError)) {
+      const row = await command.db.prepare('SELECT status,version FROM clients WHERE id=?')
+        .bind(current.id).first()
+      if (row) {
+        const fact = replayObject(row, ['status', 'version'])
+        if (fact.status === 'archived' && Number.isSafeInteger(fact.version)
+          && fact.version > current.version) versionConflict(fact.version)
       }
     }
     throw originalError
