@@ -56,6 +56,7 @@ const versionBuilder = createRecordVersionBuilder(ownership.consumer)
 const validation = (field) => { throw new TypeError(`VALIDATION_FAILED/${field}`) }
 const notFound = () => { throw new Error('NOT_FOUND') }
 const cryptoFailure = () => { throw new Error('CRYPTO_FAILURE') }
+const binaryCompare = (left, right) => left < right ? -1 : left > right ? 1 : 0
 
 const captureExact = (value, keys, fail = () => validation('body')) => {
   try {
@@ -460,7 +461,8 @@ const authenticateAssignmentVersions = async (context, current, value) => {
   }
   if (!groups.has(current.assignment.id)) notFound()
   const ordered = [...groups.values()].sort((left, right) =>
-    left.row.starts_at.localeCompare(right.row.starts_at) || left.row.id.localeCompare(right.row.id))
+    binaryCompare(left.row.starts_at, right.row.starts_at)
+      || binaryCompare(left.row.id, right.row.id))
   if (ordered.filter(({ row }) => row.ends_at === null).length !== 1
     || ordered.at(-1)?.row.ends_at !== null) notFound()
   for (let groupIndex = 0; groupIndex < ordered.length; groupIndex += 1) {
@@ -1467,14 +1469,18 @@ const validateEditReplay = (value, appointmentId, request) => {
   for (let index = 1; index < entries.length; index += 1) {
     if (entries[index - 1].receivedAt > entries[index].receivedAt
       || (entries[index - 1].receivedAt === entries[index].receivedAt
-        && entries[index - 1].id.localeCompare(entries[index].id) >= 0)) cryptoFailure()
+        && binaryCompare(entries[index - 1].id, entries[index].id) >= 0)) cryptoFailure()
   }
   const replacementTargets = new Set()
   const replacementLinks = new Map()
+  const entriesById = new Map(entries.map((entry) => [entry.id, entry]))
   for (const entry of entries) {
     if (entry.replacementEntryId === null) continue
-    if (!ids.has(entry.replacementEntryId) || entry.replacementEntryId === entry.id
-      || replacementTargets.has(entry.replacementEntryId)) cryptoFailure()
+    const replacement = entriesById.get(entry.replacementEntryId)
+    if (!replacement || entry.replacementEntryId === entry.id
+      || replacementTargets.has(entry.replacementEntryId)
+      || (replacement.correctedAt !== null
+        && replacement.correctedAt < entry.correctedAt)) cryptoFailure()
     replacementTargets.add(entry.replacementEntryId)
     replacementLinks.set(entry.id, entry.replacementEntryId)
   }

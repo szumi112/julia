@@ -1371,17 +1371,19 @@ describe('persistent appointment editing', () => {
     const correctedAt = new Date(NOW_MS + 500).toISOString()
     const receivedAt = new Date(NOW_MS + 200).toISOString()
     appointment.paymentEntries = [
-      { id: 'pay_replay_graph_a', amountGrosze: 50, method: 'cash', receivedAt,
-        correctedAt, replacementEntryId: 'pay_replay_graph_b' },
-      { id: 'pay_replay_graph_b', amountGrosze: 100, method: 'card', receivedAt,
-        correctedAt, replacementEntryId: 'pay_replay_graph_c' },
-      { id: 'pay_replay_graph_c', amountGrosze: 150, method: 'card', receivedAt,
+      { id: 'pay_A-replay', amountGrosze: 50, method: 'cash', receivedAt,
+        correctedAt, replacementEntryId: 'pay_A_replay' },
+      { id: 'pay_A_replay', amountGrosze: 100, method: 'card', receivedAt,
+        correctedAt, replacementEntryId: 'pay_a-replay' },
+      { id: 'pay_a-replay', amountGrosze: 150, method: 'card', receivedAt,
         correctedAt: null, replacementEntryId: null },
-      { id: 'pay_replay_graph_d', amountGrosze: 200, method: 'transfer', receivedAt,
+      { id: 'pay_a_replay', amountGrosze: 200, method: 'transfer', receivedAt,
         correctedAt: null, replacementEntryId: null },
     ]
     appointment.payment = { status: 'partial', collectedGrosze: 350,
       outstandingGrosze: 19_150, latestMethod: 'transfer', latestReceivedAt: receivedAt }
+    expect(appointment.paymentEntries[1].correctedAt)
+      .toBe(appointment.paymentEntries[0].correctedAt)
 
     const validDb = await withEncryptedEditReplay(client.id, key, valid)
     await expect(editAppointment({
@@ -1392,19 +1394,25 @@ describe('persistent appointment editing', () => {
 
     const hostileCases = {
       'correctedAt/replacement coherence': (candidate) => {
-        candidate.body.data.appointment.paymentEntries[3].replacementEntryId = 'pay_replay_graph_a'
+        candidate.body.data.appointment.paymentEntries[3].replacementEntryId = 'pay_A-replay'
       },
       'unique replacement targets': (candidate) => {
-        candidate.body.data.appointment.paymentEntries[0].replacementEntryId = 'pay_replay_graph_c'
+        candidate.body.data.appointment.paymentEntries[0].replacementEntryId = 'pay_a-replay'
       },
       'correction chronology': (candidate) => {
         candidate.body.data.appointment.paymentEntries[0].correctedAt = '2027-01-15T08:59:59.999Z'
       },
+      'reverse-time acyclic correction chain': (candidate) => {
+        candidate.body.data.appointment.paymentEntries[0].correctedAt =
+          new Date(NOW_MS + 700).toISOString()
+        candidate.body.data.appointment.paymentEntries[1].correctedAt =
+          new Date(NOW_MS + 500).toISOString()
+      },
       'self replacement': (candidate) => {
-        candidate.body.data.appointment.paymentEntries[0].replacementEntryId = 'pay_replay_graph_a'
+        candidate.body.data.appointment.paymentEntries[0].replacementEntryId = 'pay_A-replay'
       },
       'replacement cycle': (candidate) => {
-        candidate.body.data.appointment.paymentEntries[1].replacementEntryId = 'pay_replay_graph_a'
+        candidate.body.data.appointment.paymentEntries[1].replacementEntryId = 'pay_A-replay'
       },
       'exact aggregate': (candidate) => {
         candidate.body.data.appointment.payment.collectedGrosze += 1
@@ -1412,7 +1420,7 @@ describe('persistent appointment editing', () => {
       },
       'canonical order': (candidate) => {
         const entries = candidate.body.data.appointment.paymentEntries
-        ;[entries[2], entries[3]] = [entries[3], entries[2]]
+        ;[entries[0], entries[1]] = [entries[1], entries[0]]
       },
     }
     for (const [name, mutate] of Object.entries(hostileCases)) {
