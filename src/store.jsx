@@ -10,7 +10,10 @@ import {
   unlinkTusGuardian, updateTusKidAndClients, withTusGroupDefaults,
 } from './tus.js'
 import { dissolveLoneFamilies, withPsychologistDefaults } from './workspace.js'
-import { createWorkspaceProviderController } from './workspace-provider.js'
+import {
+  createAuthorityBoundDispatch,
+  createWorkspaceProviderController,
+} from './workspace-provider.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -272,15 +275,18 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
     })
   }
   const workspaceController = workspaceControllerRef.current
+  const authorityDispatch = useMemo(() => createAuthorityBoundDispatch({
+    dispatch,
+    getState: () => stateRef.current,
+    resetAuthority: workspaceController.resetAuthority,
+    authorityKeyFor: typeof authorityKey === 'function' ? authorityKey : () => effectiveAuthorityKey,
+    demoRoleIds: DEMO_ROLES.map((role) => role.id),
+  }), [authorityKey, effectiveAuthorityKey, workspaceController])
   const workspaceSnapshot = useSyncExternalStore(
     workspaceController.subscribe,
     workspaceController.getSnapshot,
     workspaceController.getSnapshot,
   )
-
-  useEffect(() => {
-    workspaceController.resetAuthority(effectiveAuthorityKey)
-  }, [effectiveAuthorityKey, workspaceController])
 
   // Toast actions can mutate scoped data. A role boundary invalidates both
   // their visible context and their authority, so never carry them across it.
@@ -322,8 +328,8 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
   const dismissToast = useCallback((id) => leave(id, 0), [leave])
 
   const value = useMemo(
-    () => ({ state, dispatch, toast, workspace: workspaceSnapshot.workspace }),
-    [state, toast, workspaceSnapshot.workspace]
+    () => ({ state, dispatch: authorityDispatch, toast, workspace: workspaceSnapshot.workspace }),
+    [authorityDispatch, state, toast, workspaceSnapshot.workspace]
   )
   const toastValue = useMemo(
     () => ({ toasts, dismissToast, clearToasts }),

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AppProvider, useApp, useToasts } from './store.jsx'
 import { Shell } from './layout.jsx'
 import { Login } from './views/Login.jsx'
@@ -19,7 +19,7 @@ const demoRepositoryFactory = ({ dispatch, getState }) => (
 )
 const apiRepositoryFactory = () => createApiWorkspaceRepository({ api: apiClient })
 
-const demoAuthorityKeyFor = (state) => {
+const demoAuthorityKeyFor = (authGeneration) => (state) => {
   const demoRole = DEMO_ROLES.find((role) => role.id === state.demoRoleId) || DEMO_ROLES[0]
   return createWorkspaceAuthorityKey({
     repositoryMode: 'demo',
@@ -30,6 +30,7 @@ const demoAuthorityKeyFor = (state) => {
     specialistId: demoRole.psychId === null ? null : `sp_demo_${demoRole.psychId}`,
     capabilities: [],
     demoRoleId: demoRole.id,
+    demoAuthGeneration: authGeneration,
   })
 }
 
@@ -41,12 +42,11 @@ function MotionSync() {
   return null
 }
 
-function DemoRoot() {
-  const [authed, setAuthed] = useState(false)
+function DemoRoot({ authed, onAuthenticatedChange }) {
   const { clearToasts } = useToasts()
   const setAuthenticated = (value) => {
     clearToasts()
-    setAuthed(value)
+    onAuthenticatedChange(value)
   }
   return (
     <>
@@ -63,9 +63,23 @@ function DemoRoot() {
 }
 
 function DemoApp() {
+  const [auth, setAuth] = useState({ authed: false, generation: 0 })
+  const authorityKeyForState = useMemo(
+    () => demoAuthorityKeyFor(auth.generation),
+    [auth.generation]
+  )
+  const setAuthenticated = (authed) => setAuth((current) => (
+    current.authed === authed
+      ? current
+      : { authed, generation: current.generation + 1 }
+  ))
   return (
-    <AppProvider repositoryFactory={demoRepositoryFactory} authorityKey={demoAuthorityKeyFor}>
-      <DemoRoot />
+    <AppProvider
+      key={`demo-auth-${auth.generation}`}
+      repositoryFactory={demoRepositoryFactory}
+      authorityKey={authorityKeyForState}
+    >
+      <DemoRoot authed={auth.authed} onAuthenticatedChange={setAuthenticated} />
     </AppProvider>
   )
 }
@@ -79,6 +93,7 @@ const authorityKeyFor = (session) => createWorkspaceAuthorityKey({
   specialistId: session.actor.specialistId,
   capabilities: session.capabilities,
   demoRoleId: null,
+  demoAuthGeneration: null,
 })
 
 function ProtectedApp() {

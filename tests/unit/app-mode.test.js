@@ -34,6 +34,7 @@ test('workspace authority identity is deterministic and covers every authority f
     specialistId: null,
     capabilities,
     demoRoleId: null,
+    demoAuthGeneration: null,
   }
   const key = createWorkspaceAuthorityKey(authority)
   capabilities.reverse()
@@ -48,6 +49,7 @@ test('workspace authority identity is deterministic and covers every authority f
     ['specialistId', 'sp_retained'],
     ['capabilities', ['client.manage']],
     ['demoRoleId', 'therapist'],
+    ['demoAuthGeneration', 2],
   ]) {
     assert.notEqual(createWorkspaceAuthorityKey({ ...authority, [field]: replacement }), key, field)
   }
@@ -57,6 +59,7 @@ test('workspace authority identity rejects accessor-backed mutable session input
   const authority = {
     repositoryMode: 'api', dataMode: 'fictional', actorId: 'stf_owner', actorVersion: 1,
     role: 'owner', specialistId: null, capabilities: [], demoRoleId: null,
+    demoAuthGeneration: null,
   }
   Object.defineProperty(authority, 'capabilities', { enumerable: true, get() { throw new Error('read') } })
   assert.throws(() => createWorkspaceAuthorityKey(authority), TypeError)

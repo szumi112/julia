@@ -8,7 +8,7 @@ import {
 
 const AUTHORITY_KEYS = Object.freeze([
   'repositoryMode', 'dataMode', 'actorId', 'actorVersion', 'role', 'specialistId',
-  'capabilities', 'demoRoleId',
+  'capabilities', 'demoRoleId', 'demoAuthGeneration',
 ])
 const REPOSITORY_METHODS = Object.freeze([
   'loadWindow', 'createClient', 'editClient', 'archiveClient', 'createAppointment',
@@ -84,7 +84,9 @@ export const createWorkspaceAuthorityKey = (input) => {
     || (value.specialistId !== null
       && (typeof value.specialistId !== 'string' || value.specialistId.length === 0))
     || (value.demoRoleId !== null
-      && (typeof value.demoRoleId !== 'string' || value.demoRoleId.length === 0))) {
+      && (typeof value.demoRoleId !== 'string' || value.demoRoleId.length === 0))
+    || (value.demoAuthGeneration !== null
+      && (!Number.isSafeInteger(value.demoAuthGeneration) || value.demoAuthGeneration < 0))) {
     fail('Invalid workspace authority')
   }
   return JSON.stringify([
@@ -96,7 +98,40 @@ export const createWorkspaceAuthorityKey = (input) => {
     value.specialistId,
     captureCapabilities(value.capabilities),
     value.demoRoleId,
+    value.demoAuthGeneration,
   ])
+}
+
+export const createAuthorityBoundDispatch = (options) => {
+  const captured = captureExactRecord(options, [
+    'dispatch', 'getState', 'resetAuthority', 'authorityKeyFor', 'demoRoleIds',
+  ], 'authority dispatch')
+  if (typeof captured.dispatch !== 'function' || typeof captured.getState !== 'function'
+    || typeof captured.resetAuthority !== 'function'
+    || typeof captured.authorityKeyFor !== 'function') fail('Invalid authority dispatch')
+  const demoRoleIds = new Set(captureCapabilities(captured.demoRoleIds))
+  return Object.freeze((action) => {
+    let descriptors
+    try {
+      if (action !== null && typeof action === 'object' && !Array.isArray(action)
+        && Object.getPrototypeOf(action) === Object.prototype) {
+        descriptors = Object.getOwnPropertyDescriptors(action)
+      }
+    } catch {
+      descriptors = null
+    }
+    const type = descriptors?.type
+    const roleId = descriptors?.roleId
+    if (type?.enumerable && Object.hasOwn(type, 'value') && type.value === 'SET_DEMO_ROLE'
+      && roleId?.enumerable && Object.hasOwn(roleId, 'value')
+      && typeof roleId.value === 'string' && demoRoleIds.has(roleId.value)) {
+      const state = captured.getState()
+      if (state?.demoRoleId !== roleId.value) {
+        captured.resetAuthority(captured.authorityKeyFor({ ...state, demoRoleId: roleId.value }))
+      }
+    }
+    return captured.dispatch(action)
+  })
 }
 
 const repositoryFrom = (repositoryFactory, dispatch, getState) => {
@@ -138,11 +173,15 @@ const errorCode = (error) => {
 
 const infrastructureFailure = (error) => INFRASTRUCTURE_CODES.has(errorCode(error))
 
-const readOnlyError = () => {
-  const error = new Error('WORKSPACE_READ_ONLY')
-  error.code = 'WORKSPACE_READ_ONLY'
+const fixedError = (code) => {
+  const error = new Error(code)
+  error.code = code
   return error
 }
+
+const readOnlyError = () => fixedError('WORKSPACE_READ_ONLY')
+const staleAuthorityError = () => fixedError('WORKSPACE_AUTHORITY_STALE')
+const resetFailedError = () => fixedError('WORKSPACE_RESET_FAILED')
 
 export const createWorkspaceProviderController = (options) => {
   const captured = captureExactRecord(options, [
@@ -154,7 +193,7 @@ export const createWorkspaceProviderController = (options) => {
   }
 
   let authorityKey = captured.authorityKey
-  let repositoryFactory = captured.repositoryFactory
+  const repositoryFactory = captured.repositoryFactory
   let repository = repositoryFrom(repositoryFactory, captured.dispatch, captured.getState)
   let loadedState = createLoadedWorkspaceState()
   let pendingLoads = 0
@@ -192,8 +231,10 @@ export const createWorkspaceProviderController = (options) => {
   }
 
   async function loadWindow(requested) {
+    if (readOnly || repository === null) throw readOnlyError()
     let capture = captureLoadedWorkspaceLoad(loadedState, requested)
     const generation = capture.authorityGeneration
+    const operationRepository = repository
     pendingLoads += 1
     publish()
     try {
@@ -201,15 +242,16 @@ export const createWorkspaceProviderController = (options) => {
       while (true) {
         let rawPayload
         try {
-          rawPayload = await repository.loadWindow(Object.freeze({
+          rawPayload = await operationRepository.loadWindow(Object.freeze({
             from: capture.from,
             to: capture.to,
           }))
         } catch (error) {
+          if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
           if (infrastructureFailure(error)) enterReadOnly(error, generation)
           throw error
         }
-        if (loadedState.authorityGeneration !== generation) return rawPayload
+        if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
         let merged
         try {
           merged = mergeLoadedWorkspaceLoad(loadedState, capture, rawPayload)
@@ -238,16 +280,17 @@ export const createWorkspaceProviderController = (options) => {
 
   const commands = Object.fromEntries(WORKSPACE_METHODS.map((name) => [name,
     async (...args) => {
-      if (readOnly) throw readOnlyError()
+      if (readOnly || repository === null) throw readOnlyError()
       const generation = loadedState.authorityGeneration
+      const operationRepository = repository
       try {
-        const result = await repository[name](...args)
-        if (loadedState.authorityGeneration === generation) {
-          loadedState = recordLoadedWorkspaceWrite(loadedState)
-          publish()
-        }
+        const result = await operationRepository[name](...args)
+        if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
+        loadedState = recordLoadedWorkspaceWrite(loadedState)
+        publish()
         return result
       } catch (error) {
+        if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
         if (infrastructureFailure(error)) enterReadOnly(error, generation)
         throw error
       }
@@ -257,16 +300,21 @@ export const createWorkspaceProviderController = (options) => {
   const resetAuthority = (nextAuthorityKey) => {
     if (typeof nextAuthorityKey !== 'string') fail('Invalid workspace authority key')
     if (nextAuthorityKey === authorityKey) return false
-    const nextRepository = repositoryFrom(
-      repositoryFactory, captured.dispatch, captured.getState,
-    )
     authorityKey = nextAuthorityKey
-    repository = nextRepository
+    repository = null
     loadedState = resetLoadedWorkspaceAuthority(loadedState)
     pendingLoads = 0
+    readOnly = true
+    infrastructureError = resetFailedError()
+    publish()
+    try {
+      captured.clearToasts()
+      repository = repositoryFrom(repositoryFactory, captured.dispatch, captured.getState)
+    } catch {
+      throw resetFailedError()
+    }
     readOnly = false
     infrastructureError = null
-    captured.clearToasts()
     publish()
     return true
   }

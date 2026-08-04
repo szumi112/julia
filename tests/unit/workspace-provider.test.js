@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createWorkspaceProviderController } from '../../src/workspace-provider.js'
+import * as workspaceProvider from '../../src/workspace-provider.js'
+
+const { createWorkspaceProviderController } = workspaceProvider
 
 const WORKSPACE_KEYS = [
   'archiveClient', 'cancelAppointment', 'correctPayment', 'createAppointment',
@@ -40,6 +42,8 @@ const makeController = (repositoryFactory, overrides = {}) => createWorkspacePro
   authorityKey: overrides.authorityKey || 'authority-one',
   clearToasts: overrides.clearToasts || (() => {}),
 })
+
+const stale = { code: 'WORKSPACE_AUTHORITY_STALE', message: 'WORKSPACE_AUTHORITY_STALE' }
 
 test('exposes the exact workspace contract and constructs one repository with exact dependencies', () => {
   const dispatch = () => {}
@@ -90,7 +94,7 @@ test('tracks concurrent current-authority loads until all finish and normalizes 
   assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [range('2026-08-01', '2026-08-05')])
 })
 
-test('authority reset replaces repository, clears state and toasts, and ignores old completion', async () => {
+test('authority reset replaces repository, clears state and toasts, and rejects old completion', async () => {
   const oldLoad = deferred()
   let factoryCalls = 0
   let toastClears = 0
@@ -107,8 +111,112 @@ test('authority reset replaces repository, clears state and toasts, and ignores 
   assert.equal(controller.getSnapshot().workspace.status, 'ready')
   assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [])
   oldLoad.resolve(payload('2026-08-01'))
-  await pending
+  await assert.rejects(pending, stale)
   assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [])
+})
+
+test('every old-authority mutation completion is replaced by one fixed stale error', async () => {
+  const methods = [
+    'createClient', 'editClient', 'archiveClient', 'createAppointment',
+    'editAppointment', 'cancelAppointment', 'recordPayment', 'correctPayment',
+  ]
+  for (const method of methods) {
+    const turn = deferred()
+    let factories = 0
+    const controller = makeController(() => {
+      factories += 1
+      return factories === 1 ? repositoryWith({ [method]: () => turn.promise }) : repositoryWith()
+    })
+    const command = controller.getSnapshot().workspace[method]('private-input', { secret: true })
+    controller.resetAuthority(`next-${method}`)
+    turn.resolve({ secretDto: method })
+    await assert.rejects(command, stale, method)
+    assert.equal(controller.getSnapshot().loadedState.writeEpoch, 0)
+    assert.equal(controller.getSnapshot().workspace.status, 'ready')
+  }
+})
+
+test('old-authority load and mutation failures never disclose their original errors', async () => {
+  const oldLoad = deferred()
+  const oldMutation = deferred()
+  let factories = 0
+  const controller = makeController(() => {
+    factories += 1
+    return factories === 1
+      ? repositoryWith({ loadWindow: () => oldLoad.promise, createClient: () => oldMutation.promise })
+      : repositoryWith()
+  })
+  const loading = controller.getSnapshot().workspace.loadWindow(range('2026-08-01'))
+  const mutating = controller.getSnapshot().workspace.createClient({ secret: true })
+  controller.resetAuthority('authority-two')
+  oldLoad.reject(Object.assign(new Error('private load'), { code: 'NETWORK_ERROR' }))
+  oldMutation.reject(Object.assign(new Error('private mutation'), { code: 'VERSION_CONFLICT' }))
+  await assert.rejects(loading, stale)
+  await assert.rejects(mutating, stale)
+  assert.equal(controller.getSnapshot().workspace.status, 'ready')
+})
+
+test('failed replacement construction leaves the new authority empty and read-only', async () => {
+  const events = []
+  let oldCalls = 0
+  let factories = 0
+  const controller = makeController(() => {
+    factories += 1
+    events.push(`factory-${factories}`)
+    if (factories === 2) throw new Error('private factory failure')
+    return repositoryWith({ createClient: async () => { oldCalls += 1; return {} } })
+  }, { clearToasts: () => { events.push('clear-toasts') } })
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-01'))
+  await controller.getSnapshot().workspace.createClient({})
+  assert.throws(() => controller.resetAuthority('authority-broken'), {
+    code: 'WORKSPACE_RESET_FAILED', message: 'WORKSPACE_RESET_FAILED',
+  })
+  assert.deepEqual(events, ['factory-1', 'clear-toasts', 'factory-2'])
+  assert.equal(controller.getSnapshot().workspace.status, 'read-only-error')
+  assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [])
+  assert.deepEqual([
+    controller.getSnapshot().loadedState.authorityGeneration,
+    controller.getSnapshot().loadedState.writeEpoch,
+  ], [1, 0])
+  await assert.rejects(controller.getSnapshot().workspace.loadWindow(range('2026-08-02')), {
+    code: 'WORKSPACE_READ_ONLY', message: 'WORKSPACE_READ_ONLY',
+  })
+  await assert.rejects(controller.getSnapshot().workspace.createClient({}), {
+    code: 'WORKSPACE_READ_ONLY', message: 'WORKSPACE_READ_ONLY',
+  })
+  assert.equal(oldCalls, 1)
+})
+
+test('toast reset failure prevents replacement construction and remains fail closed', () => {
+  let factories = 0
+  const controller = makeController(() => {
+    factories += 1
+    return repositoryWith()
+  }, { clearToasts: () => { throw new Error('private toast failure') } })
+  assert.throws(() => controller.resetAuthority('authority-broken'), {
+    code: 'WORKSPACE_RESET_FAILED', message: 'WORKSPACE_RESET_FAILED',
+  })
+  assert.equal(factories, 1)
+  assert.equal(controller.getSnapshot().workspace.status, 'read-only-error')
+  assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [])
+})
+
+test('demo role dispatch resets authority synchronously only for an accepted changed role', () => {
+  const events = []
+  let state = { demoRoleId: 'owner' }
+  const dispatch = workspaceProvider.createAuthorityBoundDispatch({
+    dispatch: (action) => { events.push(`dispatch-${action.roleId}`); state = { ...state, demoRoleId: action.roleId } },
+    getState: () => state,
+    resetAuthority: (key) => { events.push(`reset-${key}`) },
+    authorityKeyFor: (next) => `role-${next.demoRoleId}`,
+    demoRoleIds: ['owner', 'coordinator', 'therapist'],
+  })
+  dispatch({ type: 'SET_DEMO_ROLE', roleId: 'therapist' })
+  assert.deepEqual(events, ['reset-role-therapist', 'dispatch-therapist'])
+  events.length = 0
+  dispatch({ type: 'SET_DEMO_ROLE', roleId: 'therapist' })
+  dispatch({ type: 'SET_DEMO_ROLE', roleId: 'invalid' })
+  assert.deepEqual(events, ['dispatch-therapist', 'dispatch-invalid'])
 })
 
 test('a successful write invalidates a captured load and causes one exact bounded refetch', async () => {

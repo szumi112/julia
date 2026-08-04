@@ -154,6 +154,21 @@ test('the mock-data workspace opens after login', async ({ page }) => {
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
 })
 
+test('demo login and logout remount a clean workspace', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation', { name: 'Nawigacja główna' })
+    .getByRole('link', { name: 'Klienci' }).click()
+  await addClient(page, 'Reset Autorytetu')
+  await expect(page.getByText('Reset Autorytetu', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Wyloguj się' }).click()
+  await expect(page.getByLabel('Hasło')).toBeVisible()
+  await page.getByLabel('Hasło').fill('demo')
+  await page.getByRole('button', { name: 'Zaloguj się' }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' })
+    .getByRole('link', { name: 'Klienci' }).click()
+  await expect(page.getByText('Reset Autorytetu', { exact: true })).toHaveCount(0)
+})
+
 test('navigation focuses the destination and a day cockpit excludes background controls', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation', { name: 'Nawigacja główna' }).getByRole('link', { name: 'Kalendarz' }).click()
