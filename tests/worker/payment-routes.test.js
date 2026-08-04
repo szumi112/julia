@@ -180,14 +180,24 @@ const seedPaymentGraph = async (appointment, entries, corrections = []) => {
   ))
   for (const correction of corrections) {
     const envelope = await encryptForScope(await ring(), dataKey, {
-      expectedScope: scope, recordId: correction.id, field: 'reason',
+      expectedScope: scope,
+      recordId: correction.reasonMode === 'wrong-aad' ? `${correction.id}_wrong` : correction.id,
+      field: 'reason',
       plaintext: 'Fikcyjna korekta',
     })
+    if (correction.reasonMode === 'tampered') {
+      envelope.ciphertext = `${envelope.ciphertext.slice(0, -1)}${
+        envelope.ciphertext.endsWith('A') ? 'B' : 'A'}`
+    }
+    const reasonEnvelope = correction.reasonMode === 'malformed'
+      ? '{'
+      : correction.reasonMode === 'missing-fields' ? '{}'
+        : JSON.stringify(envelope)
     statements.push(env.DB.prepare(`INSERT INTO payment_corrections
       (id,reversed_entry_id,replacement_entry_id,reason_envelope,
        recorded_by_staff_id,created_at) VALUES (?,?,?,?,?,?)`).bind(
       correction.id, correction.reversedEntryId, correction.replacementEntryId,
-      JSON.stringify(envelope), OWNER.id, correction.createdAt ?? changedAt,
+      reasonEnvelope, OWNER.id, correction.createdAt ?? changedAt,
     ))
   }
   for (let offset = 0; offset < statements.length; offset += 100) {
@@ -329,8 +339,20 @@ const canonicalJson = (value) => JSON.stringify(value === null
     : Object.fromEntries(Object.keys(value).sort()
       .map((key) => [key, JSON.parse(canonicalJson(value[key]))])))
 
+const correctionIdempotencyRecordId = async (actorId, key) => {
+  const encoded = new TextEncoder().encode(
+    ['bwm:idempotency:record:v1', actorId, 'payments.correct', key].join('\n'),
+  )
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded))
+  try { return `idem_${encodeBase64Url(digest)}` } finally {
+    encoded.fill(0)
+    digest.fill(0)
+  }
+}
+
 const withEncryptedPaymentReplay = async (
   clientId, idempotencyKey, response, requestDigest = null,
+  operation = 'appointments.payment',
 ) => {
   const client = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
     .bind(clientId).first()
@@ -339,7 +361,7 @@ const withEncryptedPaymentReplay = async (
     envelope: JSON.parse(client.identity_envelope), expectedScope: scope,
   })
   const tuple = new TextEncoder().encode(
-    ['bwm:idempotency:record:v1', OWNER.id, 'appointments.payment', idempotencyKey].join('\n'),
+    ['bwm:idempotency:record:v1', OWNER.id, operation, idempotencyKey].join('\n'),
   )
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', tuple))
   const recordId = `idem_${encodeBase64Url(digest)}`
@@ -676,6 +698,68 @@ describe('appointment payment capture', () => {
     }
   })
 
+  it('classifies retained correction-reason corruption as crypto failure for another active target', async () => {
+    for (const reasonMode of ['malformed', 'missing-fields', 'wrong-aad', 'tampered']) {
+      const created = await seedAppointment()
+      const at = new Date(NOW_MS + 500).toISOString()
+      const marker = `correction_crypto_${++sequence}`
+      const retained = await seedPaymentGraph(created, [
+        { id: `pay_${marker}_reversed`, amountGrosze: 1_000, method: 'cash',
+          receivedAt: '2027-01-15T07:00:00.000Z', createdAt: at },
+        { id: `pay_${marker}_active`, amountGrosze: 2_000, method: 'card',
+          receivedAt: '2027-01-15T08:00:00.000Z', createdAt: at },
+      ], [{ id: `cor_${marker}`, reversedEntryId: `pay_${marker}_reversed`,
+        replacementEntryId: null, createdAt: at, reasonMode }])
+      const idFactory = vi.fn()
+      await expect(correctAppointmentPayment(await correctionInput(
+        retained, `pay_${marker}_active`, {
+          idFactory,
+          nowMs: NOW_MS + 2_000,
+          body: { expectedVersion: 2, reason: 'Nowa korekta', replacement: null },
+        },
+      ))).rejects.toThrow('CRYPTO_FAILURE')
+      expect(idFactory).not.toHaveBeenCalled()
+    }
+  })
+
+  it('rejects correction replay with a reverse-time historical replacement edge', async () => {
+    const created = await seedAppointment()
+    const at = new Date(NOW_MS + 500).toISOString()
+    const marker = `correction_replay_edge_${++sequence}`
+    const retained = await seedPaymentGraph(created, [
+      { id: `pay_${marker}_old`, amountGrosze: 1_000, method: 'cash',
+        receivedAt: '2027-01-15T07:00:00.000Z', createdAt: at },
+      { id: `pay_${marker}_replacement`, amountGrosze: 2_000, method: 'card',
+        receivedAt: '2027-01-15T07:30:00.000Z', createdAt: at },
+      { id: `pay_${marker}_target`, amountGrosze: 3_000, method: 'transfer',
+        receivedAt: '2027-01-15T08:00:00.000Z', createdAt: at },
+    ], [{ id: `cor_${marker}_old`, reversedEntryId: `pay_${marker}_old`,
+      replacementEntryId: `pay_${marker}_replacement`, createdAt: at }])
+    const input = await correctionInput(retained, `pay_${marker}_target`, {
+      nowMs: NOW_MS + 2_000,
+      body: { expectedVersion: 2, reason: 'Korekta celu', replacement: null },
+    })
+    const result = await correctAppointmentPayment(input)
+    const hostile = structuredClone(result)
+    const old = hostile.body.data.appointment.paymentEntries
+      .find(({ id }) => id === `pay_${marker}_old`)
+    const replacement = hostile.body.data.appointment.paymentEntries
+      .find(({ id }) => id === `pay_${marker}_replacement`)
+    replacement.correctedAt = new Date(NOW_MS + 400).toISOString()
+    replacement.replacementEntryId = null
+    hostile.body.data.appointment.payment = {
+      status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 19_500,
+      latestMethod: null, latestReceivedAt: null,
+    }
+    expect(old.correctedAt).toBe(at)
+    const digest = await digestCorrectPaymentRequest(input.paymentId, input.body)
+    const db = await withEncryptedPaymentReplay(
+      retained.clientId, input.idempotencyKey, hostile, digest, 'payments.correct',
+    )
+    await expect(correctAppointmentPayment({ ...input, db, idFactory: vi.fn() }))
+      .rejects.toThrow('CRYPTO_FAILURE')
+  })
+
   it('keeps payment and correction rows append-only and rolls back every UOW position in both shapes', async () => {
     const appendCreated = await seedAppointment()
     const appendRecorded = await recordAppointmentPayment(await paymentInput(appendCreated))
@@ -803,6 +887,67 @@ describe('appointment payment capture', () => {
     })
   })
 
+  it('never recovers a same-key winner when any loser-generated namespace also collides', async () => {
+    for (const kind of ['correction', 'replacement', 'version', 'audit', 'idem-record', 'idem-key']) {
+      const created = await seedAppointment()
+      const recorded = await recordAppointmentPayment(await paymentInput(created))
+      const appointment = recorded.body.data.appointment
+      const target = appointment.paymentEntries[0]
+      const key = `correction-hostile-winner-${kind}-${sequence}`
+      const replacement = kind === 'replacement' ? {
+        amountGrosze: 9_000, method: 'transfer', receivedAt: BODY.receivedAt,
+      } : null
+      const body = { expectedVersion: appointment.version,
+        reason: `Kolizja ${kind}`, replacement }
+      const ids = replacement === null
+        ? [`loser_${kind}_cor_${sequence}`, `loser_${kind}_ver_${sequence}`,
+          `loser_${kind}_aud_${sequence}`]
+        : [`loser_${kind}_cor_${sequence}`, `loser_${kind}_pay_${sequence}`,
+          `loser_${kind}_ver_${sequence}`, `loser_${kind}_aud_${sequence}`]
+      const generated = {
+        correction: `cor_${ids[0]}`,
+        replacement: replacement === null ? null : `pay_${ids[1]}`,
+        version: `ver_${ids[replacement === null ? 1 : 2]}`,
+        audit: `aud_${ids[replacement === null ? 2 : 3]}`,
+        'idem-record': await correctionIdempotencyRecordId(OWNER.id, key),
+        'idem-key': key,
+      }
+      let injected = false
+      const db = {
+        prepare: (sql) => env.DB.prepare(sql),
+        async batch(statements) {
+          if (!injected) {
+            injected = true
+            await correctAppointmentPayment({
+              db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+              nowMs: Date.parse(appointment.updatedAt) + 1_000,
+              correlationId: BASE.correlationId,
+              idFactory: suffixes(`correction_hostile_winner_${kind}_${++sequence}`),
+              paymentId: target.id, body, idempotencyKey: key,
+            })
+            await env.DB.prepare(`INSERT INTO record_versions
+              (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+               changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+              `ver_hostile_namespace_${kind}_${++sequence}`, 'client', generated[kind], 99,
+              '{}', OWNER.id, new Date(NOW_MS + 500).toISOString(), BASE.correlationId,
+            ).run()
+          }
+          return env.DB.batch(statements)
+        },
+      }
+      const recoveryDb = { prepare: vi.fn(() => { throw new Error('reserve forbidden') }) }
+      await expect(correctAppointmentPayment({
+        db, recoveryDb, actor: OWNER, keyring: await ring(),
+        nowMs: Date.parse(appointment.updatedAt) + 1_000,
+        correlationId: BASE.correlationId, idFactory: () => ids.shift(),
+        paymentId: target.id, body, idempotencyKey: key,
+      })).rejects.toThrow(/(?:identity_collision|core_directory_invariant_failed)/)
+      expect(recoveryDb.prepare).not.toHaveBeenCalled()
+      expect(await env.DB.prepare(`SELECT count(*) AS count FROM payment_corrections
+        WHERE reversed_entry_id=?`).bind(target.id).first(), kind).toEqual({ count: 1 })
+    }
+  })
+
   it('classifies a different-key correction loser as opaque not found after reproof', async () => {
     const created = await seedAppointment()
     const recorded = await recordAppointmentPayment(await paymentInput(created))
@@ -831,6 +976,122 @@ describe('appointment payment capture', () => {
     ))).rejects.toThrow('NOT_FOUND')
     expect(await env.DB.prepare(`SELECT count(*) AS count FROM payment_corrections
       WHERE reversed_entry_id=?`).bind(target.id).first()).toEqual({ count: 1 })
+  })
+
+  it('rolls back correction races that branch, gap, or cross-type the retained assignment chain', async () => {
+    for (const corruption of ['branch', 'gap', 'cross-type']) {
+      const created = await seedAppointment()
+      const recorded = await recordAppointmentPayment(await paymentInput(created))
+      const appointment = recorded.body.data.appointment
+      const target = appointment.paymentEntries[0]
+      const client = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+        .bind(appointment.clientId).first()
+      const dataKeyId = JSON.parse(client.identity_envelope).dataKeyId
+      const marker = `correction_assignment_${corruption}_${++sequence}`
+      let injected = false
+      const db = {
+        prepare: (sql) => env.DB.prepare(sql),
+        async batch(statements) {
+          if (!injected) {
+            injected = true
+            const open = await env.DB.prepare(`SELECT id,starts_at FROM client_assignments
+              WHERE client_id=? AND ends_at IS NULL`).bind(appointment.clientId).first()
+            if (corruption === 'cross-type') {
+              await env.DB.prepare(`INSERT INTO record_versions
+                (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+                 changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+                `ver_${marker}`, 'client', open.id, 99, '{}', OWNER.id,
+                new Date(NOW_MS + 500).toISOString(), BASE.correlationId,
+              ).run()
+            } else {
+              const starts = corruption === 'branch'
+                ? [new Date(NOW_MS - 2_000).toISOString(),
+                  new Date(NOW_MS - 1_000).toISOString()]
+                : [new Date(NOW_MS - 2_000).toISOString()]
+              for (let index = 0; index < starts.length; index += 1) {
+                const assignmentId = `asg_${marker}_${index}`
+                const end = corruption === 'branch'
+                  ? open.starts_at : new Date(NOW_MS - 500).toISOString()
+                await env.DB.prepare(`INSERT INTO client_assignments
+                  (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
+                   version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(
+                  assignmentId, appointment.clientId, appointment.specialistId,
+                  starts[index], end, OWNER.id, 2, starts[index], end,
+                ).run()
+                for (const version of [1, 2]) {
+                  await env.DB.prepare(`INSERT INTO record_versions
+                    (id,entity_type,entity_id,version,snapshot_envelope,
+                     changed_by_staff_id,changed_at,correlation_id)
+                    VALUES (?,?,?,?,?,?,?,?)`).bind(
+                    `ver_${marker}_${index}_${version}`, 'client_assignment', assignmentId,
+                    version, JSON.stringify({ dataKeyId, dataKeyVersion: 1 }), OWNER.id,
+                    version === 1 ? starts[index] : end, BASE.correlationId,
+                  ).run()
+                }
+              }
+            }
+          }
+          return env.DB.batch(statements)
+        },
+      }
+      await expect(correctAppointmentPayment(await correctionInput(
+        appointment, target.id, { db, body: {
+          expectedVersion: appointment.version,
+          reason: `Wyścig ${corruption}`, replacement: null,
+        } },
+      ))).rejects.toThrow(/core_directory_invariant_failed/)
+      expect(await env.DB.prepare('SELECT version FROM appointments WHERE id=?')
+        .bind(appointment.id).first()).toEqual({ version: appointment.version })
+      expect(await env.DB.prepare(`SELECT count(*) AS count FROM payment_corrections
+        WHERE reversed_entry_id=?`).bind(target.id).first()).toEqual({ count: 0 })
+    }
+  })
+
+  it('preserves invariant precedence when assignment corruption combines with a correction winner', async () => {
+    const created = await seedAppointment()
+    const recorded = await recordAppointmentPayment(await paymentInput(created))
+    const appointment = recorded.body.data.appointment
+    const target = appointment.paymentEntries[0]
+    const assignment = await env.DB.prepare(`SELECT id FROM client_assignments
+      WHERE client_id=? AND ends_at IS NULL`).bind(appointment.clientId).first()
+    let injected = false
+    const db = {
+      prepare: (sql) => env.DB.prepare(sql),
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          await correctAppointmentPayment(await correctionInput(
+            appointment, target.id, {
+              nowMs: Date.parse(appointment.updatedAt) + 1_000,
+              body: { expectedVersion: appointment.version,
+                reason: 'Wygrywająca korekta', replacement: null },
+            },
+          ))
+          await env.DB.prepare(`INSERT INTO record_versions
+            (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+             changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+            `ver_correction_combined_${++sequence}`, 'client', assignment.id, 99,
+            '{}', OWNER.id, new Date(NOW_MS + 500).toISOString(), BASE.correlationId,
+          ).run()
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    let failure
+    try {
+      await correctAppointmentPayment(await correctionInput(
+        appointment, target.id, { db,
+          body: { expectedVersion: appointment.version,
+            reason: 'Przegrywająca korekta', replacement: null } },
+      ))
+    } catch (error) { failure = error }
+    expect(failure?.message).toMatch(/(?:identity_collision|core_directory_invariant_failed)/)
+    expect(failure?.message).not.toBe('NOT_FOUND')
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM payment_corrections
+      WHERE reversed_entry_id=?`).bind(target.id).first()).toEqual({ count: 1 })
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM idempotency_records
+      WHERE operation='payments.correct' AND resource_id=?`).bind(appointment.clientId).first())
+      .toEqual({ count: 1 })
   })
 
   it('stays within exact correction domain and full-route budgets', async () => {

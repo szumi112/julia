@@ -15,7 +15,9 @@ import {
   appointmentLedgerDto,
   CHARGE_VERSION_CAP,
   loadAuthenticatedAppointmentLedger,
+  loadAuthenticatedAppointmentLedgerForCorrection,
   paymentAggregateFor,
+  retainedAssignmentLedgerPostcondition,
 } from './appointments.js'
 import {
   assertLocation,
@@ -415,7 +417,9 @@ const validateCorrectionReplay = (value, paymentId, request) => {
   for (const entry of entries) {
     if (entry.replacementEntryId === null) continue
     const replacement = byId.get(entry.replacementEntryId)
-    if (!replacement || replacement.id === entry.id || replacements.has(replacement.id)) {
+    if (!replacement || replacement.id === entry.id || replacements.has(replacement.id)
+      || (replacement.correctedAt !== null
+        && replacement.correctedAt < entry.correctedAt)) {
       cryptoFailure()
     }
     replacements.add(replacement.id)
@@ -801,7 +805,98 @@ const resolveCorrectionTarget = async (db, paymentId) => {
   return row.appointment_id
 }
 
-const correctionGuard = (db, values) => db.prepare(
+const correctionIdempotencyRecordId = async (actorId, idempotencyKey) => {
+  const encoded = new TextEncoder().encode(
+    ['bwm:idempotency:record:v1', actorId, CORRECTION_OPERATION, idempotencyKey].join('\n'),
+  )
+  let digest
+  try {
+    digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded))
+    return `idem_${encodeBase64Url(digest)}`
+  } finally {
+    encoded.fill(0)
+    digest?.fill(0)
+  }
+}
+
+const generatedCollisionPredicate = (values) => Object.freeze({
+  sql: `EXISTS (SELECT 1 FROM json_each(?) AS expected,staff_users AS occupied
+      WHERE occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.specialist_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,specialists AS occupied
+      WHERE occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.staff_user_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,clients AS occupied
+      WHERE occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,client_assignments AS occupied
+      WHERE occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.client_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.specialist_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.assigned_by_staff_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,appointments AS occupied
+      WHERE occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.client_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.specialist_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,session_charges AS occupied
+      WHERE occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.appointment_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,payment_entries AS occupied
+      WHERE (occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+          AND occupied.id IS NOT json_extract(expected.value,'$.replacementId'))
+        OR occupied.appointment_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.recorded_by_staff_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,payment_corrections AS occupied
+      WHERE (occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+          AND occupied.id!=json_extract(expected.value,'$.correctionId'))
+        OR occupied.reversed_entry_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR (occupied.replacement_entry_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+          AND NOT (occupied.id=json_extract(expected.value,'$.correctionId')
+            AND occupied.replacement_entry_id IS json_extract(expected.value,'$.replacementId')))
+        OR occupied.recorded_by_staff_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,record_versions AS occupied
+      WHERE (occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+          AND occupied.id!=json_extract(expected.value,'$.versionId'))
+        OR occupied.entity_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.changed_by_staff_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,audit_events AS occupied
+      WHERE (occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+          AND occupied.id!=json_extract(expected.value,'$.auditId'))
+        OR occupied.entity_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.actor_staff_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,data_keys AS occupied
+      WHERE occupied.id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.scope_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids'))))
+    OR EXISTS (SELECT 1 FROM json_each(?) AS expected,idempotency_records AS occupied
+      WHERE occupied.actor_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR occupied.resource_id IN (SELECT value FROM json_each(json_extract(expected.value,'$.ids')))
+        OR (occupied.idempotency_key=json_extract(expected.value,'$.idempotencyKey')
+          AND NOT (occupied.actor_id=json_extract(expected.value,'$.actorId')
+            AND occupied.operation=json_extract(expected.value,'$.operation'))))`,
+  bindings: (() => {
+    const fact = JSON.stringify([{
+      actorId: values.actorId,
+      auditId: values.auditId,
+      correctionId: values.correctionId,
+      idempotencyKey: values.idempotencyKey,
+      ids: [
+        values.correctionId, values.replacementId, values.versionId, values.auditId,
+        values.idempotencyRecordId, values.idempotencyKey,
+      ].filter((id) => id !== null),
+      operation: CORRECTION_OPERATION,
+      replacementId: values.replacementId,
+      versionId: values.versionId,
+    }])
+    return Object.freeze(Array.from({ length: 12 }, () => fact))
+  })(),
+})
+
+const correctionGuard = (db, values) => {
+  const assignmentLedger = retainedAssignmentLedgerPostcondition(
+    values.client.id, values.appointment.specialistId,
+    values.appointment.startsAt, values.dataKeyId,
+  )
+  const generatedCollision = generatedCollisionPredicate(values)
+  return db.prepare(
   `INSERT INTO core_directory_invariant_failures (failure_kind)
    SELECT 'appointment_payment_correction_postcondition' WHERE NOT (
      EXISTS (SELECT 1 FROM payment_corrections WHERE id=? AND reversed_entry_id=?
@@ -874,24 +969,8 @@ const correctionGuard = (db, values) => db.prepare(
        AND status IN ('active','paused') AND archived_at IS NULL AND version=?)
      AND (SELECT count(*) FROM record_versions
        WHERE entity_type='client' AND entity_id=?)=?
-     AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
-       WHERE retained.client_id=? AND ((SELECT count(*) FROM record_versions AS history
-         WHERE history.entity_type='client_assignment' AND history.entity_id=retained.id)!=retained.version
-       OR (SELECT min(version) FROM record_versions AS history
-         WHERE history.entity_type='client_assignment' AND history.entity_id=retained.id)!=1
-       OR (SELECT max(version) FROM record_versions AS history
-         WHERE history.entity_type='client_assignment' AND history.entity_id=retained.id)!=retained.version))
-     AND (SELECT count(*) FROM client_assignments WHERE client_id=? AND specialist_id=?
-       AND starts_at<=? AND (ends_at IS NULL OR ?<ends_at))=1
-     AND NOT EXISTS (SELECT 1 FROM payment_entries
-       WHERE id IN (SELECT value FROM json_each(?)) AND id!=? AND id IS NOT ?)
-     AND NOT EXISTS (SELECT 1 FROM payment_corrections
-       WHERE id IN (SELECT value FROM json_each(?)) AND id!=?)
-     AND NOT EXISTS (SELECT 1 FROM record_versions
-       WHERE (id IN (SELECT value FROM json_each(?)) AND id!=?)
-         OR entity_id IN (SELECT value FROM json_each(?)))
-     AND NOT EXISTS (SELECT 1 FROM audit_events
-       WHERE id IN (SELECT value FROM json_each(?)) AND id!=?)
+     AND (${assignmentLedger.sql})
+     AND NOT (${generatedCollision.sql})
    )`
 ).bind(
   values.correctionId, values.paymentId, values.replacementId,
@@ -922,27 +1001,24 @@ const correctionGuard = (db, values) => db.prepare(
   values.dataKeyId, values.dataKeyId,
   values.dataKeyId, values.client.id,
   values.client.id, values.client.identityEnvelope, values.client.version,
-  values.client.id, values.client.version, values.client.id,
-  values.client.id, values.appointment.specialistId, values.appointment.startsAt,
-  values.appointment.startsAt,
-  values.generatedJson, values.paymentId, values.replacementId,
-  values.generatedJson, values.correctionId,
-  values.generatedJson, values.versionId, values.generatedJson,
-  values.generatedJson, values.auditId,
-)
+  values.client.id, values.client.version,
+  ...assignmentLedger.bindings,
+  ...generatedCollision.bindings,
+  )
+}
 
-const correctionCollisionProof = (db, values) => db.prepare(
-  `SELECT CASE WHEN EXISTS (SELECT 1 FROM idempotency_records
+const correctionCollisionProof = (db, values) => {
+  const generatedCollision = generatedCollisionPredicate(values)
+  return db.prepare(
+    `SELECT CASE WHEN EXISTS (SELECT 1 FROM idempotency_records
        WHERE actor_id=? AND operation=? AND idempotency_key=?) THEN 1 ELSE 0 END AS stored,
-   CASE WHEN EXISTS (SELECT 1 FROM payment_entries WHERE id=?)
-       OR EXISTS (SELECT 1 FROM payment_corrections WHERE id=?)
-       OR EXISTS (SELECT 1 FROM record_versions WHERE id=? OR entity_id IN (?,?))
-       OR EXISTS (SELECT 1 FROM audit_events WHERE id=?) THEN 1 ELSE 0 END AS generated_collision`
-).bind(
-  values.actorId, CORRECTION_OPERATION, values.idempotencyKey,
-  values.replacementId, values.correctionId, values.versionId,
-  values.correctionId, values.paymentId, values.auditId,
-).first()
+   CASE WHEN (${generatedCollision.sql})
+     THEN 1 ELSE 0 END AS generated_collision`
+  ).bind(
+    values.actorId, CORRECTION_OPERATION, values.idempotencyKey,
+    ...generatedCollision.bindings,
+  ).first()
+}
 
 const reproveCorrectionRace = async (command, actor, prior, originalError) => {
   let appointmentId
@@ -988,7 +1064,9 @@ export async function correctAppointmentPayment(input) {
   const replay = await inspectStoredScopeIdempotency(command.db, command.keyring, idem)
   if (replay) return validateCorrectionReplay(replay, command.paymentId, command.body)
   const appointmentId = await resolveCorrectionTarget(command.db, command.paymentId)
-  const current = await loadAuthenticatedAppointmentLedger({ ...command, appointmentId }, actor)
+  const current = await loadAuthenticatedAppointmentLedgerForCorrection(
+    { ...command, appointmentId }, actor,
+  )
   const target = current.payment.entries.find(({ id }) => id === command.paymentId)
   if (!target || target.correctedAt !== null) notFound()
   if (command.body.expectedVersion !== current.appointment.version) {
@@ -1061,19 +1139,20 @@ export async function correctAppointmentPayment(input) {
     appointmentVersion: appointment.version, correctionId,
     reversedEntryId: command.paymentId, replacementEntryId: replacementId,
   })
+  const idempotencyRecordId = await correctionIdempotencyRecordId(
+    actor.id, command.idempotencyKey,
+  )
   const values = Object.freeze({
     appointment, charge: current.charge, client: current.client,
     actorId: actor.id, paymentId: command.paymentId, correctionId, replacementId,
     replacement: command.body.replacement, reasonEnvelope, versionId, auditId, now,
     correlationId: command.correlationId, idempotencyKey: command.idempotencyKey,
+    idempotencyRecordId,
     dataKeyId: current.context.dataKey.id, collectedGrosze,
     entryCount: entries.length, metadataJson: JSON.stringify({
       appointmentVersion: appointment.version, correctionId,
       replacementEntryId: replacementId, reversedEntryId: command.paymentId,
     }),
-    generatedJson: JSON.stringify([
-      command.paymentId, replacementId, correctionId, versionId, auditId,
-    ].filter((id) => id !== null)),
   })
   const uow = createUnitOfWork(command.db, {
     mode: 'mutation', actorId: actor.id, correlationId: command.correlationId,

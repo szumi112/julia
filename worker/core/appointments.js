@@ -670,6 +670,65 @@ const assignmentChainPostcondition = (clientId, specialistId, startsAt) => Objec
   ]),
 })
 
+export const retainedAssignmentLedgerPostcondition = (
+  clientId, specialistId, startsAt, dataKeyId,
+) => Object.freeze({
+  sql: `EXISTS (SELECT 1 FROM json_each(?) AS expected WHERE expected.key=0
+    AND (SELECT count(*) FROM client_assignments AS root
+      WHERE root.client_id=json_extract(expected.value,'$.clientId')
+        AND (SELECT count(*) FROM client_assignments AS predecessor
+          WHERE predecessor.client_id=root.client_id
+            AND predecessor.ends_at=root.starts_at)=0)=1
+    AND (SELECT count(*) FROM client_assignments
+      WHERE client_id=json_extract(expected.value,'$.clientId')
+        AND ends_at IS NULL)=1
+    AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
+      WHERE retained.client_id=json_extract(expected.value,'$.clientId') AND (
+        (retained.ends_at IS NULL AND retained.version!=1)
+        OR (retained.ends_at IS NOT NULL AND retained.version!=2)
+        OR (retained.ends_at IS NOT NULL AND retained.starts_at>=retained.ends_at)
+        OR retained.created_at!=retained.starts_at
+        OR retained.updated_at!=coalesce(retained.ends_at,retained.created_at)
+        OR (SELECT count(*) FROM client_assignments AS predecessor
+          WHERE predecessor.client_id=retained.client_id
+            AND predecessor.ends_at=retained.starts_at)>1
+        OR (retained.ends_at IS NOT NULL AND
+          (SELECT count(*) FROM client_assignments AS successor
+            WHERE successor.client_id=retained.client_id
+              AND successor.starts_at=retained.ends_at)!=1)
+        OR (SELECT count(*) FROM record_versions AS history
+          WHERE history.entity_type='client_assignment'
+            AND history.entity_id=retained.id)!=retained.version
+        OR (SELECT min(version) FROM record_versions AS history
+          WHERE history.entity_type='client_assignment'
+            AND history.entity_id=retained.id)!=1
+        OR (SELECT max(version) FROM record_versions AS history
+          WHERE history.entity_type='client_assignment'
+            AND history.entity_id=retained.id)!=retained.version))
+    AND NOT EXISTS (SELECT 1 FROM record_versions AS history
+      JOIN client_assignments AS retained ON retained.id=history.entity_id
+      WHERE retained.client_id=json_extract(expected.value,'$.clientId') AND (
+        history.entity_type!='client_assignment'
+        OR NOT json_valid(history.snapshot_envelope)
+        OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+             THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyId')
+          IS NOT json_extract(expected.value,'$.dataKeyId')
+        OR json_extract(CASE WHEN json_valid(history.snapshot_envelope)
+             THEN history.snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1))
+    AND (SELECT count(*) FROM client_assignments
+      WHERE client_id=json_extract(expected.value,'$.clientId')
+        AND starts_at<=json_extract(expected.value,'$.startsAt')
+        AND (ends_at IS NULL OR json_extract(expected.value,'$.startsAt')<ends_at))=1
+    AND (SELECT count(*) FROM client_assignments
+      WHERE client_id=json_extract(expected.value,'$.clientId')
+        AND specialist_id=json_extract(expected.value,'$.specialistId')
+        AND starts_at<=json_extract(expected.value,'$.startsAt')
+        AND (ends_at IS NULL OR json_extract(expected.value,'$.startsAt')<ends_at))=1)`,
+  bindings: Object.freeze([JSON.stringify([
+    { clientId, dataKeyId, specialistId, startsAt },
+  ])]),
+})
+
 const guardStatement = (db, values) => {
   const lifecycle = specialistPostcondition(values.practitionerStaffId)
   const assignmentChain = assignmentChainPostcondition(
@@ -1339,6 +1398,7 @@ const loadPaymentHistory = (db, appointmentId) => db.prepare(
 
 const authenticatePaymentHistory = async (
   context, appointment, charge, value, allowNonbillableCollected = false,
+  correctionFailure = notFound,
 ) => {
   const rows = resultRows(value, 1_001)
   if (rows.length > 1_000) notFound()
@@ -1371,12 +1431,12 @@ const authenticatePaymentHistory = async (
         || row.reversed_entry_id !== row.id
         || (row.replacement_entry_id !== null && (!isPaymentId(row.replacement_entry_id)
           || replacements.has(row.replacement_entry_id)))
-        || typeof row.reason_envelope !== 'string'
         || typeof row.correction_recorded_by_staff_id !== 'string'
         || !STAFF_ID.test(row.correction_recorded_by_staff_id)
         || !canonicalInstant(row.corrected_at)
         || row.corrected_at < row.payment_created_at
         || row.corrected_at > appointment.updatedAt) notFound()
+      if (typeof row.reason_envelope !== 'string') correctionFailure()
       corrections.add(row.correction_id)
       if (row.replacement_entry_id !== null) replacements.add(row.replacement_entry_id)
       try {
@@ -1389,10 +1449,9 @@ const authenticatePaymentHistory = async (
           && reason === reason.normalize('NFC') && encoded.byteLength >= 1
           && encoded.byteLength <= 500
         encoded.fill(0)
-        if (!valid) notFound()
-      } catch (error) {
-        if (error instanceof Error && error.message === 'NOT_FOUND') throw error
-        notFound()
+        if (!valid) correctionFailure()
+      } catch {
+        correctionFailure()
       }
     }
     captured.push(Object.freeze(row))
@@ -2306,6 +2365,7 @@ const cancellationScopedFact = (value, appointmentId, terminal = false) => {
 
 const retainedCancellationState = async (
   command, actor, terminal = false, capability = 'appointment.manage',
+  correctionFailure = notFound,
 ) => {
   const retained = cancellationScopedFact(
     await loadScopedAppointmentForCancellation(
@@ -2336,6 +2396,7 @@ const retainedCancellationState = async (
     context, retained.appointment, retained.charge,
     await loadPaymentHistory(command.db, retained.appointment.id),
     true,
+    correctionFailure,
   )
   await authenticateAppointmentVersions(
     context, retained.appointment,
@@ -2355,6 +2416,12 @@ const retainedCancellationState = async (
 
 export async function loadAuthenticatedAppointmentLedger(command, actor) {
   return retainedCancellationState(command, actor, false, 'payment.manage')
+}
+
+export async function loadAuthenticatedAppointmentLedgerForCorrection(command, actor) {
+  return retainedCancellationState(
+    command, actor, false, 'payment.manage', cryptoFailure,
+  )
 }
 
 const assertCancellationPaymentTransition = (current) => {
