@@ -113,18 +113,21 @@ export const createAuthorityBoundDispatch = (options) => {
   return Object.freeze((action) => {
     let descriptors
     try {
-      if (action !== null && typeof action === 'object' && !Array.isArray(action)
-        && Object.getPrototypeOf(action) === Object.prototype) {
-        descriptors = Object.getOwnPropertyDescriptors(action)
-      }
+      if (action === null || typeof action !== 'object' || Array.isArray(action)
+        || Object.getPrototypeOf(action) !== Object.prototype) fail('Invalid authority action')
+      descriptors = Object.getOwnPropertyDescriptors(action)
     } catch {
-      descriptors = null
+      fail('Invalid authority action')
     }
     const type = descriptors?.type
-    const roleId = descriptors?.roleId
-    if (type?.enumerable && Object.hasOwn(type, 'value') && type.value === 'SET_DEMO_ROLE'
-      && roleId?.enumerable && Object.hasOwn(roleId, 'value')
-      && typeof roleId.value === 'string' && demoRoleIds.has(roleId.value)) {
+    if (!type?.enumerable || !Object.hasOwn(type, 'value') || typeof type.value !== 'string') {
+      fail('Invalid authority action')
+    }
+    if (type.value === 'SET_DEMO_ROLE') {
+      const roleId = descriptors.roleId
+      if (!roleId?.enumerable || !Object.hasOwn(roleId, 'value')
+        || typeof roleId.value !== 'string') fail('Invalid authority action')
+      if (!demoRoleIds.has(roleId.value)) return captured.dispatch(action)
       const state = captured.getState()
       if (state?.demoRoleId !== roleId.value) {
         captured.resetAuthority(captured.authorityKeyFor({ ...state, demoRoleId: roleId.value }))

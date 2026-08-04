@@ -219,6 +219,80 @@ test('demo role dispatch resets authority synchronously only for an accepted cha
   assert.deepEqual(events, ['dispatch-therapist', 'dispatch-invalid'])
 })
 
+test('authority dispatch rejects unauthenticated action type descriptors before reducer access', () => {
+  const calls = { dispatch: 0, getState: 0, getter: 0, reset: 0 }
+  const dispatch = workspaceProvider.createAuthorityBoundDispatch({
+    dispatch: () => { calls.dispatch += 1 },
+    getState: () => { calls.getState += 1; return { demoRoleId: 'owner' } },
+    resetAuthority: () => { calls.reset += 1 },
+    authorityKeyFor: () => 'next',
+    demoRoleIds: ['owner', 'coordinator', 'therapist'],
+  })
+  const inherited = Object.create({ type: 'SET_DEMO_ROLE' })
+  const hidden = { roleId: 'therapist' }
+  Object.defineProperty(hidden, 'type', { value: 'SET_DEMO_ROLE', enumerable: false })
+  const accessor = { roleId: 'therapist' }
+  Object.defineProperty(accessor, 'type', {
+    enumerable: true,
+    get() { calls.getter += 1; return 'SET_DEMO_ROLE' },
+  })
+  const trapped = new Proxy({ type: 'SET_DEMO_ROLE', roleId: 'therapist' }, {
+    ownKeys() { throw new Error('private trap') },
+  })
+  const prototypeTrapped = new Proxy({ type: 'UPDATE_CLIENT' }, {
+    getPrototypeOf() { throw new Error('private prototype trap') },
+  })
+  for (const action of [
+    null, [], {}, inherited, hidden, accessor, trapped, prototypeTrapped,
+    { type: Symbol('private') },
+  ]) {
+    assert.throws(() => dispatch(action), { name: 'TypeError', message: 'Invalid authority action' })
+  }
+  assert.deepEqual(calls, { dispatch: 0, getState: 0, getter: 0, reset: 0 })
+})
+
+test('role actions reject unauthenticated role descriptors without state or reducer access', () => {
+  const calls = { dispatch: 0, getState: 0, getter: 0, reset: 0 }
+  const dispatch = workspaceProvider.createAuthorityBoundDispatch({
+    dispatch: () => { calls.dispatch += 1 },
+    getState: () => { calls.getState += 1; return { demoRoleId: 'owner' } },
+    resetAuthority: () => { calls.reset += 1 },
+    authorityKeyFor: () => 'next',
+    demoRoleIds: ['owner', 'coordinator', 'therapist'],
+  })
+  const inherited = Object.create({ roleId: 'therapist' })
+  inherited.type = 'SET_DEMO_ROLE'
+  const hidden = { type: 'SET_DEMO_ROLE' }
+  Object.defineProperty(hidden, 'roleId', { value: 'therapist', enumerable: false })
+  const accessor = { type: 'SET_DEMO_ROLE' }
+  Object.defineProperty(accessor, 'roleId', {
+    enumerable: true,
+    get() { calls.getter += 1; return 'therapist' },
+  })
+  for (const action of [
+    { type: 'SET_DEMO_ROLE' }, inherited, hidden, accessor,
+    { type: 'SET_DEMO_ROLE', roleId: 7 },
+    { type: 'SET_DEMO_ROLE', roleId: Symbol('private') },
+  ]) assert.throws(() => dispatch(action), { name: 'TypeError', message: 'Invalid authority action' })
+  assert.deepEqual(calls, { dispatch: 0, getState: 0, getter: 0, reset: 0 })
+})
+
+test('authenticated ordinary actions and extra inert descriptors preserve reducer behavior', () => {
+  const actions = []
+  const dispatch = workspaceProvider.createAuthorityBoundDispatch({
+    dispatch: (action) => { actions.push(action); return 'forwarded' },
+    getState: () => { throw new Error('ordinary action read state') },
+    resetAuthority: () => { throw new Error('ordinary action reset') },
+    authorityKeyFor: () => { throw new Error('ordinary action key') },
+    demoRoleIds: ['owner', 'coordinator', 'therapist'],
+  })
+  const symbol = Symbol('inert')
+  const action = { type: 'UPDATE_CLIENT', [symbol]: 'preserved' }
+  Object.defineProperty(action, 'unused', { enumerable: true, get() { throw new Error('unused') } })
+  assert.equal(dispatch(action), 'forwarded')
+  assert.equal(actions[0], action)
+})
+
 test('a successful write invalidates a captured load and causes one exact bounded refetch', async () => {
   const stale = deferred()
   const requests = []
