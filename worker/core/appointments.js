@@ -38,6 +38,7 @@ const BODY_KEYS = Object.freeze([
   'expectedAmountGrosze', 'location', 'status',
 ])
 const EDIT_BODY_KEYS = Object.freeze(['expectedVersion', ...BODY_KEYS.slice(1)])
+const CANCEL_BODY_KEYS = Object.freeze(['expectedVersion'])
 const INPUT_KEYS = Object.freeze([
   'db', 'recoveryDb', 'actor', 'keyring', 'nowMs', 'correlationId', 'idFactory',
   'body', 'idempotencyKey',
@@ -47,6 +48,7 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CORRELATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const OPERATION = 'appointments.create'
 const EDIT_OPERATION = 'appointments.edit'
+const CANCEL_OPERATION = 'appointments.cancel'
 const ROUTE_TARGET = 'POST /api/v1/appointments'
 const PROSPECTIVE_APPOINTMENT_ID = 'apt_authorization_target'
 const DAY_MS = 86_400_000
@@ -122,6 +124,36 @@ export function validateEditAppointmentBody(value) {
     endsAt: appointment.endsAt,
     timeZone: appointment.timeZone,
   })
+}
+
+export function validateCancelAppointmentBody(value) {
+  const captured = captureExact(value, CANCEL_BODY_KEYS)
+  if (!Number.isSafeInteger(captured.expectedVersion) || captured.expectedVersion < 1) {
+    validation('expectedVersion')
+  }
+  return Object.freeze({ expectedVersion: captured.expectedVersion })
+}
+
+const digestCancelNormalized = async (appointmentId, body) => {
+  const encoded = new TextEncoder().encode(JSON.stringify({
+    body: { expectedVersion: body.expectedVersion },
+    route: `POST /api/v1/appointments/${appointmentId}/cancellation`,
+  }))
+  let digest
+  try {
+    digest = new Uint8Array(await crypto.subtle.digest('SHA-256', encoded))
+    return encodeBase64Url(digest)
+  } finally {
+    encoded.fill(0)
+    digest?.fill(0)
+  }
+}
+
+export async function digestCancelAppointmentRequest(appointmentId, value) {
+  if (typeof appointmentId !== 'string' || !isAppointmentId(appointmentId)) {
+    validation('appointmentId')
+  }
+  return digestCancelNormalized(appointmentId, validateCancelAppointmentBody(value))
 }
 
 const digestEditNormalized = async (appointmentId, body) => {
@@ -1220,8 +1252,13 @@ const authenticateAppointmentVersions = async (context, current, aggregate, valu
       || !isSpecialistId(snapshot.specialistId) || !SERVICE_BY_ID[snapshot.serviceId]
       || !canonicalInstant(snapshot.startsAt) || !canonicalInstant(snapshot.endsAt)
       || snapshot.endsAt <= snapshot.startsAt || snapshot.timeZone !== 'Europe/Warsaw'
-      || !['scheduled', 'completed', 'noshow'].includes(snapshot.status)
-      || snapshot.cancelledAt !== null || snapshot.updatedAt !== row.changed_at
+      || !['scheduled', 'completed', 'noshow', 'cancelled'].includes(snapshot.status)
+      || ((snapshot.status === 'cancelled') !== (snapshot.cancelledAt !== null))
+      || (snapshot.cancelledAt !== null
+        && (!canonicalInstant(snapshot.cancelledAt)
+          || snapshot.cancelledAt !== snapshot.updatedAt
+          || index !== rows.length - 1))
+      || snapshot.updatedAt !== row.changed_at
       || (previousUpdatedAt !== null && snapshot.updatedAt <= previousUpdatedAt)
       || !['unpaid', 'partial', 'paid'].includes(payment.status)
       || !Number.isSafeInteger(payment.collectedGrosze) || payment.collectedGrosze < 0
@@ -1233,7 +1270,8 @@ const authenticateAppointmentVersions = async (context, current, aggregate, valu
       snapshot.specialistId !== current.specialistId
       || snapshot.serviceId !== current.serviceId || snapshot.startsAt !== current.startsAt
       || snapshot.endsAt !== current.endsAt || snapshot.location !== current.location
-      || snapshot.status !== current.status || snapshot.updatedAt !== current.updatedAt
+      || snapshot.status !== current.status || snapshot.cancelledAt !== current.cancelledAt
+      || snapshot.updatedAt !== current.updatedAt
       || payment.status !== aggregate.status
       || payment.collectedGrosze !== aggregate.collectedGrosze
       || payment.outstandingGrosze !== aggregate.outstandingGrosze
@@ -1284,7 +1322,9 @@ const loadPaymentHistory = (db, appointmentId) => db.prepare(
    WHERE payment.appointment_id=? ORDER BY payment.received_at,payment.id LIMIT 1001`
 ).bind(appointmentId).all()
 
-const authenticatePaymentHistory = async (context, appointment, charge, value) => {
+const authenticatePaymentHistory = async (
+  context, appointment, charge, value, allowNonbillableCollected = false,
+) => {
   const rows = resultRows(value, 1_001)
   if (rows.length > 1_000) notFound()
   const ids = new Set()
@@ -1367,7 +1407,9 @@ const authenticatePaymentHistory = async (context, appointment, charge, value) =
     return next
   }, 0)
   if (collectedGrosze > charge.expectedAmountGrosze
-    || (!['completed', 'noshow'].includes(appointment.status) && collectedGrosze !== 0)) notFound()
+    || (!allowNonbillableCollected
+      && !['completed', 'noshow'].includes(appointment.status)
+      && collectedGrosze !== 0)) notFound()
   const latest = effective.at(-1) ?? null
   const aggregate = paymentAggregateFor(
     appointment.status, charge.expectedAmountGrosze, collectedGrosze,
@@ -2104,6 +2146,605 @@ export async function editAppointment(input) {
     }
     if (isD1CoreDirectoryInvariantFailure(originalError)) {
       return reproveEditRace(command, actor, current, originalError)
+    }
+    throw originalError
+  }
+}
+
+const CANCEL_INPUT_KEYS = Object.freeze([
+  ...INPUT_KEYS.slice(0, 7), 'appointmentId', ...INPUT_KEYS.slice(7),
+])
+
+const captureCancelCommand = (input) => {
+  const captured = captureExact(input, CANCEL_INPUT_KEYS)
+  if (!captured.db?.prepare || !captured.db?.batch || !captured.recoveryDb?.prepare
+    || !captured.keyring || typeof captured.idFactory !== 'function'
+    || !Number.isSafeInteger(captured.nowMs) || captured.nowMs < 0
+    || typeof captured.correlationId !== 'string' || !CORRELATION_ID.test(captured.correlationId)
+    || typeof captured.idempotencyKey !== 'string'
+    || !IDEMPOTENCY_KEY.test(captured.idempotencyKey)) validation('body')
+  if (typeof captured.appointmentId !== 'string'
+    || !isAppointmentId(captured.appointmentId)) validation('appointmentId')
+  return Object.freeze({ ...captured, body: validateCancelAppointmentBody(captured.body) })
+}
+
+const loadScopedAppointmentForCancellation = (db, appointmentId, actor, terminal = false) => db.prepare(
+  `SELECT appointment.id,appointment.client_id,appointment.specialist_id,
+          appointment.service_id,appointment.starts_at,appointment.ends_at,
+          appointment.time_zone,appointment.location,appointment.status,
+          appointment.source,appointment.version,appointment.cancelled_at,
+          appointment.created_at,appointment.updated_at,
+          charge.id AS charge_id,charge.appointment_id AS charge_appointment_id,
+          charge.service_id AS charge_service_id,
+          charge.expected_amount_grosze,charge.currency,
+          charge.version AS charge_version,charge.created_at AS charge_created_at,
+          charge.updated_at AS charge_updated_at,
+          client.identity_envelope,client.status AS client_status,
+          client.version AS client_version,client.archived_at,
+          client.created_at AS client_created_at,client.updated_at AS client_updated_at,
+          assignment.id AS assignment_id,assignment.specialist_id AS assignment_specialist_id,
+          assignment.starts_at AS assignment_starts_at,assignment.ends_at AS assignment_ends_at,
+          assignment.assigned_by_staff_id,assignment.version AS assignment_version,
+          assignment.created_at AS assignment_created_at,
+          assignment.updated_at AS assignment_updated_at
+   FROM appointments AS appointment
+   JOIN session_charges AS charge ON charge.appointment_id=appointment.id
+   JOIN clients AS client ON client.id=appointment.client_id
+   JOIN client_assignments AS assignment ON assignment.client_id=client.id
+     AND assignment.ends_at IS NULL
+   WHERE appointment.id=? AND ${terminal
+    ? "appointment.status='cancelled' AND appointment.cancelled_at IS NOT NULL"
+    : "appointment.status IN ('scheduled','completed','noshow') AND appointment.cancelled_at IS NULL"}
+     AND client.status IN ('active','paused') AND client.archived_at IS NULL
+     AND (? IN ('owner','coordinator')
+       OR (?='specialist' AND ?=appointment.specialist_id))
+     AND (SELECT count(*) FROM session_charges AS exact_charge
+       WHERE exact_charge.appointment_id=appointment.id)=1
+     AND (SELECT count(*) FROM client_assignments AS open_assignment
+       WHERE open_assignment.client_id=client.id AND open_assignment.ends_at IS NULL)=1`
+).bind(appointmentId, actor.role, actor.role, actor.specialistId).first()
+
+const cancellationScopedFact = (value, appointmentId, terminal = false) => {
+  const row = captureExact(value, [
+    'id', 'client_id', 'specialist_id', 'service_id', 'starts_at', 'ends_at',
+    'time_zone', 'location', 'status', 'source', 'version', 'cancelled_at',
+    'created_at', 'updated_at', 'charge_id', 'charge_appointment_id',
+    'charge_service_id', 'expected_amount_grosze', 'currency', 'charge_version',
+    'charge_created_at', 'charge_updated_at', 'identity_envelope', 'client_status',
+    'client_version', 'archived_at', 'client_created_at', 'client_updated_at',
+    'assignment_id', 'assignment_specialist_id', 'assignment_starts_at',
+    'assignment_ends_at', 'assigned_by_staff_id', 'assignment_version',
+    'assignment_created_at', 'assignment_updated_at',
+  ], notFound)
+  try { assertLocation(row.location) } catch { notFound() }
+  if (row.id !== appointmentId || !isClientId(row.client_id)
+    || !isSpecialistId(row.specialist_id) || !SERVICE_BY_ID[row.service_id]
+    || !canonicalInstant(row.starts_at) || !canonicalInstant(row.ends_at)
+    || row.ends_at <= row.starts_at || row.time_zone !== 'Europe/Warsaw'
+    || !(terminal ? row.status === 'cancelled'
+      : ['scheduled', 'completed', 'noshow'].includes(row.status))
+    || row.source !== 'panel' || !Number.isSafeInteger(row.version) || row.version < 1
+    || (terminal
+      ? (!canonicalInstant(row.cancelled_at) || row.cancelled_at !== row.updated_at)
+      : row.cancelled_at !== null)
+    || !canonicalInstant(row.created_at)
+    || !canonicalInstant(row.updated_at) || row.updated_at < row.created_at
+    || !isChargeId(row.charge_id) || row.charge_appointment_id !== appointmentId
+    || row.charge_service_id !== row.service_id
+    || !Number.isSafeInteger(row.expected_amount_grosze)
+    || row.expected_amount_grosze < 1 || row.expected_amount_grosze > 1_000_000
+    || row.currency !== 'PLN' || !Number.isSafeInteger(row.charge_version)
+    || row.charge_version < 1 || !canonicalInstant(row.charge_created_at)
+    || !canonicalInstant(row.charge_updated_at)
+    || row.charge_updated_at < row.charge_created_at
+    || typeof row.identity_envelope !== 'string'
+    || !['active', 'paused'].includes(row.client_status)
+    || !Number.isSafeInteger(row.client_version) || row.client_version < 1
+    || row.archived_at !== null || !canonicalInstant(row.client_created_at)
+    || !canonicalInstant(row.client_updated_at)
+    || !isAssignmentId(row.assignment_id)
+    || !isSpecialistId(row.assignment_specialist_id)
+    || !canonicalInstant(row.assignment_starts_at) || row.assignment_ends_at !== null
+    || typeof row.assigned_by_staff_id !== 'string' || !STAFF_ID.test(row.assigned_by_staff_id)
+    || row.assignment_version !== 1 || !canonicalInstant(row.assignment_created_at)
+    || !canonicalInstant(row.assignment_updated_at)) notFound()
+  return Object.freeze({
+    appointment: Object.freeze({
+      id: row.id, clientId: row.client_id, specialistId: row.specialist_id,
+      serviceId: row.service_id, startsAt: row.starts_at, endsAt: row.ends_at,
+      timeZone: row.time_zone, location: row.location, status: row.status,
+      source: row.source, version: row.version, cancelledAt: row.cancelled_at,
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    }),
+    charge: Object.freeze({
+      id: row.charge_id, appointmentId: row.id, serviceId: row.charge_service_id,
+      expectedAmountGrosze: row.expected_amount_grosze, currency: row.currency,
+      version: row.charge_version, createdAt: row.charge_created_at,
+      updatedAt: row.charge_updated_at,
+    }),
+    client: Object.freeze({
+      id: row.client_id, identityEnvelope: row.identity_envelope,
+      status: row.client_status, version: row.client_version, archivedAt: null,
+      createdAt: row.client_created_at, updatedAt: row.client_updated_at,
+      assignment: Object.freeze({
+        id: row.assignment_id, clientId: row.client_id,
+        specialistId: row.assignment_specialist_id, startsAt: row.assignment_starts_at,
+        endsAt: null, assignedByStaffId: row.assigned_by_staff_id,
+        version: row.assignment_version, createdAt: row.assignment_created_at,
+        updatedAt: row.assignment_updated_at,
+      }),
+    }),
+  })
+}
+
+const retainedCancellationState = async (command, actor, terminal = false) => {
+  const retained = cancellationScopedFact(
+    await loadScopedAppointmentForCancellation(
+      command.db, command.appointmentId, actor, terminal,
+    ),
+    command.appointmentId,
+    terminal,
+  )
+  if (!authorize(actor, 'appointment.manage', {
+    kind: 'appointment', appointmentId: retained.appointment.id,
+    specialistId: retained.appointment.specialistId,
+  }, { nowMs: command.nowMs })) notFound()
+  const context = await loadClientCryptoContext(command.db, command.keyring, {
+    clientId: retained.client.id, envelope: retained.client.identityEnvelope,
+  })
+  const identity = await decryptClientIdentity(context, {
+    clientId: retained.client.id, envelope: retained.client.identityEnvelope,
+  })
+  await authenticateClientVersions(
+    context, retained.client, identity,
+    await loadClientVersions(command.db, retained.client.id),
+  )
+  await authenticateAssignmentVersions(
+    context, retained.client,
+    await loadAssignmentVersions(command.db, retained.client.id),
+  )
+  const payment = await authenticatePaymentHistory(
+    context, retained.appointment, retained.charge,
+    await loadPaymentHistory(command.db, retained.appointment.id),
+    true,
+  )
+  await authenticateAppointmentVersions(
+    context, retained.appointment,
+    paymentAggregateFor(
+      retained.appointment.status,
+      retained.charge.expectedAmountGrosze,
+      payment.collectedGrosze,
+    ),
+    await loadEntityVersions(command.db, retained.appointment.id),
+  )
+  await authenticateChargeVersions(
+    context, retained.charge,
+    await loadEntityVersions(command.db, retained.charge.id),
+  )
+  return Object.freeze({ ...retained, context, payment })
+}
+
+const assertCancellationPaymentTransition = (current) => {
+  if (!['scheduled', 'completed', 'noshow'].includes(current.appointment.status)
+    || !Number.isSafeInteger(current.payment.collectedGrosze)
+    || current.payment.collectedGrosze < 0) throw new Error('INTERNAL_ERROR')
+  if (current.payment.collectedGrosze !== 0) {
+    throw new Error('APPOINTMENT_PAYMENT_CONFLICT')
+  }
+}
+
+const validateCancelReplay = (value, appointmentId, request) => {
+  const replay = replayObject(value, ['status', 'body'])
+  const body = replayObject(replay.body, ['data'])
+  const data = replayObject(body.data, ['appointment'])
+  const appointment = replayObject(data.appointment, [
+    'id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone',
+    'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt',
+    'charge', 'payment', 'paymentEntries',
+  ])
+  const charge = replayObject(appointment.charge, [
+    'id', 'serviceId', 'expectedAmountGrosze', 'currency', 'version',
+  ])
+  const payment = replayObject(appointment.payment, [
+    'status', 'collectedGrosze', 'outstandingGrosze', 'latestMethod', 'latestReceivedAt',
+  ])
+  if (replay.status !== 200 || appointment.id !== appointmentId
+    || !isClientId(appointment.clientId) || !isSpecialistId(appointment.specialistId)
+    || !SERVICE_BY_ID[appointment.serviceId] || !canonicalInstant(appointment.startsAt)
+    || !canonicalInstant(appointment.endsAt) || appointment.endsAt <= appointment.startsAt
+    || appointment.timeZone !== 'Europe/Warsaw' || appointment.status !== 'cancelled'
+    || appointment.source !== 'panel' || appointment.version !== request.expectedVersion + 1
+    || !canonicalInstant(appointment.cancelledAt)
+    || appointment.updatedAt !== appointment.cancelledAt
+    || !canonicalInstant(appointment.createdAt) || appointment.createdAt > appointment.updatedAt
+    || !isChargeId(charge.id) || charge.serviceId !== appointment.serviceId
+    || !Number.isSafeInteger(charge.expectedAmountGrosze)
+    || charge.expectedAmountGrosze < 1 || charge.expectedAmountGrosze > 1_000_000
+    || charge.currency !== 'PLN' || !Number.isSafeInteger(charge.version) || charge.version < 1
+    || payment.status !== 'unpaid' || payment.collectedGrosze !== 0
+    || payment.outstandingGrosze !== 0 || payment.latestMethod !== null
+    || payment.latestReceivedAt !== null || !Array.isArray(appointment.paymentEntries)
+    || appointment.paymentEntries.length > 1_000
+    || Reflect.ownKeys(Object.getOwnPropertyDescriptors(appointment.paymentEntries)).length
+      !== appointment.paymentEntries.length + 1) cryptoFailure()
+  try { assertLocation(appointment.location) } catch { cryptoFailure() }
+  const ids = new Set()
+  const entries = appointment.paymentEntries.map((candidate) => {
+    const entry = replayObject(candidate, [
+      'id', 'amountGrosze', 'method', 'receivedAt', 'correctedAt', 'replacementEntryId',
+    ])
+    if (!isPaymentId(entry.id) || ids.has(entry.id)
+      || !Number.isSafeInteger(entry.amountGrosze) || entry.amountGrosze < 1
+      || entry.amountGrosze > 1_000_000
+      || !['cash', 'card', 'transfer', 'monthly'].includes(entry.method)
+      || !canonicalInstant(entry.receivedAt) || !canonicalInstant(entry.correctedAt)
+      || (entry.replacementEntryId !== null && !isPaymentId(entry.replacementEntryId))
+      || entry.correctedAt < appointment.createdAt
+      || entry.correctedAt > appointment.updatedAt) cryptoFailure()
+    ids.add(entry.id)
+    return Object.freeze(entry)
+  })
+  for (let index = 1; index < entries.length; index += 1) {
+    if (entries[index - 1].receivedAt > entries[index].receivedAt
+      || (entries[index - 1].receivedAt === entries[index].receivedAt
+        && binaryCompare(entries[index - 1].id, entries[index].id) >= 0)) cryptoFailure()
+  }
+  const replacementTargets = new Set()
+  const replacementLinks = new Map()
+  for (const entry of entries) {
+    if (entry.replacementEntryId === null) continue
+    const replacement = entries.find(({ id }) => id === entry.replacementEntryId)
+    if (!replacement || entry.replacementEntryId === entry.id
+      || replacementTargets.has(entry.replacementEntryId)
+      || replacement.correctedAt < entry.correctedAt) cryptoFailure()
+    replacementTargets.add(entry.replacementEntryId)
+    replacementLinks.set(entry.id, entry.replacementEntryId)
+  }
+  for (const start of replacementLinks.keys()) {
+    const path = new Set()
+    let cursor = start
+    while (replacementLinks.has(cursor)) {
+      if (path.has(cursor)) cryptoFailure()
+      path.add(cursor)
+      cursor = replacementLinks.get(cursor)
+    }
+  }
+  return Object.freeze({ status: 200, body: Object.freeze({
+    data: Object.freeze({ appointment: editAppointmentDto(
+      appointment, charge, Object.freeze({ ...payment, entries: Object.freeze(entries) }),
+    ) }),
+  }) })
+}
+
+const cancellationGuardStatement = (db, values) => {
+  const assignmentChain = assignmentChainPostcondition(
+    values.client.id, values.client.assignment.specialistId,
+    values.client.assignment.startsAt,
+  )
+  return db.prepare(
+    `INSERT INTO core_directory_invariant_failures (failure_kind)
+     SELECT 'appointment_cancellation_postcondition'
+     WHERE NOT (
+       EXISTS (SELECT 1 FROM appointments WHERE id=? AND client_id=?
+         AND specialist_id=? AND service_id=? AND starts_at=? AND ends_at=?
+         AND time_zone='Europe/Warsaw' AND location IS ? AND status='cancelled'
+         AND source=? AND version=? AND cancelled_at=? AND created_at=? AND updated_at=?)
+       AND (SELECT count(*) FROM appointments WHERE id=?)=1
+       AND EXISTS (SELECT 1 FROM session_charges WHERE id=? AND appointment_id=?
+         AND service_id=? AND expected_amount_grosze=? AND currency='PLN'
+         AND version=? AND created_at=? AND updated_at=?)
+       AND (SELECT count(*) FROM session_charges WHERE appointment_id=?)=1
+       AND (SELECT count(*) FROM record_versions
+         WHERE entity_type='appointment' AND entity_id=?)=?
+       AND (SELECT min(version) FROM record_versions
+         WHERE entity_type='appointment' AND entity_id=?)=1
+       AND (SELECT max(version) FROM record_versions
+         WHERE entity_type='appointment' AND entity_id=?)=?
+       AND (SELECT count(*) FROM record_versions
+         WHERE entity_type='session_charge' AND entity_id=?)=?
+       AND (SELECT min(version) FROM record_versions
+         WHERE entity_type='session_charge' AND entity_id=?)=1
+       AND (SELECT max(version) FROM record_versions
+         WHERE entity_type='session_charge' AND entity_id=?)=?
+       AND NOT EXISTS (SELECT 1 FROM record_versions WHERE
+         (entity_id=? AND entity_type!='appointment')
+         OR (entity_id=? AND entity_type!='session_charge'))
+       AND EXISTS (SELECT 1 FROM record_versions WHERE id=?
+         AND entity_type='appointment' AND entity_id=? AND version=?
+         AND changed_by_staff_id=? AND changed_at=? AND correlation_id=?
+         AND json_extract(snapshot_envelope,'$.dataKeyId')=?
+         AND json_extract(snapshot_envelope,'$.dataKeyVersion')=1)
+       AND NOT EXISTS (SELECT 1 FROM record_versions WHERE
+         entity_id IN (?,?) AND (NOT json_valid(snapshot_envelope)
+           OR json_extract(CASE WHEN json_valid(snapshot_envelope)
+                THEN snapshot_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+           OR json_extract(CASE WHEN json_valid(snapshot_envelope)
+                THEN snapshot_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1))
+       AND EXISTS (SELECT 1 FROM audit_events WHERE id=? AND actor_staff_id=?
+         AND action='appointment.cancelled' AND entity_type='appointment' AND entity_id=?
+         AND result='success' AND reason_envelope IS NULL AND correlation_id=?
+         AND metadata_json=?)
+       AND (SELECT count(*) FROM audit_events
+         WHERE action='appointment.cancelled' AND entity_type='appointment'
+           AND entity_id=? AND result='success')=1
+       AND EXISTS (SELECT 1 FROM idempotency_records WHERE actor_id=? AND operation=?
+         AND idempotency_key=? AND resource_type='client' AND resource_id=?
+         AND json_extract(request_hash,'$.dataKeyId')=?
+         AND json_extract(response_envelope,'$.dataKeyId')=?)
+       AND EXISTS (SELECT 1 FROM data_keys WHERE id=? AND scope_type='client'
+         AND scope_id=? AND purpose='identity' AND dek_version=1 AND retired_at IS NULL)
+       AND EXISTS (SELECT 1 FROM clients WHERE id=? AND identity_envelope=?
+         AND status=? AND archived_at IS NULL AND version=?
+         AND created_at=? AND updated_at=?)
+       AND (SELECT count(*) FROM record_versions
+         WHERE entity_type='client' AND entity_id=?)=?
+       AND NOT EXISTS (SELECT 1 FROM record_versions
+         WHERE entity_id=? AND entity_type!='client')
+       AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
+         WHERE retained.client_id=? AND (
+           (SELECT count(*) FROM record_versions AS history
+             WHERE history.entity_type='client_assignment'
+               AND history.entity_id=retained.id)!=retained.version
+           OR (SELECT min(history.version) FROM record_versions AS history
+             WHERE history.entity_type='client_assignment'
+               AND history.entity_id=retained.id)!=1
+           OR (SELECT max(history.version) FROM record_versions AS history
+             WHERE history.entity_type='client_assignment'
+               AND history.entity_id=retained.id)!=retained.version))
+       AND (${assignmentChain.sql})
+       AND (SELECT count(*) FROM payment_entries WHERE appointment_id=?)=?
+       AND NOT EXISTS (SELECT 1 FROM payment_entries AS payment
+         WHERE payment.appointment_id=? AND (payment.amount_grosze<1
+           OR payment.amount_grosze>1000000
+           OR payment.method NOT IN ('cash','card','transfer','monthly')
+           OR payment.external_reference_envelope IS NOT NULL
+           OR NOT EXISTS (SELECT 1 FROM staff_users WHERE id=payment.recorded_by_staff_id)))
+       AND NOT EXISTS (SELECT 1 FROM payment_corrections AS correction
+         JOIN payment_entries AS payment ON payment.id=correction.reversed_entry_id
+         WHERE payment.appointment_id=? AND (correction.replacement_entry_id=correction.reversed_entry_id
+           OR NOT json_valid(correction.reason_envelope)
+           OR json_extract(CASE WHEN json_valid(correction.reason_envelope)
+                THEN correction.reason_envelope ELSE '{}' END,'$.dataKeyId') IS NOT ?
+           OR json_extract(CASE WHEN json_valid(correction.reason_envelope)
+                THEN correction.reason_envelope ELSE '{}' END,'$.dataKeyVersion') IS NOT 1
+           OR (correction.replacement_entry_id IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM payment_entries AS replacement
+             WHERE replacement.id=correction.replacement_entry_id
+               AND replacement.appointment_id=payment.appointment_id))))
+       AND (SELECT coalesce(sum(payment.amount_grosze),0) FROM payment_entries AS payment
+         WHERE payment.appointment_id=? AND NOT EXISTS (SELECT 1 FROM payment_corrections
+           WHERE reversed_entry_id=payment.id))=0
+     )`
+  ).bind(
+    values.appointment.id, values.client.id, values.appointment.specialistId,
+    values.appointment.serviceId, values.appointment.startsAt, values.appointment.endsAt,
+    values.appointment.location, values.appointment.source, values.appointment.version,
+    values.now, values.appointment.createdAt, values.now, values.appointment.id,
+    values.charge.id, values.appointment.id, values.charge.serviceId,
+    values.charge.expectedAmountGrosze, values.charge.version,
+    values.charge.createdAt, values.charge.updatedAt, values.appointment.id,
+    values.appointment.id, values.appointment.version,
+    values.appointment.id, values.appointment.id, values.appointment.version,
+    values.charge.id, values.charge.version,
+    values.charge.id, values.charge.id, values.charge.version,
+    values.appointment.id, values.charge.id,
+    values.appointmentVersionId, values.appointment.id, values.appointment.version,
+    values.actorId, values.now, values.correlationId, values.dataKeyId,
+    values.appointment.id, values.charge.id, values.dataKeyId,
+    values.auditId, values.actorId, values.appointment.id, values.correlationId,
+    JSON.stringify({
+      appointmentVersion: values.appointment.version,
+      chargeVersion: values.charge.version,
+    }),
+    values.appointment.id,
+    values.actorId, CANCEL_OPERATION, values.idempotencyKey, values.client.id,
+    values.dataKeyId, values.dataKeyId,
+    values.dataKeyId, values.client.id,
+    values.client.id, values.client.identityEnvelope, values.client.status,
+    values.client.version, values.client.createdAt, values.client.updatedAt,
+    values.client.id, values.client.version, values.client.id, values.client.id,
+    ...assignmentChain.bindings,
+    values.appointment.id, values.payment.entries.length,
+    values.appointment.id, values.appointment.id, values.dataKeyId,
+    values.appointment.id,
+  )
+}
+
+const cancellationCollisionProof = (db, values) => db.prepare(
+  `SELECT CASE WHEN EXISTS (SELECT 1 FROM idempotency_records
+       WHERE actor_id=? AND operation=? AND idempotency_key=?)
+     THEN 1 ELSE 0 END AS stored,
+   CASE WHEN EXISTS (SELECT 1 FROM record_versions WHERE id=?)
+       OR EXISTS (SELECT 1 FROM audit_events WHERE id=?)
+     THEN 1 ELSE 0 END AS generated_collision`
+).bind(
+  values.actorId, CANCEL_OPERATION, values.idempotencyKey,
+  values.appointmentVersionId, values.auditId,
+).first()
+
+const loadTerminalCancellationProof = (db, appointment, charge) => db.prepare(
+  `SELECT (SELECT count(*) FROM audit_events
+     WHERE action='appointment.cancelled' AND entity_type='appointment'
+       AND entity_id=? AND result='success' AND reason_envelope IS NULL
+       AND metadata_json=?) AS audits,
+   (SELECT count(*) FROM idempotency_records
+     WHERE operation=? AND resource_type='client' AND resource_id=?) AS stored`
+).bind(
+  appointment.id,
+  JSON.stringify({ appointmentVersion: appointment.version, chargeVersion: charge.version }),
+  CANCEL_OPERATION,
+  appointment.clientId,
+).first()
+
+const reproveCancellationRace = async (command, actor, prior, originalError) => {
+  let fresh
+  try { fresh = await retainedCancellationState(command, actor) } catch {
+    let terminal
+    try { terminal = await retainedCancellationState(command, actor, true) } catch {
+      throw originalError
+    }
+    let proof
+    try {
+      proof = captureExact(
+        await loadTerminalCancellationProof(
+          command.db, terminal.appointment, terminal.charge,
+        ),
+        ['audits', 'stored'],
+        cryptoFailure,
+      )
+    } catch { throw originalError }
+    if (proof.audits === 1 && proof.stored === 1
+      && terminal.appointment.version === prior.appointment.version + 1
+      && terminal.appointment.clientId === prior.appointment.clientId
+      && terminal.appointment.specialistId === prior.appointment.specialistId
+      && terminal.appointment.serviceId === prior.appointment.serviceId
+      && terminal.appointment.startsAt === prior.appointment.startsAt
+      && terminal.appointment.endsAt === prior.appointment.endsAt
+      && terminal.appointment.timeZone === prior.appointment.timeZone
+      && terminal.appointment.location === prior.appointment.location
+      && terminal.appointment.source === prior.appointment.source
+      && terminal.appointment.createdAt === prior.appointment.createdAt
+      && terminal.charge.id === prior.charge.id
+      && terminal.charge.serviceId === prior.charge.serviceId
+      && terminal.charge.expectedAmountGrosze === prior.charge.expectedAmountGrosze
+      && terminal.charge.currency === prior.charge.currency
+      && terminal.charge.version === prior.charge.version
+      && terminal.charge.createdAt === prior.charge.createdAt
+      && terminal.charge.updatedAt === prior.charge.updatedAt
+      && terminal.payment.collectedGrosze === 0) notFound()
+    throw originalError
+  }
+  if (fresh.appointment.version !== prior.appointment.version) {
+    versionConflict(fresh.appointment.version)
+  }
+  try { assertCancellationPaymentTransition(fresh) } catch (error) {
+    if (error instanceof Error && error.message === 'APPOINTMENT_PAYMENT_CONFLICT') throw error
+    throw originalError
+  }
+  throw originalError
+}
+
+export async function cancelAppointment(input) {
+  const command = captureCancelCommand(input)
+  const actor = actorFact(command.actor)
+  const requestDigest = await digestCancelNormalized(command.appointmentId, command.body)
+  const idem = Object.freeze({
+    actorId: actor.id, operation: CANCEL_OPERATION,
+    idempotencyKey: command.idempotencyKey, requestDigest,
+    resourceType: 'client', scopeType: 'client', scopePurpose: 'identity',
+  })
+  const replay = await inspectStoredScopeIdempotency(command.db, command.keyring, idem)
+  if (replay) return validateCancelReplay(replay, command.appointmentId, command.body)
+
+  const current = await retainedCancellationState(command, actor)
+  if (command.body.expectedVersion !== current.appointment.version) {
+    versionConflict(current.appointment.version)
+  }
+  assertCancellationPaymentTransition(current)
+  let now
+  try { now = new Date(command.nowMs).toISOString() } catch { throw new Error('INTERNAL_ERROR') }
+  if (now <= current.appointment.updatedAt) throw new Error('INTERNAL_ERROR')
+  const used = new Set()
+  const appointmentVersionId = generated(command.idFactory, 'ver', isVersionId, used)
+  const auditId = generated(command.idFactory, 'aud', isAuditId, used)
+  const appointment = Object.freeze({
+    ...current.appointment, status: 'cancelled', version: current.appointment.version + 1,
+    cancelledAt: now, updatedAt: now,
+    paymentAggregate: paymentAggregateFor('cancelled', current.charge.expectedAmountGrosze, 0),
+  })
+  const responsePayment = Object.freeze({
+    status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0,
+    latestMethod: null, latestReceivedAt: null, entries: current.payment.entries,
+  })
+  const response = Object.freeze({ status: 200, body: Object.freeze({
+    data: Object.freeze({
+      appointment: editAppointmentDto(appointment, current.charge, responsePayment),
+    }),
+  }) })
+  const appointmentVersion = await versionBuilder.build(command.db, current.context, {
+    clientId: current.client.id, versionId: appointmentVersionId,
+    entityType: 'appointment', entity: appointment,
+    changedByStaffId: actor.id, changedAt: now,
+    correlationId: command.correlationId, ownerFact: null,
+  })
+  const idempotency = await createIdempotencyStatement(command.db, current.context, {
+    actorId: actor.id, operation: CANCEL_OPERATION,
+    idempotencyKey: command.idempotencyKey, requestDigest,
+    expectedScope: current.context.scope, resourceType: 'client',
+    resourceId: current.client.id, response, createdAt: now,
+    expiresAt: new Date(command.nowMs + 7 * DAY_MS).toISOString(),
+  })
+  const values = Object.freeze({
+    appointment, charge: current.charge, client: current.client,
+    payment: responsePayment, now, actorId: actor.id,
+    appointmentVersionId, auditId, correlationId: command.correlationId,
+    idempotencyKey: command.idempotencyKey, dataKeyId: current.context.dataKey.id,
+  })
+  const uow = createUnitOfWork(command.db, {
+    mode: 'mutation', actorId: actor.id, correlationId: command.correlationId,
+  })
+  uow.domain(command.db.prepare(
+    `UPDATE appointments SET status='cancelled',version=?,cancelled_at=?,updated_at=?
+     WHERE id=? AND client_id=? AND specialist_id=? AND service_id=?
+       AND starts_at=? AND ends_at=? AND time_zone='Europe/Warsaw'
+       AND location IS ? AND status=? AND source='panel' AND version=?
+       AND cancelled_at IS NULL AND created_at=? AND updated_at=?
+       AND EXISTS (SELECT 1 FROM session_charges WHERE id=? AND appointment_id=?
+         AND service_id=? AND expected_amount_grosze=? AND currency='PLN'
+         AND version=? AND created_at=? AND updated_at=?)
+       AND (SELECT count(*) FROM session_charges WHERE appointment_id=?)=1
+       AND (SELECT coalesce(sum(payment.amount_grosze),0)
+         FROM payment_entries AS payment WHERE payment.appointment_id=?
+           AND NOT EXISTS (SELECT 1 FROM payment_corrections
+             WHERE reversed_entry_id=payment.id))=0`
+  ).bind(
+    appointment.version, now, now, current.appointment.id, current.client.id,
+    current.appointment.specialistId, current.appointment.serviceId,
+    current.appointment.startsAt, current.appointment.endsAt,
+    current.appointment.location, current.appointment.status,
+    current.appointment.version, current.appointment.createdAt,
+    current.appointment.updatedAt, current.charge.id, current.appointment.id,
+    current.charge.serviceId, current.charge.expectedAmountGrosze,
+    current.charge.version, current.charge.createdAt, current.charge.updatedAt,
+    current.appointment.id, current.appointment.id,
+  ))
+  uow.version(conditionalVersionStatement(
+    command.db, appointmentVersion,
+    "EXISTS (SELECT 1 FROM appointments WHERE id=? AND status='cancelled' AND version=? AND cancelled_at=? AND updated_at=?)",
+    [appointment.id, appointment.version, now, now],
+  ))
+  uow.audit(auditEventStatement(command.db, {
+    id: auditId, occurredAt: now, actorStaffId: actor.id,
+    action: 'appointment.cancelled', entityType: 'appointment', entityId: appointment.id,
+    result: 'success', correlationId: command.correlationId,
+    metadata: { appointmentVersion: appointment.version, chargeVersion: current.charge.version },
+    reasonEnvelope: null,
+  }))
+  uow.idempotency(idempotency)
+  uow.guard(cancellationGuardStatement(command.db, values))
+  try {
+    await uow.commit()
+    return response
+  } catch (originalError) {
+    if (isD1IdentityCollision(originalError)) {
+      let collision
+      try {
+        collision = captureExact(
+          await cancellationCollisionProof(command.db, values),
+          ['stored', 'generated_collision'], cryptoFailure,
+        )
+      } catch { throw originalError }
+      if (![0, 1].includes(collision.stored)
+        || ![0, 1].includes(collision.generated_collision)) throw originalError
+      if (collision.stored === 1 && collision.generated_collision === 0) {
+        const winner = await recoverStoredScopeIdempotencyAfterCollision(
+          command.recoveryDb, command.keyring, idem, originalError,
+        )
+        return validateCancelReplay(winner, command.appointmentId, command.body)
+      }
+    }
+    if (isD1CoreDirectoryInvariantFailure(originalError)) {
+      return reproveCancellationRace(command, actor, current, originalError)
     }
     throw originalError
   }

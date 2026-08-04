@@ -1,6 +1,8 @@
 import {
+  cancelAppointment,
   createAppointment,
   editAppointment,
+  validateCancelAppointmentBody,
   validateCreateAppointmentBody,
   validateEditAppointmentBody,
 } from '../core/appointments.js'
@@ -80,6 +82,27 @@ export async function postAppointmentEdit(input) {
     const message = validationMessage(error)
     const match = typeof message === 'string'
       ? /^VALIDATION_FAILED\/(body|appointmentId|specialistId|serviceId|dateTime|durationMinutes|expectedAmountGrosze|location|status|expectedVersion)$/.exec(message)
+      : null
+    if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
+    throw error
+  }
+}
+
+export async function postAppointmentCancellation(input) {
+  const captured = capture(input, EDIT_KEYS, 'cancel')
+  const service = captured.cancel ?? cancelAppointment
+  if (typeof service !== 'function') throw new Error('INTERNAL_ERROR')
+  try {
+    if (typeof captured.appointmentId !== 'string'
+      || !APPOINTMENT_ID.test(captured.appointmentId)) {
+      throw new TypeError('VALIDATION_FAILED/appointmentId')
+    }
+    validateCancelAppointmentBody(captured.body)
+    return await service(Object.fromEntries(EDIT_KEYS.map((key) => [key, captured[key]])))
+  } catch (error) {
+    const message = validationMessage(error)
+    const match = typeof message === 'string'
+      ? /^VALIDATION_FAILED\/(body|appointmentId|expectedVersion)$/.exec(message)
       : null
     if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
     throw error

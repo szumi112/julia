@@ -2,14 +2,21 @@ import { env } from 'cloudflare:workers'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   assertAppointmentPaymentTransition,
+  cancelAppointment,
   createAppointment,
+  digestCancelAppointmentRequest,
   editAppointment,
   digestEditAppointmentRequest,
   digestCreateAppointmentRequest,
   validateEditAppointmentBody,
+  validateCancelAppointmentBody,
   validateCreateAppointmentBody,
 } from '../../worker/core/appointments.js'
-import { postAppointment, postAppointmentEdit } from '../../worker/routes/appointments.js'
+import {
+  postAppointment,
+  postAppointmentCancellation,
+  postAppointmentEdit,
+} from '../../worker/routes/appointments.js'
 import { createClient, editClient } from '../../worker/core/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { decryptForScope, encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
@@ -661,7 +668,7 @@ describe('persistent appointment creation', () => {
       .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: { field: 'durationMinutes' } })
   })
 
-  it('serves create through HTTP while cancellation and payment remain inactive', async () => {
+  it('serves create through HTTP while an absent cancellation target remains opaque', async () => {
     const service = vi.fn(async () => ({ status: 201, body: { data: { appointment: { id: 'apt_http' } } } }))
     const app = createApp({
       config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
@@ -1561,5 +1568,432 @@ describe('persistent appointment editing', () => {
     expect(failure?.message).not.toBe('APPOINTMENT_OVERLAP')
     expect((await env.DB.prepare('SELECT version FROM appointments WHERE id=?')
       .bind(current.id).first()).version).toBe(1)
+  })
+})
+
+describe('persistent appointment cancellation', () => {
+  const CANCEL_BODY = Object.freeze({ expectedVersion: 1 })
+  const cancel = async (appointment, overrides = {}) => {
+    const marker = `appointment_cancel_${++sequence}`
+    return cancelAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(marker), appointmentId: appointment.id,
+      body: { expectedVersion: appointment.version },
+      idempotencyKey: `${marker}-key`, ...overrides,
+    })
+  }
+  const seedCollectedPaymentForCancellation = async (appointment, { corrected = false } = {}) => {
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(appointment.clientId).first()
+    const scope = clientKeyScope(appointment.clientId)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
+    })
+    const paymentId = `pay_cancel_fixture_${++sequence}`
+    const instant = appointment.updatedAt
+    const statements = [env.DB.prepare(`INSERT INTO payment_entries
+      (id,appointment_id,amount_grosze,method,received_at,recorded_by_staff_id,
+       external_reference_envelope,created_at) VALUES (?,?,?,?,?,?,NULL,?)`).bind(
+      paymentId, appointment.id, 5_000, 'card', instant, OWNER.id, instant,
+    )]
+    if (corrected) {
+      const correctionId = `cor_cancel_fixture_${sequence}`
+      const reason = await encryptForScope(await ring(), dataKey, {
+        expectedScope: scope, recordId: correctionId, field: 'reason',
+        plaintext: 'Fikcyjna korekta testowa',
+      })
+      statements.push(env.DB.prepare(`INSERT INTO payment_corrections
+        (id,reversed_entry_id,replacement_entry_id,reason_envelope,
+         recorded_by_staff_id,created_at) VALUES (?,?,NULL,?,?,?)`).bind(
+        correctionId, paymentId, JSON.stringify(reason), OWNER.id, instant,
+      ))
+    } else {
+      const changedAt = new Date(NOW_MS + 500).toISOString()
+      await env.DB.prepare('UPDATE appointments SET version=2,updated_at=? WHERE id=?')
+        .bind(changedAt, appointment.id).run()
+      const snapshot = {
+        cancelledAt: null, clientId: appointment.clientId, createdAt: appointment.createdAt,
+        endsAt: appointment.endsAt, id: appointment.id, location: appointment.location,
+        paymentAggregate: { collectedGrosze: 5_000,
+          outstandingGrosze: ['completed', 'noshow'].includes(appointment.status)
+            ? appointment.charge.expectedAmountGrosze - 5_000 : 0,
+          status: 'partial' },
+        schema: 'appointment.v1', serviceId: appointment.serviceId, source: appointment.source,
+        specialistId: appointment.specialistId, startsAt: appointment.startsAt,
+        status: appointment.status, timeZone: appointment.timeZone,
+        updatedAt: changedAt, version: 2,
+      }
+      const envelope = await encryptForScope(await ring(), dataKey, {
+        expectedScope: scope, recordId: appointment.id, field: 'record_version',
+        plaintext: JSON.stringify(snapshot),
+      })
+      statements.push(env.DB.prepare(`INSERT INTO record_versions
+        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+         changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+        `ver_cancel_payment_${sequence}`, 'appointment', appointment.id, 2,
+        JSON.stringify(envelope), OWNER.id, changedAt, CORRELATION_ID,
+      ))
+    }
+    await env.DB.batch(statements)
+    return { paymentId, version: corrected ? appointment.version : 2 }
+  }
+
+  it('strictly captures the terminal target and exact one-field body', async () => {
+    expect(validateCancelAppointmentBody(CANCEL_BODY)).toEqual(CANCEL_BODY)
+    for (const body of [
+      {}, { expectedVersion: 0 }, { expectedVersion: 1, extra: true },
+    ]) expect(() => validateCancelAppointmentBody(body)).toThrow(/VALIDATION_FAILED/)
+    const getter = vi.fn(() => 1)
+    const hostile = {}
+    Object.defineProperty(hostile, 'expectedVersion', { enumerable: true, get: getter })
+    expect(() => validateCancelAppointmentBody(hostile)).toThrow('VALIDATION_FAILED/body')
+    expect(getter).not.toHaveBeenCalled()
+    await expect(digestCancelAppointmentRequest('apt_cancel_target', CANCEL_BODY))
+      .resolves.toMatch(/^[A-Za-z0-9_-]{43}$/)
+    await expect(digestCancelAppointmentRequest('apt_bad/id', CANCEL_BODY))
+      .rejects.toThrow('VALIDATION_FAILED/appointmentId')
+  })
+
+  it.each(['scheduled', 'completed', 'noshow'])(
+    'atomically cancels a %s appointment while preserving charge and identity',
+    async (status) => {
+      const client = await seedClient()
+      const current = (await create(client, { body: {
+        ...BODY, clientId: client.id, date: `2027-09-${status === 'scheduled' ? '01'
+          : status === 'completed' ? '02' : '03'}`, status,
+      } })).body.data.appointment
+      const before = await ledgerSnapshot()
+      const result = await cancel(current)
+      const commandNow = new Date(NOW_MS + 1_000).toISOString()
+      expect(result).toEqual({ status: 200, body: { data: { appointment: {
+        ...current, status: 'cancelled', version: 2, cancelledAt: commandNow,
+        updatedAt: commandNow, payment: { ...current.payment, outstandingGrosze: 0 },
+      } } } })
+      expect(result.body.data.appointment.charge).toEqual(current.charge)
+      const row = await env.DB.prepare(`SELECT status,version,cancelled_at,updated_at
+        FROM appointments WHERE id=?`).bind(current.id).first()
+      expect(row).toEqual({ status: 'cancelled', version: 2,
+        cancelled_at: commandNow, updated_at: commandNow })
+      expect(await env.DB.prepare('SELECT * FROM session_charges WHERE id=?')
+        .bind(current.charge.id).first()).toEqual(
+        before.charges.find(({ id }) => id === current.charge.id),
+      )
+      expect((await env.DB.prepare(`SELECT action,metadata_json,reason_envelope
+        FROM audit_events WHERE entity_id=? AND action='appointment.cancelled'`)
+        .bind(current.id).first())).toEqual({
+        action: 'appointment.cancelled', reason_envelope: null,
+        metadata_json: JSON.stringify({ appointmentVersion: 2, chargeVersion: 1 }),
+      })
+    },
+  )
+
+  it('orders scope and terminal opacity before stale and spends no IDs on failures', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-09-04',
+    } })).body.data.appointment
+    const staleIds = vi.fn()
+    await expect(cancel(current, { idFactory: staleIds, body: { expectedVersion: 2 } }))
+      .rejects.toMatchObject({ message: 'VERSION_CONFLICT', details: { currentVersion: 1 } })
+    expect(staleIds).not.toHaveBeenCalled()
+    await cancel(current)
+    const terminalIds = vi.fn()
+    await expect(cancel(current, { idFactory: terminalIds,
+      idempotencyKey: `appointment-cancel-terminal-${sequence}` }))
+      .rejects.toThrow('NOT_FOUND')
+    expect(terminalIds).not.toHaveBeenCalled()
+    await expect(cancel({ ...current, id: 'apt_guessed_target' }, {
+      idFactory: vi.fn(), body: { expectedVersion: 999 },
+    })).rejects.toThrow('NOT_FOUND')
+  })
+
+  it('keeps the cancellation adapter exact and maps only frozen safe fields', async () => {
+    const service = vi.fn(async () => ({ status: 200,
+      body: { data: { appointment: { id: 'apt_cancel_adapter' } } } }))
+    const input = {
+      db: {}, recoveryDb: {}, actor: OWNER, keyring: {}, nowMs: NOW_MS,
+      correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: 'apt_cancel_adapter', body: CANCEL_BODY,
+      idempotencyKey: 'appointment-cancel-adapter-key', cancel: service,
+    }
+    expect((await postAppointmentCancellation(input)).status).toBe(200)
+    expect(service).toHaveBeenCalledWith(expect.objectContaining({
+      appointmentId: 'apt_cancel_adapter', body: CANCEL_BODY,
+    }))
+    await expect(postAppointmentCancellation({ ...input, appointmentId: 'apt_bad/id' }))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: undefined })
+    await expect(postAppointmentCancellation({ ...input, body: { expectedVersion: 1, extra: 2 } }))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: { field: 'body' } })
+  })
+
+  it('rejects an effective payment but allows and retains a corrected net-zero history', async () => {
+    const paidClient = await seedClient()
+    const paid = (await create(paidClient, { body: {
+      ...BODY, clientId: paidClient.id, date: '2027-09-05', status: 'completed',
+    } })).body.data.appointment
+    const paidFixture = await seedCollectedPaymentForCancellation(paid)
+    const ids = vi.fn()
+    await expect(cancel(paid, { idFactory: ids,
+      body: { expectedVersion: paidFixture.version } }))
+      .rejects.toThrow('APPOINTMENT_PAYMENT_CONFLICT')
+    expect(ids).not.toHaveBeenCalled()
+
+    const scheduledClient = await seedClient()
+    const scheduled = (await create(scheduledClient, { body: {
+      ...BODY, clientId: scheduledClient.id, date: '2027-09-12', status: 'scheduled',
+    } })).body.data.appointment
+    const scheduledFixture = await seedCollectedPaymentForCancellation(scheduled)
+    await expect(cancel(scheduled, {
+      body: { expectedVersion: scheduledFixture.version }, idFactory: vi.fn(),
+    })).rejects.toThrow('APPOINTMENT_PAYMENT_CONFLICT')
+
+    const correctedClient = await seedClient()
+    const corrected = (await create(correctedClient, { body: {
+      ...BODY, clientId: correctedClient.id, date: '2027-09-06', status: 'completed',
+    } })).body.data.appointment
+    const correctedFixture = await seedCollectedPaymentForCancellation(corrected, {
+      corrected: true,
+    })
+    const result = await cancel(corrected)
+    expect(result.body.data.appointment).toMatchObject({
+      status: 'cancelled', version: 2,
+      charge: corrected.charge,
+      payment: { status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0,
+        latestMethod: null, latestReceivedAt: null },
+      paymentEntries: [{ id: correctedFixture.paymentId, amountGrosze: 5_000,
+        method: 'card', receivedAt: corrected.updatedAt,
+        correctedAt: corrected.updatedAt, replacementEntryId: null }],
+    })
+  })
+
+  it('authorizes all active roles against the current appointment specialist only', async () => {
+    for (const [index, actor] of [
+      OWNER,
+      { id: OWNER.id, role: 'coordinator', specialistId: null },
+      { id: 'stf_appointment_target', role: 'specialist',
+        specialistId: 'sp_appointment_target' },
+    ].entries()) {
+      const client = await seedClient()
+      const appointment = (await create(client, { body: {
+        ...BODY, clientId: client.id, date: `2027-09-${String(7 + index).padStart(2, '0')}`,
+      } })).body.data.appointment
+      await expect(cancel(appointment, { actor })).resolves.toMatchObject({ status: 200 })
+    }
+    const client = await seedClient()
+    const appointment = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-09-10',
+    } })).body.data.appointment
+    const ids = vi.fn()
+    await expect(cancel(appointment, { actor: {
+      id: 'stf_appointment_second', role: 'specialist',
+      specialistId: 'sp_appointment_second',
+    }, idFactory: ids })).rejects.toThrow('NOT_FOUND')
+    expect(ids).not.toHaveBeenCalled()
+  })
+
+  it('replays before retained facts or IDs and releases its half-open interval', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-09-11',
+    } })).body.data.appointment
+    const key = `appointment-cancel-replay-${sequence}`
+    const first = await cancel(current, { idempotencyKey: key })
+    const replayIds = vi.fn(() => { throw new Error('must not generate') })
+    expect(await cancelAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 99_000, correlationId: CORRELATION_ID,
+      idFactory: replayIds, appointmentId: current.id,
+      body: { expectedVersion: 1 }, idempotencyKey: key,
+    })).toEqual(first)
+    expect(replayIds).not.toHaveBeenCalled()
+
+    const nextClient = await seedClient()
+    await expect(create(nextClient, { body: {
+      ...BODY, clientId: nextClient.id, date: '2027-09-11',
+    } })).resolves.toMatchObject({ status: 201 })
+  })
+
+  it('rolls back all five statements byte-for-byte and stays inside exact budgets', async () => {
+    for (let failedAt = 0; failedAt < 5; failedAt += 1) {
+      const client = await seedClient()
+      const current = (await create(client, { body: {
+        ...BODY, clientId: client.id, date: `2027-10-0${failedAt + 1}`,
+      } })).body.data.appointment
+      const before = await ledgerSnapshot()
+      const db = {
+        prepare: (sql) => env.DB.prepare(sql),
+        batch: (statements) => env.DB.batch(statements.map((statement, index) =>
+          index === failedAt
+            ? env.DB.prepare("INSERT INTO core_directory_invariant_failures (failure_kind) VALUES ('forced')")
+            : statement)),
+      }
+      await expect(cancel(current, { db,
+        idempotencyKey: `appointment-cancel-rollback-${sequence}-${failedAt}` }))
+        .rejects.toThrow()
+      expect(await ledgerSnapshot()).toEqual(before)
+    }
+
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-06',
+    } })).body.data.appointment
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    await cancel(current, { db: budget.work, recoveryDb: budget.recovery })
+    const usage = usageForD1QueryBudgetViews(budget.work, budget.recovery)
+    expect(usage).toEqual({
+      used: 13, remaining: 37, workRemaining: 29,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('returns one canonical winner to same-key concurrent cancellation', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-07',
+    } })).body.data.appointment
+    const key = `appointment-cancel-same-key-${sequence}`
+    const keyring = await ring()
+    const command = (marker) => cancelAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring,
+      nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(marker), appointmentId: current.id,
+      body: { expectedVersion: 1 }, idempotencyKey: key,
+    })
+    const [first, second] = await Promise.all([
+      command(`appointment_cancel_same_a_${++sequence}`),
+      command(`appointment_cancel_same_b_${++sequence}`),
+    ])
+    expect(second).toEqual(first)
+    expect((await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE entity_id=? AND action='appointment.cancelled'`).bind(current.id).first()).count)
+      .toBe(1)
+  })
+
+  it('classifies a different-key concurrent terminal winner as opaque not-found', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-08',
+    } })).body.data.appointment
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    let injected = false
+    const db = {
+      prepare: (sql) => budget.work.prepare(sql),
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          await cancelAppointment({
+            db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+            nowMs: NOW_MS + 500, correlationId: CORRELATION_ID,
+            idFactory: suffixes(`appointment_cancel_race_winner_${++sequence}`),
+            appointmentId: current.id, body: { expectedVersion: 1 },
+            idempotencyKey: `appointment-cancel-race-winner-${sequence}`,
+          })
+        }
+        return budget.work.batch(statements)
+      },
+    }
+    await expect(cancel(current, { db, nowMs: NOW_MS + 1_000,
+      idempotencyKey: `appointment-cancel-race-loser-${sequence}` }))
+      .rejects.toThrow('NOT_FOUND')
+    expect((await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE entity_id=? AND action='appointment.cancelled'`).bind(current.id).first()).count)
+      .toBe(1)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 22, remaining: 28, workRemaining: 20,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('recovers an injected same-key winner with exactly two reserve reads', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-09',
+    } })).body.data.appointment
+    const key = `appointment-cancel-injected-${sequence}`
+    const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    let recoveryReads = 0
+    const recoveryDb = { prepare(sql) {
+      recoveryReads += 1
+      return budget.recovery.prepare(sql)
+    } }
+    let injected = false
+    let winner
+    const db = {
+      prepare: (sql) => budget.work.prepare(sql),
+      async batch(statements) {
+        if (!injected) {
+          injected = true
+          winner = await cancelAppointment({
+            db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+            nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+            idFactory: suffixes(`appointment_cancel_injected_winner_${++sequence}`),
+            appointmentId: current.id, body: { expectedVersion: 1 },
+            idempotencyKey: key,
+          })
+        }
+        return budget.work.batch(statements)
+      },
+    }
+    const loser = await cancelAppointment({
+      db, recoveryDb, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(`appointment_cancel_injected_loser_${++sequence}`),
+      appointmentId: current.id, body: { expectedVersion: 1 }, idempotencyKey: key,
+    })
+    expect(loser).toEqual(winner)
+    expect(recoveryReads).toBe(2)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
+      used: 16, remaining: 34, workRemaining: 26,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('keeps replay client-scoped across retired, conflicting, and malformed scope state', async () => {
+    const client = await seedClient()
+    const current = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-10',
+    } })).body.data.appointment
+    const key = `appointment-cancel-replay-scope-${sequence}`
+    const result = await cancel(current, { idempotencyKey: key })
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(client.id).first()
+    await env.DB.prepare('UPDATE data_keys SET retired_at=? WHERE id=?').bind(
+      new Date(NOW_MS + 2_000).toISOString(),
+      JSON.parse(clientRow.identity_envelope).dataKeyId,
+    ).run()
+    expect(await cancelAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: current.id, body: { expectedVersion: 1 }, idempotencyKey: key,
+    })).toEqual(result)
+    await expect(cancelAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: current.id, body: { expectedVersion: 2 }, idempotencyKey: key,
+    })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+    await expect(cancelAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: {},
+      nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: current.id, body: { expectedVersion: 1 }, idempotencyKey: key,
+    })).rejects.toThrow('CRYPTO_FAILURE')
+    const wrongScopeDb = { prepare(sql) {
+      const prepared = env.DB.prepare(sql)
+      if (!sql.includes('SELECT request_hash,resource_type,resource_id,response_envelope')) {
+        return prepared
+      }
+      return { bind(...bindings) {
+        const bound = prepared.bind(...bindings)
+        return { async first() {
+          const row = await bound.first()
+          return { ...row, resource_type: 'staff_directory' }
+        } }
+      } }
+    }, batch: (statements) => env.DB.batch(statements) }
+    await expect(cancelAppointment({
+      db: wrongScopeDb, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: current.id, body: { expectedVersion: 1 }, idempotencyKey: key,
+    })).rejects.toThrow('CRYPTO_FAILURE')
   })
 })
