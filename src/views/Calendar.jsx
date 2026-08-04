@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
+import { useApp, useAppointmentMutationLock, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip, motionOK } from '../anim.js'
 import { useIsPhone, useMediaQuery, desktopMQ } from '../responsive.js'
@@ -196,7 +196,8 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
 
 export function CalendarView({ params = {} }) {
   const { state, dispatch, toast } = useApp()
-  const { appMode, getViewState, openSessionForm, patchViewState, role } = useShell()
+  const { locked: appointmentMutationLocked } = useAppointmentMutationLock()
+  const { appMode, capabilities, getViewState, openSessionForm, patchViewState, role } = useShell()
   const isApp = appMode === 'app'
   const today = toISODate(new Date())
   const curYm = monthKey(new Date())
@@ -505,6 +506,11 @@ export function CalendarView({ params = {} }) {
     [agendaSel, mode, ym]
   )
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const canManageAppointments = !isApp || (
+    capabilities.includes('appointment.manage')
+    && workspaceState === 'ready'
+    && !appointmentMutationLocked
+  )
 
   // One navigator per view: Plan dnia moves by week, Miesiąc by month, and the
   // toolbar counts whatever the user is actually looking at.
@@ -627,12 +633,12 @@ export function CalendarView({ params = {} }) {
             />
           </span>
         </span>
-        {!isApp && !s.readOnly && (
+        {canManageAppointments && !s.readOnly && (
           <IconBtn
             name="edit"
             label={`Edytuj sesję — ${clientName}, ${s.time}`}
             size={16}
-            onClick={() => openSessionForm({ session: s })}
+            onClick={() => openSessionForm({ session: s, workspaceRange })}
           />
         )}
       </div>
@@ -680,8 +686,8 @@ export function CalendarView({ params = {} }) {
             ]}
           />
           {/* the phone's raised tabbar action already covers "new session" */}
-          {!isPhone && !isApp && (
-            <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: rolePsychId })}>
+          {!isPhone && canManageAppointments && (
+            <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: rolePsychId, workspaceRange })}>
               Nowa sesja
             </Button>
           )}
@@ -773,8 +779,8 @@ export function CalendarView({ params = {} }) {
             ) : (
               dayThread(agendaSessions, false, agendaSel, agendaFlipRef, true)
             )}
-            {!isApp && <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
-              onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId })}>
+            {canManageAppointments && <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
+              onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId, workspaceRange })}>
               Dodaj sesję tego dnia
             </Button>}
           </section>
@@ -880,9 +886,9 @@ export function CalendarView({ params = {} }) {
                 {daySessions.length > 0 &&
                   dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), canDrag, selected)}
               </div>
-              {selected && !isApp && (
+              {selected && canManageAppointments && (
                 <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
-                  onClick={() => openSessionForm({ date: selected, psychId: rolePsychId })}>
+                  onClick={() => openSessionForm({ date: selected, psychId: rolePsychId, workspaceRange })}>
                   Dodaj sesję tego dnia
                 </Button>
               )}

@@ -907,10 +907,10 @@ export function Shell({
     setRoleMenuOpen(open)
   }, [])
   const openSessionForm = useCallback((opts = {}) => {
-    if (isApp) return
+    if (isApp && !capabilities.includes('appointment.manage')) return
     setDrawer({ kind: 'session', opts })
     openOverlay('drawer')
-  }, [isApp, openOverlay])
+  }, [capabilities, isApp, openOverlay])
   const openClientForm = useCallback((opts = {}) => {
     if (isApp) return
     setDrawer({ kind: 'client', opts })
@@ -1052,7 +1052,7 @@ export function Shell({
           onClose={closeNavigation}
         />
       )}
-      {!isApp && overlay === 'drawer' && drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {overlay === 'drawer' && drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {overlay === 'drawer' && drawer?.kind === 'tusGroup' && <TusGroupDrawer opts={drawer.opts} onClose={closeDrawer} />}

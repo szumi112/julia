@@ -389,6 +389,24 @@ test('successful client commands stay locked until canonical reconciliation or a
   assert.equal(controller.getSnapshot().clientMutationLocked, false)
 })
 
+test('successful appointment create and edit stay locked until canonical reconciliation', async () => {
+  const controller = makeController(() => repositoryWith())
+  await controller.getSnapshot().workspace.createAppointment({ id: 'draft' })
+  assert.equal(controller.getSnapshot().appointmentMutationLocked, true)
+  await assert.rejects(
+    controller.getSnapshot().workspace.editAppointment('apt_ola', 1, { id: 'draft' }),
+    { code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
+  )
+
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-04'))
+  assert.equal(controller.getSnapshot().appointmentMutationLocked, false)
+
+  await controller.getSnapshot().workspace.editAppointment('apt_ola', 1, { id: 'draft' })
+  assert.equal(controller.getSnapshot().appointmentMutationLocked, true)
+  controller.resetAuthority('authority-two')
+  assert.equal(controller.getSnapshot().appointmentMutationLocked, false)
+})
+
 test('business errors do not advance the epoch or make the workspace read-only', async () => {
   const conflict = Object.assign(new Error('conflict'), { code: 'VERSION_CONFLICT', status: 409 })
   const controller = makeController(() => repositoryWith({
