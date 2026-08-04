@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { appModeFrom, appSurfaceFor, basePathFor } from '../../src/app-mode.js'
 import { createWorkspaceAuthorityKey } from '../../src/workspace-provider.js'
+import { createWorkspaceApiDependency } from '../../src/app-workspace.js'
 
 test('demo is the only mode that keeps the public GitHub Pages behavior', () => {
   assert.equal(appModeFrom('demo'), 'demo')
@@ -63,4 +64,31 @@ test('workspace authority identity rejects accessor-backed mutable session input
   }
   Object.defineProperty(authority, 'capabilities', { enumerable: true, get() { throw new Error('read') } })
   assert.throws(() => createWorkspaceAuthorityKey(authority), TypeError)
+})
+
+test('protected app adapts the full API client to the exact bound workspace dependency', async () => {
+  const calls = []
+  const methodNames = [
+    'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
+    'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
+    'correctPayment', 'createIdempotencyKey',
+  ]
+  const source = { marker: 'trusted-api', unrelatedMethod() {} }
+  for (const name of methodNames) {
+    source[name] = function (...args) {
+      calls.push([name, this.marker, args])
+      return name === 'createIdempotencyKey' ? 'workspace-key-0001' : `${name}:ok`
+    }
+  }
+  Object.freeze(source)
+
+  const dependency = createWorkspaceApiDependency(source)
+  assert.ok(Object.isFrozen(dependency))
+  assert.deepEqual(Object.keys(dependency), methodNames)
+  assert.equal(dependency.loadWorkspaceWindow({ from: '2026-08-01', to: '2026-08-31' }), 'loadWorkspaceWindow:ok')
+  assert.equal(dependency.createIdempotencyKey(), 'workspace-key-0001')
+  assert.deepEqual(calls, [
+    ['loadWorkspaceWindow', 'trusted-api', [{ from: '2026-08-01', to: '2026-08-31' }]],
+    ['createIdempotencyKey', 'trusted-api', []],
+  ])
 })

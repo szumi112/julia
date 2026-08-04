@@ -13,11 +13,13 @@ import {
   createDemoWorkspaceRepository,
 } from './workspace-repository.js'
 import { createWorkspaceAuthorityKey } from './workspace-provider.js'
+import { createWorkspaceApiDependency } from './app-workspace.js'
 
 const demoRepositoryFactory = ({ dispatch, getState }) => (
   createDemoWorkspaceRepository({ dispatch, getState })
 )
-const apiRepositoryFactory = () => createApiWorkspaceRepository({ api: apiClient })
+const workspaceApi = createWorkspaceApiDependency(apiClient)
+const apiRepositoryFactory = () => createApiWorkspaceRepository({ api: workspaceApi })
 
 const demoAuthorityKeyFor = (authGeneration) => (state) => {
   const demoRole = DEMO_ROLES.find((role) => role.id === state.demoRoleId) || DEMO_ROLES[0]
