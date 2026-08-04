@@ -301,7 +301,7 @@ export function CalendarView({ params = {} }) {
 
   // --- drag & drop: reschedule by dragging a session chip onto another day ---
   const onChipDown = (e, s) => {
-    if (s.status !== 'scheduled') return
+    if (s.status !== 'scheduled' || s.readOnly || clientOf(s.clientId)?.readOnly) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     const chip = e.currentTarget
     const pid = e.pointerId
@@ -556,6 +556,7 @@ export function CalendarView({ params = {} }) {
     && !appointmentMutationLocked
   )
   const canDrag = dragPointer && canManageAppointments
+  const canDragSession = (session) => canDrag && !session.readOnly && !clientOf(session.clientId)?.readOnly
 
   const changeAppointmentStatus = async (session, status) => {
     let commandAccepted = false
@@ -668,7 +669,7 @@ export function CalendarView({ params = {} }) {
     const p = psychOf(s.psychId)
     const clientIdentity = clientIdentityFor(state.clients, s.clientId)
     const specialistIdentity = specialistIdentityFor(state.psychologists, s.psychId)
-    const draggable = dragOk && s.status === 'scheduled'
+    const draggable = dragOk && s.status === 'scheduled' && !s.readOnly && !c?.readOnly
     const clientName = clientIdentity.name
     const highlighted = highlightedSessionIds.has(s.id)
     // settled sessions stay in time order, dimmed — the day reads as one list
@@ -909,11 +910,11 @@ export function CalendarView({ params = {} }) {
                         {items.slice(0, 3).map((s) => (
                           <span
                             key={s.id}
-                            className={`cal__item ${s.status === 'scheduled' && canDrag ? 'is-draggable' : ''}`}
+                            className={`cal__item ${s.status === 'scheduled' && canDragSession(s) ? 'is-draggable' : ''}`}
                             data-flip-id={s.id}
                             style={{ background: psychOf(s.psychId)?.soft, '--node-color': psychOf(s.psychId)?.color }}
-                            onPointerDown={(e) => { if (canDrag) onChipDown(e, s) }}
-                            title={s.status === 'scheduled' && canDrag ? 'Przeciągnij, aby przełożyć sesję' : undefined}
+                            onPointerDown={(e) => { if (canDragSession(s)) onChipDown(e, s) }}
+                            title={s.status === 'scheduled' && canDragSession(s) ? 'Przeciągnij, aby przełożyć sesję' : undefined}
                           >
                             <span className="cal__item-time">{s.time}</span>
                             <span className="cal__item-name">{clientIdentityFor(state.clients, s.clientId).name.split(' ')[0]}</span>

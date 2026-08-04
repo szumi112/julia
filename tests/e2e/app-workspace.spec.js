@@ -69,6 +69,16 @@ const historicalAppointment = {
   }],
 }
 
+const archivedScheduledAppointment = {
+  ...historicalAppointment,
+  status: 'scheduled',
+  payment: {
+    status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0,
+    latestMethod: null, latestReceivedAt: null,
+  },
+  paymentEntries: [],
+}
+
 const scheduledAppointment = {
   id: 'apt_scheduled', clientId: 'cl_active', specialistId: 'sp_anna',
   serviceId: 'zajecia', startsAt: '2026-07-15T11:00:00.000Z',
@@ -186,9 +196,10 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await expect(plan.getByText('Zofia Historyczna', { exact: true })).toBeVisible()
   await expect(plan.getByText('Archiwalny', { exact: true })).toBeVisible()
   await expect(plan).toContainText('Specjalistka niedostępna')
-  await expect(plan.getByRole('button', { name: /Edytuj sesję/ })).toHaveCount(0)
-  await expect(plan.getByRole('button', { name: /Status:/ })).toHaveCount(0)
-  await expect(plan.getByRole('button', { name: /Płatność:/ })).toHaveCount(0)
+  const archivedRow = plan.locator('.agenda__row', { hasText: 'Zofia Historyczna' })
+  await expect(archivedRow.getByRole('button', { name: /Edytuj sesję/ })).toHaveCount(0)
+  await expect(archivedRow.getByRole('button', { name: /Status:/ })).toHaveCount(0)
+  await expect(archivedRow.getByRole('button', { name: /Płatność:/ })).toHaveCount(0)
 
   await page.goto('./#/payments?ym=2026-07')
   const ledger = page.getByRole('table', { name: 'Lista rozliczeń' })
@@ -203,6 +214,44 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await expect(page.getByText('W tym kompletnym zakresie nie ma zaplanowanych sesji.', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Poprzedni miesiąc' })).toBeEnabled()
   expect(pageErrors).toEqual([])
+})
+
+test('@owner does not drag a read-only Calendar appointment', async ({ page }) => {
+  let edits = 0
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const url = new URL(route.request().url())
+    await route.fulfill(json(200, {
+      data: {
+        window: {
+          from: url.searchParams.get('from'), to: url.searchParams.get('to'),
+          timeZone: 'Europe/Warsaw', complete: true,
+        },
+        specialists: [activeSpecialist],
+        clients: [archivedClient],
+        appointments: [archivedScheduledAppointment],
+      },
+    }))
+  })
+  await page.route('**/api/v1/appointments/apt_history/edits', async (route) => {
+    edits += 1
+    await route.fulfill(errorEnvelope(500, 'UNEXPECTED'))
+  })
+
+  await page.goto('./#/calendar?date=2026-07-15&ym=2026-07&mode=cal')
+  const source = page.locator('.cal__day[data-iso="2026-07-15"] .cal__item', { hasText: 'Zofia' })
+  const target = page.locator('.cal__day[data-iso="2026-07-16"]')
+  await expect(source).toBeVisible()
+  await expect(source).not.toHaveClass(/is-draggable/)
+  const sourceBox = await source.boundingBox()
+  const targetBox = await target.boundingBox()
+  if (!sourceBox || !targetBox) throw new Error('Calendar drag target is unavailable')
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 5 })
+  await page.mouse.up()
+
+  await expect.poll(() => edits).toBe(0)
 })
 
 test('@owner cancels a Calendar appointment through the canonical command and refreshes its covered range', async ({ page }) => {

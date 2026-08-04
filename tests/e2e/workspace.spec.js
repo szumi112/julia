@@ -1200,6 +1200,34 @@ test('month view shows sessions across the whole month by default', async ({ pag
   expect(await page.locator('.cal__day:has(.cal__item)').count()).toBeGreaterThan(1)
 })
 
+test('month Calendar keeps demo appointments draggable', async ({ page }) => {
+  await freezeTime(page, '2026-07-14T10:30:00')
+  await login(page)
+  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
+  await page.getByRole('radio', { name: 'Miesiąc' }).click()
+
+  const source = page.locator('.cal__item.is-draggable').first()
+  await expect(source).toBeVisible()
+  const sessionId = await source.getAttribute('data-flip-id')
+  const targetIso = await source.evaluate((element) => {
+    const sourceDay = element.closest('.cal__day')
+    return [...document.querySelectorAll('.cal__day[data-iso]')]
+      .find((day) => !day.classList.contains('is-out') && day.dataset.iso > sourceDay.dataset.iso)
+      ?.dataset.iso
+  })
+  if (!sessionId || !targetIso) throw new Error('Demo Calendar drag target is unavailable')
+  const target = page.locator(`.cal__day[data-iso="${targetIso}"]`)
+  const sourceBox = await source.boundingBox()
+  const targetBox = await target.boundingBox()
+  if (!sourceBox || !targetBox) throw new Error('Demo Calendar drag target is unavailable')
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 5 })
+  await page.mouse.up()
+
+  await expect(target.locator(`[data-flip-id="${sessionId}"]`)).toBeVisible()
+})
+
 test('therapist agenda excludes other therapists and payment updates stay coherent', async ({ page }) => {
   await login(page)
   await page.getByRole('button', { name: /Tryb demonstracyjny/ }).click()
