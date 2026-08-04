@@ -265,6 +265,7 @@ async function activate(db, staff, invitation, principal, context, values, optio
 }
 
 async function reindexOne(db, context, table, row, activeLookup, options) {
+  const recoveryDb = options.recoveryDb ?? db
   if (row.email_lookup === activeLookup) return false
   const now = iso(options.nowMs)
   const next = { ...row, email_lookup: activeLookup, version: row.version + 1, updated_at: now }
@@ -285,7 +286,7 @@ async function reindexOne(db, context, table, row, activeLookup, options) {
   } catch (error) {
     if (!collision(error)) throw failure()
     try {
-      if (await recoverReindex(db, context, table, row, activeLookup, attempt)) return false
+      if (await recoverReindex(recoveryDb, context, table, row, activeLookup, attempt)) return false
     } catch {
       throw failure()
     }
@@ -295,7 +296,9 @@ async function reindexOne(db, context, table, row, activeLookup, options) {
 
 async function resolveActorInternal(db, principal, cryptoContext, options = {}) {
   const context = requireContext(cryptoContext)
+  const recoveryDb = options.recoveryDb ?? db
   if (!db?.prepare || principal?.kind !== 'human' || typeof principal.subject !== 'string' || !principal.subject || typeof principal.normalizedEmail !== 'string' || !principal.normalizedEmail) throw denied()
+  if (!recoveryDb?.prepare || !recoveryDb?.batch) throw failure()
   const candidates = await blindEmailCandidates(principal.normalizedEmail, context.keyring)
   const now = iso(options.nowMs)
   const [rows, boundRows] = await Promise.all([matchingStaff(db, candidates), activeForSubject(db, principal.subject)])
@@ -341,7 +344,7 @@ async function resolveActorInternal(db, principal, cryptoContext, options = {}) 
   } catch (error) {
     if (!collision(error)) throw error
     try {
-      const actor = recovery.attempt && await recoverActivation(db, context, {
+      const actor = recovery.attempt && await recoverActivation(recoveryDb, context, {
         staff, invitation: invitations[0], principal, activeLookup, attempt: recovery.attempt,
       })
       if (actor) return actor

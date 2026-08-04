@@ -40,6 +40,43 @@ function fakeDb() {
 }
 
 describe('invocation-scoped D1 query budget', () => {
+  it('rejects nested budgets from either view before delegating', () => {
+    const db = fakeDb()
+    const budget = createD1QueryBudget(db, { totalLimit: 50, recoveryReserve: 8 })
+
+    for (const view of [budget.work, budget.recovery]) {
+      expect(() => createD1QueryBudget(view, { totalLimit: 50, recoveryReserve: 8 }))
+        .toThrow('D1_QUERY_BUDGET_INVALID')
+    }
+    expect(db.calls).toEqual([])
+  })
+
+  it('captures the raw DB methods once and ignores later replacement', async () => {
+    const db = fakeDb()
+    const originalPrepare = db.prepare
+    const originalBatch = db.batch
+    const budget = createD1QueryBudget(db, { totalLimit: 4, recoveryReserve: 1 })
+    db.prepare = () => { throw new Error('replacement prepare') }
+    db.batch = () => { throw new Error('replacement batch') }
+
+    await budget.work.prepare('SELECT stable').run()
+    await budget.work.batch([budget.work.prepare('SELECT batch')])
+
+    expect(db.calls.map((call) => call.method)).toEqual(['run', 'batch'])
+    db.prepare = originalPrepare
+    db.batch = originalBatch
+  })
+
+  it.each([
+    null,
+    {},
+    { prepare() {}, batch: 1 },
+    Object.defineProperty({ batch() {} }, 'prepare', { get() { throw new Error('private marker') } }),
+  ])('fails closed on malformed or hostile raw DB surface %#', (db) => {
+    expect(() => createD1QueryBudget(db, { totalLimit: 50, recoveryReserve: 8 }))
+      .toThrow('D1_QUERY_BUDGET_INVALID')
+  })
+
   it('counts only terminal statement methods and preserves their arguments', async () => {
     const db = fakeDb()
     const budget = createD1QueryBudget(db, { totalLimit: 8, recoveryReserve: 1 })

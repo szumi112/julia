@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { auditEventStatement } from './audit/events.js'
 import { loadConfig } from './config.js'
+import { createD1QueryBudget } from './db/query-budget.js'
 import { apiError, AppError, publicError } from './http/errors.js'
 import {
   applyApiSecurityHeaders,
@@ -43,6 +44,7 @@ const STAFF_INVITATIONS_PATH = '/api/v1/staff/invitations'
 const STAFF_ID = /^\/api\/v1\/staff\/stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}\/deactivation$/
 const ACTION_RESOLUTION_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/resolution$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
+const CORE_BUDGET_FIXTURE_PATH = '/api/v1/__core-budget-fixture'
 const OPERATION_SERVICES = Object.freeze({
   getOperationalHealth,
   listOpenOperationalActions,
@@ -50,13 +52,16 @@ const OPERATION_SERVICES = Object.freeze({
   resolveOperationalAction,
 })
 
-const routeFor = (request) => {
+const routeFor = (request, coreBudgetFixtureEnabled = false) => {
   const url = new URL(request.url)
   if (url.pathname === HEALTH_PATH && url.search === '') {
     return { id: 'health.live', expected: 'service', methods: ['GET', 'HEAD'] }
   }
   if (url.pathname === '/api/v1/session') {
     return { id: 'session', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
+  }
+  if (coreBudgetFixtureEnabled && url.pathname === CORE_BUDGET_FIXTURE_PATH && url.search === '') {
+    return { id: 'core.budget-fixture', expected: 'human', methods: ['GET', 'HEAD'], core: true }
   }
   if (url.search === '' && url.pathname === STAFF_PATH) return { id: 'staff.list', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
   if (url.search === '' && url.pathname === STAFF_INVITATIONS_PATH) return { id: 'staff.invitations', expected: 'human', methods: ['POST', 'OPTIONS'] }
@@ -117,11 +122,11 @@ async function runtimeKeyring(c, config, deps) {
   return ring
 }
 
-async function identityCryptoContext(c, config, deps) {
+async function identityCryptoContext(c, config, deps, db) {
   if (deps.cryptoContext) return deps.cryptoContext
   const scope = deps.identityScope ?? IDENTITY_SCOPE
   const keyring = await runtimeKeyring(c, config, deps)
-  const row = await c.env.DB.prepare(
+  const row = await db.prepare(
     `SELECT id,scope_type,scope_id,purpose,dek_version,wrapped_key_b64,wrap_nonce_b64,kek_version,created_at,retired_at
      FROM data_keys
      WHERE scope_type=? AND scope_id=? AND purpose=? AND dek_version=1`
@@ -154,6 +159,13 @@ const readResponse = (c, result) => {
 
 export function createApp(deps = {}) {
   const app = new Hono()
+  let coreRouteFixture = null
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(deps, 'coreRouteFixture')
+    if (descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'function') {
+      coreRouteFixture = descriptor.value
+    }
+  } catch { /* The inert test seam stays disabled for hostile dependency surfaces. */ }
 
   app.use('/api/*', async (c, next) => {
     const start = performance.now()
@@ -183,12 +195,20 @@ export function createApp(deps = {}) {
   app.use('/api/v1/*', async (c, next) => {
     const request = c.req.raw
     const method = request.method
-    const route = routeFor(request)
+    const route = routeFor(request, coreRouteFixture !== null)
     c.set('routeId', route.id)
     c.set('routeAllow', route.allow)
     c.set('routeActionId', route.actionId)
     if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
     if (route.methods && !route.methods.includes(method)) throw new AppError('METHOD_NOT_ALLOWED')
+
+    if (route.core) {
+      const rawDb = c.env?.DB ?? deps.db
+      const budget = createD1QueryBudget(rawDb, { totalLimit: 50, recoveryReserve: 8 })
+      c.set('coreD1Budget', budget)
+      c.set('coreWorkDb', budget.work)
+      c.set('coreRecoveryDb', budget.recovery)
+    }
 
     const config = runtimeConfig(c, deps)
     const requestNowMs = route.expected === 'human' || isMutationMethod(method) ? nowMs(deps) : null
@@ -228,9 +248,10 @@ export function createApp(deps = {}) {
     }
 
     if (route.expected === 'human') {
-      const cryptoContext = await identityCryptoContext(c, config, deps)
+      const actorDb = route.core ? c.get('coreWorkDb') : c.env?.DB ?? deps.db
+      const cryptoContext = await identityCryptoContext(c, config, deps, actorDb)
       const actor = await (deps.resolveActor ?? resolveStaffActor)(
-        c.env?.DB ?? deps.db,
+        actorDb,
         principal,
         cryptoContext,
         {
@@ -238,6 +259,7 @@ export function createApp(deps = {}) {
           correlationId: c.get('correlationId'),
           idFactory: deps.idFactory ?? idFactory,
           auditEventStatement,
+          ...(route.core ? { recoveryDb: c.get('coreRecoveryDb') } : {}),
         }
       )
       c.set('actor', actor)
@@ -258,6 +280,19 @@ export function createApp(deps = {}) {
     if (c.get('routeId') !== 'health.live') throw new AppError('NOT_FOUND')
     return c.json({ data: { status: 'ok' } })
   })
+  if (coreRouteFixture) {
+    app.get(CORE_BUDGET_FIXTURE_PATH, async (c) => {
+      if (c.get('routeId') !== 'core.budget-fixture') throw new AppError('NOT_FOUND')
+      const result = await coreRouteFixture({
+        db: c.get('coreWorkDb'),
+        recoveryDb: c.get('coreRecoveryDb'),
+        budget: c.get('coreD1Budget'),
+        actor: c.get('actor'),
+        cryptoContext: c.get('cryptoContext'),
+      })
+      return readResponse(c, result)
+    })
+  }
   app.get('/api/v1/session', async (c) => {
     const config = runtimeConfig(c, deps)
     const result = deps.session

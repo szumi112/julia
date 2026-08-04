@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import { blindEmailIndex, decryptForScope, encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { reindexEmailLookupsBatch, resolveActor, verifyNoOldEmailLookups } from '../../worker/identity/staff.js'
 import { NOW_MS, TEST_IDENTITIES } from './fixtures.js'
@@ -167,14 +168,23 @@ describe('D1-authoritative staff resolution', () => {
     const context = await cryptoContext()
     await seedPending(context, { staffId: 'stf_frozen_race', invitationId: 'inv_frozen_race', email: 'frozen-race@example.test' })
     const loserGate = blockedBatchDb({ freezeError: true })
+    const recoverySql = []
+    const recoveryDb = {
+      prepare(sql) { recoverySql.push(sql); return env.DB.prepare(sql) },
+      batch() { throw new Error('recovery batch must not run') },
+    }
     const principal = { kind: 'human', subject: 'access-frozen-race', normalizedEmail: 'frozen-race@example.test' }
-    const loser = resolveActor(loserGate.db, principal, context, { nowMs: NOW_MS, correlationId: 'corr_frozen_loser', idFactory: ids('frozen_loser') })
+    const loser = resolveActor(loserGate.db, principal, context, {
+      nowMs: NOW_MS, correlationId: 'corr_frozen_loser', idFactory: ids('frozen_loser'), recoveryDb,
+    })
     const loserExpectation = expect(loser).resolves.toEqual({ id: 'stf_frozen_race', role: 'owner', specialistId: null, version: 2 })
     await loserGate.entered
     const winner = await resolveActor(env.DB, principal, context, { nowMs: NOW_MS, correlationId: 'corr_frozen_winner', idFactory: ids('frozen_winner') })
     loserGate.release()
     await loserExpectation
     expect(winner).toEqual({ id: 'stf_frozen_race', role: 'owner', specialistId: null, version: 2 })
+    expect(recoverySql.length).toBeGreaterThan(0)
+    expect(recoverySql.every((sql) => /^SELECT\b/.test(sql.trim()))).toBe(true)
   })
 
   it.each([
@@ -278,11 +288,44 @@ describe('D1-authoritative staff resolution', () => {
       prepare: env.DB.prepare.bind(env.DB),
       batch: async () => { throw new Error('D1_ERROR: raw-sql-marker@example.test') },
     }
+    let recoveryCalls = 0
     await expect(resolveActor(db, {
       kind: 'human', subject: 'access-sql-marker', normalizedEmail: 'sql-failure@example.test',
     }, context, {
       nowMs: NOW_MS, correlationId: 'corr_sql_failure', idFactory: ids('sql_failure'),
+      recoveryDb: {
+        prepare() { recoveryCalls += 1; throw new Error('recovery must remain unused') },
+        batch() { recoveryCalls += 1; throw new Error('recovery must remain unused') },
+      },
     })).rejects.toThrow(/^IDENTITY_FAILURE$/)
+    expect(recoveryCalls).toBe(0)
+  })
+
+  it('keeps active, pending activation, and lazy reindex ordinary work below the 42-query ceiling', async () => {
+    const context = await cryptoContext()
+    await seedPending(context, { staffId: 'stf_budget_active', invitationId: 'inv_budget_active', email: 'budget-active@example.test' })
+    await resolveActor(env.DB, { kind: 'human', subject: 'access-budget-active', normalizedEmail: 'budget-active@example.test' }, context, {
+      nowMs: NOW_MS, correlationId: 'corr_budget_active_seed', idFactory: ids('budget_active_seed'),
+    })
+    const activeBudget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    await resolveActor(activeBudget.work, { kind: 'human', subject: 'access-budget-active', normalizedEmail: 'budget-active@example.test' }, context, {
+      nowMs: NOW_MS, correlationId: 'corr_budget_active', idFactory: ids('budget_active'), recoveryDb: activeBudget.recovery,
+    })
+    expect(activeBudget.usage().used).toBe(2)
+
+    await seedPending(context, { staffId: 'stf_budget_pending', invitationId: 'inv_budget_pending', email: 'budget-pending@example.test' })
+    const pendingBudget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    await resolveActor(pendingBudget.work, { kind: 'human', subject: 'access-budget-pending', normalizedEmail: 'budget-pending@example.test' }, context, {
+      nowMs: NOW_MS, correlationId: 'corr_budget_pending', idFactory: ids('budget_pending'), recoveryDb: pendingBudget.recovery,
+    })
+    expect(pendingBudget.usage().used).toBe(12)
+
+    const v2 = await cryptoContextV2()
+    const reindexBudget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
+    await resolveActor(reindexBudget.work, { kind: 'human', subject: 'access-budget-active', normalizedEmail: 'budget-active@example.test' }, v2, {
+      nowMs: NOW_MS, correlationId: 'corr_budget_reindex', idFactory: ids('budget_reindex'), recoveryDb: reindexBudget.recovery,
+    })
+    expect(reindexBudget.usage().used).toBe(7)
   })
 
   it('activates retained V1 rows under active V2 and updates both lookups with encrypted-only audit history', async () => {

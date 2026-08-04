@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../worker/app.js'
+import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import { safeLog } from '../../worker/logging/safe-log.js'
 
 const deps = (overrides = {}) => ({
@@ -22,6 +23,44 @@ const deps = (overrides = {}) => ({
   cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
   ...overrides,
 })
+
+function coreBudgetDb(order = []) {
+  const calls = []
+  const statement = (sql, bindings = []) => ({
+    bind(...values) { return statement(sql, values) },
+    run() { calls.push({ method: 'run', sql, bindings }); return Promise.resolve({ success: true }) },
+    first() {
+      calls.push({ method: 'first', sql, bindings })
+      if (sql.includes('FROM data_keys')) {
+        order.push('query.data-key')
+        return Promise.resolve({
+          id: 'key_core_fixture', scope_type: 'staff_directory', scope_id: 'centre_1',
+          purpose: 'identity', dek_version: 1, wrapped_key_b64: 'wrapped',
+          wrap_nonce_b64: 'nonce', kek_version: 1, created_at: '2026-08-04T00:00:00.000Z',
+          retired_at: null,
+        })
+      }
+      return Promise.resolve(null)
+    },
+    all() { calls.push({ method: 'all', sql, bindings }); return Promise.resolve({ results: [] }) },
+    raw() { calls.push({ method: 'raw', sql, bindings }); return Promise.resolve([]) },
+  })
+  const db = { calls }
+  Object.defineProperties(db, {
+    prepare: { configurable: true, get() { order.push('capture.prepare'); return (sql) => statement(sql) } },
+    batch: {
+      configurable: true,
+      get() {
+        order.push('capture.batch')
+        return (statements) => {
+          calls.push({ method: 'batch', count: statements.length })
+          return Promise.resolve(statements.map(() => ({ success: true })))
+        }
+      },
+    },
+  })
+  return db
+}
 
 describe('API shell', () => {
   it('returns a stable envelope and correlation id for authenticated unknown API routes', async () => {
@@ -81,6 +120,155 @@ describe('API shell', () => {
       routeId: 'unmatched',
       status: 500,
     }))
+  })
+})
+
+describe('core route D1 budget boundary', () => {
+  const path = '/api/v1/__core-budget-fixture'
+
+  it('installs one 50/8 budget before identity crypto and shares its exact views', async () => {
+    const order = []
+    const db = coreBudgetDb(order)
+    let actorWork
+    let actorRecovery
+    const fixture = vi.fn(async ({ db: work, recoveryDb, budget }) => {
+      order.push('fixture')
+      expect(work).toBe(actorWork)
+      expect(recoveryDb).toBe(actorRecovery)
+      expect(budget.usage()).toEqual({
+        used: 3, remaining: 47, workRemaining: 39, totalLimit: 50, recoveryReserve: 8,
+      })
+      return { data: { usage: budget.usage() } }
+    })
+    const input = deps({
+      cryptoContext: undefined,
+      db,
+      keyring: {},
+      coreRouteFixture: fixture,
+      resolveAccessPrincipal: vi.fn(async () => { order.push('access'); return { kind: 'human', subject: 'access-core', normalizedEmail: 'core@example.test' } }),
+      resolveActor: vi.fn(async (work, _principal, _context, options) => {
+        order.push('actor')
+        actorWork = work
+        actorRecovery = options.recoveryDb
+        expect(work).not.toBe(db)
+        expect(actorRecovery).not.toBe(work)
+        await work.prepare('SELECT actor_one').first()
+        await work.prepare('SELECT actor_two').first()
+        return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
+      }),
+    })
+
+    const response = await createApp(input).request(path)
+
+    expect(response.status).toBe(200)
+    expect(fixture).toHaveBeenCalledOnce()
+    expect(order).toEqual([
+      'capture.prepare', 'capture.batch', 'access', 'query.data-key', 'actor', 'fixture',
+    ])
+    expect(db.calls.map((call) => call.sql)).toEqual([
+      expect.stringContaining('FROM data_keys'), 'SELECT actor_one', 'SELECT actor_two',
+    ])
+  })
+
+  it('keeps GET recovery unused and bounds a combined synthetic collision path at 50', async () => {
+    const getDb = coreBudgetDb()
+    const getFixture = vi.fn(async ({ budget }) => ({ data: { usage: budget.usage() } }))
+    const getResponse = await createApp(deps({
+      db: getDb, coreRouteFixture: getFixture,
+      resolveActor: vi.fn(async () => ({ id: 'stf_get', role: 'owner', specialistId: null, version: 1 })),
+    })).request(path)
+    expect(getResponse.status).toBe(200)
+    expect((await getResponse.json()).data.usage.used).toBe(0)
+
+    const db = coreBudgetDb()
+    const combined = vi.fn(async ({ db: work, recoveryDb, budget }) => {
+      await work.batch(Array.from({ length: 39 }, (_, index) => work.prepare(`SELECT domain_${index}`)))
+      expect(() => work.prepare('SELECT ordinary_over_ceiling').run())
+        .toThrow('D1_QUERY_BUDGET_EXCEEDED')
+      await recoveryDb.batch(Array.from({ length: 8 }, (_, index) => recoveryDb.prepare(`SELECT recovery_${index}`)))
+      expect(() => recoveryDb.prepare('SELECT total_over_ceiling').run())
+        .toThrow('D1_QUERY_BUDGET_EXCEEDED')
+      return { data: { usage: budget.usage() } }
+    })
+    const response = await createApp(deps({
+      cryptoContext: undefined,
+      db,
+      keyring: {},
+      coreRouteFixture: combined,
+      resolveActor: vi.fn(async (work) => {
+        await work.prepare('SELECT actor_one').first()
+        await work.prepare('SELECT actor_two').first()
+        return { id: 'stf_combined', role: 'owner', specialistId: null, version: 1 }
+      }),
+    })).request(path)
+
+    expect(response.status).toBe(200)
+    expect((await response.json()).data.usage).toEqual({
+      used: 50, remaining: 0, workRemaining: 0, totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
+  it('does not activate the inert fixture from request or environment data', async () => {
+    const input = deps({ db: coreBudgetDb(), coreRouteFixture: undefined })
+    const response = await createApp(input).request(`${path}?coreRouteFixture=true`, {
+      headers: { 'x-core-route-fixture': 'true' },
+    }, { coreRouteFixture: true })
+
+    expect(response.status).toBe(404)
+    expect(input.resolveActor).toHaveBeenCalledOnce()
+  })
+
+  it('activates the inert fixture only from one own data-valued createApp dependency', async () => {
+    const inheritedFixture = vi.fn()
+    const inherited = Object.assign(Object.create({ coreRouteFixture: inheritedFixture }), deps())
+    const inheritedResponse = await createApp(inherited).request(path)
+    expect(inheritedResponse.status).toBe(404)
+    expect(inheritedFixture).not.toHaveBeenCalled()
+
+    let getterCalls = 0
+    const accessor = deps()
+    Object.defineProperty(accessor, 'coreRouteFixture', {
+      enumerable: true,
+      get() { getterCalls += 1; return vi.fn() },
+    })
+    const accessorResponse = await createApp(accessor).request(path)
+    expect(accessorResponse.status).toBe(404)
+    expect(getterCalls).toBe(0)
+  })
+
+  it.each([
+    ['missing batch', { prepare() {} }],
+    ['nested work view', createD1QueryBudget(coreBudgetDb(), { totalLimit: 50, recoveryReserve: 8 }).work],
+    ['hostile prepare', Object.defineProperty({ batch() {} }, 'prepare', { get() { throw new Error('private-db-marker') } })],
+  ])('fails closed before Access for a %s DB surface', async (_label, db) => {
+    const input = deps({ db, coreRouteFixture: vi.fn(), resolveAccessPrincipal: vi.fn(), resolveActor: vi.fn() })
+    const response = await createApp(input).request(path)
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } })
+    expect(input.resolveAccessPrincipal).not.toHaveBeenCalled()
+    expect(input.resolveActor).not.toHaveBeenCalled()
+  })
+
+  it('preserves raw D1 identity for an existing non-core route', async () => {
+    const rawDb = coreBudgetDb()
+    const service = vi.fn(async ({ db }) => {
+      expect(db).toBe(rawDb)
+      return { data: { ok: true } }
+    })
+    const input = deps({
+      db: rawDb,
+      getOperationalHealth: service,
+      resolveActor: vi.fn(async (db) => {
+        expect(db).toBe(rawDb)
+        return { id: 'stf_non_core', role: 'owner', specialistId: null, version: 1 }
+      }),
+    })
+
+    const response = await createApp(input).request('/api/v1/operations/health')
+
+    expect(response.status).toBe(200)
+    expect(service).toHaveBeenCalledOnce()
   })
 })
 
