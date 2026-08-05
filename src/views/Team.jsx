@@ -36,7 +36,7 @@ function AppTeamDirectory({ psychologists }) {
             <div className="team-card__profile">
               <Avatar name={psychologist.name} color={psychologist.color} size={52} />
               <div className="team-card__identity">
-                <h2 className="team-card__name">{psychologist.title} {psychologist.name}</h2>
+                <h2 className="team-card__name">{psychologist.name}</h2>
                 <span className="team-card__spec">Dostępna do planowania wizyt</span>
               </div>
             </div>

@@ -194,6 +194,10 @@ test('@owner gates deferred surfaces and waits for a complete monthly report', a
   await page.goto('./#/team')
   await expect(page.getByRole('status', { name: 'Stan zespołu' })).toContainText('Wczytywanie zespołu')
   await expect(page.getByRole('heading', { level: 1, name: /Zespół/ })).toBeVisible()
+  const protectedSpecialistName = page.getByRole('heading', { level: 2, name: 'Anna Nowak', exact: true })
+  await expect(protectedSpecialistName).toBeVisible()
+  expect(await protectedSpecialistName.evaluate((heading) => heading.textContent)).toBe('Anna Nowak')
+  await expect(page.getByRole('main')).not.toContainText('undefined')
   await expect(page.getByRole('link', { name: 'Otwórz profil — Anna Nowak' })).toHaveCount(0)
 
   await page.goto('./#/psych?id=sp_anna')
