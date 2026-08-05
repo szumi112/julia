@@ -17,6 +17,7 @@ const REPOSITORY_METHODS = Object.freeze([
 const WORKSPACE_METHODS = Object.freeze(REPOSITORY_METHODS.filter((name) => name !== 'loadWindow'))
 const CLIENT_MUTATION_METHODS = new Set(['createClient', 'editClient', 'archiveClient'])
 const APPOINTMENT_MUTATION_METHODS = new Set(['createAppointment', 'editAppointment', 'cancelAppointment'])
+const PAYMENT_MUTATION_METHODS = new Set(['recordPayment', 'correctPayment'])
 const AUTHORITY_ACTION_KEY_LIMIT = 32
 const INFRASTRUCTURE_CODES = new Set([
   'ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'CSRF_INVALID', 'CSRF_EXPIRED',
@@ -219,6 +220,7 @@ export const createWorkspaceProviderController = (options) => {
   let readOnly = false
   let clientMutationLocked = false
   let appointmentMutationLocked = false
+  let paymentMutationLocked = false
   let infrastructureError = null
   let snapshot
   const listeners = new Set()
@@ -229,6 +231,7 @@ export const createWorkspaceProviderController = (options) => {
       loadedState,
       clientMutationLocked,
       appointmentMutationLocked,
+      paymentMutationLocked,
       workspace: Object.freeze({
         status: status(),
         loadedRanges: loadedState.loadedRanges,
@@ -286,6 +289,7 @@ export const createWorkspaceProviderController = (options) => {
         if (!merged.refetch || refetches === 1) {
           clientMutationLocked = false
           appointmentMutationLocked = false
+          paymentMutationLocked = false
           publish()
           return rawPayload
         }
@@ -312,6 +316,9 @@ export const createWorkspaceProviderController = (options) => {
       if (APPOINTMENT_MUTATION_METHODS.has(name) && appointmentMutationLocked) {
         throw fixedError('WORKSPACE_RECONCILIATION_REQUIRED')
       }
+      if (PAYMENT_MUTATION_METHODS.has(name) && paymentMutationLocked) {
+        throw fixedError('WORKSPACE_RECONCILIATION_REQUIRED')
+      }
       const generation = loadedState.authorityGeneration
       const operationRepository = repository
       try {
@@ -319,6 +326,7 @@ export const createWorkspaceProviderController = (options) => {
         if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
         if (CLIENT_MUTATION_METHODS.has(name)) clientMutationLocked = true
         if (APPOINTMENT_MUTATION_METHODS.has(name)) appointmentMutationLocked = true
+        if (PAYMENT_MUTATION_METHODS.has(name)) paymentMutationLocked = true
         loadedState = recordLoadedWorkspaceWrite(loadedState)
         publish()
         return result
@@ -340,6 +348,7 @@ export const createWorkspaceProviderController = (options) => {
     readOnly = true
     clientMutationLocked = false
     appointmentMutationLocked = false
+    paymentMutationLocked = false
     infrastructureError = resetFailedError()
     publish()
     try {

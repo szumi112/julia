@@ -12,7 +12,7 @@ import {
   specialistDto,
   validateAppointmentInput,
   validateClientInput,
-  validatePaymentInput,
+  validatePaymentDateInput,
   validateWarsawDateWindow,
   warsawDateTimeFromUtc,
   warsawDateTimeToUtc,
@@ -145,9 +145,13 @@ const captureAppointmentEdit = (input) => {
 
 const capturePayment = (input) => {
   const captured = captureRecord(input, PAYMENT_KEYS, 'body')
-  assertCivilDate(captured.paidDate, 'paidDate')
-  return captured
+  const canonical = validatePaymentDateInput(captured)
+  return { ...captured, receivedAt: canonical.receivedAt }
 }
+
+const paymentCommandInput = ({ amountGrosze, method, receivedAt }) => ({
+  amountGrosze, method, receivedAt,
+})
 
 const captureCorrection = (input) => {
   const captured = captureRecord(input, CORRECTION_KEYS, 'body')
@@ -220,11 +224,7 @@ export function createApiWorkspaceRepository(options) {
       capturedId(id, 'appointment')
       appointmentVersion(expectedVersion)
       const requested = capturePayment(input)
-      const canonical = validatePaymentInput({
-        amountGrosze: requested.amountGrosze,
-        method: requested.method,
-        receivedAt: warsawNoonToUtc(requested.paidDate),
-      })
+      const canonical = paymentCommandInput(requested)
       return action((options) => api.recordPayment(id, expectedVersion, canonical, options))
     },
     async correctPayment(id, expectedVersion, input) {
@@ -233,11 +233,7 @@ export function createApiWorkspaceRepository(options) {
       const requested = captureCorrection(input)
       const canonical = {
         reason: requested.reason,
-        replacement: requested.replacement === null ? null : validatePaymentInput({
-          amountGrosze: requested.replacement.amountGrosze,
-          method: requested.replacement.method,
-          receivedAt: warsawNoonToUtc(requested.replacement.paidDate),
-        }),
+        replacement: requested.replacement === null ? null : paymentCommandInput(requested.replacement),
       }
       return action((options) => api.correctPayment(id, expectedVersion, canonical, options))
     },
@@ -944,10 +940,7 @@ export function createDemoWorkspaceRepository(options) {
     },
     async recordPayment(id, expectedVersion, input) {
       const requested = capturePayment(input)
-      const canonical = validatePaymentInput({
-        amountGrosze: requested.amountGrosze, method: requested.method,
-        receivedAt: warsawNoonToUtc(requested.paidDate),
-      })
+      const canonical = paymentCommandInput(requested)
       assertMutationAvailable(appointmentMutationReservations, id)
       const state = currentState()
       const meta = appointmentMeta(id, state)
@@ -1027,7 +1020,7 @@ export function createDemoWorkspaceRepository(options) {
             id: allocated.id, appointmentId: link.appointmentId,
             amountGrosze: requested.replacement.amountGrosze,
             method: requested.replacement.method,
-            receivedAt: warsawNoonToUtc(requested.replacement.paidDate),
+            receivedAt: requested.replacement.receivedAt,
           }
           const createdAt = commandInstant(meta.updatedAt)
           const correction = {

@@ -22,6 +22,7 @@ const ids = {
 const utcIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const dateIso = /^(\d{4})-(\d{2})-(\d{2})$/
 const timeIso = /^(\d{2}):(\d{2})$/
+const paymentAmount = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/
 const clientStatuses = new Set(['active', 'paused', 'archived'])
 const appointmentStatuses = new Set(['scheduled', 'completed', 'cancelled', 'noshow'])
 const editableAppointmentStatuses = new Set(['scheduled', 'completed', 'noshow'])
@@ -360,6 +361,24 @@ export const validatePaymentInput = (value) => {
   if (!methods.has(value.method)) fail('method')
   assertCanonicalUtc(value.receivedAt, 'receivedAt')
   return { ...value }
+}
+
+export const validatePaymentDateInput = (value) => {
+  assertExactObject(value, ['amountGrosze', 'method', 'paidDate'])
+  return validatePaymentInput({
+    amountGrosze: value.amountGrosze,
+    method: value.method,
+    receivedAt: warsawNoonToUtc(assertCivilDate(value.paidDate, 'paidDate')),
+  })
+}
+
+export const parsePaymentAmountGrosze = (value) => {
+  const match = typeof value === 'string' ? paymentAmount.exec(value) : null
+  if (!match) fail('amountGrosze')
+  const minor = (match[2] || '').padEnd(2, '0')
+  const amountGrosze = BigInt(match[1]) * 100n + BigInt(minor || '0')
+  if (amountGrosze > BigInt(MAX_GROSZE)) fail('amountGrosze')
+  return assertInteger(Number(amountGrosze), 'amountGrosze', 1, MAX_GROSZE)
 }
 
 export const validateCorrectionInput = (value) => {

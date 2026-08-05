@@ -20,6 +20,7 @@ import {
   isClientId,
   isWellFormedUnicode,
   paymentAggregate,
+  parsePaymentAmountGrosze,
   clientDto,
   legacyAppointmentProjection,
   legacyClientProjection,
@@ -28,6 +29,7 @@ import {
   validateAppointmentInput,
   validateClientInput,
   validateCorrectionInput,
+  validatePaymentDateInput,
   validatePaymentInput,
   validateWarsawDateWindow,
   warsawDateTimeToUtc,
@@ -171,6 +173,32 @@ test('canonical DTOs fail closed and separate legacy projections derive frontend
   assert.equal(legacyClientProjection(client).email, '')
   const dto = appointmentDto({ id: 'apt_one', clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', startsAt: '2026-08-04T07:15:00.000Z', endsAt: '2026-08-04T08:05:00.000Z', timeZone: 'Europe/Warsaw', location: null, status: 'completed', source: 'panel', version: 1, cancelledAt: null, createdAt: '2026-08-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z', charge: { id: 'chg_one', serviceId: 'zajecia', expectedAmountGrosze: 18000, currency: 'PLN', version: 1 }, paymentEntries: [{ id: 'pay_one', appointmentId: 'apt_one', amountGrosze: 18000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }], corrections: [] })
   assert.deepEqual(legacyAppointmentProjection(dto), { ...dto, psychId: 'sp_one', date: '2026-08-04', time: '09:15', duration: 50, amount: 180, payment: 'paid', paidAmount: 180, method: 'card', paidDate: '2026-08-04' })
+})
+
+test('payment date input becomes Warsaw noon UTC and rejects invalid civil dates', () => {
+  assert.deepEqual(validatePaymentDateInput({
+    amountGrosze: 12_345, method: 'card', paidDate: '2026-08-04',
+  }), {
+    amountGrosze: 12_345, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z',
+  })
+  assert.deepEqual(validatePaymentDateInput({
+    amountGrosze: 12_345, method: 'cash', paidDate: '2026-01-04',
+  }), {
+    amountGrosze: 12_345, method: 'cash', receivedAt: '2026-01-04T11:00:00.000Z',
+  })
+  for (const paidDate of ['2026-02-29', '2026-08-04T12:00', '']) {
+    assert.throws(() => validatePaymentDateInput({
+      amountGrosze: 1, method: 'cash', paidDate,
+    }), /VALIDATION_FAILED\/paidDate/)
+  }
+})
+
+test('payment amount parsing preserves integer grosze', () => {
+  assert.equal(parsePaymentAmountGrosze('120'), 12_000)
+  assert.equal(parsePaymentAmountGrosze('120.05'), 12_005)
+  for (const amount of ['', '0', '12.345', '12,50', '-1']) {
+    assert.throws(() => parsePaymentAmountGrosze(amount), /VALIDATION_FAILED\/amountGrosze/)
+  }
 })
 
 test('string validation permits well-formed supplementary characters only', () => {

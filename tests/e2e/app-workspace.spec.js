@@ -115,6 +115,20 @@ const completedAppointment = {
   },
 }
 
+const paymentRecordedAppointment = {
+  ...completedAppointment,
+  version: 3,
+  updatedAt: '2026-07-16T11:00:00.000Z',
+  payment: {
+    status: 'partial', collectedGrosze: 12_000, outstandingGrosze: 6_000,
+    latestMethod: 'card', latestReceivedAt: '2026-01-04T11:00:00.000Z',
+  },
+  paymentEntries: [{
+    id: 'pay_recorded', amountGrosze: 12_000, method: 'card',
+    receivedAt: '2026-01-04T11:00:00.000Z', correctedAt: null, replacementEntryId: null,
+  }],
+}
+
 const workspaceEnvelope = (from, to, appointment) => json(200, {
   data: {
     window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
@@ -404,4 +418,118 @@ test('@owner rolls a Calendar drag back after the canonical reschedule command c
   await expect.poll(() => workspaceReads).toBe(2)
   await expect(source).toBeVisible()
   await expect(target.locator('.cal__item', { hasText: 'Ola' })).toHaveCount(0)
+})
+
+test('@owner records a protected payment from Payments and reloads the canonical month', async ({ page }) => {
+  const payments = []
+  let workspaceReads = 0
+  let appointment = completedAppointment
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    workspaceReads += 1
+    const url = new URL(route.request().url())
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'),
+      url.searchParams.get('to'),
+      appointment,
+    ))
+  })
+  await page.route('**/api/v1/appointments/apt_scheduled/payments', async (route) => {
+    payments.push({ method: route.request().method(), body: route.request().postData() })
+    appointment = paymentRecordedAppointment
+    await route.fulfill(json(200, { data: { appointment: paymentRecordedAppointment } }))
+  })
+
+  await page.goto('./#/payments?ym=2026-07')
+  const ledger = page.getByRole('table', { name: 'Lista rozliczeń' })
+  const row = ledger.locator('tbody tr', { hasText: 'Ola Aktywna' })
+  await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
+  const entry = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+  await entry.getByLabel('Kwota wpłaty').fill('120')
+  await entry.getByLabel('Forma płatności').selectOption('card')
+  await entry.getByLabel('Data wpłaty').fill('2026-01-04')
+  await entry.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+
+  await expect(row).toContainText('120 zł')
+  expect(payments).toEqual([{
+    method: 'POST',
+    body: JSON.stringify({
+      expectedVersion: 2,
+      amountGrosze: 12_000,
+      method: 'card',
+      receivedAt: '2026-01-04T11:00:00.000Z',
+    }),
+  }])
+  await expect.poll(() => workspaceReads).toBe(2)
+})
+
+test('@owner keeps protected payment input after a command failure', async ({ page }) => {
+  let workspaceReads = 0
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    workspaceReads += 1
+    const url = new URL(route.request().url())
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'),
+      url.searchParams.get('to'),
+      completedAppointment,
+    ))
+  })
+  await page.route('**/api/v1/appointments/apt_scheduled/payments', (route) => (
+    route.fulfill(errorEnvelope(409, 'PAYMENT_AMOUNT_CONFLICT'))
+  ))
+
+  await page.goto('./#/payments?ym=2026-07')
+  const row = page.getByRole('table', { name: 'Lista rozliczeń' })
+    .locator('tbody tr', { hasText: 'Ola Aktywna' })
+  await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
+  const entry = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+  await entry.getByLabel('Kwota wpłaty').fill('120')
+  await entry.getByLabel('Forma płatności').selectOption('card')
+  await entry.getByLabel('Data wpłaty').fill('2026-01-04')
+  await entry.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+
+  await expect(entry).toBeVisible()
+  await expect(entry.getByLabel('Kwota wpłaty')).toHaveValue('120')
+  await expect(entry.getByLabel('Forma płatności')).toHaveValue('card')
+  await expect(entry.getByLabel('Data wpłaty')).toHaveValue('2026-01-04')
+  await expect(entry.getByText('Nie udało się zaksięgować wpłaty.', { exact: true })).toBeVisible()
+  expect(workspaceReads).toBe(1)
+})
+
+test('@owner cannot replay an accepted payment while canonical refresh fails across a Payments remount', async ({ page }) => {
+  const payments = []
+  let workspaceReads = 0
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    workspaceReads += 1
+    if (workspaceReads === 1) {
+      const url = new URL(route.request().url())
+      await route.fulfill(workspaceEnvelope(
+        url.searchParams.get('from'), url.searchParams.get('to'), completedAppointment,
+      ))
+      return
+    }
+    await route.fulfill(errorEnvelope(500, 'INTERNAL_ERROR'))
+  })
+  await page.route('**/api/v1/appointments/apt_scheduled/payments', async (route) => {
+    payments.push({ method: route.request().method(), body: route.request().postData() })
+    await route.fulfill(json(200, { data: { appointment: paymentRecordedAppointment } }))
+  })
+
+  await page.goto('./#/payments?ym=2026-07')
+  const row = page.getByRole('table', { name: 'Lista rozliczeń' })
+    .locator('tbody tr', { hasText: 'Ola Aktywna' })
+  await row.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
+  const entry = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+  await entry.getByLabel('Kwota wpłaty').fill('120')
+  await entry.getByLabel('Forma płatności').selectOption('card')
+  await entry.getByLabel('Data wpłaty').fill('2026-01-04')
+  await entry.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+  await expect.poll(() => workspaceReads).toBe(2)
+
+  await page.goto('./#/dashboard')
+  await page.goto('./#/payments?ym=2026-07')
+  await expect(row.getByRole('button', { name: /Zaksięguj wpłatę/ })).toHaveCount(0)
+  expect(payments).toHaveLength(1)
 })

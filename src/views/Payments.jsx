@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
+import {
+  useApp, usePaymentMutationLock, useWorkspaceRefresh, useWorkspaceWindow,
+  sessionsInMonth, availableMonths,
+} from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
 import {
@@ -15,6 +18,7 @@ import {
   isBillable, collectedOf, outstandingOf, sessionsWord, METHOD_LABELS, toISODate,
 } from '../format.js'
 import { paymentEntryFor, paymentSnapshotOf, scopedBillingSummary } from '../workspace.js'
+import { parsePaymentAmountGrosze, validatePaymentDateInput } from '../core-records.js'
 import {
   clientIdentityFor,
   monthWorkspaceRange,
@@ -147,9 +151,209 @@ function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
   )
 }
 
+function AppPaymentEntry({
+  session, client, fallbackFocusRef, paymentMutationLocked, refreshWorkspace, workspace,
+  workspaceRange,
+}) {
+  const [open, setOpen] = useState(false)
+  const [form, setForm] = useState({ amount: '', method: '', paidDate: toISODate(new Date()) })
+  const [errors, setErrors] = useState({})
+  const [saveStatus, setSaveStatus] = useState('idle')
+  const [saveError, setSaveError] = useState(null)
+  const wrapRef = useRef(null)
+  const amountRef = useRef(null)
+  const methodRef = useRef(null)
+  const dateRef = useRef(null)
+  const outstandingGrosze = Math.round(outstandingOf(session) * 100)
+  const remainder = outstandingGrosze / 100
+  const saving = saveStatus === 'saving'
+  const reconciled = saveStatus === 'reconciling'
+
+  const begin = () => {
+    if (paymentMutationLocked || workspace.status !== 'ready') return
+    setForm({
+      amount: String(remainder), method: session.method || '', paidDate: toISODate(new Date()),
+    })
+    setErrors({})
+    setSaveStatus('idle')
+    setSaveError(null)
+    setOpen(true)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    requestAnimationFrame(() => amountRef.current?.focus({ preventScroll: true }))
+  }, [open])
+
+  const focusAfterClose = () => {
+    requestAnimationFrame(() => {
+      const trigger = wrapRef.current?.querySelector('button')
+      ;(trigger || fallbackFocusRef?.current)?.focus({ preventScroll: true })
+    })
+  }
+
+  const set = (key, value) => {
+    setForm((current) => ({ ...current, [key]: value }))
+    setErrors((current) => ({ ...current, [key]: null }))
+    if (!reconciled) {
+      setSaveStatus('idle')
+      setSaveError(null)
+    }
+  }
+
+  const paymentInput = () => {
+    let amountGrosze
+    try {
+      amountGrosze = parsePaymentAmountGrosze(form.amount)
+    } catch {
+      return { errors: { amount: 'Podaj kwotę w pełnych groszach' }, input: null }
+    }
+    if (amountGrosze > outstandingGrosze) {
+      return { errors: { amount: 'Kwota nie może przekraczać pozostałej kwoty' }, input: null }
+    }
+    try {
+      validatePaymentDateInput({ amountGrosze, method: form.method, paidDate: form.paidDate })
+    } catch (error) {
+      const field = error instanceof TypeError ? error.message.split('/').at(-1) : 'body'
+      return {
+        errors: {
+          method: field === 'method' ? 'Wybierz formę płatności' : null,
+          paidDate: field === 'paidDate' ? 'Podaj poprawną datę wpłaty' : null,
+          form: field === 'amountGrosze' ? 'Podaj kwotę w pełnych groszach' : 'Sprawdź dane wpłaty',
+        },
+        input: null,
+      }
+    }
+    return { errors: {}, input: { amountGrosze, method: form.method, paidDate: form.paidDate } }
+  }
+
+  const save = async (event) => {
+    event.preventDefault()
+    if (saving || reconciled || paymentMutationLocked || workspace.status !== 'ready') return
+    const next = paymentInput()
+    setErrors(next.errors)
+    if (!next.input) {
+      requestAnimationFrame(() => {
+        if (next.errors.amount) amountRef.current?.focus({ preventScroll: true })
+        else if (next.errors.method) methodRef.current?.focus({ preventScroll: true })
+        else if (next.errors.paidDate) dateRef.current?.focus({ preventScroll: true })
+      })
+      return
+    }
+    setSaveStatus('saving')
+    setSaveError(null)
+    try {
+      await workspace.recordPayment(session.id, session.version, next.input)
+    } catch {
+      setSaveStatus('error')
+      setSaveError('Nie udało się zaksięgować wpłaty.')
+      return
+    }
+    try {
+      await refreshWorkspace(workspaceRange)
+    } catch {
+      setSaveStatus('reconciling')
+      setSaveError('Wpłata została zapisana, ale nie udało się odświeżyć rozliczeń.')
+      return
+    }
+    setOpen(false)
+    focusAfterClose()
+  }
+
+  const close = () => {
+    if (saving || reconciled) return
+    setOpen(false)
+    focusAfterClose()
+  }
+
+  return (
+    <span ref={wrapRef}>
+      <Popover
+        open={open}
+        setOpen={(next) => { if (!saving && !reconciled) setOpen(next) }}
+        contentRole="dialog"
+        ariaLabel="Zaksięguj wpłatę"
+        align="right"
+        trigger={(
+          <Button
+            variant="soft"
+            size="sm"
+            aria-haspopup="dialog"
+            aria-label={`Zaksięguj wpłatę — ${client?.name || 'klient'}, ${fmtFullDate(session.date)}`}
+            disabled={paymentMutationLocked || workspace.status !== 'ready'}
+            onClick={begin}
+          >
+            Zaksięguj
+          </Button>
+        )}
+      >
+        <form className="payment-entry" onSubmit={save} noValidate>
+          <div>
+            <strong>{client?.name || 'Klient'}</strong>
+            <p>{fmtFullDate(session.date)} · pozostało {fmtMoney(remainder)}</p>
+          </div>
+          {saveError && <p className="form-error" role="alert">{saveError}</p>}
+          <Field label="Kwota wpłaty" error={errors.amount}>
+            <input
+              ref={amountRef}
+              className="input"
+              type="number"
+              min="0.01"
+              max={remainder}
+              step="0.01"
+              inputMode="decimal"
+              name="payment-amount"
+              autoComplete="off"
+              disabled={saving || reconciled}
+              value={form.amount}
+              onChange={(event) => set('amount', event.target.value)}
+            />
+          </Field>
+          <Field label="Forma płatności" error={errors.method}>
+            <select
+              ref={methodRef}
+              className="select"
+              name="payment-method"
+              autoComplete="off"
+              disabled={saving || reconciled}
+              value={form.method}
+              onChange={(event) => set('method', event.target.value)}
+            >
+              <option value="">Wybierz</option>
+              {Object.entries(METHOD_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Data wpłaty" error={errors.paidDate || errors.form}>
+            <input
+              ref={dateRef}
+              className="input"
+              type="date"
+              name="payment-date"
+              autoComplete="off"
+              disabled={saving || reconciled}
+              value={form.paidDate}
+              onChange={(event) => set('paidDate', event.target.value)}
+            />
+          </Field>
+          <div className="payment-entry__actions">
+            <Button size="sm" variant="ghost" disabled={saving || reconciled} onClick={close}>Anuluj</Button>
+            <Button size="sm" type="submit" disabled={saving || reconciled}>
+              {saving ? 'Zapisywanie…' : reconciled ? 'Oczekiwanie na odświeżenie' : 'Zapisz wpłatę'}
+            </Button>
+          </div>
+        </form>
+      </Popover>
+    </span>
+  )
+}
+
 export function Payments() {
-  const { state, dispatch, toast } = useApp()
-  const { appMode, getViewState, openSessionForm, patchViewState, route } = useShell()
+  const { state, dispatch, toast, workspace } = useApp()
+  const { locked: paymentMutationLocked } = usePaymentMutationLock()
+  const { appMode, capabilities, getViewState, openSessionForm, patchViewState, route } = useShell()
+  const refreshWorkspace = useWorkspaceRefresh()
   const isApp = appMode === 'app'
   const ref = useReveal()
   const ledgerTitleRef = useRef(null)
@@ -187,6 +391,10 @@ export function Payments() {
   const [unpaidOnly, setUnpaidOnly] = useState(initial.unpaidOnly)
   const workspaceRange = useMemo(() => monthWorkspaceRange(ym), [ym])
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const canManagePayments = isApp
+    && capabilities.includes('payment.manage')
+    && workspaceState === 'ready'
+    && workspace.status === 'ready'
 
   const months = useMemo(() => availableMonths(state.sessions), [state.sessions])
   const psychologists = useMemo(
@@ -494,7 +702,19 @@ export function Payments() {
                       <td><PaymentPicker session={session} readOnly /></td>
                       <td className="right">
                         {isApp ? (
-                          <span className="faint">—</span>
+                          canManagePayments && outstanding > 0 && !session.readOnly && !client?.readOnly ? (
+                            <AppPaymentEntry
+                              session={session}
+                              client={client}
+                              fallbackFocusRef={ledgerTitleRef}
+                              paymentMutationLocked={paymentMutationLocked}
+                              refreshWorkspace={refreshWorkspace}
+                              workspace={workspace}
+                              workspaceRange={workspaceRange}
+                            />
+                          ) : (
+                            <span className="faint">—</span>
+                          )
                         ) : outstanding > 0 ? (
                           <PaymentEntry
                             session={session}

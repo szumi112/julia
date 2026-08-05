@@ -26,6 +26,7 @@ const AppCtx = createContext(null)
 const ToastCtx = createContext([])
 const ClientMutationCtx = createContext(Object.freeze({ locked: false }))
 const AppointmentMutationCtx = createContext(Object.freeze({ locked: false }))
+const PaymentMutationCtx = createContext(Object.freeze({ locked: false }))
 
 let nextId = 10000
 
@@ -370,12 +371,18 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
     () => Object.freeze({ locked: workspaceSnapshot.appointmentMutationLocked }),
     [workspaceSnapshot.appointmentMutationLocked]
   )
+  const paymentMutationValue = useMemo(
+    () => Object.freeze({ locked: workspaceSnapshot.paymentMutationLocked }),
+    [workspaceSnapshot.paymentMutationLocked]
+  )
   return (
     <ClientMutationCtx.Provider value={clientMutationValue}>
       <AppointmentMutationCtx.Provider value={appointmentMutationValue}>
-        <AppCtx.Provider value={value}>
-          <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
-        </AppCtx.Provider>
+        <PaymentMutationCtx.Provider value={paymentMutationValue}>
+          <AppCtx.Provider value={value}>
+            <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
+          </AppCtx.Provider>
+        </PaymentMutationCtx.Provider>
       </AppointmentMutationCtx.Provider>
     </ClientMutationCtx.Provider>
   )
@@ -385,6 +392,7 @@ export const useApp = () => useContext(AppCtx)
 export const useToasts = () => useContext(ToastCtx)
 export const useClientMutationLock = () => useContext(ClientMutationCtx)
 export const useAppointmentMutationLock = () => useContext(AppointmentMutationCtx)
+export const usePaymentMutationLock = () => useContext(PaymentMutationCtx)
 
 export const useWorkspaceWindow = (range, enabled = true) => {
   const { workspace } = useApp()

@@ -411,6 +411,25 @@ test('successful appointment create, edit, and cancellation stay locked until ca
   assert.equal(controller.getSnapshot().appointmentMutationLocked, false)
 })
 
+test('successful payment commands stay locked until canonical reconciliation', async () => {
+  const calls = []
+  const controller = makeController(() => repositoryWith({
+    recordPayment: async (...args) => { calls.push(args); return {} },
+  }))
+  await controller.getSnapshot().workspace.recordPayment('apt_ola', 1, { amountGrosze: 100 })
+  assert.equal(controller.getSnapshot().paymentMutationLocked, true)
+  await assert.rejects(
+    controller.getSnapshot().workspace.recordPayment('apt_ola', 1, { amountGrosze: 100 }),
+    { code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
+  )
+  assert.equal(calls.length, 1)
+
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-04'))
+  assert.equal(controller.getSnapshot().paymentMutationLocked, false)
+  await controller.getSnapshot().workspace.recordPayment('apt_ola', 2, { amountGrosze: 100 })
+  assert.equal(calls.length, 2)
+})
+
 test('business errors do not advance the epoch or make the workspace read-only', async () => {
   const conflict = Object.assign(new Error('conflict'), { code: 'VERSION_CONFLICT', status: 409 })
   const controller = makeController(() => repositoryWith({
