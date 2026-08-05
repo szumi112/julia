@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { createApp } from '../../worker/app.js'
 import worker from '../../worker/index.js'
 import { enqueueOutboxStatement } from '../../worker/jobs/outbox.js'
 import { getOrCreateDataKey } from '../../worker/security/envelope.js'
@@ -24,6 +25,97 @@ const IDENTITY_SCOPE = Object.freeze({
   id: 'centre_1',
   purpose: 'identity',
 })
+
+const CORE_ORIGIN = 'https://panel.example.test'
+const CORE_CONFIG = Object.freeze({
+  appEnv: 'staging', appOrigin: CORE_ORIGIN, dataMode: 'fictional',
+})
+const CORE_ACTORS = Object.freeze([
+  Object.freeze({ id: 'stf_boundary_owner', role: 'owner', specialistId: null, version: 1 }),
+  Object.freeze({ id: 'stf_boundary_coordinator', role: 'coordinator', specialistId: null, version: 1 }),
+  Object.freeze({ id: 'stf_boundary_specialist', role: 'specialist', specialistId: 'sp_boundary', version: 1 }),
+])
+const CLIENT_BODY = Object.freeze({
+  name: 'Fikcyjna granica', age: 12, status: 'active', specialistId: 'sp_boundary',
+})
+const CORE_CASES = Object.freeze([
+  Object.freeze({ id: 'workspace', method: 'GET', path: '/api/v1/workspace?from=2027-01-01&to=2027-01-01' }),
+  Object.freeze({ id: 'clients.create', path: '/api/v1/clients', body: CLIENT_BODY }),
+  Object.freeze({ id: 'clients.edit', path: '/api/v1/clients/cl_guessed/edits', body: {
+    expectedVersion: 1, ...CLIENT_BODY,
+  } }),
+  Object.freeze({ id: 'clients.archive', path: '/api/v1/clients/cl_guessed/archive', body: {
+    expectedVersion: 1,
+  } }),
+  Object.freeze({ id: 'appointments.create', path: '/api/v1/appointments', body: {
+    clientId: 'cl_guessed', specialistId: 'sp_boundary', serviceId: 'zajecia',
+    date: '2027-01-01', time: '10:00', durationMinutes: 50,
+    expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
+  } }),
+  Object.freeze({ id: 'appointments.edit', path: '/api/v1/appointments/apt_guessed/edits', body: {
+    expectedVersion: 1, specialistId: 'sp_boundary', serviceId: 'zajecia',
+    date: '2027-01-01', time: '10:00', durationMinutes: 50,
+    expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
+  } }),
+  Object.freeze({ id: 'appointments.cancel', path: '/api/v1/appointments/apt_guessed/cancellation', body: {
+    expectedVersion: 1,
+  } }),
+  Object.freeze({ id: 'appointments.payment', path: '/api/v1/appointments/apt_guessed/payments', body: {
+    expectedVersion: 1, amountGrosze: 18_000, method: 'card',
+    receivedAt: '2027-01-01T09:00:00.000Z',
+  } }),
+  Object.freeze({ id: 'payments.correct', path: '/api/v1/payments/pay_guessed/corrections', body: {
+    expectedVersion: 1, reason: 'Fikcyjna korekta', replacement: null,
+  } }),
+])
+
+const coreRequest = (entry, body = entry.body, headers = {}) => new Request(
+  `https://worker.example.test${entry.path}`,
+  entry.method === 'GET'
+    ? { method: 'GET', headers }
+    : {
+        method: 'POST',
+        headers: {
+          origin: CORE_ORIGIN,
+          'content-type': 'application/json',
+          'idempotency-key': 'entry-boundary-key-0001',
+          'x-csrf-token': 'valid-token',
+          ...headers,
+        },
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      },
+)
+
+const coreApp = (overrides = {}) => {
+  const called = []
+  const unavailable = (endpoint) => async (input) => {
+    called.push({ endpoint, role: input.actor.role,
+      target: input.clientId ?? input.appointmentId ?? input.paymentId ?? null })
+    throw new Error('NOT_FOUND')
+  }
+  const app = createApp({
+    config: CORE_CONFIG,
+    db: env.DB,
+    cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+    resolveAccessPrincipal: async () => ({ kind: 'human', subject: 'access-boundary' }),
+    resolveActor: async () => CORE_ACTORS[0],
+    verifyCsrfToken: async () => true,
+    getWorkspace: unavailable('workspace'),
+    postClient: unavailable('clients.create'),
+    postClientEdit: unavailable('clients.edit'),
+    postClientArchive: unavailable('clients.archive'),
+    postAppointment: unavailable('appointments.create'),
+    postAppointmentEdit: unavailable('appointments.edit'),
+    postAppointmentCancellation: unavailable('appointments.cancel'),
+    postAppointmentPayment: unavailable('appointments.payment'),
+    postPaymentCorrection: unavailable('payments.correct'),
+    safeLog: vi.fn(),
+    ...overrides,
+  })
+  return { app, called }
+}
+
+const errorCode = async (response) => (await response.json()).error.code
 
 async function ensureIdentityKey(runtimeEnv, id, createdAt) {
   const keyring = await createKeyring(runtimeEnv, {
@@ -201,5 +293,147 @@ describe('Worker entry boundary', () => {
       { waitUntil() { waitUntilCalls += 1 } }
     )).toThrow(/^SCHEDULED_CRON_INVALID$/)
     expect(waitUntilCalls).toBe(0)
+  })
+})
+
+describe('core Worker route boundary', () => {
+  it('collapses every role x endpoint guessed-ID attempt to the same opaque result', async () => {
+    const called = []
+
+    for (const actor of CORE_ACTORS) {
+      const route = coreApp({ resolveActor: async () => actor })
+      for (const entry of CORE_CASES) {
+        const response = await route.app.request(coreRequest(entry))
+        expect(response.status).toBe(404)
+        expect(await errorCode(response)).toBe('NOT_FOUND')
+      }
+      called.push(...route.called)
+    }
+
+    expect(called).toHaveLength(CORE_ACTORS.length * CORE_CASES.length)
+    expect(called.map(({ endpoint }) => endpoint)).toEqual([
+      ...CORE_ACTORS.flatMap(() => CORE_CASES.map(({ id }) => id)),
+    ])
+    expect(called.map(({ role }) => role)).toEqual([
+      ...CORE_ACTORS.flatMap(({ role }) => CORE_CASES.map(() => role)),
+    ])
+    expect(called.map(({ target }) => target)).toEqual([
+      ...CORE_ACTORS.flatMap(() => CORE_CASES.map(({ id }) => (
+        id === 'clients.edit' || id === 'clients.archive' ? 'cl_guessed'
+          : id.startsWith('appointments.') && id !== 'appointments.create' ? 'apt_guessed'
+            : id === 'payments.correct' ? 'pay_guessed' : null
+      ))),
+    ])
+  })
+
+  it('rejects unknown, duplicate, and malformed JSON before a core command service runs', async () => {
+    const { app, called } = coreApp()
+    const cases = [
+      [JSON.stringify({ ...CLIENT_BODY, unknown: true }), 'VALIDATION_FAILED'],
+      ['{"name":"Fikcyjna","name":"Druga","age":12,"status":"active","specialistId":"sp_boundary"}', 'VALIDATION_FAILED'],
+      ['{"name":', 'INVALID_JSON'],
+    ]
+
+    for (const [body, expected] of cases) {
+      const response = await app.request(coreRequest(CORE_CASES[1], body))
+      expect(response.status).toBe(400)
+      expect(await errorCode(response)).toBe(expected)
+    }
+    expect(called).toEqual([])
+  })
+
+  it('accepts exactly 65,536 request bytes and rejects the next byte before dispatch', async () => {
+    const called = []
+    const { app } = coreApp({
+      postClient: async (input) => {
+        called.push(input.body)
+        return { status: 201, body: { data: { client: { id: 'cl_boundary' } } } }
+      },
+    })
+    const encoded = new TextEncoder()
+    const canonical = JSON.stringify(CLIENT_BODY)
+    const atLimit = `${canonical}${' '.repeat(65_536 - encoded.encode(canonical).byteLength)}`
+    const aboveLimit = `${canonical}${' '.repeat(65_537 - encoded.encode(canonical).byteLength)}`
+
+    const accepted = await app.request(coreRequest(CORE_CASES[1], atLimit))
+    expect(accepted.status).toBe(201)
+    expect(called).toEqual([CLIENT_BODY])
+    const rejected = await app.request(coreRequest(CORE_CASES[1], aboveLimit))
+    expect(rejected.status).toBe(413)
+    expect(await errorCode(rejected)).toBe('PAYLOAD_TOO_LARGE')
+    expect(called).toHaveLength(1)
+  })
+
+  it('enforces method, origin, Access, and CSRF gates in order without leaking the request', async () => {
+    const events = []
+    const make = ({ accessFailure = null, csrfFailure = null } = {}) => coreApp({
+      resolveAccessPrincipal: async () => {
+        events.push('access')
+        if (accessFailure) throw new Error(accessFailure)
+        return { kind: 'human', subject: 'access-boundary' }
+      },
+      verifyCsrfToken: async () => {
+        events.push('csrf')
+        if (csrfFailure) throw new Error(csrfFailure)
+      },
+      resolveActor: async () => {
+        events.push('actor')
+        return CORE_ACTORS[0]
+      },
+      readJsonBodyOnce: async () => {
+        events.push('body')
+        return CLIENT_BODY
+      },
+      postClient: async () => {
+        events.push('service')
+        return { status: 201, body: { data: { client: { id: 'cl_boundary' } } } }
+      },
+    }).app
+
+    const method = await make().request(new Request('https://worker.example.test/api/v1/clients', {
+      method: 'PUT', body: JSON.stringify(CLIENT_BODY), headers: { 'content-type': 'application/json' },
+    }))
+    expect(method.status).toBe(405)
+    expect(events).toEqual([])
+
+    const origin = await make().request(coreRequest(CORE_CASES[1], CLIENT_BODY, {
+      origin: 'https://wrong-origin.example.test',
+    }))
+    expect(origin.status).toBe(403)
+    expect(await errorCode(origin)).toBe('ORIGIN_INVALID')
+    expect(events).toEqual([])
+
+    const access = await make({ accessFailure: 'ACCESS_DENIED' }).request(coreRequest(CORE_CASES[1]))
+    expect(access.status).toBe(403)
+    expect(await errorCode(access)).toBe('ACCESS_DENIED')
+    expect(events).toEqual(['access'])
+
+    events.length = 0
+    const csrf = await make({ csrfFailure: 'CSRF_INVALID' }).request(coreRequest(CORE_CASES[1]))
+    expect(csrf.status).toBe(403)
+    expect(await errorCode(csrf)).toBe('CSRF_INVALID')
+    expect(events).toEqual(['access', 'csrf'])
+
+    events.length = 0
+    const accepted = await make().request(coreRequest(CORE_CASES[1]))
+    expect(accepted.status).toBe(201)
+    expect(events).toEqual(['access', 'csrf', 'actor', 'body', 'service'])
+  })
+
+  it('keeps fictional identity values out of entry logs and error envelopes', async () => {
+    const confidentialName = 'Fikcyjna nazwa tylko dla testu granicy'
+    const safeLog = vi.fn()
+    const { app } = coreApp({
+      safeLog,
+      postClient: async () => { throw new Error('NOT_FOUND') },
+    })
+    const response = await app.request(coreRequest(CORE_CASES[1], {
+      ...CLIENT_BODY, name: confidentialName,
+    }))
+    expect(response.status).toBe(404)
+    const error = await response.json()
+    const observed = JSON.stringify({ error, logs: safeLog.mock.calls })
+    expect(observed).not.toContain(confidentialName)
+    expect(observed).not.toContain('specialistId')
   })
 })
