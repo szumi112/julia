@@ -129,12 +129,12 @@ const paymentRecordedAppointment = {
   }],
 }
 
-const workspaceEnvelope = (from, to, appointment) => json(200, {
+const workspaceEnvelope = (from, to, appointment = null) => json(200, {
   data: {
     window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
     specialists: [activeSpecialist],
     clients: [activeClient],
-    appointments: [appointment],
+    appointments: appointment === null ? [] : [appointment],
   },
 })
 
@@ -497,20 +497,26 @@ test('@owner keeps protected payment input after a command failure', async ({ pa
   expect(workspaceReads).toBe(1)
 })
 
-test('@owner cannot replay an accepted payment while canonical refresh fails across a Payments remount', async ({ page }) => {
+test('@owner cannot replay an accepted payment after an unrelated canonical load', async ({ page }) => {
   const payments = []
   let workspaceReads = 0
   await freezeTime(page, '2026-07-15T08:00:00.000Z')
   await page.route('**/api/v1/workspace?*', async (route) => {
     workspaceReads += 1
+    const url = new URL(route.request().url())
     if (workspaceReads === 1) {
-      const url = new URL(route.request().url())
       await route.fulfill(workspaceEnvelope(
         url.searchParams.get('from'), url.searchParams.get('to'), completedAppointment,
       ))
       return
     }
-    await route.fulfill(errorEnvelope(500, 'INTERNAL_ERROR'))
+    if (workspaceReads === 2) {
+      await route.fulfill(errorEnvelope(409, 'VERSION_CONFLICT'))
+      return
+    }
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'), url.searchParams.get('to'), null,
+    ))
   })
   await page.route('**/api/v1/appointments/apt_scheduled/payments', async (route) => {
     payments.push({ method: route.request().method(), body: route.request().postData() })
@@ -528,8 +534,9 @@ test('@owner cannot replay an accepted payment while canonical refresh fails acr
   await entry.getByRole('button', { name: 'Zapisz wpłatę' }).click()
   await expect.poll(() => workspaceReads).toBe(2)
 
-  await page.goto('./#/dashboard')
+  await page.goto('./#/calendar?date=2026-06-15&ym=2026-06&mode=cal')
+  await expect.poll(() => workspaceReads).toBe(3)
   await page.goto('./#/payments?ym=2026-07')
-  await expect(row.getByRole('button', { name: /Zaksięguj wpłatę/ })).toHaveCount(0)
+  await expect(row.getByRole('button', { name: /Zaksięguj wpłatę/ })).toBeDisabled()
   expect(payments).toHaveLength(1)
 })

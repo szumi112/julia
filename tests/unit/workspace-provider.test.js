@@ -16,9 +16,14 @@ const client = () => ({
   id: 'cl_ola', name: 'Ola', status: 'active', readOnly: false,
   assignment: { id: 'asg_ola', specialistId: 'sp_anna' },
 })
-const payload = (from, to = from) => ({
+const paymentAppointment = () => ({
+  id: 'apt_ola', clientId: 'cl_ola', specialistId: 'sp_anna',
+  startsAt: '2026-08-04T10:00:00.000Z',
+  charge: { id: 'chg_ola' }, paymentEntries: [],
+})
+const payload = (from, to = from, appointments = []) => ({
   window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
-  specialists: [specialist()], clients: [client()], appointments: [],
+  specialists: [specialist()], clients: [client()], appointments,
 })
 const deferred = () => {
   let resolve
@@ -125,9 +130,19 @@ test('every old-authority mutation completion is replaced by one fixed stale err
     let factories = 0
     const controller = makeController(() => {
       factories += 1
-      return factories === 1 ? repositoryWith({ [method]: () => turn.promise }) : repositoryWith()
+      return factories === 1 ? repositoryWith({
+        loadWindow: async ({ from, to }) => payload(from, to, method === 'recordPayment'
+          ? [paymentAppointment()]
+          : []),
+        [method]: () => turn.promise,
+      }) : repositoryWith()
     })
-    const command = controller.getSnapshot().workspace[method]('private-input', { secret: true })
+    if (method === 'recordPayment') {
+      await controller.getSnapshot().workspace.loadWindow(range('2026-08-04'))
+    }
+    const command = method === 'recordPayment'
+      ? controller.getSnapshot().workspace.recordPayment('apt_ola', 1, { amountGrosze: 100 })
+      : controller.getSnapshot().workspace[method]('private-input', { secret: true })
     controller.resetAuthority(`next-${method}`)
     turn.resolve({ secretDto: method })
     await assert.rejects(command, stale, method)
@@ -411,12 +426,27 @@ test('successful appointment create, edit, and cancellation stay locked until ca
   assert.equal(controller.getSnapshot().appointmentMutationLocked, false)
 })
 
-test('successful payment commands stay locked until canonical reconciliation', async () => {
+test('accepted payments stay locked through failed selected-date reloads and unrelated reconciliation', async () => {
   const calls = []
+  const conflict = Object.assign(new Error('conflict'), { code: 'VERSION_CONFLICT', status: 409 })
+  let loads = 0
   const controller = makeController(() => repositoryWith({
+    loadWindow: async ({ from, to }) => {
+      loads += 1
+      if (loads === 2) throw conflict
+      return payload(from, to, from <= '2026-08-04' && to >= '2026-08-04'
+        ? [paymentAppointment()]
+        : [])
+    },
     recordPayment: async (...args) => { calls.push(args); return {} },
   }))
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-04'))
   await controller.getSnapshot().workspace.recordPayment('apt_ola', 1, { amountGrosze: 100 })
+  assert.equal(controller.getSnapshot().paymentMutationLocked, true)
+  await assert.rejects(controller.getSnapshot().workspace.loadWindow(range('2026-08-04')), conflict)
+  assert.equal(controller.getSnapshot().workspace.status, 'ready')
+
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-05'))
   assert.equal(controller.getSnapshot().paymentMutationLocked, true)
   await assert.rejects(
     controller.getSnapshot().workspace.recordPayment('apt_ola', 1, { amountGrosze: 100 }),
@@ -428,6 +458,18 @@ test('successful payment commands stay locked until canonical reconciliation', a
   assert.equal(controller.getSnapshot().paymentMutationLocked, false)
   await controller.getSnapshot().workspace.recordPayment('apt_ola', 2, { amountGrosze: 100 })
   assert.equal(calls.length, 2)
+})
+
+test('payment recording fails closed until its exact canonical appointment is loaded', async () => {
+  let calls = 0
+  const controller = makeController(() => repositoryWith({
+    recordPayment: async () => { calls += 1; return {} },
+  }))
+  await assert.rejects(
+    controller.getSnapshot().workspace.recordPayment('apt_ola', 1, { amountGrosze: 100 }),
+    { code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
+  )
+  assert.equal(calls, 0)
 })
 
 test('business errors do not advance the epoch or make the workspace read-only', async () => {

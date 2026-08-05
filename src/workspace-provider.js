@@ -5,6 +5,7 @@ import {
   recordLoadedWorkspaceWrite,
   resetLoadedWorkspaceAuthority,
 } from './loaded-windows.js'
+import { isAppointmentId, warsawDateFromUtc } from './core-records.js'
 
 const AUTHORITY_KEYS = Object.freeze([
   'repositoryMode', 'dataMode', 'actorId', 'actorVersion', 'role', 'specialistId',
@@ -203,6 +204,39 @@ const readOnlyError = () => fixedError('WORKSPACE_READ_ONLY')
 const staleAuthorityError = () => fixedError('WORKSPACE_AUTHORITY_STALE')
 const resetFailedError = () => fixedError('WORKSPACE_RESET_FAILED')
 
+const unresolvedPaymentLock = () => Object.freeze({ appointmentId: null, date: null })
+
+const paymentLockForRecord = (state, appointmentId) => {
+  try {
+    if (!isAppointmentId(appointmentId)) throw new TypeError('Invalid appointment ID')
+    const appointmentDescriptor = Object.getOwnPropertyDescriptor(
+      state.appointmentsById, appointmentId,
+    )
+    if (!appointmentDescriptor || !Object.hasOwn(appointmentDescriptor, 'value')) {
+      throw new TypeError('Appointment is not canonically loaded')
+    }
+    const startDescriptor = Object.getOwnPropertyDescriptor(appointmentDescriptor.value, 'startsAt')
+    if (!startDescriptor || !Object.hasOwn(startDescriptor, 'value')) {
+      throw new TypeError('Appointment start is unavailable')
+    }
+    const date = warsawDateFromUtc(startDescriptor.value)
+    captureLoadedWorkspaceLoad(state, { from: date, to: date })
+    return Object.freeze({ appointmentId, date })
+  } catch {
+    throw fixedError('WORKSPACE_RECONCILIATION_REQUIRED')
+  }
+}
+
+const paymentLockForCommand = (name, state, args) => {
+  if (name === 'recordPayment') return paymentLockForRecord(state, args[0])
+  // Task 33 will resolve a correction's payment entry to its appointment. Until then,
+  // do not treat any range as reconciled after an accepted correction.
+  return unresolvedPaymentLock()
+}
+
+const paymentLockReconciledBy = (lock, capture) => lock !== null
+  && lock.date !== null && capture.from <= lock.date && lock.date <= capture.to
+
 export const createWorkspaceProviderController = (options) => {
   const captured = captureExactRecord(options, [
     'repositoryFactory', 'dispatch', 'getState', 'authorityKey', 'clearToasts',
@@ -220,7 +254,7 @@ export const createWorkspaceProviderController = (options) => {
   let readOnly = false
   let clientMutationLocked = false
   let appointmentMutationLocked = false
-  let paymentMutationLocked = false
+  let paymentMutationLock = null
   let infrastructureError = null
   let snapshot
   const listeners = new Set()
@@ -231,7 +265,7 @@ export const createWorkspaceProviderController = (options) => {
       loadedState,
       clientMutationLocked,
       appointmentMutationLocked,
-      paymentMutationLocked,
+      paymentMutationLocked: paymentMutationLock !== null,
       workspace: Object.freeze({
         status: status(),
         loadedRanges: loadedState.loadedRanges,
@@ -289,7 +323,7 @@ export const createWorkspaceProviderController = (options) => {
         if (!merged.refetch || refetches === 1) {
           clientMutationLocked = false
           appointmentMutationLocked = false
-          paymentMutationLocked = false
+          if (paymentLockReconciledBy(paymentMutationLock, capture)) paymentMutationLock = null
           publish()
           return rawPayload
         }
@@ -316,17 +350,20 @@ export const createWorkspaceProviderController = (options) => {
       if (APPOINTMENT_MUTATION_METHODS.has(name) && appointmentMutationLocked) {
         throw fixedError('WORKSPACE_RECONCILIATION_REQUIRED')
       }
-      if (PAYMENT_MUTATION_METHODS.has(name) && paymentMutationLocked) {
+      if (PAYMENT_MUTATION_METHODS.has(name) && paymentMutationLock !== null) {
         throw fixedError('WORKSPACE_RECONCILIATION_REQUIRED')
       }
       const generation = loadedState.authorityGeneration
       const operationRepository = repository
+      const nextPaymentMutationLock = PAYMENT_MUTATION_METHODS.has(name)
+        ? paymentLockForCommand(name, loadedState, args)
+        : null
       try {
         const result = await operationRepository[name](...args)
         if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
         if (CLIENT_MUTATION_METHODS.has(name)) clientMutationLocked = true
         if (APPOINTMENT_MUTATION_METHODS.has(name)) appointmentMutationLocked = true
-        if (PAYMENT_MUTATION_METHODS.has(name)) paymentMutationLocked = true
+        if (PAYMENT_MUTATION_METHODS.has(name)) paymentMutationLock = nextPaymentMutationLock
         loadedState = recordLoadedWorkspaceWrite(loadedState)
         publish()
         return result
@@ -348,7 +385,7 @@ export const createWorkspaceProviderController = (options) => {
     readOnly = true
     clientMutationLocked = false
     appointmentMutationLocked = false
-    paymentMutationLocked = false
+    paymentMutationLock = null
     infrastructureError = resetFailedError()
     publish()
     try {
