@@ -31,9 +31,11 @@ async function addClient(page, name, psychId = 'p1') {
 
 // The calendar navigates by week and by month; an arbitrary date is reached
 // through the route the way every deep link into it does.
-const openCalendarDay = (page, iso) =>
-  page.evaluate((target) => { window.location.hash = target }, `#/calendar?date=${iso}`)
 const selectedDay = (page) => page.locator('.day-strip__day.is-on')
+const openCalendarDay = async (page, iso) => {
+  await page.evaluate((target) => { window.location.hash = target }, `#/calendar?date=${iso}`)
+  await expect(selectedDay(page)).toHaveAttribute('data-iso', iso)
+}
 
 async function setAgendaStatus(page, accessibleName, targetStatus) {
   const agenda = page.getByRole('region', { name: 'Plan dnia' })
