@@ -16,10 +16,15 @@ const client = () => ({
   id: 'cl_ola', name: 'Ola', status: 'active', readOnly: false,
   assignment: { id: 'asg_ola', specialistId: 'sp_anna' },
 })
-const paymentAppointment = () => ({
+const paymentAppointment = (paymentEntries = []) => ({
   id: 'apt_ola', clientId: 'cl_ola', specialistId: 'sp_anna',
   startsAt: '2026-08-04T10:00:00.000Z',
-  charge: { id: 'chg_ola' }, paymentEntries: [],
+  charge: { id: 'chg_ola' }, paymentEntries,
+})
+const paymentEntry = (overrides = {}) => ({
+  id: 'pay_ola', amountGrosze: 100, method: 'cash',
+  receivedAt: '2026-08-04T10:00:00.000Z', correctedAt: null, replacementEntryId: null,
+  ...overrides,
 })
 const payload = (from, to = from, appointments = []) => ({
   window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
@@ -133,16 +138,22 @@ test('every old-authority mutation completion is replaced by one fixed stale err
       return factories === 1 ? repositoryWith({
         loadWindow: async ({ from, to }) => payload(from, to, method === 'recordPayment'
           ? [paymentAppointment()]
+          : method === 'correctPayment'
+            ? [paymentAppointment([paymentEntry()])]
           : []),
         [method]: () => turn.promise,
       }) : repositoryWith()
     })
-    if (method === 'recordPayment') {
+    if (method === 'recordPayment' || method === 'correctPayment') {
       await controller.getSnapshot().workspace.loadWindow(range('2026-08-04'))
     }
     const command = method === 'recordPayment'
       ? controller.getSnapshot().workspace.recordPayment('apt_ola', 1, { amountGrosze: 100 })
-      : controller.getSnapshot().workspace[method]('private-input', { secret: true })
+      : method === 'correctPayment'
+        ? controller.getSnapshot().workspace.correctPayment('pay_ola', 1, {
+          reason: 'Korekta', replacement: null,
+        })
+        : controller.getSnapshot().workspace[method]('private-input', { secret: true })
     controller.resetAuthority(`next-${method}`)
     turn.resolve({ secretDto: method })
     await assert.rejects(command, stale, method)
@@ -468,6 +479,64 @@ test('payment recording fails closed until its exact canonical appointment is lo
   await assert.rejects(
     controller.getSnapshot().workspace.recordPayment('apt_ola', 1, { amountGrosze: 100 }),
     { code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
+  )
+  assert.equal(calls, 0)
+})
+
+test('payment correction resolves its canonical entry and unlocks only after its covering load', async () => {
+  const calls = []
+  const entry = paymentEntry()
+  const controller = makeController(() => repositoryWith({
+    loadWindow: async ({ from, to }) => payload(from, to, from <= '2026-08-04' && to >= '2026-08-04'
+      ? [paymentAppointment([entry])]
+      : []),
+    correctPayment: async (...args) => { calls.push(args); return {} },
+  }))
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-04'))
+  await controller.getSnapshot().workspace.correctPayment('pay_ola', 1, {
+    reason: 'Błędna forma płatności', replacement: null,
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(controller.getSnapshot().paymentMutationLocked, true)
+
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-05'))
+  assert.equal(controller.getSnapshot().paymentMutationLocked, true)
+  await assert.rejects(
+    controller.getSnapshot().workspace.correctPayment('pay_ola', 1, {
+      reason: 'Błędna forma płatności', replacement: null,
+    }),
+    { code: 'WORKSPACE_RECONCILIATION_REQUIRED' },
+  )
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-04'))
+  assert.equal(controller.getSnapshot().paymentMutationLocked, false)
+})
+
+test('payment correction fails closed when its target entry is not canonically loaded', async () => {
+  let calls = 0
+  const controller = makeController(() => repositoryWith({
+    correctPayment: async () => { calls += 1; return {} },
+  }))
+  await assert.rejects(
+    controller.getSnapshot().workspace.correctPayment('pay_missing', 1, {
+      reason: 'Błędna forma płatności', replacement: null,
+    }),
+    { code: 'WORKSPACE_RECONCILIATION_REQUIRED' },
+  )
+  assert.equal(calls, 0)
+})
+
+test('payment correction fails closed when its loaded target entry is malformed', async () => {
+  let calls = 0
+  const controller = makeController(() => repositoryWith({
+    loadWindow: async ({ from, to }) => payload(from, to, [paymentAppointment([{ id: 'pay_ola' }])]),
+    correctPayment: async () => { calls += 1; return {} },
+  }))
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-04'))
+  await assert.rejects(
+    controller.getSnapshot().workspace.correctPayment('pay_ola', 1, {
+      reason: 'Błędna forma płatności', replacement: null,
+    }),
+    { code: 'WORKSPACE_RECONCILIATION_REQUIRED' },
   )
   assert.equal(calls, 0)
 })

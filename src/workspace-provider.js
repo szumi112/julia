@@ -1,11 +1,12 @@
 import {
   captureLoadedWorkspaceLoad,
   createLoadedWorkspaceState,
+  isWorkspaceWindowLoaded,
   mergeLoadedWorkspaceLoad,
   recordLoadedWorkspaceWrite,
   resetLoadedWorkspaceAuthority,
 } from './loaded-windows.js'
-import { isAppointmentId, warsawDateFromUtc } from './core-records.js'
+import { isAppointmentId, isPaymentId, warsawDateFromUtc } from './core-records.js'
 
 const AUTHORITY_KEYS = Object.freeze([
   'repositoryMode', 'dataMode', 'actorId', 'actorVersion', 'role', 'specialistId',
@@ -19,6 +20,10 @@ const WORKSPACE_METHODS = Object.freeze(REPOSITORY_METHODS.filter((name) => name
 const CLIENT_MUTATION_METHODS = new Set(['createClient', 'editClient', 'archiveClient'])
 const APPOINTMENT_MUTATION_METHODS = new Set(['createAppointment', 'editAppointment', 'cancelAppointment'])
 const PAYMENT_MUTATION_METHODS = new Set(['recordPayment', 'correctPayment'])
+const PAYMENT_ENTRY_KEYS = new Set([
+  'id', 'amountGrosze', 'method', 'receivedAt', 'correctedAt', 'replacementEntryId',
+])
+const PAYMENT_METHODS = new Set(['cash', 'card', 'transfer', 'monthly'])
 const AUTHORITY_ACTION_KEY_LIMIT = 32
 const INFRASTRUCTURE_CODES = new Set([
   'ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'CSRF_INVALID', 'CSRF_EXPIRED',
@@ -204,8 +209,6 @@ const readOnlyError = () => fixedError('WORKSPACE_READ_ONLY')
 const staleAuthorityError = () => fixedError('WORKSPACE_AUTHORITY_STALE')
 const resetFailedError = () => fixedError('WORKSPACE_RESET_FAILED')
 
-const unresolvedPaymentLock = () => Object.freeze({ appointmentId: null, date: null })
-
 const paymentLockForRecord = (state, appointmentId) => {
   try {
     if (!isAppointmentId(appointmentId)) throw new TypeError('Invalid appointment ID')
@@ -227,11 +230,76 @@ const paymentLockForRecord = (state, appointmentId) => {
   }
 }
 
+const paymentLockForCorrection = (state, paymentId) => {
+  try {
+    if (!isPaymentId(paymentId)) throw new TypeError('Invalid payment ID')
+    const appointments = state.appointmentsById
+    const descriptors = Object.getOwnPropertyDescriptors(appointments)
+    const matches = []
+    for (const appointmentId of Reflect.ownKeys(descriptors)) {
+      if (typeof appointmentId !== 'string') throw new TypeError('Invalid appointment map')
+      const descriptor = descriptors[appointmentId]
+      if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')
+        || !isAppointmentId(appointmentId)) throw new TypeError('Invalid appointment map')
+      const appointment = descriptor.value
+      if (appointment === null || typeof appointment !== 'object' || Array.isArray(appointment)
+        || Object.getPrototypeOf(appointment) !== Object.prototype) {
+        throw new TypeError('Invalid appointment')
+      }
+      const idDescriptor = Object.getOwnPropertyDescriptor(appointment, 'id')
+      const startsAtDescriptor = Object.getOwnPropertyDescriptor(appointment, 'startsAt')
+      const entriesDescriptor = Object.getOwnPropertyDescriptor(appointment, 'paymentEntries')
+      if (!idDescriptor || !Object.hasOwn(idDescriptor, 'value') || idDescriptor.value !== appointmentId
+        || !startsAtDescriptor || !Object.hasOwn(startsAtDescriptor, 'value')
+        || !entriesDescriptor || !Object.hasOwn(entriesDescriptor, 'value')
+        || !Array.isArray(entriesDescriptor.value)) {
+        throw new TypeError('Invalid appointment')
+      }
+      for (const entry of entriesDescriptor.value) {
+        if (entry === null || typeof entry !== 'object' || Array.isArray(entry)
+          || Object.getPrototypeOf(entry) !== Object.prototype) {
+          throw new TypeError('Invalid payment entry')
+        }
+        const entryId = Object.getOwnPropertyDescriptor(entry, 'id')
+        const entryDescriptors = Object.getOwnPropertyDescriptors(entry)
+        const entryKeys = Reflect.ownKeys(entryDescriptors)
+        if (entryKeys.length !== PAYMENT_ENTRY_KEYS.size
+          || entryKeys.some((key) => typeof key !== 'string' || !PAYMENT_ENTRY_KEYS.has(key))
+          || !entryId || !Object.hasOwn(entryId, 'value') || !isPaymentId(entryId.value)
+          || !Number.isSafeInteger(entryDescriptors.amountGrosze?.value)
+          || entryDescriptors.amountGrosze.value < 1 || entryDescriptors.amountGrosze.value > 1_000_000
+          || !PAYMENT_METHODS.has(entryDescriptors.method?.value)
+          || typeof entryDescriptors.receivedAt?.value !== 'string'
+          || (entryDescriptors.correctedAt?.value !== null
+            && typeof entryDescriptors.correctedAt?.value !== 'string')
+          || (entryDescriptors.replacementEntryId?.value !== null
+            && !isPaymentId(entryDescriptors.replacementEntryId?.value))
+          || (entryDescriptors.correctedAt?.value === null
+            && entryDescriptors.replacementEntryId?.value !== null)) {
+          throw new TypeError('Invalid payment entry')
+        }
+        warsawDateFromUtc(entryDescriptors.receivedAt.value)
+        if (entryDescriptors.correctedAt.value !== null) {
+          warsawDateFromUtc(entryDescriptors.correctedAt.value)
+        }
+        if (entryId.value === paymentId) matches.push({ appointmentId, startsAt: startsAtDescriptor.value })
+      }
+    }
+    if (matches.length !== 1) throw new TypeError('Payment entry is unavailable')
+    const { appointmentId, startsAt } = matches[0]
+    const date = warsawDateFromUtc(startsAt)
+    if (!isWorkspaceWindowLoaded(state, { from: date, to: date })) {
+      throw new TypeError('Payment entry is not canonically loaded')
+    }
+    return Object.freeze({ appointmentId, date })
+  } catch {
+    throw fixedError('WORKSPACE_RECONCILIATION_REQUIRED')
+  }
+}
+
 const paymentLockForCommand = (name, state, args) => {
   if (name === 'recordPayment') return paymentLockForRecord(state, args[0])
-  // Task 33 will resolve a correction's payment entry to its appointment. Until then,
-  // do not treat any range as reconciled after an accepted correction.
-  return unresolvedPaymentLock()
+  return paymentLockForCorrection(state, args[0])
 }
 
 const paymentLockReconciledBy = (lock, capture) => lock !== null

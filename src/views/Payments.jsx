@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  useApp, usePaymentMutationLock, useWorkspaceRefresh, useWorkspaceWindow,
+  useApp, useCanonicalAppointments, usePaymentMutationLock, useWorkspaceRefresh, useWorkspaceWindow,
   sessionsInMonth, availableMonths,
 } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
@@ -18,7 +18,9 @@ import {
   isBillable, collectedOf, outstandingOf, sessionsWord, METHOD_LABELS, toISODate,
 } from '../format.js'
 import { paymentEntryFor, paymentSnapshotOf, scopedBillingSummary } from '../workspace.js'
-import { parsePaymentAmountGrosze, validatePaymentDateInput } from '../core-records.js'
+import {
+  assertCorrectionReason, parsePaymentAmountGrosze, validatePaymentDateInput, warsawDateFromUtc,
+} from '../core-records.js'
 import {
   clientIdentityFor,
   monthWorkspaceRange,
@@ -349,8 +351,241 @@ function AppPaymentEntry({
   )
 }
 
+function AppPaymentCorrection({
+  entry, session, client, fallbackFocusRef, paymentMutationLocked, refreshWorkspace, workspace,
+  workspaceRange,
+}) {
+  const [open, setOpen] = useState(false)
+  const [form, setForm] = useState({ reason: '', replace: false, amount: '', method: '', paidDate: '' })
+  const [errors, setErrors] = useState({})
+  const [saveStatus, setSaveStatus] = useState('idle')
+  const [saveError, setSaveError] = useState(null)
+  const wrapRef = useRef(null)
+  const reasonRef = useRef(null)
+  const amountRef = useRef(null)
+  const methodRef = useRef(null)
+  const dateRef = useRef(null)
+  const saving = saveStatus === 'saving'
+  const reconciled = saveStatus === 'reconciling'
+
+  const begin = () => {
+    if (paymentMutationLocked || workspace.status !== 'ready') return
+    setForm({
+      reason: '', replace: false, amount: String(entry.amountGrosze / 100),
+      method: entry.method, paidDate: warsawDateFromUtc(entry.receivedAt),
+    })
+    setErrors({})
+    setSaveStatus('idle')
+    setSaveError(null)
+    setOpen(true)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    requestAnimationFrame(() => reasonRef.current?.focus({ preventScroll: true }))
+  }, [open])
+
+  const focusAfterClose = () => {
+    requestAnimationFrame(() => {
+      const trigger = wrapRef.current?.querySelector('button')
+      ;(trigger || fallbackFocusRef?.current)?.focus({ preventScroll: true })
+    })
+  }
+
+  const set = (key, value) => {
+    setForm((current) => ({ ...current, [key]: value }))
+    setErrors((current) => ({ ...current, [key]: null, form: null }))
+    if (!reconciled) {
+      setSaveStatus('idle')
+      setSaveError(null)
+    }
+  }
+
+  const correctionInput = () => {
+    let reason
+    try {
+      reason = assertCorrectionReason(form.reason.trim())
+    } catch {
+      return { errors: { reason: 'Podaj powód korekty (maksymalnie 500 bajtów)' }, input: null }
+    }
+    if (!form.replace) return { errors: {}, input: { reason, replacement: null } }
+    let amountGrosze
+    try {
+      amountGrosze = parsePaymentAmountGrosze(form.amount)
+    } catch {
+      return { errors: { amount: 'Podaj kwotę w pełnych groszach' }, input: null }
+    }
+    try {
+      validatePaymentDateInput({ amountGrosze, method: form.method, paidDate: form.paidDate })
+    } catch (error) {
+      const field = error instanceof TypeError ? error.message.split('/').at(-1) : 'body'
+      return {
+        errors: {
+          method: field === 'method' ? 'Wybierz formę płatności' : null,
+          paidDate: field === 'paidDate' ? 'Podaj poprawną datę wpłaty' : null,
+          form: field === 'amountGrosze' ? 'Podaj kwotę w pełnych groszach' : 'Sprawdź dane wpłaty',
+        },
+        input: null,
+      }
+    }
+    return {
+      errors: {},
+      input: {
+        reason,
+        replacement: { amountGrosze, method: form.method, paidDate: form.paidDate },
+      },
+    }
+  }
+
+  const save = async (event) => {
+    event.preventDefault()
+    if (saving || reconciled || paymentMutationLocked || workspace.status !== 'ready') return
+    const next = correctionInput()
+    setErrors(next.errors)
+    if (!next.input) {
+      requestAnimationFrame(() => {
+        if (next.errors.reason) reasonRef.current?.focus({ preventScroll: true })
+        else if (next.errors.amount) amountRef.current?.focus({ preventScroll: true })
+        else if (next.errors.method) methodRef.current?.focus({ preventScroll: true })
+        else if (next.errors.paidDate) dateRef.current?.focus({ preventScroll: true })
+      })
+      return
+    }
+    setSaveStatus('saving')
+    setSaveError(null)
+    try {
+      await workspace.correctPayment(entry.id, session.version, next.input)
+    } catch {
+      setSaveStatus('error')
+      setSaveError('Nie udało się zapisać korekty.')
+      return
+    }
+    try {
+      await refreshWorkspace(workspaceRange)
+    } catch {
+      setSaveStatus('reconciling')
+      setSaveError('Korekta została zapisana, ale nie udało się odświeżyć rozliczeń.')
+      return
+    }
+    setOpen(false)
+    focusAfterClose()
+  }
+
+  const close = () => {
+    if (saving || reconciled) return
+    setOpen(false)
+    focusAfterClose()
+  }
+
+  return (
+    <span ref={wrapRef}>
+      <Popover
+        open={open}
+        setOpen={(next) => { if (!saving && !reconciled) setOpen(next) }}
+        contentRole="dialog"
+        ariaLabel="Skoryguj wpłatę"
+        align="right"
+        trigger={(
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-haspopup="dialog"
+            aria-label={`Skoryguj wpłatę — ${fmtMoney(entry.amountGrosze / 100)}, ${client?.name || 'klient'}`}
+            disabled={paymentMutationLocked || workspace.status !== 'ready'}
+            onClick={begin}
+          >
+            Skoryguj
+          </Button>
+        )}
+      >
+        <form className="payment-entry" onSubmit={save} noValidate>
+          <div>
+            <strong>{client?.name || 'Klient'}</strong>
+            <p>{fmtMoney(entry.amountGrosze / 100)} · {METHOD_LABELS[entry.method]} · {fmtFullDate(warsawDateFromUtc(entry.receivedAt))}</p>
+          </div>
+          {saveError && <p className="form-error" role="alert">{saveError}</p>}
+          <Field label="Powód korekty" error={errors.reason}>
+            <textarea
+              ref={reasonRef}
+              className="input"
+              name="correction-reason"
+              autoComplete="off"
+              maxLength={500}
+              disabled={saving || reconciled}
+              value={form.reason}
+              onChange={(event) => set('reason', event.target.value)}
+            />
+          </Field>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              name="replacement-payment"
+              checked={form.replace}
+              disabled={saving || reconciled}
+              onChange={(event) => set('replace', event.target.checked)}
+            />
+            <span>Dodaj wpłatę zastępczą</span>
+          </label>
+          {form.replace && <>
+            <Field label="Kwota zastępcza" error={errors.amount}>
+              <input
+                ref={amountRef}
+                className="input"
+                type="number"
+                min="0.01"
+                step="0.01"
+                inputMode="decimal"
+                name="replacement-amount"
+                autoComplete="off"
+                disabled={saving || reconciled}
+                value={form.amount}
+                onChange={(event) => set('amount', event.target.value)}
+              />
+            </Field>
+            <Field label="Forma zastępcza" error={errors.method}>
+              <select
+                ref={methodRef}
+                className="select"
+                name="replacement-method"
+                autoComplete="off"
+                disabled={saving || reconciled}
+                value={form.method}
+                onChange={(event) => set('method', event.target.value)}
+              >
+                <option value="">Wybierz</option>
+                {Object.entries(METHOD_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Data zastępcza" error={errors.paidDate || errors.form}>
+              <input
+                ref={dateRef}
+                className="input"
+                type="date"
+                name="replacement-date"
+                autoComplete="off"
+                disabled={saving || reconciled}
+                value={form.paidDate}
+                onChange={(event) => set('paidDate', event.target.value)}
+              />
+            </Field>
+          </>}
+          <div className="payment-entry__actions">
+            <Button size="sm" variant="ghost" disabled={saving || reconciled} onClick={close}>Anuluj</Button>
+            <Button size="sm" type="submit" disabled={saving || reconciled}>
+              {saving ? 'Zapisywanie…' : reconciled ? 'Oczekiwanie na odświeżenie' : 'Zapisz korektę'}
+            </Button>
+          </div>
+        </form>
+      </Popover>
+    </span>
+  )
+}
+
 export function Payments() {
   const { state, dispatch, toast, workspace } = useApp()
+  const canonicalAppointments = useCanonicalAppointments()
   const { locked: paymentMutationLocked } = usePaymentMutationLock()
   const { appMode, capabilities, getViewState, openSessionForm, patchViewState, route } = useShell()
   const refreshWorkspace = useWorkspaceRefresh()
@@ -671,62 +906,97 @@ export function Payments() {
                   const clientIdentity = clientIdentityFor(state.clients, session.clientId)
                   const specialistIdentity = specialistIdentityFor(state.psychologists, session.psychId)
                   const outstanding = outstandingOf(session)
+                  const canonicalEntries = isApp
+                    && Array.isArray(canonicalAppointments[session.id]?.paymentEntries)
+                    ? canonicalAppointments[session.id].paymentEntries
+                    : []
                   return (
-                    <tr
-                      key={session.id}
-                      data-flip-id={session.id}
-                      data-session-id={session.id}
-                      data-payment={session.payment}
-                      data-paid-amount={String(session.paidAmount ?? 0)}
-                      data-method={session.method || ''}
-                      data-paid-date={session.paidDate || ''}
-                      data-outstanding={String(outstanding)}
-                      className={outstanding > 0 ? 'is-due' : ''}
-                    >
-                      <td style={{ fontWeight: 600 }}>{fmtShortDate(session.date)}</td>
-                      <td>
-                        {clientIdentity.name}
-                        {client?.readOnly && <> <Pill tone="ink">Archiwalny</Pill></>}
-                      </td>
-                      <td>
-                        <span className="row" style={{ gap: 8 }}>
-                          <span className="finance-ledger__swatch" style={{ background: specialistIdentity.color }} />
-                          <span className="muted">{specialistIdentity.available
-                            ? specialistIdentity.name.split(' ')[0]
-                            : specialistIdentity.name}</span>
-                        </span>
-                      </td>
-                      <td className="right num-cell">{fmtMoney(session.amount)}</td>
-                      <td className="right num-cell muted">{fmtMoney(collectedOf(session))}</td>
-                      <td className="muted">{METHOD_LABELS[session.method] || '—'}</td>
-                      <td><PaymentPicker session={session} readOnly /></td>
-                      <td className="right">
-                        {isApp ? (
-                          canManagePayments && outstanding > 0 && !session.readOnly && !client?.readOnly ? (
-                            <AppPaymentEntry
+                    <Fragment key={session.id}>
+                      <tr
+                        data-flip-id={session.id}
+                        data-session-id={session.id}
+                        data-payment={session.payment}
+                        data-paid-amount={String(session.paidAmount ?? 0)}
+                        data-method={session.method || ''}
+                        data-paid-date={session.paidDate || ''}
+                        data-outstanding={String(outstanding)}
+                        className={outstanding > 0 ? 'is-due' : ''}
+                      >
+                        <td style={{ fontWeight: 600 }}>{fmtShortDate(session.date)}</td>
+                        <td>
+                          {clientIdentity.name}
+                          {client?.readOnly && <> <Pill tone="ink">Archiwalny</Pill></>}
+                        </td>
+                        <td>
+                          <span className="row" style={{ gap: 8 }}>
+                            <span className="finance-ledger__swatch" style={{ background: specialistIdentity.color }} />
+                            <span className="muted">{specialistIdentity.available
+                              ? specialistIdentity.name.split(' ')[0]
+                              : specialistIdentity.name}</span>
+                          </span>
+                        </td>
+                        <td className="right num-cell">{fmtMoney(session.amount)}</td>
+                        <td className="right num-cell muted">{fmtMoney(collectedOf(session))}</td>
+                        <td className="muted">{METHOD_LABELS[session.method] || '—'}</td>
+                        <td><PaymentPicker session={session} readOnly /></td>
+                        <td className="right">
+                          {isApp ? (
+                            canManagePayments && outstanding > 0 && !session.readOnly && !client?.readOnly ? (
+                              <AppPaymentEntry
+                                session={session}
+                                client={client}
+                                fallbackFocusRef={ledgerTitleRef}
+                                paymentMutationLocked={paymentMutationLocked}
+                                refreshWorkspace={refreshWorkspace}
+                                workspace={workspace}
+                                workspaceRange={workspaceRange}
+                              />
+                            ) : (
+                              <span className="faint">—</span>
+                            )
+                          ) : outstanding > 0 ? (
+                            <PaymentEntry
                               session={session}
                               client={client}
                               fallbackFocusRef={ledgerTitleRef}
-                              paymentMutationLocked={paymentMutationLocked}
-                              refreshWorkspace={refreshWorkspace}
-                              workspace={workspace}
-                              workspaceRange={workspaceRange}
+                              onBook={(patch) => bookPayment(session, patch)}
                             />
                           ) : (
-                            <span className="faint">—</span>
-                          )
-                        ) : outstanding > 0 ? (
-                          <PaymentEntry
-                            session={session}
-                            client={client}
-                            fallbackFocusRef={ledgerTitleRef}
-                            onBook={(patch) => bookPayment(session, patch)}
-                          />
-                        ) : (
-                          <Icon name="check" size={16} style={{ color: 'var(--sage-deep)' }} />
-                        )}
-                      </td>
-                    </tr>
+                            <Icon name="check" size={16} style={{ color: 'var(--sage-deep)' }} />
+                          )}
+                        </td>
+                      </tr>
+                      {isApp && canonicalEntries.length > 0 && (
+                        <tr className="finance-ledger__history">
+                          <td colSpan={8}>
+                            <div role="region" aria-label="Historia wpłat">
+                              <strong>Historia wpłat</strong>
+                              {canonicalEntries.map((entry) => (
+                                <div className="row row--between" key={entry.id}>
+                                  <span className="muted">
+                                    {fmtMoney(entry.amountGrosze / 100)} · {METHOD_LABELS[entry.method] || '—'} · {fmtShortDate(warsawDateFromUtc(entry.receivedAt))}
+                                  </span>
+                                  {entry.correctedAt === null ? (
+                                    canManagePayments && !session.readOnly && !client?.readOnly ? (
+                                      <AppPaymentCorrection
+                                        entry={entry}
+                                        session={session}
+                                        client={client}
+                                        fallbackFocusRef={ledgerTitleRef}
+                                        paymentMutationLocked={paymentMutationLocked}
+                                        refreshWorkspace={refreshWorkspace}
+                                        workspace={workspace}
+                                        workspaceRange={workspaceRange}
+                                      />
+                                    ) : <span className="faint">—</span>
+                                  ) : <Pill tone="ink">Skorygowana</Pill>}
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   )
                 })}
               </tbody>

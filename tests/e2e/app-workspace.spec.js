@@ -129,6 +129,41 @@ const paymentRecordedAppointment = {
   }],
 }
 
+const correctedPaymentAppointment = {
+  ...paymentRecordedAppointment,
+  version: 4,
+  updatedAt: '2026-07-16T12:00:00.000Z',
+  payment: {
+    status: 'partial', collectedGrosze: 10_000, outstandingGrosze: 8_000,
+    latestMethod: 'transfer', latestReceivedAt: '2026-01-05T11:00:00.000Z',
+  },
+  paymentEntries: [
+    {
+      id: 'pay_recorded', amountGrosze: 12_000, method: 'card',
+      receivedAt: '2026-01-04T11:00:00.000Z',
+      correctedAt: '2026-07-16T12:00:00.000Z', replacementEntryId: 'pay_replacement',
+    },
+    {
+      id: 'pay_replacement', amountGrosze: 10_000, method: 'transfer',
+      receivedAt: '2026-01-05T11:00:00.000Z', correctedAt: null, replacementEntryId: null,
+    },
+  ],
+}
+
+const reversedPaymentAppointment = {
+  ...paymentRecordedAppointment,
+  version: 4,
+  updatedAt: '2026-07-16T12:00:00.000Z',
+  payment: {
+    status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18_000,
+    latestMethod: null, latestReceivedAt: null,
+  },
+  paymentEntries: [{
+    ...paymentRecordedAppointment.paymentEntries[0],
+    correctedAt: '2026-07-16T12:00:00.000Z', replacementEntryId: null,
+  }],
+}
+
 const workspaceEnvelope = (from, to, appointment = null) => json(200, {
   data: {
     window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
@@ -495,6 +530,126 @@ test('@owner keeps protected payment input after a command failure', async ({ pa
   await expect(entry.getByLabel('Data wpłaty')).toHaveValue('2026-01-04')
   await expect(entry.getByText('Nie udało się zaksięgować wpłaty.', { exact: true })).toBeVisible()
   expect(workspaceReads).toBe(1)
+})
+
+test('@owner corrects one canonical payment entry and shows reloaded history without Undo', async ({ page }) => {
+  const corrections = []
+  let workspaceReads = 0
+  let appointment = paymentRecordedAppointment
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    workspaceReads += 1
+    const url = new URL(route.request().url())
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'), url.searchParams.get('to'), appointment,
+    ))
+  })
+  await page.route('**/api/v1/payments/pay_recorded/corrections', async (route) => {
+    corrections.push({ method: route.request().method(), body: route.request().postData() })
+    appointment = correctedPaymentAppointment
+    await route.fulfill(json(200, { data: { appointment: correctedPaymentAppointment } }))
+  })
+
+  await page.goto('./#/payments?ym=2026-07')
+  const ledger = page.getByRole('table', { name: 'Lista rozliczeń' })
+  await ledger.getByRole('button', { name: /Skoryguj wpłatę/ }).click()
+  const correction = page.getByRole('dialog', { name: 'Skoryguj wpłatę' })
+  await correction.getByLabel('Powód korekty').fill('  Błędna forma płatności  ')
+  await correction.getByLabel('Dodaj wpłatę zastępczą').check()
+  await correction.getByLabel('Kwota zastępcza').fill('100')
+  await correction.getByLabel('Forma zastępcza').selectOption('transfer')
+  await correction.getByLabel('Data zastępcza').fill('2026-01-05')
+  await correction.getByRole('button', { name: 'Zapisz korektę' }).click()
+
+  await expect(ledger).toContainText('Skorygowana')
+  await expect(ledger).toContainText('100 zł')
+  await expect(page.getByRole('button', { name: 'Cofnij' })).toHaveCount(0)
+  expect(corrections).toEqual([{
+    method: 'POST',
+    body: JSON.stringify({
+      expectedVersion: 3,
+      reason: 'Błędna forma płatności',
+      replacement: {
+        amountGrosze: 10_000,
+        method: 'transfer',
+        receivedAt: '2026-01-05T11:00:00.000Z',
+      },
+    }),
+  }])
+  await expect.poll(() => workspaceReads).toBe(2)
+})
+
+test('@owner keeps protected correction input after a command failure', async ({ page }) => {
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const url = new URL(route.request().url())
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'), url.searchParams.get('to'), paymentRecordedAppointment,
+    ))
+  })
+  await page.route('**/api/v1/payments/pay_recorded/corrections', (route) => (
+    route.fulfill(errorEnvelope(409, 'PAYMENT_CORRECTION_CONFLICT'))
+  ))
+
+  await page.goto('./#/payments?ym=2026-07')
+  await page.getByRole('table', { name: 'Lista rozliczeń' })
+    .getByRole('button', { name: /Skoryguj wpłatę/ }).click()
+  const correction = page.getByRole('dialog', { name: 'Skoryguj wpłatę' })
+  await correction.getByLabel('Powód korekty').fill('Błędna forma płatności')
+  await correction.getByLabel('Dodaj wpłatę zastępczą').check()
+  await correction.getByLabel('Kwota zastępcza').fill('100')
+  await correction.getByLabel('Forma zastępcza').selectOption('transfer')
+  await correction.getByLabel('Data zastępcza').fill('2026-01-05')
+  await correction.getByRole('button', { name: 'Zapisz korektę' }).click()
+
+  await expect(correction).toBeVisible()
+  await expect(correction.getByLabel('Powód korekty')).toHaveValue('Błędna forma płatności')
+  await expect(correction.getByLabel('Dodaj wpłatę zastępczą')).toBeChecked()
+  await expect(correction.getByLabel('Kwota zastępcza')).toHaveValue('100')
+  await expect(correction.getByLabel('Forma zastępcza')).toHaveValue('transfer')
+  await expect(correction.getByLabel('Data zastępcza')).toHaveValue('2026-01-05')
+  await expect(correction.getByText('Nie udało się zapisać korekty.', { exact: true })).toBeVisible()
+})
+
+test('@owner cannot replay an accepted correction after an unrelated canonical load', async ({ page }) => {
+  const corrections = []
+  let workspaceReads = 0
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    workspaceReads += 1
+    const url = new URL(route.request().url())
+    if (workspaceReads === 1) {
+      await route.fulfill(workspaceEnvelope(
+        url.searchParams.get('from'), url.searchParams.get('to'), paymentRecordedAppointment,
+      ))
+      return
+    }
+    if (workspaceReads === 2) {
+      await route.fulfill(errorEnvelope(409, 'VERSION_CONFLICT'))
+      return
+    }
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'), url.searchParams.get('to'), null,
+    ))
+  })
+  await page.route('**/api/v1/payments/pay_recorded/corrections', async (route) => {
+    corrections.push({ method: route.request().method(), body: route.request().postData() })
+    await route.fulfill(json(200, { data: { appointment: reversedPaymentAppointment } }))
+  })
+
+  await page.goto('./#/payments?ym=2026-07')
+  const ledger = page.getByRole('table', { name: 'Lista rozliczeń' })
+  await ledger.getByRole('button', { name: /Skoryguj wpłatę/ }).click()
+  const correction = page.getByRole('dialog', { name: 'Skoryguj wpłatę' })
+  await correction.getByLabel('Powód korekty').fill('Błędna forma płatności')
+  await correction.getByRole('button', { name: 'Zapisz korektę' }).click()
+  await expect.poll(() => workspaceReads).toBe(2)
+
+  await page.goto('./#/calendar?date=2026-06-15&ym=2026-06&mode=cal')
+  await expect.poll(() => workspaceReads).toBe(3)
+  await page.goto('./#/payments?ym=2026-07')
+  await expect(ledger.getByRole('button', { name: /Skoryguj wpłatę/ })).toBeDisabled()
+  expect(corrections).toHaveLength(1)
 })
 
 test('@owner cannot replay an accepted payment after an unrelated canonical load', async ({ page }) => {

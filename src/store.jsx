@@ -27,6 +27,7 @@ const ToastCtx = createContext([])
 const ClientMutationCtx = createContext(Object.freeze({ locked: false }))
 const AppointmentMutationCtx = createContext(Object.freeze({ locked: false }))
 const PaymentMutationCtx = createContext(Object.freeze({ locked: false }))
+const CanonicalAppointmentsCtx = createContext(Object.freeze(Object.create(null)))
 
 let nextId = 10000
 
@@ -375,13 +376,21 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
     () => Object.freeze({ locked: workspaceSnapshot.paymentMutationLocked }),
     [workspaceSnapshot.paymentMutationLocked]
   )
+  const canonicalAppointments = useMemo(
+    () => protectedRecords
+      ? workspaceSnapshot.loadedState.appointmentsById
+      : Object.freeze(Object.create(null)),
+    [protectedRecords, workspaceSnapshot.loadedState.appointmentsById]
+  )
   return (
     <ClientMutationCtx.Provider value={clientMutationValue}>
       <AppointmentMutationCtx.Provider value={appointmentMutationValue}>
         <PaymentMutationCtx.Provider value={paymentMutationValue}>
-          <AppCtx.Provider value={value}>
-            <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
-          </AppCtx.Provider>
+          <CanonicalAppointmentsCtx.Provider value={canonicalAppointments}>
+            <AppCtx.Provider value={value}>
+              <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
+            </AppCtx.Provider>
+          </CanonicalAppointmentsCtx.Provider>
         </PaymentMutationCtx.Provider>
       </AppointmentMutationCtx.Provider>
     </ClientMutationCtx.Provider>
@@ -393,6 +402,7 @@ export const useToasts = () => useContext(ToastCtx)
 export const useClientMutationLock = () => useContext(ClientMutationCtx)
 export const useAppointmentMutationLock = () => useContext(AppointmentMutationCtx)
 export const usePaymentMutationLock = () => useContext(PaymentMutationCtx)
+export const useCanonicalAppointments = () => useContext(CanonicalAppointmentsCtx)
 
 export const useWorkspaceWindow = (range, enabled = true) => {
   const { workspace } = useApp()
