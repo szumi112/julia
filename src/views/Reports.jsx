@@ -23,6 +23,13 @@ import { monthWorkspaceRange } from '../workspace-view.js'
 const fmtHours = (value) => `${new Intl.NumberFormat('pl-PL', { maximumFractionDigits: 1 }).format(value)} h`
 const fmtRoundedNumber = (value) => fmtNumber(Math.round(value))
 const share = (part, whole) => (whole > 0 ? Math.round((part / whole) * 100) : 0)
+const validMonthKey = (value) => {
+  const match = typeof value === 'string' ? /^(\d{4})-(\d{2})$/.exec(value) : null
+  if (!match) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  return year >= 1 && month >= 1 && month <= 12
+}
 
 // Both money bars split the same way, so they get the same two colours and the
 // same legend wording everywhere on the page.
@@ -51,9 +58,9 @@ export function Reports({ params = {} }) {
     const saved = getViewState('reports', { ym: currentYm, specialist: null })
     return {
       // URL params win over the registry — a shared link must reproduce its scope
-      ym: /^\d{4}-\d{2}$/.test(params.ym || '') && params.ym <= currentYm
+      ym: validMonthKey(params.ym) && params.ym <= currentYm
         ? params.ym
-        : typeof saved.ym === 'string' && /^\d{4}-\d{2}$/.test(saved.ym) && saved.ym <= currentYm
+        : validMonthKey(saved.ym) && saved.ym <= currentYm
           ? saved.ym
           : currentYm,
       specialist: state.psychologists.some((psychologist) => psychologist.id === params.specialist)

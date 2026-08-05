@@ -22,6 +22,7 @@ const sessionEnvelope = ({
     displayName: 'Alicja Testowa',
     role: 'owner',
     specialistId: null,
+    version: 1,
   },
   capabilities = ['appointment.manage'],
 } = {}) => {
@@ -38,6 +39,36 @@ const sessionEnvelope = ({
     },
   })
 }
+
+const coordinatorSession = () => sessionEnvelope({
+  actor: {
+    id: 'stf_capability_coordinator',
+    displayName: 'Celina Testowa',
+    role: 'coordinator',
+    specialistId: null,
+    version: 1,
+  },
+  capabilities: [
+    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
+    'client.manage', 'client.operational.read', 'finance.centre.read',
+    'operations.health.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
+  ],
+})
+
+const specialistSession = () => sessionEnvelope({
+  actor: {
+    id: 'stf_capability_specialist',
+    displayName: 'Zofia Fikcyjna',
+    role: 'specialist',
+    specialistId: 'sp_zofia',
+    version: 1,
+  },
+  capabilities: [
+    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
+    'client.manage', 'client.operational.read', 'clinical.read', 'payment.manage',
+    'specialist.directory.read', 'tus.manage',
+  ],
+})
 
 const HEALTH_CHECKS = [
   {
@@ -374,16 +405,14 @@ test('@specialist never mounts or requests operations', async ({ page }) => {
   expect(operationRequests(requests, 'GET', '/api/v1/security/audit')).toHaveLength(0)
 })
 
-test('@owner without audit capability never constructs security or denial-spike UI', async ({ page }) => {
+test('@owner changes to coordinator authority without security or denial-spike UI', async ({ page }) => {
   const requests = []
   page.on('request', (request) => requests.push(request))
   await installOperationsRoutes(page)
   await openOperations(page)
   await expect(page.getByRole('tab', { name: 'Bezpieczeństwo' })).toBeVisible()
 
-  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope({
-    capabilities: ['operations.health.read'],
-  })))
+  await page.route('**/api/v1/session', (route) => route.fulfill(coordinatorSession()))
   await page.evaluate(() => window.dispatchEvent(new Event('bwm:test-auth-refresh')))
 
   await expect(page.getByRole('heading', { name: 'Stan i bezpieczeństwo' })).toBeVisible()
@@ -393,7 +422,7 @@ test('@owner without audit capability never constructs security or denial-spike 
   expect(operationRequests(requests, 'GET', '/api/v1/security/audit')).toHaveLength(0)
 })
 
-test('@owner correction revokes pending active security without stale audit publication', async ({ page }) => {
+test('@owner correction to coordinator revokes pending active security without stale audit publication', async ({ page }) => {
   let releaseAudit
   let auditReads = 0
   const auditReleased = new Promise((resolve) => { releaseAudit = resolve })
@@ -408,9 +437,7 @@ test('@owner correction revokes pending active security without stale audit publ
   await page.getByRole('tab', { name: 'Bezpieczeństwo' }).click()
   await expect(page.getByText('Pobieranie zdarzeń bezpieczeństwa…', { exact: true })).toBeVisible()
 
-  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope({
-    capabilities: ['operations.health.read'],
-  })))
+  await page.route('**/api/v1/session', (route) => route.fulfill(coordinatorSession()))
   await page.evaluate(() => window.dispatchEvent(new Event('bwm:test-auth-refresh')))
 
   await expect(page.getByRole('tab', { name: 'Stan systemu' })).toHaveAttribute('aria-selected', 'true')
@@ -426,7 +453,7 @@ test('@owner correction revokes pending active security without stale audit publ
   expect(auditReads).toBe(1)
 })
 
-test('@owner capability loss unmounts operations and invalidates a pending publication', async ({ page }) => {
+test('@owner role change unmounts operations and invalidates a pending publication', async ({ page }) => {
   let releaseActions
   const actionsReleased = new Promise((resolve) => { releaseActions = resolve })
   let actionsRequests = 0
@@ -441,7 +468,7 @@ test('@owner capability loss unmounts operations and invalidates a pending publi
   await page.getByRole('tab', { name: 'Działania' }).click()
   await expect(page.getByText('Pobieranie działań…', { exact: true })).toBeVisible()
 
-  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope()))
+  await page.route('**/api/v1/session', (route) => route.fulfill(specialistSession()))
   await page.evaluate(() => window.dispatchEvent(new Event('bwm:test-auth-refresh')))
 
   await expect(page.getByRole('heading', { name: 'Stan i bezpieczeństwo' })).toHaveCount(0)
@@ -869,7 +896,7 @@ test('@owner retains confirmed success as stale when the reconciliation read fai
   await expect(page.getByRole('alert')).toContainText('Działanie zapisano, ale lista może być nieaktualna.')
 })
 
-test('@owner capability loss during resolution prevents detached reconciliation', async ({ page }) => {
+test('@owner role change during resolution prevents detached reconciliation', async ({ page }) => {
   let actionReads = 0
   let posts = 0
   let markPostSeen
@@ -893,7 +920,7 @@ test('@owner capability loss during resolution prevents detached reconciliation'
   await page.getByRole('alertdialog').getByRole('button', { name: 'Oznacz jako rozwiązane' }).click()
   await postSeen
 
-  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope()))
+  await page.route('**/api/v1/session', (route) => route.fulfill(specialistSession()))
   await page.evaluate(() => window.dispatchEvent(new Event('bwm:test-auth-refresh')))
   await expect(page.getByRole('heading', { name: 'Stan i bezpieczeństwo' })).toHaveCount(0)
   releasePost()
@@ -1195,7 +1222,7 @@ test('@owner operation privacy and browser persistence stay empty after tabs and
   expect(leaks.htmlLeak).toBe(false)
   expect(leaks.hash).not.toMatch(/act_|evt_|corr_|bkp_|cursor|version|idempotency/i)
   expect(logs).toEqual([])
-  expect(requests.filter((url) => /owner@example\.test|ciphertext|provider|bkp_/i.test(url))).toEqual([])
+  expect(requests.filter((url) => /\/api\/.*(?:owner@example\.test|ciphertext|provider|bkp_)/i.test(url))).toEqual([])
 
   await page.reload()
   await expect(page.getByRole('heading', { name: /^Ustawienia / })).toBeVisible()

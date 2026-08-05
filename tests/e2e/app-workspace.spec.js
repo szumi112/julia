@@ -192,6 +192,7 @@ test('@owner gates deferred surfaces and waits for a complete monthly report', a
   await expect(page.getByRole('link', { name: 'Zajęcia TUS', exact: true })).toHaveCount(0)
 
   await page.goto('./#/team')
+  await expect(page.getByRole('status', { name: 'Stan zespołu' })).toContainText('Wczytywanie zespołu')
   await expect(page.getByRole('heading', { level: 1, name: /Zespół/ })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Otwórz profil — Anna Nowak' })).toHaveCount(0)
 
@@ -208,6 +209,29 @@ test('@owner gates deferred surfaces and waits for a complete monthly report', a
   await expect(page.getByRole('heading', { level: 1, name: /Raport miesięczny/ })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Zajęcia grupowe TUS' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Eksport (demo)' })).toHaveCount(0)
+})
+
+test('@owner falls back from invalid civil report months without rendering errors', async ({ page }) => {
+  const pageErrors = []
+  const windows = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const url = new URL(route.request().url())
+    const from = url.searchParams.get('from')
+    const to = url.searchParams.get('to')
+    windows.push({ from, to })
+    await route.fulfill(workspaceEnvelope(from, to, completedAppointment))
+  })
+
+  for (const ym of ['2025-00', '2025-13']) {
+    await page.goto(`./#/reports?ym=${ym}`)
+    await expect(page.getByRole('heading', { level: 1, name: /Raport miesięczny/ })).toBeVisible()
+    await expect(page.locator('.month-nav__label')).toHaveText('lipiec 2026')
+  }
+
+  expect(pageErrors).toEqual([])
+  expect(windows).toEqual([{ from: '2026-07-01', to: '2026-07-31' }])
 })
 
 test('@owner renders only complete canonical workspace windows as read-only history', async ({ page }) => {

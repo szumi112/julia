@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useApp, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
+import { useApp, useWorkspaceWindow, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
 import { useMinuteNow } from '../clock.js'
@@ -12,6 +12,7 @@ import {
 } from '../format.js'
 import { sessionConflicts, specialistWeekLoad } from '../workspace.js'
 import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
+import { rollingWorkspaceRange } from '../workspace-view.js'
 
 const TEAM_FILTERS = [
   { value: 'all', label: 'Cały zespół' },
@@ -162,6 +163,8 @@ export function Team() {
   const ref = useReveal()
   const now = useMinuteNow()
   const today = toISODate(now)
+  const workspaceRange = useMemo(() => rollingWorkspaceRange(today), [today])
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const [filter, setFilter] = useState(() => {
     const saved = getViewState('team', { filter: 'all' })
     return TEAM_FILTERS.some((option) => option.value === saved.filter) ? saved.filter : 'all'
@@ -203,6 +206,20 @@ export function Team() {
   useEffect(() => {
     patchViewState('team', { filter })
   }, [filter, patchViewState])
+
+  if (isApp && workspaceState !== 'ready') {
+    return (
+      <section role="status" aria-label="Stan zespołu">
+        <EmptyState
+          icon="team"
+          title={workspaceState === 'loading' ? 'Wczytywanie zespołu…' : 'Zespół jest teraz niedostępny'}
+          hint={workspaceState === 'loading'
+            ? 'Pobieramy uprawniony zakres aktywnych specjalistek.'
+            : 'Dane pozostają tylko do odczytu. Spróbuj ponownie po odświeżeniu strony.'}
+        />
+      </section>
+    )
+  }
 
   if (isApp) return <AppTeamDirectory psychologists={psychologists} />
 

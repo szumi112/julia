@@ -22,6 +22,7 @@ const sessionEnvelope = ({
     displayName: 'Alicja Testowa',
     role: 'owner',
     specialistId: null,
+    version: 1,
   },
   capabilities = ['appointment.manage'],
 } = {}) => {
@@ -593,15 +594,16 @@ test('@owner staff deactivation is a native modal that owns the shell shortcuts'
   await expectStaffModalOwnsShell(page, confirm)
 })
 
-test('@owner without staff capability never mounts or requests the directory', async ({ page }) => {
+test('@owner rejects a malformed capability grant before requesting the directory', async ({ page }) => {
   let staffRequests = 0
   page.on('request', (request) => {
     if (new URL(request.url()).pathname.startsWith('/api/v1/staff')) staffRequests += 1
   })
   await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope()))
 
-  await openSettings(page)
+  await page.goto('./#/settings')
 
+  await expect(page.getByRole('heading', { name: 'Nie udało się połączyć z panelem' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Zaproś osobę' })).toHaveCount(0)
   for (const email of [
@@ -614,7 +616,7 @@ test('@owner without staff capability never mounts or requests the directory', a
   expect(staffRequests).toBe(0)
 })
 
-test('@owner capability loss clears the directory without another staff request', async ({ page }) => {
+test('@owner role change removes the directory without another staff request', async ({ page }) => {
   let staffRequests = 0
   page.on('request', (request) => {
     if (new URL(request.url()).pathname === '/api/v1/staff') staffRequests += 1
@@ -622,7 +624,20 @@ test('@owner capability loss clears the directory without another staff request'
   await openSettings(page)
   await expect(page.getByText('coordinator@example.test', { exact: true })).toBeVisible()
   const requestsBeforeRefresh = staffRequests
-  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope()))
+  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope({
+    actor: {
+      id: 'stf_capability_coordinator',
+      displayName: 'Celina Testowa',
+      role: 'coordinator',
+      specialistId: null,
+      version: 1,
+    },
+    capabilities: [
+      'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
+      'client.manage', 'client.operational.read', 'finance.centre.read',
+      'operations.health.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
+    ],
+  })))
 
   await page.evaluate(() => {
     window.dispatchEvent(new Event('bwm:test-auth-refresh'))
