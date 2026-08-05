@@ -223,15 +223,6 @@ test('@owner retries only after the explicit command', async ({ page }) => {
 test('@owner refreshes in place and replaces subscribed session authority', async ({ page }) => {
   await page.goto('.')
   await expectAuthenticated(page, 'owner')
-  await page.getByRole('navigation', { name: 'Nawigacja główna' })
-    .getByRole('link', { name: 'Ustawienia' })
-    .click()
-  const reduceMotion = page.getByRole('switch', { name: 'Ogranicz animacje' })
-  await expect(reduceMotion).toHaveAttribute('aria-checked', 'false')
-  await reduceMotion.click()
-  await expect(reduceMotion).toHaveAttribute('aria-checked', 'true')
-  await expect(page.getByText('Ogranicz animacje — włączone', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Cofnij' })).toBeVisible()
 
   let releaseRefresh
   let markRefreshSeen
@@ -249,8 +240,13 @@ test('@owner refreshes in place and replaces subscribed session authority', asyn
           displayName: 'Renata Odświeżona',
           role: 'specialist',
           specialistId: 'sp_refreshed_specialist',
+          version: 1,
         },
-        capabilities: ['appointment.manage', 'payment.manage'],
+        capabilities: [
+          'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
+          'client.manage', 'client.operational.read', 'clinical.read', 'payment.manage',
+          'specialist.directory.read', 'tus.manage',
+        ],
         csrfExpiresAt,
         csrfToken: `v1.${csrfExpiresUnix}.${'A'.repeat(22)}.${'B'.repeat(43)}`,
         dataMode: 'fictional',
@@ -265,17 +261,11 @@ test('@owner refreshes in place and replaces subscribed session authority', asyn
   await refreshSeen
   await expect(page.locator('.shell')).toHaveAttribute('aria-busy', 'true')
   await expect(page.getByText('Alicja Testowa', { exact: true }).first()).toBeVisible()
-  await expect(reduceMotion).toHaveAttribute('aria-checked', 'true')
-  await expect(page.getByRole('button', { name: 'Cofnij' })).toBeVisible()
 
   releaseRefresh()
   await expect(page.getByText('Renata Odświeżona', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('Specjalista', { exact: true }).first()).toBeVisible()
   await expect(page.locator('.shell')).toHaveAttribute('aria-busy', 'false')
-  await expect(page.getByRole('switch', { name: 'Ogranicz animacje' }))
-    .toHaveAttribute('aria-checked', 'false')
-  await expect(page.getByText('Ogranicz animacje — włączone', { exact: true })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Cofnij' })).toHaveCount(0)
   const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
   await expect(navigation.getByRole('link', { name: 'Finanse', exact: true })).toBeVisible()
   await expect(navigation.getByRole('link', { name: 'Raporty', exact: true })).toHaveCount(0)
@@ -332,8 +322,14 @@ test('@owner constrains a max-length authenticated identity at shell breakpoints
         displayName,
         role: 'owner',
         specialistId: null,
+        version: 1,
       },
-      capabilities: ['appointment.manage', 'staff.manage'],
+      capabilities: [
+        'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct',
+        'chat.general', 'client.manage', 'client.operational.read', 'clinical.read',
+        'finance.centre.read', 'operations.health.read', 'payment.manage',
+        'security.audit.read', 'specialist.directory.read', 'staff.manage', 'tus.manage',
+      ],
       csrfExpiresAt,
       csrfToken: `v1.${csrfExpiresUnix}.${'A'.repeat(22)}.${'B'.repeat(43)}`,
       dataMode: 'fictional',
@@ -1089,7 +1085,7 @@ test('@coordinator never requests or renders staff access data', async ({ page }
   })
   await page.goto('./#/settings')
   await expectAuthenticated(page, 'coordinator')
-  await expect(page.getByRole('heading', { name: 'Kalendarz i integracje' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Twoje konto' })).toBeVisible()
 
   await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Zaproś osobę' })).toHaveCount(0)
@@ -1153,7 +1149,7 @@ test('@specialist never requests or renders staff access data', async ({ page })
   })
   await page.goto('./#/settings')
   await expectAuthenticated(page, 'specialist')
-  await expect(page.getByRole('heading', { name: 'Kalendarz i integracje' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Twoje konto' })).toBeVisible()
 
   await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Zaproś osobę' })).toHaveCount(0)

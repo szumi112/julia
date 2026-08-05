@@ -127,6 +127,8 @@ function BoardComposer() {
 // Full board — slide-over with the composer and complete history.
 export function BoardDrawer({ onClose }) {
   const { state } = useApp()
+  const { appMode } = useShell()
+  if (appMode === 'app') return null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const { close } = useDrawerFX(drawerRef, backRef, onClose)

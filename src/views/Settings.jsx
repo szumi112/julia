@@ -85,14 +85,16 @@ export function Settings({ params = {} }) {
   const canManageStaff = isApp && capabilities.includes('staff.manage')
   const canReadOperations = isApp && capabilities.includes('operations.health.read')
   const availableSections = useMemo(() => {
-    const sections = isOwner ? SECTIONS : PERSONAL_SECTIONS
+    const sections = isApp
+      ? SECTIONS.filter((section) => section.id === 'account')
+      : isOwner ? SECTIONS : PERSONAL_SECTIONS
     return [
       ...sections,
       ...(canManageStaff ? [STAFF_SECTION] : []),
       ...(canReadOperations ? [OPERATIONS_SECTION] : []),
     ]
-  }, [canManageStaff, canReadOperations, isOwner])
-  const defaultSection = isOwner ? 'account' : 'calendar'
+  }, [canManageStaff, canReadOperations, isApp, isOwner])
+  const defaultSection = isApp || isOwner ? 'account' : 'calendar'
   const psychologists = useMemo(
     () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
     [state.psychologists]
@@ -257,12 +259,14 @@ export function Settings({ params = {} }) {
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">{isOwner ? 'Konfiguracja' : 'Twoje preferencje'}</div>
+          <div className="eyebrow">{isApp ? 'Konto' : isOwner ? 'Konfiguracja' : 'Twoje preferencje'}</div>
           <h1 className="display view-head__title">
-            Ustawienia <em>{isOwner ? 'centrum' : 'osobiste'}</em>
+            Ustawienia <em>{isApp ? 'konta' : isOwner ? 'centrum' : 'osobiste'}</em>
           </h1>
           <p className="view-head__sub">
-            {isOwner
+            {isApp
+              ? 'Tożsamość i dostęp do panelu są zarządzane przez chroniony dostęp.'
+              : isOwner
               ? 'Konto, dane centrum, integracje oraz stawki i limity zespołu.'
               : `Kalendarz, integracje i preferencje dla: ${role.name} · ${role.label}.`}
           </p>
@@ -303,7 +307,7 @@ export function Settings({ params = {} }) {
         )}
 
         <div className="settings-sections">
-          {isOwner && (
+          {(isApp || isOwner) && (
             <>
               <section
                 className="settings-section"
@@ -363,7 +367,7 @@ export function Settings({ params = {} }) {
             )}
               </section>
 
-              <section
+              {!isApp && <section
                 className="settings-section"
                 ref={(element) => { sectionRefs.current.center = element }}
                 aria-labelledby="settings-center-title"
@@ -434,11 +438,11 @@ export function Settings({ params = {} }) {
                 label="Zapisz dane centrum"
               />
             </form>
-              </section>
+              </section>}
             </>
           )}
 
-          <section
+          {!isApp && <section
             className="settings-section"
             ref={(element) => { sectionRefs.current.calendar = element }}
             aria-labelledby="settings-calendar-title"
@@ -499,9 +503,9 @@ export function Settings({ params = {} }) {
                 </Button>
               </div>
             </div>
-          </section>
+          </section>}
 
-          {isOwner && (
+          {!isApp && isOwner && (
             <section
               className="settings-section"
               ref={(element) => { sectionRefs.current.team = element }}

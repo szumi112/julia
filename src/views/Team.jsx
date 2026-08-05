@@ -19,6 +19,33 @@ const TEAM_FILTERS = [
   { value: 'full', label: 'Pełne obłożenie' },
 ]
 
+function AppTeamDirectory({ psychologists }) {
+  return (
+    <div>
+      <div className="view-head">
+        <div>
+          <div className="eyebrow">Katalog specjalistek</div>
+          <h1 className="display view-head__title">Zespół <em>centrum</em></h1>
+          <p className="view-head__sub">Lista aktywnych specjalistek jest dostępna tylko do odczytu.</p>
+        </div>
+      </div>
+      <div className="grid-2 team-grid">
+        {psychologists.map((psychologist) => (
+          <article className="card team-card" key={psychologist.id} data-psych-id={psychologist.id}>
+            <div className="team-card__profile">
+              <Avatar name={psychologist.name} color={psychologist.color} size={52} />
+              <div className="team-card__identity">
+                <h2 className="team-card__name">{psychologist.title} {psychologist.name}</h2>
+                <span className="team-card__spec">Dostępna do planowania wizyt</span>
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
   const titleId = `team-specialist-title-${psychologist.id}`
   const todaySessions = sessions
@@ -176,6 +203,8 @@ export function Team() {
   useEffect(() => {
     patchViewState('team', { filter })
   }, [filter, patchViewState])
+
+  if (isApp) return <AppTeamDirectory psychologists={psychologists} />
 
   return (
     <div ref={ref}>

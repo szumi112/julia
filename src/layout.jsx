@@ -47,14 +47,15 @@ const DEMO_ROLE_NAV = {
   therapist: ['dashboard', 'calendar', 'clients', 'tus', 'settings'],
 }
 const APP_ROLE_NAV = {
-  owner: DEMO_ROLE_NAV.owner,
-  coordinator: ['dashboard', 'calendar', 'clients', 'tus', 'payments', 'reports', 'settings'],
-  therapist: ['dashboard', 'calendar', 'clients', 'tus', 'payments', 'settings'],
+  owner: ['dashboard', 'calendar', 'clients', 'team', 'payments', 'reports', 'settings'],
+  coordinator: ['dashboard', 'calendar', 'clients', 'payments', 'reports', 'settings'],
+  therapist: ['dashboard', 'calendar', 'clients', 'payments', 'settings'],
 }
 const EMPTY_CAPABILITIES = Object.freeze([])
 const canAccessInMode = (routeName, role, appMode) => {
+  if (appMode === 'app' && ['tus', 'tusGroup', 'psych'].includes(routeName)) return false
   const matrix = appMode === 'app' ? APP_ROLE_NAV : DEMO_ROLE_NAV
-  return Boolean(matrix[role.id]?.includes(routeName))
+  return Boolean(matrix[role.id]?.includes(ACTIVE_OF[routeName] || routeName))
 }
 
 const routeTitle = (routeName) => {
@@ -667,7 +668,7 @@ export function Shell({
   const [route, setRoute] = useState(() => {
     const requested = routeFromHash(window.location.hash)
     if (!requested || !VIEWS[requested.name]
-      || !canAccessInMode(ACTIVE_OF[requested.name] || requested.name, role, appMode)) {
+      || !canAccessInMode(requested.name, role, appMode)) {
       return { name: 'dashboard' }
     }
     return requested
@@ -733,7 +734,7 @@ export function Shell({
       const requested = routeFromHash(window.location.hash)
       const accessible = requested
         && VIEWS[requested.name]
-        && canAccessInMode(ACTIVE_OF[requested.name] || requested.name, currentRole, appMode)
+        && canAccessInMode(requested.name, currentRole, appMode)
       const nextRoute = accessible ? requested : { name: 'dashboard' }
       if (
         currentRoute.name === nextRoute.name
@@ -844,7 +845,7 @@ export function Shell({
   const navigate = useCallback((name, params) => {
     const currentRole = roleRef.current
     const currentRoute = routeRef.current
-    if (!canAccessInMode(ACTIVE_OF[name] || name, currentRole, appMode)) return
+    if (!canAccessInMode(name, currentRole, appMode)) return
     if (currentRoute.name === name && JSON.stringify(currentRoute.params) === JSON.stringify(params)) return
     if (leaveBlocked()) {
       setPendingLeave(() => () => requestLeave(() => navigate(name, params)))
@@ -921,10 +922,26 @@ export function Shell({
     setDrawer({ kind: 'psych', opts })
     openOverlay('drawer')
   }, [isApp, openOverlay])
-  const openTusGroupForm = useCallback((opts = {}) => { setDrawer({ kind: 'tusGroup', opts }); openOverlay('drawer') }, [openOverlay])
-  const openTusKidForm = useCallback((opts = {}) => { setDrawer({ kind: 'tusKid', opts }); openOverlay('drawer') }, [openOverlay])
-  const openTusClassForm = useCallback((opts = {}) => { setDrawer({ kind: 'tusClass', opts }); openOverlay('drawer') }, [openOverlay])
-  const openTeamBoard = useCallback(() => { setDrawer({ kind: 'board' }); openOverlay('drawer') }, [openOverlay])
+  const openTusGroupForm = useCallback((opts = {}) => {
+    if (isApp) return
+    setDrawer({ kind: 'tusGroup', opts })
+    openOverlay('drawer')
+  }, [isApp, openOverlay])
+  const openTusKidForm = useCallback((opts = {}) => {
+    if (isApp) return
+    setDrawer({ kind: 'tusKid', opts })
+    openOverlay('drawer')
+  }, [isApp, openOverlay])
+  const openTusClassForm = useCallback((opts = {}) => {
+    if (isApp) return
+    setDrawer({ kind: 'tusClass', opts })
+    openOverlay('drawer')
+  }, [isApp, openOverlay])
+  const openTeamBoard = useCallback(() => {
+    if (isApp) return
+    setDrawer({ kind: 'board' })
+    openOverlay('drawer')
+  }, [isApp, openOverlay])
   const closeDrawer = useCallback(() => {
     closeOverlay('drawer')
     setDrawer(null)
@@ -1055,10 +1072,10 @@ export function Shell({
       {overlay === 'drawer' && drawer?.kind === 'session' && <SessionDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'client' && <ClientDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'psych' && <PsychDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {overlay === 'drawer' && drawer?.kind === 'tusGroup' && <TusGroupDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {overlay === 'drawer' && drawer?.kind === 'tusKid' && <TusKidDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {overlay === 'drawer' && drawer?.kind === 'tusClass' && <TusClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
-      {overlay === 'drawer' && drawer?.kind === 'board' && <BoardDrawer onClose={closeDrawer} />}
+      {!isApp && overlay === 'drawer' && drawer?.kind === 'tusGroup' && <TusGroupDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {!isApp && overlay === 'drawer' && drawer?.kind === 'tusKid' && <TusKidDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {!isApp && overlay === 'drawer' && drawer?.kind === 'tusClass' && <TusClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {!isApp && overlay === 'drawer' && drawer?.kind === 'board' && <BoardDrawer onClose={closeDrawer} />}
       {overlay === 'palette' && <CommandPalette onClose={() => closeOverlay('palette')} />}
       {pendingLeave && (
         <LeaveConfirmDialog

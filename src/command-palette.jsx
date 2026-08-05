@@ -50,7 +50,7 @@ export function CommandPalette({ onClose }) {
         })
       )
     state.psychologists
-      .filter((p) => canAccess('team', role) && (!q || norm(p.name + ' ' + p.spec).includes(q)))
+      .filter((p) => canAccess('psych', role) && (!q || norm(p.name + ' ' + p.spec).includes(q)))
       .slice(0, q ? 5 : 3)
       .forEach((p) =>
         out.push({

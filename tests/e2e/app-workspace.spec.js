@@ -175,6 +175,41 @@ const workspaceEnvelope = (from, to, appointment = null) => json(200, {
 
 const containsHistory = (from, to) => from <= '2026-07-15' && to >= '2026-07-15'
 
+test('@owner gates deferred surfaces and waits for a complete monthly report', async ({ page }) => {
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const url = new URL(route.request().url())
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    await route.fulfill(workspaceEnvelope(
+      url.searchParams.get('from'),
+      url.searchParams.get('to'),
+      completedAppointment,
+    ))
+  })
+
+  await page.goto('./#/tus')
+  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
+  await expect(page.getByRole('link', { name: 'Zajęcia TUS', exact: true })).toHaveCount(0)
+
+  await page.goto('./#/team')
+  await expect(page.getByRole('heading', { level: 1, name: /Zespół/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Otwórz profil — Anna Nowak' })).toHaveCount(0)
+
+  await page.goto('./#/psych?id=sp_anna')
+  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
+
+  await page.goto('./#/settings')
+  await expect(page.getByText('Google Calendar', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('form', { name: 'Zespół i stawki' })).toHaveCount(0)
+  await expect(page.getByRole('form', { name: 'Dane centrum' })).toHaveCount(0)
+
+  await page.goto('./#/reports?ym=2026-07')
+  await expect(page.getByRole('status', { name: 'Stan raportu' })).toContainText('Wczytywanie raportu')
+  await expect(page.getByRole('heading', { level: 1, name: /Raport miesięczny/ })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Zajęcia grupowe TUS' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Eksport (demo)' })).toHaveCount(0)
+})
+
 test('@owner renders only complete canonical workspace windows as read-only history', async ({ page }) => {
   const pageErrors = []
   let workspaceReads = 0
@@ -229,10 +264,8 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await expect(page.getByRole('main').getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(0)
 
   await page.goto('./#/psych?id=sp_anna')
-  await expect(page.getByRole('heading', { level: 1, name: 'Anna Nowak' })).toBeVisible()
-  await expect(page.getByRole('main').getByRole('button', { name: 'Edytuj profil' })).toHaveCount(0)
-  await expect(page.getByRole('main').getByRole('button', { name: 'Nowa sesja' })).toHaveCount(0)
-  await expect(page.getByRole('main').locator('button.agenda__row')).toHaveCount(0)
+  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
+  await expect(page.getByRole('heading', { level: 1, name: 'Anna Nowak' })).toHaveCount(0)
 
   await page.setViewportSize({ width: 390, height: 844 })
   const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
