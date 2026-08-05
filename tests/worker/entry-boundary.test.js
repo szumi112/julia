@@ -38,36 +38,7 @@ const CORE_ACTORS = Object.freeze([
 const CLIENT_BODY = Object.freeze({
   name: 'Fikcyjna granica', age: 12, status: 'active', specialistId: 'sp_boundary',
 })
-const CORE_CASES = Object.freeze([
-  Object.freeze({ id: 'workspace', method: 'GET', path: '/api/v1/workspace?from=2027-01-01&to=2027-01-01' }),
-  Object.freeze({ id: 'clients.create', path: '/api/v1/clients', body: CLIENT_BODY }),
-  Object.freeze({ id: 'clients.edit', path: '/api/v1/clients/cl_guessed/edits', body: {
-    expectedVersion: 1, ...CLIENT_BODY,
-  } }),
-  Object.freeze({ id: 'clients.archive', path: '/api/v1/clients/cl_guessed/archive', body: {
-    expectedVersion: 1,
-  } }),
-  Object.freeze({ id: 'appointments.create', path: '/api/v1/appointments', body: {
-    clientId: 'cl_guessed', specialistId: 'sp_boundary', serviceId: 'zajecia',
-    date: '2027-01-01', time: '10:00', durationMinutes: 50,
-    expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
-  } }),
-  Object.freeze({ id: 'appointments.edit', path: '/api/v1/appointments/apt_guessed/edits', body: {
-    expectedVersion: 1, specialistId: 'sp_boundary', serviceId: 'zajecia',
-    date: '2027-01-01', time: '10:00', durationMinutes: 50,
-    expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
-  } }),
-  Object.freeze({ id: 'appointments.cancel', path: '/api/v1/appointments/apt_guessed/cancellation', body: {
-    expectedVersion: 1,
-  } }),
-  Object.freeze({ id: 'appointments.payment', path: '/api/v1/appointments/apt_guessed/payments', body: {
-    expectedVersion: 1, amountGrosze: 18_000, method: 'card',
-    receivedAt: '2027-01-01T09:00:00.000Z',
-  } }),
-  Object.freeze({ id: 'payments.correct', path: '/api/v1/payments/pay_guessed/corrections', body: {
-    expectedVersion: 1, reason: 'Fikcyjna korekta', replacement: null,
-  } }),
-])
+const CORE_CLIENT_CREATE = Object.freeze({ path: '/api/v1/clients', body: CLIENT_BODY })
 
 const coreRequest = (entry, body = entry.body, headers = {}) => new Request(
   `https://worker.example.test${entry.path}`,
@@ -297,35 +268,6 @@ describe('Worker entry boundary', () => {
 })
 
 describe('core Worker route boundary', () => {
-  it('collapses every role x endpoint guessed-ID attempt to the same opaque result', async () => {
-    const called = []
-
-    for (const actor of CORE_ACTORS) {
-      const route = coreApp({ resolveActor: async () => actor })
-      for (const entry of CORE_CASES) {
-        const response = await route.app.request(coreRequest(entry))
-        expect(response.status).toBe(404)
-        expect(await errorCode(response)).toBe('NOT_FOUND')
-      }
-      called.push(...route.called)
-    }
-
-    expect(called).toHaveLength(CORE_ACTORS.length * CORE_CASES.length)
-    expect(called.map(({ endpoint }) => endpoint)).toEqual([
-      ...CORE_ACTORS.flatMap(() => CORE_CASES.map(({ id }) => id)),
-    ])
-    expect(called.map(({ role }) => role)).toEqual([
-      ...CORE_ACTORS.flatMap(({ role }) => CORE_CASES.map(() => role)),
-    ])
-    expect(called.map(({ target }) => target)).toEqual([
-      ...CORE_ACTORS.flatMap(() => CORE_CASES.map(({ id }) => (
-        id === 'clients.edit' || id === 'clients.archive' ? 'cl_guessed'
-          : id.startsWith('appointments.') && id !== 'appointments.create' ? 'apt_guessed'
-            : id === 'payments.correct' ? 'pay_guessed' : null
-      ))),
-    ])
-  })
-
   it('rejects unknown, duplicate, and malformed JSON before a core command service runs', async () => {
     const { app, called } = coreApp()
     const cases = [
@@ -335,7 +277,7 @@ describe('core Worker route boundary', () => {
     ]
 
     for (const [body, expected] of cases) {
-      const response = await app.request(coreRequest(CORE_CASES[1], body))
+      const response = await app.request(coreRequest(CORE_CLIENT_CREATE, body))
       expect(response.status).toBe(400)
       expect(await errorCode(response)).toBe(expected)
     }
@@ -355,10 +297,10 @@ describe('core Worker route boundary', () => {
     const atLimit = `${canonical}${' '.repeat(65_536 - encoded.encode(canonical).byteLength)}`
     const aboveLimit = `${canonical}${' '.repeat(65_537 - encoded.encode(canonical).byteLength)}`
 
-    const accepted = await app.request(coreRequest(CORE_CASES[1], atLimit))
+    const accepted = await app.request(coreRequest(CORE_CLIENT_CREATE, atLimit))
     expect(accepted.status).toBe(201)
     expect(called).toEqual([CLIENT_BODY])
-    const rejected = await app.request(coreRequest(CORE_CASES[1], aboveLimit))
+    const rejected = await app.request(coreRequest(CORE_CLIENT_CREATE, aboveLimit))
     expect(rejected.status).toBe(413)
     expect(await errorCode(rejected)).toBe('PAYLOAD_TOO_LARGE')
     expect(called).toHaveLength(1)
@@ -396,26 +338,26 @@ describe('core Worker route boundary', () => {
     expect(method.status).toBe(405)
     expect(events).toEqual([])
 
-    const origin = await make().request(coreRequest(CORE_CASES[1], CLIENT_BODY, {
+    const origin = await make().request(coreRequest(CORE_CLIENT_CREATE, CLIENT_BODY, {
       origin: 'https://wrong-origin.example.test',
     }))
     expect(origin.status).toBe(403)
     expect(await errorCode(origin)).toBe('ORIGIN_INVALID')
     expect(events).toEqual([])
 
-    const access = await make({ accessFailure: 'ACCESS_DENIED' }).request(coreRequest(CORE_CASES[1]))
+    const access = await make({ accessFailure: 'ACCESS_DENIED' }).request(coreRequest(CORE_CLIENT_CREATE))
     expect(access.status).toBe(403)
     expect(await errorCode(access)).toBe('ACCESS_DENIED')
     expect(events).toEqual(['access'])
 
     events.length = 0
-    const csrf = await make({ csrfFailure: 'CSRF_INVALID' }).request(coreRequest(CORE_CASES[1]))
+    const csrf = await make({ csrfFailure: 'CSRF_INVALID' }).request(coreRequest(CORE_CLIENT_CREATE))
     expect(csrf.status).toBe(403)
     expect(await errorCode(csrf)).toBe('CSRF_INVALID')
     expect(events).toEqual(['access', 'csrf'])
 
     events.length = 0
-    const accepted = await make().request(coreRequest(CORE_CASES[1]))
+    const accepted = await make().request(coreRequest(CORE_CLIENT_CREATE))
     expect(accepted.status).toBe(201)
     expect(events).toEqual(['access', 'csrf', 'actor', 'body', 'service'])
   })
@@ -427,7 +369,7 @@ describe('core Worker route boundary', () => {
       safeLog,
       postClient: async () => { throw new Error('NOT_FOUND') },
     })
-    const response = await app.request(coreRequest(CORE_CASES[1], {
+    const response = await app.request(coreRequest(CORE_CLIENT_CREATE, {
       ...CLIENT_BODY, name: confidentialName,
     }))
     expect(response.status).toBe(404)

@@ -14,6 +14,7 @@ import {
 import { postClient, postClientArchive, postClientEdit } from '../../worker/routes/clients.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import {
+  blindEmailIndex,
   decryptForScope,
   encryptForScope,
   getOrCreateDataKey,
@@ -34,6 +35,112 @@ import {
 const NOW_MS = 1_800_000_000_000
 const BODY = Object.freeze({
   name: 'Fikcyjna', age: 12, status: 'active', specialistId: 'sp_target',
+})
+
+const registerRealRouteAuthorizationAndBudgetTests = () => describe('core route real authorization and shared budgets', () => {
+  it('keeps real path and body guesses plus specialist out-of-scope targets opaque without residue', async () => {
+    const cryptoContext = await realRouteCrypto()
+    const owner = await seedRealRouteActor(cryptoContext, { role: 'owner' })
+    const coordinator = await seedRealRouteActor(cryptoContext, { role: 'coordinator' })
+    const specialist = await seedRealRouteActor(cryptoContext, { role: 'specialist' })
+    const actors = [owner, coordinator, specialist]
+    const before = await coreResidue()
+    const envelopes = []
+
+    for (const actor of actors) {
+      const request = realMutation('/api/v1/clients', {
+        name: 'Fikcyjna niedostępna', age: 12, status: 'active', specialistId: 'sp_route_missing',
+      })
+      const response = await realRouteApp({ keyring: cryptoContext.keyring, principal: actor.principal })
+        .request(request.path, request.init)
+      expect(response.status).toBe(404)
+      envelopes.push(await response.json())
+      expect(await coreResidue()).toEqual(before)
+    }
+
+    const create = realMutation('/api/v1/clients', {
+      name: 'Fikcyjna przypisana', age: 12, status: 'active', specialistId: 'sp_target',
+    })
+    const ownerApp = realRouteApp({ keyring: cryptoContext.keyring, principal: owner.principal })
+    const created = await ownerApp.request(create.path, create.init)
+    expect(created.status).toBe(201)
+    const client = (await created.json()).data.client
+    const afterCreate = await coreResidue()
+
+    const denied = [
+      ['/api/v1/clients/cl_route_missing/edits', {
+        expectedVersion: 1, name: 'Fikcyjna', age: 12, status: 'active', specialistId: 'sp_target',
+      }],
+      ['/api/v1/appointments', {
+        clientId: 'cl_route_missing', specialistId: 'sp_target', serviceId: 'zajecia',
+        date: '2027-01-01', time: '10:00', durationMinutes: 50,
+        expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
+      }],
+      ['/api/v1/appointments/apt_route_missing/edits', {
+        expectedVersion: 1, specialistId: 'sp_target', serviceId: 'zajecia',
+        date: '2027-01-01', time: '10:00', durationMinutes: 50,
+        expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
+      }],
+      ['/api/v1/appointments/apt_route_missing/cancellation', { expectedVersion: 1 }],
+      ['/api/v1/appointments/apt_route_missing/payments', {
+        expectedVersion: 1, amountGrosze: 18_000, method: 'card',
+        receivedAt: '2027-01-01T09:00:00.000Z',
+      }],
+      ['/api/v1/payments/pay_route_missing/corrections', {
+        expectedVersion: 1, reason: 'Fikcyjna korekta', replacement: null,
+      }],
+    ]
+    for (const actor of actors) {
+      for (const [path, body] of denied) {
+        const request = realMutation(path, body)
+        const response = await realRouteApp({ keyring: cryptoContext.keyring, principal: actor.principal })
+          .request(request.path, request.init)
+        expect(response.status).toBe(404)
+        envelopes.push(await response.json())
+        expect(await coreResidue()).toEqual(afterCreate)
+      }
+    }
+    const outOfScope = realMutation(`/api/v1/clients/${client.id}/edits`, {
+      expectedVersion: client.version, name: 'Fikcyjna poza zakresem', age: 12,
+      status: 'active', specialistId: 'sp_target',
+    })
+    const specialistResponse = await realRouteApp({
+      keyring: cryptoContext.keyring, principal: specialist.principal,
+    }).request(outOfScope.path, outOfScope.init)
+    expect(specialistResponse.status).toBe(404)
+    envelopes.push(await specialistResponse.json())
+    expect(await coreResidue()).toEqual(afterCreate)
+    expect(envelopes.every((value) => value.error.code === 'NOT_FOUND'
+      && Object.keys(value.error).sort().join(',') === 'code,correlationId')).toBe(true)
+  })
+
+  it('shares one bounded production budget across pending activation or reindex and a real client command', async () => {
+    const v1 = await realRouteCrypto()
+    const pending = await seedRealRouteActor(v1, { role: 'owner', status: 'pending' })
+    const pendingCounter = countedDb()
+    const pendingRequest = realMutation('/api/v1/clients', {
+      name: 'Fikcyjna aktywacja', age: 12, status: 'active', specialistId: 'sp_target',
+    })
+    const pendingResponse = await realRouteApp({
+      db: pendingCounter.db, keyring: v1.keyring, principal: pending.principal,
+    }).request(pendingRequest.path, pendingRequest.init)
+    expect(pendingResponse.status).toBe(201)
+    expect(pendingCounter.statements()).toBe(23)
+    expect(pendingCounter.statements()).toBeLessThanOrEqual(50)
+
+    const active = await seedRealRouteActor(v1, { role: 'owner' })
+    const v2 = await realRouteCrypto(2)
+    const reindexCounter = countedDb()
+    const reindexRequest = realMutation('/api/v1/clients', {
+      name: 'Fikcyjna reindeksacja', age: 12, status: 'active', specialistId: 'sp_target',
+    })
+    const reindexResponse = await realRouteApp({
+      db: reindexCounter.db, keyring: v2.keyring, principal: active.principal,
+    }).request(reindexRequest.path, reindexRequest.init)
+    expect(reindexResponse.status).toBe(201)
+    expect(reindexCounter.statements()).toBe(18)
+    expect(reindexCounter.statements()).toBeLessThanOrEqual(50)
+  })
 })
 
 describe('persistent client archive', () => {
@@ -807,6 +914,141 @@ beforeAll(async () => {
     ),
   ])
 })
+
+const REAL_ROUTE_SCOPE = Object.freeze({
+  type: 'staff_directory', id: 'centre_1', purpose: 'identity',
+})
+let realRouteSerial = 0
+
+const nextRealRouteId = (kind) => `${kind}_route_boundary_${++realRouteSerial}`
+
+const realRouteCrypto = async (lookupVersion = 1) => {
+  const keyring = lookupVersion === 1
+    ? await ring()
+    : await createKeyring({
+        BWM_DATA_KEK_V1: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        BWM_LOOKUP_HMAC_V1: 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ',
+        BWM_LOOKUP_HMAC_V2: 'BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU',
+        BWM_BACKUP_KEK_V1: 'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
+      }, {
+        activeDataKekVersion: 1, activeLookupKeyVersion: 2, activeBackupKekVersion: 1,
+      })
+  const dataKey = await getOrCreateDataKey(env.DB, keyring, REAL_ROUTE_SCOPE, {
+    id: 'key_client_real_route_identity', createdAt: new Date(NOW_MS).toISOString(),
+  })
+  return { keyring, dataKey, scope: REAL_ROUTE_SCOPE }
+}
+
+const encryptedRouteField = async (context, recordId, field, plaintext) => JSON.stringify(
+  await encryptForScope(context.keyring, context.dataKey, {
+    expectedScope: context.scope, recordId, field, plaintext,
+  }),
+)
+
+const seedRealRouteActor = async (context, { role, status = 'active', lookupVersion = 1 }) => {
+  const suffix = ++realRouteSerial
+  const id = `stf_route_${role}_${suffix}`
+  const email = `${role}-route-${suffix}@example.test`
+  const specialistId = role === 'specialist' ? `sp_route_specialist_${suffix}` : null
+  const now = new Date(NOW_MS).toISOString()
+  const lookup = await blindEmailIndex(email, context.keyring, lookupVersion)
+  await env.DB.prepare(`INSERT INTO staff_users
+    (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+     specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+    id, lookup,
+    await encryptedRouteField(context, id, 'email', email),
+    await encryptedRouteField(context, id, 'display_name', `Fikcyjny ${role}`),
+    role, status, status === 'active' ? `access-route-${suffix}` : null,
+    specialistId, 1, status === 'active' ? now : null, null, now, now,
+  ).run()
+  if (specialistId) {
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO specialists
+        (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+        VALUES (?,?,18000,?,1,NULL,?,?)`).bind(
+        specialistId, id, status === 'active' ? 'active' : 'pending', now, now,
+      ),
+      env.DB.prepare(`INSERT INTO record_versions
+        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+         changed_at,correlation_id) VALUES (?,'specialist',?,1,'{}',NULL,?,?)`).bind(
+        nextRealRouteId('ver'), specialistId, now, CORRELATION_ID,
+      ),
+    ])
+  }
+  if (status === 'pending') {
+    const invitationId = `inv_route_${suffix}`
+    await env.DB.prepare(`INSERT INTO staff_invitations
+      (id,staff_id,email_lookup,email_envelope,display_name_envelope,role,status,inviter_id,
+       expires_at,access_allowed_at,email_sent_at,activated_at,revoked_at,version,created_at,updated_at)
+      VALUES (?,?,?,?,?,?, 'pending', ?, ?, ?, NULL, NULL, NULL, 1, ?, ?)`).bind(
+      invitationId, id, lookup,
+      await encryptedRouteField(context, invitationId, 'email', email),
+      await encryptedRouteField(context, invitationId, 'display_name', `Fikcyjny ${role}`),
+      role, id, new Date(NOW_MS + 60_000).toISOString(), now, now, now,
+    ).run()
+  }
+  return {
+    id, specialistId,
+    principal: { kind: 'human', subject: `access-route-${suffix}`, normalizedEmail: email },
+  }
+}
+
+const realRouteApp = ({ db = env.DB, keyring, principal }) => createApp({
+  config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+  db, keyring,
+  idFactory: () => nextRealRouteId('route'),
+  now: () => NOW_MS,
+  resolveAccessPrincipal: async () => principal,
+  verifyCsrfToken: async () => true,
+  safeLog: vi.fn(),
+})
+
+const realMutation = (path, body, key = `route-boundary-${++realRouteSerial}-0001`) => ({
+  path,
+  init: {
+    method: 'POST',
+    headers: {
+      origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+      'sec-fetch-site': 'same-origin', 'x-csrf-token': 'valid',
+      'x-correlation-id': CORRELATION_ID, 'idempotency-key': key,
+    },
+    body: JSON.stringify(body),
+  },
+})
+
+const coreResidue = async () => Object.fromEntries(await Promise.all([
+  'clients', 'client_assignments', 'appointments', 'session_charges',
+  'payment_entries', 'payment_corrections', 'idempotency_records',
+].map(async (table) => [table, (await env.DB.prepare(
+  `SELECT count(*) AS count FROM ${table}`,
+).first()).count])))
+
+const countedDb = () => {
+  let statements = 0
+  const wrapped = new WeakMap()
+  const wrap = (inner) => {
+    const statement = {
+      bind(...values) { return wrap(inner.bind(...values)) },
+      run(...args) { statements += 1; return inner.run(...args) },
+      first(...args) { statements += 1; return inner.first(...args) },
+      all(...args) { statements += 1; return inner.all(...args) },
+      raw(...args) { statements += 1; return inner.raw(...args) },
+    }
+    wrapped.set(statement, inner)
+    return statement
+  }
+  return {
+    db: {
+      prepare(sql) { return wrap(env.DB.prepare(sql)) },
+      batch(batch) {
+        statements += batch.length
+        return env.DB.batch(batch.map((statement) => wrapped.get(statement)))
+      },
+    },
+    statements: () => statements,
+  }
+}
 
 describe('persistent client creation', () => {
   it('strictly captures the exact create body without invoking accessors', () => {
@@ -2373,3 +2615,5 @@ describe('persistent client edit and reassignment', () => {
     })
   })
 })
+
+registerRealRouteAuthorizationAndBudgetTests()
