@@ -71,6 +71,7 @@ const registerRealRouteAuthorizationAndBudgetTests = () => describe('core route 
       ['/api/v1/clients/cl_route_missing/edits', {
         expectedVersion: 1, name: 'Fikcyjna', age: 12, status: 'active', specialistId: 'sp_target',
       }],
+      ['/api/v1/clients/cl_route_missing/archive', { expectedVersion: 1 }],
       ['/api/v1/appointments', {
         clientId: 'cl_route_missing', specialistId: 'sp_target', serviceId: 'zajecia',
         date: '2027-01-01', time: '10:00', durationMinutes: 50,
@@ -100,16 +101,21 @@ const registerRealRouteAuthorizationAndBudgetTests = () => describe('core route 
         expect(await coreResidue()).toEqual(afterCreate)
       }
     }
-    const outOfScope = realMutation(`/api/v1/clients/${client.id}/edits`, {
-      expectedVersion: client.version, name: 'Fikcyjna poza zakresem', age: 12,
-      status: 'active', specialistId: 'sp_target',
-    })
-    const specialistResponse = await realRouteApp({
-      keyring: cryptoContext.keyring, principal: specialist.principal,
-    }).request(outOfScope.path, outOfScope.init)
-    expect(specialistResponse.status).toBe(404)
-    envelopes.push(await specialistResponse.json())
-    expect(await coreResidue()).toEqual(afterCreate)
+    const outOfScope = [
+      realMutation(`/api/v1/clients/${client.id}/edits`, {
+        expectedVersion: client.version, name: 'Fikcyjna poza zakresem', age: 12,
+        status: 'active', specialistId: 'sp_target',
+      }),
+      realMutation(`/api/v1/clients/${client.id}/archive`, { expectedVersion: client.version }),
+    ]
+    for (const request of outOfScope) {
+      const specialistResponse = await realRouteApp({
+        keyring: cryptoContext.keyring, principal: specialist.principal,
+      }).request(request.path, request.init)
+      expect(specialistResponse.status).toBe(404)
+      envelopes.push(await specialistResponse.json())
+      expect(await coreResidue()).toEqual(afterCreate)
+    }
     expect(envelopes.every((value) => value.error.code === 'NOT_FOUND'
       && Object.keys(value.error).sort().join(',') === 'code,correlationId')).toBe(true)
   })
