@@ -79,6 +79,11 @@ const roleCapabilities = {
     'operations.health.read', 'payment.manage', 'security.audit.read', 'specialist.directory.read',
     'staff.manage', 'tus.manage',
   ],
+  coordinator: [
+    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
+    'client.manage', 'client.operational.read', 'finance.centre.read',
+    'operations.health.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
+  ],
   specialist: [
     'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general', 'client.manage',
     'client.operational.read', 'clinical.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
@@ -93,11 +98,36 @@ const noDurableBrowserState = (page) => page.evaluate(async () => ({
   session: Object.keys(sessionStorage),
 }))
 
+const expectCommand = (route, { method, path, body }) => {
+  const request = route.request()
+  expect(request.method()).toBe(method)
+  expect(new URL(request.url()).pathname).toBe(path)
+  expect(request.postDataJSON()).toEqual(body)
+}
+
 test('@owner completes a fictional client, visit, payment, correction, and reload workflow without browser persistence', async ({ page }) => {
   await freezeTime(page)
   const writes = []
   const specialists = [specialist('sp_anna', 'Anna Nowak')]
-  const clients = []
+  const createdClient = client({ id: 'cl_iga', name: 'Iga Próbna', age: 10, specialistId: 'sp_anna' })
+  const scheduledVisit = appointment({})
+  const completedVisit = appointment({ status: 'completed', version: 2, updatedAt: '2026-08-04T12:00:00.000Z' })
+  const paidVisit = appointment({
+    status: 'completed', version: 3, updatedAt: '2026-08-04T12:00:00.000Z', collectedGrosze: 12_000,
+    paymentEntries: [{ id: 'pay_iga', amountGrosze: 12_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z', correctedAt: null, replacementEntryId: null }],
+  })
+  const correctedVisit = appointment({
+    status: 'completed', version: 4, updatedAt: '2026-08-04T12:00:00.000Z', collectedGrosze: 10_000,
+    paymentEntries: [
+      { id: 'pay_iga', amountGrosze: 12_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z', correctedAt: '2026-08-04T12:00:00.000Z', replacementEntryId: 'pay_iga_replacement' },
+      { id: 'pay_iga_replacement', amountGrosze: 10_000, method: 'transfer', receivedAt: '2026-08-05T10:00:00.000Z', correctedAt: null, replacementEntryId: null },
+    ],
+  })
+  const noshowVisit = appointment({
+    status: 'noshow', version: 5, updatedAt: '2026-08-04T12:00:00.000Z', collectedGrosze: 10_000,
+    paymentEntries: correctedVisit.paymentEntries,
+  })
+  let clients = []
   let visit = null
   let appointmentEdits = 0
   page.on('request', (request) => {
@@ -110,50 +140,48 @@ test('@owner completes a fictional client, visit, payment, correction, and reloa
     }))
   })
   await page.route('**/api/v1/clients', (route) => {
-    const body = route.request().postDataJSON()
-    const created = client({ id: 'cl_iga', name: body.name, age: body.age, specialistId: body.specialistId })
-    clients.push(created)
-    return route.fulfill(json(201, { data: { client: created } }))
+    expectCommand(route, { method: 'POST', path: '/api/v1/clients', body: {
+      name: 'Iga Próbna', age: 10, status: 'active', specialistId: 'sp_anna',
+    } })
+    clients = [createdClient]
+    return route.fulfill(json(201, { data: { client: createdClient } }))
   })
   await page.route('**/api/v1/appointments', (route) => {
-    const body = route.request().postDataJSON()
-    visit = appointment({
-      clientId: body.clientId, specialistId: body.specialistId, status: body.status,
-      startsAt: '2026-08-04T10:00:00.000Z', endsAt: '2026-08-04T10:50:00.000Z',
-    })
-    return route.fulfill(json(201, { data: { appointment: visit } }))
+    expectCommand(route, { method: 'POST', path: '/api/v1/appointments', body: {
+      clientId: 'cl_iga', specialistId: 'sp_anna', serviceId: 'zajecia', date: '2026-08-04',
+      time: '12:00', durationMinutes: 50, expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
+    } })
+    visit = scheduledVisit
+    return route.fulfill(json(201, { data: { appointment: scheduledVisit } }))
   })
   await page.route('**/api/v1/appointments/apt_iga/edits', (route) => {
     appointmentEdits += 1
-    const body = route.request().postDataJSON()
-    visit = appointment({
-      ...visit, status: body.status, version: visit.version + 1,
-      paymentEntries: visit.paymentEntries, collectedGrosze: visit.payment.collectedGrosze,
-      updatedAt: '2026-08-04T12:00:00.000Z',
-    })
+    const expected = appointmentEdits === 1 ? {
+      expectedVersion: 1, specialistId: 'sp_anna', serviceId: 'zajecia', date: '2026-08-04',
+      time: '12:00', durationMinutes: 50, expectedAmountGrosze: 18_000, location: null, status: 'completed',
+    } : {
+      expectedVersion: 4, specialistId: 'sp_anna', serviceId: 'zajecia', date: '2026-08-04',
+      time: '12:00', durationMinutes: 50, expectedAmountGrosze: 18_000, location: null, status: 'noshow',
+    }
+    expectCommand(route, { method: 'POST', path: '/api/v1/appointments/apt_iga/edits', body: expected })
+    visit = appointmentEdits === 1 ? completedVisit : noshowVisit
     return route.fulfill(json(200, { data: { appointment: visit } }))
   })
   await page.route('**/api/v1/appointments/apt_iga/payments', (route) => {
-    const body = route.request().postDataJSON()
-    visit = appointment({
-      ...visit, version: visit.version + 1, status: visit.status, collectedGrosze: body.amountGrosze,
-      paymentEntries: [{ id: 'pay_iga', amountGrosze: body.amountGrosze, method: body.method, receivedAt: body.receivedAt, correctedAt: null, replacementEntryId: null }],
-      updatedAt: '2026-08-04T12:00:00.000Z',
-    })
-    return route.fulfill(json(200, { data: { appointment: visit } }))
+    expectCommand(route, { method: 'POST', path: '/api/v1/appointments/apt_iga/payments', body: {
+      expectedVersion: 2, amountGrosze: 12_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z',
+    } })
+    visit = paidVisit
+    return route.fulfill(json(200, { data: { appointment: paidVisit } }))
   })
   await page.route('**/api/v1/payments/pay_iga/corrections', (route) => {
-    const body = route.request().postDataJSON()
-    const replacement = body.replacement
-    visit = appointment({
-      ...visit, version: visit.version + 1, status: visit.status, collectedGrosze: replacement.amountGrosze,
-      paymentEntries: [
-        { ...visit.paymentEntries[0], correctedAt: '2026-08-04T12:00:00.000Z', replacementEntryId: 'pay_iga_replacement' },
-        { id: 'pay_iga_replacement', amountGrosze: replacement.amountGrosze, method: replacement.method, receivedAt: replacement.receivedAt, correctedAt: null, replacementEntryId: null },
-      ],
-      updatedAt: '2026-08-04T12:00:00.000Z',
-    })
-    return route.fulfill(json(200, { data: { appointment: visit } }))
+    expectCommand(route, { method: 'POST', path: '/api/v1/payments/pay_iga/corrections', body: {
+      expectedVersion: 3, reason: 'Fikcyjna korekta', replacement: {
+        amountGrosze: 10_000, method: 'transfer', receivedAt: '2026-08-05T10:00:00.000Z',
+      },
+    } })
+    visit = correctedVisit
+    return route.fulfill(json(200, { data: { appointment: correctedVisit } }))
   })
 
   await page.goto('./#/clients')
@@ -209,14 +237,23 @@ test('@owner completes a fictional client, visit, payment, correction, and reloa
 test('@owner @coordinator keeps retained active practitioners in the exact 93-day directory on desktop and phone', async ({ page }, testInfo) => {
   await freezeTime(page)
   const reads = []
+  const directory = [
+    specialist('sp_owner_retained', 'Alicja Retencja'),
+    specialist('sp_coordinator_retained', 'Celina Retencja'),
+  ]
+  const actor = testInfo.project.name === 'coordinator'
+    ? { id: 'stf_coordinator_retained', displayName: 'Celina Testowa', role: 'coordinator', specialistId: 'sp_coordinator_retained', version: 1 }
+    : { id: 'stf_owner_retained', displayName: 'Alicja Testowa', role: 'owner', specialistId: 'sp_owner_retained', version: 1 }
+  let sessionReads = 0
+  await page.route('**/api/v1/session', (route) => {
+    sessionReads += 1
+    return route.fulfill(session(actor, roleCapabilities[actor.role]))
+  })
   await page.route('**/api/v1/workspace?*', (route) => {
     const url = new URL(route.request().url())
     reads.push([url.searchParams.get('from'), url.searchParams.get('to')])
     return route.fulfill(workspace(url.searchParams.get('from'), url.searchParams.get('to'), {
-      specialists: [
-        specialist('sp_owner_retained', 'Alicja Retencja'),
-        specialist('sp_coordinator_retained', 'Celina Retencja'),
-      ], clients: [],
+      specialists: directory, clients: [],
     }))
   })
   if (testInfo.project.name === 'coordinator') {
@@ -233,6 +270,8 @@ test('@owner @coordinator keeps retained active practitioners in the exact 93-da
     await expect(page.getByText('Celina Retencja', { exact: true })).toBeVisible()
     await expect(page.getByText('Dostępna do planowania wizyt', { exact: true })).toHaveCount(2)
   }
+  expect(sessionReads).toBe(1)
+  expect(directory.map(({ id }) => id)).toContain(actor.specialistId)
   expect(reads).toContainEqual(['2026-05-04', '2026-08-04'])
 })
 
@@ -243,18 +282,25 @@ test('@specialist renders only assigned clients and their own appointments', asy
     specialistId: 'sp_anna', version: 1,
   }, roleCapabilities.specialist)))
   const own = client({ id: 'cl_own', name: 'Maja Własna', specialistId: 'sp_anna' })
+  const foreign = client({ id: 'cl_foreign', name: 'Klientka Poza Zakresem', specialistId: 'sp_basia' })
+  const ownAppointment = appointment({ id: 'apt_own', clientId: own.id, specialistId: 'sp_anna', status: 'completed' })
+  const foreignAppointment = appointment({ id: 'apt_foreign', clientId: foreign.id, specialistId: 'sp_basia', status: 'completed' })
+  let suppliedForeignScope = false
   await page.route('**/api/v1/workspace?*', (route) => {
     const url = new URL(route.request().url())
+    suppliedForeignScope = true
     return route.fulfill(workspace(url.searchParams.get('from'), url.searchParams.get('to'), {
-      specialists: [specialist('sp_anna', 'Anna Nowak')], clients: [own],
-      appointments: [appointment({ id: 'apt_own', clientId: own.id, specialistId: 'sp_anna', status: 'completed' })],
+      specialists: [specialist('sp_anna', 'Anna Nowak'), specialist('sp_basia', 'Basia Zielińska')],
+      clients: [foreign, own], appointments: [foreignAppointment, ownAppointment],
     }))
   })
   await page.goto('./#/clients')
   await expect(page.getByText('Maja Własna', { exact: true })).toBeVisible()
+  expect(suppliedForeignScope).toBe(true)
   await expect(page.getByText('Klientka Poza Zakresem', { exact: true })).toHaveCount(0)
   await page.goto('./#/calendar?date=2026-08-04')
   await expect(page.getByRole('region', { name: 'Plan dnia' })).toContainText('Maja Własna')
+  await expect(page.getByRole('region', { name: 'Plan dnia' })).not.toContainText('Klientka Poza Zakresem')
 })
 
 test('@owner renders a referenced archived client as phone read-only history', async ({ page }) => {
@@ -284,7 +330,7 @@ test('@owner renders a referenced archived client as phone read-only history', a
 
 test('@owner keeps archive conflict explicit until cancellation makes archive legal', async ({ page }) => {
   await freezeTime(page)
-  const clients = [client({ id: 'cl_archive', name: 'Iga Do Archiwum' })]
+  let clients = [client({ id: 'cl_archive', name: 'Iga Do Archiwum' })]
   let visit = appointment({ id: 'apt_archive', clientId: 'cl_archive', startsAt: '2026-08-04T10:00:00.000Z', endsAt: '2026-08-04T10:50:00.000Z' })
   let archiveAttempts = 0
   await page.route('**/api/v1/workspace?*', (route) => {
@@ -295,13 +341,17 @@ test('@owner keeps archive conflict explicit until cancellation makes archive le
   })
   await page.route('**/api/v1/clients/cl_archive/archive', (route) => {
     archiveAttempts += 1
+    expectCommand(route, { method: 'POST', path: '/api/v1/clients/cl_archive/archive', body: { expectedVersion: 1 } })
     if (archiveAttempts === 1) return route.fulfill(error(409, 'CLIENT_ARCHIVE_CONFLICT'))
-    clients.splice(0, 1, client({ id: 'cl_archive', name: 'Iga Do Archiwum', status: 'archived', specialistId: null, version: 2, archivedAt: '2026-08-04T09:00:00.000Z', updatedAt: '2026-08-04T09:00:00.000Z' }))
-    return route.fulfill(json(200, { data: { client: clients[0] } }))
+    const archived = client({ id: 'cl_archive', name: 'Iga Do Archiwum', status: 'archived', specialistId: null, version: 2, archivedAt: '2026-08-04T09:00:00.000Z', updatedAt: '2026-08-04T09:00:00.000Z' })
+    clients = [archived]
+    return route.fulfill(json(200, { data: { client: archived } }))
   })
   await page.route('**/api/v1/appointments/apt_archive/cancellation', (route) => {
-    visit = appointment({ ...visit, status: 'cancelled', version: 2, updatedAt: '2026-08-04T09:00:00.000Z' })
-    return route.fulfill(json(200, { data: { appointment: visit } }))
+    expectCommand(route, { method: 'POST', path: '/api/v1/appointments/apt_archive/cancellation', body: { expectedVersion: 1 } })
+    const cancelled = appointment({ id: 'apt_archive', clientId: 'cl_archive', status: 'cancelled', version: 2, updatedAt: '2026-08-04T09:00:00.000Z' })
+    visit = cancelled
+    return route.fulfill(json(200, { data: { appointment: cancelled } }))
   })
 
   await page.goto('./#/client?id=cl_archive')
@@ -327,7 +377,7 @@ test('@owner keeps archive conflict explicit until cancellation makes archive le
 
 test('@owner discards a stale second drawer while an offline draft remains open', async ({ page, context }) => {
   await freezeTime(page)
-  const records = [client({ id: 'cl_stale', name: 'Ola Kanoniczna', version: 1 })]
+  let records = [client({ id: 'cl_stale', name: 'Ola Kanoniczna', version: 1 })]
   let edits = 0
   await context.route('**/api/v1/workspace?*', (route) => {
     const url = new URL(route.request().url())
@@ -338,27 +388,37 @@ test('@owner discards a stale second drawer while an offline draft remains open'
   await context.route('**/api/v1/clients/cl_stale/edits', (route) => {
     edits += 1
     if (edits === 1) {
-      const body = route.request().postDataJSON()
-      records.splice(0, 1, client({
-        id: 'cl_stale', name: body.name, version: 2,
+      expectCommand(route, { method: 'POST', path: '/api/v1/clients/cl_stale/edits', body: {
+        expectedVersion: 1, name: 'Ola Zwycięska', age: 11, status: 'active', specialistId: 'sp_anna',
+      } })
+      const canonical = client({
+        id: 'cl_stale', name: 'Ola Zwycięska', version: 2,
         updatedAt: '2026-08-04T12:00:00.000Z',
-      }))
-      return route.fulfill(json(200, { data: { client: records[0] } }))
+      })
+      records = [canonical]
+      return route.fulfill(json(200, { data: { client: canonical } }))
     }
+    expectCommand(route, { method: 'POST', path: '/api/v1/clients/cl_stale/edits', body: {
+      expectedVersion: 1, name: 'Ola Przestarzała', age: 11, status: 'active', specialistId: 'sp_anna',
+    } })
     return route.fulfill(error(409, 'VERSION_CONFLICT'))
   })
   await page.goto('./#/client?id=cl_stale')
   const second = await context.newPage()
   await freezeTime(second)
   await second.goto('./#/client?id=cl_stale')
-  for (const current of [page, second]) {
-    await current.getByRole('button', { name: 'Edytuj' }).click()
-    await current.getByRole('dialog', { name: 'Edycja klienta' }).getByLabel('Imię i nazwisko').fill('Ola Lokalna')
-  }
+  await page.getByRole('button', { name: 'Edytuj' }).click()
+  await page.getByRole('dialog', { name: 'Edycja klienta' }).getByLabel('Imię i nazwisko').fill('Ola Zwycięska')
+  await second.getByRole('button', { name: 'Edytuj' }).click()
+  await second.getByRole('dialog', { name: 'Edycja klienta' }).getByLabel('Imię i nazwisko').fill('Ola Przestarzała')
   await page.getByRole('dialog', { name: 'Edycja klienta' }).getByRole('button', { name: 'Zapisz zmiany' }).click()
+  await expect(page.getByRole('heading', { name: 'Ola Zwycięska' })).toBeVisible()
+  expect(records).toMatchObject([{ name: 'Ola Zwycięska', version: 2 }])
   await second.getByRole('dialog', { name: 'Edycja klienta' }).getByRole('button', { name: 'Zapisz zmiany' }).click()
   await expect(second.getByRole('dialog', { name: 'Edycja klienta' })).toHaveCount(0)
-  await expect(second.getByRole('heading', { name: 'Ola Lokalna' })).toBeVisible()
+  await expect(second.getByRole('heading', { name: 'Ola Zwycięska' })).toBeVisible()
+  await expect(second.getByText('Ola Przestarzała', { exact: true })).toHaveCount(0)
+  expect(edits).toBe(2)
 
   await page.goto('./#/clients')
   await context.route('**/api/v1/clients', (route) => route.abort('connectionfailed'))
