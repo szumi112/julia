@@ -1,4 +1,7 @@
-import { acceptCanonicalEmail } from '../identity/canonical-email.js'
+import {
+  acceptCanonicalEmail,
+  acceptPhaseOneAccessEmail,
+} from '../identity/canonical-email.js'
 
 const ENDPOINT = 'https://api.scaleway.com/transactional-email/v1alpha1/regions/fr-par/emails'
 const MAX_RESPONSE_BYTES = 64 * 1024
@@ -7,9 +10,9 @@ const MAX_JSON_DEPTH = 64
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
-const PROTECTED_ORIGINS = new Set([
-  'https://bearwithme-panel.app',
-  'https://staging.bearwithme-panel.app',
+const PROTECTED_ORIGINS = new Map([
+  ['https://bearwithme-panel.app', 'production'],
+  ['https://staging.bearwithme-panel.app', 'staging'],
 ])
 const OPTIONAL_STRINGS = Object.freeze([
   'message_id',
@@ -49,19 +52,19 @@ const saneName = (value) => typeof value === 'string'
   && value.length > 0
   && utf8Bytes(value) <= 120
   && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
-const exactProtectedOrigin = (value) => {
-  if (typeof value !== 'string') return false
+const protectedEnvironment = (value) => {
+  if (typeof value !== 'string') return null
   try {
     const url = new URL(value)
-    return value === url.origin
+    const valid = value === url.origin
       && url.protocol === 'https:'
       && !url.username
       && !url.password
       && !url.search
       && !url.hash
-      && PROTECTED_ORIGINS.has(value)
+    return valid ? (PROTECTED_ORIGINS.get(value) ?? null) : null
   } catch {
-    return false
+    return null
   }
 }
 
@@ -133,6 +136,7 @@ function invitationContent(appOrigin, expiresAt) {
 }
 
 function validateInput(input) {
+  const appEnv = protectedEnvironment(input?.appOrigin)
   if (!ownObject(input)
     || typeof input.fetch !== 'function'
     || typeof input.secret !== 'string'
@@ -141,9 +145,9 @@ function validateInput(input) {
     || !UUID.test(input.projectId ?? '')
     || !acceptCanonicalEmail(input.fromEmail)
     || !saneName(input.fromName)
-    || !exactProtectedOrigin(input.appOrigin)
+    || appEnv === null
     || !ID.test(input.jobId ?? '')
-    || !acceptCanonicalEmail(input.recipient, { fictional: true })
+    || !acceptPhaseOneAccessEmail(input.recipient, { appEnv })
     || !canonicalInstant(input.expiresAt)) {
     fail('EMAIL_PROVIDER_CONFIG_INVALID')
   }

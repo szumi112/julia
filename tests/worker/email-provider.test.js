@@ -145,6 +145,27 @@ describe('Scaleway invitation email provider request', () => {
     expect(bodies[0]).toBe(bodies[1])
   })
 
+  it('accepts the staging owner alias only for the exact staging origin', async () => {
+    const recipient = 'staging-owner@bearwithme-panel.app'
+    const fetch = vi.fn(async () => response(acceptedBody()))
+
+    await expect(sendInvitationEmail({
+      ...valid,
+      appOrigin: 'https://staging.bearwithme-panel.app',
+      fetch,
+      recipient,
+    })).resolves.toEqual({ providerId: PROVIDER_ID })
+    expect(JSON.parse(fetch.mock.calls[0][1].body).to).toEqual([{ email: recipient }])
+
+    fetch.mockClear()
+    await rejected({ ...valid, fetch, recipient }, {
+      code: 'EMAIL_PROVIDER_CONFIG_INVALID',
+      retryable: false,
+      ambiguous: false,
+    })
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['a missing fetch implementation', { fetch: null }],
     ['a noncanonical project UUID', { projectId: 'project_1' }],
