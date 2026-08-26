@@ -425,22 +425,6 @@ test('D1 REST client rejects unknown or nested response shapes', async () => {
       ...okResult(),
       messages: [{ code: 1000, message: 'unexpected' }],
     },
-    {
-      ...okResult(),
-      result: [{
-        meta: { served_by: 'miniflare.db' },
-        results: [],
-        success: true,
-      }],
-    },
-    {
-      ...okResult(),
-      result: [{
-        meta: { total_attempts: 1 },
-        results: [],
-        success: true,
-      }],
-    },
   ]
   for (const response of invalidResponses) {
     const client = createD1RestClient({
@@ -472,11 +456,13 @@ test('D1 REST client accepts exactly the documented optional query metadata fiel
           last_row_id: 0,
           rows_read: 1,
           rows_written: 0,
+          served_by: 'v3-prod',
           served_by_colo: 'WAW',
           served_by_primary: true,
           served_by_region: 'WEUR',
           size_after: 16_384,
           timings: { sql_duration_ms: 0.25 },
+          total_attempts: 1,
         },
         results: [{ proof: 'ok' }],
         success: true,

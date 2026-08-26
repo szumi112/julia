@@ -253,9 +253,11 @@ const META_TYPES = Object.freeze({
   last_row_id: 'number',
   rows_read: 'number',
   rows_written: 'number',
+  served_by: 'string',
   served_by_colo: 'string',
   served_by_primary: 'boolean',
   size_after: 'number',
+  total_attempts: 'number',
 })
 const D1_REGIONS = new Set(['APAC', 'EEUR', 'ENAM', 'OC', 'WEUR', 'WNAM'])
 const validMeta = (meta) => ownObject(meta)
