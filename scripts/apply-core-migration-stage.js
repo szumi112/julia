@@ -229,7 +229,7 @@ export function normalizeCoreMigrationStageInput(env, argv = []) {
     || Array.isArray(env)
     || env.DATA_MODE !== 'fictional'
     || !Array.isArray(argv)
-    || !['stage-a', 'stage-b'].includes(argv[0])) {
+    || !['stage-a', 'stage-b', 'stage-c'].includes(argv[0])) {
     fail('CORE_MIGRATION_STAGE_INPUT_INVALID')
   }
   if (argv.length === 4 && argv[1] === '--remote' && argv[2] === '--env') {

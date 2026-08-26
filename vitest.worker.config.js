@@ -14,6 +14,7 @@ export default defineConfig({
             CORE_DIRECTORY_STAGE: 'stage-a-complete-before-fixtures',
             TEST_STAGE_A_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-a'),
             TEST_STAGE_B_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-b'),
+            TEST_STAGE_C_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-c'),
             BWM_DATA_KEK_V1: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
             BWM_LOOKUP_HMAC_V1: 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ',
             BWM_BACKUP_KEK_V1: 'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',

@@ -15,6 +15,10 @@ export const CORE_MIGRATION_STAGE_B_NAMES = Object.freeze([
   '0011_appointment_ledger.sql',
 ])
 
+export const CORE_MIGRATION_STAGE_C_NAMES = Object.freeze([
+  '0012_finance_ledger.sql',
+])
+
 export const CORE_MIGRATION_REMOTE_ENV_NAMES = Object.freeze(['production', 'staging'])
 
 export const CORE_MIGRATION_PRODUCTION_ACK_VARIABLE = 'BWM_CONFIRM_PRODUCTION_DATABASE'
@@ -134,10 +138,12 @@ WHERE failure_kind IS NOT NULL`
 const STAGES = Object.freeze({
   'stage-a': CORE_MIGRATION_STAGE_A_NAMES,
   'stage-b': CORE_MIGRATION_STAGE_B_NAMES,
+  'stage-c': CORE_MIGRATION_STAGE_C_NAMES,
 })
 const KNOWN_NAMES = Object.freeze([
   ...CORE_MIGRATION_STAGE_A_NAMES,
   ...CORE_MIGRATION_STAGE_B_NAMES,
+  ...CORE_MIGRATION_STAGE_C_NAMES,
 ])
 
 const invalid = () => {
