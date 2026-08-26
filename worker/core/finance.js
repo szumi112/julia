@@ -309,7 +309,15 @@ export async function startFinanceImport(input) {
   try {
     await unit.commit()
   } catch (error) {
-    const winner = await inspectIdempotency(command.db, context, idem)
+    let replayContext = context
+    if (context.statement) {
+      try {
+        replayContext = await loadFinanceContext(command.db, command.keyring)
+      } catch {
+        throw error
+      }
+    }
+    const winner = await inspectIdempotency(command.db, replayContext, idem)
     if (winner) return winner
     const existing = await command.db.prepare(
       'SELECT id FROM finance_import_batches WHERE fingerprint=?'
@@ -471,9 +479,9 @@ export async function appendFinanceImportChunk(input) {
     await unit.commit()
   } catch (error) {
     const winner = await loadReplay()
-    if (winner && winner.sequence === body.sequence
-      && winner.row_count === body.entries.length
-      && winner.payload_hash === payloadHash) {
+    if (winner) {
+      if (winner.sequence !== body.sequence || winner.row_count !== body.entries.length
+        || winner.payload_hash !== payloadHash) fail('IDEMPOTENCY_CONFLICT')
       return responseForBatch(200, batchDto(winner))
     }
     if (isD1FinanceSourceDuplicate(error)) fail('FINANCE_IMPORT_DUPLICATE')

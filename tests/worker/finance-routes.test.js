@@ -320,6 +320,44 @@ describe('protected finance import and read service', () => {
     expect(commits[1]).toEqual(commits[0])
   })
 
+  it('rejects simultaneous chunk payloads that reuse an idempotency key', async () => {
+    const keyring = await ring()
+    const start = await startFinanceImport({
+      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 30,
+      correlationId: CORRELATION_ID, idFactory: ids(),
+      body: {
+        filename: 'conflicting-chunks.xlsx', fingerprint: 'd'.repeat(64),
+        formatVersion: 1, totalRows: 1,
+      },
+      idempotencyKey: 'finance-start-conflicting-0001',
+    })
+    const batchId = start.body.data.batch.id
+    const chunkInput = (idFactory, amountGrosze) => ({
+      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 31,
+      correlationId: CORRELATION_ID, idFactory, batchId,
+      body: {
+        sequence: 0,
+        entries: [entry(batchId, {
+          amountGrosze,
+          paidAmountGrosze: amountGrosze,
+          accountingMonth: '2026-02', occurredOn: '2026-02-05', rowNumber: 510,
+          source: {
+            batchId, sourceKey: 'workbook:v1:0:510:0', sheet: 'Luty 2026',
+            rowNumber: 510, raw: { Cena: amountGrosze / 100 },
+          },
+        })],
+      },
+      idempotencyKey: 'finance-chunk-conflicting-0001',
+    })
+    const outcomes = await Promise.allSettled([
+      appendFinanceImportChunk(chunkInput(ids(), 18_000)),
+      appendFinanceImportChunk(chunkInput(ids(), 20_000)),
+    ])
+    expect(outcomes.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+    const rejected = outcomes.find(({ status }) => status === 'rejected')
+    expect(rejected?.reason?.message).toBe('IDEMPOTENCY_CONFLICT')
+  })
+
   it('dispatches finance reads and imports through the authenticated closed HTTP shell', async () => {
     const list = async (input) => ({
       data: { entries: [], summary: {
