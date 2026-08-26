@@ -232,6 +232,7 @@ const sourceIdentity = (value) => JSON.stringify([
   value.invoiceNote,
   value.specialistId,
   value.lessonCount,
+  value.source.sourceKey,
   value.source.rowNumber,
 ])
 

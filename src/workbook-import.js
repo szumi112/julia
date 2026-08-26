@@ -24,6 +24,8 @@ const text = (value) => value === null || value === undefined
   ? ''
   : String(value).trim().normalize('NFC')
 
+const rawScalar = (value) => typeof value === 'string' ? text(value) : value
+
 const searchText = (value) => text(value).normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '')
   .replaceAll('ł', 'l')
@@ -180,7 +182,7 @@ const rawRecord = (headers, row) => {
   const result = {}
   headers.forEach((header, index) => {
     const key = text(header)
-    if (key) result[key] = row[index] ?? ''
+    if (key) result[key] = rawScalar(row[index] ?? '')
   })
   return result
 }
@@ -194,7 +196,7 @@ const baseRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
   settlement = 'unknown', invoice = 'unknown', invoiceNote = '', specialistName = '',
   lessonCount = null, raw }) => ({
   sourceKey,
-  sheet,
+  sheet: text(sheet),
   rowNumber,
   recordType,
   accountingMonth: accountingMonth && MONTH_KEY.test(accountingMonth) ? accountingMonth : null,
@@ -283,7 +285,7 @@ const normalizeEnglish = (sheet, context) => {
         raw: {
           'Imię i nazwisko': counterparty,
           'Ilość lekcji': lessons,
-          Kwota: sheet.rows[index][column + 2],
+          Kwota: rawScalar(sheet.rows[index][column + 2]),
         },
       }))
     }
@@ -314,7 +316,10 @@ const normalizeFixedCosts = (sheet, context) => {
         amount,
         counterparty: '',
         sourceLabel: label,
-        raw: { [text(value)]: label, [text(headers[column + 1]) || 'Kwota']: sheet.rows[index][column + 1] },
+        raw: {
+          [text(value)]: label,
+          [text(headers[column + 1]) || 'Kwota']: rawScalar(sheet.rows[index][column + 1]),
+        },
       }))
     }
   })

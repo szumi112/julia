@@ -172,6 +172,20 @@ test('fails closed instead of silently dropping a populated transaction with an 
   }), /WORKBOOK_ROW_AMOUNT_INVALID/)
 })
 
+test('normalizes raw source strings before protected payload validation', () => {
+  const preview = normalizeWorkbookRows({
+    filename: 'whitespace.xlsx',
+    fingerprint: '1'.repeat(64),
+    sheets: [{
+      name: 'Maj 2025',
+      rows: [transactionHeader, ['  Konsultacja  ', 200, '  Osoba Testowa  ', '2025-05-02']],
+    }],
+  })
+
+  assert.equal(preview.rows[0].raw.Usługa, 'Konsultacja')
+  assert.equal(preview.rows[0].raw.Klient, 'Osoba Testowa')
+})
+
 test('normalizes TUS, English, expenses, and ancillary revenue as distinct records', () => {
   const preview = normalizeWorkbookRows({
     filename: 'fictional.xlsx',

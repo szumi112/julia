@@ -227,7 +227,8 @@ describe('protected finance import and read service', () => {
         entries: [entry(duplicate.body.data.batch.id, {
           source: {
             batchId: duplicate.body.data.batch.id,
-            sourceKey: 'different-file-and-key', sheet: 'Wrzesień', rowNumber: 2,
+            sourceKey: 'fictional.xlsx:Wrzesień:2:abcdef0123456789',
+            sheet: 'Wrzesień', rowNumber: 2,
             raw: { Klient: 'Fikcyjna Klientka', Cena: '180' },
           },
         })],
