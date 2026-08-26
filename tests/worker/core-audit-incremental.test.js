@@ -31,7 +31,7 @@ const session = {
     capabilities: [
       'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct',
       'chat.general', 'client.manage', 'client.operational.read', 'clinical.read',
-      'finance.centre.read', 'finance.centre.manage', 'operations.health.read', 'payment.manage',
+      'finance.centre.manage', 'finance.centre.read', 'operations.health.read', 'payment.manage',
       'security.audit.read', 'specialist.directory.read', 'staff.manage', 'tus.manage',
     ],
     csrfToken: `v1.2290764000.${'A'.repeat(22)}.${'B'.repeat(43)}`,
