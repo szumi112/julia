@@ -220,6 +220,178 @@ test('stage commands accept only fictional non-production execution', async () =
   }
 })
 
+test('remote stage input accepts explicit envs and keeps every local guard', async () => {
+  const module = await loadApplyModule()
+  assert.ok(module, 'core migration stage command must exist')
+  assert.deepEqual(module.normalizeCoreMigrationStageInput({
+    DATA_MODE: 'fictional',
+  }, ['stage-a', '--remote', '--env', 'staging']), {
+    envName: 'staging',
+    local: false,
+    stage: 'stage-a',
+  })
+  assert.deepEqual(module.normalizeCoreMigrationStageInput({
+    CLOUDFLARE_ENV: 'production',
+    DATA_MODE: 'fictional',
+  }, ['stage-b', '--remote', '--env', 'production']), {
+    envName: 'production',
+    local: false,
+    stage: 'stage-b',
+  })
+
+  for (const fixture of [
+    [{ DATA_MODE: 'real' }, ['stage-a', '--remote', '--env', 'staging']],
+    [{ APP_ENV: 'production', DATA_MODE: 'fictional' }, ['stage-a', '--remote', '--env', 'staging']],
+    [{ CLOUDFLARE_ENV: 'production', DATA_MODE: 'fictional' }, ['stage-a', '--remote', '--env', 'staging']],
+    [{ DATA_MODE: 'fictional' }, ['stage-a', '--remote', '--env', 'demo']],
+    [{ DATA_MODE: 'fictional' }, ['stage-a', '--env', 'staging', '--remote']],
+    [{ DATA_MODE: 'fictional' }, ['stage-a', '--remote', '--env']],
+    [{ APP_ENV: 'development', DATA_MODE: 'fictional' }, ['stage-a']],
+  ]) {
+    assert.throws(
+      () => module.normalizeCoreMigrationStageInput(...fixture),
+      /CORE_MIGRATION_STAGE_INPUT_INVALID/,
+    )
+  }
+})
+
+test('remote target selection requires a named env block and exact production confirmation', async () => {
+  const module = await loadStageModule()
+  assert.ok(module, 'core migration stage selector must exist')
+  assert.equal(module.CORE_MIGRATION_PRODUCTION_ACK_VARIABLE, 'BWM_CONFIRM_PRODUCTION_DATABASE')
+  const config = {
+    d1_databases: [{ binding: 'DB', database_name: 'bearwithme-panel-local' }],
+    env: {
+      production: {
+        d1_databases: [{
+          binding: 'DB',
+          database_id: '00000000-0000-0000-0000-000000000003',
+          database_name: 'bearwithme-panel-production',
+        }],
+      },
+      staging: {
+        d1_databases: [{
+          binding: 'DB',
+          database_id: '00000000-0000-0000-0000-000000000002',
+          database_name: 'bearwithme-panel-staging',
+        }],
+      },
+    },
+  }
+
+  const staging = module.selectCoreMigrationRemoteTarget(config, 'staging')
+  assert.deepEqual(staging, {
+    databaseName: 'bearwithme-panel-staging',
+    envName: 'staging',
+  })
+  assert.equal(Object.isFrozen(staging), true)
+  const production = module.selectCoreMigrationRemoteTarget(config, 'production')
+  assert.deepEqual(production, {
+    databaseName: 'bearwithme-panel-production',
+    envName: 'production',
+  })
+
+  assert.throws(
+    () => module.selectCoreMigrationRemoteTarget({ d1_databases: config.d1_databases }, 'staging'),
+    /CORE_MIGRATION_REMOTE_ENV_MISSING/,
+  )
+  assert.throws(
+    () => module.selectCoreMigrationRemoteTarget({ env: { production: config.env.production } }, 'staging'),
+    /CORE_MIGRATION_REMOTE_ENV_MISSING/,
+  )
+  for (const block of [
+    {},
+    { d1_databases: [] },
+    { d1_databases: [...config.env.staging.d1_databases, ...config.env.staging.d1_databases] },
+    { d1_databases: [{ ...config.env.staging.d1_databases[0], binding: 'DATA' }] },
+    { d1_databases: [{ ...config.env.staging.d1_databases[0], database_name: '' }] },
+  ]) {
+    assert.throws(
+      () => module.selectCoreMigrationRemoteTarget({ env: { staging: block } }, 'staging'),
+      /CORE_MIGRATION_REMOTE_ENV_INVALID/,
+    )
+  }
+  assert.throws(
+    () => module.selectCoreMigrationRemoteTarget(config, 'demo'),
+    /CORE_MIGRATION_STAGE_INVALID/,
+  )
+
+  assert.equal(module.confirmCoreMigrationRemoteTarget({}, staging), staging)
+  assert.equal(module.confirmCoreMigrationRemoteTarget({
+    BWM_CONFIRM_PRODUCTION_DATABASE: 'bearwithme-panel-production',
+  }, production), production)
+  for (const env of [
+    {},
+    { BWM_CONFIRM_PRODUCTION_DATABASE: 'bearwithme-panel-prod' },
+    { BWM_CONFIRM_PRODUCTION_DATABASE: 'bearwithme-panel-production ' },
+    { BWM_CONFIRM_PRODUCTION_DATABASE: '' },
+    { BWM_CONFIRM_PRODUCTION_DATABASE: 'bearwithme-panel-staging' },
+  ]) {
+    assert.throws(
+      () => module.confirmCoreMigrationRemoteTarget(env, production),
+      /CORE_MIGRATION_REMOTE_PRODUCTION_UNCONFIRMED/,
+    )
+  }
+})
+
+test('remote stage generation rewrites only the named env block onto a fresh active directory', async (t) => {
+  const module = await loadApplyModule()
+  assert.ok(module, 'core migration stage generator must exist')
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'bwm-core-stage-remote-')))
+  t.after(() => rmSync(root, { force: true, recursive: true }))
+  const sourceDirectory = join(root, 'source')
+  const outputRoot = join(root, 'private')
+  mkdirSync(sourceDirectory)
+  for (const name of STAGE_A_NAMES) {
+    writeFileSync(join(sourceDirectory, name), `-- ${name}\nSELECT 1;\n`)
+  }
+  mkdirSync(outputRoot, { mode: 0o700 })
+  mkdirSync(join(outputRoot, 'active'), { mode: 0o700 })
+  writeFileSync(join(outputRoot, 'active', '9999_foreign.sql'), '-- foreign\n', { mode: 0o600 })
+  const configPath = join(root, 'wrangler.json')
+  writeFileSync(configPath, JSON.stringify({
+    d1_databases: [{ binding: 'DB', migrations_dir: 'migrations' }],
+    env: {
+      production: {
+        d1_databases: [{ binding: 'DB', database_name: 'bearwithme-panel-production' }],
+      },
+      staging: {
+        d1_databases: [{ binding: 'DB', database_name: 'bearwithme-panel-staging' }],
+      },
+    },
+    main: './worker/index.js',
+    vars: { DATA_MODE: 'fictional' },
+  }))
+
+  const generated = module.generateCoreMigrationStageA({
+    configPath,
+    envName: 'staging',
+    outputRoot,
+    sourceDirectory,
+  })
+
+  assert.deepEqual(readdirSync(generated.migrationsDirectory).sort(), STAGE_A_NAMES)
+  assert.deepEqual(generated.names, STAGE_A_NAMES)
+  assert.equal(generated.configPath, join(outputRoot, 'wrangler.stage-a.staging.json'))
+  const config = JSON.parse(readFileSync(generated.configPath, 'utf8'))
+  assert.equal(config.env.staging.d1_databases[0].migrations_dir, generated.migrationsDirectory)
+  assert.equal(config.env.staging.d1_databases[0].database_name, 'bearwithme-panel-staging')
+  assert.equal(config.env.production.d1_databases[0].migrations_dir, undefined)
+
+  const missingPath = join(root, 'wrangler.missing.json')
+  writeFileSync(missingPath, JSON.stringify({
+    d1_databases: [{ binding: 'DB', migrations_dir: 'migrations' }],
+    main: './worker/index.js',
+  }))
+  assert.throws(() => module.generateCoreMigrationStageA({
+    configPath: missingPath,
+    envName: 'staging',
+    outputRoot,
+    sourceDirectory,
+  }), /CORE_MIGRATION_REMOTE_ENV_MISSING/)
+  assert.deepEqual(readdirSync(generated.migrationsDirectory).sort(), STAGE_A_NAMES)
+})
+
 test('stage-B preflight accepts only an exact empty Wrangler result', async () => {
   const module = await loadApplyModule()
   assert.ok(module, 'core migration stage command must exist')

@@ -35,6 +35,8 @@ const BACKEND_BINDINGS = [
   'DB',
   'SCW_SECRET_KEY',
 ]
+const DEPLOY_ENVIRONMENT_NAMES = ['production', 'staging']
+const ZEROED_DATABASE_ID = /^0{8}-0{4}-0{4}-0{4}-0{11}[0-9a-f]$/
 const SEMVER_NUMBER = '(?:0|[1-9]\\d*)'
 const SEMVER_PRERELEASE = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)'
 const EXACT_SEMVER = new RegExp(
@@ -148,15 +150,26 @@ export const assertTrackedFiles = (paths) => {
 }
 
 export const assertCoreMigrationConfiguration = (config) => {
-  const databases = config?.d1_databases
-  if (!Array.isArray(databases)
+  const invalidDatabases = (databases) => !Array.isArray(databases)
     || databases.length < 1
     || databases.some((database) => (
       !database
       || typeof database !== 'object'
       || Array.isArray(database)
       || database.migrations_dir !== '.core-migrations/active'
-    ))) {
+    ))
+  const environments = config?.env !== null
+    && typeof config?.env === 'object'
+    && !Array.isArray(config.env)
+    ? Object.values(config.env)
+    : []
+  const environmentDatabases = environments
+    .filter((block) => block !== null
+      && typeof block === 'object'
+      && !Array.isArray(block)
+      && block.d1_databases !== undefined)
+    .map((block) => block.d1_databases)
+  if (invalidDatabases(config?.d1_databases) || environmentDatabases.some(invalidDatabases)) {
     throw new Error('D1 must use the generated core migration directory')
   }
 }
@@ -173,7 +186,44 @@ export const assertDirectDependencyPins = (packageJson) => {
 
 export const assertRuntimeIndex = (html) => assertNoRuntimeHosts(html, 'index.html')
 
-export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) => {
+const isLocalDevOrigin = (value) => {
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    return true
+  }
+  return url.protocol !== 'https:'
+    || url.hostname === 'localhost'
+    || url.hostname.endsWith('.localhost')
+    || url.hostname === '127.0.0.1'
+    || url.hostname === '[::1]'
+}
+
+// The @cloudflare/vite-plugin resolves CLOUDFLARE_ENV at build time and stamps the
+// generated Worker config with targetEnvironment plus the flattened env block, so
+// a deploy for a named environment must never ship the local placeholder config.
+const assertDeployEnvironment = (workerConfig, expectedEnvironment) => {
+  if (workerConfig.targetEnvironment !== expectedEnvironment) {
+    throw new Error(`Generated Worker config must target environment ${expectedEnvironment}`)
+  }
+  const vars = workerConfig.vars
+  if (!vars || typeof vars !== 'object' || Array.isArray(vars) || vars.APP_ENV !== expectedEnvironment) {
+    throw new Error(`Generated Worker config vars.APP_ENV must be ${expectedEnvironment}`)
+  }
+  if (isLocalDevOrigin(vars.APP_ORIGIN)) {
+    throw new Error('Generated Worker config vars.APP_ORIGIN must not be a local development origin')
+  }
+  const databases = workerConfig.d1_databases
+  if (!Array.isArray(databases)
+    || databases.length < 1
+    || databases.some((database) => typeof database?.database_id !== 'string'
+      || ZEROED_DATABASE_ID.test(database.database_id))) {
+    throw new Error('Generated Worker config must bind a provisioned D1 database id')
+  }
+}
+
+export const inspectDeployArtifact = ({ root, configPath, secretValues = {}, expectedEnvironment = null }) => {
   const lexicalProjectRoot = resolve(root)
   const projectRoot = realpathSync(root)
   const appRoot = resolve(projectRoot, 'dist/app')
@@ -241,6 +291,7 @@ export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) =
   if (!workerConfig || typeof workerConfig !== 'object' || Array.isArray(workerConfig)) {
     throw new Error('Generated Worker config must be an object')
   }
+  if (expectedEnvironment !== null) assertDeployEnvironment(workerConfig, expectedEnvironment)
   const workerPath = resolveRegularInside({
     base: dirname(workerConfigPath),
     value: workerConfig.main,
@@ -288,8 +339,14 @@ export const inspectDeployArtifact = ({ root, configPath, secretValues = {} }) =
 
 const runCli = () => {
   const args = process.argv.slice(2)
-  if (args.length > 1 || (args.length === 1 && args[0] !== '--dist')) {
-    throw new Error('Usage: node scripts/assert-repository-safety.mjs [--dist]')
+  const usage = 'Usage: node scripts/assert-repository-safety.mjs [--dist [--env <staging|production>]]'
+  let expectedEnvironment = null
+  if (args.length > 0 && args[0] !== '--dist') throw new Error(usage)
+  if (args.length === 3) {
+    if (args[1] !== '--env' || !DEPLOY_ENVIRONMENT_NAMES.includes(args[2])) throw new Error(usage)
+    expectedEnvironment = args[2]
+  } else if (args.length > 1) {
+    throw new Error(usage)
   }
   const tracked = execFileSync('git', ['ls-files', '-z']).toString().split('\0').filter(Boolean)
   assertTrackedFiles(tracked)
@@ -300,7 +357,7 @@ const runCli = () => {
     const secretValues = Object.fromEntries(
       SECRET_NAMES.flatMap((name) => process.env[name] ? [[name, process.env[name]]] : [])
     )
-    inspectDeployArtifact({ root: process.cwd(), secretValues })
+    inspectDeployArtifact({ root: process.cwd(), secretValues, expectedEnvironment })
   }
 }
 

@@ -10,7 +10,7 @@ import {
 const correlationId = '11111111-1111-4111-8111-111111111111'
 const config = {
   appEnv: 'staging',
-  appOrigin: 'https://panel.bearwithme.pl',
+  appOrigin: 'https://bearwithme-panel.app',
   dataMode: 'fictional',
   accessHealthServiceTokenId: 'health-service',
 }

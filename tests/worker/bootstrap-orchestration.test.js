@@ -10,7 +10,7 @@ const key = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
 
 const bootstrapEnv = () => ({
   APP_ENV: 'staging',
-  APP_ORIGIN: 'https://staging-panel.bearwithme.pl',
+  APP_ORIGIN: 'https://staging.bearwithme-panel.app',
   BOOTSTRAP_OWNER_DISPLAY_NAME: 'Alicja Orkiestracja',
   BOOTSTRAP_OWNER_EMAIL: 'orchestration@example.test',
   BOOTSTRAP_TARGET: 'staging',

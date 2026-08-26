@@ -13,7 +13,7 @@ import { isD1OutboxOperationGuardFailure } from '../../worker/db/errors.js'
 const key = (character) => Buffer.alloc(32, character.charCodeAt(0)).toString('base64url')
 const baseEnv = () => ({
   APP_ENV: 'staging',
-  APP_ORIGIN: 'https://staging-panel.bearwithme.pl',
+  APP_ORIGIN: 'https://staging.bearwithme-panel.app',
   BOOTSTRAP_OWNER_DISPLAY_NAME: 'Alicja Testowa',
   BOOTSTRAP_OWNER_EMAIL: 'owner@example.test',
   BOOTSTRAP_TARGET: 'staging',
@@ -214,13 +214,20 @@ test('bootstrap input accepts only the exact staging, fictional, provider-bound 
   assert.equal(normalized.activeBackupKekVersion, 1)
   assert.equal(Object.isFrozen(normalized), true)
 
+  const stagingOwner = normalizeBootstrapInput({
+    ...baseEnv(),
+    BOOTSTRAP_OWNER_EMAIL: 'staging-owner@bearwithme-panel.app',
+  }, [])
+  assert.equal(stagingOwner.ownerEmail, 'staging-owner@bearwithme-panel.app')
+
   for (const [name, value] of [
     ['APP_ENV', 'development'],
-    ['APP_ORIGIN', 'https://panel.bearwithme.pl'],
+    ['APP_ORIGIN', 'https://bearwithme-panel.app'],
     ['BOOTSTRAP_TARGET', 'staging '],
     ['DATA_MODE', 'real'],
     ['BOOTSTRAP_OWNER_EMAIL', 'Owner@example.test'],
     ['BOOTSTRAP_OWNER_EMAIL', 'owner@example.com'],
+    ['BOOTSTRAP_OWNER_EMAIL', 'another@bearwithme-panel.app'],
     ['BOOTSTRAP_OWNER_DISPLAY_NAME', ' Alicja Testowa'],
     ['CF_ACCOUNT_ID', 'A'.repeat(32)],
     ['CF_D1_DATABASE_ID', '22222222-2222-4222-8222-22222222222A'],

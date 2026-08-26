@@ -50,6 +50,17 @@ it('creates the complete encrypted pre-reconcile aggregate in one guarded batch'
   })
 })
 
+it('builds the encrypted staging bootstrap aggregate for the exact role alias', async () => {
+  const keyring = await bootstrapKeyring('alias')
+  const built = await buildBootstrapCreationBatch({
+    ...bootstrapInput('alias'),
+    keyring,
+    ownerEmail: 'staging-owner@bearwithme-panel.app',
+  })
+
+  expect(JSON.stringify(built.batch)).not.toContain('staging-owner@bearwithme-panel.app')
+})
+
 const LEGACY_IDENTITY_AUDITS = Object.freeze({
   'identity.activation': Object.freeze({
     entity_type: 'staff_user',

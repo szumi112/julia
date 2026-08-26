@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url'
+import { acceptPhaseOneAccessEmail } from '../worker/identity/canonical-email.js'
 import {
   buildBootstrapCreationBatch,
   inspectBootstrapAggregate,
@@ -14,7 +15,6 @@ import { createKeyring } from '../worker/security/keyring.js'
 
 const ACCOUNT_ID = /^[0-9a-f]{32}$/
 const PROVIDER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const EMAIL = /^[^@\s]+@example\.test$/
 const D1_REST_DEADLINE_MS = 15_000
 const MAX_PARAM_BYTES = 16_384
 const MAX_REQUEST_BYTES = 65_536
@@ -72,12 +72,9 @@ const canonicalDisplayName = (value) => typeof value === 'string'
   && value.length > 0
   && new TextEncoder().encode(value).byteLength <= 120
   && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
-const canonicalEmail = (value) => typeof value === 'string'
-  && value === value.normalize('NFC')
-  && value === value.trim()
-  && value === value.toLowerCase()
-  && new TextEncoder().encode(value).byteLength <= 254
-  && EMAIL.test(value)
+const canonicalEmail = (value) => acceptPhaseOneAccessEmail(value, {
+  appEnv: 'staging',
+}) !== null
 
 const parseJsonWithoutDuplicateKeys = (source) => {
   let cursor = 0
@@ -419,7 +416,7 @@ export function normalizeBootstrapInput(env, argv = []) {
   if (selected.APP_ENV !== 'staging'
     || selected.BOOTSTRAP_TARGET !== 'staging'
     || selected.DATA_MODE !== 'fictional'
-    || selected.APP_ORIGIN !== 'https://staging-panel.bearwithme.pl'
+    || selected.APP_ORIGIN !== 'https://staging.bearwithme-panel.app'
     || !canonicalDisplayName(selected.BOOTSTRAP_OWNER_DISPLAY_NAME)
     || !canonicalEmail(selected.BOOTSTRAP_OWNER_EMAIL)
     || !ACCOUNT_ID.test(selected.CF_ACCOUNT_ID ?? '')

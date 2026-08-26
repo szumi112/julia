@@ -17,6 +17,7 @@ import {
   LOCAL_HARNESS_WRANGLER_NAME,
 } from '../../scripts/local-harness-core.js'
 import {
+  createWranglerD1Facade,
   normalizeCoreDirectoryUpgradeInput,
   runCoreDirectoryUpgradeCli,
   runWranglerCommand,
@@ -87,6 +88,35 @@ test('upgrade CLI requires fictional mode and refuses every production marker', 
   ]) {
     assert.throws(
       () => normalizeCoreDirectoryUpgradeInput(env, []),
+      /^Error: CORE_DIRECTORY_UPGRADE_INPUT_INVALID$/,
+    )
+  }
+})
+
+test('upgrade CLI accepts explicit remote envs with unchanged local guards', () => {
+  assert.deepEqual(
+    normalizeCoreDirectoryUpgradeInput({ DATA_MODE: 'fictional' }, ['--remote', '--env', 'staging']),
+    { envName: 'staging', maxSteps: 25 },
+  )
+  assert.deepEqual(
+    normalizeCoreDirectoryUpgradeInput({
+      CLOUDFLARE_ENV: 'production',
+      CORE_DIRECTORY_MAX_STEPS: '5',
+      DATA_MODE: 'fictional',
+    }, ['--remote', '--env', 'production']),
+    { envName: 'production', maxSteps: 5 },
+  )
+  for (const fixture of [
+    [{ DATA_MODE: 'real' }, ['--remote', '--env', 'staging']],
+    [{ APP_ENV: 'production', DATA_MODE: 'fictional' }, ['--remote', '--env', 'staging']],
+    [{ CLOUDFLARE_ENV: 'production', DATA_MODE: 'fictional' }, ['--remote', '--env', 'staging']],
+    [{ DATA_MODE: 'fictional' }, ['--remote', '--env', 'demo']],
+    [{ DATA_MODE: 'fictional' }, ['--remote']],
+    [{ DATA_MODE: 'fictional' }, ['--remote', '--env']],
+    [{ DATA_MODE: 'fictional' }, ['--env', 'staging', '--remote']],
+  ]) {
+    assert.throws(
+      () => normalizeCoreDirectoryUpgradeInput(...fixture),
       /^Error: CORE_DIRECTORY_UPGRADE_INPUT_INVALID$/,
     )
   }
@@ -244,6 +274,161 @@ test('Wrangler command accepts only a clean exact JSON success envelope', () => 
       stdout: '{"error":{"text":"secret row"}}',
     }),
   }), /^Error: CORE_DIRECTORY_D1_REFUSED$/)
+})
+
+test('Wrangler facade targets the named remote env and passes operator auth through', async (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'bwm-directory-remote-')))
+  t.after(() => rmSync(root, { force: true, recursive: true }))
+  const configPath = join(root, 'wrangler.json')
+  writeFileSync(configPath, JSON.stringify({
+    d1_databases: [{ binding: 'DB', database_name: 'bearwithme-panel-local' }],
+    env: {
+      production: {
+        d1_databases: [{ binding: 'DB', database_name: 'bearwithme-panel-production' }],
+      },
+      staging: {
+        d1_databases: [{ binding: 'DB', database_name: 'bearwithme-panel-staging' }],
+      },
+    },
+  }))
+  const calls = []
+  const runCommand = (invocation) => {
+    calls.push(invocation)
+    return [{ meta: { duration: 1 }, results: [], success: true }]
+  }
+  const env = {
+    CLOUDFLARE_API_TOKEN: 'fictional-operator-token',
+    DATA_MODE: 'fictional',
+  }
+
+  const db = createWranglerD1Facade(env, { configPath, envName: 'staging', runCommand })
+  await db.prepare('SELECT 1 AS one').all()
+  assert.equal(calls.length, 1)
+  const { args, env: childEnv } = calls[0]
+  assert.deepEqual(args.slice(args.indexOf('DB') + 1, args.indexOf('DB') + 4), [
+    '--env',
+    'staging',
+    '--remote',
+  ])
+  assert.equal(args.includes('--local'), false)
+  assert.equal(args.includes('--persist-to'), false)
+  assert.equal(args[args.indexOf('--config') + 1], configPath)
+  assert.equal(childEnv.CLOUDFLARE_API_TOKEN, 'fictional-operator-token')
+  assert.equal(childEnv.CLOUDFLARE_API_BASE_URL, undefined)
+  assert.equal(childEnv.WRANGLER_SEND_METRICS, 'false')
+
+  assert.throws(
+    () => createWranglerD1Facade(env, { configPath, envName: 'production', runCommand }),
+    /^Error: CORE_MIGRATION_REMOTE_PRODUCTION_UNCONFIRMED$/,
+  )
+  const confirmed = createWranglerD1Facade({
+    ...env,
+    BWM_CONFIRM_PRODUCTION_DATABASE: 'bearwithme-panel-production',
+  }, { configPath, envName: 'production', runCommand })
+  await confirmed.prepare('SELECT 1 AS one').all()
+  assert.deepEqual(
+    calls[1].args.slice(calls[1].args.indexOf('DB') + 1, calls[1].args.indexOf('DB') + 4),
+    ['--env', 'production', '--remote'],
+  )
+
+  const missingPath = join(root, 'wrangler.missing.json')
+  writeFileSync(missingPath, JSON.stringify({
+    d1_databases: [{ binding: 'DB', database_name: 'bearwithme-panel-local' }],
+  }))
+  assert.throws(
+    () => createWranglerD1Facade(env, { configPath: missingPath, envName: 'staging', runCommand }),
+    /^Error: CORE_MIGRATION_REMOTE_ENV_MISSING$/,
+  )
+})
+
+test('Wrangler facade never forwards KEK secrets or unrelated parent env to remote children', async (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'bwm-directory-remote-env-')))
+  t.after(() => rmSync(root, { force: true, recursive: true }))
+  const configPath = join(root, 'wrangler.json')
+  writeFileSync(configPath, JSON.stringify({
+    d1_databases: [{ binding: 'DB', database_name: 'bearwithme-panel-local' }],
+    env: {
+      staging: {
+        d1_databases: [{ binding: 'DB', database_name: 'bearwithme-panel-staging' }],
+      },
+    },
+  }))
+  const calls = []
+  const runCommand = (invocation) => {
+    calls.push(invocation)
+    return [{ meta: { duration: 1 }, results: [], success: true }]
+  }
+  const env = {
+    BWM_BACKUP_KEK_V1: 'fictional-backup-kek',
+    BWM_DATA_KEK_V1: 'fictional-data-kek',
+    BWM_LOOKUP_HMAC_V1: 'fictional-lookup-hmac',
+    CLOUDFLARE_ACCOUNT_ID: 'fictional-account-id',
+    CLOUDFLARE_API_TOKEN: 'fictional-operator-token',
+    DATA_MODE: 'fictional',
+    HOME: '/home/fictional-operator',
+    PATH: '/usr/bin:/bin',
+    UNRELATED_PARENT_VALUE: 'must-not-leak',
+  }
+
+  const db = createWranglerD1Facade(env, { configPath, envName: 'staging', runCommand })
+  await db.prepare('SELECT 1 AS one').all()
+  assert.equal(calls.length, 1)
+  const childEnv = calls[0].env
+  assert.deepEqual(Object.keys(childEnv).filter((name) => name.startsWith('BWM_')), [])
+  assert.equal(childEnv.UNRELATED_PARENT_VALUE, undefined)
+  assert.equal(childEnv.DATA_MODE, undefined)
+  assert.equal(childEnv.CLOUDFLARE_ACCOUNT_ID, 'fictional-account-id')
+  assert.equal(childEnv.CLOUDFLARE_API_TOKEN, 'fictional-operator-token')
+  assert.equal(childEnv.HOME, '/home/fictional-operator')
+  assert.equal(childEnv.PATH, '/usr/bin:/bin')
+  assert.equal(childEnv.CLOUDFLARE_INCLUDE_PROCESS_ENV, 'false')
+  assert.equal(childEnv.CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV, 'false')
+  assert.equal(childEnv.WRANGLER_LOG_SANITIZE, 'true')
+})
+
+test('upgrade CLI completes a fresh remote database with aggregate-only output', async () => {
+  const targets = []
+  let stdout = ''
+  let stderr = ''
+  const exitCode = await runCoreDirectoryUpgradeCli({
+    argv: ['--remote', '--env', 'staging'],
+    env: { DATA_MODE: 'fictional' },
+    stderr: { write: (value) => { stderr += value } },
+    stdout: { write: (value) => { stdout += value } },
+    deps: {
+      advance: async ({ cryptoContext }) => {
+        assert.equal(cryptoContext, null)
+        return { createdCount: 0, processedCount: 0, status: 'complete' }
+      },
+      createDb: async (childEnv, options) => {
+        targets.push(options)
+        return Object.freeze({})
+      },
+      idFactory: (kind) => `${kind === 'version' ? 'ver' : 'aud'}_cli_test`,
+      now: () => Date.parse('2031-04-05T06:07:08.009Z'),
+    },
+  })
+  assert.equal(exitCode, 0)
+  assert.equal(stderr, '')
+  assert.equal(stdout, '{"createdCount":0,"processedCount":0,"status":"complete"}\n')
+  assert.deepEqual(targets, [{ envName: 'staging' }])
+})
+
+test('upgrade CLI surfaces remote env misconfiguration with a fixed clear code', async () => {
+  let stdout = ''
+  let stderr = ''
+  const exitCode = await runCoreDirectoryUpgradeCli({
+    argv: ['--remote', '--env', 'staging'],
+    env: { DATA_MODE: 'fictional' },
+    stderr: { write: (value) => { stderr += value } },
+    stdout: { write: (value) => { stdout += value } },
+    deps: {
+      createDb: async () => { throw new Error('CORE_MIGRATION_REMOTE_ENV_MISSING') },
+    },
+  })
+  assert.equal(exitCode, 1)
+  assert.equal(stdout, '')
+  assert.equal(stderr, 'CORE_MIGRATION_REMOTE_ENV_MISSING\n')
 })
 
 test('real fictional CLI completes fresh stage A and reruns as an aggregate-only no-op', {

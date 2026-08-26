@@ -11,7 +11,7 @@ import { safeLog } from '../../worker/logging/safe-log.js'
 const deps = (overrides = {}) => ({
   config: {
     appEnv: 'staging',
-    appOrigin: 'https://panel.bearwithme.pl',
+    appOrigin: 'https://bearwithme-panel.app',
     dataMode: 'fictional',
   },
   resolveAccessPrincipal: vi.fn(async () => ({
@@ -129,7 +129,7 @@ describe('API shell', () => {
 })
 
 describe('closed core route descriptors', () => {
-  const origin = 'https://panel.bearwithme.pl'
+  const origin = 'https://bearwithme-panel.app'
   const commands = [
     ['/api/v1/clients/cl_one/edits', { expectedVersion: 1, name: 'Ala', age: 12, status: 'active', specialistId: 'sp_one' }],
     ['/api/v1/clients/cl_one/archive', { expectedVersion: 1 }],
@@ -582,7 +582,7 @@ describe('closed core route descriptors', () => {
 
 describe('operations HTTP shell', () => {
   const correlationId = '11111111-1111-4111-8111-111111111111'
-  const origin = 'https://panel.bearwithme.pl'
+  const origin = 'https://bearwithme-panel.app'
   const actor = Object.freeze({
     id: 'stf_shell',
     role: 'owner',

@@ -93,6 +93,32 @@ test('D1 configuration exposes only the ignored generated migration directory', 
   }
 })
 
+test('environment D1 blocks must also use the generated migration directory', () => {
+  const compliantDatabase = { binding: 'DB', migrations_dir: '.core-migrations/active' }
+  assert.doesNotThrow(() => assertCoreMigrationConfiguration({
+    d1_databases: [compliantDatabase],
+    env: {
+      production: { d1_databases: [{ ...compliantDatabase }] },
+      staging: { d1_databases: [{ ...compliantDatabase }] },
+    },
+  }))
+
+  for (const environmentDatabases of [
+    [{ binding: 'DB', migrations_dir: 'migrations' }],
+    [{ binding: 'DB' }],
+    [],
+    'not-an-array',
+  ]) {
+    assert.throws(() => assertCoreMigrationConfiguration({
+      d1_databases: [compliantDatabase],
+      env: {
+        production: { d1_databases: [{ ...compliantDatabase }] },
+        staging: { d1_databases: environmentDatabases },
+      },
+    }), /generated core migration directory/)
+  }
+})
+
 test('only exact direct dependency versions are accepted', () => {
   assert.doesNotThrow(() => assertDirectDependencyPins({
     dependencies: { react: '18.3.1' },
@@ -139,6 +165,81 @@ test('runtime HTML rejects external fonts and CDN scripts', () => {
 test('deploy inspection follows structured config into the browser asset directory', (t) => {
   const root = deployFixture(t)
   assert.doesNotThrow(() => inspectDeployArtifact({ root, secretValues: {} }))
+})
+
+const environmentWorkerConfig = (overrides = {}) => ({
+  main: 'worker.js',
+  assets: { directory: 'assets' },
+  targetEnvironment: 'staging',
+  vars: {
+    APP_ENV: 'staging',
+    APP_ORIGIN: 'https://staging.bearwithme-panel.app',
+  },
+  d1_databases: [{
+    binding: 'DB',
+    database_name: 'bearwithme-panel-staging',
+    database_id: '0b54f9d2-3c1e-4a87-9f26-8d5c1e7a4b90',
+  }],
+  ...overrides,
+})
+
+test('deploy inspection accepts an artifact resolved for the requested environment', (t) => {
+  const root = deployFixture(t, { workerConfig: environmentWorkerConfig() })
+  assert.doesNotThrow(() => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }))
+  assert.doesNotThrow(() => inspectDeployArtifact({ root, secretValues: {} }))
+})
+
+test('deploy inspection rejects an artifact that does not target the requested environment', (t) => {
+  const placeholderRoot = deployFixture(t)
+  assert.throws(
+    () => inspectDeployArtifact({ root: placeholderRoot, secretValues: {}, expectedEnvironment: 'production' }),
+    /must target environment production/,
+  )
+
+  const mismatchedRoot = deployFixture(t, { workerConfig: environmentWorkerConfig() })
+  assert.throws(
+    () => inspectDeployArtifact({ root: mismatchedRoot, secretValues: {}, expectedEnvironment: 'production' }),
+    /must target environment production/,
+  )
+})
+
+test('deploy inspection rejects environment artifacts with development vars or placeholder databases', (t) => {
+  const appEnvRoot = deployFixture(t, {
+    workerConfig: environmentWorkerConfig({
+      vars: { APP_ENV: 'development', APP_ORIGIN: 'https://staging.bearwithme-panel.app' },
+    }),
+  })
+  assert.throws(
+    () => inspectDeployArtifact({ root: appEnvRoot, secretValues: {}, expectedEnvironment: 'staging' }),
+    /vars\.APP_ENV must be staging/,
+  )
+
+  for (const appOrigin of ['http://127.0.0.1:5174', 'http://localhost:5174', 'https://app.localhost', undefined]) {
+    const originRoot = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({
+        vars: { APP_ENV: 'staging', APP_ORIGIN: appOrigin },
+      }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root: originRoot, secretValues: {}, expectedEnvironment: 'staging' }),
+      /vars\.APP_ORIGIN/,
+    )
+  }
+
+  for (const databases of [
+    [{ binding: 'DB', database_name: 'bearwithme-panel-staging', database_id: '00000000-0000-0000-0000-000000000001' }],
+    [{ binding: 'DB', database_name: 'bearwithme-panel-staging' }],
+    [],
+    undefined,
+  ]) {
+    const databaseRoot = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({ d1_databases: databases }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root: databaseRoot, secretValues: {}, expectedEnvironment: 'staging' }),
+      /provisioned D1 database id/,
+    )
+  }
 })
 
 test('deploy inspection permits only the plugin auxiliaryWorkers shape', (t) => {

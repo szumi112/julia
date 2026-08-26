@@ -17,9 +17,12 @@ import {
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
+  CORE_MIGRATION_REMOTE_ENV_NAMES,
   CORE_MIGRATION_STAGE_A_NAMES,
   CORE_MIGRATION_STAGE_B_NAMES,
   CORE_DIRECTORY_INVARIANT_FAILURE_SQL,
+  confirmCoreMigrationRemoteTarget,
+  selectCoreMigrationRemoteTarget,
   selectCoreMigrationStage,
 } from './core-migration-stages.js'
 import {
@@ -118,6 +121,7 @@ function materializeCoreMigrationStage({
 
 function generateCoreMigrationStage({
   configPath,
+  envName = null,
   outputRoot,
   sourceDirectory,
   stage,
@@ -134,9 +138,10 @@ function generateCoreMigrationStage({
     || realpathSync(configPath) !== configPath) fail()
   const sourceConfig = JSON.parse(readFileSync(configPath, 'utf8'))
   const databases = sourceConfig?.d1_databases
-  if (!Array.isArray(databases)
+  if (envName === null && (!Array.isArray(databases)
     || databases.length !== 1
-    || databases[0]?.binding !== 'DB') fail()
+    || databases[0]?.binding !== 'DB')) fail()
+  if (envName !== null) selectCoreMigrationRemoteTarget(sourceConfig, envName)
   const migrationsDirectory = join(outputRoot, 'active')
   const materialized = materializeCoreMigrationStage({
     sourceDirectory,
@@ -148,12 +153,30 @@ function generateCoreMigrationStage({
     main: isAbsolute(sourceConfig.main)
       ? sourceConfig.main
       : resolve(dirname(configPath), sourceConfig.main),
-    d1_databases: [{
-      ...databases[0],
-      migrations_dir: migrationsDirectory,
-    }],
+    ...(envName === null
+      ? {
+          d1_databases: [{
+            ...databases[0],
+            migrations_dir: migrationsDirectory,
+          }],
+        }
+      : {
+          env: {
+            ...sourceConfig.env,
+            [envName]: {
+              ...sourceConfig.env[envName],
+              d1_databases: [{
+                ...sourceConfig.env[envName].d1_databases[0],
+                migrations_dir: migrationsDirectory,
+              }],
+            },
+          },
+        }),
   }
-  const generatedConfigPath = join(outputRoot, `wrangler.${stage}.json`)
+  const generatedConfigPath = join(
+    outputRoot,
+    `wrangler.${stage}${envName === null ? '' : `.${envName}`}.json`,
+  )
   if (existsSync(generatedConfigPath)) {
     const generatedStats = lstatSync(generatedConfigPath)
     if (!generatedStats.isFile() || generatedStats.isSymbolicLink()) fail()
@@ -189,10 +212,11 @@ export function generateCoreMigrationStageA(input) {
   if (!input
     || typeof input !== 'object'
     || Array.isArray(input)
-    || Object.keys(input).length !== 3
+    || ![3, 4].includes(Object.keys(input).length)
     || !Object.hasOwn(input, 'configPath')
     || !Object.hasOwn(input, 'outputRoot')
-    || !Object.hasOwn(input, 'sourceDirectory')) fail()
+    || !Object.hasOwn(input, 'sourceDirectory')
+    || (Object.keys(input).length === 4 && !Object.hasOwn(input, 'envName'))) fail()
   return generateCoreMigrationStage({
     ...input,
     stage: 'stage-a',
@@ -203,17 +227,31 @@ export function normalizeCoreMigrationStageInput(env, argv = []) {
   if (!env
     || typeof env !== 'object'
     || Array.isArray(env)
-    || env.APP_ENV === 'production'
-    || env.CLOUDFLARE_ENV === 'production'
     || env.DATA_MODE !== 'fictional'
     || !Array.isArray(argv)
-    || (argv.length !== 1 && argv.length !== 2)
-    || !['stage-a', 'stage-b'].includes(argv[0])
-    || (argv.length === 2 && argv[1] !== '--local')) {
+    || !['stage-a', 'stage-b'].includes(argv[0])) {
+    fail('CORE_MIGRATION_STAGE_INPUT_INVALID')
+  }
+  if (argv.length === 4 && argv[1] === '--remote' && argv[2] === '--env') {
+    if (!CORE_MIGRATION_REMOTE_ENV_NAMES.includes(argv[3])
+      || (argv[3] !== 'production'
+        && (env.APP_ENV === 'production' || env.CLOUDFLARE_ENV === 'production'))) {
+      fail('CORE_MIGRATION_STAGE_INPUT_INVALID')
+    }
+    return Object.freeze({
+      envName: argv[3],
+      local: false,
+      stage: argv[0],
+    })
+  }
+  if (argv.length !== 2
+    || argv[1] !== '--local'
+    || env.APP_ENV === 'production'
+    || env.CLOUDFLARE_ENV === 'production') {
     fail('CORE_MIGRATION_STAGE_INPUT_INVALID')
   }
   return Object.freeze({
-    local: argv[1] === '--local',
+    local: true,
     stage: argv[0],
   })
 }
@@ -283,7 +321,7 @@ const preflightCoreMigrationStageB = ({ configPath, env, input, persistencePath 
     'd1',
     'execute',
     'DB',
-    ...(input.local ? ['--local'] : []),
+    ...(input.local ? ['--local'] : ['--env', input.envName, '--remote']),
     ...(persistencePath ? ['--persist-to', persistencePath] : []),
     '--command',
     CORE_DIRECTORY_INVARIANT_FAILURE_SQL,
@@ -311,6 +349,12 @@ export function runCoreMigrationStage({
 } = {}) {
   const input = normalizeCoreMigrationStageInput(env, argv)
   const target = runnerTarget(env, input)
+  if (!input.local) {
+    confirmCoreMigrationRemoteTarget(env, selectCoreMigrationRemoteTarget(
+      JSON.parse(readFileSync(target.configPath, 'utf8')),
+      input.envName,
+    ))
+  }
   if (input.stage === 'stage-b') {
     const ready = preflightCoreMigrationStageB({
       configPath: target.configPath,
@@ -331,6 +375,7 @@ export function runCoreMigrationStage({
       }
     : generateCoreMigrationStage({
         configPath: target.configPath,
+        envName: input.envName ?? null,
         outputRoot: target.outputRoot,
         sourceDirectory: SOURCE_DIRECTORY,
         stage: input.stage,
@@ -350,7 +395,7 @@ export function runCoreMigrationStage({
     'migrations',
     'apply',
     'DB',
-    ...(input.local ? ['--local'] : []),
+    ...(input.local ? ['--local'] : ['--env', input.envName, '--remote']),
     ...(target.persistencePath ? ['--persist-to', target.persistencePath] : []),
   ]
   const child = spawnSync(process.execPath, args, {

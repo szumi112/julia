@@ -6,7 +6,7 @@ import { issueCsrfToken, verifyCsrfToken } from '../../worker/security/csrf.js'
 const secret = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
 const config = { activeLookupKeyVersion: 1 }
 const nowMs = 1_800_000_000_000
-const input = { subject: 'access_subject_1', origin: 'https://staging-panel.bearwithme.pl' }
+const input = { subject: 'access_subject_1', origin: 'https://staging.bearwithme-panel.app' }
 const ring = (overrides = {}, settings = config) => createKeyring({ BWM_LOOKUP_HMAC_V1: secret(2), ...overrides }, settings)
 const invalid = (operation) => expect(operation).rejects.toThrow(/^CSRF_INVALID$/)
 

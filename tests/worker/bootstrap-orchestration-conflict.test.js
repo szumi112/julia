@@ -12,7 +12,7 @@ it('refuses a conflicting owner before opaque IDs or provider I/O', async () => 
     argv: [],
     env: {
       APP_ENV: 'staging',
-      APP_ORIGIN: 'https://staging-panel.bearwithme.pl',
+      APP_ORIGIN: 'https://staging.bearwithme-panel.app',
       BOOTSTRAP_OWNER_DISPLAY_NAME: 'Inna Osoba',
       BOOTSTRAP_OWNER_EMAIL: 'other-owner@example.test',
       BOOTSTRAP_TARGET: 'staging',

@@ -64,12 +64,13 @@ const isDevelopmentOrigin = (value) => {
   return url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1')
 }
 
-const isPublicHttpsOrigin = (value) => {
-  if (!exactOrigin(value)) return false
-  const url = new URL(value)
-  return url.protocol === 'https:'
-    && (url.hostname === 'bearwithme.pl' || url.hostname.endsWith('.bearwithme.pl'))
-}
+const PUBLIC_ORIGINS = Object.freeze({
+  production: 'https://bearwithme-panel.app',
+  staging: 'https://staging.bearwithme-panel.app',
+})
+
+const isPublicHttpsOrigin = (value, appEnv) => exactOrigin(value)
+  && value === PUBLIC_ORIGINS[appEnv]
 
 const isAccessTeamDomain = (value) => {
   if (!exactOrigin(value)) return false
@@ -93,7 +94,7 @@ const schema = z.object({
 }).superRefine((value, context) => {
   const originIsValid = value.APP_ENV === 'development'
     ? isDevelopmentOrigin(value.APP_ORIGIN)
-    : isPublicHttpsOrigin(value.APP_ORIGIN)
+    : isPublicHttpsOrigin(value.APP_ORIGIN, value.APP_ENV)
   if (!originIsValid) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -261,7 +262,7 @@ export function loadAccessProviderConfig(env, config) {
     || value.token.length < 1
     || value.token.length > 4096
     || /\s/u.test(value.token)) throw new Error('PROVIDER_CONFIG_INVALID')
-  return Object.freeze(value)
+  return Object.freeze({ ...value, appEnv: config.appEnv })
 }
 
 export function loadEmailProviderConfig(env, config) {

@@ -11,7 +11,7 @@ import { createKeyring } from '../../worker/security/keyring.js'
 import { NOW_MS } from './fixtures.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
-const ORIGIN = 'https://panel.bearwithme.pl'
+const ORIGIN = 'https://bearwithme-panel.app'
 const CORRELATION_ID = '77777777-7777-4777-8777-777777777777'
 const SCOPE = Object.freeze({
   type: 'staff_directory',

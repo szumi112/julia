@@ -8,7 +8,9 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": [
+      "/api/*"
+    ]
   },
   "d1_databases": [
     {
@@ -27,7 +29,10 @@
     }
   ],
   "triggers": {
-    "crons": ["* * * * *", "*/5 * * * *"]
+    "crons": [
+      "* * * * *",
+      "*/5 * * * *"
+    ]
   },
   "vars": {
     "APP_ENV": "development",
@@ -44,7 +49,118 @@
     "required": [
       "BWM_BACKUP_KEK_V1",
       "BWM_DATA_KEK_V1",
-      "BWM_LOOKUP_HMAC_V1"
+      "BWM_LOOKUP_HMAC_V1",
+      "CF_ACCESS_GROUP_TOKEN",
+      "CF_D1_EXPORT_TOKEN",
+      "SCW_SECRET_KEY"
     ]
+  },
+  "env": {
+    "staging": {
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [
+        {
+          "pattern": "staging.bearwithme-panel.app",
+          "custom_domain": true
+        }
+      ],
+      "vars": {
+        "APP_ENV": "staging",
+        "APP_ORIGIN": "https://staging.bearwithme-panel.app",
+        "DATA_MODE": "fictional",
+        "ACCESS_AUD": "3eea6e3e16a2b87b65e9540c401157a31ef0cd064f4b00db9ab5416b1262853b",
+        "ACCESS_HEALTH_SERVICE_TOKEN_ID": "1ff4b9d0298f97a272b5322f24c4503f.access",
+        "ACCESS_TEAM_DOMAIN": "https://bearwithme-panel.cloudflareaccess.com",
+        "ACTIVE_DATA_KEK_VERSION": "1",
+        "ACTIVE_LOOKUP_KEY_VERSION": "1",
+        "ACTIVE_BACKUP_KEK_VERSION": "1",
+        "CF_ACCOUNT_ID": "2c7526d6afa1ee03407e35beefc21a0f",
+        "CF_D1_DATABASE_ID": "adcc8cc6-2ca2-4f9c-8565-fe9c64f0df9e",
+        "CF_ACCESS_GROUP_ID": "e7255a79-ecbd-499b-8918-073ae44252b7",
+        "CF_ACCESS_GROUP_NAME": "Bear with me - panel - staging"
+      },
+      "secrets": {
+        "required": [
+          "BWM_BACKUP_KEK_V1",
+          "BWM_DATA_KEK_V1",
+          "BWM_LOOKUP_HMAC_V1",
+          "CF_ACCESS_GROUP_TOKEN",
+          "CF_D1_EXPORT_TOKEN",
+          "SCW_SECRET_KEY"
+        ]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "bearwithme-panel-staging",
+          "database_id": "adcc8cc6-2ca2-4f9c-8565-fe9c64f0df9e",
+          "migrations_dir": ".core-migrations/active"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "ARCHIVE",
+          "bucket_name": "bearwithme-panel-staging",
+          "jurisdiction": "eu"
+        }
+      ],
+      "observability": {
+        "enabled": true
+      }
+    },
+    "production": {
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [
+        {
+          "pattern": "bearwithme-panel.app",
+          "custom_domain": true
+        }
+      ],
+      "vars": {
+        "APP_ENV": "production",
+        "APP_ORIGIN": "https://bearwithme-panel.app",
+        "DATA_MODE": "fictional",
+        "ACCESS_AUD": "ebc1f66ccc0ce49926759295632f0d84f6f9c284e799b180e3d14e5d6e2d4783",
+        "ACCESS_HEALTH_SERVICE_TOKEN_ID": "10d8ebca112e79c08ef7933597a2eb28.access",
+        "ACCESS_TEAM_DOMAIN": "https://bearwithme-panel.cloudflareaccess.com",
+        "ACTIVE_DATA_KEK_VERSION": "1",
+        "ACTIVE_LOOKUP_KEY_VERSION": "1",
+        "ACTIVE_BACKUP_KEK_VERSION": "1",
+        "CF_ACCOUNT_ID": "2c7526d6afa1ee03407e35beefc21a0f",
+        "CF_D1_DATABASE_ID": "6f1eef07-18e5-4ecd-81d9-43e191f3ca72",
+        "CF_ACCESS_GROUP_ID": "30c86cc6-eec5-45b7-8df6-975275e382d4",
+        "CF_ACCESS_GROUP_NAME": "Bear with me - panel - production"
+      },
+      "secrets": {
+        "required": [
+          "BWM_BACKUP_KEK_V1",
+          "BWM_DATA_KEK_V1",
+          "BWM_LOOKUP_HMAC_V1",
+          "CF_ACCESS_GROUP_TOKEN",
+          "CF_D1_EXPORT_TOKEN",
+          "SCW_SECRET_KEY"
+        ]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "bearwithme-panel-production",
+          "database_id": "6f1eef07-18e5-4ecd-81d9-43e191f3ca72",
+          "migrations_dir": ".core-migrations/active"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "ARCHIVE",
+          "bucket_name": "bearwithme-panel-production",
+          "jurisdiction": "eu"
+        }
+      ],
+      "observability": {
+        "enabled": true
+      }
+    }
   }
 }

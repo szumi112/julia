@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   acceptCanonicalEmail,
+  acceptPhaseOneAccessEmail,
   normalizeCanonicalEmail,
 } from '../../worker/identity/canonical-email.js'
 
@@ -20,6 +21,31 @@ const invalidEmails = Object.freeze([
 ])
 
 describe('shared canonical email boundary', () => {
+  it('admits only the exact staging role alias beyond fictional addresses', () => {
+    expect(acceptPhaseOneAccessEmail('owner@example.test', { appEnv: 'development' }))
+      .toBe('owner@example.test')
+    expect(acceptPhaseOneAccessEmail('owner@example.test', { appEnv: 'production' }))
+      .toBe('owner@example.test')
+    expect(acceptPhaseOneAccessEmail('staging-owner@bearwithme-panel.app', {
+      appEnv: 'staging',
+    })).toBe('staging-owner@bearwithme-panel.app')
+    expect(acceptPhaseOneAccessEmail('staging-owner@bearwithme-panel.app', {
+      appEnv: 'production',
+    })).toBeNull()
+    expect(acceptPhaseOneAccessEmail('another@bearwithme-panel.app', {
+      appEnv: 'staging',
+    })).toBeNull()
+  })
+
+  it('reserves the non-deliverable empty-group address from application identities', () => {
+    expect(acceptPhaseOneAccessEmail('disabled@example.test', { appEnv: 'staging' }))
+      .toBeNull()
+    expect(acceptPhaseOneAccessEmail('disabled@example.test', {
+      allowDisabled: true,
+      appEnv: 'production',
+    })).toBe('disabled@example.test')
+  })
+
   it('normalizes valid invitation input before persistence', () => {
     expect(normalizeCanonicalEmail('  Z\u0307ANETA@EXAMPLE.TEST  ', {
       fictional: true,

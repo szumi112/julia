@@ -671,7 +671,7 @@ describe('persistent appointment creation', () => {
   it('serves create through HTTP while an absent cancellation target remains opaque', async () => {
     const service = vi.fn(async () => ({ status: 201, body: { data: { appointment: { id: 'apt_http' } } } }))
     const app = createApp({
-      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+      config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
       db: env.DB, cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
       resolveAccessPrincipal: vi.fn(async () => ({ kind: 'human', subject: 'access-http', normalizedEmail: 'http@example.test' })),
       resolveActor: vi.fn(async () => ({ ...OWNER, version: 1 })),
@@ -680,7 +680,7 @@ describe('persistent appointment creation', () => {
       createAppointment: service, safeLog: vi.fn(), now: () => NOW_MS,
     })
     const request = (path) => app.request(path, { method: 'POST', headers: {
-      origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+      origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
       'idempotency-key': 'appointment-http-key-0001', 'x-csrf-token': 'valid',
       'x-correlation-id': CORRELATION_ID,
     }, body: JSON.stringify(BODY) })
@@ -688,7 +688,7 @@ describe('persistent appointment creation', () => {
     expect(service).toHaveBeenCalledOnce()
     const later = await app.request('/api/v1/appointments/apt_http/cancellation', {
       method: 'POST', headers: {
-        origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+        origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
         'idempotency-key': 'appointment-http-key-0002', 'x-csrf-token': 'valid',
       },
       body: JSON.stringify({ expectedVersion: 1 }),

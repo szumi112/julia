@@ -1,5 +1,5 @@
 import { loadEmailProviderConfig } from '../config.js'
-import { acceptCanonicalEmail } from '../identity/canonical-email.js'
+import { acceptPhaseOneAccessEmail } from '../identity/canonical-email.js'
 import { decodeBase64Url, encodeBase64Url } from '../security/encoding.js'
 import { blindEmailCandidates, decryptForScope } from '../security/envelope.js'
 import { sendInvitationEmail } from '../providers/scaleway-email.js'
@@ -114,7 +114,7 @@ const emailFor = (context, row) => decryptForScope(
     envelope: JSON.parse(row.email_envelope),
   },
 )
-const canonicalRecipient = (value) => acceptCanonicalEmail(value, { fictional: true })
+const canonicalRecipient = (value, appEnv) => acceptPhaseOneAccessEmail(value, { appEnv })
 const fixedProviderFailure = (error) => {
   if ((typeof error !== 'object' || error === null) && typeof error !== 'function') {
     return { result: 'dead' }
@@ -139,8 +139,8 @@ const fixedProviderFailure = (error) => {
   return { result: 'dead' }
 }
 
-export async function desiredAccessEmails(db, cryptoContext, nowMs) {
-  return [...(await desiredAccessMembership(db, cryptoContext, nowMs)).emails]
+export async function desiredAccessEmails(db, cryptoContext, nowMs, appEnv = 'development') {
+  return [...(await desiredAccessMembership(db, cryptoContext, nowMs, appEnv)).emails]
 }
 
 export { accessDesiredFingerprint, acquireAccessReconcileLease, desiredAccessMembership }
@@ -233,7 +233,7 @@ export async function handleInvitationEmail({
   } catch {
     return { result: 'dead' }
   }
-  const recipient = canonicalRecipient(invitationEmail)
+  const recipient = canonicalRecipient(invitationEmail, config?.appEnv)
   if (!recipient || staffEmail !== recipient
     || invitation.email_lookup !== invitation.staff_email_lookup) return { result: 'dead' }
   let candidates

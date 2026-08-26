@@ -2,6 +2,7 @@ import { auditEventStatement } from '../audit/events.js'
 import { isD1OutboxOperationGuardFailure } from '../db/errors.js'
 import { createUnitOfWork } from '../db/unit-of-work.js'
 import { loadAccessProviderConfig } from '../config.js'
+import { acceptPhaseOneAccessEmail } from '../identity/canonical-email.js'
 import {
   blindEmailCandidates,
   decryptForScope,
@@ -17,7 +18,6 @@ const INVITATION_ID = /^inv_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const LOOKUP = /^v[1-9]\d*:[A-Za-z0-9_-]{43}$/
 const FINGERPRINT = /^[A-Za-z0-9_-]{43}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
-const EMAIL = /^[^@\s]+@example\.test$/
 const LEASE_MS = 60_000
 const PROVIDER_TIMEOUT_MS = 15_000
 const PROVIDER_RUNWAY_MS = (PROVIDER_TIMEOUT_MS * 3) + 1_000
@@ -47,11 +47,9 @@ const idFrom = (factory) => {
   if (!validId(value)) throw new Error('ACCESS_RECONCILE_STATE_INVALID')
   return value
 }
-const canonicalEmail = (value) => typeof value === 'string'
-  && value === value.trim()
-  && value === value.toLowerCase()
-  && textEncoder.encode(value).byteLength <= 254
-  && EMAIL.test(value)
+const canonicalEmail = (value, appEnv) => (
+  acceptPhaseOneAccessEmail(value, { appEnv }) !== null
+)
 const operationGuard = (db, operationId, predicate, bindings) => db.prepare(
   `INSERT INTO outbox_operation_guard_failures (operation_id)
    SELECT ? WHERE NOT (${predicate})`
@@ -112,11 +110,12 @@ export async function accessDesiredFingerprint(lookups) {
   }
 }
 
-async function completeDesiredMembership(db, cryptoContext, nowMs) {
+async function completeDesiredMembership(db, cryptoContext, nowMs, appEnv = 'development') {
   if (!db?.prepare || !cryptoContext?.keyring || !ownObject(cryptoContext.dataKey)
     || !ownObject(cryptoContext.scope)
     || cryptoContext.scope.type !== 'staff_directory'
-    || cryptoContext.scope.purpose !== 'identity') directoryError()
+    || cryptoContext.scope.purpose !== 'identity'
+    || !['development', 'production', 'staging'].includes(appEnv)) directoryError()
   const now = iso(nowMs)
   let staffResult
   let invitationResult
@@ -181,7 +180,7 @@ async function completeDesiredMembership(db, cryptoContext, nowMs) {
     const invitation = staff.status === 'pending' ? invitations[0] : null
     if (staff.status === 'pending' && (!invitation || invitation.expires_at <= now)) continue
     const staffEmail = await decryptEmail(cryptoContext, staff.id, staff.email_envelope)
-    if (!canonicalEmail(staffEmail)) directoryError()
+    if (!canonicalEmail(staffEmail, appEnv)) directoryError()
     await validateLookup(cryptoContext, staffEmail, staff.email_lookup)
     if (invitation) {
       const invitationEmail = await decryptEmail(
@@ -189,7 +188,7 @@ async function completeDesiredMembership(db, cryptoContext, nowMs) {
         invitation.id,
         invitation.email_envelope,
       )
-      if (!canonicalEmail(invitationEmail)
+      if (!canonicalEmail(invitationEmail, appEnv)
         || invitationEmail !== staffEmail
         || invitation.email_lookup !== staff.email_lookup) directoryError()
       await validateLookup(cryptoContext, invitationEmail, invitation.email_lookup)
@@ -235,8 +234,8 @@ async function completeDesiredMembership(db, cryptoContext, nowMs) {
   }
 }
 
-export async function desiredAccessMembership(db, cryptoContext, nowMs) {
-  const desired = await completeDesiredMembership(db, cryptoContext, nowMs)
+export async function desiredAccessMembership(db, cryptoContext, nowMs, appEnv = 'development') {
+  const desired = await completeDesiredMembership(db, cryptoContext, nowMs, appEnv)
   return Object.freeze({
     emails: Object.freeze([...desired.emails]),
     fingerprint: desired.fingerprint,
@@ -910,6 +909,7 @@ export async function handleAccessReconcile(input) {
       input.db,
       input.cryptoContext,
       refreshNowMs,
+      input.config?.appEnv,
     )
   } catch (error) {
     await releaseLease(input.db, lease, refreshNowMs)
@@ -1009,6 +1009,7 @@ export async function handleAccessReconcile(input) {
     input.db,
     input.cryptoContext,
     finalNowMs,
+    input.config?.appEnv,
   )
   const generationChanged = finalStates.desired.value.generation !== generation
   const fingerprintChanged = finalMembership.fingerprint !== membership.fingerprint

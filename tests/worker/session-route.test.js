@@ -20,7 +20,7 @@ import { NOW_MS } from './fixtures.js'
 const now = new Date(NOW_MS).toISOString()
 const correlationId = '11111111-1111-4111-8111-111111111111'
 const scope = { type: 'staff_directory', id: 'centre_session', purpose: 'identity' }
-const config = { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl' }
+const config = { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app' }
 
 async function fixture(suffix = 'owner', {
   role = 'owner',
@@ -329,7 +329,7 @@ describe('/api/v1/session route', () => {
     )
     await expect(verifyCsrfToken(result.data.csrfToken, {
       subject: context.subject,
-      origin: 'https://other.bearwithme.pl',
+      origin: 'https://other.bearwithme-panel.app',
       keyring: context.keyring,
       nowMs: NOW_MS + 1_000,
     })).rejects.toThrow(/^CSRF_INVALID$/)

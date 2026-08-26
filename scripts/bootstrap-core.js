@@ -4,6 +4,7 @@ import {
   decryptForScope,
   encryptForScope,
 } from '../worker/security/envelope.js'
+import { acceptPhaseOneAccessEmail } from '../worker/identity/canonical-email.js'
 import { accessDesiredFingerprint } from '../worker/jobs/access-reconciliation.js'
 import { retryDelayMs } from '../worker/jobs/outbox.js'
 import { CORE_DIRECTORY_INVARIANT_FAILURE_SQL } from './core-migration-stages.js'
@@ -790,7 +791,7 @@ export async function buildBootstrapCreationBatch(input = {}) {
     || input.scope.purpose !== 'identity'
     || input.scope.type !== 'staff_directory'
     || typeof input.ownerEmail !== 'string'
-    || !/^[^@\s]+@example\.test$/.test(input.ownerEmail)
+    || acceptPhaseOneAccessEmail(input.ownerEmail, { appEnv: 'staging' }) === null
     || typeof input.ownerDisplayName !== 'string'
     || input.ownerDisplayName.length < 1
     || typeof input.idFactory !== 'function'

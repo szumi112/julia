@@ -1,6 +1,10 @@
+import {
+  ACCESS_DISABLED_EMAIL,
+  acceptPhaseOneAccessEmail,
+} from '../identity/canonical-email.js'
+
 const ACCOUNT_ID = /^[0-9a-f]{32}$/
 const GROUP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const EMAIL = /^[^@\s]+@example\.test$/
 const MAX_TIMEOUT_MS = 15_000
 const MAX_RULE_DEPTH = 16
 const MAX_RULE_ITEMS = 1_000
@@ -26,11 +30,9 @@ const dataProperty = (object, key) => {
   if (!descriptor || !Object.hasOwn(descriptor, 'value')) fail('ACCESS_PROVIDER_RESPONSE_INVALID')
   return descriptor.value
 }
-const canonicalEmail = (value) => typeof value === 'string'
-  && value === value.trim()
-  && value === value.toLowerCase()
-  && value.length <= 254
-  && EMAIL.test(value)
+const canonicalEmail = (value, appEnv, allowDisabled = false) => (
+  acceptPhaseOneAccessEmail(value, { allowDisabled, appEnv }) !== null
+)
 const validGroupName = (value) => typeof value === 'string'
   && value === value.trim()
   && value.length > 0
@@ -68,7 +70,7 @@ function cloneControlledJson(value, depth = 0) {
   return clone
 }
 
-function exactEmailRules(value) {
+function exactEmailRules(value, appEnv) {
   if (!Array.isArray(value) || value.length > MAX_RULE_ITEMS) {
     fail('ACCESS_PROVIDER_RESPONSE_INVALID')
   }
@@ -80,7 +82,7 @@ function exactEmailRules(value) {
     if (!ownObject(nested) || Object.keys(nested).length !== 1
       || !Object.hasOwn(nested, 'email')) fail('ACCESS_PROVIDER_RESPONSE_INVALID')
     const email = dataProperty(nested, 'email')
-    if (!canonicalEmail(email)) fail('ACCESS_PROVIDER_RESPONSE_INVALID')
+    if (!canonicalEmail(email, appEnv, true)) fail('ACCESS_PROVIDER_RESPONSE_INVALID')
     return { email: { email } }
   })
 }
@@ -107,7 +109,7 @@ function exactGroup(body, input) {
   const id = dataProperty(group, 'id')
   const name = dataProperty(group, 'name')
   if (id !== input.groupId || name !== input.groupName) fail('ACCESS_PROVIDER_GROUP_DRIFT')
-  const include = exactEmailRules(dataProperty(group, 'include'))
+  const include = exactEmailRules(dataProperty(group, 'include'), input.appEnv)
   const require = controlledRules(dataProperty(group, 'require'))
   const exclude = controlledRules(dataProperty(group, 'exclude'))
   return Object.freeze({
@@ -120,6 +122,7 @@ function exactGroup(body, input) {
 function validateInput(input) {
   if (!ownObject(input)
     || typeof input.fetch !== 'function'
+    || !['production', 'staging'].includes(input.appEnv)
     || !ACCOUNT_ID.test(input.accountId ?? '')
     || !GROUP_ID.test(input.groupId ?? '')
     || !validGroupName(input.groupName)
@@ -133,7 +136,9 @@ function validateInput(input) {
     fail('ACCESS_PROVIDER_CONFIG_INVALID')
   }
   const emails = [...new Set(input.emails)]
-  if (!emails.every(canonicalEmail)) fail('ACCESS_PROVIDER_CONFIG_INVALID')
+  if (!emails.every((email) => canonicalEmail(email, input.appEnv))) {
+    fail('ACCESS_PROVIDER_CONFIG_INVALID')
+  }
   emails.sort()
   const AbortControllerImpl = input.AbortController ?? globalThis.AbortController
   const setTimeoutImpl = input.setTimeout ?? globalThis.setTimeout
@@ -276,7 +281,10 @@ const sameRules = (left, right) => JSON.stringify(left) === JSON.stringify(right
 export async function reconcileAccessGroup(input = {}) {
   const validated = validateInput(input)
   const current = await request(input, validated, 'GET')
-  const include = validated.emails.map((email) => ({ email: { email } }))
+  const providerEmails = validated.emails.length > 0
+    ? validated.emails
+    : [ACCESS_DISABLED_EMAIL]
+  const include = providerEmails.map((email) => ({ email: { email } }))
   const payload = JSON.stringify({
     name: input.groupName,
     include,

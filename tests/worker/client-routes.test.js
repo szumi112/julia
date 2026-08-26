@@ -357,7 +357,7 @@ describe('persistent client archive', () => {
       ).bind(JSON.stringify(envelope), new Date(NOW_MS + 1_000).toISOString(), staffId).run()
     }
     const workspaceApp = createApp({
-      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+      config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
       db: env.DB, cryptoContext: { keyring, dataKey: staffKey, scope: staffScope },
       resolveAccessPrincipal: vi.fn(async () => ({ kind: 'human', subject: 'archive-history' })),
       resolveActor: vi.fn(async () => ({
@@ -1001,7 +1001,7 @@ const seedRealRouteActor = async (context, { role, status = 'active', lookupVers
 }
 
 const realRouteApp = ({ db = env.DB, keyring, principal }) => createApp({
-  config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+  config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
   db, keyring,
   idFactory: () => nextRealRouteId('route'),
   now: () => NOW_MS,
@@ -1015,7 +1015,7 @@ const realMutation = (path, body, key = `route-boundary-${++realRouteSerial}-000
   init: {
     method: 'POST',
     headers: {
-      origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+      origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
       'sec-fetch-site': 'same-origin', 'x-csrf-token': 'valid',
       'x-correlation-id': CORRELATION_ID, 'idempotency-key': key,
     },
@@ -1316,7 +1316,7 @@ describe('persistent client creation', () => {
         }
       }
       const app = createApp({
-        config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+        config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
         db: env.DB,
         cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
         resolveAccessPrincipal: vi.fn(async () => ({
@@ -1334,7 +1334,7 @@ describe('persistent client creation', () => {
       const response = await app.request('/api/v1/clients', {
         method: 'POST',
         headers: {
-          origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+          origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
           'idempotency-key': idempotencyKey, 'x-csrf-token': 'valid',
           'x-correlation-id': CORRELATION_ID,
         },
@@ -1373,7 +1373,7 @@ describe('persistent client creation', () => {
       }
     }
     const app = createApp({
-      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+      config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
       db: env.DB,
       cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
       resolveAccessPrincipal: vi.fn(async () => ({
@@ -1390,7 +1390,7 @@ describe('persistent client creation', () => {
     const response = await app.request('/api/v1/clients', {
       method: 'POST',
       headers: {
-        origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+        origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
         'idempotency-key': `client-positive-${label}-0001`, 'x-csrf-token': 'valid',
         'x-correlation-id': CORRELATION_ID,
       },
@@ -1490,7 +1490,7 @@ describe('persistent client creation', () => {
       batch: async () => [],
     }
     const app = createApp({
-      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+      config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
       db: rawDb,
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       resolveAccessPrincipal: vi.fn(async () => ({
@@ -1508,7 +1508,7 @@ describe('persistent client creation', () => {
       now: () => NOW_MS,
     })
     const headers = {
-      origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+      origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
       'idempotency-key': 'client-create-shell-0001', 'x-csrf-token': 'valid',
     }
     const response = await app.request('/api/v1/clients', {
@@ -1535,7 +1535,7 @@ describe('persistent client creation', () => {
   it('maps semantic create validation to the safe field without touching D1', async () => {
     const prepare = vi.fn()
     const app = createApp({
-      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+      config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
       db: { prepare, batch: vi.fn() },
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       resolveAccessPrincipal: vi.fn(async () => ({
@@ -1551,7 +1551,7 @@ describe('persistent client creation', () => {
     const response = await app.request('/api/v1/clients', {
       method: 'POST',
       headers: {
-        origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+        origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
         'idempotency-key': 'client-create-invalid-0001', 'x-csrf-token': 'valid',
       },
       body: JSON.stringify({ ...BODY, name: ' Fikcyjna' }),
@@ -2585,7 +2585,7 @@ describe('persistent client edit and reassignment', () => {
       }
     }
     const app = createApp({
-      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+      config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
       db: env.DB,
       cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
       resolveAccessPrincipal: vi.fn(async () => ({
@@ -2604,7 +2604,7 @@ describe('persistent client edit and reassignment', () => {
     const response = await app.request(`/api/v1/clients/${client.id}/edits`, {
       method: 'POST',
       headers: {
-        origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+        origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
         'idempotency-key': 'client-edit-http-success-0001', 'x-csrf-token': 'valid',
         'x-correlation-id': CORRELATION_ID,
       },

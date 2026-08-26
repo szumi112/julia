@@ -32,6 +32,7 @@ const responseAtEndpoint = (body) => {
 }
 
 const input = (fetch, overrides = {}) => ({
+  appEnv: 'staging',
   fetch,
   token: TOKEN,
   accountId: ACCOUNT_ID,
@@ -64,6 +65,32 @@ const rejectingCancel = (reason) => {
 }
 
 describe('Cloudflare Access provider', () => {
+  it('accepts only the exact protected staging role alias', async () => {
+    const desired = [{ email: { email: 'staging-owner@bearwithme-panel.app' } }]
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(ok(group({ include: desired })))
+      .mockResolvedValueOnce(ok(group({ include: desired })))
+      .mockResolvedValueOnce(ok(group({ include: desired })))
+
+    await expect(reconcileAccessGroup(input(fetch, {
+      emails: ['staging-owner@bearwithme-panel.app'],
+    }))).resolves.toEqual({ reconciled: true })
+  })
+
+  it('uses a non-deliverable sentinel when the desired production group is empty', async () => {
+    const sentinel = [{ email: { email: 'disabled@example.test' } }]
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(ok(group({ include: sentinel })))
+      .mockResolvedValueOnce(ok(group({ include: sentinel })))
+      .mockResolvedValueOnce(ok(group({ include: sentinel })))
+
+    await expect(reconcileAccessGroup(input(fetch, {
+      appEnv: 'production',
+      emails: [],
+    }))).resolves.toEqual({ reconciled: true })
+    expect(JSON.parse(fetch.mock.calls[1][1].body).include).toEqual(sentinel)
+  })
+
   it('uses exact GET/PUT/GET requests and emits one deterministic controlled body', async () => {
     const desired = [
       { email: { email: 'anna@example.test' } },
@@ -536,6 +563,8 @@ describe('Cloudflare Access provider', () => {
   })
 
   it.each([
+    [{ appEnv: 'production', emails: ['staging-owner@bearwithme-panel.app'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
+    [{ appEnv: 'staging', emails: ['disabled@example.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ emails: ['PERSON@example.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ emails: ['person@real.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ emails: [' person@example.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],

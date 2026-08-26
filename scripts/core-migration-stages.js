@@ -15,6 +15,10 @@ export const CORE_MIGRATION_STAGE_B_NAMES = Object.freeze([
   '0011_appointment_ledger.sql',
 ])
 
+export const CORE_MIGRATION_REMOTE_ENV_NAMES = Object.freeze(['production', 'staging'])
+
+export const CORE_MIGRATION_PRODUCTION_ACK_VARIABLE = 'BWM_CONFIRM_PRODUCTION_DATABASE'
+
 export const CORE_DIRECTORY_INVARIANT_FAILURE_SQL = `SELECT failure_kind
 FROM (
   SELECT CASE
@@ -163,4 +167,42 @@ export function selectCoreMigrationStage(migrations, stage) {
   const selected = allowlist.map((name) => byName.get(name))
   if (selected.some((migration) => !migration)) invalid()
   return Object.freeze(selected)
+}
+
+export function selectCoreMigrationRemoteTarget(config, envName) {
+  if (!CORE_MIGRATION_REMOTE_ENV_NAMES.includes(envName)
+    || !config
+    || typeof config !== 'object'
+    || Array.isArray(config)) invalid()
+  const block = config.env?.[envName]
+  if (block === undefined) throw new Error('CORE_MIGRATION_REMOTE_ENV_MISSING')
+  const databases = block?.d1_databases
+  if (!block
+    || typeof block !== 'object'
+    || Array.isArray(block)
+    || !Array.isArray(databases)
+    || databases.length !== 1
+    || databases[0]?.binding !== 'DB'
+    || typeof databases[0].database_name !== 'string'
+    || databases[0].database_name === '') {
+    throw new Error('CORE_MIGRATION_REMOTE_ENV_INVALID')
+  }
+  return Object.freeze({ databaseName: databases[0].database_name, envName })
+}
+
+export function confirmCoreMigrationRemoteTarget(env, target) {
+  if (!env
+    || typeof env !== 'object'
+    || Array.isArray(env)
+    || !target
+    || typeof target !== 'object'
+    || Array.isArray(target)
+    || !CORE_MIGRATION_REMOTE_ENV_NAMES.includes(target.envName)
+    || typeof target.databaseName !== 'string'
+    || target.databaseName === '') invalid()
+  if (target.envName === 'production'
+    && env[CORE_MIGRATION_PRODUCTION_ACK_VARIABLE] !== target.databaseName) {
+    throw new Error('CORE_MIGRATION_REMOTE_PRODUCTION_UNCONFIRMED')
+  }
+  return target
 }

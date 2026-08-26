@@ -1,9 +1,14 @@
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { advanceCoreDirectoryUpgrade } from './upgrade-core-directory-core.js'
+import {
+  CORE_MIGRATION_REMOTE_ENV_NAMES,
+  confirmCoreMigrationRemoteTarget,
+  selectCoreMigrationRemoteTarget,
+} from './core-migration-stages.js'
 import {
   LOCAL_HARNESS_RUNNER_MODE,
   LOCAL_HARNESS_WRANGLER_NAME,
@@ -21,6 +26,11 @@ const CHILD_DEADLINE_MS = 30_000
 const MAX_CHILD_OUTPUT_BYTES = 64 * 1024
 const RESULT_KEYS = Object.freeze(['meta', 'results', 'success'])
 const SCOPE = Object.freeze({ id: 'centre_1', purpose: 'identity', type: 'staff_directory' })
+const REMOTE_FAILURE_MESSAGES = Object.freeze([
+  'CORE_MIGRATION_REMOTE_ENV_INVALID',
+  'CORE_MIGRATION_REMOTE_ENV_MISSING',
+  'CORE_MIGRATION_REMOTE_PRODUCTION_UNCONFIRMED',
+])
 
 const invalidInput = () => { throw new Error('CORE_DIRECTORY_UPGRADE_INPUT_INVALID') }
 const ownObject = (value) => value !== null
@@ -43,17 +53,25 @@ export function normalizeCoreDirectoryUpgradeInput(env, argv = []) {
     || typeof env !== 'object'
     || Array.isArray(env)
     || !Array.isArray(argv)
-    || argv.length !== 0
-    || env.APP_ENV !== 'development'
-    || env.CLOUDFLARE_ENV === 'production'
     || env.DATA_MODE !== 'fictional') invalidInput()
+  let envName = null
+  if (argv.length === 3 && argv[0] === '--remote' && argv[1] === '--env') {
+    if (!CORE_MIGRATION_REMOTE_ENV_NAMES.includes(argv[2])
+      || (argv[2] !== 'production'
+        && (env.APP_ENV === 'production' || env.CLOUDFLARE_ENV === 'production'))) {
+      invalidInput()
+    }
+    envName = argv[2]
+  } else if (argv.length !== 0
+    || env.APP_ENV !== 'development'
+    || env.CLOUDFLARE_ENV === 'production') invalidInput()
   const raw = env.CORE_DIRECTORY_MAX_STEPS
   const maxSteps = raw === undefined ? 25 : Number(raw)
   if ((raw !== undefined && (!/^(?:[1-9]|[1-9]\d|100)$/.test(raw)))
     || !Number.isSafeInteger(maxSteps)
     || maxSteps < 1
     || maxSteps > 100) invalidInput()
-  return Object.freeze({ maxSteps })
+  return Object.freeze(envName === null ? { maxSteps } : { envName, maxSteps })
 }
 
 const safeChildEnv = (env, cwd) => Object.freeze({
@@ -79,6 +97,37 @@ const safeChildEnv = (env, cwd) => Object.freeze({
   ...(env.BWM_APP_E2E_OWNERSHIP
     ? { BWM_APP_E2E_OWNERSHIP: env.BWM_APP_E2E_OWNERSHIP }
     : {}),
+})
+
+// Remote children receive an allowlisted environment mirroring safeChildEnv plus
+// what remote wrangler auth genuinely needs — never the whole parent env: the
+// production upgrade parent necessarily holds the BWM_* KEK secrets, and no child
+// process may ever see them.
+const REMOTE_CHILD_PASSTHROUGH_NAMES = Object.freeze([
+  'CLOUDFLARE_ACCOUNT_ID',
+  'CLOUDFLARE_API_KEY',
+  'CLOUDFLARE_API_TOKEN',
+  'CLOUDFLARE_EMAIL',
+  'HOME',
+  'PATH',
+])
+
+const remoteChildEnv = (env) => Object.freeze({
+  ...Object.fromEntries(REMOTE_CHILD_PASSTHROUGH_NAMES
+    .filter((name) => typeof env[name] === 'string')
+    .map((name) => [name, env[name]])),
+  CI: '1',
+  CLOUDFLARE_INCLUDE_PROCESS_ENV: 'false',
+  CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: 'false',
+  LANG: 'C',
+  LC_ALL: 'C',
+  NODE_DISABLE_COMPILE_CACHE: '1',
+  NO_COLOR: '1',
+  WRANGLER_HIDE_BANNER: 'true',
+  WRANGLER_LOG_SANITIZE: 'true',
+  WRANGLER_SEND_ERROR_REPORTS: 'false',
+  WRANGLER_SEND_METRICS: 'false',
+  WRANGLER_WRITE_LOGS: 'false',
 })
 
 const validCell = (value) => value === null
@@ -165,13 +214,32 @@ const boundSql = ({ params, sql }) => {
   return result
 }
 
-const d1Target = (env) => {
+const d1Target = (env, { configPath, envName }) => {
   const runner = env.BWM_LOCAL_RUNNER_MODE === LOCAL_HARNESS_RUNNER_MODE
   if (env.BWM_LOCAL_RUNNER_MODE !== undefined && !runner) invalidInput()
+  if (envName !== null) {
+    if (runner
+      || !CORE_MIGRATION_REMOTE_ENV_NAMES.includes(envName)
+      || typeof configPath !== 'string'
+      || !isAbsolute(configPath)
+      || resolve(configPath) !== configPath
+      || realpathSync(configPath) !== configPath) invalidInput()
+    const target = confirmCoreMigrationRemoteTarget(env, selectCoreMigrationRemoteTarget(
+      JSON.parse(readFileSync(configPath, 'utf8')),
+      envName,
+    ))
+    return Object.freeze({
+      configPath,
+      cwd: PROJECT_ROOT,
+      envName: target.envName,
+      persistencePath: null,
+    })
+  }
   if (!runner) {
     return Object.freeze({
       configPath: WRANGLER_CONFIG,
       cwd: PROJECT_ROOT,
+      envName: null,
       persistencePath: null,
     })
   }
@@ -181,14 +249,20 @@ const d1Target = (env) => {
     || resolve(persistencePath) !== persistencePath
     || realpathSync(persistencePath) !== persistencePath) invalidInput()
   const root = realpathSync(dirname(persistencePath))
-  const configPath = realpathSync(join(root, LOCAL_HARNESS_WRANGLER_NAME))
-  return Object.freeze({ configPath, cwd: root, persistencePath })
+  return Object.freeze({
+    configPath: realpathSync(join(root, LOCAL_HARNESS_WRANGLER_NAME)),
+    cwd: root,
+    envName: null,
+    persistencePath,
+  })
 }
 
 export function createWranglerD1Facade(env, {
+  configPath = WRANGLER_CONFIG,
+  envName = null,
   runCommand = runWranglerCommand,
 } = {}) {
-  const target = d1Target(env)
+  const target = d1Target(env, { configPath, envName })
   const descriptors = new WeakMap()
   const execute = (statements) => {
     const command = `${statements.map((statement) => boundSql(statement)).join(';\n')};`
@@ -202,7 +276,9 @@ export function createWranglerD1Facade(env, {
       'd1',
       'execute',
       'DB',
-      '--local',
+      ...(target.envName === null
+        ? ['--local']
+        : ['--env', target.envName, '--remote']),
       ...(target.persistencePath ? ['--persist-to', target.persistencePath] : []),
       '--command',
       command,
@@ -211,7 +287,9 @@ export function createWranglerD1Facade(env, {
     const results = runCommand({
       args,
       cwd: target.cwd,
-      env: safeChildEnv(env, target.cwd),
+      env: target.envName === null
+        ? safeChildEnv(env, target.cwd)
+        : remoteChildEnv(env),
       executable: NODE_EXECUTABLE,
     })
     if (results.length !== statements.length) {
@@ -287,7 +365,9 @@ export async function runCoreDirectoryUpgradeCli({
     return 1
   }
   try {
-    const db = await (deps.createDb ?? createWranglerD1Facade)(env)
+    const db = await (deps.createDb ?? createWranglerD1Facade)(env, {
+      envName: input.envName ?? null,
+    })
     const advance = deps.advance ?? advanceCoreDirectoryUpgrade
     const loadCryptoContext = deps.loadCryptoContext ?? ((targetDb) => (
       loadStaffDirectoryCryptoContext(targetDb, env)
@@ -330,8 +410,10 @@ export async function runCoreDirectoryUpgradeCli({
       status: result.status,
     })}\n`)
     return 2
-  } catch {
-    stderr.write('CORE_DIRECTORY_UPGRADE_FAILED\n')
+  } catch (error) {
+    stderr.write(`${REMOTE_FAILURE_MESSAGES.includes(error?.message)
+      ? error.message
+      : 'CORE_DIRECTORY_UPGRADE_FAILED'}\n`)
     return 1
   }
 }

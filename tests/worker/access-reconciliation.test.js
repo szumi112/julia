@@ -279,6 +279,32 @@ function meteredDb(real, { rejectPublication = false } = {}) {
 }
 
 describe('authoritative Access desired membership', () => {
+  it('admits the exact protected staging role alias only in staging', async () => {
+    const cryptoContext = await context()
+    const owner = await seedStaff(cryptoContext, {
+      id: `stf_staging_owner_${serial}`,
+      email: 'staging-owner@bearwithme-panel.app',
+      role: 'owner',
+      status: 'active',
+    })
+    await retirePriorCandidates(owner.id)
+
+    await expect(handlers.desiredAccessMembership(
+      env.DB,
+      cryptoContext,
+      NOW_MS,
+      'staging',
+    )).resolves.toMatchObject({
+      emails: ['staging-owner@bearwithme-panel.app'],
+    })
+    await expect(handlers.desiredAccessMembership(
+      env.DB,
+      cryptoContext,
+      NOW_MS,
+      'production',
+    )).rejects.toThrow(/^ACCESS_DESIRED_STATE_INVALID$/)
+  })
+
   it('returns normalized sorted membership and the exact blind-index fingerprint vector', async () => {
     const cryptoContext = await context()
     const owner = await seedStaff(cryptoContext, {

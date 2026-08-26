@@ -1116,7 +1116,7 @@ describe('appointment payment capture', () => {
     const httpTarget = httpAppointment.paymentEntries[0]
     let views
     const app = createApp({
-      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl',
+      config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app',
         dataMode: 'fictional' },
       db: env.DB, cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
       resolveAccessPrincipal: vi.fn(async () => ({ kind: 'human',
@@ -1133,7 +1133,7 @@ describe('appointment payment capture', () => {
     })
     const response = await app.request(`/api/v1/payments/${httpTarget.id}/corrections`, {
       method: 'POST', headers: {
-        origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+        origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
         'idempotency-key': `correction-http-${sequence}-key`, 'x-csrf-token': 'valid',
         'x-correlation-id': BASE.correlationId,
       }, body: JSON.stringify({ expectedVersion: httpAppointment.version,
@@ -1731,7 +1731,7 @@ describe('appointment payment capture', () => {
     const httpAppointment = await seedAppointment()
     let views
     const app = createApp({
-      config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl',
+      config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app',
         dataMode: 'fictional' },
       db: env.DB, cryptoContext: { keyring: await ring(), dataKey: {}, scope: {} },
       resolveAccessPrincipal: vi.fn(async () => ({ kind: 'human',
@@ -1748,7 +1748,7 @@ describe('appointment payment capture', () => {
     const response = await app.request(
       `/api/v1/appointments/${httpAppointment.id}/payments`, {
         method: 'POST', headers: {
-          origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+          origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
           'idempotency-key': `payment-http-${sequence}-key`, 'x-csrf-token': 'valid',
           'x-correlation-id': BASE.correlationId,
         }, body: JSON.stringify(BODY),

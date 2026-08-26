@@ -14,7 +14,7 @@ describe('loadBackupProviderConfig', () => {
 
 const valid = {
   APP_ENV: 'staging',
-  APP_ORIGIN: 'https://staging-panel.bearwithme.pl',
+  APP_ORIGIN: 'https://staging.bearwithme-panel.app',
   DATA_MODE: 'fictional',
   ACCESS_AUD: 'aud-1',
   ACCESS_HEALTH_SERVICE_TOKEN_ID: 'health-token-id',
@@ -57,7 +57,12 @@ const expectBackupError = (env, config, message = 'BACKUP_CONFIG_INVALID') => {
 
 describe('loadConfig', () => {
   it('accepts one exact HTTPS origin and versioned 32-byte keys', () => {
-    expect(loadConfig(valid).appOrigin).toBe('https://staging-panel.bearwithme.pl')
+    expect(loadConfig(valid).appOrigin).toBe('https://staging.bearwithme-panel.app')
+    expect(loadConfig({
+      ...valid,
+      APP_ENV: 'production',
+      APP_ORIGIN: 'https://bearwithme-panel.app',
+    }).appOrigin).toBe('https://bearwithme-panel.app')
   })
 
   it('returns the unchanged exact frozen public config without provider material', () => {
@@ -65,7 +70,7 @@ describe('loadConfig', () => {
     expect(result).toEqual({
       appEnv: 'staging',
       dataMode: 'fictional',
-      appOrigin: 'https://staging-panel.bearwithme.pl',
+      appOrigin: 'https://staging.bearwithme-panel.app',
       accessAudience: 'aud-1',
       accessHealthServiceTokenId: 'health-token-id',
       accessIssuer: 'https://bearwithme.cloudflareaccess.com',
@@ -95,7 +100,8 @@ describe('loadConfig', () => {
 
   it.each([
     ['APP_ORIGIN', '*'],
-    ['APP_ORIGIN', 'https://panel.bearwithme.pl.attacker.example'],
+    ['APP_ORIGIN', 'https://bearwithme-panel.app.attacker.example'],
+    ['APP_ORIGIN', 'https://panel.bearwithme.pl'],
     ['ACCESS_TEAM_DOMAIN', 'http://bearwithme.cloudflareaccess.com'],
     ['ACCESS_TEAM_DOMAIN', 'https://bearwithme.cloudflareaccess.com.attacker.example'],
     ['ACCESS_TEAM_DOMAIN', 'https://nested.bearwithme.cloudflareaccess.com'],
@@ -115,9 +121,12 @@ describe('loadConfig', () => {
   it.each([
     ['production', 'http://127.0.0.1:5174'],
     ['staging', 'http://localhost:5174'],
-    ['development', 'https://staging-panel.bearwithme.pl'],
-    ['production', 'https://panel.bearwithme.pl/'],
-    ['production', 'https://panel.bearwithme.pl:443'],
+    ['development', 'https://staging.bearwithme-panel.app'],
+    ['production', 'https://staging.bearwithme-panel.app'],
+    ['staging', 'https://bearwithme-panel.app'],
+    ['staging', 'https://other.bearwithme-panel.app'],
+    ['production', 'https://bearwithme-panel.app/'],
+    ['production', 'https://bearwithme-panel.app:443'],
   ])('rejects invalid %s origin form %s', (appEnv, appOrigin) => {
     expect(() => loadConfig({ ...valid, APP_ENV: appEnv, APP_ORIGIN: appOrigin })).toThrow()
   })
@@ -376,6 +385,7 @@ describe('loadAccessProviderConfig', () => {
     const result = loadAccessProviderConfig(access, { appEnv: 'staging' })
     expect(result).toEqual({
       accountId: access.CF_ACCOUNT_ID,
+      appEnv: 'staging',
       groupId: access.CF_ACCESS_GROUP_ID,
       groupName: access.CF_ACCESS_GROUP_NAME,
       token: access.CF_ACCESS_GROUP_TOKEN,

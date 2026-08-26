@@ -7,6 +7,10 @@ const MAX_JSON_DEPTH = 64
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const PROTECTED_ORIGINS = new Set([
+  'https://bearwithme-panel.app',
+  'https://staging.bearwithme-panel.app',
+])
 const OPTIONAL_STRINGS = Object.freeze([
   'message_id',
   'project_id',
@@ -55,7 +59,7 @@ const exactProtectedOrigin = (value) => {
       && !url.password
       && !url.search
       && !url.hash
-      && (url.hostname === 'bearwithme.pl' || url.hostname.endsWith('.bearwithme.pl'))
+      && PROTECTED_ORIGINS.has(value)
   } catch {
     return false
   }

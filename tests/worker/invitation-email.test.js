@@ -338,6 +338,21 @@ describe('authoritative invitation email dispatch', () => {
     expect(await row('delivery_attempts', 'outbox_job_id', value.jobId)).toBeNull()
   })
 
+  it('delivers the exact protected staging role alias through an injected provider', async () => {
+    const value = await fixture({ email: 'staging-owner@bearwithme-panel.app' })
+    const provider = vi.fn().mockResolvedValue({ providerId: PROVIDER_ID })
+
+    await expect(dispatch(value, {
+      config: {
+        appEnv: 'staging',
+        appOrigin: 'https://staging.bearwithme-panel.app',
+      },
+      providers: { sendInvitationEmail: provider },
+    })).resolves.toEqual({ result: 'email-accepted', providerId: PROVIDER_ID })
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(provider.mock.calls[0][0].recipient).toBe('staging-owner@bearwithme-panel.app')
+  })
+
   it.each([
     ['a missing invitation', { missingInvitation: true }],
     ['a disabled staff row', { staffStatus: 'disabled' }],

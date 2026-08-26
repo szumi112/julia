@@ -70,7 +70,7 @@ const seedActor = async (cryptoContext, { role, specialistId = null }) => {
 }
 
 const appFor = (keyring, principal) => createApp({
-  config: { appEnv: 'staging', appOrigin: 'https://panel.bearwithme.pl', dataMode: 'fictional' },
+  config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
   db: env.DB, keyring,
   idFactory: () => nextId('route'), now: () => NOW_MS,
   resolveAccessPrincipal: async () => principal,
@@ -83,7 +83,7 @@ const createClient = (name, specialistId) => ({
   init: {
     method: 'POST',
     headers: {
-      origin: 'https://panel.bearwithme.pl', 'content-type': 'application/json',
+      origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
       'sec-fetch-site': 'same-origin', 'x-csrf-token': 'valid',
       'x-correlation-id': CORRELATION_ID, 'idempotency-key': `workspace-route-${++serial}-0001`,
     },
