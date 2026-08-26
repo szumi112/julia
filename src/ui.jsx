@@ -284,14 +284,22 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, contentR
     const wrap = ref.current
     const pop = popRef.current
     if (!wrap || !pop) return
-    const r = wrap.getBoundingClientRect()
-    const margin = 8
-    let left = align === 'right' ? r.right - pop.offsetWidth : r.left
-    left = Math.max(margin, Math.min(left, window.innerWidth - pop.offsetWidth - margin))
-    let top = r.bottom + 7
-    if (top + pop.offsetHeight > window.innerHeight - margin) top = r.top - pop.offsetHeight - 7
-    top = Math.max(margin, top)
-    setPos({ left, top })
+    const reposition = () => {
+      const r = wrap.getBoundingClientRect()
+      const margin = 8
+      let left = align === 'right' ? r.right - pop.offsetWidth : r.left
+      left = Math.max(margin, Math.min(left, window.innerWidth - pop.offsetWidth - margin))
+      let top = r.bottom + 7
+      if (top + pop.offsetHeight > window.innerHeight - margin) top = r.top - pop.offsetHeight - 7
+      top = Math.max(margin, top)
+      setPos({ left, top })
+    }
+    reposition()
+    const observer = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(reposition)
+      : null
+    observer?.observe(pop)
+    return () => observer?.disconnect()
   }, [open, align])
 
   useEffect(() => {

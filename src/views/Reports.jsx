@@ -4,12 +4,12 @@
 // tus.js deliberately keeps it out of monthStats, so it never joins the
 // session totals above it.
 import { useEffect, useMemo, useState } from 'react'
-import { useApp, sessionsInMonth, monthStats, availableMonths, revenueSeries } from '../store.jsx'
+import { useApp, useWorkspaceWindow, sessionsInMonth, monthStats, availableMonths, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { useReveal } from '../anim.js'
 import { useMinuteNow } from '../clock.js'
-import { Avatar, Button, Chip, IconBtn, Stat } from '../ui.jsx'
+import { Avatar, Button, Chip, EmptyState, IconBtn, Stat } from '../ui.jsx'
 import { AreaChart, Donut, BarFill } from '../charts.jsx'
 import { kidsOfGroup, tusMonthSummary } from '../tus.js'
 import { kidsWord } from './Tus.jsx'
@@ -17,11 +17,19 @@ import {
   fmtMoney, fmtNumber, monthKey, addMonths, fmtMonthYear, fmtMonthName, cap, pad2, toISODate,
   billableSummary, outstandingOf, sessionsWord,
 } from '../format.js'
+import { monthWorkspaceRange } from '../workspace-view.js'
 
 // pl-PL decimals: "37,5 h" — one fraction digit max, integers stay clean
 const fmtHours = (value) => `${new Intl.NumberFormat('pl-PL', { maximumFractionDigits: 1 }).format(value)} h`
 const fmtRoundedNumber = (value) => fmtNumber(Math.round(value))
 const share = (part, whole) => (whole > 0 ? Math.round((part / whole) * 100) : 0)
+const validMonthKey = (value) => {
+  const match = typeof value === 'string' ? /^(\d{4})-(\d{2})$/.exec(value) : null
+  if (!match) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  return year >= 1 && month >= 1 && month <= 12
+}
 
 // Both money bars split the same way, so they get the same two colours and the
 // same legend wording everywhere on the page.
@@ -43,15 +51,16 @@ function SplitLegend({ paidLabel = 'Wpłacono', dueLabel = 'Pozostało do zapła
 
 export function Reports({ params = {} }) {
   const { state, toast } = useApp()
-  const { getViewState, patchViewState } = useShell()
+  const { appMode, getViewState, patchViewState } = useShell()
+  const isApp = appMode === 'app'
   const currentYm = monthKey(new Date())
   const [initialViewState] = useState(() => {
     const saved = getViewState('reports', { ym: currentYm, specialist: null })
     return {
       // URL params win over the registry — a shared link must reproduce its scope
-      ym: /^\d{4}-\d{2}$/.test(params.ym || '') && params.ym <= currentYm
+      ym: validMonthKey(params.ym) && params.ym <= currentYm
         ? params.ym
-        : typeof saved.ym === 'string' && /^\d{4}-\d{2}$/.test(saved.ym) && saved.ym <= currentYm
+        : validMonthKey(saved.ym) && saved.ym <= currentYm
           ? saved.ym
           : currentYm,
       specialist: state.psychologists.some((psychologist) => psychologist.id === params.specialist)
@@ -63,6 +72,8 @@ export function Reports({ params = {} }) {
   })
   const [ym, setYm] = useState(initialViewState.ym)
   const [psychFilter, setPsychFilter] = useState(initialViewState.specialist)
+  const workspaceRange = useMemo(() => monthWorkspaceRange(ym), [ym])
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const ref = useReveal([ym, psychFilter])
   const now = useMinuteNow()
   const nowIso = `${toISODate(now)}T${pad2(now.getHours())}:${pad2(now.getMinutes())}`
@@ -140,6 +151,20 @@ export function Reports({ params = {} }) {
     specialist: psychFilter || undefined,
   })
 
+  if (isApp && workspaceState !== 'ready') {
+    return (
+      <section role="status" aria-label="Stan raportu">
+        <EmptyState
+          icon="reports"
+          title={workspaceState === 'loading' ? 'Wczytywanie raportu…' : 'Raport jest teraz niedostępny'}
+          hint={workspaceState === 'loading'
+            ? 'Pobieramy kompletny wybrany miesiąc.'
+            : 'Nie pokazujemy podsumowania dla niepełnego okresu.'}
+        />
+      </section>
+    )
+  }
+
   return (
     <div ref={ref}>
       <div className="view-head" data-reveal>
@@ -157,14 +182,16 @@ export function Reports({ params = {} }) {
             </Button>
           )}
           <div className="month-nav">
-            <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={ym <= minYm} onClick={() => setYm(addMonths(ym, -1))} />
+            <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={!isApp && ym <= minYm} onClick={() => setYm(addMonths(ym, -1))} />
             <span className="month-nav__label">{fmtMonthYear(ym)}</span>
             <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= maxYm} onClick={() => setYm(addMonths(ym, 1))} />
           </div>
-          <Button variant="ghost" icon="print" onClick={() => window.print()}>Drukuj</Button>
-          <Button icon="download" magnetic onClick={() => toast('Raport PDF wyeksportowany (demo)')}>
-            Eksport (demo)
-          </Button>
+          {!isApp && <>
+            <Button variant="ghost" icon="print" onClick={() => window.print()}>Drukuj</Button>
+            <Button icon="download" magnetic onClick={() => toast('Raport PDF wyeksportowany (demo)')}>
+              Eksport (demo)
+            </Button>
+          </>}
         </div>
       </div>
 
@@ -282,14 +309,16 @@ export function Reports({ params = {} }) {
             </div>
           </div>
 
-          <div className="card card--pad" data-reveal>
-            <h2 className="card-title">Przychód · ostatnie 6 miesięcy</h2>
-            <div style={{ marginTop: 12 }}>
-              <AreaChart data={series} height={200} label={`Przychód — ${scopeName}`} />
+          {!isApp && (
+            <div className="card card--pad" data-reveal>
+              <h2 className="card-title">Przychód · ostatnie 6 miesięcy</h2>
+              <div style={{ marginTop: 12 }}>
+                <AreaChart data={series} height={200} label={`Przychód — ${scopeName}`} />
+              </div>
             </div>
-          </div>
+          )}
 
-          {tusRows.length > 0 && (
+          {!isApp && tusRows.length > 0 && (
             <section className="card card--pad" data-reveal aria-label="Zajęcia grupowe TUS">
               <div className="row row--between">
                 <h2 className="card-title">Zajęcia grupowe TUS · {fmtMonthYear(ym)}</h2>

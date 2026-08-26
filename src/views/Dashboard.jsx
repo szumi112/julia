@@ -31,19 +31,20 @@ function TodayThread({ sessions, nowMin, currentId, onOpen }) {
             && !live
             && timeToMin(session.time) + (session.duration || 50) <= nowMin
           const status = live ? 'trwa' : overdue ? 'wymaga statusu' : ROW_STATUS[session.status] || ''
+          const Row = onOpen ? 'button' : 'div'
           return (
             <Fragment key={session.id}>
               {markerHere && <div className="spine__now" aria-hidden="true">teraz</div>}
-              <button
+              <Row
                 className={`spine__row today-session ${live ? 'is-live' : ''} ${session.status === 'completed' ? 'is-done' : ''}`}
                 data-status={session.status}
                 style={{ '--node-color': session.psych?.color }}
-                onClick={() => onOpen(session)}
+                onClick={onOpen ? () => onOpen(session) : undefined}
               >
                 <span className="spine__time">{session.time}</span>
                 <span className="spine__name">{session.client?.name}</span>
                 <span className="today-session__status">{status}</span>
-              </button>
+              </Row>
             </Fragment>
           )
         })}
@@ -126,6 +127,8 @@ function BoardComposer() {
 // Full board — slide-over with the composer and complete history.
 export function BoardDrawer({ onClose }) {
   const { state } = useApp()
+  const { appMode } = useShell()
+  if (appMode === 'app') return null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const { close } = useDrawerFX(drawerRef, backRef, onClose)
@@ -164,7 +167,8 @@ export function BoardDrawer({ onClose }) {
 
 export function Dashboard() {
   const { state } = useApp()
-  const { openSessionForm, openClientForm, openTeamBoard, navigate, role } = useShell()
+  const { appMode, openSessionForm, openClientForm, openTeamBoard, navigate, role } = useShell()
+  const isApp = appMode === 'app'
   const ref = useReveal()
 
   // minute-aligned shared clock — "Trwa teraz" / "Następna sesja" never go stale
@@ -195,7 +199,7 @@ export function Dashboard() {
   // The masthead is just the cover date; the nearest session follows as the lede.
   // Therapists have no Payments route, so their arrears stay a plain figure.
   const canOpenPayments = role.scope !== 'own'
-  const showBoard = ['owner', 'coordinator'].includes(role.id)
+  const showBoard = !isApp && ['owner', 'coordinator'].includes(role.id)
 
   return (
     <section className="today-page" role="region" aria-label="Pulpit dnia" ref={ref}>
@@ -217,7 +221,7 @@ export function Dashboard() {
             <p className="today-hero__meta">{terminalSupport}</p>
           </>
         )}
-        <div className="today-hero__actions">
+        {!isApp && <div className="today-hero__actions">
           {heroSession && (
             <Button magnetic onClick={() => openSessionForm({ session: heroSession })}>Otwórz sesję</Button>
           )}
@@ -230,7 +234,7 @@ export function Dashboard() {
             Nowa sesja
           </Button>
           <button className="link" onClick={() => openClientForm()}>Nowy klient</button>
-        </div>
+        </div>}
       </header>
 
       <div className="figures today-figures" role="group" aria-label="Podsumowanie dnia">
@@ -254,7 +258,7 @@ export function Dashboard() {
             sessions={todays}
             nowMin={nowMin}
             currentId={workspace.current?.id}
-            onOpen={(s) => openSessionForm({ session: state.sessions.find((x) => x.id === s.id) })}
+            onOpen={isApp ? undefined : (s) => openSessionForm({ session: state.sessions.find((x) => x.id === s.id) })}
           />
         </section>
       )}

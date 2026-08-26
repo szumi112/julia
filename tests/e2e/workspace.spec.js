@@ -31,9 +31,11 @@ async function addClient(page, name, psychId = 'p1') {
 
 // The calendar navigates by week and by month; an arbitrary date is reached
 // through the route the way every deep link into it does.
-const openCalendarDay = (page, iso) =>
-  page.evaluate((target) => { window.location.hash = target }, `#/calendar?date=${iso}`)
 const selectedDay = (page) => page.locator('.day-strip__day.is-on')
+const openCalendarDay = async (page, iso) => {
+  await page.evaluate((target) => { window.location.hash = target }, `#/calendar?date=${iso}`)
+  await expect(selectedDay(page)).toHaveAttribute('data-iso', iso)
+}
 
 async function setAgendaStatus(page, accessibleName, targetStatus) {
   const agenda = page.getByRole('region', { name: 'Plan dnia' })
@@ -152,6 +154,21 @@ test('the mock-data workspace opens after login', async ({ page }) => {
   await login(page)
   await expect(page.getByRole('region', { name: 'Pulpit dnia' })).toBeVisible()
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+})
+
+test('demo login and logout remount a clean workspace', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation', { name: 'Nawigacja główna' })
+    .getByRole('link', { name: 'Klienci' }).click()
+  await addClient(page, 'Reset Autorytetu')
+  await expect(page.getByText('Reset Autorytetu', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Wyloguj się' }).click()
+  await expect(page.getByLabel('Hasło')).toBeVisible()
+  await page.getByLabel('Hasło').fill('demo')
+  await page.getByRole('button', { name: 'Zaloguj się' }).click()
+  await page.getByRole('navigation', { name: 'Nawigacja główna' })
+    .getByRole('link', { name: 'Klienci' }).click()
+  await expect(page.getByText('Reset Autorytetu', { exact: true })).toHaveCount(0)
 })
 
 test('navigation focuses the destination and a day cockpit excludes background controls', async ({ page }) => {
@@ -1119,7 +1136,9 @@ test('calendar opens the therapist agenda and exposes exact partial payment edit
   await expect(page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' })).toHaveAttribute('aria-current', 'page')
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
   await expect(agenda).toBeVisible()
-  const partialPayment = agenda.getByRole('button', { name: /Częściowo/ })
+  const partialPayments = agenda.getByRole('button', { name: /Częściowo/ })
+  await expect(partialPayments).not.toHaveCount(0)
+  const partialPayment = partialPayments.first()
   await partialPayment.scrollIntoViewIfNeeded()
   await partialPayment.click()
   await page.getByRole('menuitemradio', { name: 'Częściowo opłacona' }).click()
@@ -1137,7 +1156,11 @@ test('calendar combines payment and attendance filters after role scope', async 
   await filters.getByRole('button', { name: 'Nieobecność', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Filtry · 2' })).toBeVisible()
   const agenda = page.getByRole('region', { name: /Plan dnia/ })
-  await expect(agenda.locator('[data-payment="unpaid"][data-attendance="noshow"]')).toHaveCount(1)
+  const rows = agenda.locator('.agenda__row')
+  await expect(rows).not.toHaveCount(0)
+  await expect(
+    rows.locator(':scope:not([data-payment="unpaid"][data-attendance="noshow"])')
+  ).toHaveCount(0)
   await page.getByRole('button', { name: 'Wyczyść filtry' }).click()
   // clearing brings the settled sessions straight back into the same list
   await expect(agenda.locator('[data-terminal="true"]').first()).toBeVisible()
@@ -1177,6 +1200,34 @@ test('month view shows sessions across the whole month by default', async ({ pag
   await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
   await page.getByRole('radio', { name: 'Miesiąc' }).click()
   expect(await page.locator('.cal__day:has(.cal__item)').count()).toBeGreaterThan(1)
+})
+
+test('month Calendar keeps demo appointments draggable', async ({ page }) => {
+  await freezeTime(page, '2026-07-14T10:30:00')
+  await login(page)
+  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
+  await page.getByRole('radio', { name: 'Miesiąc' }).click()
+
+  const source = page.locator('.cal__item.is-draggable').first()
+  await expect(source).toBeVisible()
+  const sessionId = await source.getAttribute('data-flip-id')
+  const targetIso = await source.evaluate((element) => {
+    const sourceDay = element.closest('.cal__day')
+    return [...document.querySelectorAll('.cal__day[data-iso]')]
+      .find((day) => !day.classList.contains('is-out') && day.dataset.iso > sourceDay.dataset.iso)
+      ?.dataset.iso
+  })
+  if (!sessionId || !targetIso) throw new Error('Demo Calendar drag target is unavailable')
+  const target = page.locator(`.cal__day[data-iso="${targetIso}"]`)
+  const sourceBox = await source.boundingBox()
+  const targetBox = await target.boundingBox()
+  if (!sourceBox || !targetBox) throw new Error('Demo Calendar drag target is unavailable')
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, { steps: 5 })
+  await page.mouse.up()
+
+  await expect(target.locator(`[data-flip-id="${sessionId}"]`)).toBeVisible()
 })
 
 test('therapist agenda excludes other therapists and payment updates stay coherent', async ({ page }) => {
@@ -1320,7 +1371,9 @@ test.describe('Task 3 daily-care redesign', () => {
       .getByRole('button', { name: 'Edytuj sesję — Tymon Wielgosz, 15:00' })
       .click()
     const dialog = page.getByRole('dialog', { name: 'Edycja sesji' })
-    await dialog.getByRole('radio', { name: 'Odwołana', exact: true }).click()
+    const cancelled = dialog.getByRole('radio', { name: 'Odwołana', exact: true })
+    await expect(cancelled).toBeVisible()
+    await cancelled.click()
     await dialog.getByRole('button', { name: 'Zapisz zmiany' }).click()
     await expect(dialog).toBeHidden()
     await navigation.getByRole('link', { name: 'Dziś' }).click()

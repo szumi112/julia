@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, sessionsInMonth, availableMonths } from '../store.jsx'
+import { useApp, useAppointmentMutationLock, useWorkspaceRefresh, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip, motionOK } from '../anim.js'
 import { useIsPhone, useMediaQuery, desktopMQ } from '../responsive.js'
@@ -14,6 +14,13 @@ import {
   fmtWeekday, fmtDayMonth, fmtWeekRange, fmtMoney, sessionsWord, timeToMin,
   STATUS_LABELS, PAY_LABELS,
 } from '../format.js'
+import {
+  clientIdentityFor,
+  monthWorkspaceRange,
+  specialistIdentityFor,
+  weekWorkspaceRange,
+} from '../workspace-view.js'
+import { ApiError } from '../api.js'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
 const STRIP_DOW = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
@@ -110,6 +117,18 @@ function monthGrid(ym) {
   return cells
 }
 
+const appointmentEditInput = (session, patch = {}) => ({
+  specialistId: session.psychId,
+  serviceId: session.service,
+  date: session.date,
+  time: session.time,
+  durationMinutes: session.duration,
+  expectedAmountGrosze: Math.round(session.amount * 100),
+  location: session.location ?? null,
+  status: session.status,
+  ...patch,
+})
+
 // Seven-day, Monday-first strip. The toolbar above owns week navigation, so the
 // strip is purely the day picker. Keyboard movement updates selection and focus
 // together so only the active date participates in the tab order.
@@ -189,8 +208,11 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
 }
 
 export function CalendarView({ params = {} }) {
-  const { state, dispatch, toast } = useApp()
-  const { getViewState, openSessionForm, patchViewState, role } = useShell()
+  const { state, dispatch, toast, workspace } = useApp()
+  const { locked: appointmentMutationLocked } = useAppointmentMutationLock()
+  const refreshWorkspace = useWorkspaceRefresh()
+  const { appMode, capabilities, getViewState, openSessionForm, patchViewState, role } = useShell()
+  const isApp = appMode === 'app'
   const today = toISODate(new Date())
   const curYm = monthKey(new Date())
   const [initialViewState] = useState(() => initialCalendarViewState(getViewState, params, today))
@@ -202,7 +224,7 @@ export function CalendarView({ params = {} }) {
   const isPhone = useIsPhone()
   // dragging an agenda row or a month-grid chip would trap touch scrolling,
   // so it stays a fine-pointer affordance (reschedule via the session form)
-  const canDrag = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
+  const dragPointer = useMediaQuery(`${desktopMQ} and (pointer: fine)`)
   const gridRef = useRef(null)
   const dayPanelRef = useRef(null)
   const agendaPanelRef = useRef(null)
@@ -279,7 +301,7 @@ export function CalendarView({ params = {} }) {
 
   // --- drag & drop: reschedule by dragging a session chip onto another day ---
   const onChipDown = (e, s) => {
-    if (s.status !== 'scheduled') return
+    if (s.status !== 'scheduled' || s.readOnly || clientOf(s.clientId)?.readOnly) return
     if (e.pointerType === 'mouse' && e.button !== 0) return
     const chip = e.currentTarget
     const pid = e.pointerId
@@ -328,7 +350,7 @@ export function CalendarView({ params = {} }) {
       d.dropEl = dropEl
     }
 
-    const finish = (ev) => {
+    const finish = async (ev) => {
       if (ev && ev.pointerId !== pid) return
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', finish)
@@ -341,7 +363,37 @@ export function CalendarView({ params = {} }) {
       const ghost = d.ghost
       if (d.dropIso) {
         const target = d.dropEl
-        dispatch({ type: 'UPDATE_SESSION', id: s.id, patch: { date: d.dropIso } })
+        if (isApp) {
+          let commandAccepted = false
+          try {
+            await workspace.editAppointment(s.id, s.version, appointmentEditInput(s, { date: d.dropIso }))
+            commandAccepted = true
+            await refreshWorkspace(workspaceRange)
+          } catch (error) {
+            if (!commandAccepted && error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
+              try {
+                await refreshWorkspace(workspaceRange)
+                toast('Termin został zmieniony. Odświeżono kalendarz.', 'alert')
+              } catch {
+                toast('Termin został zmieniony, ale nie udało się odświeżyć kalendarza.', 'alert')
+              }
+            } else if (commandAccepted) {
+              toast('Sesję przeniesiono, ale nie udało się odświeżyć kalendarza.', 'alert')
+            } else {
+              toast('Nie udało się przenieść sesji.', 'alert')
+            }
+            const r = chip.getBoundingClientRect()
+            if (motionOK()) {
+              window.gsap.to(ghost, {
+                x: r.left, y: r.top, scale: 1, rotation: 0, autoAlpha: 0.3,
+                duration: 0.3, ease: 'power3.inOut', onComplete: () => ghost.remove(),
+              })
+            } else ghost.remove()
+            return
+          }
+        } else {
+          dispatch({ type: 'UPDATE_SESSION', id: s.id, patch: { date: d.dropIso } })
+        }
         // same non-blocking overlap check as the session form
         const start = timeToMin(s.time)
         const end = start + s.duration
@@ -493,6 +545,48 @@ export function CalendarView({ params = {} }) {
     [byDate, agendaSel]
   )
   const weekDays = useMemo(() => weekDaysFor(agendaSel), [agendaSel])
+  const workspaceRange = useMemo(
+    () => mode === 'agenda' ? weekWorkspaceRange(agendaSel) : monthWorkspaceRange(ym),
+    [agendaSel, mode, ym]
+  )
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const canManageAppointments = !isApp || (
+    capabilities.includes('appointment.manage')
+    && workspaceState === 'ready'
+    && !appointmentMutationLocked
+  )
+  const canDrag = dragPointer && canManageAppointments
+  const canDragSession = (session) => canDrag && !session.readOnly && !clientOf(session.clientId)?.readOnly
+
+  const changeAppointmentStatus = async (session, status) => {
+    let commandAccepted = false
+    try {
+      if (status === 'cancelled') {
+        await workspace.cancelAppointment(session.id, session.version)
+      } else {
+        await workspace.editAppointment(session.id, session.version, appointmentEditInput(session, { status }))
+      }
+      commandAccepted = true
+      await refreshWorkspace(workspaceRange)
+    } catch (error) {
+      if (!commandAccepted && error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
+        try {
+          await refreshWorkspace(workspaceRange)
+          toast('Termin został zmieniony. Odświeżono kalendarz.', 'alert')
+        } catch {
+          toast('Termin został zmieniony, ale nie udało się odświeżyć kalendarza.', 'alert')
+        }
+      } else if (commandAccepted) {
+        toast('Status sesji zapisano, ale nie udało się odświeżyć kalendarza.', 'alert')
+      } else {
+        toast('Nie udało się zmienić statusu sesji.', 'alert')
+      }
+      return
+    }
+    toast(status === 'cancelled'
+      ? 'Sesja odwołana — nie jest fakturowana'
+      : `Status zmieniony: ${STATUS_LABELS[status].toLowerCase()}`)
+  }
 
   // One navigator per view: Plan dnia moves by week, Miesiąc by month, and the
   // toolbar counts whatever the user is actually looking at.
@@ -505,8 +599,8 @@ export function CalendarView({ params = {} }) {
       nextLabel: 'Następny tydzień',
       prev: () => selectDay(addDays(agendaSel, -7)),
       next: () => selectDay(addDays(agendaSel, 7)),
-      prevOff: monthKey(addDays(weekDays[0], -7)) < firstMonth,
-      nextOff: monthKey(addDays(weekDays[6], 7)) > lastMonth,
+      prevOff: !isApp && monthKey(addDays(weekDays[0], -7)) < firstMonth,
+      nextOff: !isApp && monthKey(addDays(weekDays[6], 7)) > lastMonth,
       atToday: agendaSel === today,
       count: `${agendaSessions.length} ${sessionsWord(agendaSessions.length)} tego dnia`,
     }
@@ -516,8 +610,8 @@ export function CalendarView({ params = {} }) {
       nextLabel: 'Następny miesiąc',
       prev: () => changeMonth(-1),
       next: () => changeMonth(1),
-      prevOff: ym <= firstMonth,
-      nextOff: ym >= lastMonth,
+      prevOff: !isApp && ym <= firstMonth,
+      nextOff: !isApp && ym >= lastMonth,
       atToday: ym === curYm,
       count: `${monthSessions.length} ${sessionsWord(monthSessions.length)} w tym miesiącu`,
     }
@@ -555,12 +649,28 @@ export function CalendarView({ params = {} }) {
     )
   }, [agendaSel, mode])
 
+  if (isApp && workspaceState !== 'ready') {
+    return (
+      <section role="status" aria-label="Stan kalendarza">
+        <EmptyState
+          icon="calendar"
+          title={workspaceState === 'loading' ? 'Wczytywanie kalendarza…' : 'Kalendarz jest teraz niedostępny'}
+          hint={workspaceState === 'loading'
+            ? 'Pobieramy kompletny widoczny zakres kalendarza.'
+            : 'Nie pokazujemy niepełnych ani demonstracyjnych danych.'}
+        />
+      </section>
+    )
+  }
+
   // one session row — shared by the desktop day panel and the phone agenda
   const dayRow = (s, dragOk) => {
     const c = clientOf(s.clientId)
     const p = psychOf(s.psychId)
-    const draggable = dragOk && s.status === 'scheduled'
-    const clientName = c?.name || 'Klient'
+    const clientIdentity = clientIdentityFor(state.clients, s.clientId)
+    const specialistIdentity = specialistIdentityFor(state.psychologists, s.psychId)
+    const draggable = dragOk && s.status === 'scheduled' && !s.readOnly && !c?.readOnly
+    const clientName = clientIdentity.name
     const highlighted = highlightedSessionIds.has(s.id)
     // settled sessions stay in time order, dimmed — the day reads as one list
     const terminal = s.status === 'completed' || s.status === 'cancelled'
@@ -583,14 +693,17 @@ export function CalendarView({ params = {} }) {
         <span className="agenda__main">
           <span className="agenda__client">{clientName}</span>
           <span className="agenda__meta">
-            <Avatar name={p?.name || '?'} color={p?.color} size={16} />
-            {p?.name} · {fmtMoney(s.amount)}
+            <Avatar name={specialistIdentity.name} color={specialistIdentity.color} size={16} />
+            {specialistIdentity.name} · {fmtMoney(s.amount)}
           </span>
           <span className="agenda__pills">
             {serviceBadge(s.service) && <Pill tone="sky">{serviceBadge(s.service)}</Pill>}
+            {c?.readOnly && <Pill tone="ink">Archiwalny</Pill>}
             <StatusPicker
               session={s}
               accessibleLabel={`Status: ${STATUS_LABELS[s.status]} — ${clientName}, ${s.time}`}
+              canChange={canManageAppointments}
+              onStatusChange={(status) => changeAppointmentStatus(s, status)}
             />
             <PaymentPicker
               session={s}
@@ -598,12 +711,14 @@ export function CalendarView({ params = {} }) {
             />
           </span>
         </span>
-        <IconBtn
-          name="edit"
-          label={`Edytuj sesję — ${clientName}, ${s.time}`}
-          size={16}
-          onClick={() => openSessionForm({ session: s })}
-        />
+        {canManageAppointments && !s.readOnly && (
+          <IconBtn
+            name="edit"
+            label={`Edytuj sesję — ${clientName}, ${s.time}`}
+            size={16}
+            onClick={() => openSessionForm({ session: s, workspaceRange })}
+          />
+        )}
       </div>
     )
   }
@@ -649,8 +764,8 @@ export function CalendarView({ params = {} }) {
             ]}
           />
           {/* the phone's raised tabbar action already covers "new session" */}
-          {!isPhone && (
-            <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: rolePsychId })}>
+          {!isPhone && canManageAppointments && (
+            <Button icon="plus" magnetic onClick={() => openSessionForm({ date: selected || today, psychId: rolePsychId, workspaceRange })}>
               Nowa sesja
             </Button>
           )}
@@ -737,15 +852,15 @@ export function CalendarView({ params = {} }) {
                 compact
                 icon="calendar"
                 title="Brak sesji tego dnia"
-                hint="Dodaj pierwszą sesję przyciskiem poniżej."
+                hint={isApp ? 'W tym kompletnym zakresie nie ma zaplanowanych sesji.' : 'Dodaj pierwszą sesję przyciskiem poniżej.'}
               />
             ) : (
               dayThread(agendaSessions, false, agendaSel, agendaFlipRef, true)
             )}
-            <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
-              onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId })}>
+            {canManageAppointments && <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
+              onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId, workspaceRange })}>
               Dodaj sesję tego dnia
-            </Button>
+            </Button>}
           </section>
         </>
       ) : (
@@ -795,14 +910,14 @@ export function CalendarView({ params = {} }) {
                         {items.slice(0, 3).map((s) => (
                           <span
                             key={s.id}
-                            className={`cal__item ${s.status === 'scheduled' && canDrag ? 'is-draggable' : ''}`}
+                            className={`cal__item ${s.status === 'scheduled' && canDragSession(s) ? 'is-draggable' : ''}`}
                             data-flip-id={s.id}
                             style={{ background: psychOf(s.psychId)?.soft, '--node-color': psychOf(s.psychId)?.color }}
-                            onPointerDown={(e) => { if (canDrag) onChipDown(e, s) }}
-                            title={s.status === 'scheduled' && canDrag ? 'Przeciągnij, aby przełożyć sesję' : undefined}
+                            onPointerDown={(e) => { if (canDragSession(s)) onChipDown(e, s) }}
+                            title={s.status === 'scheduled' && canDragSession(s) ? 'Przeciągnij, aby przełożyć sesję' : undefined}
                           >
                             <span className="cal__item-time">{s.time}</span>
-                            <span className="cal__item-name">{clientOf(s.clientId)?.name.split(' ')[0]}</span>
+                            <span className="cal__item-name">{clientIdentityFor(state.clients, s.clientId).name.split(' ')[0]}</span>
                           </span>
                         ))}
                         {items.length > 3 && <span className="cal__more">+{items.length - 3} więcej</span>}
@@ -843,15 +958,15 @@ export function CalendarView({ params = {} }) {
                     compact
                     icon="calendar"
                     title="Brak sesji tego dnia"
-                    hint="Dodaj pierwszą sesję przyciskiem poniżej."
+                    hint={isApp ? 'W tym kompletnym zakresie nie ma zaplanowanych sesji.' : 'Dodaj pierwszą sesję przyciskiem poniżej.'}
                   />
                 )}
                 {daySessions.length > 0 &&
                   dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), canDrag, selected)}
               </div>
-              {selected && (
+              {selected && canManageAppointments && (
                 <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
-                  onClick={() => openSessionForm({ date: selected, psychId: rolePsychId })}>
+                  onClick={() => openSessionForm({ date: selected, psychId: rolePsychId, workspaceRange })}>
                   Dodaj sesję tego dnia
                 </Button>
               )}

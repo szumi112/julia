@@ -19,7 +19,15 @@ npm run dev
 Następnie otwórz adres podany przez Vite (domyślnie `http://localhost:5173/julia/`).
 **Logowanie:** dowolny e-mail i hasło (pola nie mogą być puste).
 
-> GSAP i three.js ładowane są z CDN — do uruchomienia potrzebne jest połączenie z internetem.
+## Dwa tryby uruchomienia
+
+- `npm run dev` / `npm run build:demo` - publiczna demonstracja pod `/julia/`,
+  wyłącznie z fikcyjnymi danymi.
+- `npm run dev:app` / `npm run build:production` - chroniona aplikacja pod `/`,
+  z API Workera. Do zakończenia migracji używa wyłącznie fikcyjnych danych.
+
+Kroje pisma, GSAP i three.js są pakowane lokalnie. Aplikacja personelu nie pobiera
+skryptów ani fontów z zewnętrznych CDN.
 
 ## Co jest w środku
 
@@ -47,8 +55,8 @@ diagnozy, warsztaty), to założenia przyjęte na potrzeby kalendarza.
 ## Technologie i decyzje
 
 - React 18 + Vite (SPA, własny mini-router z animowanymi przejściami).
-- GSAP (CDN) — choreografia wejść, liczniki, mikrointerakcje; respektuje `prefers-reduced-motion`.
-- three.js (CDN) — jedna lekka scena shaderowa (simplex noise), pauza przy ukrytej karcie.
+- GSAP — choreografia wejść, liczniki, mikrointerakcje; respektuje `prefers-reduced-motion`.
+- three.js — jedna lekka scena shaderowa (simplex noise), pauza przy ukrytej karcie.
 - Typografia: Alata (logotyp) + Fraunces (nagłówki „okładkowe") + Heebo (interfejs) — Alata i Heebo to kroje ze strony centrum.
 - Paleta marki: koral `#ED5A39`, róż `#E88AAC`, bursztyn `#ED9936`, błękit `#B2D9EA` i atramentowy granat `#351B69` na ciepłym papierze.
 - Dane: deterministyczny generator (~190 sesji, 21 klientów, 4 specjalistki, 3 grupy TUS, ostatnie ~4 miesiące) liczony względem bieżącej daty — demo zawsze wygląda na „żywe".

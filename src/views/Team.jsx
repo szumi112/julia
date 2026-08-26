@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useApp, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
+import { useApp, useWorkspaceWindow, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
 import { useMinuteNow } from '../clock.js'
@@ -12,12 +12,40 @@ import {
 } from '../format.js'
 import { sessionConflicts, specialistWeekLoad } from '../workspace.js'
 import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
+import { rollingWorkspaceRange } from '../workspace-view.js'
 
 const TEAM_FILTERS = [
   { value: 'all', label: 'Cały zespół' },
   { value: 'available', label: 'Dostępne miejsca' },
   { value: 'full', label: 'Pełne obłożenie' },
 ]
+
+function AppTeamDirectory({ psychologists }) {
+  return (
+    <div>
+      <div className="view-head">
+        <div>
+          <div className="eyebrow">Katalog specjalistek</div>
+          <h1 className="display view-head__title">Zespół <em>centrum</em></h1>
+          <p className="view-head__sub">Lista aktywnych specjalistek jest dostępna tylko do odczytu.</p>
+        </div>
+      </div>
+      <div className="grid-2 team-grid">
+        {psychologists.map((psychologist) => (
+          <article className="card team-card" key={psychologist.id} data-psych-id={psychologist.id}>
+            <div className="team-card__profile">
+              <Avatar name={psychologist.name} color={psychologist.color} size={52} />
+              <div className="team-card__identity">
+                <h2 className="team-card__name">{psychologist.name}</h2>
+                <span className="team-card__spec">Dostępna do planowania wizyt</span>
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
   const titleId = `team-specialist-title-${psychologist.id}`
@@ -130,10 +158,13 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
 
 export function Team() {
   const { state } = useApp()
-  const { getViewState, openPsychForm, patchViewState } = useShell()
+  const { appMode, getViewState, openPsychForm, patchViewState } = useShell()
+  const isApp = appMode === 'app'
   const ref = useReveal()
   const now = useMinuteNow()
   const today = toISODate(now)
+  const workspaceRange = useMemo(() => rollingWorkspaceRange(today), [today])
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const [filter, setFilter] = useState(() => {
     const saved = getViewState('team', { filter: 'all' })
     return TEAM_FILTERS.some((option) => option.value === saved.filter) ? saved.filter : 'all'
@@ -176,6 +207,22 @@ export function Team() {
     patchViewState('team', { filter })
   }, [filter, patchViewState])
 
+  if (isApp && workspaceState !== 'ready') {
+    return (
+      <section role="status" aria-label="Stan zespołu">
+        <EmptyState
+          icon="team"
+          title={workspaceState === 'loading' ? 'Wczytywanie zespołu…' : 'Zespół jest teraz niedostępny'}
+          hint={workspaceState === 'loading'
+            ? 'Pobieramy uprawniony zakres aktywnych specjalistek.'
+            : 'Dane pozostają tylko do odczytu. Spróbuj ponownie po odświeżeniu strony.'}
+        />
+      </section>
+    )
+  }
+
+  if (isApp) return <AppTeamDirectory psychologists={psychologists} />
+
   return (
     <div ref={ref}>
       <div className="view-head" data-reveal>
@@ -186,11 +233,11 @@ export function Team() {
             Obłożenie od poniedziałku do niedzieli{firstLoad ? ` · ${fmtDayMonth(firstLoad.start)} – ${fmtDayMonth(firstLoad.end)}` : ''}. Konflikty prowadzą prosto do właściwych sesji.
           </p>
         </div>
-        <div className="view-head__actions">
+        {!isApp && <div className="view-head__actions">
           <Button icon="plus" magnetic onClick={() => openPsychForm()}>
             Dodaj specjalistkę
           </Button>
-        </div>
+        </div>}
       </div>
 
       {state.psychologists.length === 0 && (
@@ -199,7 +246,7 @@ export function Team() {
             icon="team"
             title="Zespół jest jeszcze pusty"
             hint="Dodaj pierwszą specjalistkę, aby przypisywać jej klientów i sesje."
-            action={<Button size="sm" icon="plus" onClick={() => openPsychForm()}>Dodaj specjalistkę</Button>}
+            action={!isApp && <Button size="sm" icon="plus" onClick={() => openPsychForm()}>Dodaj specjalistkę</Button>}
           />
         </div>
       )}
@@ -250,7 +297,8 @@ export function Team() {
 
 export function PsychDetail({ params }) {
   const { state } = useApp()
-  const { openSessionForm, openPsychForm } = useShell()
+  const { appMode, openSessionForm, openPsychForm } = useShell()
+  const isApp = appMode === 'app'
   const ref = useReveal([params.id])
   const [debtOnly, setDebtOnly] = useState(false)
   const psych = state.psychologists.find((p) => p.id === params.id)
@@ -297,10 +345,10 @@ export function PsychDetail({ params }) {
             <Pill tone="amber">{fmtMoney(psych.rate)} / sesja</Pill>
           </div>
         </div>
-        <div className="id-band__actions">
+        {!isApp && <div className="id-band__actions">
           <Button variant="ghost" icon="edit" onClick={() => openPsychForm({ psych })}>Edytuj profil</Button>
           <Button icon="plus" onClick={() => openSessionForm({ psychId: psych.id })}>Nowa sesja</Button>
-        </div>
+        </div>}
       </div>
 
       <div className="stats-row stats-row--4">
@@ -393,20 +441,23 @@ export function PsychDetail({ params }) {
                 compact
                 icon="calendar"
                 title="Brak zaplanowanych sesji"
-                action={<Button size="sm" variant="soft" icon="plus" onClick={() => openSessionForm({ psychId: psych.id })}>Nowa sesja</Button>}
+                action={!isApp && <Button size="sm" variant="soft" icon="plus" onClick={() => openSessionForm({ psychId: psych.id })}>Nowa sesja</Button>}
               />
             )}
-            {upcoming.map((s) => (
-              <button key={s.id} className="agenda__row hover-row" style={{ width: '100%', textAlign: 'left' }}
-                onClick={() => openSessionForm({ session: s })}>
-                <span className="agenda__time">{s.time}</span>
-                <span className="agenda__main">
-                  <span className="agenda__client">{clientOf(s.clientId)?.name}</span>
-                  <span className="agenda__meta">{fmtDayMonth(s.date)} · {s.duration} min</span>
-                </span>
-                <Icon name="chevR" size={15} className="faint" />
-              </button>
-            ))}
+            {upcoming.map((s) => {
+              const Row = isApp ? 'div' : 'button'
+              return (
+                <Row key={s.id} className={`agenda__row ${isApp ? '' : 'hover-row'}`} style={{ width: '100%', textAlign: 'left' }}
+                  onClick={isApp ? undefined : () => openSessionForm({ session: s })}>
+                  <span className="agenda__time">{s.time}</span>
+                  <span className="agenda__main">
+                    <span className="agenda__client">{clientOf(s.clientId)?.name}</span>
+                    <span className="agenda__meta">{fmtDayMonth(s.date)} · {s.duration} min</span>
+                  </span>
+                  <Icon name="chevR" size={15} className="faint" />
+                </Row>
+              )
+            })}
           </div>
         </div>
       </div>

@@ -9,12 +9,35 @@ import { STATUS_LABELS, STATUS_PILL, PAY_LABELS, PAY_PILL, METHOD_LABELS, fmtMon
 const STATUS_TONE = { scheduled: 'coral', completed: 'sage', cancelled: 'pink', noshow: 'error' }
 const PAY_TONE = { paid: 'sage', unpaid: 'error', partial: 'amber' }
 
-export function StatusPicker({ session, accessibleLabel }) {
+export function StatusPicker({ session, accessibleLabel, canChange = false, onStatusChange }) {
   const { dispatch, toast } = useApp()
-  const { role } = useShell()
+  const { appMode, role } = useShell()
   const [open, setOpen] = useState(false)
-  if (role.scope === 'own' && session.psychId !== role.psychId) {
+  const [saving, setSaving] = useState(false)
+  if ((appMode === 'app' && (!canChange || typeof onStatusChange !== 'function')) || session.readOnly
+    || (role.scope === 'own' && session.psychId !== role.psychId)) {
     return <Pill tone={STATUS_TONE[session.status]} dot>{STATUS_LABELS[session.status]}</Pill>
+  }
+  const changeStatus = async (status) => {
+    if (saving) return
+    if (status === session.status) {
+      setOpen(false)
+      return
+    }
+    setSaving(true)
+    try {
+      if (appMode === 'app') await onStatusChange(status)
+      else {
+        dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: { status } })
+        // cancelling has a billing consequence worth naming
+        toast(status === 'cancelled'
+          ? 'Status zmieniony: odwołana — sesja nie jest fakturowana'
+          : `Status zmieniony: ${STATUS_LABELS[status].toLowerCase()}`)
+      }
+    } finally {
+      setSaving(false)
+      setOpen(false)
+    }
   }
   return (
     <Popover
@@ -37,17 +60,11 @@ export function StatusPicker({ session, accessibleLabel }) {
         <PopItem
           key={st}
           on={st === session.status}
-          onClick={() => {
-            dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: { status: st } })
-            setOpen(false)
-            // cancelling has a billing consequence worth naming
-            toast(st === 'cancelled'
-              ? 'Status zmieniony: odwołana — sesja nie jest fakturowana'
-              : `Status zmieniony: ${STATUS_LABELS[st].toLowerCase()}`)
-          }}
+          disabled={saving}
+          onClick={() => { void changeStatus(st) }}
         >
           <span className="dot" style={{ width: 7, height: 7, borderRadius: 99, background: `var(--${STATUS_TONE[st] === 'error' ? 'error' : STATUS_TONE[st]})` }} />
-          {STATUS_LABELS[st]}
+          {st === 'cancelled' && appMode === 'app' ? 'Odwołaj' : STATUS_LABELS[st]}
         </PopItem>
       ))}
     </Popover>
@@ -56,13 +73,14 @@ export function StatusPicker({ session, accessibleLabel }) {
 
 export function PaymentPicker({ session, accessibleLabel, readOnly = false }) {
   const { dispatch, toast } = useApp()
-  const { openSessionForm, role } = useShell()
+  const { appMode, openSessionForm, role } = useShell()
   const [open, setOpen] = useState(false)
   const label =
     session.payment === 'partial'
       ? `${PAY_LABELS.partial} · ${fmtMoney(session.paidAmount)}`
       : PAY_LABELS[session.payment]
-  if (readOnly || (role.scope === 'own' && session.psychId !== role.psychId)) {
+  if (readOnly || appMode === 'app' || session.readOnly
+    || (role.scope === 'own' && session.psychId !== role.psychId)) {
     return <Pill tone={PAY_TONE[session.payment]} dot>{label}</Pill>
   }
   return (

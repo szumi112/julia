@@ -1,5 +1,8 @@
 // In-memory app state — no persistence by design (demo).
-import { createContext, useContext, useMemo, useReducer, useState, useCallback, useEffect } from 'react'
+import {
+  createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef,
+  useState, useSyncExternalStore,
+} from 'react'
 import { DEMO_ROLES, INITIAL_STATE } from './data.js'
 import { monthKey, billableSummary, outstandingOf, paymentPatchFor, toISODate } from './format.js'
 import {
@@ -7,11 +10,24 @@ import {
   unlinkTusGuardian, updateTusKidAndClients, withTusGroupDefaults,
 } from './tus.js'
 import { dissolveLoneFamilies, withPsychologistDefaults } from './workspace.js'
+import {
+  createAuthorityBoundDispatch,
+  createWorkspaceProviderController,
+} from './workspace-provider.js'
+import {
+  isWorkspaceRangeCovered,
+  projectLoadedWorkspace,
+  workspaceRangeState,
+} from './workspace-view.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
 // recreate the app context value and re-render all of its consumers
 const ToastCtx = createContext([])
+const ClientMutationCtx = createContext(Object.freeze({ locked: false }))
+const AppointmentMutationCtx = createContext(Object.freeze({ locked: false }))
+const PaymentMutationCtx = createContext(Object.freeze({ locked: false }))
+const CanonicalAppointmentsCtx = createContext(Object.freeze(Object.create(null)))
 
 let nextId = 10000
 
@@ -248,10 +264,58 @@ function reducer(state, action) {
   }
 }
 
-export function AppProvider({ children }) {
+export function AppProvider({ children, repositoryFactory, authorityKey }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE)
+  const stateRef = useRef(state)
+  stateRef.current = state
   const [toasts, setToasts] = useState([])
   const clearToasts = useCallback(() => setToasts([]), [])
+  const effectiveAuthorityKey = typeof authorityKey === 'function'
+    ? authorityKey(state)
+    : authorityKey
+  const workspaceControllerRef = useRef(null)
+  if (workspaceControllerRef.current === null) {
+    workspaceControllerRef.current = createWorkspaceProviderController({
+      repositoryFactory,
+      dispatch,
+      getState: () => stateRef.current,
+      authorityKey: effectiveAuthorityKey,
+      clearToasts,
+    })
+  }
+  const workspaceController = workspaceControllerRef.current
+  const authorityDispatch = useMemo(() => createAuthorityBoundDispatch({
+    dispatch,
+    getState: () => stateRef.current,
+    resetAuthority: workspaceController.resetAuthority,
+    authorityKeyFor: typeof authorityKey === 'function' ? authorityKey : () => effectiveAuthorityKey,
+    demoRoleIds: DEMO_ROLES.map((role) => role.id),
+  }), [authorityKey, effectiveAuthorityKey, workspaceController])
+  const workspaceSnapshot = useSyncExternalStore(
+    workspaceController.subscribe,
+    workspaceController.getSnapshot,
+    workspaceController.getSnapshot,
+  )
+  const protectedRecords = useMemo(() => {
+    try {
+      return JSON.parse(effectiveAuthorityKey)?.[0] === 'api'
+    } catch {
+      return false
+    }
+  }, [effectiveAuthorityKey])
+  const viewState = useMemo(() => {
+    if (!protectedRecords) return state
+    const records = projectLoadedWorkspace(workspaceSnapshot.loadedState)
+    return {
+      ...state,
+      ...records,
+      posts: [],
+      tusGroups: [],
+      tusKids: [],
+      tusClasses: [],
+      tusPayments: [],
+    }
+  }, [protectedRecords, state, workspaceSnapshot.loadedState])
 
   // Toast actions can mutate scoped data. A role boundary invalidates both
   // their visible context and their authority, so never carry them across it.
@@ -293,22 +357,78 @@ export function AppProvider({ children }) {
   const dismissToast = useCallback((id) => leave(id, 0), [leave])
 
   const value = useMemo(
-    () => ({ state, dispatch, toast }),
-    [state, toast]
+    () => ({ state: viewState, dispatch: authorityDispatch, toast, workspace: workspaceSnapshot.workspace }),
+    [authorityDispatch, toast, viewState, workspaceSnapshot.workspace]
   )
   const toastValue = useMemo(
     () => ({ toasts, dismissToast, clearToasts }),
     [clearToasts, dismissToast, toasts]
   )
+  const clientMutationValue = useMemo(
+    () => Object.freeze({ locked: workspaceSnapshot.clientMutationLocked }),
+    [workspaceSnapshot.clientMutationLocked]
+  )
+  const appointmentMutationValue = useMemo(
+    () => Object.freeze({ locked: workspaceSnapshot.appointmentMutationLocked }),
+    [workspaceSnapshot.appointmentMutationLocked]
+  )
+  const paymentMutationValue = useMemo(
+    () => Object.freeze({ locked: workspaceSnapshot.paymentMutationLocked }),
+    [workspaceSnapshot.paymentMutationLocked]
+  )
+  const canonicalAppointments = useMemo(
+    () => protectedRecords
+      ? workspaceSnapshot.loadedState.appointmentsById
+      : Object.freeze(Object.create(null)),
+    [protectedRecords, workspaceSnapshot.loadedState.appointmentsById]
+  )
   return (
-    <AppCtx.Provider value={value}>
-      <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
-    </AppCtx.Provider>
+    <ClientMutationCtx.Provider value={clientMutationValue}>
+      <AppointmentMutationCtx.Provider value={appointmentMutationValue}>
+        <PaymentMutationCtx.Provider value={paymentMutationValue}>
+          <CanonicalAppointmentsCtx.Provider value={canonicalAppointments}>
+            <AppCtx.Provider value={value}>
+              <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
+            </AppCtx.Provider>
+          </CanonicalAppointmentsCtx.Provider>
+        </PaymentMutationCtx.Provider>
+      </AppointmentMutationCtx.Provider>
+    </ClientMutationCtx.Provider>
   )
 }
 
 export const useApp = () => useContext(AppCtx)
 export const useToasts = () => useContext(ToastCtx)
+export const useClientMutationLock = () => useContext(ClientMutationCtx)
+export const useAppointmentMutationLock = () => useContext(AppointmentMutationCtx)
+export const usePaymentMutationLock = () => useContext(PaymentMutationCtx)
+export const useCanonicalAppointments = () => useContext(CanonicalAppointmentsCtx)
+
+export const useWorkspaceWindow = (range, enabled = true) => {
+  const { workspace } = useApp()
+  const requested = useRef(new Set())
+  const key = range ? `${range.from}|${range.to}` : ''
+  const covered = range
+    ? isWorkspaceRangeCovered(workspace.loadedRanges, range)
+    : false
+
+  useEffect(() => {
+    if (!enabled || !range || covered || workspace.status === 'read-only-error'
+      || requested.current.has(key)) return
+    requested.current.add(key)
+    Promise.resolve(workspace.loadWindow(range)).catch(() => {})
+  }, [covered, enabled, key, range, workspace])
+
+  if (!enabled || !range) return 'ready'
+  return workspaceRangeState(workspace.status, workspace.loadedRanges, range)
+}
+
+// Mutations invalidate no directory rows locally. Callers refresh the same bounded
+// canonical window after a successful command instead of applying command DTOs.
+export const useWorkspaceRefresh = () => {
+  const { workspace } = useApp()
+  return useCallback((range) => workspace.loadWindow(range), [workspace])
+}
 
 // ---------- selectors ----------
 

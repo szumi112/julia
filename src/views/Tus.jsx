@@ -138,7 +138,8 @@ function GroupCard({ centre, group, leaders, monthSummary, next, roster }) {
 
 export function TusGroups() {
   const { state } = useApp()
-  const { getViewState, patchViewState, role, openTusGroupForm, openTusKidForm } = useShell()
+  const { appMode, getViewState, patchViewState, role, openTusGroupForm, openTusKidForm } = useShell()
+  if (appMode === 'app') return null
   const ref = useReveal()
   const searchRef = useRef(null)
   const centre = role.scope !== 'own'

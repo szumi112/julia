@@ -1,6 +1,6 @@
 // Add/Edit session — slide-over drawer with validation.
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp } from '../store.jsx'
+import { useApp, useAppointmentMutationLock, useWorkspaceRefresh } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { Button, Field, Segmented, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
@@ -8,10 +8,15 @@ import { useDrawerFX, motionOK } from '../anim.js'
 import { toISODate, timeToMin, fmtDayMonth, isBillable, STATUS_LABELS, PAY_LABELS, METHOD_LABELS } from '../format.js'
 import { clientsForRole } from '../workspace.js'
 import { SERVICES, SERVICE_BY_ID, STANDARD_SERVICE, amountFor, durationFor } from '../services.js'
+import { ApiError } from '../api.js'
+import { validateAppointmentInput } from '../core-records.js'
 
 export function SessionDrawer({ opts, onClose }) {
-  const { state, dispatch, toast } = useApp()
-  const { role, registerLeaveGuard } = useShell()
+  const { state, dispatch, toast, workspace } = useApp()
+  const { locked: appointmentMutationLocked } = useAppointmentMutationLock()
+  const { appMode, capabilities, role, registerLeaveGuard } = useShell()
+  const refreshWorkspace = useWorkspaceRefresh()
+  const isApp = appMode === 'app'
   const editing = opts.session || null
   const drawerRef = useRef(null)
   const backRef = useRef(null)
@@ -28,6 +33,7 @@ export function SessionDrawer({ opts, onClose }) {
   const availablePsychologists = role.scope === 'own'
     ? state.psychologists.filter((psych) => psych.id === role.psychId)
     : state.psychologists
+  const statusOptions = Object.entries(STATUS_LABELS).filter(([value]) => !isApp || value !== 'cancelled')
 
   // a new session opens priced: the service and the specialist are both known
   // up front, so the cennik can fill the amount before anything is typed
@@ -54,6 +60,8 @@ export function SessionDrawer({ opts, onClose }) {
   })
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
+  const [saveStatus, setSaveStatus] = useState('idle')
+  const [saveError, setSaveError] = useState(null)
   const amountTouched = useRef(!!editing)
   const [initialForm] = useState(form)
   const discardGuard = useDiscardGuard(JSON.stringify(form) !== JSON.stringify(initialForm))
@@ -80,6 +88,8 @@ export function SessionDrawer({ opts, onClose }) {
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
     setErrors((e) => ({ ...e, [k]: null }))
+    setSaveStatus('idle')
+    setSaveError(null)
   }
 
   // auto-fill psychologist + amount when picking a client
@@ -150,8 +160,95 @@ export function SessionDrawer({ opts, onClose }) {
     }
   }, [conflict?.id])
 
+  const appPayload = () => {
+    const appointment = {
+      clientId: form.clientId,
+      specialistId: form.psychId,
+      serviceId: form.service,
+      date: form.date,
+      time: form.time,
+      durationMinutes: Number(form.duration),
+      expectedAmountGrosze: Math.round(Number(form.amount) * 100),
+      location: null,
+      status: form.status,
+    }
+    validateAppointmentInput(appointment)
+    if (!editing) return appointment
+    const { clientId, ...edit } = appointment
+    return edit
+  }
+
+  const appErrors = () => {
+    try {
+      appPayload()
+      return {}
+    } catch (error) {
+      const field = error instanceof TypeError ? error.message.split('/').at(-1) : 'body'
+      return {
+        clientId: field === 'clientId' ? 'Wybierz klienta' : null,
+        psychId: field === 'specialistId' ? 'Wybierz specjalistkę' : null,
+        date: field === 'dateTime' ? 'Podaj poprawną datę i godzinę' : null,
+        time: field === 'dateTime' ? 'Podaj poprawną datę i godzinę' : null,
+        amount: ['expectedAmountGrosze', 'durationMinutes', 'serviceId'].includes(field)
+          ? 'Sprawdź rodzaj spotkania i kwotę' : null,
+        body: ['clientId', 'specialistId', 'dateTime', 'expectedAmountGrosze', 'durationMinutes', 'serviceId', 'status'].includes(field)
+          ? null
+          : 'Sprawdź dane sesji',
+      }
+    }
+  }
+
+  const refreshAfterAppMutation = async () => {
+    try {
+      await refreshWorkspace(opts.workspaceRange)
+    } catch {
+      forceClose()
+      toast('Sesję zapisano, ale nie udało się odświeżyć kalendarza.', 'alert')
+      return false
+    }
+    return true
+  }
+
+  const submitApp = async () => {
+    if (saveStatus === 'saving' || appointmentMutationLocked
+      || !capabilities.includes('appointment.manage')) return
+    const nextErrors = appErrors()
+    setErrors(nextErrors)
+    if (Object.values(nextErrors).some(Boolean)) {
+      shake()
+      focusFirstInvalid()
+      return
+    }
+    const payload = appPayload()
+    setSaveStatus('saving')
+    setSaveError(null)
+    try {
+      if (editing) await workspace.editAppointment(editing.id, editing.version, payload)
+      else await workspace.createAppointment(payload)
+    } catch (error) {
+      setSaveStatus('error')
+      if (error instanceof ApiError && error.code === 'APPOINTMENT_OVERLAP') {
+        setSaveError('Ten termin jest już zajęty. Wybierz inną godzinę.')
+      } else if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
+        try {
+          await refreshWorkspace(opts.workspaceRange)
+        } catch {
+          // The form intentionally stays open with its draft after stale failures.
+        }
+        setSaveError('Termin został zmieniony. Odśwież kalendarz i spróbuj ponownie.')
+      } else {
+        setSaveError('Nie udało się zapisać sesji.')
+      }
+      return
+    }
+    if (!await refreshAfterAppMutation()) return
+    toast(editing ? 'Zmiany w sesji zapisane' : 'Nowa sesja dodana do kalendarza')
+    forceClose()
+  }
+
   const submit = (e) => {
     e.preventDefault()
+    if (isApp) return submitApp()
     const errs = {}
     if (!form.clientId) errs.clientId = 'Wybierz klienta'
     if (!form.psychId) errs.psychId = 'Wybierz specjalistkę'
@@ -205,6 +302,7 @@ export function SessionDrawer({ opts, onClose }) {
   }
 
   const remove = () => {
+    if (isApp) return
     dispatch({ type: 'DELETE_SESSION', id: editing.id })
     toast('Sesja usunięta', 'close')
     forceClose()
@@ -232,7 +330,7 @@ export function SessionDrawer({ opts, onClose }) {
           <Field label="Klient" error={errors.clientId}>
             {/* no autoFocus: it would hijack activeElement before useDrawerFX
                 records the opener, breaking focus restore on close */}
-            <select name="session-client" autoComplete="off" className="select" value={form.clientId} onChange={(e) => onClientChange(e.target.value)}>
+            <select name="session-client" autoComplete="off" className="select" value={form.clientId} onChange={(e) => onClientChange(e.target.value)} disabled={isApp && Boolean(editing)}>
               <option value="">— wybierz klienta —</option>
               {availableClients.map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
@@ -309,11 +407,11 @@ export function SessionDrawer({ opts, onClose }) {
               ariaLabel="Status sesji"
               value={form.status}
               onChange={(v) => set('status', v)}
-              options={Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))}
+              options={statusOptions.map(([value, label]) => ({ value, label }))}
             />
           </Field>
 
-          <Field
+          {!isApp && <Field
             label="Płatność"
             hint="Czy klient zapłacił za tę sesję — przy wpłacie częściowej podaj kwotę."
           >
@@ -323,9 +421,9 @@ export function SessionDrawer({ opts, onClose }) {
               onChange={(v) => set('payment', v)}
               options={Object.entries(PAY_LABELS).map(([value, label]) => ({ value, label }))}
             />
-          </Field>
+          </Field>}
 
-          {form.payment !== 'unpaid' && (
+          {!isApp && form.payment !== 'unpaid' && (
             <Field label="Forma płatności" hint="Jak klient zapłacił — gotówką, kartą czy przelewem.">
               <Segmented
                 ariaLabel="Forma płatności"
@@ -339,7 +437,7 @@ export function SessionDrawer({ opts, onClose }) {
             </Field>
           )}
 
-          {form.payment === 'partial' && (
+          {!isApp && form.payment === 'partial' && (
             <Field label="Wpłacono (zł)" error={errors.paidAmount}>
               <input
                 type="number"
@@ -357,7 +455,7 @@ export function SessionDrawer({ opts, onClose }) {
             </Field>
           )}
 
-          <Field label="Zalecenia / notatka">
+          {!isApp && <Field label="Zalecenia / notatka">
             <textarea
               name="session-note"
               autoComplete="off"
@@ -366,7 +464,7 @@ export function SessionDrawer({ opts, onClose }) {
               placeholder="Zalecenia dla klienta, przebieg sesji…"
               onChange={(e) => set('note', e.target.value)}
             />
-          </Field>
+          </Field>}
 
           {editing && confirmDel && (
             <div className="form-warn form-warn--error" role="alert">
@@ -377,6 +475,12 @@ export function SessionDrawer({ opts, onClose }) {
                 {isBillable(editing) && <> — zniknie też z rozliczeń i raportu miesiąca</>}
                 .
               </span>
+            </div>
+          )}
+          {saveError && (
+            <div className="form-warn form-warn--error" role="alert">
+              <Icon name="alert" size={15} />
+              <span>{saveError}</span>
             </div>
           )}
         </form>
@@ -395,15 +499,15 @@ export function SessionDrawer({ opts, onClose }) {
             </>
           ) : (
             <>
-              <Button variant="primary" onClick={submit}>
+              <Button variant="primary" onClick={submit} disabled={isApp && (saveStatus === 'saving' || appointmentMutationLocked)}>
                 {editing ? 'Zapisz zmiany' : 'Dodaj sesję'}
               </Button>
-              {editing && (
+              {editing && !isApp && (
                 <Button variant="danger" onClick={() => setConfirmDel(true)}>
                   Usuń
                 </Button>
               )}
-              <Button variant="ghost" onClick={close}>Anuluj</Button>
+              <Button variant="ghost" onClick={close} disabled={isApp && saveStatus === 'saving'}>Anuluj</Button>
             </>
           )}
         </div>

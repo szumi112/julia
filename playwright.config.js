@@ -4,6 +4,7 @@ const baseURL = 'http://127.0.0.1:5173/julia/'
 
 export default defineConfig({
   testDir: './tests/e2e',
+  testIgnore: '**/app-*.spec.js',
   timeout: 30_000,
   use: {
     baseURL,
