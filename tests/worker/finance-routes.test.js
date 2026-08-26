@@ -31,6 +31,19 @@ const ring = () => createKeyring(env, {
   activeBackupKekVersion: 1,
 })
 
+const ringWithLookupV2 = async () => {
+  const base = await ring()
+  const v2 = await crypto.subtle.importKey(
+    'raw', new Uint8Array(32).fill(9), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  )
+  return Object.freeze({
+    ...base,
+    activeLookupKeyVersion: 2,
+    lookupKeyVersions: Object.freeze([1, 2]),
+    getLookupHmac: (version) => version === 2 ? v2 : base.getLookupHmac(version),
+  })
+}
+
 let serial = 0
 const ids = () => {
   const marker = ++serial
@@ -66,7 +79,7 @@ const entry = (batchId, patch = {}) => {
   lessonCount: null,
   source: {
     batchId,
-    sourceKey: `fictional.xlsx:Wrzesień:${rowNumber}:abcdef0123456789`,
+    sourceKey: `workbook:v1:0:${rowNumber}:0`,
     sheet: 'Wrzesień',
     rowNumber,
     raw: { Klient: 'Fikcyjna Klientka', Cena: 180 },
@@ -155,7 +168,7 @@ describe('protected finance import and read service', () => {
           paidAmountGrosze: 4_000, paymentMethod: 'transfer', invoiceStatus: 'not_required',
           counterparty: 'Fikcyjny koszt', sourceLabel: 'Materiały fikcyjne',
           invoiceNote: '', source: {
-            batchId, sourceKey: 'fictional.xlsx:Wrzesień:3:abcdef0123456789',
+            batchId, sourceKey: 'workbook:v1:0:3:0',
             sheet: 'Wrzesień', rowNumber: 3, raw: { Koszt: 'Materiały fikcyjne' },
           },
         }),
@@ -209,8 +222,9 @@ describe('protected finance import and read service', () => {
     expect(JSON.stringify(stored)).not.toContain('Materiały fikcyjne')
 
     const duplicateIds = ids()
+    const rotatedKeyring = await ringWithLookupV2()
     const duplicate = await startFinanceImport({
-      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 6,
+      db: env.DB, actor: OWNER, keyring: rotatedKeyring, nowMs: NOW_MS + 6,
       correlationId: CORRELATION_ID, idFactory: duplicateIds,
       body: {
         filename: 'fictional-slice.csv', fingerprint: 'b'.repeat(64),
@@ -219,7 +233,7 @@ describe('protected finance import and read service', () => {
       idempotencyKey: 'finance-start-key-duplicate-0001',
     })
     await expect(appendFinanceImportChunk({
-      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 7,
+      db: env.DB, actor: OWNER, keyring: rotatedKeyring, nowMs: NOW_MS + 7,
       correlationId: CORRELATION_ID, idFactory: duplicateIds,
       batchId: duplicate.body.data.batch.id,
       body: {
@@ -227,14 +241,14 @@ describe('protected finance import and read service', () => {
         entries: [entry(duplicate.body.data.batch.id, {
           source: {
             batchId: duplicate.body.data.batch.id,
-            sourceKey: 'fictional.xlsx:Wrzesień:2:abcdef0123456789',
+            sourceKey: 'workbook:v1:99:2:0',
             sheet: 'Wrzesień', rowNumber: 2,
             raw: { Klient: 'Fikcyjna Klientka', Cena: '180' },
           },
         })],
       },
       idempotencyKey: 'finance-chunk-key-duplicate-0001',
-    })).rejects.toThrow()
+    })).rejects.toThrow('FINANCE_IMPORT_DUPLICATE')
   })
 
   it('allows owner-only mutation and denies specialists all centre finance reads', async () => {
@@ -254,6 +268,56 @@ describe('protected finance import and read service', () => {
       db: env.DB, actor: SPECIALIST, keyring, nowMs: NOW_MS,
       month: '2025-09', kind: null,
     })).rejects.toThrow('NOT_FOUND')
+  })
+
+  it('recovers simultaneous identical start, chunk, and commit retries', async () => {
+    const keyring = await ring()
+    const startInput = (idFactory) => ({
+      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 20,
+      correlationId: CORRELATION_ID, idFactory,
+      body: {
+        filename: 'concurrent.xlsx', fingerprint: 'c'.repeat(64),
+        formatVersion: 1, totalRows: 1,
+      },
+      idempotencyKey: 'finance-start-concurrent-0001',
+    })
+    const starts = await Promise.all([
+      startFinanceImport(startInput(ids())),
+      startFinanceImport(startInput(ids())),
+    ])
+    expect(starts[1]).toEqual(starts[0])
+    const batchId = starts[0].body.data.batch.id
+    const chunkBody = {
+      sequence: 0,
+      entries: [entry(batchId, {
+        accountingMonth: '2026-01', occurredOn: '2026-01-05', rowNumber: 500,
+        source: {
+          batchId, sourceKey: 'workbook:v1:0:500:0', sheet: 'Styczeń 2026',
+          rowNumber: 500, raw: { Cena: 180 },
+        },
+      })],
+    }
+    const chunkInput = (idFactory) => ({
+      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 21,
+      correlationId: CORRELATION_ID, idFactory, batchId, body: chunkBody,
+      idempotencyKey: 'finance-chunk-concurrent-0001',
+    })
+    const chunks = await Promise.all([
+      appendFinanceImportChunk(chunkInput(ids())),
+      appendFinanceImportChunk(chunkInput(ids())),
+    ])
+    expect(chunks[1].body).toEqual(chunks[0].body)
+    const commitInput = (idFactory) => ({
+      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 22,
+      correlationId: CORRELATION_ID, idFactory, batchId,
+      body: { expectedVersion: 2 },
+      idempotencyKey: 'finance-commit-concurrent-0001',
+    })
+    const commits = await Promise.all([
+      commitFinanceImport(commitInput(ids())),
+      commitFinanceImport(commitInput(ids())),
+    ])
+    expect(commits[1]).toEqual(commits[0])
   })
 
   it('dispatches finance reads and imports through the authenticated closed HTTP shell', async () => {

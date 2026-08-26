@@ -10,9 +10,13 @@ import {
   createUnitOfWork,
   inspectIdempotency,
 } from '../db/unit-of-work.js'
+import {
+  isD1FinanceSourceDuplicate,
+} from '../db/errors.js'
 import { authorize } from '../identity/policy.js'
 import {
   blindEmailIndex,
+  blindEmailCandidates,
   createWrappedDataKey,
   decryptForScope,
   encryptForScope,
@@ -34,6 +38,7 @@ const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/
+const SOURCE_KEY = /^workbook:v1:(\d{1,4}):(\d{1,6}):(\d{1,4})$/
 const KINDS = new Set(['expense', 'income'])
 const MAX_CHUNK_ROWS = 20
 const DAY_MS = 86_400_000
@@ -217,6 +222,12 @@ const idempotencyInput = (actorId, operation, idempotencyKey, requestDigest) => 
   actorId, operation, idempotencyKey, requestDigest, expectedScope: FINANCE_SCOPE,
 })
 
+const sourceBlock = (source) => {
+  const match = SOURCE_KEY.exec(source.sourceKey)
+  if (!match || Number(match[2]) !== source.rowNumber) validation('body')
+  return Number(match[3])
+}
+
 const sourceIdentity = (value) => JSON.stringify([
   value.kind,
   value.recordType,
@@ -232,8 +243,8 @@ const sourceIdentity = (value) => JSON.stringify([
   value.invoiceNote,
   value.specialistId,
   value.lessonCount,
-  value.source.sourceKey,
   value.source.rowNumber,
+  sourceBlock(value.source),
 ])
 
 export async function startFinanceImport(input) {
@@ -295,7 +306,17 @@ export async function startFinanceImport(input) {
     auditId, action: 'finance.import.started', actorId: actor.id,
     correlationId: command.correlationId, metadata,
   }))
-  await unit.commit()
+  try {
+    await unit.commit()
+  } catch (error) {
+    const winner = await inspectIdempotency(command.db, context, idem)
+    if (winner) return winner
+    const existing = await command.db.prepare(
+      'SELECT id FROM finance_import_batches WHERE fingerprint=?'
+    ).bind(body.fingerprint).first()
+    if (existing) fail('FINANCE_IMPORT_DUPLICATE')
+    throw error
+  }
   return response
 }
 
@@ -339,7 +360,7 @@ export async function appendFinanceImportChunk(input) {
     validation('body')
   }
   const payloadHash = await hashChunk(body)
-  const replay = await command.db.prepare(
+  const loadReplay = () => command.db.prepare(
     `SELECT chunk.sequence,chunk.row_count,chunk.payload_hash,
             batch.id,batch.fingerprint,batch.format_version,batch.total_rows,
             batch.accepted_rows,batch.status,batch.version,batch.created_at,
@@ -348,6 +369,7 @@ export async function appendFinanceImportChunk(input) {
      JOIN finance_import_batches AS batch ON batch.id=chunk.batch_id
      WHERE chunk.batch_id=? AND chunk.idempotency_key=?`
   ).bind(command.batchId, command.idempotencyKey).first()
+  const replay = await loadReplay()
   if (replay) {
     if (replay.sequence !== body.sequence || replay.row_count !== body.entries.length
       || replay.payload_hash !== payloadHash) fail('IDEMPOTENCY_CONFLICT')
@@ -360,8 +382,25 @@ export async function appendFinanceImportChunk(input) {
   }
   const now = canonicalInstant(command.nowMs)
   const context = await loadFinanceContext(command.db, command.keyring)
+  const lookupSets = await Promise.all(body.entries.map(async (value) => {
+    const identity = sourceIdentity(value)
+    const candidates = await blindEmailCandidates(identity, command.keyring)
+    const active = await blindEmailIndex(identity, command.keyring)
+    if (!candidates.includes(active)) fail('CRYPTO_FAILURE')
+    return Object.freeze({ active, candidates: Object.freeze(candidates) })
+  }))
+  const lookupCandidates = [...new Set(lookupSets.flatMap(({ candidates }) => candidates))]
+  if (lookupCandidates.length !== lookupSets.reduce(
+    (total, { candidates }) => total + candidates.length, 0
+  )) fail('FINANCE_IMPORT_DUPLICATE')
+  const existingSource = await command.db.prepare(
+    `SELECT id FROM finance_entries
+     WHERE source_dedup_lookup IN (${lookupCandidates.map(() => '?').join(',')})
+     LIMIT 1`
+  ).bind(...lookupCandidates).first()
+  if (existingSource) fail('FINANCE_IMPORT_DUPLICATE')
   const entries = []
-  for (const value of body.entries) {
+  for (const [index, value] of body.entries.entries()) {
     const id = generated(command.idFactory, 'fin', ENTRY_ID)
     const detailsEnvelope = await seal(context, id, 'details', {
       schema: 'finance_entry_details.v1',
@@ -373,7 +412,7 @@ export async function appendFinanceImportChunk(input) {
     const sourceEnvelope = await seal(context, id, 'source_row', {
       schema: 'finance_entry_source.v1', source: value.source,
     })
-    const sourceLookup = await blindEmailIndex(sourceIdentity(value), command.keyring)
+    const sourceLookup = lookupSets[index].active
     const safeSourceKey = `workbook:v1:${value.source.rowNumber}:${sourceLookup.slice(3)}`
     entries.push({ id, value, detailsEnvelope, sourceEnvelope, sourceLookup, safeSourceKey })
   }
@@ -393,7 +432,7 @@ export async function appendFinanceImportChunk(input) {
         amount_grosze,paid_amount_grosze,payment_method,settlement_status,
         invoice_status,specialist_id,appointment_id,counterparty_lookup,
         details_envelope,source_row_envelope,version,created_by_staff_id,
-        source_lookup,
+        source_dedup_lookup,
         created_at,updated_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(
@@ -428,7 +467,18 @@ export async function appendFinanceImportChunk(input) {
     auditId, action: 'finance.import.chunk.accepted', actorId: actor.id,
     correlationId: command.correlationId, metadata,
   }))
-  await unit.commit()
+  try {
+    await unit.commit()
+  } catch (error) {
+    const winner = await loadReplay()
+    if (winner && winner.sequence === body.sequence
+      && winner.row_count === body.entries.length
+      && winner.payload_hash === payloadHash) {
+      return responseForBatch(200, batchDto(winner))
+    }
+    if (isD1FinanceSourceDuplicate(error)) fail('FINANCE_IMPORT_DUPLICATE')
+    throw error
+  }
   return responseForBatch(200, batchDto({
     ...current, accepted_rows: acceptedRows, version: nextVersion, updated_at: now,
   }))
@@ -486,7 +536,13 @@ export async function commitFinanceImport(input) {
     auditId, action: 'finance.import.committed', actorId: actor.id,
     correlationId: command.correlationId, metadata,
   }))
-  await unit.commit()
+  try {
+    await unit.commit()
+  } catch (error) {
+    const winner = await inspectIdempotency(command.db, context, idem)
+    if (winner) return winner
+    throw error
+  }
   return response
 }
 

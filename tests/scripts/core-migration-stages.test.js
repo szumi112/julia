@@ -31,6 +31,7 @@ const STAGE_B_NAMES = Object.freeze([
 const STAGE_C_NAMES = Object.freeze([
   '0012_finance_ledger.sql',
   '0013_finance_source_deduplication.sql',
+  '0014_finance_import_recovery.sql',
 ])
 
 const migration = (name) => Object.freeze({
@@ -67,6 +68,7 @@ test('stage A selects the exact named D1 migrations and never exposes stage B', 
     migration('0011_appointment_ledger.sql'),
     migration('0012_finance_ledger.sql'),
     migration('0013_finance_source_deduplication.sql'),
+    migration('0014_finance_import_recovery.sql'),
   ]
   const selected = module.selectCoreMigrationStage(source, 'stage-a')
 

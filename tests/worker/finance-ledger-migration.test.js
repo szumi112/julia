@@ -60,6 +60,7 @@ const insertEntry = (patch = {}) => {
     detailsEnvelope: '{}',
     sourceRowEnvelope: '{}',
     sourceLookup: null,
+    sourceDedupLookup: null,
     version: 1,
     createdBy: 'stf_finance_owner',
     createdAt: now,
@@ -72,14 +73,15 @@ const insertEntry = (patch = {}) => {
       amount_grosze,paid_amount_grosze,payment_method,settlement_status,
       invoice_status,specialist_id,appointment_id,counterparty_lookup,
       details_envelope,source_row_envelope,version,created_by_staff_id,
-      created_at,updated_at,source_lookup)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      created_at,updated_at,source_lookup,source_dedup_lookup)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     value.id, value.batchId, value.sourceKey, value.kind, value.recordType,
     value.accountingMonth, value.occurredOn, value.amountGrosze,
     value.paidAmountGrosze, value.method, value.settlement, value.invoice,
     value.specialistId, value.appointmentId, value.counterpartyLookup,
     value.detailsEnvelope, value.sourceRowEnvelope, value.version,
     value.createdBy, value.createdAt, value.updatedAt, value.sourceLookup,
+    value.sourceDedupLookup,
   )
 }
 
@@ -104,10 +106,11 @@ describe('finance ledger migration', () => {
     )).toEqual([
       { name: '0012_finance_ledger.sql' },
       { name: '0013_finance_source_deduplication.sql' },
+      { name: '0014_finance_import_recovery.sql' },
     ])
     const expected = {
       finance_adjustments: ['id', 'finance_entry_id', 'reason_envelope', 'before_envelope', 'after_envelope', 'recorded_by_staff_id', 'created_at'],
-      finance_entries: ['id', 'batch_id', 'source_key', 'kind', 'record_type', 'accounting_month', 'occurred_on', 'amount_grosze', 'paid_amount_grosze', 'currency', 'payment_method', 'settlement_status', 'invoice_status', 'specialist_id', 'appointment_id', 'counterparty_lookup', 'details_envelope', 'source_row_envelope', 'version', 'created_by_staff_id', 'created_at', 'updated_at', 'source_lookup'],
+      finance_entries: ['id', 'batch_id', 'source_key', 'kind', 'record_type', 'accounting_month', 'occurred_on', 'amount_grosze', 'paid_amount_grosze', 'currency', 'payment_method', 'settlement_status', 'invoice_status', 'specialist_id', 'appointment_id', 'counterparty_lookup', 'details_envelope', 'source_row_envelope', 'version', 'created_by_staff_id', 'created_at', 'updated_at', 'source_lookup', 'source_dedup_lookup'],
       finance_import_batches: ['id', 'fingerprint', 'filename_envelope', 'format_version', 'total_rows', 'accepted_rows', 'status', 'created_by_staff_id', 'version', 'created_at', 'updated_at', 'committed_at'],
       finance_import_chunks: ['id', 'batch_id', 'sequence', 'row_count', 'payload_hash', 'idempotency_key', 'created_at'],
     }
@@ -186,11 +189,11 @@ describe('finance ledger migration', () => {
     })
     await insertEntry({
       id: 'fin_source_one', sourceKey: 'safe-source-one',
-      sourceLookup: `v1:${'x'.repeat(43)}`,
+      sourceDedupLookup: `v2:${'x'.repeat(43)}`,
     })
     await expect(insertEntry({
       id: 'fin_source_two', batchId: 'fib_source_two', sourceKey: 'safe-source-two',
-      sourceLookup: `v1:${'x'.repeat(43)}`,
+      sourceDedupLookup: `v2:${'x'.repeat(43)}`,
     })).rejects.toThrow()
   })
 

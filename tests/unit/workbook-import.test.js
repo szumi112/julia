@@ -162,14 +162,16 @@ test('preserves additive prices and never infers months from monetary amounts', 
 })
 
 test('fails closed instead of silently dropping a populated transaction with an invalid price', () => {
-  assert.throws(() => normalizeWorkbookRows({
-    filename: 'invalid.xlsx',
-    fingerprint: 'f'.repeat(64),
-    sheets: [{
-      name: 'Maj 2025',
-      rows: [transactionHeader, ['Konsultacja', 'do ustalenia', 'Osoba Testowa', '2025-05-02']],
-    }],
-  }), /WORKBOOK_ROW_AMOUNT_INVALID/)
+  for (const price of ['do ustalenia', '200+20 na 2 sesje']) {
+    assert.throws(() => normalizeWorkbookRows({
+      filename: 'invalid.xlsx',
+      fingerprint: 'f'.repeat(64),
+      sheets: [{
+        name: 'Maj 2025',
+        rows: [transactionHeader, ['Konsultacja', price, 'Osoba Testowa', '2025-05-02']],
+      }],
+    }), /WORKBOOK_ROW_AMOUNT_INVALID/)
+  }
 })
 
 test('normalizes raw source strings before protected payload validation', () => {

@@ -88,11 +88,12 @@ const civilDate = (value) => {
 
 const amountGrosze = (value, { allowZero = false } = {}) => {
   const source = text(value).replace(/\s*(?:zł|pln)$/iu, '').replaceAll(' ', '')
-  const additive = /^(\d+(?:[.,]\d+)?)(?:\+(\d+(?:[.,]\d+)?))+(?:[^\d].*)?$/u.test(source)
+  const additive = /^(\d+(?:[.,]\d+)?(?:\+\d+(?:[.,]\d+)?)*)[^\d+]*$/u.exec(source)
+  const additiveExpression = additive?.[1]?.includes('+') ? additive[1] : null
   const normalized = typeof value === 'number'
     ? value
-    : additive
-      ? source.match(/\d+(?:[.,]\d+)?/g)
+    : additiveExpression
+      ? additiveExpression.split('+')
         .reduce((sum, part) => sum + Number(part.replace(',', '.')), 0)
       : Number(source.replace(',', '.'))
   if (!Number.isFinite(normalized) || normalized < 0 || (!allowZero && normalized === 0)) return null
