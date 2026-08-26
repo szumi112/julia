@@ -59,6 +59,7 @@ const insertEntry = (patch = {}) => {
     counterpartyLookup: null,
     detailsEnvelope: '{}',
     sourceRowEnvelope: '{}',
+    sourceLookup: null,
     version: 1,
     createdBy: 'stf_finance_owner',
     createdAt: now,
@@ -71,14 +72,14 @@ const insertEntry = (patch = {}) => {
       amount_grosze,paid_amount_grosze,payment_method,settlement_status,
       invoice_status,specialist_id,appointment_id,counterparty_lookup,
       details_envelope,source_row_envelope,version,created_by_staff_id,
-      created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      created_at,updated_at,source_lookup)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     value.id, value.batchId, value.sourceKey, value.kind, value.recordType,
     value.accountingMonth, value.occurredOn, value.amountGrosze,
     value.paidAmountGrosze, value.method, value.settlement, value.invoice,
     value.specialistId, value.appointmentId, value.counterpartyLookup,
     value.detailsEnvelope, value.sourceRowEnvelope, value.version,
-    value.createdBy, value.createdAt, value.updatedAt,
+    value.createdBy, value.createdAt, value.updatedAt, value.sourceLookup,
   )
 }
 
@@ -99,11 +100,14 @@ describe('finance ledger migration', () => {
 
   it('applies stage C and creates the exact finance columns', async () => {
     expect(await all(
-      "SELECT name FROM d1_migrations WHERE name='0012_finance_ledger.sql'"
-    )).toEqual([{ name: '0012_finance_ledger.sql' }])
+      "SELECT name FROM d1_migrations WHERE name LIKE '001%finance_%' ORDER BY name"
+    )).toEqual([
+      { name: '0012_finance_ledger.sql' },
+      { name: '0013_finance_source_deduplication.sql' },
+    ])
     const expected = {
       finance_adjustments: ['id', 'finance_entry_id', 'reason_envelope', 'before_envelope', 'after_envelope', 'recorded_by_staff_id', 'created_at'],
-      finance_entries: ['id', 'batch_id', 'source_key', 'kind', 'record_type', 'accounting_month', 'occurred_on', 'amount_grosze', 'paid_amount_grosze', 'currency', 'payment_method', 'settlement_status', 'invoice_status', 'specialist_id', 'appointment_id', 'counterparty_lookup', 'details_envelope', 'source_row_envelope', 'version', 'created_by_staff_id', 'created_at', 'updated_at'],
+      finance_entries: ['id', 'batch_id', 'source_key', 'kind', 'record_type', 'accounting_month', 'occurred_on', 'amount_grosze', 'paid_amount_grosze', 'currency', 'payment_method', 'settlement_status', 'invoice_status', 'specialist_id', 'appointment_id', 'counterparty_lookup', 'details_envelope', 'source_row_envelope', 'version', 'created_by_staff_id', 'created_at', 'updated_at', 'source_lookup'],
       finance_import_batches: ['id', 'fingerprint', 'filename_envelope', 'format_version', 'total_rows', 'accepted_rows', 'status', 'created_by_staff_id', 'version', 'created_at', 'updated_at', 'committed_at'],
       finance_import_chunks: ['id', 'batch_id', 'sequence', 'row_count', 'payload_hash', 'idempotency_key', 'created_at'],
     }
@@ -176,6 +180,18 @@ describe('finance ledger migration', () => {
        VALUES ('fic_chunk_two','fib_migration_one',0,2,?,'key-two',?)`,
       'd'.repeat(64), now,
     )).rejects.toThrow()
+
+    await insertBatch({
+      id: 'fib_source_two', fingerprint: 'e'.repeat(64), totalRows: 1,
+    })
+    await insertEntry({
+      id: 'fin_source_one', sourceKey: 'safe-source-one',
+      sourceLookup: `v1:${'x'.repeat(43)}`,
+    })
+    await expect(insertEntry({
+      id: 'fin_source_two', batchId: 'fib_source_two', sourceKey: 'safe-source-two',
+      sourceLookup: `v1:${'x'.repeat(43)}`,
+    })).rejects.toThrow()
   })
 
   it('keeps adjustments append-only and requires entry version increments', async () => {

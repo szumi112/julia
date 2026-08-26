@@ -5,9 +5,14 @@ import {
   validateFinanceImport,
 } from '../../src/finance-records.js'
 import { auditEventStatement } from '../audit/events.js'
-import { createUnitOfWork } from '../db/unit-of-work.js'
+import {
+  createIdempotencyStatement,
+  createUnitOfWork,
+  inspectIdempotency,
+} from '../db/unit-of-work.js'
 import { authorize } from '../identity/policy.js'
 import {
+  blindEmailIndex,
   createWrappedDataKey,
   decryptForScope,
   encryptForScope,
@@ -31,6 +36,7 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/
 const KINDS = new Set(['expense', 'income'])
 const MAX_CHUNK_ROWS = 20
+const DAY_MS = 86_400_000
 
 const fail = (code = 'INTERNAL_ERROR') => { throw new Error(code) }
 const validation = (field = 'body') => { throw new TypeError(`VALIDATION_FAILED/${field}`) }
@@ -207,6 +213,28 @@ const responseForBatch = (status, batch) => Object.freeze({
   body: Object.freeze({ data: Object.freeze({ batch: Object.freeze(batch) }) }),
 })
 
+const idempotencyInput = (actorId, operation, idempotencyKey, requestDigest) => Object.freeze({
+  actorId, operation, idempotencyKey, requestDigest, expectedScope: FINANCE_SCOPE,
+})
+
+const sourceIdentity = (value) => JSON.stringify([
+  value.kind,
+  value.recordType,
+  value.accountingMonth,
+  value.occurredOn,
+  value.amountGrosze,
+  value.paidAmountGrosze,
+  value.paymentMethod,
+  value.settlementStatus,
+  value.invoiceStatus,
+  value.counterparty,
+  value.sourceLabel,
+  value.invoiceNote,
+  value.specialistId,
+  value.lessonCount,
+  value.source.rowNumber,
+])
+
 export async function startFinanceImport(input) {
   const command = exact(input, [
     'db', 'actor', 'keyring', 'nowMs', 'correlationId', 'idFactory', 'body',
@@ -217,13 +245,18 @@ export async function startFinanceImport(input) {
   requireManage(actor, command.nowMs)
   if (!IDEMPOTENCY_KEY.test(command.idempotencyKey ?? '')) validation('body')
   const body = validateFinanceImport(command.body)
+  const now = canonicalInstant(command.nowMs)
+  const context = await createFinanceContext(command.db, command.keyring, command.idFactory, now)
+  const idem = idempotencyInput(
+    actor.id, 'finance.import.start', command.idempotencyKey, JSON.stringify(body),
+  )
+  const replay = await inspectIdempotency(command.db, context, idem)
+  if (replay) return replay
   const duplicate = await command.db.prepare(
     'SELECT id FROM finance_import_batches WHERE fingerprint=?'
   ).bind(body.fingerprint).first()
   if (duplicate) fail('FINANCE_IMPORT_DUPLICATE')
-  const now = canonicalInstant(command.nowMs)
   const batchId = generated(command.idFactory, 'fib', BATCH_ID)
-  const context = await createFinanceContext(command.db, command.keyring, command.idFactory, now)
   const auditId = generated(command.idFactory, 'aud', AUDIT_ID)
   const filenameEnvelope = await seal(context, batchId, 'filename', {
     schema: 'finance_import_filename.v1', filename: body.filename,
@@ -234,6 +267,7 @@ export async function startFinanceImport(input) {
     format_version: body.formatVersion, total_rows: body.totalRows, accepted_rows: 0,
     status: 'importing', version: 1, created_at: now, updated_at: now, committed_at: null,
   }
+  const response = responseForBatch(201, batchDto(row, body.filename))
   const unit = createUnitOfWork(command.db, {
     mode: 'mutation', actorId: actor.id, correlationId: command.correlationId,
   })
@@ -251,13 +285,17 @@ export async function startFinanceImport(input) {
     id: auditId, now, actorId: actor.id, action: 'finance.import.started',
     entityId: batchId, correlationId: command.correlationId, metadata,
   }))
+  unit.idempotency(await createIdempotencyStatement(command.db, context, {
+    ...idem, resourceType: 'finance_import', resourceId: batchId, response,
+    createdAt: now, expiresAt: new Date(command.nowMs + 7 * DAY_MS).toISOString(),
+  }))
   unit.guard(batchGuard(command.db, {
     batchId, status: 'importing', acceptedRows: 0, version: 1,
     auditId, action: 'finance.import.started', actorId: actor.id,
     correlationId: command.correlationId, metadata,
   }))
   await unit.commit()
-  return responseForBatch(201, batchDto(row, body.filename))
+  return response
 }
 
 const validateChunkBody = (value) => {
@@ -334,7 +372,9 @@ export async function appendFinanceImportChunk(input) {
     const sourceEnvelope = await seal(context, id, 'source_row', {
       schema: 'finance_entry_source.v1', source: value.source,
     })
-    entries.push({ id, value, detailsEnvelope, sourceEnvelope })
+    const sourceLookup = await blindEmailIndex(sourceIdentity(value), command.keyring)
+    const safeSourceKey = `workbook:v1:${value.source.rowNumber}:${sourceLookup.slice(3)}`
+    entries.push({ id, value, detailsEnvelope, sourceEnvelope, sourceLookup, safeSourceKey })
   }
   const chunkId = generated(command.idFactory, 'fic', CHUNK_ID)
   const auditId = generated(command.idFactory, 'aud', AUDIT_ID)
@@ -352,14 +392,15 @@ export async function appendFinanceImportChunk(input) {
         amount_grosze,paid_amount_grosze,payment_method,settlement_status,
         invoice_status,specialist_id,appointment_id,counterparty_lookup,
         details_envelope,source_row_envelope,version,created_by_staff_id,
+        source_lookup,
         created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     ).bind(
-      item.id, command.batchId, value.source.sourceKey, value.kind, value.recordType,
+      item.id, command.batchId, item.safeSourceKey, value.kind, value.recordType,
       value.accountingMonth, value.occurredOn, value.amountGrosze, value.paidAmountGrosze,
       value.paymentMethod, value.settlementStatus, value.invoiceStatus,
       value.specialistId, null, null, item.detailsEnvelope, item.sourceEnvelope,
-      1, actor.id, now, now,
+      1, actor.id, item.sourceLookup, now, now,
     ))
   }
   unit.domain(command.db.prepare(
@@ -405,6 +446,11 @@ export async function commitFinanceImport(input) {
   if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 1) {
     validation('expectedVersion')
   }
+  const context = await loadFinanceContext(command.db, command.keyring)
+  const idem = idempotencyInput(actor.id, 'finance.import.commit', command.idempotencyKey,
+    JSON.stringify({ batchId: command.batchId, expectedVersion: body.expectedVersion }))
+  const replay = await inspectIdempotency(command.db, context, idem)
+  if (replay) return replay
   const current = await loadBatch(command.db, command.batchId)
   if (current.version !== body.expectedVersion) fail('VERSION_CONFLICT')
   if (current.status === 'committed') return responseForBatch(200, batchDto(current))
@@ -414,6 +460,9 @@ export async function commitFinanceImport(input) {
   const auditId = generated(command.idFactory, 'aud', AUDIT_ID)
   const version = current.version + 1
   const metadata = Object.freeze({ batchVersion: version, rowCount: current.total_rows })
+  const response = responseForBatch(200, batchDto({
+    ...current, status: 'committed', version, updated_at: now, committed_at: now,
+  }))
   const unit = createUnitOfWork(command.db, {
     mode: 'mutation', actorId: actor.id, correlationId: command.correlationId,
   })
@@ -426,6 +475,10 @@ export async function commitFinanceImport(input) {
     id: auditId, now, actorId: actor.id, action: 'finance.import.committed',
     entityId: command.batchId, correlationId: command.correlationId, metadata,
   }))
+  unit.idempotency(await createIdempotencyStatement(command.db, context, {
+    ...idem, resourceType: 'finance_import', resourceId: command.batchId, response,
+    createdAt: now, expiresAt: new Date(command.nowMs + 7 * DAY_MS).toISOString(),
+  }))
   unit.guard(batchGuard(command.db, {
     batchId: command.batchId, status: 'committed',
     acceptedRows: current.total_rows, version,
@@ -433,9 +486,7 @@ export async function commitFinanceImport(input) {
     correlationId: command.correlationId, metadata,
   }))
   await unit.commit()
-  return responseForBatch(200, batchDto({
-    ...current, status: 'committed', version, updated_at: now, committed_at: now,
-  }))
+  return response
 }
 
 const parseDetails = (value) => {
@@ -473,13 +524,17 @@ export async function listFinanceEntries(input) {
     bindings.push(command.kind)
   }
   const rows = (await command.db.prepare(
-    `SELECT id,batch_id,source_key,kind,record_type,accounting_month,occurred_on,
-            amount_grosze,paid_amount_grosze,payment_method,settlement_status,
-            invoice_status,specialist_id,appointment_id,details_envelope,
-            source_row_envelope,version,created_by_staff_id,created_at,updated_at
-     FROM finance_entries
+    `SELECT entry.id,entry.batch_id,entry.source_key,entry.kind,entry.record_type,
+            entry.accounting_month,entry.occurred_on,entry.amount_grosze,
+            entry.paid_amount_grosze,entry.payment_method,entry.settlement_status,
+            entry.invoice_status,entry.specialist_id,entry.appointment_id,
+            entry.details_envelope,entry.source_row_envelope,entry.version,
+            entry.created_by_staff_id,entry.created_at,entry.updated_at
+     FROM finance_entries AS entry
+     JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
      WHERE ${predicates.join(' AND ')}
-     ORDER BY occurred_on DESC,id ASC LIMIT 5000`
+       AND batch.status='committed'
+     ORDER BY entry.occurred_on DESC,entry.id ASC LIMIT 5000`
   ).bind(...bindings).all()).results
   if (!Array.isArray(rows)) fail()
   if (rows.length === 0) return Object.freeze({ data: Object.freeze({

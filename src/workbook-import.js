@@ -85,9 +85,14 @@ const civilDate = (value) => {
 }
 
 const amountGrosze = (value, { allowZero = false } = {}) => {
+  const source = text(value).replace(/\s*(?:zł|pln)$/iu, '').replaceAll(' ', '')
+  const additive = /^(\d+(?:[.,]\d+)?)(?:\+(\d+(?:[.,]\d+)?))+(?:[^\d].*)?$/u.test(source)
   const normalized = typeof value === 'number'
     ? value
-    : Number(text(value).replace(/\s*(?:zł|pln)$/iu, '').replaceAll(' ', '').replace(',', '.'))
+    : additive
+      ? source.match(/\d+(?:[.,]\d+)?/g)
+        .reduce((sum, part) => sum + Number(part.replace(',', '.')), 0)
+      : Number(source.replace(',', '.'))
   if (!Number.isFinite(normalized) || normalized < 0 || (!allowZero && normalized === 0)) return null
   const grosze = Math.round(normalized * 100)
   return Number.isSafeInteger(grosze) ? grosze : null
@@ -136,8 +141,8 @@ const monthKey = (year, month) => Number.isSafeInteger(year) && year >= 2000 && 
   ? `${year}-${String(month).padStart(2, '0')}`
   : null
 
-const monthFromValue = (value, fallbackYear = null) => {
-  if (typeof value === 'number' || /^\d+(?:\.0+)?$/.test(text(value))) {
+const monthFromValue = (value, fallbackYear = null, { allowSerial = false } = {}) => {
+  if (allowSerial && (typeof value === 'number' || /^\d+(?:\.0+)?$/.test(text(value)))) {
     const date = excelDate(value)
     return date?.slice(0, 7) ?? null
   }
@@ -180,8 +185,8 @@ const rawRecord = (headers, row) => {
   return result
 }
 
-const makeSourceKey = ({ filename, sheet, rowNumber, fingerprint, block = null }) => (
-  `${filename}:${sheet}:${rowNumber}${block === null ? '' : `:${block}`}:${fingerprint.slice(0, 16)}`
+const makeSourceKey = ({ sheetIndex, rowNumber, block = 0 }) => (
+  `workbook:v1:${sheetIndex}:${rowNumber}:${block}`
 )
 
 const baseRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
@@ -211,19 +216,25 @@ const normalizeTransactions = (sheet, context) => {
   if (headerIndex < 0) return []
   const headersRow = sheet.rows[headerIndex]
   const headers = headerMap(headersRow)
-  const candidates = sheet.rows.slice(headerIndex + 1).map((row, index) => ({
-    row,
-    rowNumber: headerIndex + index + 2,
-    occurredOn: civilDate(valueAt(row, headers, 'data zakupu')),
-  })).filter(({ row }) => (
-    text(valueAt(row, headers, 'usluga'))
-      && text(valueAt(row, headers, 'klient'))
-      && amountGrosze(valueAt(row, headers, 'cena')) !== null
-  ))
+  const candidates = []
+  sheet.rows.slice(headerIndex + 1).forEach((row, index) => {
+    const service = text(valueAt(row, headers, 'usluga'))
+    const client = text(valueAt(row, headers, 'klient'))
+    if (!service || !client) return
+    if (searchText(service) === 'usluga' && searchText(client) === 'klient') return
+    const amount = amountGrosze(valueAt(row, headers, 'cena'))
+    if (amount === null) fail('WORKBOOK_ROW_AMOUNT_INVALID')
+    candidates.push({
+      row,
+      rowNumber: headerIndex + index + 2,
+      occurredOn: civilDate(valueAt(row, headers, 'data zakupu')),
+      amount,
+    })
+  })
   const datedMonths = candidates.map(({ occurredOn }) => occurredOn?.slice(0, 7)).filter(Boolean)
   const sheetMonth = inferredSheetMonth(sheet, datedMonths)
   const tusSheet = searchText(sheet.name).includes('grupa tus')
-  return candidates.map(({ row, rowNumber, occurredOn }) => {
+  return candidates.map(({ row, rowNumber, occurredOn, amount }) => {
     const label = valueAt(row, headers, 'usluga')
     const isTus = tusSheet || searchText(label).startsWith('grupa tus')
     return baseRow({
@@ -233,7 +244,7 @@ const normalizeTransactions = (sheet, context) => {
       recordType: isTus ? 'tus' : 'income',
       accountingMonth: isTus ? sheetMonth : occurredOn?.slice(0, 7) ?? sheetMonth,
       occurredOn,
-      amount: amountGrosze(valueAt(row, headers, 'cena')),
+      amount,
       counterparty: valueAt(row, headers, 'klient'),
       sourceLabel: label,
       method: paymentMethod(valueAt(row, headers, 'sposob platnosci')),
@@ -253,7 +264,7 @@ const normalizeEnglish = (sheet, context) => {
   const rows = []
   headerRow.forEach((value, column) => {
     if (searchText(value) !== 'imie i nazwisko') return
-    const accountingMonth = monthFromValue(monthRow[column])
+    const accountingMonth = monthFromValue(monthRow[column], null, { allowSerial: true })
     for (let index = 2; index < sheet.rows.length; index++) {
       const counterparty = text(sheet.rows[index][column])
       const lessons = integer(sheet.rows[index][column + 1], { allowZero: true })
@@ -325,15 +336,16 @@ export function normalizeWorkbookRows({ filename, fingerprint, sheets }) {
     || !Array.isArray(sheets) || sheets.length === 0) fail('WORKBOOK_INPUT_INVALID')
   const context = { filename, fingerprint }
   const rows = []
-  for (const sheet of sheets) {
+  for (const [sheetIndex, sheet] of sheets.entries()) {
     if (!sheet || typeof sheet.name !== 'string' || !Array.isArray(sheet.rows)) {
       fail('WORKBOOK_SHEET_INVALID')
     }
-    const english = normalizeEnglish(sheet, context)
-    const fixed = normalizeFixedCosts(sheet, context)
+    const sheetContext = { ...context, sheetIndex }
+    const english = normalizeEnglish(sheet, sheetContext)
+    const fixed = normalizeFixedCosts(sheet, sheetContext)
     if (english.length) rows.push(...english)
     else if (fixed.length) rows.push(...fixed)
-    else rows.push(...normalizeTransactions(sheet, context))
+    else rows.push(...normalizeTransactions(sheet, sheetContext))
   }
   const sourceKeys = new Set()
   for (const row of rows) {

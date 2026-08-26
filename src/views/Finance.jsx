@@ -111,7 +111,9 @@ export function Finance() {
   const { capabilities, route } = useShell()
   const currentMonth = monthKey(new Date())
   const [month, setMonth] = useState(() => (
-    validMonth(route.params?.ym) ? route.params.ym : currentMonth
+    route.params?.ym === 'unknown'
+      ? null
+      : validMonth(route.params?.ym) ? route.params.ym : currentMonth
   ))
   const [kind, setKind] = useState(null)
   const [query, setQuery] = useState('')
@@ -124,7 +126,7 @@ export function Finance() {
   const fileRef = useRef(null)
   const canImport = capabilities.includes('finance.centre.manage')
 
-  useRouteParamsSync('payments', { ym: month })
+  useRouteParamsSync('ledger', { ym: month ?? 'unknown' })
 
   useEffect(() => {
     let active = true
@@ -186,7 +188,7 @@ export function Finance() {
         fingerprint: preview.fingerprint,
         formatVersion: preview.formatVersion,
         totalRows: preview.rows.length,
-      })
+      }, { idempotencyKey: `finance-start-${preview.fingerprint}` })
       const chunks = financeImportChunks(
         preview.rows,
         started.id,
@@ -198,10 +200,13 @@ export function Finance() {
           batch.id,
           chunk.sequence,
           chunk.entries,
+          { idempotencyKey: `finance-chunk-${preview.fingerprint.slice(0, 48)}-${chunk.sequence}` },
         )
         setImportStatus({ importing: true, progress: batch.acceptedRows, error: '' })
       }
-      await apiClient.commitFinanceImport(batch.id, batch.version)
+      await apiClient.commitFinanceImport(batch.id, batch.version, {
+        idempotencyKey: `finance-commit-${preview.fingerprint}`,
+      })
       setPreview(null)
       setParseStatus('idle')
       setImportStatus({ importing: false, progress: 0, error: '' })
@@ -262,16 +267,24 @@ export function Finance() {
 
       <section className="finance-mvp__scope" aria-label="Zakres rejestru finansowego">
         <div className="month-nav">
-          <IconBtn name="chevL" label="Poprzedni miesiąc" onClick={() => setMonth(addMonths(month, -1))} />
-          <span className="month-nav__label">{fmtMonthYear(month)}</span>
-          <IconBtn
-            name="chevR"
-            label="Następny miesiąc"
-            disabled={month >= currentMonth}
-            onClick={() => setMonth(addMonths(month, 1))}
-          />
+          {month === null ? (
+            <span className="month-nav__label">Bez ustalonego miesiąca</span>
+          ) : (
+            <>
+              <IconBtn name="chevL" label="Poprzedni miesiąc" onClick={() => setMonth(addMonths(month, -1))} />
+              <span className="month-nav__label">{fmtMonthYear(month)}</span>
+              <IconBtn
+                name="chevR"
+                label="Następny miesiąc"
+                disabled={month >= currentMonth}
+                onClick={() => setMonth(addMonths(month, 1))}
+              />
+            </>
+          )}
         </div>
         <div className="row chips-row" role="group" aria-label="Rodzaj pozycji">
+          <Chip on={month !== null} onClick={() => setMonth(currentMonth)}>Miesiące</Chip>
+          <Chip on={month === null} onClick={() => setMonth(null)}>Bez miesiąca</Chip>
           <Chip on={kind === null} onClick={() => setKind(null)}>Wszystkie</Chip>
           <Chip on={kind === 'income'} onClick={() => setKind('income')}>Przychody</Chip>
           <Chip on={kind === 'expense'} onClick={() => setKind('expense')}>Koszty</Chip>
@@ -291,7 +304,7 @@ export function Finance() {
         </section>
       ) : (
         <>
-          <section className="finance-mvp__stats" aria-label={`Podsumowanie — ${fmtMonthYear(month)}`}>
+          <section className="finance-mvp__stats" aria-label={`Podsumowanie — ${month === null ? 'bez ustalonego miesiąca' : fmtMonthYear(month)}`}>
             <SummaryCard label="Przychody" value={money(summary.revenueGrosze)} note={`${summary.entryCount} pozycji w rejestrze`} />
             <SummaryCard label="Wpłacono" value={money(summary.collectedGrosze)} note={`${money(outstanding)} pozostało`} tone="sage" />
             <SummaryCard label="Koszty" value={money(summary.expensesGrosze)} note="Stałe i pozostałe koszty" tone="amber" />

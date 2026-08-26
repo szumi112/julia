@@ -130,6 +130,15 @@ describe('protected finance import and read service', () => {
       status: 201,
       body: { data: { batch: { id: batchId, acceptedRows: 0, status: 'importing' } } },
     })
+    expect(await startFinanceImport({
+      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 1,
+      correlationId: CORRELATION_ID, idFactory,
+      body: {
+        filename: 'fictional.xlsx', fingerprint: 'a'.repeat(64),
+        formatVersion: 1, totalRows: 2,
+      },
+      idempotencyKey: 'finance-start-key-0001',
+    })).toEqual(started)
 
     await expect(commitFinanceImport({
       db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 1,
@@ -158,6 +167,11 @@ describe('protected finance import and read service', () => {
       batchId, body: chunkBody, idempotencyKey: 'finance-chunk-key-0001',
     })
     expect(chunk.body.data.batch).toMatchObject({ acceptedRows: 2, version: 2 })
+    const hidden = await listFinanceEntries({
+      db: env.DB, actor: COORDINATOR, keyring, nowMs: NOW_MS + 2,
+      month: '2025-09', kind: null,
+    })
+    expect(hidden.data.summary.entryCount).toBe(0)
     expect((await appendFinanceImportChunk({
       db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 3,
       correlationId: CORRELATION_ID, idFactory,
@@ -170,6 +184,11 @@ describe('protected finance import and read service', () => {
       batchId, body: { expectedVersion: 2 }, idempotencyKey: 'finance-commit-key-0001',
     })
     expect(committed.body.data.batch).toMatchObject({ status: 'committed', version: 3 })
+    expect(await commitFinanceImport({
+      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 5,
+      correlationId: CORRELATION_ID, idFactory,
+      batchId, body: { expectedVersion: 2 }, idempotencyKey: 'finance-commit-key-0001',
+    })).toEqual(committed)
 
     const listed = await listFinanceEntries({
       db: env.DB, actor: COORDINATOR, keyring, nowMs: NOW_MS + 5,
@@ -188,6 +207,33 @@ describe('protected finance import and read service', () => {
     ).bind(batchId).all()).results
     expect(JSON.stringify(stored)).not.toContain('Fikcyjna Klientka')
     expect(JSON.stringify(stored)).not.toContain('Materiały fikcyjne')
+
+    const duplicateIds = ids()
+    const duplicate = await startFinanceImport({
+      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 6,
+      correlationId: CORRELATION_ID, idFactory: duplicateIds,
+      body: {
+        filename: 'fictional-slice.csv', fingerprint: 'b'.repeat(64),
+        formatVersion: 1, totalRows: 1,
+      },
+      idempotencyKey: 'finance-start-key-duplicate-0001',
+    })
+    await expect(appendFinanceImportChunk({
+      db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 7,
+      correlationId: CORRELATION_ID, idFactory: duplicateIds,
+      batchId: duplicate.body.data.batch.id,
+      body: {
+        sequence: 0,
+        entries: [entry(duplicate.body.data.batch.id, {
+          source: {
+            batchId: duplicate.body.data.batch.id,
+            sourceKey: 'different-file-and-key', sheet: 'Wrzesień', rowNumber: 2,
+            raw: { Klient: 'Fikcyjna Klientka', Cena: '180' },
+          },
+        })],
+      },
+      idempotencyKey: 'finance-chunk-key-duplicate-0001',
+    })).rejects.toThrow()
   })
 
   it('allows owner-only mutation and denies specialists all centre finance reads', async () => {
@@ -243,6 +289,9 @@ describe('protected finance import and read service', () => {
     const read = await app.request('/api/v1/finance?month=2025-09')
     expect(read.status).toBe(200)
     expect((await read.json()).data.summary.month).toBe('2025-09')
+    const unknown = await app.request('/api/v1/finance?month=unknown')
+    expect(unknown.status).toBe(200)
+    expect((await unknown.json()).data.summary.month).toBeNull()
 
     const created = await app.request('/api/v1/finance/imports', {
       method: 'POST',

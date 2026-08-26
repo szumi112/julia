@@ -1575,11 +1575,12 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   }
   const listFinance = (options) => {
     const accepted = captureDataObject(options, ['month', 'kind'])
-    if (!accepted || typeof accepted.month !== 'string' || !FINANCE_MONTH.test(accepted.month)
+    if (!accepted || !(accepted.month === null
+      || (typeof accepted.month === 'string' && FINANCE_MONTH.test(accepted.month)))
       || (accepted.kind !== null && !['expense', 'income'].includes(accepted.kind))) {
       return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     }
-    const query = new URLSearchParams({ month: accepted.month })
+    const query = new URLSearchParams({ month: accepted.month ?? 'unknown' })
     if (accepted.kind !== null) query.set('kind', accepted.kind)
     return requestJson(`${API_ROOT}/finance?${query}`, {
       method: 'GET', credentials: 'same-origin', headers: baseHeaders(),

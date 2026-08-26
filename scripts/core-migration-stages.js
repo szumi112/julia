@@ -17,6 +17,7 @@ export const CORE_MIGRATION_STAGE_B_NAMES = Object.freeze([
 
 export const CORE_MIGRATION_STAGE_C_NAMES = Object.freeze([
   '0012_finance_ledger.sql',
+  '0013_finance_source_deduplication.sql',
 ])
 
 export const CORE_MIGRATION_REMOTE_ENV_NAMES = Object.freeze(['production', 'staging'])

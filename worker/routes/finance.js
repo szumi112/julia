@@ -65,7 +65,8 @@ export async function getFinance(input) {
   const keys = [...url.searchParams.keys()]
   if (!url.searchParams.has('month') || keys.some((key) => !['kind', 'month'].includes(key))
     || new Set(keys).size !== keys.length) throw new AppError('VALIDATION_FAILED')
-  const month = url.searchParams.get('month')
+  const rawMonth = url.searchParams.get('month')
+  const month = rawMonth === 'unknown' ? null : rawMonth
   const kind = url.searchParams.has('kind') ? url.searchParams.get('kind') : null
   return mapped(() => service({
     db: command.db, actor: command.actor, keyring: command.keyring,

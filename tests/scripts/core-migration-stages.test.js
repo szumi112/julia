@@ -30,6 +30,7 @@ const STAGE_B_NAMES = Object.freeze([
 ])
 const STAGE_C_NAMES = Object.freeze([
   '0012_finance_ledger.sql',
+  '0013_finance_source_deduplication.sql',
 ])
 
 const migration = (name) => Object.freeze({
@@ -65,6 +66,7 @@ test('stage A selects the exact named D1 migrations and never exposes stage B', 
     migration('0010_specialist_lifecycle_assertion.sql'),
     migration('0011_appointment_ledger.sql'),
     migration('0012_finance_ledger.sql'),
+    migration('0013_finance_source_deduplication.sql'),
   ]
   const selected = module.selectCoreMigrationStage(source, 'stage-a')
 
@@ -90,7 +92,7 @@ test('stage B selects only the exact ordered later migrations', async () => {
   assert.equal(Object.isFrozen(selected), true)
 })
 
-test('stage C selects only the finance ledger migration', async () => {
+test('stage C selects only the finance ledger migrations', async () => {
   const module = await loadStageModule()
   assert.ok(module, 'core migration stage selector must exist')
   const source = [
@@ -102,7 +104,7 @@ test('stage C selects only the finance ledger migration', async () => {
   const selected = module.selectCoreMigrationStage(source, 'stage-c')
 
   assert.deepEqual(selected.map(({ name }) => name), STAGE_C_NAMES)
-  assert.equal(selected[0], source.at(-1))
+  assert.equal(selected.at(-1), source.at(-1))
   assert.equal(Object.isFrozen(selected), true)
 })
 

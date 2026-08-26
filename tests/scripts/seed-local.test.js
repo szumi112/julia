@@ -167,6 +167,7 @@ test('local seed accepts only the exact applied stage-A plus stage-B plus stage-
     '0010_specialist_lifecycle_assertion.sql',
     '0011_appointment_ledger.sql',
     '0012_finance_ledger.sql',
+    '0013_finance_source_deduplication.sql',
   ].map((name) => ({ name }))
 
   assert.deepEqual(module.parseLocalSeedMigrationPreflight(expected), {

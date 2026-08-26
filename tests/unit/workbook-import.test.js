@@ -106,7 +106,7 @@ test('normalizes transactions without inventing missing workbook facts', () => {
     costOrAncillaryRows: 3,
   })
   assert.deepEqual(preview.rows[0], {
-    sourceKey: `fictional.xlsx:SierpieńWrzesień:2:${'a'.repeat(16)}`,
+    sourceKey: 'workbook:v1:0:2:0',
     sheet: 'SierpieńWrzesień',
     rowNumber: 2,
     recordType: 'income',
@@ -132,6 +132,44 @@ test('normalizes transactions without inventing missing workbook facts', () => {
   assert.equal(undated.paymentMethod, 'blik')
   assert.equal(undated.settlementStatus, 'unknown')
   assert.equal(undated.invoiceStatus, 'action_required')
+})
+
+test('preserves additive prices and never infers months from monetary amounts', () => {
+  const preview = normalizeWorkbookRows({
+    filename: 'fictional-client-name.xlsx',
+    fingerprint: 'e'.repeat(64),
+    sheets: [{
+      name: 'Wrzesień 2025',
+      rows: [
+        transactionHeader,
+        ['Konsultacja', '200 + 20 na sesje', 'Osoba Testowa', '2025-09-02', '', '', ''],
+      ],
+    }, {
+      name: 'Stałe koszty',
+      rows: [
+        ['Koszt', 'Cena'],
+        ['Wynajem', 2200],
+      ],
+    }],
+  })
+
+  assert.equal(preview.rows[0].amountGrosze, 22_000)
+  assert.equal(preview.rows[1].accountingMonth, null)
+  assert.doesNotMatch(preview.rows[0].sourceKey, /fictional|client|\.xlsx|eeee/)
+  assert.deepEqual(preview.warnings.find(({ code }) => code === 'ACCOUNTING_MONTH_UNKNOWN'), {
+    code: 'ACCOUNTING_MONTH_UNKNOWN', count: 1,
+  })
+})
+
+test('fails closed instead of silently dropping a populated transaction with an invalid price', () => {
+  assert.throws(() => normalizeWorkbookRows({
+    filename: 'invalid.xlsx',
+    fingerprint: 'f'.repeat(64),
+    sheets: [{
+      name: 'Maj 2025',
+      rows: [transactionHeader, ['Konsultacja', 'do ustalenia', 'Osoba Testowa', '2025-05-02']],
+    }],
+  }), /WORKBOOK_ROW_AMOUNT_INVALID/)
 })
 
 test('normalizes TUS, English, expenses, and ancillary revenue as distinct records', () => {
@@ -202,16 +240,7 @@ test('preserves an English learner month with zero lessons and zero amount', () 
   assert.equal(preview.rows[0].amountGrosze, 0)
 })
 
-test('rejects duplicate source rows and unsafe workbook formats', async () => {
-  const duplicate = {
-    name: 'SierpieńWrzesień',
-    rows: [transactionHeader, workbookSheets[0].rows[1]],
-  }
-  assert.throws(() => normalizeWorkbookRows({
-    filename: 'duplicate.xlsx',
-    fingerprint: 'c'.repeat(64),
-    sheets: [duplicate, duplicate],
-  }), /WORKBOOK_DUPLICATE_ROW/)
+test('rejects unsafe workbook formats', async () => {
   await assert.rejects(
     parseWorkbookFile(new ArrayBuffer(8), { filename: 'unsafe.xlsm' }),
     /WORKBOOK_FORMAT_UNSUPPORTED/,

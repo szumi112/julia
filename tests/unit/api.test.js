@@ -2896,6 +2896,24 @@ test('finance API lists a month and sends the exact import lifecycle requests', 
   assert.equal(calls[4].url, `/api/v1/finance/imports/${batch.id}/commit`)
 })
 
+test('finance API exposes entries without an accounting month', async () => {
+  const summary = {
+    month: null, revenueGrosze: 0, expensesGrosze: 0, balanceGrosze: 0,
+    collectedGrosze: 0, outstandingGrosze: 0, invoiceActionCount: 0, entryCount: 0,
+  }
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse({ data: { entries: [], summary } }),
+  )
+  const client = createApiClient({ fetchImpl, idempotencyKeyFactory: () => 'finance-generated-key-0001' })
+  await client.getSession()
+
+  assert.deepEqual(await client.listFinance({ month: null, kind: null }), {
+    entries: [], summary,
+  })
+  assert.equal(calls[1].url, '/api/v1/finance?month=unknown')
+})
+
 test('exposes client commands and sends canonical create, edit, and archive requests', async () => {
   assert.equal(typeof apiClient.createClient, 'function')
   assert.equal(typeof apiClient.editClient, 'function')
