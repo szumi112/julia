@@ -4,6 +4,8 @@ const PAYMENT_ID = /^pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ASSIGNMENT_ID = /^asg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CORRECTION_ID = /^cor_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const FINANCE_BATCH_ID = /^fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const FINANCE_ENTRY_ID = /^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 
 const schema = (entityType, entityIdKind, metadata) => Object.freeze({
   entityType,
@@ -19,6 +21,9 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'client.assignment.changed': schema('client', 'clientId', { clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' }),
   'client.created': schema('client', 'clientId', { assignmentId: 'assignmentId', assignmentVersion: 'version', clientVersion: 'version' }),
   'client.updated': schema('client', 'clientId', { clientVersion: 'version' }),
+  'finance.import.chunk.accepted': schema('finance_import', 'financeBatchId', { batchVersion: 'version', rowCount: 'count' }),
+  'finance.import.committed': schema('finance_import', 'financeBatchId', { batchVersion: 'version', rowCount: 'count' }),
+  'finance.import.started': schema('finance_import', 'financeBatchId', { batchVersion: 'version', rowCount: 'count' }),
   'payment.corrected': schema('payment_entry', 'paymentId', { appointmentVersion: 'version', correctionId: 'correctionId', replacementEntryId: 'nullablePaymentId', reversedEntryId: 'paymentId' }),
   'payment.recorded': schema('appointment', 'appointmentId', { appointmentVersion: 'version', paymentEntryId: 'paymentId' }),
 })
@@ -49,6 +54,7 @@ const captureExactDataObject = (value, keys) => {
 
 const acceptsType = (type, value) => {
   if (type === 'version') return Number.isSafeInteger(value) && value > 0
+  if (type === 'count') return Number.isSafeInteger(value) && value >= 0
   if (type === 'assignmentId') return typeof value === 'string' && ASSIGNMENT_ID.test(value)
   if (type === 'correctionId') return typeof value === 'string' && CORRECTION_ID.test(value)
   if (type === 'paymentId') return typeof value === 'string' && PAYMENT_ID.test(value)
@@ -70,6 +76,8 @@ export const captureCoreAuditMetadata = (action, value) => {
 const acceptsEntityId = (kind, value) => typeof value === 'string' && ({
   appointmentId: APPOINTMENT_ID,
   clientId: CLIENT_ID,
+  financeBatchId: FINANCE_BATCH_ID,
+  financeEntryId: FINANCE_ENTRY_ID,
   paymentId: PAYMENT_ID,
 })[kind].test(value)
 

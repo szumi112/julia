@@ -2,6 +2,12 @@ import { APP_MODE } from './app-mode.js'
 import { isWellFormedUnicode, validateAppointmentInput } from './core-records.js'
 import { SERVICE_BY_ID } from './services.js'
 import {
+  financeEntryDto,
+  financeMonthSummary,
+  validateFinanceEntryInput,
+  validateFinanceImport,
+} from './finance-records.js'
+import {
   captureCoreAuditEvent,
   captureCoreAuditMetadata,
   CORE_AUDIT_SCHEMAS,
@@ -22,6 +28,9 @@ const APPOINTMENT_ID = /^apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CHARGE_ID = /^chg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const PAYMENT_ID = /^pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CORRECTION_ID = /^cor_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const FINANCE_BATCH_ID = /^fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const FINANCE_FINGERPRINT = /^[0-9a-f]{64}$/
+const FINANCE_MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/
 const OUTBOX_TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const AUDIT_CURSOR = /^v1\.([1-9]\d*)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -56,6 +65,10 @@ const SERVER_STATUS = Object.freeze({
   APPOINTMENT_PAYMENT_CONFLICT: 409,
   PAYMENT_AMOUNT_CONFLICT: 409,
   PAYMENT_CORRECTION_CONFLICT: 409,
+  FINANCE_IMPORT_CLOSED: 409,
+  FINANCE_IMPORT_DUPLICATE: 409,
+  FINANCE_IMPORT_INCOMPLETE: 409,
+  FINANCE_IMPORT_OVERFLOW: 409,
   STAFF_INVITATION_CONFLICT: 409,
   LAST_ACTIVE_OWNER: 409,
   VERSION_CONFLICT: 409,
@@ -78,6 +91,8 @@ const VALIDATION_FIELDS = new Set([
   'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt',
   'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to',
   'specialists', 'clients', 'appointments', 'paymentEntries',
+  'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
+  'entries', 'accountingMonth', 'kind',
 ])
 const WORKSPACE_FIELDS = new Set(['specialists', 'clients', 'appointments', 'paymentEntries'])
 const CAPABILITIES = Object.freeze([
@@ -90,6 +105,7 @@ const CAPABILITIES = Object.freeze([
   'client.operational.read',
   'clinical.read',
   'finance.centre.read',
+  'finance.centre.manage',
   'operations.health.read',
   'payment.manage',
   'security.audit.read',
@@ -1287,6 +1303,60 @@ const acceptedInviteInput = (input) => plainObject(input)
 
 const acceptedKey = (value) => typeof value === 'string' && IDEMPOTENCY_KEY.test(value)
 
+const FINANCE_ENTRY_INPUT_KEYS = Object.freeze([
+  'kind', 'recordType', 'accountingMonth', 'occurredOn', 'amountGrosze',
+  'paidAmountGrosze', 'paymentMethod', 'settlementStatus', 'invoiceStatus',
+  'counterparty', 'sourceLabel', 'invoiceNote', 'specialistId', 'lessonCount', 'source',
+])
+
+const captureFinanceEntryInput = (raw) => {
+  const captured = captureDataObject(raw, FINANCE_ENTRY_INPUT_KEYS)
+  if (!captured) return null
+  try { return validateFinanceEntryInput({ ...captured }) } catch { return null }
+}
+
+const captureFinanceBatch = (raw, includeFilename) => {
+  const keys = [
+    'id', 'fingerprint', ...(includeFilename ? ['filename'] : []), 'formatVersion',
+    'totalRows', 'acceptedRows', 'status', 'version', 'createdAt', 'updatedAt',
+    'committedAt',
+  ]
+  const value = captureDataObject(raw, keys)
+  if (!value || typeof value.id !== 'string' || !FINANCE_BATCH_ID.test(value.id)
+    || typeof value.fingerprint !== 'string' || !FINANCE_FINGERPRINT.test(value.fingerprint)
+    || (includeFilename && !validText(value.filename, 255))
+    || value.formatVersion !== 1 || !positive(value.totalRows) || value.totalRows > 10_000
+    || !Number.isSafeInteger(value.acceptedRows) || value.acceptedRows < 0
+    || value.acceptedRows > value.totalRows
+    || !['importing', 'committed', 'failed'].includes(value.status)
+    || !positive(value.version) || !validInstant(value.createdAt)
+    || !validInstant(value.updatedAt) || value.updatedAt < value.createdAt
+    || (value.committedAt !== null && !validInstant(value.committedAt))
+    || (value.status === 'committed') !== (value.committedAt !== null)
+    || (value.status === 'committed' && value.acceptedRows !== value.totalRows)) return null
+  return Object.freeze({ ...value })
+}
+
+const acceptedFinanceBatch = (payload, status, includeFilename, expectedStatuses) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['batch'])
+  const batch = data && captureFinanceBatch(data.batch, includeFilename)
+  return batch && expectedStatuses.includes(status) ? batch : null
+}
+
+const acceptedFinanceList = (payload, month) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['entries', 'summary'])
+  const values = data && captureArray(data.entries, 5_000)
+  if (!values) return null
+  let entries
+  try { entries = values.map((value) => financeEntryDto(value)) } catch { return null }
+  const expected = financeMonthSummary(entries, month)
+  const summary = captureDataObject(data.summary, Object.keys(expected))
+  if (!summary || Object.keys(expected).some((key) => summary[key] !== expected[key])) return null
+  return Object.freeze({ entries: Object.freeze(entries), summary: expected })
+}
+
 const idempotencyOptions = (options) => {
   try {
     if (!plainObject(options)) return null
@@ -1503,6 +1573,18 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       validate: (payload) => acceptedAudit(payload, requestedLimit),
     })
   }
+  const listFinance = (options) => {
+    const accepted = captureDataObject(options, ['month', 'kind'])
+    if (!accepted || typeof accepted.month !== 'string' || !FINANCE_MONTH.test(accepted.month)
+      || (accepted.kind !== null && !['expense', 'income'].includes(accepted.kind))) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    const query = new URLSearchParams({ month: accepted.month })
+    if (accepted.kind !== null) query.set('kind', accepted.kind)
+    return requestJson(`${API_ROOT}/finance?${query}`, {
+      method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
+    }, { validate: (payload) => acceptedFinanceList(payload, accepted.month) })
+  }
   const createIdempotencyKey = () => {
     let value
     try {
@@ -1558,6 +1640,48 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       `${API_ROOT}/clients`,
       body,
       (payload, status) => acceptedCreatedClient(payload, status, requested),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const startFinanceImport = (input, options) => {
+    const acceptedOptions = captureClientOptions(options)
+    let requested
+    try { requested = validateFinanceImport(input) } catch { requested = null }
+    if (!requested || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/finance/imports`, JSON.stringify(requested),
+      (payload, status) => acceptedFinanceBatch(payload, status, true, [201]),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const appendFinanceImportChunk = (batchId, sequence, values, options) => {
+    const acceptedOptions = captureClientOptions(options)
+    const entries = Array.isArray(values) && values.length >= 1 && values.length <= 20
+      ? values.map(captureFinanceEntryInput) : null
+    if (typeof batchId !== 'string' || !FINANCE_BATCH_ID.test(batchId)
+      || !Number.isSafeInteger(sequence) || sequence < 0 || sequence > 9999
+      || !entries || entries.some((value) => !value || value.source?.batchId !== batchId)
+      || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/finance/imports/${batchId}/chunks`,
+      JSON.stringify({ sequence, entries }),
+      (payload, status) => acceptedFinanceBatch(payload, status, false, [200]),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const commitFinanceImport = (batchId, expectedVersion, options) => {
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof batchId !== 'string' || !FINANCE_BATCH_ID.test(batchId)
+      || !positive(expectedVersion) || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/finance/imports/${batchId}/commit`,
+      JSON.stringify({ expectedVersion }),
+      (payload, status) => acceptedFinanceBatch(payload, status, false, [200]),
       acceptedOptions.idempotencyKey,
     )
   }
@@ -1791,9 +1915,13 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     getOperationsHealth,
     getOperationalActions,
     getSecurityAudit,
+    listFinance,
     createClient,
     editClient,
     archiveClient,
+    startFinanceImport,
+    appendFinanceImportChunk,
+    commitFinanceImport,
     createAppointment,
     editAppointment,
     cancelAppointment,

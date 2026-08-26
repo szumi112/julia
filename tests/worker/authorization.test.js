@@ -45,6 +45,7 @@ describe('authorization matrix', () => {
     ['appointment.charge.read', { kind: 'appointment', appointmentId: 'apt_1', specialistId: 'sp_spec' }, true, true, true],
     ['payment.manage', { kind: 'appointment', appointmentId: 'apt_1', specialistId: 'sp_spec' }, true, true, true],
     ['finance.centre.read', centre, true, true, false],
+    ['finance.centre.manage', centre, true, false, false],
     ['tus.manage', { kind: 'tus_group', groupId: 'tus', leaderSpecialistIds: ['sp_spec'] }, true, true, true],
     ['clinical.read', activeAssignment, false, false, true],
     ['chat.general', centre, true, true, true],

@@ -3,7 +3,7 @@ import { isAppointmentId, isClientId, isSpecialistId } from '../../src/core-reco
 export const CAPABILITIES = Object.freeze([
   'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct', 'chat.general',
   'client.manage', 'client.operational.read', 'clinical.read', 'finance.centre.read',
-  'operations.health.read', 'payment.manage', 'security.audit.read', 'specialist.directory.read',
+  'finance.centre.manage', 'operations.health.read', 'payment.manage', 'security.audit.read', 'specialist.directory.read',
   'staff.manage', 'tus.manage',
 ])
 
@@ -143,7 +143,7 @@ export function authorize(value, capability, resource, options = {}) {
     if (!actor || !CAPABILITIES.includes(capability)
       || !Number.isSafeInteger(nowMs) || nowMs < 0) return false
 
-    if (['centre.manage', 'staff.manage', 'security.audit.read'].includes(capability)) {
+    if (['centre.manage', 'finance.centre.manage', 'staff.manage', 'security.audit.read'].includes(capability)) {
       return actor.role === 'owner' && exactCentre(resource)
     }
     if (capability === 'finance.centre.read' || capability === 'operations.health.read') {

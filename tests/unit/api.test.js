@@ -34,6 +34,7 @@ const sessionBody = (overrides = {}) => ({
       'client.operational.read',
       'clinical.read',
       'finance.centre.read',
+      'finance.centre.manage',
       'operations.health.read',
       'payment.manage',
       'security.audit.read',
@@ -2822,6 +2823,78 @@ const clientDto = (overrides = {}) => ({
 })
 
 const clientEnvelope = (client) => ({ data: { client } })
+
+test('finance API lists a month and sends the exact import lifecycle requests', async () => {
+  const batch = {
+    id: 'fib_api_one', fingerprint: 'a'.repeat(64), formatVersion: 1,
+    totalRows: 1, acceptedRows: 0, status: 'importing', version: 1,
+    createdAt: '2026-08-27T10:00:00.000Z',
+    updatedAt: '2026-08-27T10:00:00.000Z', committedAt: null,
+  }
+  const financeEntry = {
+    id: 'fin_api_one', kind: 'income', recordType: 'income',
+    accountingMonth: '2025-09', occurredOn: '2025-09-08', amountGrosze: 18000,
+    paidAmountGrosze: 18000, paymentMethod: 'card', settlementStatus: 'paid',
+    invoiceStatus: 'issued', counterparty: 'Fikcyjna Klientka',
+    sourceLabel: 'Konsultacja fikcyjna', invoiceNote: '', specialistId: null,
+    lessonCount: null, source: {
+      batchId: batch.id, sourceKey: 'fictional.xlsx:Wrzesień:2:abcdef0123456789',
+      sheet: 'Wrzesień', rowNumber: 2, raw: { Cena: 180 },
+    }, appointmentId: null, version: 1, createdByStaffId: 'stf_owner_1',
+    createdAt: '2026-08-27T10:01:00.000Z', updatedAt: '2026-08-27T10:01:00.000Z',
+  }
+  const summary = {
+    month: '2025-09', revenueGrosze: 18000, expensesGrosze: 0,
+    balanceGrosze: 18000, collectedGrosze: 18000, outstandingGrosze: 0,
+    invoiceActionCount: 0, entryCount: 1,
+  }
+  const financeInput = Object.fromEntries([
+    'kind', 'recordType', 'accountingMonth', 'occurredOn', 'amountGrosze',
+    'paidAmountGrosze', 'paymentMethod', 'settlementStatus', 'invoiceStatus',
+    'counterparty', 'sourceLabel', 'invoiceNote', 'specialistId', 'lessonCount', 'source',
+  ].map((key) => [key, financeEntry[key]]))
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse({ data: { entries: [financeEntry], summary } }),
+    jsonResponse({ data: { batch: { ...batch, filename: 'fictional.xlsx' } } }, 201),
+    jsonResponse({ data: { batch: { ...batch, acceptedRows: 1, version: 2 } } }),
+    jsonResponse({ data: { batch: {
+      ...batch, acceptedRows: 1, status: 'committed', version: 3,
+      updatedAt: '2026-08-27T10:02:00.000Z', committedAt: '2026-08-27T10:02:00.000Z',
+    } } }),
+  )
+  const client = createApiClient({ fetchImpl, idempotencyKeyFactory: () => 'finance-generated-key-0001' })
+  await client.getSession()
+
+  assert.deepEqual(await client.listFinance({ month: '2025-09', kind: null }), {
+    entries: [financeEntry], summary,
+  })
+  await client.startFinanceImport({
+    filename: 'fictional.xlsx', fingerprint: 'a'.repeat(64), formatVersion: 1, totalRows: 1,
+  }, { idempotencyKey: 'finance-start-key-0001' })
+  await client.appendFinanceImportChunk(batch.id, 0, [financeInput], {
+    idempotencyKey: 'finance-chunk-key-0001',
+  })
+  await client.commitFinanceImport(batch.id, 2, { idempotencyKey: 'finance-commit-key-0001' })
+
+  assert.equal(calls[1].url, '/api/v1/finance?month=2025-09')
+  assert.equal(calls[2].url, '/api/v1/finance/imports')
+  assert.equal(calls[3].url, `/api/v1/finance/imports/${batch.id}/chunks`)
+  assert.deepEqual(JSON.parse(calls[3].init.body), {
+    sequence: 0,
+    entries: [{
+      kind: financeEntry.kind, recordType: financeEntry.recordType,
+      accountingMonth: financeEntry.accountingMonth, occurredOn: financeEntry.occurredOn,
+      amountGrosze: financeEntry.amountGrosze, paidAmountGrosze: financeEntry.paidAmountGrosze,
+      paymentMethod: financeEntry.paymentMethod,
+      settlementStatus: financeEntry.settlementStatus, invoiceStatus: financeEntry.invoiceStatus,
+      counterparty: financeEntry.counterparty, sourceLabel: financeEntry.sourceLabel,
+      invoiceNote: financeEntry.invoiceNote, specialistId: financeEntry.specialistId,
+      lessonCount: financeEntry.lessonCount, source: financeEntry.source,
+    }],
+  })
+  assert.equal(calls[4].url, `/api/v1/finance/imports/${batch.id}/commit`)
+})
 
 test('exposes client commands and sends canonical create, edit, and archive requests', async () => {
   assert.equal(typeof apiClient.createClient, 'function')

@@ -20,6 +20,9 @@ const FACTS = Object.freeze([
   ['appointment.cancelled', 'appointment', 'apt_incremental', { appointmentVersion: 3, chargeVersion: 2 }],
   ['payment.recorded', 'appointment', 'apt_incremental', { appointmentVersion: 4, paymentEntryId: 'pay_incremental' }],
   ['payment.corrected', 'payment_entry', 'pay_incremental', { appointmentVersion: 5, correctionId: 'cor_incremental', reversedEntryId: 'pay_incremental', replacementEntryId: 'pay_incremental_two' }],
+  ['finance.import.started', 'finance_import', 'fib_incremental', { batchVersion: 1, rowCount: 2 }],
+  ['finance.import.chunk.accepted', 'finance_import', 'fib_incremental', { batchVersion: 2, rowCount: 2 }],
+  ['finance.import.committed', 'finance_import', 'fib_incremental', { batchVersion: 3, rowCount: 2 }],
 ])
 
 const session = {
@@ -28,7 +31,7 @@ const session = {
     capabilities: [
       'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct',
       'chat.general', 'client.manage', 'client.operational.read', 'clinical.read',
-      'finance.centre.read', 'operations.health.read', 'payment.manage',
+      'finance.centre.read', 'finance.centre.manage', 'operations.health.read', 'payment.manage',
       'security.audit.read', 'specialist.directory.read', 'staff.manage', 'tus.manage',
     ],
     csrfToken: `v1.2290764000.${'A'.repeat(22)}.${'B'.repeat(43)}`,
