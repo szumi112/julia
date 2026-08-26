@@ -25,6 +25,8 @@ const ENTRY_ID = /^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CHUNK_ID = /^fic_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const AUDIT_ID = /^aud_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const DATA_KEY_ID = /^key_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/
 const KINDS = new Set(['expense', 'income'])
@@ -55,10 +57,27 @@ const exact = (value, keys, field = 'body') => {
 }
 
 const actorFact = (value) => {
-  const actor = exact(value, ['id', 'role', 'specialistId'], 'actor')
-  if (!authorize(actor, 'finance.centre.read', CENTRE, { nowMs: 0 })
-    && !authorize(actor, 'finance.centre.manage', CENTRE, { nowMs: 0 })) fail('NOT_FOUND')
-  return Object.freeze(actor)
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) fail('NOT_FOUND')
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const actor = {}
+    for (const key of ['id', 'role', 'specialistId']) {
+      const descriptor = descriptors[key]
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) fail('NOT_FOUND')
+      actor[key] = descriptor.value
+    }
+    if (typeof actor.id !== 'string' || !STAFF_ID.test(actor.id)
+      || !['owner', 'coordinator', 'specialist'].includes(actor.role)
+      || (actor.specialistId !== null
+        && (typeof actor.specialistId !== 'string' || !SPECIALIST_ID.test(actor.specialistId)))
+      || (actor.role === 'specialist' && actor.specialistId === null)
+      || (!authorize(actor, 'finance.centre.read', CENTRE, { nowMs: 0 })
+        && !authorize(actor, 'finance.centre.manage', CENTRE, { nowMs: 0 }))) fail('NOT_FOUND')
+    return Object.freeze(actor)
+  } catch (error) {
+    if (error instanceof Error && error.message === 'NOT_FOUND') throw error
+    fail('NOT_FOUND')
+  }
 }
 
 const requireRead = (actor, nowMs) => {

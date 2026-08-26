@@ -98,6 +98,21 @@ beforeAll(async () => {
 })
 
 describe('protected finance import and read service', () => {
+  it('accepts the versioned actor shape resolved by the HTTP identity boundary', async () => {
+    const listed = await listFinanceEntries({
+      db: env.DB, actor: { ...OWNER, version: 1 }, keyring: await ring(), nowMs: NOW_MS,
+      month: '2026-08', kind: null,
+    })
+
+    expect(listed.data).toEqual({
+      entries: [],
+      summary: {
+        month: '2026-08', revenueGrosze: 0, expensesGrosze: 0, balanceGrosze: 0,
+        collectedGrosze: 0, outstandingGrosze: 0, invoiceActionCount: 0, entryCount: 0,
+      },
+    })
+  })
+
   it('imports encrypted fictional rows, commits only a complete batch, and summarizes a month', async () => {
     const idFactory = ids()
     const keyring = await ring()

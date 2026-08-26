@@ -328,7 +328,7 @@ test('@owner constrains a max-length authenticated identity at shell breakpoints
       capabilities: [
         'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct',
         'chat.general', 'client.manage', 'client.operational.read', 'clinical.read',
-        'finance.centre.read', 'operations.health.read', 'payment.manage',
+        'finance.centre.manage', 'finance.centre.read', 'operations.health.read', 'payment.manage',
         'security.audit.read', 'specialist.directory.read', 'staff.manage', 'tus.manage',
       ],
       csrfExpiresAt,

@@ -2,8 +2,8 @@ import { isAppointmentId, isClientId, isSpecialistId } from '../../src/core-reco
 
 export const CAPABILITIES = Object.freeze([
   'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct', 'chat.general',
-  'client.manage', 'client.operational.read', 'clinical.read', 'finance.centre.read',
-  'finance.centre.manage', 'operations.health.read', 'payment.manage', 'security.audit.read', 'specialist.directory.read',
+  'client.manage', 'client.operational.read', 'clinical.read', 'finance.centre.manage',
+  'finance.centre.read', 'operations.health.read', 'payment.manage', 'security.audit.read', 'specialist.directory.read',
   'staff.manage', 'tus.manage',
 ])
 
