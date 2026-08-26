@@ -152,7 +152,7 @@ test('local seed manifest owns exactly three deterministic fictional identities'
   assert.equal(Object.isFrozen(LOCAL_SEED_MANIFEST), true)
 })
 
-test('local seed accepts only the exact applied stage-A plus stage-B migration history', async () => {
+test('local seed accepts only the exact applied stage-A plus stage-B plus stage-C migration history', async () => {
   const module = await import('../../scripts/seed-local.mjs')
   const expected = [
     '0001_security_primitives.sql',
@@ -166,6 +166,7 @@ test('local seed accepts only the exact applied stage-A plus stage-B migration h
     '0009_core_directory_expand.sql',
     '0010_specialist_lifecycle_assertion.sql',
     '0011_appointment_ledger.sql',
+    '0012_finance_ledger.sql',
   ].map((name) => ({ name }))
 
   assert.deepEqual(module.parseLocalSeedMigrationPreflight(expected), {
