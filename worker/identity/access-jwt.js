@@ -143,10 +143,24 @@ export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
 }
 
 function validatePayload(payload, protectedHeader, nowMs) {
-  if (protectedHeader?.alg !== 'RS256' || protectedHeader?.typ !== 'JWT' || typeof protectedHeader?.kid !== 'string' || !protectedHeader.kid) throw invalid()
-  if (payload?.type !== 'app' || !integer(payload.iat) || !integer(payload.exp) || payload.exp <= payload.iat
-    || payload.exp - payload.iat > MAX_AGE_SECONDS + TOLERANCE_SECONDS || payload.iat > Math.floor(nowMs / 1000) + TOLERANCE_SECONDS) throw invalid()
-  if (payload.nbf !== undefined && (!integer(payload.nbf) || payload.nbf > Math.floor(nowMs / 1000) + TOLERANCE_SECONDS)) throw invalid()
+  if (protectedHeader?.alg !== 'RS256' || protectedHeader?.typ !== 'JWT'
+    || typeof protectedHeader?.kid !== 'string' || !protectedHeader.kid) {
+    throw invalid('ACCESS_JWT_HEADER_INVALID')
+  }
+  if (payload?.type !== 'app') throw invalid('ACCESS_JWT_TYPE_INVALID')
+  if (!integer(payload.iat) || !integer(payload.exp) || payload.exp <= payload.iat) {
+    throw invalid('ACCESS_JWT_TIME_INVALID')
+  }
+  if (payload.exp - payload.iat > MAX_AGE_SECONDS + TOLERANCE_SECONDS) {
+    throw invalid('ACCESS_JWT_LIFETIME_INVALID')
+  }
+  if (payload.iat > Math.floor(nowMs / 1000) + TOLERANCE_SECONDS) {
+    throw invalid('ACCESS_JWT_ISSUED_AT_INVALID')
+  }
+  if (payload.nbf !== undefined
+    && (!integer(payload.nbf) || payload.nbf > Math.floor(nowMs / 1000) + TOLERANCE_SECONDS)) {
+    throw invalid('ACCESS_JWT_NOT_ACTIVE')
+  }
 }
 
 export function createAccessVerifier({ issuer, audience, jwks, now = () => new Date() } = {}) {
@@ -171,9 +185,15 @@ export function createAccessVerifier({ issuer, audience, jwks, now = () => new D
   return Object.freeze({
     async verifyHumanAccessAssertion(assertion) {
       const { payload } = await verify(assertion)
-      if (typeof payload.sub !== 'string' || !payload.sub || typeof payload.email !== 'string') throw invalid()
+      if (typeof payload.sub !== 'string' || !payload.sub) {
+        throw invalid('ACCESS_JWT_SUBJECT_INVALID')
+      }
+      if (typeof payload.email !== 'string') throw invalid('ACCESS_JWT_EMAIL_INVALID')
+      if (Object.hasOwn(payload, 'common_name')) {
+        throw invalid('ACCESS_JWT_PRINCIPAL_KIND_INVALID')
+      }
       const normalizedEmail = payload.email.trim().toLowerCase()
-      if (!normalizedEmail || Object.hasOwn(payload, 'common_name')) throw invalid()
+      if (!normalizedEmail) throw invalid('ACCESS_JWT_EMAIL_INVALID')
       return Object.freeze({ kind: 'human', subject: payload.sub, normalizedEmail, issuedAt: payload.iat, expiresAt: payload.exp })
     },
     async verifyServiceAccessAssertion(assertion, config) {

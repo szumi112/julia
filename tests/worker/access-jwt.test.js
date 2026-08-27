@@ -71,6 +71,21 @@ describe('Access assertion verification', () => {
     expect(Object.keys(error)).not.toContain('diagnosticCode')
   })
 
+  it.each([
+    ['header', TEST_IDENTITIES.owner, { header: { alg: 'RS256', kid: KID } }, 'ACCESS_JWT_HEADER_INVALID'],
+    ['token type', { ...TEST_IDENTITIES.owner, type: 'other' }, {}, 'ACCESS_JWT_TYPE_INVALID'],
+    ['lifetime', TEST_IDENTITIES.owner, { expiresAt: 1_800_029_000 }, 'ACCESS_JWT_LIFETIME_INVALID'],
+    ['subject', { ...TEST_IDENTITIES.owner, sub: '' }, {}, 'ACCESS_JWT_SUBJECT_INVALID'],
+    ['email', { ...TEST_IDENTITIES.owner, email: '' }, {}, 'ACCESS_JWT_EMAIL_INVALID'],
+    ['principal kind', { ...TEST_IDENTITIES.owner, common_name: null }, {}, 'ACCESS_JWT_PRINCIPAL_KIND_INVALID'],
+  ])('classifies an invalid %s without exposing claim values', async (_label, claims, options, expected) => {
+    const assertion = await signAccessJwt(claims, options)
+    const error = await verifier().verifyHumanAccessAssertion(assertion).catch((reason) => reason)
+
+    expect(error.message).toBe('ACCESS_ASSERTION_INVALID')
+    expect(error.diagnosticCode).toBe(expected)
+  })
+
   it('accepts an audience array containing the exact audience and rejects human-service confusion', async () => {
     await expect(verifier().verifyHumanAccessAssertion(await signAccessJwt(TEST_IDENTITIES.owner, { audience: ['unrelated', AUDIENCE] }))).resolves.toMatchObject({ kind: 'human' })
     const serviceWithEmail = await signAccessJwt({ common_name: testConfig.accessHealthServiceTokenId, email: 'service@example.test', sub: '' })
