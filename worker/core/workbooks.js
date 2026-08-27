@@ -707,7 +707,8 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
   if (typeof loadPanelState !== 'function') previewInvalid()
   const specialistIds = [...new Set([...normalizedEdits.values()]
     .map(({ values }) => values.specialistId)
-    .filter((id) => id !== null && id !== undefined))]
+    .filter((id) => typeof id === 'string'
+      && /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(id)))]
     .sort(compareUtf16CodeUnits)
   let loaded
   try {

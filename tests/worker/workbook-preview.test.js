@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { previewWorkbook } from '../../worker/core/workbooks.js'
+import { createWorkbookImport, previewWorkbook } from '../../worker/core/workbooks.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import {
@@ -298,6 +298,7 @@ describe('no-write workbook preview', () => {
     ['settlementStatus', 'partial', 'settlementStatus'],
     ['invoiceStatus', 'pending', 'invoiceStatus'],
     ['specialistId', 'sp_missing_panel_specialist', 'specialistId'],
+    ['specialistId', 'bad-id', 'specialistId'],
   ])('returns a stable conflict for invalid prospective Panel %s', async (
     editedField, editedValue, conflictField,
   ) => {
@@ -342,6 +343,7 @@ describe('no-write workbook preview', () => {
       }),
       loadPanelState: async ({ specialistIds }) => {
         expect(specialistIds).toEqual(editedField === 'specialistId'
+          && editedValue === 'sp_missing_panel_specialist'
           ? ['sp_missing_panel_specialist'] : [])
         return {
           fieldsByType: {
@@ -372,6 +374,90 @@ describe('no-write workbook preview', () => {
       code: 'PANEL_VALUE_INVALID', field: conflictField,
       recordId: 'fin_panel_validation',
     }])
+  })
+
+  it('rejects a malformed Panel specialist at exact-file commit before D1 or R2 writes', async () => {
+    const keyring = await ring()
+    const callbacks = createWorkbookPanelMetadataCallbacks({
+      keyring, config, centreId: 'centre_1',
+    })
+    const currentValues = panelFinanceValues({
+      specialistId: 'sp_existing_panel_specialist',
+    })
+    const metadata = {
+      format: 'Panel-v2',
+      scope: { id: 'centre_1', type: 'centre' },
+      rows: [{
+        id: 'fin_panel_bad_specialist', type: 'finance_entry', baseVersion: 3,
+        fieldDigests: {
+          specialistId: await callbacks.digestField({
+            rowType: 'finance_entry', rowId: 'fin_panel_bad_specialist',
+            field: 'specialistId', value: currentValues.specialistId,
+          }),
+        },
+      }],
+      voidIds: [],
+    }
+    const readPanel = async () => ({
+      edits: [{
+        id: 'fin_panel_bad_specialist', sheet: 'Panel — Wizyty',
+        values: { specialistId: 'bad-id' },
+      }],
+      kind: 'panel-v2', metadata, voidIds: [],
+    })
+    const loadedState = {
+      fieldsByType: { finance_entry: { specialistId: { type: 'text' } } },
+      specialistIds: ['sp_existing_panel_specialist'],
+      rows: [{
+        id: 'fin_panel_bad_specialist', type: 'finance_entry', version: 3,
+        kind: 'income', recordType: 'income', values: currentValues,
+      }],
+    }
+    const bytes = new Uint8Array([8, 9])
+    const preview = await previewWorkbook({
+      bytes, filename: 'panel.xlsx', actor: owner, keyring, config,
+      centreId: 'centre_1', nowMs: 1_800_000_000_000,
+      parse: async () => parsed(), readPanel,
+      loadPanelState: async () => loadedState,
+    })
+    expect(preview.data.conflicts).toEqual([{
+      code: 'PANEL_VALUE_INVALID', field: 'specialistId',
+      recordId: 'fin_panel_bad_specialist',
+    }])
+    const db = {
+      prepare: vi.fn(() => { throw new Error('D1_WRITE_TRAP') }),
+      batch: vi.fn(async () => { throw new Error('D1_WRITE_TRAP') }),
+    }
+    const bucket = {
+      delete: vi.fn(async () => { throw new Error('R2_WRITE_TRAP') }),
+      put: vi.fn(async () => { throw new Error('R2_WRITE_TRAP') }),
+    }
+
+    await expect(createWorkbookImport({
+      db,
+      bucket,
+      actor: owner,
+      keyring,
+      config,
+      centreId: 'centre_1',
+      nowMs: 1_800_000_000_100,
+      correlationId: 'corr_panel_bad_specialist',
+      idFactory: () => 'panel_bad_specialist',
+      bytes,
+      filename: 'panel.xlsx',
+      previewToken: preview.data.previewToken,
+      idempotencyKey: 'panel-bad-specialist',
+      parse: async () => parsed(),
+      readPanel,
+      loadPanelState: async ({ specialistIds }) => {
+        expect(specialistIds).toEqual([])
+        return loadedState
+      },
+    })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+    expect(db.prepare).not.toHaveBeenCalled()
+    expect(db.batch).not.toHaveBeenCalled()
+    expect(bucket.delete).not.toHaveBeenCalled()
+    expect(bucket.put).not.toHaveBeenCalled()
   })
 
   it('orders authenticated Panel actions by UTF-16 code units', async () => {
