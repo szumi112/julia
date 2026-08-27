@@ -24,6 +24,7 @@ import {
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CENTRE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 const INVITATION_RATE_LIMIT = 5
@@ -169,16 +170,22 @@ async function activeOwner(db, actor, nowMs) {
   return row
 }
 
-export async function inviteStaff({ db, cryptoContext, actor, input, idempotencyKey, correlationId, nowMs, dataMode, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
+export async function inviteStaff({ db, cryptoContext, actor, input, idempotencyKey, correlationId, nowMs, dataMode, targetSpecialist = null, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
   if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
     || !cryptoContext?.scope || !validId(correlationId) || !Number.isSafeInteger(nowMs)
     || nowMs < 0 || !IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) throw new Error('VALIDATION_FAILED')
   const owner = await activeOwner(db, actor, nowMs)
-  const request = validateInvitationInput(input, { dataMode })
+  const request = validateInvitationInput(input, {
+    dataMode: targetSpecialist ? 'staging-access' : dataMode,
+  })
   const requestDigest = JSON.stringify({
     displayName: request.displayName,
     email: request.email,
     role: request.role,
+    ...(targetSpecialist ? {
+      specialistId: targetSpecialist.id,
+      specialistVersion: targetSpecialist.version,
+    } : {}),
   })
   const idem = {
     actorId: owner.id,
@@ -203,7 +210,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     email_envelope: await envelope(cryptoContext, staffId, 'email', request.email),
     display_name_envelope: await envelope(cryptoContext, staffId, 'display_name', request.displayName), role: request.role,
     status: 'pending', access_subject: null,
-    specialist_id: reused?.specialist_id
+    specialist_id: targetSpecialist?.id ?? reused?.specialist_id
       ?? (request.role === 'specialist' ? specialistIdFor(staffId) : null),
     version: reused ? reused.version + 1 : 1,
     activated_at: null,
@@ -246,6 +253,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     now,
     correlationId,
     idFactory,
+    displayName: request.displayName,
   })
   staff = specialist.staff
   const desired = await desiredGenerationStatement(db, now, idFactory)
@@ -277,6 +285,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
   const reconcileId = idFrom(idFactory)
   const expiryJobId = idFrom(idFactory)
   const denialAuditId = idFrom(idFactory)
+  const accountLinkId = targetSpecialist ? prefixedIdFrom('spl', idFactory) : null
   const reconcileKey = `staff.access.reconcile:${desired.generation}`
   const expiryKey = `staff.invitation.expire:${invitationId}`
   const primaryAudit = auditEventStatement(db, {
@@ -319,8 +328,6 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     actorId: owner.id,
     correlationId,
   })
-  if (specialist.domainStatement) uow.domain(specialist.domainStatement)
-  if (specialist.versionStatement) uow.version(specialist.versionStatement)
   if (expiredOpen) {
     uow.domain(
       db.prepare(
@@ -381,6 +388,15 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       db.prepare('INSERT INTO staff_invitations (id,staff_id,email_lookup,email_envelope,display_name_envelope,role,status,inviter_id,expires_at,access_allowed_at,email_sent_at,activated_at,revoked_at,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
         .bind(...Object.values(plain(invitation, ['id', 'staff_id', 'email_lookup', 'email_envelope', 'display_name_envelope', 'role', 'status', 'inviter_id', 'expires_at', 'access_allowed_at', 'email_sent_at', 'activated_at', 'revoked_at', 'version', 'created_at', 'updated_at'])))
     )
+  }
+  if (specialist.domainStatement) uow.domain(specialist.domainStatement)
+  if (specialist.versionStatement) uow.version(specialist.versionStatement)
+  if (targetSpecialist) {
+    uow.domain(db.prepare(
+      `INSERT INTO specialist_account_links
+       (id,specialist_id,staff_user_id,lifecycle,changed_by_staff_id,version,created_at)
+       VALUES (?,?,?,'reserved',?,1,?)`
+    ).bind(accountLinkId, targetSpecialist.id, staffId, owner.id, now))
   }
   uow.version(staffVersion.statement)
   uow.version(invitationVersion.statement)
@@ -533,6 +549,66 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
   }
 }
 
+export async function inviteSpecialistProfile({
+  db,
+  cryptoContext,
+  actor,
+  specialistId,
+  input,
+  idempotencyKey,
+  correlationId,
+  nowMs,
+  dataMode,
+  idFactory,
+} = {}) {
+  if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
+    || !cryptoContext?.scope || !SPECIALIST_ID.test(specialistId ?? '')
+    || !exactObject(input, ['email', 'expectedVersion'])
+    || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    validation('specialistId')
+  }
+  await activeOwner(db, actor, nowMs)
+  const profile = await db.prepare(
+    `SELECT id,staff_user_id,display_name_envelope,status,version
+     FROM specialists WHERE id=?`
+  ).bind(specialistId).first()
+  if (!profile || profile.status !== 'active' || profile.staff_user_id !== null) {
+    throw new Error('STAFF_INVITATION_CONFLICT')
+  }
+  if (profile.version !== input.expectedVersion) {
+    const error = new Error('VERSION_CONFLICT')
+    error.details = { currentVersion: profile.version }
+    throw error
+  }
+  let displayName
+  try {
+    displayName = await decryptForScope(
+      cryptoContext.keyring,
+      cryptoContext.dataKey,
+      {
+        expectedScope: cryptoContext.scope,
+        recordId: profile.id,
+        field: 'display_name',
+        envelope: JSON.parse(profile.display_name_envelope),
+      },
+    )
+  } catch {
+    throw new Error('CRYPTO_FAILURE')
+  }
+  return inviteStaff({
+    db,
+    cryptoContext,
+    actor,
+    input: { displayName, email: input.email, role: 'specialist' },
+    idempotencyKey,
+    correlationId,
+    nowMs,
+    dataMode,
+    targetSpecialist: Object.freeze(profile),
+    idFactory,
+  })
+}
+
 export async function listStaff({ db, cryptoContext, actor, nowMs } = {}) {
   if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
     || !cryptoContext?.scope || !Number.isSafeInteger(nowMs) || nowMs < 0) {
@@ -640,6 +716,12 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
   const desired = await desiredGenerationStatement(db, now, idFactory)
   const auditId = idFrom(idFactory)
   const reconcileId = idFrom(idFactory)
+  const releasedLinkId = specialist.profile?.staff_user_id === null
+    && specialist.profile?.status === 'active'
+    && ['active', 'pending'].includes(row.status)
+    && staff.status === 'disabled'
+    ? prefixedIdFrom('spl', idFactory)
+    : null
   const reconcileKey = `staff.access.reconcile:${desired.generation}`
   const uow = createUnitOfWork(db, {
     mode: 'mutation',
@@ -648,6 +730,20 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
   })
   if (specialist.domainStatement) uow.domain(specialist.domainStatement)
   if (specialist.versionStatement) uow.version(specialist.versionStatement)
+  if (releasedLinkId) {
+    uow.domain(db.prepare(
+      `INSERT INTO specialist_account_links
+       (id,specialist_id,staff_user_id,lifecycle,changed_by_staff_id,version,created_at)
+       VALUES (?,?,?,'released',?,?,?)`,
+    ).bind(
+      releasedLinkId,
+      specialist.specialistId,
+      staffId,
+      owner.id,
+      specialist.specialistVersion,
+      now,
+    ))
+  }
   uow.domain(
     db.prepare(
       `UPDATE staff_users

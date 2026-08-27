@@ -566,7 +566,7 @@ describe('Cloudflare Access provider', () => {
     [{ appEnv: 'production', emails: ['kontakt@bearwithme.pl'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ appEnv: 'staging', emails: ['disabled@example.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ emails: ['PERSON@example.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
-    [{ emails: ['person@real.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
+    [{ emails: ['person@localhost'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ emails: [' person@example.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ timeoutMs: 15_001 }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ token: '   ' }, 'ACCESS_PROVIDER_CONFIG_INVALID'],

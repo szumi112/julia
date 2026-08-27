@@ -1,5 +1,8 @@
 import { pathToFileURL } from 'node:url'
-import { acceptPhaseOneAccessEmail } from '../worker/identity/canonical-email.js'
+import {
+  acceptPhaseOneAccessEmail,
+  STAGING_OWNER_EMAIL,
+} from '../worker/identity/canonical-email.js'
 import {
   buildBootstrapCreationBatch,
   inspectBootstrapAggregate,
@@ -72,9 +75,10 @@ const canonicalDisplayName = (value) => typeof value === 'string'
   && value.length > 0
   && new TextEncoder().encode(value).byteLength <= 120
   && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
-const canonicalEmail = (value) => acceptPhaseOneAccessEmail(value, {
-  appEnv: 'staging',
-}) !== null
+const canonicalEmail = (value) => {
+  const email = acceptPhaseOneAccessEmail(value, { appEnv: 'staging' })
+  return email === STAGING_OWNER_EMAIL || email?.endsWith('@example.test') === true
+}
 
 const parseJsonWithoutDuplicateKeys = (source) => {
   let cursor = 0

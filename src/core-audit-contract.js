@@ -6,6 +6,7 @@ const CORRECTION_ID = /^cor_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const FINANCE_BATCH_ID = /^fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const FINANCE_ENTRY_ID = /^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 
 const schema = (entityType, entityIdKind, metadata) => Object.freeze({
   entityType,
@@ -26,6 +27,8 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'finance.import.started': schema('finance_import', 'financeBatchId', { batchVersion: 'version', rowCount: 'count' }),
   'payment.corrected': schema('payment_entry', 'paymentId', { appointmentVersion: 'version', correctionId: 'correctionId', replacementEntryId: 'nullablePaymentId', reversedEntryId: 'paymentId' }),
   'payment.recorded': schema('appointment', 'appointmentId', { appointmentVersion: 'version', paymentEntryId: 'paymentId' }),
+  'specialist.profile.created': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
+  'specialist.profile.updated': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
 })
 
 export const CORE_AUDIT_ACTIONS = Object.freeze(Object.keys(CORE_AUDIT_SCHEMAS))
@@ -79,6 +82,7 @@ const acceptsEntityId = (kind, value) => typeof value === 'string' && ({
   financeBatchId: FINANCE_BATCH_ID,
   financeEntryId: FINANCE_ENTRY_ID,
   paymentId: PAYMENT_ID,
+  specialistId: SPECIALIST_ID,
 })[kind].test(value)
 
 export const captureCoreAuditEvent = (value) => {

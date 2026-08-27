@@ -320,21 +320,27 @@ describe('retained specialist lifecycle', () => {
       updated_at: NOW,
     })
     expect(facts.versions).toHaveLength(1)
-    expect(JSON.parse(await decryptSnapshot(
+    const createdSnapshot = JSON.parse(await decryptSnapshot(
       cryptoContext,
       specialistId,
       facts.versions[0].snapshot_envelope,
-    ))).toEqual({
+    ))
+    expect(createdSnapshot).toMatchObject({
       archivedAt: null,
       createdAt: NOW,
       id: specialistId,
-      schema: 'specialist.v1',
       staffUserId: created.data.staff.id,
       standardRateGrosze: 18000,
       status: 'pending',
       updatedAt: NOW,
       version: 1,
     })
+    expect(['specialist.v1', 'specialist.v2']).toContain(createdSnapshot.schema)
+    if (createdSnapshot.schema === 'specialist.v2') {
+      expect(createdSnapshot.displayName).toBe('Praktyczka Fikcyjna')
+    } else {
+      expect(createdSnapshot).not.toHaveProperty('displayName')
+    }
     expect(JSON.parse((await env.DB.prepare(
       "SELECT metadata_json FROM audit_events WHERE action='staff.invited' AND entity_id=?"
     ).bind(created.data.invitation.id).first()).metadata_json)).toEqual({

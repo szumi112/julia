@@ -155,7 +155,12 @@ const projectSpecialist = (item) => frozenRecord({
   color: presentationColor(item.id),
   status: item.status === 'active' ? 'active' : fail('workspace specialist'),
   version: safeInteger(item.version, 1, Number.MAX_SAFE_INTEGER, 'workspace specialist'),
-  staffVersion: safeInteger(item.staffVersion, 1, Number.MAX_SAFE_INTEGER, 'workspace specialist'),
+  staffVersion: item.staffVersion === null ? null
+    : safeInteger(item.staffVersion, 1, Number.MAX_SAFE_INTEGER, 'workspace specialist'),
+  ...(Object.hasOwn(item, 'accessStatus') ? {
+    accessStatus: ['unclaimed', 'invited', 'enabled'].includes(item.accessStatus)
+      ? item.accessStatus : fail('workspace specialist'),
+  } : {}),
 })
 
 const projectClient = (item) => {

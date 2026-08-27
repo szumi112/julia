@@ -1,7 +1,12 @@
 import { authorize } from '../identity/policy.js'
 import { auditEventStatement, encryptAuditReason } from '../audit/events.js'
 import { createUnitOfWork } from '../db/unit-of-work.js'
-import { deactivateStaff, inviteStaff, listStaff } from '../identity/invitations.js'
+import {
+  deactivateStaff,
+  inviteSpecialistProfile,
+  inviteStaff,
+  listStaff,
+} from '../identity/invitations.js'
 
 const centre = { kind: 'centre', centreId: 'centre_1' }
 const deny = async ({ db, actor, cryptoContext, correlationId, nowMs, idFactory }) => {
@@ -36,6 +41,17 @@ export async function postInvitation(input) {
   const key = input.idempotencyKey
   if (!key) throw new Error('VALIDATION_FAILED')
   return inviteStaff({ ...input, input: input.body, idempotencyKey: key, dataMode: input.config.dataMode })
+}
+export async function postSpecialistInvitation(input) {
+  if (!allowed(input.actor, input.nowMs)) return deny(input)
+  const key = input.idempotencyKey
+  if (!key) throw new Error('VALIDATION_FAILED')
+  return inviteSpecialistProfile({
+    ...input,
+    input: input.body,
+    idempotencyKey: key,
+    dataMode: input.config.dataMode,
+  })
 }
 export async function postDeactivation(input) {
   if (!allowed(input.actor, input.nowMs)) return deny(input)

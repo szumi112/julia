@@ -93,6 +93,7 @@ const VALIDATION_FIELDS = new Set([
   'specialists', 'clients', 'appointments', 'paymentEntries',
   'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
   'entries', 'accountingMonth', 'kind',
+  'standardRateGrosze',
 ])
 const WORKSPACE_FIELDS = new Set(['specialists', 'clients', 'appointments', 'paymentEntries'])
 const CAPABILITIES = Object.freeze([
@@ -342,15 +343,27 @@ const workspaceIdentity = (name, age) => validClientIdentityText(name)
   && (age === null || (Number.isSafeInteger(age) && age >= 1 && age <= 26))
 
 const captureWorkspaceSpecialist = (raw) => {
-  const value = captureDataObject(raw, [
+  const legacyKeys = [
     'id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion',
-  ])
+  ]
+  const value = captureDataObject(raw, legacyKeys)
+    ?? captureDataObject(raw, [...legacyKeys, 'accessStatus'])
   if (!value || typeof value.id !== 'string' || !SPECIALIST_ID.test(value.id)
     || !validWorkspaceText(value.displayName, 120)
     || !workspacePositive(value.standardRateGrosze, 1_000_000)
     || value.status !== 'active' || !workspacePositive(value.version)
-    || !workspacePositive(value.staffVersion)) return null
-  return Object.freeze({
+    || !(value.staffVersion === null || workspacePositive(value.staffVersion))
+    || (Object.hasOwn(value, 'accessStatus')
+      && !['unclaimed', 'invited', 'enabled'].includes(value.accessStatus))) return null
+  return Object.freeze(Object.hasOwn(value, 'accessStatus') ? {
+    id: value.id,
+    displayName: value.displayName,
+    standardRateGrosze: value.standardRateGrosze,
+    status: 'active',
+    version: value.version,
+    staffVersion: value.staffVersion,
+    accessStatus: value.accessStatus,
+  } : {
     id: value.id,
     displayName: value.displayName,
     standardRateGrosze: value.standardRateGrosze,
@@ -449,6 +462,49 @@ const acceptedCreatedClient = (payload, status, requested) => {
     || client.assignment.startsAt !== client.createdAt
     || client.assignment.version !== 1) return null
   return client
+}
+
+const captureSpecialistProfileInput = (raw) => {
+  const value = captureDataObject(raw, ['displayName', 'standardRateGrosze'])
+  if (!value || !validWorkspaceText(value.displayName, 120)
+    || !workspacePositive(value.standardRateGrosze, 1_000_000)) return null
+  return Object.freeze(value)
+}
+
+const acceptedSpecialistProfile = (payload, status, requested) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['specialist'])
+  const value = data && captureDataObject(data.specialist, [
+    'id', 'displayName', 'standardRateGrosze', 'status', 'version', 'accessStatus',
+    'createdAt', 'updatedAt',
+  ])
+  if (status !== 201 || !value || !SPECIALIST_ID.test(value.id ?? '')
+    || value.displayName !== requested.displayName
+    || value.standardRateGrosze !== requested.standardRateGrosze
+    || value.status !== 'active' || value.version !== 1
+    || value.accessStatus !== 'unclaimed' || !validInstant(value.createdAt)
+    || value.updatedAt !== value.createdAt) return null
+  return Object.freeze(value)
+}
+
+const acceptedEditedSpecialistProfile = (
+  payload, status, specialistId, expectedVersion, requested,
+) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['specialist'])
+  const value = data && captureDataObject(data.specialist, [
+    'id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion',
+    'accessStatus', 'createdAt', 'updatedAt',
+  ])
+  if (status !== 200 || !value || value.id !== specialistId
+    || value.displayName !== requested.displayName
+    || value.standardRateGrosze !== requested.standardRateGrosze
+    || value.status !== 'active' || value.version !== expectedVersion + 1
+    || !(value.staffVersion === null || positive(value.staffVersion))
+    || !['unclaimed', 'invited', 'enabled'].includes(value.accessStatus)
+    || !validInstant(value.createdAt) || !validInstant(value.updatedAt)
+    || value.updatedAt < value.createdAt) return null
+  return Object.freeze(value)
 }
 
 const acceptedEditedClient = (payload, status, clientId, expectedVersion, requested) => {
@@ -780,7 +836,7 @@ const acceptedWorkspace = (payload, requested) => {
   ])
   const window = data && captureDataObject(data.window, ['from', 'to', 'timeZone', 'complete'])
   const specialists = data && captureDenseArray(data.specialists, 50)
-  const clients = data && captureDenseArray(data.clients, 200)
+  const clients = data && captureDenseArray(data.clients, 1_000)
   const appointments = data && captureDenseArray(data.appointments, 500)
   const bounds = workspaceBounds(requested)
   if (!window || !specialists || !clients || !appointments || !bounds
@@ -1644,6 +1700,37 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
+  const createSpecialistProfile = (input, options) => {
+    const requested = captureSpecialistProfileInput(input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/specialists`,
+      JSON.stringify(requested),
+      (payload, status) => acceptedSpecialistProfile(payload, status, requested),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const updateSpecialistProfile = (specialistId, expectedVersion, input, options) => {
+    const requested = captureSpecialistProfileInput(input)
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof specialistId !== 'string' || !SPECIALIST_ID.test(specialistId)
+      || !positive(expectedVersion) || !requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/specialists/${specialistId}/edits`,
+      JSON.stringify({ expectedVersion, ...requested }),
+      (payload, status) => acceptedEditedSpecialistProfile(
+        payload, status, specialistId, expectedVersion, requested,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
   const startFinanceImport = (input, options) => {
     const acceptedOptions = captureClientOptions(options)
     let requested
@@ -1863,6 +1950,25 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       idempotencyKey,
     )
   }
+  const inviteSpecialistProfile = (specialistId, input, options = {}) => {
+    const acceptedOptions = idempotencyOptions(options)
+    if (!acceptedOptions || typeof specialistId !== 'string'
+      || !SPECIALIST_ID.test(specialistId)) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    const requested = captureDataObject(input, ['email', 'expectedVersion'])
+    if (!requested || !validText(requested.email, 320)
+      || !positive(requested.expectedVersion)) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/specialists/${specialistId}/invitations`,
+      JSON.stringify(requested),
+      acceptedInvitationResult,
+      acceptedOptions.idempotencyKey,
+    )
+  }
   const deactivateStaff = (staffId, version, options = {}) => {
     const acceptedOptions = idempotencyOptions(options)
     if (!acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
@@ -1918,6 +2024,8 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     getSecurityAudit,
     listFinance,
     createClient,
+    createSpecialistProfile,
+    updateSpecialistProfile,
     editClient,
     archiveClient,
     startFinanceImport,
@@ -1929,6 +2037,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     recordPayment,
     correctPayment,
     inviteStaff,
+    inviteSpecialistProfile,
     deactivateStaff,
     resolveOperationalAction,
     createIdempotencyKey,

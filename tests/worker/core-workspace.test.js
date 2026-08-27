@@ -179,8 +179,8 @@ describe('workspace read model', () => {
     expect(result).toEqual({ data: {
       window: { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true },
       specialists: [
-        { id: 'sp_ania', displayName: 'Ągata Fikcyjna', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3 },
-        { id: 'sp_zofia', displayName: 'Zofia Fikcyjna', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3 },
+        { id: 'sp_ania', displayName: 'Ągata Fikcyjna', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
+        { id: 'sp_zofia', displayName: 'Zofia Fikcyjna', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
       ],
       clients: [
         { id: 'cl_archived', name: 'Archiwalna Fikcyjna', age: null, status: 'archived', version: 2, archivedAt: instant('01'), createdAt: instant('01'), updatedAt: instant('02'), readOnly: true, assignment: null },
@@ -200,11 +200,11 @@ describe('workspace read model', () => {
       }],
     } })
     expect(calls).toHaveLength(4)
-    expect(calls[0].sql).toContain("specialist.status='active'")
-    expect(calls[0].sql).toContain("staff.status='active'")
+    expect(calls[0].sql).toContain("specialist.status IN ('active','pending')")
+    expect(calls[0].sql).toContain("staff.status IN ('pending','active')")
     expect(calls[0].sql).not.toContain("staff.role='specialist'")
     expect(calls[1].bindings).toEqual([window.lower, window.upper, 501])
-    expect(calls[2].bindings).toEqual([window.lower, window.upper, 201])
+    expect(calls[2].bindings).toEqual([window.lower, window.upper, 1001])
     expect(calls[3].bindings).toEqual([window.lower, window.upper, 1001])
     expect(decryptSpecialist).toHaveBeenCalledTimes(2)
     expect(decryptClient).toHaveBeenCalledTimes(2)
@@ -231,14 +231,14 @@ describe('workspace read model', () => {
     expect(calls[2].sql).toContain('history.specialist_id=?')
     expect(calls[3].sql).toContain('appointment.specialist_id=?')
     expect(calls[1].bindings).toEqual(['sp_spec', window.lower, window.upper, 501])
-    expect(calls[2].bindings).toEqual(['sp_spec', 'sp_spec', window.lower, window.upper, 201])
+    expect(calls[2].bindings).toEqual(['sp_spec', 'sp_spec', window.lower, window.upper, 1001])
     expect(calls[3].bindings).toEqual(['sp_spec', window.lower, window.upper, 1001])
   })
 
   it.each([
     ['specialists', 50, { specialists: Array.from({ length: 51 }, (_, index) => specialistRow(`sp_cap_${index}`, `stf_cap_${index}`)) }, 1],
     ['appointments', 500, { appointments: Array.from({ length: 501 }, (_, index) => appointmentRow(`apt_cap_${index}`, 'cl_cap', 'sp_cap')) }, 2],
-    ['clients', 200, { clients: Array.from({ length: 201 }, (_, index) => clientRow(`cl_cap_${index}`, 'active', { id: `asg_cap_${index}`, specialistId: 'sp_cap', startsAt: instant('01'), version: 1 })) }, 3],
+    ['clients', 1_000, { clients: Array.from({ length: 1_001 }, (_, index) => clientRow(`cl_cap_${index}`, 'active', { id: `asg_cap_${index}`, specialistId: 'sp_cap', startsAt: instant('01'), version: 1 })) }, 3],
     ['paymentEntries', 1000, { payments: Array.from({ length: 1001 }, (_, index) => paymentRow(`pay_cap_${index}`, 'apt_cap', 1, instant('04'))) }, 4],
   ])('returns exact no-truncation cap for %s', async (field, publicLimit, rows, queryCount) => {
     const { db, calls } = scriptedDb(rows)
@@ -259,7 +259,7 @@ describe('workspace read model', () => {
     const specialists = Array.from({ length: 50 }, (_, index) => (
       specialistRow(`sp_max_${index}`, `stf_max_${index}`)
     ))
-    const clients = Array.from({ length: 200 }, (_, index) => clientRow(
+    const clients = Array.from({ length: 1_000 }, (_, index) => clientRow(
       `cl_max_${index}`, 'active', {
         id: `asg_max_${index}`, specialistId: 'sp_max_0',
         startsAt: instant('01'), version: 1,
@@ -281,7 +281,7 @@ describe('workspace read model', () => {
       decryptClient: async ({ clientId }) => ({ name: `Fikcyjna ${clientId}`, age: null }),
     })
     expect(result.data.specialists).toHaveLength(50)
-    expect(result.data.clients).toHaveLength(200)
+    expect(result.data.clients).toHaveLength(1_000)
     expect(result.data.appointments).toHaveLength(500)
     expect(result.data.appointments.find(({ id }) => id === 'apt_max_0').paymentEntries)
       .toHaveLength(1000)
@@ -648,7 +648,7 @@ describe('workspace read model', () => {
       specialists: [], clients: [], appointments: [],
     } })
     expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
-      used: 7, remaining: 43, workRemaining: 35, totalLimit: 50, recoveryReserve: 8,
+      used: 8, remaining: 42, workRemaining: 34, totalLimit: 50, recoveryReserve: 8,
     })
   })
 
@@ -789,7 +789,11 @@ describe('workspace read model', () => {
     })
     const plans = []
     for (const call of scripted.calls) {
-      const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${call.sql}`).bind(...call.bindings).all()
+      const compatibleSql = call.sql.replace(
+        'specialist.display_name_envelope',
+        'staff.display_name_envelope',
+      )
+      const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${compatibleSql}`).bind(...call.bindings).all()
       plans.push(plan.results.map(({ detail }) => detail))
     }
     expect(plans[0]).toEqual(expect.arrayContaining([
@@ -898,7 +902,7 @@ describe('workspace read model', () => {
       status: 'paid', collectedGrosze: 20000, outstandingGrosze: 0,
       latestMethod: 'transfer', latestReceivedAt: instant('05'),
     })
-    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery).used).toBe(4)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery).used).toBe(5)
     expect(JSON.stringify(result)).not.toContain('workspace@example.test')
     expect(JSON.stringify(result)).not.toContain('access-workspace-practitioner')
     expect(JSON.stringify(result)).not.toContain('ciphertext')
