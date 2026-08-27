@@ -1,0 +1,33 @@
+{
+  "filename": "fictional-reconciliation.xlsx",
+  "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sheets": [
+    {
+      "name": "SierpieńWrzesień",
+      "rows": [
+        ["Usługa", "Cena", "Klient", "Data zakupu", "Sposób płatności", "Status", "Faktura"],
+        ["Konsultacja", 180, "Osoba Sierpniowa", "2024-08-20", "Przelew", "Opłacona", ""],
+        ["Konsultacja", 180, "Osoba Wrześniowa", "2024-09-30", "Gotówka", "Opłacona", ""],
+        ["Konsultacja", 180, "Osoba Bez Daty", "", "", "", ""],
+        ["Konsultacja", 180, "Osoba Z Błędną Datą", "2024-09-31", "", "", ""]
+      ]
+    },
+    {
+      "name": "Angielski Julia",
+      "rows": [
+        ["Wrzesień 2025"],
+        ["Imię i nazwisko", "Ilość lekcji", "Kwota"],
+        ["Uczeń Pierwszy", 4, 220],
+        ["Suma", { "formula": "SUM(B3:B3)", "cached": 4 }, { "formula": "SUM(C3:C3)", "cached": 220 }],
+        ["Uczeń Po Podsumowaniu", 2, 110]
+      ]
+    },
+    {
+      "name": "Stałe koszty",
+      "rows": [
+        ["Koszt", "Cena", "", "Koszt", "Kwota", "", "Przychód", "Kwota"],
+        ["Wynajem", 2200, "", "Telefon", 100, "", "Warsztat", 500]
+      ]
+    }
+  ]
+}

@@ -41,7 +41,8 @@
     "upgrade:core-directory": "APP_ENV=development DATA_MODE=fictional node scripts/upgrade-core-directory.js",
     "upgrade:core-directory:staging": "DATA_MODE=fictional node scripts/upgrade-core-directory.js --remote --env staging",
     "upgrade:core-directory:production": "DATA_MODE=fictional node scripts/upgrade-core-directory.js --remote --env production",
-    "backup:restore": "node scripts/restore-backup.mjs"
+    "backup:restore": "node scripts/restore-backup.mjs",
+    "audit:workbook": "node scripts/audit-workbook.mjs"
   },
   "dependencies": {
     "@fontsource-variable/fraunces": "5.3.0",

@@ -1,11 +1,11 @@
 import { strFromU8, unzipSync } from 'fflate'
 
 const MAX_WORKBOOK_BYTES = 5 * 1024 * 1024
+const MAX_WORKBOOK_DECOMPRESSED_BYTES = 25 * 1024 * 1024
 const FINGERPRINT = /^[0-9a-f]{64}$/
 const MONTH_KEY = /^\d{4}-(?:0[1-9]|1[0-2])$/
-const ACCOUNTING_MONTH_OVERRIDES = Object.freeze({
-  sierpienwrzesien: '2026-08',
-})
+export const WORKBOOK_PARSER_VERSION = 2
+export const WORKBOOK_MATERIALIZER_VERSION = 2
 const POLISH_MONTHS = Object.freeze({
   styczen: 1,
   luty: 2,
@@ -28,6 +28,11 @@ const text = (value) => value === null || value === undefined
   : String(value).trim().normalize('NFC')
 
 const rawScalar = (value) => typeof value === 'string' ? text(value) : value
+
+const formulaValue = (value) => value && typeof value === 'object'
+  && !Array.isArray(value) && typeof value.formula === 'string'
+
+const scalar = (value) => formulaValue(value) ? '' : value
 
 const searchText = (value) => text(value).normalize('NFD')
   .replace(/[\u0300-\u036f]/g, '')
@@ -170,6 +175,29 @@ const inferredSheetMonth = (sheet, datedMonths) => {
     ?? (datedMonths.length === 1 ? datedMonths[0] : null)
 }
 
+const columnName = (index) => {
+  let value = index + 1
+  let result = ''
+  while (value > 0) {
+    const remainder = (value - 1) % 26
+    result = String.fromCharCode(65 + remainder) + result
+    value = Math.floor((value - 1) / 26)
+  }
+  return result
+}
+
+const formulaCellSet = (sheet) => new Set(Array.isArray(sheet.formulaCells)
+  ? sheet.formulaCells
+  : [])
+
+const hasFormula = (sheet, formulas, rowIndex, column) => formulaValue(
+  sheet.rows[rowIndex]?.[column],
+) || formulas.has(`${columnName(column)}${rowIndex + 1}`)
+
+const cellType = (sheet, rowIndex, column) => sheet.cellTypes?.[
+  `${columnName(column)}${rowIndex + 1}`
+] ?? null
+
 const headerMap = (row) => new Map(row.map((value, index) => [searchText(value), index]))
 
 const transactionHeaderIndex = (rows) => rows.findIndex((row) => {
@@ -186,7 +214,7 @@ const rawRecord = (headers, row) => {
   const result = {}
   headers.forEach((header, index) => {
     const key = text(header)
-    if (key) result[key] = rawScalar(row[index] ?? '')
+    if (key && !formulaValue(row[index])) result[key] = rawScalar(scalar(row[index] ?? ''))
   })
   return result
 }
@@ -198,7 +226,7 @@ const makeSourceKey = ({ sheetIndex, rowNumber, block = 0 }) => (
 const baseRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
   occurredOn = null, amount, counterparty, sourceLabel, method = 'unknown',
   settlement = 'unknown', invoice = 'unknown', invoiceNote = '', specialistName = '',
-  lessonCount = null, raw }) => ({
+  lessonCount = null, warningCodes = [], raw }) => ({
   sourceKey,
   sheet: text(sheet),
   rowNumber,
@@ -215,72 +243,172 @@ const baseRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
   specialistName: text(specialistName) || null,
   lessonCount,
   raw,
+  ...(warningCodes.length ? { warningCodes: Object.freeze([...warningCodes]) } : {}),
+})
+
+const quarantineRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
+  reasonCode, raw }) => ({
+  sourceKey,
+  sheet: text(sheet),
+  rowNumber,
+  recordType,
+  accountingMonth: accountingMonth && MONTH_KEY.test(accountingMonth) ? accountingMonth : null,
+  reasonCode,
+  raw,
+})
+
+const normalizedResult = (rows = [], quarantinedRows = [], sourceCandidates = 0,
+  excludedFormulaBlocks = 0, excludedFormulaRows = 0) => ({
+  rows,
+  quarantinedRows,
+  sourceCandidates,
+  excludedFormulaBlocks,
+  excludedFormulaRows,
 })
 
 const normalizeTransactions = (sheet, context) => {
   const headerIndex = transactionHeaderIndex(sheet.rows)
-  if (headerIndex < 0) return []
+  if (headerIndex < 0) return normalizedResult()
   const headersRow = sheet.rows[headerIndex]
   const headers = headerMap(headersRow)
+  const formulas = formulaCellSet(sheet)
   const candidates = []
+  let excludedFormulaBlocks = 0
+  let excludedFormulaRows = 0
   sheet.rows.slice(headerIndex + 1).forEach((row, index) => {
-    const service = text(valueAt(row, headers, 'usluga'))
-    const client = text(valueAt(row, headers, 'klient'))
-    if (!service || !client) return
+    const rowIndex = headerIndex + index + 1
+    const service = text(scalar(valueAt(row, headers, 'usluga')))
+    const client = text(scalar(valueAt(row, headers, 'klient')))
+    const amountValue = scalar(valueAt(row, headers, 'cena'))
+    const dateValue = scalar(valueAt(row, headers, 'data zakupu'))
+    const candidateColumns = ['usluga', 'cena', 'klient', 'data zakupu']
+      .map((name) => headers.get(name))
+      .filter((column) => column !== undefined)
+    if (candidateColumns.some((column) => hasFormula(sheet, formulas, rowIndex, column))) {
+      excludedFormulaBlocks++
+      const amountColumn = headers.get('cena')
+      if (service && amountColumn !== undefined
+        && hasFormula(sheet, formulas, rowIndex, amountColumn)) excludedFormulaRows++
+      return
+    }
+    if (!service || !client || (!text(amountValue) && !text(dateValue))) return
     if (searchText(service) === 'usluga' && searchText(client) === 'klient') return
-    const amount = amountGrosze(valueAt(row, headers, 'cena'))
-    if (amount === null) fail('WORKBOOK_ROW_AMOUNT_INVALID')
     candidates.push({
       row,
       rowNumber: headerIndex + index + 2,
-      occurredOn: civilDate(valueAt(row, headers, 'data zakupu')),
-      amount,
+      amountValue,
+      dateValue,
+      dateCellType: headers.has('data zakupu')
+        ? cellType(sheet, rowIndex, headers.get('data zakupu'))
+        : null,
+      occurredOn: civilDate(dateValue),
+      amount: amountGrosze(amountValue),
     })
   })
   const datedMonths = candidates.map(({ occurredOn }) => occurredOn?.slice(0, 7)).filter(Boolean)
   const sheetMonth = inferredSheetMonth(sheet, datedMonths)
-  const normalizedSheetName = searchText(sheet.name)
-  const accountingMonthOverride = Object.hasOwn(ACCOUNTING_MONTH_OVERRIDES, normalizedSheetName)
-    ? ACCOUNTING_MONTH_OVERRIDES[normalizedSheetName]
-    : null
   const tusSheet = searchText(sheet.name).includes('grupa tus')
-  return candidates.map(({ row, rowNumber, occurredOn, amount }) => {
+  const rows = []
+  const quarantinedRows = []
+  candidates.forEach(({ row, rowNumber, amountValue, dateValue, dateCellType, occurredOn,
+    amount }) => {
     const label = valueAt(row, headers, 'usluga')
     const isTus = tusSheet || searchText(label).startsWith('grupa tus')
-    return baseRow({
-      sourceKey: makeSourceKey({ ...context, sheet: sheet.name, rowNumber }),
+    const accountingMonth = occurredOn?.slice(0, 7) ?? sheetMonth
+    const sourceKey = makeSourceKey({ ...context, sheet: sheet.name, rowNumber })
+    let reasonCode = null
+    if (amount === null) reasonCode = 'AMOUNT_INVALID'
+    else if (!isTus && text(dateValue) === '') reasonCode = 'SERVICE_DATE_MISSING'
+    else if (!isTus && (occurredOn === null
+      || (dateCellType !== null && !['n', 'd'].includes(dateCellType)))) {
+      reasonCode = 'SERVICE_DATE_INVALID'
+    }
+    if (reasonCode) {
+      quarantinedRows.push(quarantineRow({
+        sourceKey,
+        sheet: sheet.name,
+        rowNumber,
+        recordType: isTus ? 'tus' : 'income',
+        accountingMonth,
+        reasonCode,
+        raw: rawRecord(headersRow, row),
+      }))
+      return
+    }
+    rows.push(baseRow({
+      sourceKey,
       sheet: sheet.name,
       rowNumber,
       recordType: isTus ? 'tus' : 'income',
-      accountingMonth: accountingMonthOverride
-        ?? (isTus ? sheetMonth : occurredOn?.slice(0, 7) ?? sheetMonth),
+      accountingMonth,
       occurredOn,
       amount,
       counterparty: valueAt(row, headers, 'klient'),
       sourceLabel: label,
-      method: paymentMethod(valueAt(row, headers, 'sposob platnosci')),
-      settlement: settlementStatus(valueAt(row, headers, 'status')),
-      invoice: invoiceStatus(valueAt(row, headers, 'faktura')),
-      invoiceNote: valueAt(row, headers, 'faktura'),
-      specialistName: valueAt(row, headers, 'psycholog'),
+      method: paymentMethod(scalar(valueAt(row, headers, 'sposob platnosci'))),
+      settlement: settlementStatus(scalar(valueAt(row, headers, 'status'))),
+      invoice: invoiceStatus(scalar(valueAt(row, headers, 'faktura'))),
+      invoiceNote: scalar(valueAt(row, headers, 'faktura')),
+      specialistName: scalar(valueAt(row, headers, 'psycholog')),
+      warningCodes: typeof amountValue === 'string' ? ['AMOUNT_STORED_AS_TEXT'] : [],
       raw: rawRecord(headersRow, row),
-    })
+    }))
   })
+  return normalizedResult(
+    rows,
+    quarantinedRows,
+    candidates.length,
+    excludedFormulaBlocks,
+    excludedFormulaRows,
+  )
 }
 
 const normalizeEnglish = (sheet, context) => {
-  if (!searchText(sheet.name).includes('angielski') || sheet.rows.length < 3) return []
+  if (!searchText(sheet.name).includes('angielski') || sheet.rows.length < 3) {
+    return normalizedResult()
+  }
   const monthRow = sheet.rows[0]
   const headerRow = sheet.rows[1]
   const rows = []
+  const quarantinedRows = []
+  const formulas = formulaCellSet(sheet)
+  let sourceCandidates = 0
+  let excludedFormulaBlocks = 0
   headerRow.forEach((value, column) => {
     if (searchText(value) !== 'imie i nazwisko') return
     const accountingMonth = monthFromValue(monthRow[column], null, { allowSerial: true })
     for (let index = 2; index < sheet.rows.length; index++) {
-      const counterparty = text(sheet.rows[index][column])
-      const lessons = integer(sheet.rows[index][column + 1], { allowZero: true })
-      const amount = amountGrosze(sheet.rows[index][column + 2], { allowZero: true })
-      if (!counterparty || lessons === null || amount === null) continue
+      const block = sheet.rows[index].slice(column, column + 3)
+      if (block.every((item) => text(scalar(item)) === '')) continue
+      if ([column, column + 1, column + 2].some((cellColumn) => (
+        hasFormula(sheet, formulas, index, cellColumn)
+      ))) {
+        excludedFormulaBlocks++
+        continue
+      }
+      const counterparty = text(scalar(sheet.rows[index][column]))
+      const lessons = integer(scalar(sheet.rows[index][column + 1]), { allowZero: true })
+      const amount = amountGrosze(scalar(sheet.rows[index][column + 2]), { allowZero: true })
+      sourceCandidates++
+      if (!counterparty || lessons === null || amount === null) {
+        const reasonCode = !counterparty
+          ? 'COUNTERPARTY_MISSING'
+          : lessons === null ? 'LESSON_COUNT_INVALID' : 'AMOUNT_INVALID'
+        quarantinedRows.push(quarantineRow({
+          sourceKey: makeSourceKey({ ...context, sheet: sheet.name, rowNumber: index + 1, block: column + 1 }),
+          sheet: sheet.name,
+          rowNumber: index + 1,
+          recordType: 'english',
+          accountingMonth,
+          reasonCode,
+          raw: {
+            'Imię i nazwisko': counterparty,
+            'Ilość lekcji': rawScalar(scalar(sheet.rows[index][column + 1])),
+            Kwota: rawScalar(scalar(sheet.rows[index][column + 2])),
+          },
+        }))
+        continue
+      }
       rows.push(baseRow({
         sourceKey: makeSourceKey({ ...context, sheet: sheet.name, rowNumber: index + 1, block: column + 1 }),
         sheet: sheet.name,
@@ -299,22 +427,38 @@ const normalizeEnglish = (sheet, context) => {
       }))
     }
   })
-  return rows
+  return normalizedResult(rows, quarantinedRows, sourceCandidates, excludedFormulaBlocks)
 }
 
 const normalizeFixedCosts = (sheet, context) => {
-  if (!searchText(sheet.name).includes('stale koszty') || sheet.rows.length < 2) return []
+  if (!searchText(sheet.name).includes('stale koszty') || sheet.rows.length < 2) {
+    return normalizedResult()
+  }
   const headers = sheet.rows[0]
   const rows = []
+  const quarantinedRows = []
+  const formulas = formulaCellSet(sheet)
+  let sourceCandidates = 0
+  let excludedFormulaBlocks = 0
   headers.forEach((value, column) => {
     const normalized = searchText(value)
     if (normalized !== 'koszt' && normalized !== 'przychod') return
     for (let index = 1; index < sheet.rows.length; index++) {
-      const label = text(sheet.rows[index][column])
-      const amount = amountGrosze(sheet.rows[index][column + 1])
-      if (!label || amount === null) continue
+      const labelValue = scalar(sheet.rows[index][column])
+      const amountValue = scalar(sheet.rows[index][column + 1])
+      if (!text(labelValue)) continue
+      if ([column, column + 1].some((cellColumn) => (
+        hasFormula(sheet, formulas, index, cellColumn)
+      ))) {
+        excludedFormulaBlocks++
+        continue
+      }
+      const label = text(labelValue)
+      const amount = amountGrosze(amountValue)
+      if (amount === null) continue
+      sourceCandidates++
       const nearby = sheet.rows[index].slice(Math.max(0, column - 1), column + 4)
-      const accountingMonth = nearby.map((item) => monthFromValue(item)).find(Boolean)
+      const accountingMonth = nearby.map((item) => monthFromValue(scalar(item))).find(Boolean)
         ?? monthFromValue(sheet.name)
       rows.push(baseRow({
         sourceKey: makeSourceKey({ ...context, sheet: sheet.name, rowNumber: index + 1, block: column + 1 }),
@@ -332,7 +476,7 @@ const normalizeFixedCosts = (sheet, context) => {
       }))
     }
   })
-  return rows
+  return normalizedResult(rows, quarantinedRows, sourceCandidates, excludedFormulaBlocks)
 }
 
 const warningsFor = (rows) => {
@@ -341,6 +485,10 @@ const warningsFor = (rows) => {
   const unknownMethods = rows.filter((row) => row.paymentMethod === 'unknown').length
   if (unknownMonths) warnings.push({ code: 'ACCOUNTING_MONTH_UNKNOWN', count: unknownMonths })
   if (unknownMethods) warnings.push({ code: 'PAYMENT_METHOD_UNKNOWN', count: unknownMethods })
+  const textAmounts = rows.filter(({ warningCodes }) => (
+    warningCodes?.includes('AMOUNT_STORED_AS_TEXT')
+  )).length
+  if (textAmounts) warnings.push({ code: 'AMOUNT_STORED_AS_TEXT', count: textAmounts })
   return warnings
 }
 
@@ -350,6 +498,10 @@ export function normalizeWorkbookRows({ filename, fingerprint, sheets }) {
     || !Array.isArray(sheets) || sheets.length === 0) fail('WORKBOOK_INPUT_INVALID')
   const context = { filename, fingerprint }
   const rows = []
+  const quarantinedRows = []
+  let sourceCandidates = 0
+  let excludedFormulaBlocks = 0
+  let excludedFormulaRows = 0
   for (const [sheetIndex, sheet] of sheets.entries()) {
     if (!sheet || typeof sheet.name !== 'string' || !Array.isArray(sheet.rows)) {
       fail('WORKBOOK_SHEET_INVALID')
@@ -357,12 +509,19 @@ export function normalizeWorkbookRows({ filename, fingerprint, sheets }) {
     const sheetContext = { ...context, sheetIndex }
     const english = normalizeEnglish(sheet, sheetContext)
     const fixed = normalizeFixedCosts(sheet, sheetContext)
-    if (english.length) rows.push(...english)
-    else if (fixed.length) rows.push(...fixed)
-    else rows.push(...normalizeTransactions(sheet, sheetContext))
+    const normalized = english.sourceCandidates || english.excludedFormulaBlocks
+      ? english
+      : fixed.sourceCandidates || fixed.excludedFormulaBlocks
+        ? fixed
+        : normalizeTransactions(sheet, sheetContext)
+    rows.push(...normalized.rows)
+    quarantinedRows.push(...normalized.quarantinedRows)
+    sourceCandidates += normalized.sourceCandidates
+    excludedFormulaBlocks += normalized.excludedFormulaBlocks
+    excludedFormulaRows += normalized.excludedFormulaRows
   }
   const sourceKeys = new Set()
-  for (const row of rows) {
+  for (const row of [...rows, ...quarantinedRows]) {
     if (sourceKeys.has(row.sourceKey)) fail('WORKBOOK_DUPLICATE_ROW')
     sourceKeys.add(row.sourceKey)
   }
@@ -378,11 +537,21 @@ export function normalizeWorkbookRows({ filename, fingerprint, sheets }) {
   }
   return Object.freeze({
     formatVersion: 1,
+    parserVersion: WORKBOOK_PARSER_VERSION,
+    materializerVersion: WORKBOOK_MATERIALIZER_VERSION,
     fingerprint,
     filename,
     counts: Object.freeze(counts),
     warnings: Object.freeze(warningsFor(rows)),
     rows: Object.freeze(rows.map((row) => Object.freeze(row))),
+    quarantinedRows: Object.freeze(quarantinedRows.map((row) => Object.freeze(row))),
+    reconciliation: Object.freeze({
+      sourceCandidates,
+      acceptedRows: rows.length,
+      quarantinedRows: quarantinedRows.length,
+      excludedFormulaBlocks,
+      excludedFormulaRows,
+    }),
   })
 }
 
@@ -397,6 +566,8 @@ const parseSharedStrings = (xml) => {
 
 const parseWorksheet = (xml, sharedStrings) => {
   const rows = []
+  const formulaCells = []
+  const cellTypes = {}
   for (const rowMatch of xml.matchAll(/<row\b([^>]*)>([\s\S]*?)<\/row>/g)) {
     const rowNumber = Number(attribute(rowMatch[1], 'r'))
     if (!Number.isSafeInteger(rowNumber) || rowNumber < 1) fail('WORKBOOK_ROW_INVALID')
@@ -406,6 +577,8 @@ const parseWorksheet = (xml, sharedStrings) => {
       const ref = attribute(cellMatch[1], 'r')
       const type = attribute(cellMatch[1], 't')
       const body = cellMatch[2] ?? ''
+      if (/<f\b/.test(body)) formulaCells.push(ref)
+      cellTypes[ref] = type ?? 'n'
       const raw = /<v\b[^>]*>([\s\S]*?)<\/v>/.exec(body)?.[1] ?? ''
       let value = ''
       if (type === 's' && /^\d+$/.test(raw)) value = sharedStrings[Number(raw)] ?? ''
@@ -414,12 +587,112 @@ const parseWorksheet = (xml, sharedStrings) => {
       else if (type === 'str') value = xmlText(raw)
       else if (raw !== '' && Number.isFinite(Number(raw))) value = Number(raw)
       else value = xmlText(raw)
-      row[columnIndex(ref)] = value
+      const formulaElement = /<f\b/.test(body)
+      const formula = /<f\b[^>]*>([\s\S]*?)<\/f>/.exec(body)?.[1] ?? ''
+      row[columnIndex(ref)] = !formulaElement
+        ? value
+        : { formula: xmlText(formula), cached: value }
     }
     while (rows.length < rowNumber - 1) rows.push([])
     rows.push(row)
   }
-  return rows
+  return { rows, formulaCells, cellTypes }
+}
+
+const zipEntryPaths = (bytes) => {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  let end = bytes.byteLength - 22
+  const minimum = Math.max(0, bytes.byteLength - 65_557)
+  while (end >= minimum && view.getUint32(end, true) !== 0x06054b50) end--
+  if (end < minimum || view.getUint16(end + 4, true) !== 0
+    || view.getUint16(end + 6, true) !== 0) fail('WORKBOOK_ARCHIVE_INVALID')
+  const entries = view.getUint16(end + 10, true)
+  const centralSize = view.getUint32(end + 12, true)
+  let offset = view.getUint32(end + 16, true)
+  const centralEnd = offset + centralSize
+  if (entries === 0xffff || centralEnd > end || offset < 0) fail('WORKBOOK_ARCHIVE_INVALID')
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  const paths = []
+  for (let index = 0; index < entries; index++) {
+    if (offset + 46 > centralEnd || view.getUint32(offset, true) !== 0x02014b50) {
+      fail('WORKBOOK_ARCHIVE_INVALID')
+    }
+    const nameLength = view.getUint16(offset + 28, true)
+    const extraLength = view.getUint16(offset + 30, true)
+    const commentLength = view.getUint16(offset + 32, true)
+    const nameStart = offset + 46
+    const next = nameStart + nameLength + extraLength + commentLength
+    if (next > centralEnd) fail('WORKBOOK_ARCHIVE_INVALID')
+    let path
+    try { path = decoder.decode(bytes.subarray(nameStart, nameStart + nameLength)) } catch {
+      fail('WORKBOOK_ARCHIVE_PATH_INVALID')
+    }
+    paths.push({ path, uncompressedSize: view.getUint32(offset + 24, true) })
+    offset = next
+  }
+  if (offset !== centralEnd) fail('WORKBOOK_ARCHIVE_INVALID')
+  return paths
+}
+
+const validateRelationshipXml = (xml) => {
+  const root = /<Relationships\b[^>]*>([\s\S]*?)<\/Relationships>/.exec(xml)
+  if (!root) fail('WORKBOOK_RELATIONSHIP_INVALID')
+  const declarationsRemoved = xml
+    .replace(/<\?xml\b[\s\S]*?\?>/g, '')
+    .replace(root[0], '')
+    .trim()
+  if (declarationsRemoved) fail('WORKBOOK_RELATIONSHIP_INVALID')
+  const relationships = [...root[1].matchAll(/<Relationship\b([^>]*?)\/>/g)]
+  const residue = root[1].replace(/<Relationship\b[^>]*?\/>/g, '').trim()
+  if (residue) fail('WORKBOOK_RELATIONSHIP_INVALID')
+  const ids = new Set()
+  for (const match of relationships) {
+    const id = attribute(match[1], 'Id')
+    const type = attribute(match[1], 'Type')
+    const target = attribute(match[1], 'Target')
+    if (!id || !type || !target || ids.has(id)) fail('WORKBOOK_RELATIONSHIP_INVALID')
+    ids.add(id)
+    if (searchText(attribute(match[1], 'TargetMode')) === 'external'
+      || /(?:external|oleobject|attachedtoolbars)/i.test(type)) {
+      fail('WORKBOOK_EXTERNAL_RELATIONSHIP_FORBIDDEN')
+    }
+  }
+}
+
+const validateArchiveEntries = (bytes) => {
+  const entries = zipEntryPaths(bytes)
+  const seen = new Set()
+  let decompressedBytes = 0
+  for (const { path, uncompressedSize } of entries) {
+    if (!path || path.startsWith('/') || path.includes('\\') || path.includes('\0')
+      || path.split('/').some((component) => component === '..' || component === '.')) {
+      fail('WORKBOOK_ARCHIVE_PATH_INVALID')
+    }
+    if (seen.has(path)) fail('WORKBOOK_ARCHIVE_DUPLICATE_PATH')
+    seen.add(path)
+    decompressedBytes += uncompressedSize
+    if (decompressedBytes > MAX_WORKBOOK_DECOMPRESSED_BYTES) {
+      fail('WORKBOOK_DECOMPRESSED_SIZE_INVALID')
+    }
+    if (/(?:^|\/)(?:vbaProject\.bin|macrosheets\/|activeX\/|embeddings\/)/i.test(path)) {
+      fail('WORKBOOK_MACRO_FORBIDDEN')
+    }
+  }
+  return decompressedBytes
+}
+
+const validateArchiveFiles = (files, decompressedBytes) => {
+  if (Object.values(files).reduce((total, value) => total + value.byteLength, 0)
+    !== decompressedBytes) fail('WORKBOOK_ARCHIVE_INVALID')
+  for (const [path, value] of Object.entries(files)) {
+    if (path.endsWith('.rels')) validateRelationshipXml(strFromU8(value))
+    if (/^xl\/worksheets\/[^/]+\.xml$/i.test(path)) {
+      const xml = strFromU8(value)
+      for (const formula of xml.matchAll(/<f\b[^>]*>([\s\S]*?)<\/f>/g)) {
+        if (/\bDDE\s*\(/i.test(xmlText(formula[1]))) fail('WORKBOOK_FORMULA_FORBIDDEN')
+      }
+    }
+  }
 }
 
 const workbookSheetsFrom = (files) => {
@@ -447,7 +720,7 @@ const workbookSheetsFrom = (files) => {
     const target = targets.get(id)
     if (!name || !target || target.includes('..')) fail('WORKBOOK_RELATIONSHIP_INVALID')
     const path = target.startsWith('/') ? target.slice(1) : `xl/${target}`
-    sheets.push({ name, rows: parseWorksheet(read(path), sharedStrings) })
+    sheets.push({ name, ...parseWorksheet(read(path), sharedStrings) })
   }
   if (!sheets.length) fail('WORKBOOK_SHEETS_MISSING')
   return sheets
@@ -460,8 +733,10 @@ export async function parseWorkbookFile(arrayBuffer, { filename } = {}) {
   if (!(arrayBuffer instanceof ArrayBuffer) || arrayBuffer.byteLength < 1
     || arrayBuffer.byteLength > MAX_WORKBOOK_BYTES) fail('WORKBOOK_SIZE_INVALID')
   const bytes = new Uint8Array(arrayBuffer)
+  const decompressedBytes = validateArchiveEntries(bytes)
   let files
   try { files = unzipSync(bytes) } catch { fail('WORKBOOK_ARCHIVE_INVALID') }
+  validateArchiveFiles(files, decompressedBytes)
   return normalizeWorkbookRows({
     filename,
     fingerprint: await sha256(bytes),

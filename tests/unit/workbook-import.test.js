@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { strToU8, zipSync } from 'fflate'
 import {
@@ -6,6 +7,10 @@ import {
   parseWorkbookCsv,
   parseWorkbookFile,
 } from '../../src/workbook-import.js'
+
+const reconciliationFixture = JSON.parse(readFileSync(new URL(
+  '../fixtures/workbook-reconciliation-v2.json', import.meta.url,
+), 'utf8'))
 
 const transactionHeader = [
   'Usługa', 'Cena', 'Klient', 'Data zakupu', 'Sposób płatności', 'Status', 'Faktura',
@@ -66,31 +71,45 @@ const worksheetXml = (rows) => `<?xml version="1.0" encoding="UTF-8" standalone=
   `<row r="${rowIndex + 1}">${row.map((value, columnIndex) => {
     const ref = `${columnName(columnIndex)}${rowIndex + 1}`
     if (value === '' || value === null || value === undefined) return `<c r="${ref}"/>`
+    if (typeof value === 'object' && value.formula) {
+      return `<c r="${ref}"><f>${xmlEscape(value.formula)}</f><v>${value.cached}</v></c>`
+    }
+    if (typeof value === 'object' && Number.isSafeInteger(value.sharedString)) {
+      return `<c r="${ref}" t="s"><v>${value.sharedString}</v></c>`
+    }
     if (typeof value === 'number') return `<c r="${ref}"><v>${value}</v></c>`
     return `<c r="${ref}" t="inlineStr"><is><t>${xmlEscape(value)}</t></is></c>`
   }).join('')}</row>`
 )).join('')}</sheetData></worksheet>`
 
-const testWorkbook = () => {
+const testWorkbook = ({ sheets = workbookSheets, sharedStrings = [], extraFiles = {},
+  extraRelationships = '' } = {}) => {
   const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${workbookSheets.map((sheet, index) => (
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((sheet, index) => (
   `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`
 )).join('')}</sheets></workbook>`
   const relationships = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${workbookSheets.map((_, index) => (
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_, index) => (
   `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`
-)).join('')}</Relationships>`
+)).join('')}${extraRelationships}</Relationships>`
   const files = {
     'xl/workbook.xml': strToU8(workbook),
     'xl/_rels/workbook.xml.rels': strToU8(relationships),
+    ...extraFiles,
   }
-  workbookSheets.forEach((sheet, index) => {
+  if (sharedStrings.length) {
+    files['xl/sharedStrings.xml'] = strToU8(`<?xml version="1.0" encoding="UTF-8"?>
+      <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${sharedStrings.map((value) => (
+        `<si><t>${xmlEscape(value)}</t></si>`
+      )).join('')}</sst>`)
+  }
+  sheets.forEach((sheet, index) => {
     files[`xl/worksheets/sheet${index + 1}.xml`] = strToU8(worksheetXml(sheet.rows))
   })
   return zipSync(files)
 }
 
-test('normalizes transactions with the approved staging accounting month', () => {
+test('normalizes transactions with civil-date accounting months', () => {
   const preview = normalizeWorkbookRows({
     filename: 'fictional.xlsx',
     fingerprint: 'a'.repeat(64),
@@ -98,9 +117,9 @@ test('normalizes transactions with the approved staging accounting month', () =>
   })
 
   assert.deepEqual(preview.counts, {
-    financeRows: 3,
+    financeRows: 2,
     datedFinanceRows: 2,
-    undatedFinanceRows: 1,
+    undatedFinanceRows: 0,
     tusRows: 1,
     englishRows: 2,
     costOrAncillaryRows: 3,
@@ -110,7 +129,7 @@ test('normalizes transactions with the approved staging accounting month', () =>
     sheet: 'SierpieńWrzesień',
     rowNumber: 2,
     recordType: 'income',
-    accountingMonth: '2026-08',
+    accountingMonth: '2024-08',
     occurredOn: '2024-08-20',
     amountGrosze: 16000,
     counterparty: 'Joanna Testowa',
@@ -127,14 +146,14 @@ test('normalizes transactions with the approved staging accounting month', () =>
     }), {}),
   })
   const undated = preview.rows.find((row) => row.sourceLabel === 'Webinar online')
-  assert.equal(undated.occurredOn, null)
-  assert.equal(undated.accountingMonth, '2026-08')
-  assert.equal(undated.paymentMethod, 'blik')
-  assert.equal(undated.settlementStatus, 'unknown')
-  assert.equal(undated.invoiceStatus, 'action_required')
+  assert.equal(undated, undefined)
+  assert.deepEqual(preview.quarantinedRows.map(({ reasonCode, accountingMonth }) => ({
+    reasonCode,
+    accountingMonth,
+  })), [{ reasonCode: 'SERVICE_DATE_MISSING', accountingMonth: '2024-09' }])
 })
 
-test('assigns the combined staging sheet to August 2026 while preserving source dates', () => {
+test('assigns every dated combined-sheet row to its civil month', () => {
   const preview = normalizeWorkbookRows({
     filename: 'fictional.xlsx',
     fingerprint: 'c'.repeat(64),
@@ -152,9 +171,25 @@ test('assigns the combined staging sheet to August 2026 while preserving source 
     accountingMonth,
     occurredOn,
   })), [
-    { accountingMonth: '2026-08', occurredOn: '2024-08-20' },
-    { accountingMonth: '2026-08', occurredOn: '2024-09-30' },
+    { accountingMonth: '2024-08', occurredOn: '2024-08-20' },
+    { accountingMonth: '2024-09', occurredOn: '2024-09-30' },
   ])
+})
+
+test('returns stable quarantine reasons for populated candidates with unusable service dates', () => {
+  const preview = normalizeWorkbookRows(reconciliationFixture)
+
+  assert.deepEqual(preview.quarantinedRows?.map(({ rowNumber, reasonCode, accountingMonth }) => ({
+    rowNumber,
+    reasonCode,
+    accountingMonth,
+  })), [
+    { rowNumber: 4, reasonCode: 'SERVICE_DATE_MISSING', accountingMonth: '2024-09' },
+    { rowNumber: 5, reasonCode: 'SERVICE_DATE_INVALID', accountingMonth: '2024-09' },
+  ])
+  assert.equal(preview.reconciliation.sourceCandidates, 9)
+  assert.equal(preview.reconciliation.acceptedRows, 7)
+  assert.equal(preview.reconciliation.quarantinedRows, 2)
 })
 
 test('preserves additive prices and never infers months from monetary amounts', () => {
@@ -182,18 +217,23 @@ test('preserves additive prices and never infers months from monetary amounts', 
   assert.deepEqual(preview.warnings.find(({ code }) => code === 'ACCOUNTING_MONTH_UNKNOWN'), {
     code: 'ACCOUNTING_MONTH_UNKNOWN', count: 1,
   })
+  assert.deepEqual(preview.warnings.find(({ code }) => code === 'AMOUNT_STORED_AS_TEXT'), {
+    code: 'AMOUNT_STORED_AS_TEXT', count: 1,
+  })
 })
 
-test('fails closed instead of silently dropping a populated transaction with an invalid price', () => {
+test('quarantines instead of silently dropping a populated transaction with an invalid price', () => {
   for (const price of ['do ustalenia', '200+20 na 2 sesje']) {
-    assert.throws(() => normalizeWorkbookRows({
+    const preview = normalizeWorkbookRows({
       filename: 'invalid.xlsx',
       fingerprint: 'f'.repeat(64),
       sheets: [{
         name: 'Maj 2025',
         rows: [transactionHeader, ['Konsultacja', price, 'Osoba Testowa', '2025-05-02']],
       }],
-    }), /WORKBOOK_ROW_AMOUNT_INVALID/)
+    })
+    assert.equal(preview.rows.length, 0)
+    assert.equal(preview.quarantinedRows?.[0]?.reasonCode, 'AMOUNT_INVALID')
   }
 })
 
@@ -219,7 +259,7 @@ test('normalizes TUS, English, expenses, and ancillary revenue as distinct recor
   })
   const tus = preview.rows.find((row) => row.recordType === 'tus')
   assert.equal(tus.sourceLabel, 'Grupa TUS 5-6 lat')
-  assert.equal(tus.accountingMonth, '2024-09')
+  assert.equal(tus.accountingMonth, '2024-10')
   const english = preview.rows.filter((row) => row.recordType === 'english')
   assert.deepEqual(english.map(({ accountingMonth, lessonCount, amountGrosze }) => (
     { accountingMonth, lessonCount, amountGrosze }
@@ -244,8 +284,51 @@ test('parses a real OOXML zip and hashes its bytes before normalization', async 
     bytes.byteOffset + bytes.byteLength,
   ), { filename: 'mini.xlsx' })
   assert.match(preview.fingerprint, /^[0-9a-f]{64}$/)
-  assert.equal(preview.counts.financeRows, 3)
-  assert.equal(preview.rows.length, 8)
+  assert.equal(preview.counts.financeRows, 2)
+  assert.equal(preview.rows.length, 7)
+})
+
+test('excludes formula-cache summaries but retains valid records after them', async () => {
+  const fixtureSheets = reconciliationFixture.sheets.filter(({ name }) => name === 'Angielski Julia')
+  const bytes = testWorkbook({ sheets: fixtureSheets })
+  const preview = await parseWorkbookFile(bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ), { filename: 'formula-cache.xlsx' })
+
+  assert.deepEqual(preview.rows.map(({ counterparty }) => counterparty), [
+    'Uczeń Pierwszy',
+    'Uczeń Po Podsumowaniu',
+  ])
+  assert.equal(preview.reconciliation.excludedFormulaBlocks, 1)
+})
+
+test('quarantines a shared-string OOXML service date instead of coercing its text', async () => {
+  const bytes = testWorkbook({
+    sharedStrings: ['2025-09-02'],
+    sheets: [{
+      name: 'Wrzesień',
+      rows: [
+        transactionHeader,
+        ['Konsultacja', 180, 'Osoba Testowa', { sharedString: 0 }],
+      ],
+    }],
+  })
+  const preview = await parseWorkbookFile(bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ), { filename: 'shared-date.xlsx' })
+
+  assert.equal(preview.rows.length, 0)
+  assert.equal(preview.quarantinedRows[0].reasonCode, 'SERVICE_DATE_INVALID')
+})
+
+test('adds parser and materializer versions without changing transport format version', () => {
+  const preview = normalizeWorkbookRows(reconciliationFixture)
+
+  assert.equal(preview.formatVersion, 1)
+  assert.equal(preview.parserVersion, 2)
+  assert.equal(preview.materializerVersion, 2)
 })
 
 test('parses CSV rows with quoted commas and stable source keys', async () => {
@@ -284,4 +367,62 @@ test('rejects unsafe workbook formats', async () => {
     parseWorkbookFile(new ArrayBuffer(8), { filename: 'unsafe.xlsm' }),
     /WORKBOOK_FORMAT_UNSUPPORTED/,
   )
+})
+
+test('rejects executable formulas and unsafe OOXML package relationships', async () => {
+  const cases = [
+    {
+      name: 'macro.xlsx',
+      bytes: testWorkbook({ extraFiles: { 'xl/vbaProject.bin': new Uint8Array([1]) } }),
+      code: 'WORKBOOK_MACRO_FORBIDDEN',
+    },
+    {
+      name: 'external.xlsx',
+      bytes: testWorkbook({
+        extraRelationships: '<Relationship Id="external" Type="externalLink" Target="https://example.test/source.xlsx" TargetMode="External"/>',
+      }),
+      code: 'WORKBOOK_EXTERNAL_RELATIONSHIP_FORBIDDEN',
+    },
+    {
+      name: 'malformed-relationship.xlsx',
+      bytes: testWorkbook({
+        extraRelationships: '<Relationship Id="malformed" Type="worksheet"/>',
+      }),
+      code: 'WORKBOOK_RELATIONSHIP_INVALID',
+    },
+    {
+      name: 'traversal.xlsx',
+      bytes: testWorkbook({ extraFiles: { '../escape.txt': strToU8('unsafe') } }),
+      code: 'WORKBOOK_ARCHIVE_PATH_INVALID',
+    },
+    {
+      name: 'dde.xlsx',
+      bytes: testWorkbook({ sheets: [{
+        name: 'Maj 2025',
+        rows: [
+          transactionHeader,
+          ['Konsultacja', { formula: 'DDE("cmd","/c calc")', cached: 180 }, 'Osoba Testowa', '2025-05-02'],
+        ],
+      }] }),
+      code: 'WORKBOOK_FORMULA_FORBIDDEN',
+    },
+  ]
+
+  for (const { name, bytes, code } of cases) {
+    await assert.rejects(parseWorkbookFile(bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ), { filename: name }), new RegExp(code))
+  }
+})
+
+test('rejects an archive whose decompressed payload exceeds the parser budget', async () => {
+  const bytes = testWorkbook({
+    extraFiles: { 'xl/media/oversized.bin': new Uint8Array(26 * 1024 * 1024) },
+  })
+
+  await assert.rejects(parseWorkbookFile(bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ), { filename: 'oversized.xlsx' }), /WORKBOOK_DECOMPRESSED_SIZE_INVALID/)
 })
