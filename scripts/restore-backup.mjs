@@ -6,7 +6,11 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { createKeyring } from '../worker/security/keyring.js'
-import { restoreBackup, validateRestoreRequest } from './restore-backup-lib.mjs'
+import {
+  createPinnedWranglerRunner,
+  restoreBackup,
+  validateRestoreRequest,
+} from './restore-backup-lib.mjs'
 
 const executeFile = promisify(execFile)
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -69,23 +73,6 @@ const bodyStream = (body) => {
   if (body instanceof ReadableStream) return body
   if (typeof body?.transformToWebStream === 'function') return body.transformToWebStream()
   throw new Error('RESTORE_FAILED')
-}
-
-const recursiveValue = (value, key) => {
-  if (!value || typeof value !== 'object') return null
-  if (Object.hasOwn(value, key)) return value[key]
-  for (const child of Object.values(value)) {
-    const found = recursiveValue(child, key)
-    if (found !== null) return found
-  }
-  return null
-}
-
-const recursiveValues = (value, key, result = []) => {
-  if (!value || typeof value !== 'object') return result
-  if (Object.hasOwn(value, key)) result.push(value[key])
-  for (const child of Object.values(value)) recursiveValues(child, key, result)
-  return result
 }
 
 async function main() {
@@ -174,26 +161,16 @@ async function main() {
       return bodyStream(response.Body)
     },
   }
-  const runCommand = async (command) => {
-    const common = [wranglerPath, 'd1', 'execute', command.target, '--remote', '--json']
-    let args
-    if (command.operation === 'import') args = [...common, '--file', command.filePath]
-    else if (command.operation === 'migrations') {
-      args = [...common, '--command', 'SELECT name FROM d1_migrations ORDER BY id']
-    } else if (command.operation === 'sentinel') {
-      args = [...common, '--command', "SELECT json_extract(value_json,'$.sentinel') AS sentinel FROM system_state WHERE key='restore.sentinel'"]
-    } else throw new Error('RESTORE_FAILED')
-    const child = await executeFile(process.execPath, args, {
+  const commandRunner = createPinnedWranglerRunner({
+    tempRoot: tmpdir(),
+    wranglerPath,
+    execute: (args) => executeFile(process.execPath, args, {
       cwd: projectRoot,
       env: { PATH: process.env.PATH, CLOUDFLARE_API_TOKEN: apiToken },
       maxBuffer: 1024 * 1024,
       signal: controller.signal,
-    })
-    const parsed = JSON.parse(child.stdout)
-    if (command.operation === 'import') return { imported: true }
-    if (command.operation === 'migrations') return { migrations: recursiveValues(parsed, 'name') }
-    return { sentinel: recursiveValue(parsed, 'sentinel') }
-  }
+    }),
+  })
 
   const abort = () => controller.abort()
   process.once('SIGINT', abort)
@@ -206,7 +183,7 @@ async function main() {
       tempRoot: tmpdir(),
       keyring,
       provider,
-      runCommand,
+      runCommand: commandRunner.runCommand,
       log() {},
       signal: controller.signal,
     })
@@ -214,6 +191,7 @@ async function main() {
   } finally {
     process.removeListener('SIGINT', abort)
     process.removeListener('SIGTERM', abort)
+    await commandRunner.cleanup()
   }
 }
 

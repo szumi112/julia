@@ -901,6 +901,108 @@ describe('operational backup create runner', () => {
     }])
   })
 
+  it.each([
+    ['SQL', 1],
+    ['manifest', 2],
+  ])('terminalizes an expired final claim after %s upload so retention can clean it', async (_stage, expireAfterPut) => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: `job_backup_exhausted_after_${expireAfterPut}`,
+      backupId: `bkp_backup_exhausted_after_${expireAfterPut}`,
+      localDay: `2044-08-0${expireAfterPut}`,
+    })
+    await processNextBackupCreate(processInput({
+      context,
+      schedulerRun,
+      idFactory: () => `attempt_backup_exhausted_${expireAfterPut}_1`,
+      leaseOwnerFactory: () => `owner_backup_exhausted_${expireAfterPut}_1`,
+    }))
+    const attemptSevenNow = await forceReclaims({ context, schedulerRun, count: 6 })
+    const attemptEightNow = attemptSevenNow + LEASE_MS + 1
+    let nowMs = attemptEightNow
+    let putCount = 0
+    const archive = {
+      async put(key, value) {
+        putCount += 1
+        if (key.endsWith('.sql')) await value.pipeTo(new WritableStream({ write() {} }))
+        if (putCount === expireAfterPut) nowMs = attemptEightNow + LEASE_MS + 1
+        return {
+          etag: `etag-exhausted-${expireAfterPut}-${putCount}`,
+          size: key.endsWith('.sql') ? 1 : value.byteLength,
+        }
+      },
+    }
+    const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+    const runnerInput = () => ({
+      db: env.DB,
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      schedulerRun,
+      now: () => nowMs,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence(`attempt_backup_exhausted_${expireAfterPut}_8`),
+      leaseOwnerFactory: sequence(`owner_backup_exhausted_${expireAfterPut}_8`),
+      nonceFactory: () => new Uint8Array(12).fill(expireAfterPut),
+      rawKeyFactory: () => new Uint8Array(32).fill(expireAfterPut + 1),
+      pollExport: async () => ({
+        atBookmark: `bookmark-exhausted-${expireAfterPut}`,
+        downloadUrl: `https://download.example.test/exhausted-${expireAfterPut}`,
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([expireAfterPut]))
+            controller.close()
+          },
+        }),
+      }),
+    })
+
+    await expect(runNextBackupCreate(runnerInput())).rejects.toThrow('BACKUP_LEASE_LOST')
+    expect(putCount).toBe(expireAfterPut)
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'processing', attempt_count: 8, last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'exporting', version: 2, last_error_code: null,
+    })
+
+    const terminalInput = runnerInput()
+    terminalInput.pollExport = async () => { throw new Error('PROVIDER_MUST_NOT_RUN') }
+    terminalInput.downloadExport = async () => { throw new Error('PROVIDER_MUST_NOT_RUN') }
+    await expect(runNextBackupCreate(terminalInput)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'dead',
+      attempt_count: 8,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'failed', version: 3, last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect((await attempts(seeded.jobId)).at(-1)).toMatchObject({
+      attempt_number: 8,
+      result: 'dead',
+      error_code: 'OUTBOX_LEASE_EXPIRED',
+      provider_reference: null,
+    })
+  })
+
   it('retains a monthly stored backup for 12 calendar months', async () => {
     const context = await cryptoContext()
     const schedulerRun = await seedScheduler()
@@ -1036,7 +1138,7 @@ describe('strict backup reclaim', () => {
     ))).toBe(true)
   })
 
-  it('allows attempt seven to become private recovery-only attempt eight then rejects exhaustion', async () => {
+  it('allows attempt seven to become private recovery-only attempt eight then terminalizes exhaustion', async () => {
     const { context, schedulerRun, seeded } = await initialClaim({
       idFactory: () => 'attempt_backup_recovery_1',
       leaseOwnerFactory: () => 'owner_backup_recovery_1',
@@ -1058,17 +1160,22 @@ describe('strict backup reclaim', () => {
     expect((await attempts(seeded.jobId)).filter((row) => row.completed_at === null))
       .toEqual([expect.objectContaining({ attempt_number: 8 })])
 
-    const exhaustedJob = await job(seeded.jobId)
-    const exhaustedAttempts = await attempts(seeded.jobId)
     await expect(processNextBackupCreate(processInput({
       context,
       schedulerRun,
       nowMs: attemptEightNow + LEASE_MS + 1,
       idFactory: () => 'attempt_backup_recovery_9',
       leaseOwnerFactory: () => 'owner_backup_recovery_9',
-    }))).rejects.toThrow(/^BACKUP_STATE_INVALID$/)
-    expect(await job(seeded.jobId)).toEqual(exhaustedJob)
-    expect(await attempts(seeded.jobId)).toEqual(exhaustedAttempts)
+    }))).resolves.toEqual({ claimed: true, schedulerRun })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'dead', attempt_count: 8, last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'failed', version: 3, last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect((await attempts(seeded.jobId)).at(-1)).toMatchObject({
+      attempt_number: 8, result: 'dead', error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
   })
 
   it('uses the same exact five-statement budget for reclaim', async () => {

@@ -279,7 +279,7 @@ function validateInitial(row, common) {
     || row.max_attempt_number !== null
     || row.invalid_terminal_attempt_rows !== 0
     || ATTEMPT_COLUMNS.some((column) => row[`old_attempt_${column}`] !== null)) invalid()
-  return { ...common, oldAttempt: null, nextAttempt: 1 }
+  return { ...common, oldAttempt: null, nextAttempt: 1, exhausted: false }
 }
 
 function validateReclaim(row, common, claimNow) {
@@ -313,8 +313,13 @@ function validateReclaim(row, common, claimNow) {
     || oldAttempt.result !== null
     || oldAttempt.error_code !== null
     || oldAttempt.provider_reference !== null) invalid()
-  if (job.attempt_count >= job.max_attempts) invalid()
-  return { ...common, oldAttempt, nextAttempt: job.attempt_count + 1 }
+  const exhausted = job.attempt_count >= job.max_attempts
+  return {
+    ...common,
+    oldAttempt,
+    nextAttempt: exhausted ? null : job.attempt_count + 1,
+    exhausted,
+  }
 }
 
 async function validateCandidate(row, cryptoContext, claimNow) {
@@ -711,6 +716,10 @@ async function processCaptured(input) {
   const row = await readCandidate(input.db, input.claimNow)
   if (row === null) return { claimed: false, schedulerRun: input.scheduler }
   const candidate = await validateCandidate(row, input.cryptoContext, input.claimNow)
+  if (candidate.exhausted) {
+    await terminalizeExhaustedClaim(input, candidate)
+    return { claimed: true, schedulerRun: input.scheduler }
+  }
   await claimCandidate(input, candidate)
   return { claimed: true, schedulerRun: input.scheduler }
 }
@@ -933,6 +942,109 @@ async function failClaim(input, candidate, claim, error) {
   return code
 }
 
+async function terminalizeExhaustedClaim(input, candidate) {
+  const { job, backup, oldAttempt } = candidate
+  const failedAt = input.claimNow
+  const errorCode = 'OUTBOX_LEASE_EXPIRED'
+  const oldJobBindings = processingJobBindings(
+    job,
+    job.attempt_count,
+    job.lease_owner,
+    job.lease_expires_at,
+    job.updated_at,
+  )
+  try {
+    fixedArray(await input.db.batch([
+      input.db.prepare(
+        `UPDATE outbox_attempts
+         SET completed_at=?,result='dead',error_code=?,provider_reference=NULL
+         WHERE id=? AND job_id=? AND attempt_number=? AND started_at=?
+           AND completed_at IS NULL AND result IS NULL
+           AND error_code IS NULL AND provider_reference IS NULL`
+      ).bind(
+        failedAt,
+        errorCode,
+        oldAttempt.id,
+        job.id,
+        oldAttempt.attempt_number,
+        oldAttempt.started_at,
+      ),
+      input.db.prepare(
+        `UPDATE backup_runs
+         SET status='failed',version=version+1,last_error_code=?,updated_at=?
+         WHERE changes()=1
+           AND ${exportingBackupPredicate('backup_runs')}
+           AND EXISTS (
+             SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+           )
+           AND EXISTS (
+             SELECT 1 FROM outbox_jobs AS j
+             WHERE ${oldProcessingJobPredicate('j')} AND j.lease_expires_at<?
+           )`
+      ).bind(
+        errorCode,
+        failedAt,
+        ...exportingBackupBindings(backup),
+        ...schedulerBindings(input),
+        ...oldJobBindings,
+        failedAt,
+      ),
+      input.db.prepare(
+        `UPDATE outbox_jobs
+         SET status='dead',lease_owner=NULL,lease_expires_at=NULL,
+             last_error_code=?,updated_at=?
+         WHERE changes()=1
+           AND ${oldProcessingJobPredicate('outbox_jobs')}
+           AND lease_expires_at<?`
+      ).bind(errorCode, failedAt, ...oldJobBindings, failedAt),
+      operationGuard(
+        input.db,
+        `backup_exhausted_${job.id}_${job.attempt_count}`,
+        `changes()=1
+         AND EXISTS (
+           SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+         )
+         AND EXISTS (
+           SELECT 1 FROM backup_runs
+           WHERE id=? AND status='failed' AND version=3
+             AND last_error_code=? AND updated_at=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_jobs
+           WHERE id=? AND status='dead' AND attempt_count=8
+             AND lease_owner IS NULL AND lease_expires_at IS NULL
+             AND last_error_code=? AND updated_at=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_attempts
+           WHERE id=? AND job_id=? AND attempt_number=8
+             AND completed_at=? AND result='dead' AND error_code=?
+             AND provider_reference IS NULL
+         )
+         AND (SELECT count(*) FROM outbox_attempts
+              WHERE job_id=? AND completed_at IS NULL)=0`,
+        [
+          ...schedulerBindings(input),
+          backup.id,
+          errorCode,
+          failedAt,
+          job.id,
+          errorCode,
+          failedAt,
+          oldAttempt.id,
+          job.id,
+          failedAt,
+          errorCode,
+          job.id,
+        ],
+      ),
+    ]), 4)
+  } catch (error) {
+    if (isD1OutboxOperationGuardFailure(error)) throw new Error('BACKUP_LEASE_LOST')
+    throw error
+  }
+}
+
 export async function runNextBackupCreate(input) {
   const runner = captureRunnerInput(input)
   const captured = captureInput({
@@ -951,6 +1063,15 @@ export async function runNextBackupCreate(input) {
   const row = await readCandidate(captured.db, captured.claimNow)
   if (row === null) return { claimed: false, result: null, backupId: null }
   const candidate = await validateCandidate(row, captured.cryptoContext, captured.claimNow)
+  if (candidate.exhausted) {
+    await terminalizeExhaustedClaim(captured, candidate)
+    return {
+      claimed: true,
+      result: 'dead',
+      backupId: candidate.backup.id,
+      errorCode: 'OUTBOX_LEASE_EXPIRED',
+    }
+  }
   const claim = await claimCandidate(captured, candidate)
   let rawSsecKey
   try {

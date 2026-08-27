@@ -3,7 +3,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { restoreBackup, validateRestoreRequest } from '../../scripts/restore-backup-lib.mjs'
+import {
+  createPinnedWranglerRunner,
+  restoreBackup,
+  validateRestoreRequest,
+  writeRestoreStream,
+} from '../../scripts/restore-backup-lib.mjs'
 
 const fixture = JSON.parse(readFileSync(
   new URL('../fixtures/backup-format-v1.json', import.meta.url),
@@ -26,6 +31,107 @@ const keyring = Object.freeze({
       ['encrypt', 'decrypt'],
     )
     : null,
+})
+
+test('Wrangler restore commands use only a temporary binding pinned to the validated database UUID', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'bwm-restore-runner-test-'))
+  const target = 'bearwithme-restore-pinned'
+  const targetId = '11111111-2222-4333-8444-555555555555'
+  const invocations = []
+  let configPath = null
+  const runner = createPinnedWranglerRunner({
+    tempRoot,
+    wranglerPath: '/opaque/wrangler.js',
+    async execute(args) {
+      invocations.push(args)
+      const configIndex = args.indexOf('--config')
+      assert.notEqual(configIndex, -1)
+      configPath = args[configIndex + 1]
+      assert.equal(statSync(configPath).mode & 0o777, 0o600)
+      assert.deepEqual(JSON.parse(readFileSync(configPath, 'utf8')), {
+        compatibility_date: '2026-08-27',
+        d1_databases: [{
+          binding: 'RESTORE_TARGET',
+          database_id: targetId,
+          database_name: target,
+        }],
+        name: 'bearwithme-restore-operator',
+      })
+      if (args.includes('--file')) return { stdout: '[]' }
+      if (args.some((value) => value.includes('d1_migrations'))) {
+        return { stdout: '[{"results":[{"name":"0001_identity_operations.sql"}]}]' }
+      }
+      return { stdout: '[{"results":[{"sentinel":"opaque_sentinel"}]}]' }
+    },
+  })
+
+  try {
+    assert.deepEqual(await runner.runCommand({
+      operation: 'import', target, targetId, filePath: '/opaque/restore.sql',
+    }), { imported: true })
+    assert.deepEqual(await runner.runCommand({
+      operation: 'migrations', target, targetId,
+    }), { migrations: ['0001_identity_operations.sql'] })
+    assert.deepEqual(await runner.runCommand({
+      operation: 'sentinel', target, targetId,
+    }), { sentinel: 'opaque_sentinel' })
+  } finally {
+    await runner.cleanup()
+  }
+
+  assert.equal(invocations.length, 3)
+  for (const args of invocations) {
+    assert.deepEqual(args.slice(0, 4), [
+      '/opaque/wrangler.js', 'd1', 'execute', 'RESTORE_TARGET',
+    ])
+    assert.equal(args.includes(target), false)
+    assert.equal(args.includes(targetId), false)
+  }
+  assert.ok(configPath)
+  assert.equal(existsSync(configPath), false)
+  rmSync(tempRoot, { recursive: true, force: true })
+})
+
+test('restore stream retries short file writes and counts only confirmed bytes', async () => {
+  const written = []
+  const writes = []
+  const handle = {
+    async write(bytes, offset, length, position) {
+      assert.equal(position, null)
+      const bytesWritten = Math.min(2, length)
+      writes.push({ offset, length, bytesWritten })
+      written.push(...bytes.subarray(offset, offset + bytesWritten))
+      return { bytesWritten, buffer: bytes }
+    },
+  }
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3, 4, 5]))
+      controller.enqueue(new Uint8Array([6]))
+      controller.close()
+    },
+  })
+
+  await assert.doesNotReject(writeRestoreStream(handle, stream, 6))
+  assert.deepEqual(written, [1, 2, 3, 4, 5, 6])
+  assert.deepEqual(writes, [
+    { offset: 0, length: 5, bytesWritten: 2 },
+    { offset: 2, length: 3, bytesWritten: 2 },
+    { offset: 4, length: 1, bytesWritten: 1 },
+    { offset: 0, length: 1, bytesWritten: 1 },
+  ])
+})
+
+test('restore stream rejects a zero-progress file write', async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1]))
+      controller.close()
+    },
+  })
+  await assert.rejects(writeRestoreStream({
+    async write(bytes) { return { bytesWritten: 0, buffer: bytes } },
+  }, stream, 1), /^Error: RESTORE_FAILED$/)
 })
 
 test('guarded restore authenticates R2 facts, imports through 0600, verifies migrations and sentinel, then cleans up', async () => {
@@ -168,7 +274,11 @@ test('guarded restore aborts between commands and always removes the plaintext t
     keyring,
     provider: {
       async describeDatabase(target) {
-        return { name: target, id: 'target-abort-id', jurisdiction: 'eu' }
+        return {
+          name: target,
+          id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+          jurisdiction: 'eu',
+        }
       },
       async getManifest() { return manifestBytes },
       async headObject() {
