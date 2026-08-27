@@ -283,7 +283,7 @@ describe('authoritative Access desired membership', () => {
     const cryptoContext = await context()
     const owner = await seedStaff(cryptoContext, {
       id: `stf_staging_owner_${serial}`,
-      email: 'staging-owner@bearwithme-panel.app',
+      email: 'kontakt@bearwithme.pl',
       role: 'owner',
       status: 'active',
     })
@@ -295,7 +295,7 @@ describe('authoritative Access desired membership', () => {
       NOW_MS,
       'staging',
     )).resolves.toMatchObject({
-      emails: ['staging-owner@bearwithme-panel.app'],
+      emails: ['kontakt@bearwithme.pl'],
     })
     await expect(handlers.desiredAccessMembership(
       env.DB,

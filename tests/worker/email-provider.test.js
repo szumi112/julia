@@ -146,7 +146,7 @@ describe('Scaleway invitation email provider request', () => {
   })
 
   it('accepts the staging owner alias only for the exact staging origin', async () => {
-    const recipient = 'staging-owner@bearwithme-panel.app'
+    const recipient = 'kontakt@bearwithme.pl'
     const fetch = vi.fn(async () => response(acceptedBody()))
 
     await expect(sendInvitationEmail({

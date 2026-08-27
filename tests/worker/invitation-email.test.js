@@ -339,7 +339,7 @@ describe('authoritative invitation email dispatch', () => {
   })
 
   it('delivers the exact protected staging role alias through an injected provider', async () => {
-    const value = await fixture({ email: 'staging-owner@bearwithme-panel.app' })
+    const value = await fixture({ email: 'kontakt@bearwithme.pl' })
     const provider = vi.fn().mockResolvedValue({ providerId: PROVIDER_ID })
 
     await expect(dispatch(value, {
@@ -350,7 +350,7 @@ describe('authoritative invitation email dispatch', () => {
       providers: { sendInvitationEmail: provider },
     })).resolves.toEqual({ result: 'email-accepted', providerId: PROVIDER_ID })
     expect(provider).toHaveBeenCalledTimes(1)
-    expect(provider.mock.calls[0][0].recipient).toBe('staging-owner@bearwithme-panel.app')
+    expect(provider.mock.calls[0][0].recipient).toBe('kontakt@bearwithme.pl')
   })
 
   it.each([
