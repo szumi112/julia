@@ -154,16 +154,32 @@ const relationshipOwner = (path) => {
 }
 
 const unsafeFormulaPipe = (formula) => {
-  let inString = false
+  let quote = null
+  let quotedIdentifierPipe = false
   for (let index = 0; index < formula.length; index++) {
-    if (formula[index] === '"') {
-      if (inString && formula[index + 1] === '"') index++
-      else inString = !inString
-    } else if (formula[index] === '|' && !inString) {
-      return true
+    const character = formula[index]
+    if (quote === '"') {
+      if (character !== '"') continue
+      if (formula[index + 1] === '"') index++
+      else quote = null
+      continue
     }
+    if (quote === "'") {
+      if (character === '|') quotedIdentifierPipe = true
+      if (character !== "'") continue
+      if (formula[index + 1] === "'") index++
+      else {
+        if (quotedIdentifierPipe && formula[index + 1] !== '!') return true
+        quote = null
+        quotedIdentifierPipe = false
+      }
+      continue
+    }
+    if (character === '"') quote = '"'
+    else if (character === "'") quote = "'"
+    else if (character === '|') return true
   }
-  return inString
+  return quote !== null
 }
 
 const unsafeFormula = (formula) => /\b(?:CALL|DDE|EXEC|HYPERLINK|REGISTER|RTD|WEBSERVICE)\s*\(/i.test(formula)

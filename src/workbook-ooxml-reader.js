@@ -74,6 +74,10 @@ const worksheetRows = (xml, sharedStrings) => {
     for (const cellMatch of body.matchAll(/<c\b([^>]*?)>([\s\S]*?)<\/c\s*>|<c\b([^>]*?)\/>/g)) {
       const cellAttributes = cellMatch[1] ?? cellMatch[3] ?? ''
       const reference = xmlAttribute(cellAttributes, 'r')
+      const referenceRow = Number(/^[A-Z]{1,3}([1-9]\d*)$/.exec(reference)?.[1])
+      if (!Number.isSafeInteger(referenceRow) || referenceRow !== rowNumber) {
+        fail('WORKBOOK_CELL_REFERENCE_INVALID')
+      }
       const column = columnIndex(reference)
       if (cells.has(column)) fail('WORKBOOK_CELL_DUPLICATE')
       const cellBody = cellMatch[2] ?? ''
@@ -93,8 +97,31 @@ const requiredStringCell = (rows, rowNumber, column) => {
   return cell.value
 }
 
+const metadataDimension = (xml) => {
+  const dimensions = [...xml.matchAll(/<dimension\b([^>]*?)(?:\/>|>[\s\S]*?<\/dimension\s*>)/g)]
+  if (!dimensions.length) return
+  if (dimensions.length !== 1) fail('PANEL_META_INVALID')
+  const reference = xmlAttribute(dimensions[0][1], 'ref')
+  const references = reference?.split(':') ?? []
+  if (!references.length || references.length > 2) fail('PANEL_META_INVALID')
+  const bounds = references.map((value) => {
+    const match = /^([A-Z]{1,3})([1-9]\d*)$/.exec(value)
+    if (!match) fail('PANEL_META_INVALID')
+    const row = Number(match[2])
+    if (!Number.isSafeInteger(row)) fail('PANEL_META_INVALID')
+    return { column: columnIndex(value), row }
+  })
+  const [start, end = start] = bounds
+  if (start.column > end.column || start.row > end.row
+    || start.column > 0 || start.row > 1 || end.column < 0 || end.row < 3) {
+    fail('PANEL_META_INVALID')
+  }
+}
+
 const readSignedMetadata = async (files, metaSheet, sharedStrings, verify) => {
-  const rows = worksheetRows(readXml(files, metaSheet.path), sharedStrings)
+  const xml = readXml(files, metaSheet.path)
+  metadataDimension(xml)
+  const rows = worksheetRows(xml, sharedStrings)
   if (rows.size !== 3 || [...rows.entries()].some(([rowNumber, cells]) => (
     rowNumber < 1 || rowNumber > 3 || cells.size !== 1 || !cells.has(0)
   ))) fail('PANEL_META_INVALID')
@@ -105,26 +132,19 @@ const readSignedMetadata = async (files, metaSheet, sharedStrings, verify) => {
   }, verify)
 }
 
-const hasMetadataEnvelope = (files, sheet, sharedStrings) => {
-  const envelopeCells = new Set()
-  const markerValues = []
+const isResidualMetadataCandidate = (files, sheet, sharedStrings) => {
+  if (sheet.state !== 'veryHidden' || !sheet.relationship.type?.endsWith('/worksheet')
+    || (sheet.relationship.targetMode
+      && sheet.relationship.targetMode.toLowerCase() !== 'internal')) return false
   const xml = readXml(files, sheet.path)
   for (const match of xml.matchAll(/<c\b([^>]*?)>([\s\S]*?)<\/c\s*>/g)) {
     const reference = xmlAttribute(match[1], 'r')
-    if (reference !== 'A1' && reference !== 'A2' && reference !== 'A3') continue
-    const type = xmlAttribute(match[1], 't')
-    if (reference !== 'A1' && ['inlineStr', 's', 'str'].includes(type)) {
-      envelopeCells.add(reference)
-    }
+    if (reference !== 'A1' || /<(?:[A-Za-z_][\w.-]*:)?f\b/.test(match[2])) continue
     try {
-      const value = cellValue(match[1], match[2], sharedStrings)
-      if (reference === 'A1' && typeof value === 'string') markerValues.push(value)
-      else if (typeof value === 'string') envelopeCells.add(reference)
+      if (cellValue(match[1], match[2], sharedStrings) === 'Panel-v2') return true
     } catch {}
   }
-  return markerValues.includes('Panel-v2')
-    && envelopeCells.has('A2')
-    && envelopeCells.has('A3')
+  return false
 }
 
 const headerColumns = (rows) => {
@@ -183,23 +203,23 @@ export const readPanelWorkbook = async (source, { verify } = {}) => {
   ))
   const recognized = new Set([...PANEL_VISIBLE_SHEETS, PANEL_PERMISSIONS_SHEET, PANEL_META_SHEET])
   const panelSheets = catalog.sheets.filter(({ name }) => recognized.has(name))
-  const envelopeSheets = catalog.sheets.filter((sheet) => (
-    hasMetadataEnvelope(files, sheet, sharedStrings)
+  const residualCandidates = catalog.sheets.filter((sheet) => (
+    isResidualMetadataCandidate(files, sheet, sharedStrings)
   ))
   const hasPanelArtifacts = panelSheets.length > 0
     || catalog.sheets.some(({ name }) => name.startsWith('Panel — '))
-    || envelopeSheets.length > 0
+    || residualCandidates.length > 0
   if (!hasPanelArtifacts) {
     return { edits: [], kind: 'legacy', metadata: null, voidIds: [] }
   }
   const metaSheets = panelSheets.filter(({ name }) => name === PANEL_META_SHEET)
   if (metaSheets.length !== 1) {
-    if (envelopeSheets.length === 1) {
-      await readSignedMetadata(files, envelopeSheets[0], sharedStrings, verify)
+    if (residualCandidates.length === 1) {
+      await readSignedMetadata(files, residualCandidates[0], sharedStrings, verify)
     }
     fail('PANEL_META_REQUIRED')
   }
-  if (envelopeSheets.length !== 1 || envelopeSheets[0].path !== metaSheets[0].path) {
+  if (residualCandidates.some(({ path }) => path !== metaSheets[0].path)) {
     fail('PANEL_META_INVALID')
   }
   const names = new Set()

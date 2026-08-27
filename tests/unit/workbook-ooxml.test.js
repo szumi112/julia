@@ -382,7 +382,7 @@ test('full-centre patch appends Panel-v2 while preserving legacy OOXML semantics
     'Panel \u2014 Uprawnienia',
     'Panel \u2014 Meta',
   ])
-  assert.match(workbook, /name="Panel \u2014 Meta"[^>]*state="hidden"/)
+  assert.match(workbook, /name="Panel \u2014 Meta"[^>]*state="veryHidden"/)
   assert.match(workbook, /<calcPr\b[^>]*calcMode="auto"[^>]*fullCalcOnLoad="1"[^>]*forceFullCalc="1"/)
   assert.equal(files['xl/calcChain.xml'], undefined)
   assert.doesNotMatch(relationships, /calcChain/)
@@ -606,6 +606,9 @@ const resaveSharedCellsAsInline = (xml, strings) => xml.replace(
   (_, before, after, index) => `<c${before}${after} t="inlineStr"><is><t>${testXmlEscape(strings[Number(index)])}</t></is></c>`,
 )
 
+const copyPackageFiles = (files) => Object.fromEntries(Object.entries(files)
+  .map(([path, bytes]) => [path, new Uint8Array(bytes)]))
+
 test('Meta verification survives client re-save representation and ZIP ordering changes', async () => {
   const { readPanelWorkbook } = await workbookOoxml()
   const files = unzipSync(await patchedPanelWorkbook())
@@ -647,15 +650,37 @@ test('signed inline Meta cannot be downgraded by removing shared strings and ren
   files['xl/workbook.xml'] = strToU8(
     strFromU8(files['xl/workbook.xml']).replaceAll('Panel — ', 'Archive — '),
   )
+  const dimensionVariants = Object.fromEntries(['expanded', 'malformed', 'missing']
+    .map((name) => [name, copyPackageFiles(files)]))
+  dimensionVariants.expanded['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(dimensionVariants.expanded['xl/worksheets/sheet9.xml'])
+      .replace('<dimension ref="A1:A3"/>', '<dimension ref="A1:C99"/>'),
+  )
+  dimensionVariants.malformed['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(dimensionVariants.malformed['xl/worksheets/sheet9.xml'])
+      .replace('<dimension ref="A1:A3"/>', '<dimension ref="not-a-range"/>'),
+  )
+  dimensionVariants.missing['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(dimensionVariants.missing['xl/worksheets/sheet9.xml'])
+      .replace('<dimension ref="A1:A3"/>', ''),
+  )
   let verificationCalls = 0
 
-  await assert.rejects(readPanelWorkbook(zipSync(files), {
+  for (const candidateFiles of [files, dimensionVariants.expanded, dimensionVariants.missing]) {
+    await assert.rejects(readPanelWorkbook(zipSync(candidateFiles), {
+      verify: async (...args) => {
+        verificationCalls++
+        return signingCallbacks.verify(...args)
+      },
+    }), /PANEL_META_REQUIRED/)
+  }
+  await assert.rejects(readPanelWorkbook(zipSync(dimensionVariants.malformed), {
     verify: async (...args) => {
       verificationCalls++
       return signingCallbacks.verify(...args)
     },
-  }), /PANEL_META_REQUIRED/)
-  assert.equal(verificationCalls, 1)
+  }), /PANEL_META_INVALID/)
+  assert.equal(verificationCalls, 3)
 })
 
 test('malformed renamed inline Meta cannot be downgraded after shared-string compaction', async () => {
@@ -681,46 +706,85 @@ test('malformed renamed inline Meta cannot be downgraded after shared-string com
   files['xl/workbook.xml'] = strToU8(
     strFromU8(files['xl/workbook.xml']).replaceAll('Panel — ', 'Archive — '),
   )
-  const invalidCellFiles = Object.fromEntries(Object.entries(files)
-    .map(([path, bytes]) => [path, new Uint8Array(bytes)]))
-  files['xl/worksheets/sheet9.xml'] = strToU8(
-    strFromU8(files['xl/worksheets/sheet9.xml'])
+  const variants = Object.fromEntries([
+    'bogusType', 'duplicateRow', 'invalidIndex', 'mismatchedRow', 'signature',
+  ]
+    .map((name) => [name, copyPackageFiles(files)]))
+  variants.duplicateRow['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(variants.duplicateRow['xl/worksheets/sheet9.xml'])
       .replace(
         '</sheetData>',
         '<row r="3"><c r="A3" t="inlineStr"><is><t>duplicate</t></is></c></row></sheetData>',
       ),
   )
-  invalidCellFiles['xl/worksheets/sheet9.xml'] = strToU8(
-    strFromU8(invalidCellFiles['xl/worksheets/sheet9.xml']).replace(
+  variants.invalidIndex['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(variants.invalidIndex['xl/worksheets/sheet9.xml']).replace(
       /<c\b(?=[^>]*\br="A2")[^>]*>[\s\S]*?<\/c>/,
       '<c r="A2" t="s"><v>999999</v></c>',
     ),
   )
+  variants.bogusType['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(variants.bogusType['xl/worksheets/sheet9.xml']).replace(
+      /<c\b(?=[^>]*\br="A2")[^>]*>[\s\S]*?<\/c>/,
+      '<c r="A2" t="bogus"><v>1</v></c>',
+    ),
+  )
+  variants.mismatchedRow['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(variants.mismatchedRow['xl/worksheets/sheet9.xml'])
+      .replace('<c r="A2"', '<c r="A4"'),
+  )
+  variants.signature['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(variants.signature['xl/worksheets/sheet9.xml']).replace(
+      /<c\b(?=[^>]*\br="A3")[^>]*>[\s\S]*?<\/c>/,
+      '<c r="A3" t="inlineStr"><is><t>sig_tampered</t></is></c>',
+    ),
+  )
   let verificationCalls = 0
 
-  await assert.rejects(readPanelWorkbook(zipSync(files), {
+  await assert.rejects(readPanelWorkbook(zipSync(variants.duplicateRow), {
     verify: async (...args) => {
       verificationCalls++
       return signingCallbacks.verify(...args)
     },
   }), /WORKBOOK_ROW_INVALID|PANEL_META_INVALID/)
-  await assert.rejects(readPanelWorkbook(zipSync(invalidCellFiles), {
+  await assert.rejects(readPanelWorkbook(zipSync(variants.invalidIndex), {
     verify: async (...args) => {
       verificationCalls++
       return signingCallbacks.verify(...args)
     },
   }), /WORKBOOK_SHARED_STRING_INVALID|PANEL_META_INVALID/)
-  assert.equal(verificationCalls, 0)
+  await assert.rejects(readPanelWorkbook(zipSync(variants.bogusType), {
+    verify: async (...args) => {
+      verificationCalls++
+      return signingCallbacks.verify(...args)
+    },
+  }), /WORKBOOK_CELL_TYPE_INVALID|PANEL_META_INVALID/)
+  await assert.rejects(readPanelWorkbook(zipSync(variants.mismatchedRow), {
+    verify: async (...args) => {
+      verificationCalls++
+      return signingCallbacks.verify(...args)
+    },
+  }), /WORKBOOK_CELL_REFERENCE_INVALID|PANEL_META_INVALID/)
+  await assert.rejects(readPanelWorkbook(zipSync(variants.signature), {
+    verify: async (...args) => {
+      verificationCalls++
+      return signingCallbacks.verify(...args)
+    },
+  }), /PANEL_META_SIGNATURE_INVALID/)
+  assert.equal(verificationCalls, 1)
 })
 
-test('ordinary legacy text equal to the marker is not a Meta envelope', async () => {
+test('ordinary visible legacy A1:A3 text is not a residual Meta candidate', async () => {
   const { readPanelWorkbook } = await workbookOoxml()
   const files = syntheticTemplateFiles()
   files['xl/worksheets/sheet2.xml'] = strToU8(
-    strFromU8(files['xl/worksheets/sheet2.xml']).replace(
-      '<c r="A1" s="7"><v>42</v></c>',
-      '<c r="A1" t="inlineStr"><is><t>Panel-v2</t></is></c>',
-    ),
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+      + '<dimension ref="A1:A3"/><sheetData>'
+      + '<row r="1"><c r="A1" t="inlineStr"><is><t>Panel-v2</t></is></c></row>'
+      + '<row r="2"><c r="A2" t="inlineStr"><is><t>Ordinary note</t></is></c></row>'
+      + '<row r="3"><c r="A3" t="inlineStr"><is><t>Ordinary footer</t></is></c></row>'
+      + '</sheetData></worksheet>',
   )
 
   assert.deepEqual(await readPanelWorkbook(zipSync(files), {
@@ -825,6 +889,7 @@ test('scoped output rebuilds from explicit allowlists with compact strings and n
       .map((match) => Number(match[1])))]
 
   assert.deepEqual(workbookSheetNames(workbook), ['Panel \u2014 Wizyty', 'Panel \u2014 Meta'])
+  assert.match(workbook, /name="Panel \u2014 Meta"[^>]*state="veryHidden"/)
   assert.doesNotMatch(allPartText, new RegExp(sentinel))
   assert.doesNotMatch(allPartText, /<f\b/)
   assert.deepEqual([...new Set(usedIndexes)].sort((left, right) => left - right),
@@ -1151,15 +1216,21 @@ test('generated formulas are explicit trusted inputs and reject external or exec
     verify: signingCallbacks.verify,
   })).kind, 'panel-v2')
 
-  const literalPipeSheets = panelSheets()
-  literalPipeSheets[0].rows[0].values.total.formula = 'IF(A1="left|right",1,0)'
-  const literalPipe = await patchPanelWorkbook(syntheticTemplate(), {
-    sheets: literalPipeSheets,
-    metadata: panelMetadata(),
-  }, { sign: signingCallbacks.sign })
-  assert.equal((await readPanelWorkbook(literalPipe, {
-    verify: signingCallbacks.verify,
-  })).kind, 'panel-v2')
+  for (const formula of [
+    "'Visits|Archive'!A10",
+    "'Owner''s Visits|Archive'!A10",
+    'IF(A1="left|right",1,0)',
+  ]) {
+    const literalPipeSheets = panelSheets()
+    literalPipeSheets[0].rows[0].values.total.formula = formula
+    const literalPipe = await patchPanelWorkbook(syntheticTemplate(), {
+      sheets: literalPipeSheets,
+      metadata: panelMetadata(),
+    }, { sign: signingCallbacks.sign })
+    assert.equal((await readPanelWorkbook(literalPipe, {
+      verify: signingCallbacks.verify,
+    })).kind, 'panel-v2')
+  }
 })
 
 test('re-patching Panel-v2 replaces generated sheets and removes revoked optional parts', async () => {
