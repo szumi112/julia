@@ -4,7 +4,19 @@ import { decodeBase64Url } from '../security/encoding.js'
 const MAX_AGE_SECONDS = 8 * 60 * 60
 const TOLERANCE_SECONDS = 5
 
-const invalid = () => new Error('ACCESS_ASSERTION_INVALID')
+const DIAGNOSTIC_CODE = /^ACCESS_JWT_[A-Z0-9_]{1,48}$/
+const invalid = (diagnosticCode = 'ACCESS_JWT_INVALID') => {
+  const error = new Error('ACCESS_ASSERTION_INVALID')
+  Object.defineProperty(error, 'diagnosticCode', {
+    configurable: false,
+    enumerable: false,
+    value: DIAGNOSTIC_CODE.test(diagnosticCode)
+      ? diagnosticCode
+      : 'ACCESS_JWT_INVALID',
+    writable: false,
+  })
+  return error
+}
 const unavailable = () => new Error('ACCESS_KEYSET_UNAVAILABLE')
 const integer = (value) => Number.isSafeInteger(value)
 const remoteJwksByFetch = new WeakMap()
@@ -21,6 +33,26 @@ const keysetUnavailable = () => {
   const error = unavailable()
   keysetFailures.add(error)
   return error
+}
+
+const verificationDiagnostic = (error) => {
+  if (error?.message === 'ACCESS_ASSERTION_INVALID'
+    && DIAGNOSTIC_CODE.test(error?.diagnosticCode ?? '')) return error.diagnosticCode
+  if (error?.code === 'ERR_JWT_EXPIRED') return 'ACCESS_JWT_EXPIRED'
+  if (error?.code === 'ERR_JWT_CLAIM_VALIDATION_FAILED') {
+    if (error.claim === 'aud') return 'ACCESS_JWT_AUDIENCE_INVALID'
+    if (error.claim === 'iss') return 'ACCESS_JWT_ISSUER_INVALID'
+    if (error.claim === 'nbf') return 'ACCESS_JWT_NOT_ACTIVE'
+    return 'ACCESS_JWT_CLAIMS_INVALID'
+  }
+  if (error?.code === 'ERR_JWKS_NO_MATCHING_KEY') return 'ACCESS_JWT_KEY_ID_INVALID'
+  if (error?.code === 'ERR_JWS_SIGNATURE_VERIFICATION_FAILED') {
+    return 'ACCESS_JWT_SIGNATURE_INVALID'
+  }
+  if (error?.code === 'ERR_JWS_INVALID' || error?.code === 'ERR_JWT_INVALID') {
+    return 'ACCESS_JWT_FORMAT_INVALID'
+  }
+  return 'ACCESS_JWT_VERIFICATION_INVALID'
 }
 
 function validRsaMaterial(key) {
@@ -133,7 +165,7 @@ export function createAccessVerifier({ issuer, audience, jwks, now = () => new D
     } catch (error) {
       if (remoteOutages.has(error)) throw keysetUnavailable()
       if (error?.message === 'ACCESS_ASSERTION_INVALID') throw error
-      throw invalid()
+      throw invalid(verificationDiagnostic(error))
     }
   }
   return Object.freeze({
@@ -175,7 +207,7 @@ export async function resolveAccessPrincipal(request, { config, verifier, expect
       return principal
     } catch (error) {
       if (keysetFailures.has(error)) throw error
-      throw invalid()
+      throw invalid(error?.diagnosticCode)
     }
   }
   if (expected === 'human') return localIdentity(request, config)

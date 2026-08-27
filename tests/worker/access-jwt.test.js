@@ -61,6 +61,16 @@ describe('Access assertion verification', () => {
     }
   })
 
+  it('keeps a non-public diagnostic category for a rejected audience', async () => {
+    const assertion = await signAccessJwt(TEST_IDENTITIES.owner, { audience: 'other' })
+    const error = await verifier().verifyHumanAccessAssertion(assertion).catch((reason) => reason)
+
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe('ACCESS_ASSERTION_INVALID')
+    expect(error.diagnosticCode).toBe('ACCESS_JWT_AUDIENCE_INVALID')
+    expect(Object.keys(error)).not.toContain('diagnosticCode')
+  })
+
   it('accepts an audience array containing the exact audience and rejects human-service confusion', async () => {
     await expect(verifier().verifyHumanAccessAssertion(await signAccessJwt(TEST_IDENTITIES.owner, { audience: ['unrelated', AUDIENCE] }))).resolves.toMatchObject({ kind: 'human' })
     const serviceWithEmail = await signAccessJwt({ common_name: testConfig.accessHealthServiceTokenId, email: 'service@example.test', sub: '' })
