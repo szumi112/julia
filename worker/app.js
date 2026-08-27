@@ -26,7 +26,12 @@ import {
   resolveOperationalAction,
 } from './routes/operations.js'
 import { getSession } from './routes/session.js'
-import { getStaff, postDeactivation, postInvitation } from './routes/staff.js'
+import {
+  getStaff,
+  postDeactivation,
+  postInvitation,
+  postSpecialistInvitation,
+} from './routes/staff.js'
 import { getWorkspace } from './routes/workspace.js'
 import { postClient, postClientArchive, postClientEdit } from './routes/clients.js'
 import {
@@ -36,6 +41,10 @@ import {
   postAppointmentPayment,
 } from './routes/appointments.js'
 import { postPaymentCorrection } from './routes/payments.js'
+import {
+  postSpecialistProfile,
+  postSpecialistProfileEdit,
+} from './routes/specialists.js'
 import {
   getFinance,
   postFinanceImport,
@@ -58,6 +67,7 @@ const HEALTH_PATH = '/api/v1/health/live'
 const STAFF_PATH = '/api/v1/staff'
 const STAFF_INVITATIONS_PATH = '/api/v1/staff/invitations'
 const STAFF_ID = /^\/api\/v1\/staff\/stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}\/deactivation$/
+const SPECIALIST_INVITATION_ID = /^\/api\/v1\/specialists\/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}\/invitations$/
 const ACTION_RESOLUTION_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/resolution$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CLIENT_PATH_ID = 'cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}'
@@ -86,6 +96,8 @@ const descriptor = (value) => {
 }
 const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'workspace', path: '/api/v1/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'client.operational.read', auditActions: [], bodyKeys: null }),
+  descriptor({ id: 'specialists.create', path: '/api/v1/specialists', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'standardRateGrosze'] }),
+  descriptor({ id: 'specialists.edit', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'standardRateGrosze'] }),
   descriptor({ id: 'clients.create', path: '/api/v1/clients', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'] }),
   descriptor({ id: 'clients.edit', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'] }),
   descriptor({ id: 'clients.archive', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/archive$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'] }),
@@ -127,6 +139,7 @@ const routeFor = (request) => {
   }
   if (url.search === '' && url.pathname === STAFF_PATH) return { id: 'staff.list', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
   if (url.search === '' && url.pathname === STAFF_INVITATIONS_PATH) return { id: 'staff.invitations', expected: 'human', methods: ['POST', 'OPTIONS'] }
+  if (url.search === '' && SPECIALIST_INVITATION_ID.test(url.pathname)) return { id: 'specialists.invitations', expected: 'human', methods: ['POST', 'OPTIONS'] }
   if (url.search === '' && STAFF_ID.test(url.pathname)) return { id: 'staff.deactivation', expected: 'human', methods: ['POST', 'OPTIONS'] }
   if (url.search === '' && url.pathname === '/api/v1/operations/health') {
     return { id: 'operations.health', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'], allow: OPERATIONS_READ_ALLOW, service: 'getOperationalHealth' }
@@ -328,6 +341,7 @@ export function createApp(deps = {}) {
     if (isMutationMethod(method)) {
       c.set('jsonBody', await (deps.readJsonBodyOnce ?? readJsonBodyOnce)(request, {
         rejectDuplicateTopLevelKeys: route.core || route.id === 'staff.invitations'
+          || route.id === 'specialists.invitations'
           || route.id === 'staff.deactivation'
           || route.id === 'operations.action-resolution',
       }))
@@ -396,6 +410,30 @@ export function createApp(deps = {}) {
       ...(deps.createClient ? { create: deps.createClient } : {}),
     }
     const result = await (deps.postClient ?? postClient)(input)
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/specialists', async (c) => {
+    if (c.get('routeId') !== 'specialists.create') throw new AppError('NOT_FOUND')
+    const result = await (deps.postSpecialistProfile ?? postSpecialistProfile)({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory, body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.createSpecialistProfile ? { create: deps.createSpecialistProfile } : {}),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/specialists/:specialistId/edits', async (c) => {
+    if (c.get('routeId') !== 'specialists.edit') throw new AppError('NOT_FOUND')
+    const result = await (deps.postSpecialistProfileEdit ?? postSpecialistProfileEdit)({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory, specialistId: c.req.param('specialistId'),
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.updateSpecialistProfile ? { edit: deps.updateSpecialistProfile } : {}),
+    })
     return c.json(result.body, result.status)
   })
   app.post('/api/v1/clients/:clientId/edits', async (c) => {
@@ -564,6 +602,17 @@ export function createApp(deps = {}) {
     const result = await (deps.postDeactivation ?? postDeactivation)({ db: c.env?.DB ?? deps.db, cryptoContext: c.get('cryptoContext'), actor: c.get('actor'), nowMs: c.get('nowMs'), correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory, idempotencyKey: c.req.header('Idempotency-Key'), body: c.get('jsonBody'), staffId: c.req.param('staffId'), config: runtimeConfig(c, deps) })
     return c.json(result)
   })
+  app.post('/api/v1/specialists/:specialistId/invitations', async (c) => {
+    if (c.get('routeId') !== 'specialists.invitations') throw new AppError('NOT_FOUND')
+    const result = await (deps.postSpecialistInvitation ?? postSpecialistInvitation)({
+      db: c.env?.DB ?? deps.db, cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'), nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      idempotencyKey: c.req.header('Idempotency-Key'), body: c.get('jsonBody'),
+      specialistId: c.req.param('specialistId'), config: runtimeConfig(c, deps),
+    })
+    return c.json(result, 201)
+  })
   app.options('/api/v1/staff', (c) => {
     if (c.get('routeId') !== 'staff.list') throw new AppError('NOT_FOUND')
     return new Response(null, { status: 204, headers: { Allow: 'GET, HEAD, OPTIONS' } })
@@ -574,6 +623,10 @@ export function createApp(deps = {}) {
   })
   app.options('/api/v1/staff/:staffId/deactivation', (c) => {
     if (c.get('routeId') !== 'staff.deactivation') throw new AppError('NOT_FOUND')
+    return new Response(null, { status: 204, headers: { Allow: STAFF_MUTATION_ALLOW } })
+  })
+  app.options('/api/v1/specialists/:specialistId/invitations', (c) => {
+    if (c.get('routeId') !== 'specialists.invitations') throw new AppError('NOT_FOUND')
     return new Response(null, { status: 204, headers: { Allow: STAFF_MUTATION_ALLOW } })
   })
   app.get('/api/v1/operations/health', async (c) => {

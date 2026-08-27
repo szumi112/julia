@@ -175,6 +175,8 @@ describe('closed core route descriptors', () => {
       id, capability, auditActions, bodyKeys, sharedBudget,
     }))).toEqual([
       { id: 'workspace', capability: 'client.operational.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'specialists.create', capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'standardRateGrosze'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'specialists.edit', capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'standardRateGrosze'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'clients.create', capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'clients.edit', capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'clients.archive', capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },

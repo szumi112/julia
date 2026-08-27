@@ -21,7 +21,7 @@ const invalidEmails = Object.freeze([
 ])
 
 describe('shared canonical email boundary', () => {
-  it('admits only the public centre email as the staging owner address', () => {
+  it('admits canonical real staff e-mails only on staging', () => {
     expect(acceptPhaseOneAccessEmail('owner@example.test', { appEnv: 'development' }))
       .toBe('owner@example.test')
     expect(acceptPhaseOneAccessEmail('owner@example.test', { appEnv: 'production' }))
@@ -34,10 +34,13 @@ describe('shared canonical email boundary', () => {
     })).toBeNull()
     expect(acceptPhaseOneAccessEmail('staging-owner@bearwithme-panel.app', {
       appEnv: 'staging',
-    })).toBeNull()
+    })).toBe('staging-owner@bearwithme-panel.app')
     expect(acceptPhaseOneAccessEmail('another@bearwithme-panel.app', {
       appEnv: 'staging',
-    })).toBeNull()
+    })).toBe('another@bearwithme-panel.app')
+    expect(acceptPhaseOneAccessEmail('anna-j@gmail.com', {
+      appEnv: 'staging',
+    })).toBe('anna-j@gmail.com')
   })
 
   it('reserves the non-deliverable empty-group address from application identities', () => {

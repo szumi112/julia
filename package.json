@@ -35,6 +35,9 @@
     "migrate:core:stage-c": "APP_ENV=development DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-c --local",
     "migrate:core:stage-c:staging": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-c --remote --env staging",
     "migrate:core:stage-c:production": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-c --remote --env production",
+    "migrate:core:stage-d": "APP_ENV=development DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-d --local",
+    "migrate:core:stage-d:staging": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-d --remote --env staging",
+    "migrate:core:stage-d:production": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-d --remote --env production",
     "upgrade:core-directory": "APP_ENV=development DATA_MODE=fictional node scripts/upgrade-core-directory.js",
     "upgrade:core-directory:staging": "DATA_MODE=fictional node scripts/upgrade-core-directory.js --remote --env staging",
     "upgrade:core-directory:production": "DATA_MODE=fictional node scripts/upgrade-core-directory.js --remote --env production"

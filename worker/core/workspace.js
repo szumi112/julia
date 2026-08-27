@@ -25,7 +25,7 @@ const dayFormatter = new Intl.DateTimeFormat('en-CA', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 })
 const collator = new Intl.Collator('pl-PL', { sensitivity: 'base', usage: 'sort' })
-const CAPS = Object.freeze({ specialists: 50, clients: 200, appointments: 500, paymentEntries: 1_000 })
+const CAPS = Object.freeze({ specialists: 50, clients: 1_000, appointments: 500, paymentEntries: 1_000 })
 const STAFF_KEYS = Object.freeze([
   'id', 'staff_user_id', 'standard_rate_grosze', 'status', 'version', 'staff_id',
   'staff_specialist_id', 'staff_status', 'staff_version', 'display_name_envelope',
@@ -139,11 +139,11 @@ const freeze = (value) => {
   return value
 }
 
-const defaultDecryptSpecialist = async ({ staffId, envelope, cryptoContext }) => {
+const defaultDecryptSpecialist = async ({ recordId, envelope, cryptoContext }) => {
   const context = captureExact(cryptoContext, ['keyring', 'dataKey', 'scope'], cryptoFailure)
   return decryptForScope(context.keyring, context.dataKey, {
     expectedScope: context.scope,
-    recordId: staffId,
+    recordId,
     field: 'display_name',
     envelope: parseEnvelope(envelope),
   })
@@ -238,6 +238,19 @@ const DIRECTORY_SQL = `
   JOIN staff_users AS staff
     ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
   WHERE specialist.status='active' AND staff.status='active'
+  ORDER BY specialist.id
+  LIMIT ?`
+
+const DIRECTORY_V2_SQL = `
+  SELECT specialist.id, specialist.staff_user_id, specialist.standard_rate_grosze,
+         specialist.status, specialist.version, staff.id AS staff_id,
+         staff.specialist_id AS staff_specialist_id, staff.status AS staff_status,
+         staff.version AS staff_version, specialist.display_name_envelope
+  FROM specialists AS specialist
+  LEFT JOIN staff_users AS staff
+    ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
+  WHERE specialist.status IN ('active','pending')
+    AND (specialist.staff_user_id IS NULL OR staff.status IN ('pending','active'))
   ORDER BY specialist.id
   LIMIT ?`
 
@@ -375,17 +388,45 @@ const validatedClientKey = (row) => {
   return dataKey
 }
 
-const specialistDto = async (row, context, decrypt) => {
-  if (!isSpecialistId(row.id)
-    || typeof row.staff_user_id !== 'string' || row.staff_user_id !== row.staff_id
-    || row.staff_specialist_id !== row.id || row.status !== 'active'
-    || row.staff_status !== 'active' || !positive(row.standard_rate_grosze, 1_000_000)
-    || !positive(row.version) || !positive(row.staff_version)
-    || typeof row.display_name_envelope !== 'string') invalid()
-  const displayName = canonicalName(await decrypt({
-    staffId: row.staff_id, envelope: row.display_name_envelope, cryptoContext: context,
-  }))
-  return freeze({
+const specialistDto = async (row, context, decrypt, profileV2) => {
+  const accessStatus = row.staff_user_id === null
+    ? 'unclaimed'
+    : row.staff_status === 'pending' ? 'invited'
+      : row.staff_status === 'active' ? 'enabled' : null
+  if (!isSpecialistId(row.id) || !positive(row.standard_rate_grosze, 1_000_000)
+    || !positive(row.version) || typeof row.display_name_envelope !== 'string'
+    || (profileV2
+      ? (!['active', 'pending'].includes(row.status) || accessStatus === null
+        || (row.staff_user_id !== null && (
+          row.staff_user_id !== row.staff_id || row.staff_specialist_id !== row.id
+          || !positive(row.staff_version)
+        )))
+      : (typeof row.staff_user_id !== 'string' || row.staff_user_id !== row.staff_id
+        || row.staff_specialist_id !== row.id || row.status !== 'active'
+        || row.staff_status !== 'active' || !positive(row.staff_version)))) invalid()
+  let decryptedName
+  try {
+    decryptedName = await decrypt({
+      recordId: profileV2 ? row.id : row.staff_id,
+      staffId: row.staff_id,
+      envelope: row.display_name_envelope,
+      cryptoContext: context,
+    })
+  } catch (error) {
+    if (!profileV2 || row.staff_id === null) throw error
+    decryptedName = await decrypt({
+      recordId: row.staff_id,
+      staffId: row.staff_id,
+      envelope: row.display_name_envelope,
+      cryptoContext: context,
+    })
+  }
+  const displayName = canonicalName(decryptedName)
+  return freeze(profileV2 ? {
+    id: row.id, displayName, standardRateGrosze: row.standard_rate_grosze,
+    status: 'active', version: row.version, staffVersion: row.staff_version,
+    accessStatus,
+  } : {
     id: row.id, displayName, standardRateGrosze: row.standard_rate_grosze,
     status: 'active', version: row.version, staffVersion: row.staff_version,
   })
@@ -570,11 +611,24 @@ export async function readWorkspace(input) {
   }, { nowMs: 0 })) invalid()
 
   const scoped = actor.role === 'specialist'
-  const specialistRows = limit(await query(
-    db, DIRECTORY_SQL, [CAPS.specialists + 1], STAFF_KEYS,
-  ), 'specialists')
+  let specialistRows
+  let profileV2 = true
+  try {
+    specialistRows = limit(await query(
+      db, DIRECTORY_V2_SQL, [CAPS.specialists + 1], STAFF_KEYS,
+    ), 'specialists')
+  } catch (error) {
+    if (!/no such column: specialist\.display_name_envelope/.test(error?.message ?? '')) {
+      throw error
+    }
+    profileV2 = false
+    specialistRows = limit(await query(
+      db, DIRECTORY_SQL, [CAPS.specialists + 1], STAFF_KEYS,
+    ), 'specialists')
+  }
   if (new Set(specialistRows.map((row) => row.id)).size !== specialistRows.length
-    || new Set(specialistRows.map((row) => row.staff_id)).size !== specialistRows.length) invalid()
+    || new Set(specialistRows.map((row) => row.staff_id).filter(Boolean)).size
+      !== specialistRows.filter((row) => row.staff_id !== null).length) invalid()
   const appointmentBindings = scoped
     ? [actor.specialistId, window.lower, window.upper, CAPS.appointments + 1]
     : [window.lower, window.upper, CAPS.appointments + 1]
@@ -608,7 +662,7 @@ export async function readWorkspace(input) {
     appointmentByClient.set(row.client_id, values)
   }
   const specialists = await Promise.all(specialistRows.map((row) => (
-    specialistDto(row, cryptoContext, decryptSpecialist)
+    specialistDto(row, cryptoContext, decryptSpecialist, profileV2)
   )))
   const clients = await Promise.all(clientRows.map((row) => (
     clientDto(row, actor, cryptoContext, decryptClient, appointmentByClient)

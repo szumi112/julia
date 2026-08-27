@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useApp, useWorkspaceWindow, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
+import { useApp, useWorkspaceRefresh, useWorkspaceWindow, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
 import { useMinuteNow } from '../clock.js'
@@ -13,6 +13,8 @@ import {
 import { sessionConflicts, specialistWeekLoad } from '../workspace.js'
 import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
 import { rollingWorkspaceRange } from '../workspace-view.js'
+import { useAuth } from '../auth.jsx'
+import { SpecialistAccessForm, SpecialistProfileForm } from './SpecialistProfileForms.jsx'
 
 const TEAM_FILTERS = [
   { value: 'all', label: 'Cały zespół' },
@@ -20,15 +22,30 @@ const TEAM_FILTERS = [
   { value: 'full', label: 'Pełne obłożenie' },
 ]
 
-function AppTeamDirectory({ psychologists }) {
+const ACCESS_LABELS = Object.freeze({
+  enabled: 'Dostęp aktywny',
+  invited: 'Zaproszenie oczekuje',
+  unclaimed: 'Brak dostępu do panelu',
+})
+const ACCESS_TONES = Object.freeze({ enabled: 'sage', invited: 'amber', unclaimed: 'ink' })
+
+function AppTeamDirectory({ onRefresh, psychologists }) {
+  const { session } = useAuth()
+  const owner = session.actor.role === 'owner'
+  const [surface, setSurface] = useState(null)
   return (
     <div>
       <div className="view-head">
         <div>
           <div className="eyebrow">Katalog specjalistek</div>
           <h1 className="display view-head__title">Zespół <em>centrum</em></h1>
-          <p className="view-head__sub">Lista aktywnych specjalistek jest dostępna tylko do odczytu.</p>
+          <p className="view-head__sub">{owner
+            ? 'Twórz i edytuj profile oraz aktywuj dostęp do panelu.'
+            : 'Lista aktywnych specjalistek jest dostępna tylko do odczytu.'}</p>
         </div>
+        {owner ? <div className="view-head__actions">
+          <Button icon="plus" onClick={() => setSurface({ kind: 'create' })}>Dodaj specjalistkę</Button>
+        </div> : null}
       </div>
       <div className="grid-2 team-grid">
         {psychologists.map((psychologist) => (
@@ -37,12 +54,44 @@ function AppTeamDirectory({ psychologists }) {
               <Avatar name={psychologist.name} color={psychologist.color} size={52} />
               <div className="team-card__identity">
                 <h2 className="team-card__name">{psychologist.name}</h2>
-                <span className="team-card__spec">Dostępna do planowania wizyt</span>
+                <span className="team-card__spec">Specjalistka · {fmtMoney(psychologist.rate)} / sesja</span>
+                <Pill tone={ACCESS_TONES[psychologist.accessStatus ?? 'enabled']}>
+                  {ACCESS_LABELS[psychologist.accessStatus ?? 'enabled']}
+                </Pill>
               </div>
             </div>
+            {owner ? (
+              <div className="team-card__footer">
+                <Button size="sm" variant="ghost" onClick={() => setSurface({
+                  kind: 'edit', profile: psychologist,
+                })}>Edytuj profil</Button>
+                {psychologist.accessStatus === 'unclaimed' ? (
+                  <Button size="sm" variant="soft" onClick={() => setSurface({
+                    kind: 'access', profile: psychologist,
+                  })}>Aktywuj dostęp</Button>
+                ) : null}
+              </div>
+            ) : null}
           </article>
         ))}
       </div>
+      {surface?.kind === 'create' ? (
+        <SpecialistProfileForm onClose={() => setSurface(null)} onSaved={onRefresh} />
+      ) : null}
+      {surface?.kind === 'edit' ? (
+        <SpecialistProfileForm
+          profile={surface.profile}
+          onClose={() => setSurface(null)}
+          onSaved={onRefresh}
+        />
+      ) : null}
+      {surface?.kind === 'access' ? (
+        <SpecialistAccessForm
+          profile={surface.profile}
+          onClose={() => setSurface(null)}
+          onSaved={onRefresh}
+        />
+      ) : null}
     </div>
   )
 }
@@ -165,6 +214,7 @@ export function Team() {
   const today = toISODate(now)
   const workspaceRange = useMemo(() => rollingWorkspaceRange(today), [today])
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const refreshWorkspace = useWorkspaceRefresh()
   const [filter, setFilter] = useState(() => {
     const saved = getViewState('team', { filter: 'all' })
     return TEAM_FILTERS.some((option) => option.value === saved.filter) ? saved.filter : 'all'
@@ -221,7 +271,12 @@ export function Team() {
     )
   }
 
-  if (isApp) return <AppTeamDirectory psychologists={psychologists} />
+  if (isApp) return (
+    <AppTeamDirectory
+      psychologists={psychologists}
+      onRefresh={() => refreshWorkspace(workspaceRange)}
+    />
+  )
 
   return (
     <div ref={ref}>

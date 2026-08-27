@@ -34,5 +34,5 @@ export function acceptPhaseOneAccessEmail(value, {
   if (email === null) return null
   if (email === ACCESS_DISABLED_EMAIL) return allowDisabled ? email : null
   if (email.endsWith('@example.test')) return email
-  return appEnv === 'staging' && email === STAGING_OWNER_EMAIL ? email : null
+  return appEnv === 'staging' ? email : null
 }

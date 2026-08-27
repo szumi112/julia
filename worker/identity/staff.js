@@ -24,6 +24,12 @@ const statementId = (factory) => {
   if (!id(value)) throw failure()
   return value
 }
+const accountLinkId = (factory) => {
+  const suffix = statementId(factory)
+  const value = `spl_${suffix}`
+  if (value.length > 128) throw failure()
+  return value
+}
 const entityType = (table) => table === 'staff_users' ? 'staff_user' : 'staff_invitation'
 const collision = isD1IdentityCollision
 
@@ -229,6 +235,13 @@ async function matchingStaff(db, candidates) {
   ).bind(...candidates).all()).results
 }
 
+async function hasSpecialistAccountLinks(db) {
+  const row = await db.prepare(
+    "SELECT name FROM sqlite_schema WHERE type='table' AND name='specialist_account_links'",
+  ).first()
+  return row?.name === 'specialist_account_links'
+}
+
 async function activeForSubject(db, subject) {
   return (await db.prepare(
     `SELECT id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,specialist_id,version,activated_at,disabled_at,created_at,updated_at
@@ -263,6 +276,22 @@ async function activate(db, staff, invitation, principal, context, values, optio
   ).bind(activeLookup, now, now, invitation.id, staff.id, staff.role, invitation.version, ...candidates, now)
   const staffVersion = await recordVersionStatement(db, context, 'staff_users', staff, staffNext, { now, correlationId, idFactory, changedByStaffId: staff.id })
   const invitationVersion = await recordVersionStatement(db, context, 'staff_invitations', invitation, invitationNext, { now, correlationId, idFactory, changedByStaffId: staff.id })
+  const linkStatement = specialist.specialistId !== null
+    && specialist.specialistVersion !== null
+    && await hasSpecialistAccountLinks(db)
+    ? db.prepare(
+        `INSERT INTO specialist_account_links
+         (id,specialist_id,staff_user_id,lifecycle,changed_by_staff_id,version,created_at)
+         VALUES (?,?,?,'activated',?,?,?)`,
+      ).bind(
+        accountLinkId(idFactory),
+        specialist.specialistId,
+        staff.id,
+        staff.id,
+        specialist.specialistVersion,
+        now,
+      )
+    : null
   const auditId = statementId(idFactory)
   recovery.attempt = Object.freeze({
     staffVersionId: staffVersion.id,
@@ -275,6 +304,7 @@ async function activate(db, staff, invitation, principal, context, values, optio
   const statements = [
     ...(specialist.domainStatement ? [specialist.domainStatement] : []),
     ...(specialist.versionStatement ? [specialist.versionStatement] : []),
+    ...(linkStatement ? [linkStatement] : []),
     staffUpdate,
     invitationUpdate,
     staffVersion.statement,

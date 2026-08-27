@@ -42,6 +42,7 @@ const VALIDATION_FIELDS = new Set([
   'specialists', 'clients', 'appointments', 'paymentEntries',
   'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
   'entries', 'accountingMonth', 'kind',
+  'standardRateGrosze',
 ])
 const WORKSPACE_FIELDS = new Set(['specialists', 'clients', 'appointments', 'paymentEntries'])
 const EXACT_INTERNAL_MESSAGES = new Set(Object.keys(STATUS_BY_CODE))

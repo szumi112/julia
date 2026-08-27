@@ -704,7 +704,7 @@ test('accepts every workspace cap boundary and rejects overflow without truncati
   boundaryBodies.push(specialists)
 
   const clients = fullWorkspaceBody()
-  clients.data.clients = Array.from({ length: 200 }, (_, index) => {
+  clients.data.clients = Array.from({ length: 1_000 }, (_, index) => {
     const client = structuredClone(clients.data.clients[0])
     const suffix = String(index).padStart(3, '0')
     client.id = `cl_${suffix}`
@@ -762,8 +762,8 @@ test('accepts every workspace cap boundary and rejects overflow without truncati
     })(),
     (() => {
       const body = structuredClone(clients)
-      const next = { ...body.data.clients.at(-1), id: 'cl_999', assignment: {
-        ...body.data.clients.at(-1).assignment, id: 'asg_999',
+      const next = { ...body.data.clients.at(-1), id: 'cl_1000', assignment: {
+        ...body.data.clients.at(-1).assignment, id: 'asg_1000',
       } }
       body.data.clients.push(next)
       return body
@@ -939,6 +939,77 @@ test('performs independent uncached workspace GETs without changing session or m
   assert.equal(calls.slice(1, 4).some((call) => header(call, 'Idempotency-Key') !== null), false)
   assert.equal(calls.slice(1, 4).some((call) => Object.hasOwn(call.init, 'body')), false)
   assert.equal(JSON.stringify(options), '{"from":"2026-08-01","to":"2026-08-31"}')
+})
+
+test('creates, edits, and targets an invitation at one stable specialist profile', async () => {
+  const createdAt = '2026-08-27T12:00:00.000Z'
+  const created = {
+    data: { specialist: {
+      id: 'sp_anna_profile', displayName: 'Anna Janowska',
+      standardRateGrosze: 18000, status: 'active', version: 1,
+      accessStatus: 'unclaimed', createdAt, updatedAt: createdAt,
+    } },
+  }
+  const updatedAt = '2026-08-27T12:01:00.000Z'
+  const edited = {
+    data: { specialist: {
+      ...created.data.specialist,
+      displayName: 'Anna Janowska-Kowalska',
+      standardRateGrosze: 19000,
+      version: 2,
+      staffVersion: null,
+      updatedAt,
+    } },
+  }
+  const invited = {
+    data: {
+      staff: staff({
+        id: 'stf_anna_profile', displayName: 'Anna Janowska-Kowalska',
+        email: 'anna-j@gmail.com', status: 'pending', version: 1,
+        specialistId: 'sp_anna_profile',
+      }),
+      invitation,
+    },
+  }
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse(created, 201),
+    jsonResponse(edited),
+    jsonResponse(invited, 201),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+  await client.createSpecialistProfile({
+    displayName: 'Anna Janowska', standardRateGrosze: 18000,
+  }, { idempotencyKey: 'specialist-create-api-0001' })
+  await client.updateSpecialistProfile('sp_anna_profile', 1, {
+    displayName: 'Anna Janowska-Kowalska', standardRateGrosze: 19000,
+  }, { idempotencyKey: 'specialist-edit-api-0001' })
+  await client.inviteSpecialistProfile('sp_anna_profile', {
+    email: 'anna-j@gmail.com', expectedVersion: 2,
+  }, { idempotencyKey: 'specialist-invite-api-0001' })
+
+  assert.deepEqual(queued.calls.slice(1).map(({ url, init }) => ({
+    body: init.body,
+    key: header({ init }, 'Idempotency-Key'),
+    method: init.method,
+    url,
+  })), [
+    {
+      body: '{"displayName":"Anna Janowska","standardRateGrosze":18000}',
+      key: 'specialist-create-api-0001', method: 'POST', url: '/api/v1/specialists',
+    },
+    {
+      body: '{"expectedVersion":1,"displayName":"Anna Janowska-Kowalska","standardRateGrosze":19000}',
+      key: 'specialist-edit-api-0001', method: 'POST',
+      url: '/api/v1/specialists/sp_anna_profile/edits',
+    },
+    {
+      body: '{"email":"anna-j@gmail.com","expectedVersion":2}',
+      key: 'specialist-invite-api-0001', method: 'POST',
+      url: '/api/v1/specialists/sp_anna_profile/invitations',
+    },
+  ])
 })
 
 test('gets and validates the session over the exact same-origin request', async () => {

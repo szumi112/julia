@@ -48,7 +48,8 @@ const eventFor = (action) => {
     entityId: schema.entityIdKind === 'clientId' ? 'cl_one'
       : schema.entityIdKind === 'appointmentId' ? 'apt_one'
         : schema.entityIdKind === 'financeBatchId' ? 'fib_one'
-          : schema.entityIdKind === 'financeEntryId' ? 'fin_one' : 'pay_one',
+          : schema.entityIdKind === 'financeEntryId' ? 'fin_one'
+            : schema.entityIdKind === 'specialistId' ? 'sp_one' : 'pay_one',
     result: 'success',
     metadata: Object.fromEntries(Object.entries(schema.metadata)
       .map(([key, type]) => [key, valueFor(type)])),

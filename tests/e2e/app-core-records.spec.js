@@ -268,7 +268,7 @@ test('@owner @coordinator keeps retained active practitioners in the exact 93-da
     await page.goto('./#/team')
     await expect(page.getByText('Alicja Retencja', { exact: true })).toBeVisible()
     await expect(page.getByText('Celina Retencja', { exact: true })).toBeVisible()
-    await expect(page.getByText('Dostępna do planowania wizyt', { exact: true })).toHaveCount(2)
+    await expect(page.getByText('Dostęp aktywny', { exact: true })).toHaveCount(2)
   }
   expect(sessionReads).toBe(1)
   expect(directory.map(({ id }) => id)).toContain(actor.specialistId)

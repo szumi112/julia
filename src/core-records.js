@@ -471,13 +471,22 @@ export const clientDto = (client) => {
 }
 
 export const specialistDto = (specialist) => {
-  assertExactObject(specialist, ['id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion'], 'specialist')
+  const legacyKeys = ['id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion']
+  try {
+    assertExactObject(specialist, legacyKeys, 'specialist')
+  } catch {
+    assertExactObject(specialist, [...legacyKeys, 'accessStatus'], 'specialist')
+  }
   assertId(specialist.id, 'specialist')
   assertNfcTrimmed(specialist.displayName, { field: 'displayName', minBytes: 1, maxBytes: 120 })
   assertInteger(specialist.standardRateGrosze, 'standardRateGrosze', 1, MAX_GROSZE)
   if (specialist.status !== 'active') fail('specialist')
   assertInteger(specialist.version, 'version', 1, Number.MAX_SAFE_INTEGER)
-  assertInteger(specialist.staffVersion, 'staffVersion', 1, Number.MAX_SAFE_INTEGER)
+  if (specialist.staffVersion !== null) {
+    assertInteger(specialist.staffVersion, 'staffVersion', 1, Number.MAX_SAFE_INTEGER)
+  }
+  if (Object.hasOwn(specialist, 'accessStatus')
+    && !['unclaimed', 'invited', 'enabled'].includes(specialist.accessStatus)) fail('specialist')
   return { ...specialist }
 }
 

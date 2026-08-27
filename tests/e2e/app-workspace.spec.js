@@ -289,7 +289,7 @@ test('@owner renders only complete canonical workspace windows as read-only hist
 
   await page.goto('./#/team')
   await expect(page.getByRole('heading', { level: 1, name: /Zespół/ })).toBeVisible()
-  await expect(page.getByRole('main').getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(0)
+  await expect(page.getByRole('main').getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(1)
 
   await page.goto('./#/psych?id=sp_anna')
   await expect(page.locator('.topbar__title b')).toHaveText('Dziś')

@@ -71,7 +71,7 @@ export function specialistSnapshot(profile) {
 function validProfile(profile) {
   return exactRow(profile, PROFILE_COLUMNS)
     && SPECIALIST_ID.test(profile.id ?? '')
-    && STAFF_ID.test(profile.staff_user_id ?? '')
+    && (profile.staff_user_id === null || STAFF_ID.test(profile.staff_user_id ?? ''))
     && Number.isSafeInteger(profile.standard_rate_grosze)
     && profile.standard_rate_grosze >= 1
     && profile.standard_rate_grosze <= 1_000_000
@@ -85,7 +85,11 @@ function validProfile(profile) {
     && profile.created_at <= profile.updated_at
 }
 
-async function snapshotEnvelope(context, profile) {
+async function snapshotEnvelope(context, profile, displayName = null) {
+  const snapshot = specialistSnapshot(profile)
+  const plaintext = displayName === null
+    ? JSON.stringify(snapshot)
+    : JSON.stringify({ ...snapshot, displayName, schema: 'specialist.v2' })
   return JSON.stringify(await encryptForScope(
     context.keyring,
     context.dataKey,
@@ -93,9 +97,16 @@ async function snapshotEnvelope(context, profile) {
       expectedScope: context.scope,
       recordId: profile.id,
       field: 'record_version',
-      plaintext: JSON.stringify(specialistSnapshot(profile)),
+      plaintext,
     },
   ))
+}
+
+async function hasDisplayNameColumn(db) {
+  const row = await db.prepare(
+    "SELECT name FROM pragma_table_info('specialists') WHERE name='display_name_envelope'",
+  ).first()
+  return row?.name === 'display_name_envelope'
 }
 
 export async function specialistSnapshotMatches(context, record, profile) {
@@ -115,7 +126,15 @@ export async function specialistSnapshotMatches(context, record, profile) {
         envelope: JSON.parse(record.snapshot_envelope),
       },
     )
-    return sameRow(JSON.parse(plaintext), specialistSnapshot(profile))
+    const parsed = JSON.parse(plaintext)
+    if (sameRow(parsed, specialistSnapshot(profile))) return true
+    if (parsed?.schema !== 'specialist.v2'
+      || typeof parsed.displayName !== 'string') return false
+    const { displayName: _displayName, ...withoutDisplayName } = parsed
+    return sameRow(withoutDisplayName, {
+      ...specialistSnapshot(profile),
+      schema: 'specialist.v2',
+    })
   } catch {
     return false
   }
@@ -134,7 +153,7 @@ async function currentProfile(db, context, specialistId, staffId) {
   if (!profile) return null
   if (!validProfile(profile)
     || profile.id !== specialistId
-    || profile.staff_user_id !== staffId) failure()
+    || (profile.staff_user_id !== null && profile.staff_user_id !== staffId)) failure()
   const record = await db.prepare(
     `SELECT id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
             changed_at,correlation_id
@@ -155,6 +174,7 @@ export async function prepareSpecialistTransition({
   now,
   correlationId,
   idFactory,
+  displayName,
 } = {}) {
   if (!db?.prepare || !cryptoContext?.keyring || !cryptoContext?.dataKey
     || !cryptoContext?.scope || !nextStaff || !STAFF_ID.test(nextStaff.id ?? '')
@@ -163,7 +183,7 @@ export async function prepareSpecialistTransition({
     || (changedByStaffId !== null && !STAFF_ID.test(changedByStaffId ?? ''))
     || !validInstant(now) || !validId(correlationId)) failure()
 
-  const retainedId = currentStaff?.specialist_id ?? null
+  const retainedId = currentStaff?.specialist_id ?? nextStaff.specialist_id ?? null
   if (retainedId !== null && !SPECIALIST_ID.test(retainedId)) failure()
   const specialistId = retainedId
     ?? (nextStaff.role === 'specialist' ? specialistIdFor(nextStaff.id) : null)
@@ -188,10 +208,19 @@ export async function prepareSpecialistTransition({
     specialistId,
     nextStaff.id,
   )
-  if (currentStaff && current && current.status !== specialistStatusForStaff(currentStaff.status)) {
+  const profileV2 = await hasDisplayNameColumn(db)
+  const releasedCurrent = profileV2
+    && currentStaff?.status === 'disabled'
+    && current?.staff_user_id === null
+    && current?.status === 'active'
+  if (currentStaff && current
+    && current.status !== specialistStatusForStaff(currentStaff.status)
+    && !releasedCurrent) {
     failure()
   }
-  const status = specialistStatusForStaff(nextStaff.status)
+  const releasing = profileV2 && current !== null && nextStaff.status === 'disabled'
+  const status = releasing ? 'active' : specialistStatusForStaff(nextStaff.status)
+  const nextStaffUserId = releasing ? null : nextStaff.id
   let profile
   let domainStatement
   if (!current) {
@@ -205,21 +234,52 @@ export async function prepareSpecialistTransition({
       created_at: now,
       updated_at: now,
     }
-    domainStatement = db.prepare(
-      `INSERT INTO specialists
-       (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
-       VALUES (?,?,18000,?,1,?,?,?)`
-    ).bind(
-      profile.id,
-      profile.staff_user_id,
-      profile.status,
-      profile.archived_at,
-      profile.created_at,
-      profile.updated_at,
-    )
-  } else if (current.status !== status) {
+    if (profileV2) {
+      if (typeof displayName !== 'string' || displayName !== displayName.trim()
+        || displayName.length < 1
+        || new TextEncoder().encode(displayName).byteLength > 120) failure()
+      const displayNameEnvelope = JSON.stringify(await encryptForScope(
+        cryptoContext.keyring,
+        cryptoContext.dataKey,
+        {
+          expectedScope: cryptoContext.scope,
+          recordId: profile.id,
+          field: 'display_name',
+          plaintext: displayName,
+        },
+      ))
+      domainStatement = db.prepare(
+        `INSERT INTO specialists
+         (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
+          archived_at,created_at,updated_at)
+         VALUES (?,?,?,18000,?,1,?,?,?)`
+      ).bind(
+        profile.id,
+        profile.staff_user_id,
+        displayNameEnvelope,
+        profile.status,
+        profile.archived_at,
+        profile.created_at,
+        profile.updated_at,
+      )
+    } else {
+      domainStatement = db.prepare(
+        `INSERT INTO specialists
+         (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+         VALUES (?,?,18000,?,1,?,?,?)`
+      ).bind(
+        profile.id,
+        profile.staff_user_id,
+        profile.status,
+        profile.archived_at,
+        profile.created_at,
+        profile.updated_at,
+      )
+    }
+  } else if (current.status !== status || current.staff_user_id !== nextStaffUserId) {
     profile = {
       ...current,
+      staff_user_id: nextStaffUserId,
       status,
       version: current.version + 1,
       archived_at: status === 'archived' ? now : null,
@@ -227,9 +287,10 @@ export async function prepareSpecialistTransition({
     }
     domainStatement = db.prepare(
       `UPDATE specialists
-       SET status=?,version=version+1,archived_at=?,updated_at=?
-       WHERE id=? AND staff_user_id=? AND status=? AND version=?`
+       SET staff_user_id=?,status=?,version=version+1,archived_at=?,updated_at=?
+       WHERE id=? AND staff_user_id IS ? AND status=? AND version=?`
     ).bind(
+      profile.staff_user_id,
       profile.status,
       profile.archived_at,
       profile.updated_at,
@@ -258,7 +319,7 @@ export async function prepareSpecialistTransition({
     recordId,
     profile.id,
     profile.version,
-    await snapshotEnvelope(cryptoContext, profile),
+    await snapshotEnvelope(cryptoContext, profile, current ? null : displayName ?? null),
     changedByStaffId,
     now,
     correlationId,
@@ -293,16 +354,30 @@ export function specialistPostcondition(staffId) {
             ))
           OR (
             staff.specialist_id IS NOT NULL
-            AND specialist.status=CASE staff.status
-              WHEN 'pending' THEN 'pending'
-              WHEN 'active' THEN 'active'
-              WHEN 'disabled' THEN 'archived'
-            END
+            AND (
+              specialist.status=CASE staff.status
+                WHEN 'pending' THEN 'pending'
+                WHEN 'active' THEN 'active'
+                WHEN 'disabled' THEN 'archived'
+              END
+              OR (
+                staff.status='disabled'
+                AND EXISTS (
+                  SELECT 1 FROM specialists AS released
+                  WHERE released.id=staff.specialist_id
+                    AND released.staff_user_id IS NULL
+                    AND released.status='active'
+                    AND released.archived_at IS NULL
+                )
+              )
+            )
             AND EXISTS (
               SELECT 1 FROM record_versions AS version
+              JOIN specialists AS current_specialist
+                ON current_specialist.id=staff.specialist_id
               WHERE version.entity_type='specialist'
-                AND version.entity_id=specialist.id
-                AND version.version=specialist.version
+                AND version.entity_id=current_specialist.id
+                AND version.version=current_specialist.version
             )
           )
         )
