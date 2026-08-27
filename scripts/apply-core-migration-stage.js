@@ -20,6 +20,7 @@ import {
   CORE_MIGRATION_REMOTE_ENV_NAMES,
   CORE_MIGRATION_STAGE_A_NAMES,
   CORE_MIGRATION_STAGE_B_NAMES,
+  CORE_MIGRATION_STAGE_C_NAMES,
   CORE_DIRECTORY_INVARIANT_FAILURE_SQL,
   confirmCoreMigrationRemoteTarget,
   selectCoreMigrationRemoteTarget,
@@ -229,7 +230,7 @@ export function normalizeCoreMigrationStageInput(env, argv = []) {
     || Array.isArray(env)
     || env.DATA_MODE !== 'fictional'
     || !Array.isArray(argv)
-    || !['stage-a', 'stage-b'].includes(argv[0])) {
+    || !['stage-a', 'stage-b', 'stage-c'].includes(argv[0])) {
     fail('CORE_MIGRATION_STAGE_INPUT_INVALID')
   }
   if (argv.length === 4 && argv[1] === '--remote' && argv[2] === '--env') {
@@ -382,7 +383,9 @@ export function runCoreMigrationStage({
       })
   const expectedNames = input.stage === 'stage-a'
     ? CORE_MIGRATION_STAGE_A_NAMES
-    : CORE_MIGRATION_STAGE_B_NAMES
+    : input.stage === 'stage-b'
+      ? CORE_MIGRATION_STAGE_B_NAMES
+      : CORE_MIGRATION_STAGE_C_NAMES
   if (generated.names.length !== expectedNames.length) fail()
   const args = [
     WRANGLER_SCRIPT,

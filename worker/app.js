@@ -36,6 +36,12 @@ import {
   postAppointmentPayment,
 } from './routes/appointments.js'
 import { postPaymentCorrection } from './routes/payments.js'
+import {
+  getFinance,
+  postFinanceImport,
+  postFinanceImportChunk,
+  postFinanceImportCommit,
+} from './routes/finance.js'
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
 import { loadDataKey } from './security/envelope.js'
 import { createKeyring } from './security/keyring.js'
@@ -57,6 +63,7 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CLIENT_PATH_ID = 'cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}'
 const APPOINTMENT_PATH_ID = 'apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const PAYMENT_PATH_ID = 'pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const FINANCE_BATCH_PATH_ID = 'fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const CORE_COMMAND_ALLOW = 'POST, OPTIONS'
 const CORE_READ_ALLOW = 'GET, HEAD, OPTIONS'
 const CORE_BUDGET = Object.freeze({ totalLimit: 50, recoveryReserve: 8 })
@@ -87,6 +94,10 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'appointments.cancel', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/cancellation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'] }),
   descriptor({ id: 'appointments.payment', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/payments$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'] }),
   descriptor({ id: 'payments.correct', pathPattern: `^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
+  descriptor({ id: 'finance.list', path: '/api/v1/finance', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null }),
+  descriptor({ id: 'finance.import.start', path: '/api/v1/finance/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'] }),
+  descriptor({ id: 'finance.import.chunk', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/chunks$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'] }),
+  descriptor({ id: 'finance.import.commit', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/commit$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'] }),
 ])
 export const CORE_ROUTE_DESCRIPTORS = CORE_ROUTES
 if (CORE_ROUTES.some((route) => route.auditActions.some((action) => !isCoreAuditAction(action)))) {
@@ -484,6 +495,50 @@ export function createApp(deps = {}) {
         ? { correctPayment: deps.correctAppointmentPayment } : {}),
     }
     const result = await (deps.postPaymentCorrection ?? postPaymentCorrection)(input)
+    return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/finance', async (c) => {
+    if (c.get('routeId') !== 'finance.list') throw new AppError('NOT_FOUND')
+    const result = await (deps.getFinance ?? getFinance)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'), url: c.req.url,
+      ...(deps.listFinanceEntries ? { list: deps.listFinanceEntries } : {}),
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/finance/imports', async (c) => {
+    if (c.get('routeId') !== 'finance.import.start') throw new AppError('NOT_FOUND')
+    const result = await (deps.postFinanceImport ?? postFinanceImport)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.startFinanceImport ? { start: deps.startFinanceImport } : {}),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/finance/imports/:batchId/chunks', async (c) => {
+    if (c.get('routeId') !== 'finance.import.chunk') throw new AppError('NOT_FOUND')
+    const result = await (deps.postFinanceImportChunk ?? postFinanceImportChunk)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      batchId: c.req.param('batchId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.appendFinanceImportChunk ? { append: deps.appendFinanceImportChunk } : {}),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/finance/imports/:batchId/commit', async (c) => {
+    if (c.get('routeId') !== 'finance.import.commit') throw new AppError('NOT_FOUND')
+    const result = await (deps.postFinanceImportCommit ?? postFinanceImportCommit)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      batchId: c.req.param('batchId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.commitFinanceImport ? { commit: deps.commitFinanceImport } : {}),
+    })
     return c.json(result.body, result.status)
   })
   app.options('/api/v1/session', (c) => new Response(null, {

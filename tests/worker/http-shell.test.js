@@ -160,6 +160,10 @@ describe('closed core route descriptors', () => {
       { id: 'appointments.cancel', capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'appointments.payment', capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'payments.correct', capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'finance.list', capability: 'finance.centre.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'finance.import.start', capability: 'finance.centre.manage', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'finance.import.chunk', capability: 'finance.centre.manage', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'finance.import.commit', capability: 'finance.centre.manage', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
     ])
     expect(Object.isFrozen(CORE_ROUTE_DESCRIPTORS)).toBe(true)
     expect(CORE_ROUTE_DESCRIPTORS.every((route) => Object.isFrozen(route)

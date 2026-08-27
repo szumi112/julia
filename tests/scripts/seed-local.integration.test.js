@@ -139,6 +139,20 @@ const applyMigrations = (root) => {
     shell: false,
   })
   if (sealing.status !== 0) assert.fail('SEED_LOCAL_TEST_SEALING_FAILED')
+  const finance = spawnSync(NODE, [APPLY_STAGE, 'stage-c', '--local'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...privateChildEnv(root),
+      APP_ENV: 'development',
+      BWM_LOCAL_PERSISTENCE_PATH: persistencePath(root),
+      BWM_LOCAL_RUNNER_MODE: LOCAL_HARNESS_RUNNER_MODE,
+      DATA_MODE: 'fictional',
+    },
+    maxBuffer: 64 * 1024,
+    shell: false,
+  })
+  if (finance.status !== 0) assert.fail('SEED_LOCAL_TEST_FINANCE_FAILED')
 }
 
 const wranglerExecute = (root, operationArgs) => spawnSync(NODE, [

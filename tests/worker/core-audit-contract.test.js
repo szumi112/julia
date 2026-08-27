@@ -31,6 +31,9 @@ const validators = Object.freeze([
 const valueFor = (type) => ({
   assignmentId: 'asg_one',
   correctionId: 'cor_one',
+  count: 2,
+  financeBatchId: 'fib_one',
+  financeEntryId: 'fin_one',
   nullablePaymentId: null,
   paymentId: 'pay_one',
   version: 1,
@@ -43,7 +46,9 @@ const eventFor = (action) => {
     actorStaffId: 'stf_one',
     entityType: schema.entityType,
     entityId: schema.entityIdKind === 'clientId' ? 'cl_one'
-      : schema.entityIdKind === 'appointmentId' ? 'apt_one' : 'pay_one',
+      : schema.entityIdKind === 'appointmentId' ? 'apt_one'
+        : schema.entityIdKind === 'financeBatchId' ? 'fib_one'
+          : schema.entityIdKind === 'financeEntryId' ? 'fin_one' : 'pay_one',
     result: 'success',
     metadata: Object.fromEntries(Object.entries(schema.metadata)
       .map(([key, type]) => [key, valueFor(type)])),

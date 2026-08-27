@@ -32,3 +32,13 @@ export const applyCoreDirectoryStageB = () => {
     selectCoreMigrationStage(env.TEST_STAGE_B_MIGRATIONS, 'stage-b'),
   )
 }
+
+export const applyFinanceStageC = () => {
+  if (env.CORE_DIRECTORY_STAGE !== 'stage-a-complete-before-fixtures') {
+    throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')
+  }
+  return applyD1Migrations(
+    env.DB,
+    selectCoreMigrationStage(env.TEST_STAGE_C_MIGRATIONS, 'stage-c'),
+  )
+}

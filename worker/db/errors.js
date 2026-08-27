@@ -18,6 +18,8 @@ const exactSignal = (error, signal) => new RegExp(
 
 export const isD1IdentityCollision = (error) => exactSignal(error, 'identity_collision')
 
+export const isD1FinanceSourceDuplicate = (error) => exactSignal(error, 'finance_source_duplicate')
+
 export const isD1LastActiveOwner = (error) => exactSignal(error, 'last_active_owner')
 
 export const isD1RateLimitGuardFailure = (error) => exactSignal(error, 'rate_limit_guard_failed')

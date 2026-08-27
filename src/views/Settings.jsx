@@ -325,7 +325,10 @@ export function Settings({ params = {} }) {
                   <span className="settings-account-identity__label">Rola</span>
                   <strong>{role.label}</strong>
                 </div>
-                <p>Tożsamość jest zarządzana przez chroniony dostęp do panelu.</p>
+                <p>
+                  Logujesz się jednorazowym kodem e-mail — panel nie przechowuje hasła.
+                  Aby otrzymać nowy kod, wyloguj się i rozpocznij logowanie ponownie.
+                </p>
               </div>
             ) : (
               <form className="card card--pad stack" aria-label="Twoje konto" onSubmit={saveProfile} noValidate>

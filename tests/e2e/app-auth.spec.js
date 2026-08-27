@@ -328,7 +328,7 @@ test('@owner constrains a max-length authenticated identity at shell breakpoints
       capabilities: [
         'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct',
         'chat.general', 'client.manage', 'client.operational.read', 'clinical.read',
-        'finance.centre.read', 'operations.health.read', 'payment.manage',
+        'finance.centre.manage', 'finance.centre.read', 'operations.health.read', 'payment.manage',
         'security.audit.read', 'specialist.directory.read', 'staff.manage', 'tus.manage',
       ],
       csrfExpiresAt,
@@ -427,6 +427,8 @@ test('@owner renders immutable identity and keeps browser application storage em
   const account = page.locator('.settings-account-identity')
   await expect(account).toContainText('Alicja Testowa')
   await expect(account).toContainText('Właściciel')
+  await expect(account).toContainText('jednorazowym kodem e-mail')
+  await expect(account).toContainText('panel nie przechowuje hasła')
   await expect(account.getByRole('textbox')).toHaveCount(0)
   await expect(account).not.toContainText('@')
   await expect(page.getByRole('button', { name: 'Zapisz konto' })).toHaveCount(0)

@@ -44,6 +44,7 @@ import { materializeCoreMigrationStageA } from './apply-core-migration-stage.js'
 import {
   CORE_MIGRATION_STAGE_A_NAMES,
   CORE_MIGRATION_STAGE_B_NAMES,
+  CORE_MIGRATION_STAGE_C_NAMES,
 } from './core-migration-stages.js'
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
@@ -1572,7 +1573,9 @@ const defaultAssertHarness = async (harness, migrationStage = 'stage-a') => {
     ? CORE_MIGRATION_STAGE_A_NAMES
     : migrationStage === 'stage-b'
       ? CORE_MIGRATION_STAGE_B_NAMES
-      : null
+      : migrationStage === 'stage-c'
+        ? CORE_MIGRATION_STAGE_C_NAMES
+        : null
   const migrationNames = readdirSync(activeMigrations).sort()
   if (!expectedMigrations
     || migrationNames.length !== expectedMigrations.length
@@ -2362,6 +2365,26 @@ export async function runAppE2E({
       shell: false,
     }, 'APP_E2E_MIGRATION_FAILED')
     migrationStage = 'stage-b'
+
+    await assertHarness(harness, migrationStage)
+    if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
+    await executeStage({
+      args: [
+        regularExecutable(APPLY_MIGRATION_STAGE_SCRIPT_PATH),
+        'stage-c',
+        '--local',
+      ],
+      command: regularExecutable(NODE_EXECUTABLE),
+      cwd: harness.path,
+      env: privateChildEnvironment(harness, {
+        APP_ENV: 'development',
+        BWM_LOCAL_PERSISTENCE_PATH: harness.state.path,
+        BWM_LOCAL_RUNNER_MODE: LOCAL_HARNESS_RUNNER_MODE,
+        DATA_MODE: 'fictional',
+      }),
+      shell: false,
+    }, 'APP_E2E_MIGRATION_FAILED')
+    migrationStage = 'stage-c'
 
     advance(PHASE.seeding)
     await assertHarness(harness, migrationStage)

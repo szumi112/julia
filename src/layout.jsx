@@ -17,6 +17,7 @@ import { Team, PsychDetail } from './views/Team.jsx'
 import { TusGroups } from './views/Tus.jsx'
 import { TusGroupDetail } from './views/TusGroup.jsx'
 import { Payments } from './views/Payments.jsx'
+import { Finance } from './views/Finance.jsx'
 import { Reports } from './views/Reports.jsx'
 import { Settings } from './views/Settings.jsx'
 import { SessionDrawer } from './views/SessionForm.jsx'
@@ -38,6 +39,7 @@ const NAV = [
   { id: 'tus', label: 'Zajęcia TUS', icon: 'group' },
   { id: 'team', label: 'Zespół', icon: 'team' },
   { id: 'payments', label: 'Finanse', icon: 'payments' },
+  { id: 'ledger', label: 'Rejestr', icon: 'reports' },
   { id: 'reports', label: 'Raporty', icon: 'reports' },
 ]
 
@@ -47,8 +49,8 @@ const DEMO_ROLE_NAV = {
   therapist: ['dashboard', 'calendar', 'clients', 'tus', 'settings'],
 }
 const APP_ROLE_NAV = {
-  owner: ['dashboard', 'calendar', 'clients', 'team', 'payments', 'reports', 'settings'],
-  coordinator: ['dashboard', 'calendar', 'clients', 'payments', 'reports', 'settings'],
+  owner: ['dashboard', 'calendar', 'clients', 'team', 'payments', 'ledger', 'reports', 'settings'],
+  coordinator: ['dashboard', 'calendar', 'clients', 'payments', 'ledger', 'reports', 'settings'],
   therapist: ['dashboard', 'calendar', 'clients', 'payments', 'settings'],
 }
 const EMPTY_CAPABILITIES = Object.freeze([])
@@ -73,6 +75,7 @@ const TITLES = {
   team: 'Zespół',
   psych: 'Profil specjalistki',
   payments: 'Finanse',
+  ledger: 'Rejestr',
   reports: 'Raporty',
   settings: 'Ustawienia',
 }
@@ -87,6 +90,7 @@ const VIEWS = {
   team: Team,
   psych: PsychDetail,
   payments: Payments,
+  ledger: Finance,
   reports: Reports,
   settings: Settings,
 }
@@ -271,7 +275,7 @@ function MobileRoleControls({ appMode, role, onRoleChange, onLogout }) {
 
 // Compact-shell navigation: the sidebar slides in from the left as a drawer,
 // with the same GSAP choreography as the form drawers (mirrored).
-const PHONE_MENU_IDS = ['clients', 'team', 'payments', 'reports', 'settings']
+const PHONE_MENU_IDS = ['clients', 'team', 'ledger', 'payments', 'reports', 'settings']
 
 function MobileNavDrawer({
   appMode,
@@ -953,7 +957,7 @@ export function Shell({
     viewRef.current?.focus({ preventScroll: true })
   }, [role.id, route.name, routeParamsKey])
 
-  const View = isApp && role.id === 'therapist' && route.name === 'payments'
+  const View = isApp && route.name === 'payments' && role.id === 'therapist'
     ? AppSpecialistPayments
     : VIEWS[route.name] || Dashboard
   const hasOverlay = overlay !== null

@@ -3,6 +3,7 @@ import { expect, it } from 'vitest'
 import {
   classifyOwnerTransitionError,
   isD1CoreDirectoryInvariantFailure,
+  isD1FinanceSourceDuplicate,
   isD1IdentityCollision,
   isD1LastActiveOwner,
   isD1RateLimitGuardFailure,
@@ -50,6 +51,10 @@ it('classifies only exact D1 guard errors', () => {
   expect(isD1IdentityCollision(new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT'))).toBe(true)
   expect(isD1LastActiveOwner(new Error('last_active_owner: SQLITE_CONSTRAINT'))).toBe(true)
   expect(isD1IdentityCollision(new Error('transport identity_collision downstream'))).toBe(false)
+  expect(isD1FinanceSourceDuplicate(
+    new Error('D1_ERROR: finance_source_duplicate: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')
+  )).toBe(true)
+  expect(isD1FinanceSourceDuplicate(new Error('finance_source_duplicate later'))).toBe(false)
   expect(isD1LastActiveOwner(new Error('last_active_owner later'))).toBe(false)
   expect(isD1RateLimitGuardFailure(
     new Error('D1_ERROR: rate_limit_guard_failed: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')

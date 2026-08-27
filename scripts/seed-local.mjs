@@ -42,6 +42,7 @@ import {
 import {
   CORE_MIGRATION_STAGE_A_NAMES,
   CORE_MIGRATION_STAGE_B_NAMES,
+  CORE_MIGRATION_STAGE_C_NAMES,
 } from './core-migration-stages.js'
 
 export { LOCAL_SEED_MANIFEST } from './seed-core.js'
@@ -62,6 +63,7 @@ const CORE_MIGRATION_HISTORY_SQL = 'SELECT name FROM d1_migrations ORDER BY id'
 const APPLIED_CORE_MIGRATION_NAMES = Object.freeze([
   ...CORE_MIGRATION_STAGE_A_NAMES,
   ...CORE_MIGRATION_STAGE_B_NAMES,
+  ...CORE_MIGRATION_STAGE_C_NAMES,
 ])
 const localHarnessConfig = (runnerRoot) => Buffer.from(
   buildLocalHarnessWranglerConfig(

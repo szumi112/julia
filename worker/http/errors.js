@@ -20,6 +20,10 @@ const STATUS_BY_CODE = Object.freeze({
   APPOINTMENT_PAYMENT_CONFLICT: 409,
   PAYMENT_AMOUNT_CONFLICT: 409,
   PAYMENT_CORRECTION_CONFLICT: 409,
+  FINANCE_IMPORT_CLOSED: 409,
+  FINANCE_IMPORT_DUPLICATE: 409,
+  FINANCE_IMPORT_INCOMPLETE: 409,
+  FINANCE_IMPORT_OVERFLOW: 409,
   STAFF_INVITATION_CONFLICT: 409,
   LAST_ACTIVE_OWNER: 409,
   VERSION_CONFLICT: 409,
@@ -36,6 +40,8 @@ const VALIDATION_FIELDS = new Set([
   'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt',
   'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to',
   'specialists', 'clients', 'appointments', 'paymentEntries',
+  'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
+  'entries', 'accountingMonth', 'kind',
 ])
 const WORKSPACE_FIELDS = new Set(['specialists', 'clients', 'appointments', 'paymentEntries'])
 const EXACT_INTERNAL_MESSAGES = new Set(Object.keys(STATUS_BY_CODE))

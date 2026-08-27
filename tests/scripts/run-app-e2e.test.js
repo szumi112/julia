@@ -424,7 +424,7 @@ test('runner applies stage A, upgrades, applies stage B, seeds, then starts exac
 
   assert.deepEqual(result, { code: 'APP_E2E_READY', ok: true })
   const runs = calls.filter(({ kind }) => kind === 'run')
-  assert.equal(runs.length, 4)
+  assert.equal(runs.length, 5)
   assert.match(runs[0].args.join(' '), /d1 migrations apply DB --local/)
   assert.deepEqual(
     runs[0].args.slice(-2),
@@ -444,9 +444,12 @@ test('runner applies stage A, upgrades, applies stage B, seeds, then starts exac
   assert.match(runs[2].args.join(' '), /scripts\/apply-core-migration-stage\.js stage-b --local/)
   assert.equal(runs[2].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
   assert.equal(runs[2].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
-  assert.match(runs[3].args.join(' '), /scripts\/seed-local\.mjs/)
+  assert.match(runs[3].args.join(' '), /scripts\/apply-core-migration-stage\.js stage-c --local/)
   assert.equal(runs[3].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
   assert.equal(runs[3].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
+  assert.match(runs[4].args.join(' '), /scripts\/seed-local\.mjs/)
+  assert.equal(runs[4].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
+  assert.equal(runs[4].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
   const start = calls.find(({ kind }) => kind === 'start')
   assert.ok(start)
   assert.deepEqual(start.args.slice(1), [
@@ -987,6 +990,7 @@ test('runner interruption kills a stubborn inherited seed descendant before clea
           if (runs === 1) return { code: 0, stderr: '', stdout: '' }
           if (runs === 2) return { code: 0, stderr: '', stdout: UPGRADE_COMPLETE_OUTPUT }
           if (runs === 3) return { code: 0, stderr: '', stdout: '' }
+          if (runs === 4) return { code: 0, stderr: '', stdout: '' }
           return runBoundedAppChild({
             args: ['-e', leaderSource],
             command: realpathSync(process.execPath),
@@ -1063,6 +1067,7 @@ test('runner seed-stage deadline kills a pipe-holding descendant and forbids Vit
           if (runs === 1) return { code: 0, stderr: '', stdout: '' }
           if (runs === 2) return { code: 0, stderr: '', stdout: UPGRADE_COMPLETE_OUTPUT }
           if (runs === 3) return { code: 0, stderr: '', stdout: '' }
+          if (runs === 4) return { code: 0, stderr: '', stdout: '' }
           return runBoundedAppChild({
             args: ['-e', leaderSource],
             command: realpathSync(process.execPath),
