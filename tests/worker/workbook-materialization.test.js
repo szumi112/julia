@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   continueWorkbookImport,
   createWorkbookImport,
@@ -265,6 +265,66 @@ beforeAll(async () => {
 })
 
 describe('approved workbook materialization', () => {
+  it('refuses a materialization job whose creator differs from its import creator', async () => {
+    const progress = JSON.stringify({
+      accepted: 0,
+      accountingMonthsCorrected: 0,
+      candidateCount: 0,
+      financeBatchId: null,
+      fixedRevenuesInserted: 0,
+      formulaGhostsVoided: 0,
+      inserted: 0,
+      linked: 0,
+      quarantined: 0,
+      quarantinedVoided: 0,
+      specialistAssignmentsCorrected: 0,
+      textAmountVisitsInserted: 0,
+      voided: 0,
+    })
+    const first = vi.fn(async () => ({
+      import_id: 'wbi_creator_mismatch',
+      artifact_id: 'wba_creator_mismatch',
+      import_status: 'ready',
+      accepted_records: 0,
+      quarantined_records: 0,
+      created_by_staff_id: actor.id,
+      import_version: 1,
+      import_created_at: NOW,
+      import_updated_at: NOW,
+      import_completed_at: null,
+      job_id: 'wbj_creator_mismatch',
+      phase: 'apply_finance',
+      job_status: 'ready',
+      cursor: 0,
+      total_records: 0,
+      processed_records: 0,
+      progress_json: progress,
+      summary_json: null,
+      job_created_by_staff_id: otherOwner.id,
+      job_version: 1,
+      job_updated_at: NOW,
+      job_completed_at: null,
+      workbook_kind: 'panel-v2',
+      plan_version: 1,
+      plan_envelope: '{}',
+      fingerprint: 'a'.repeat(64),
+    }))
+    const statement = { bind: vi.fn(() => statement), first }
+    const db = {
+      prepare: vi.fn(() => statement),
+      batch: vi.fn(async () => { throw new Error('BATCH_MUST_NOT_RUN') }),
+    }
+
+    await expect(continueWorkbookImport({
+      db, actor, keyring, config, centreId: 'centre_1', nowMs: NOW_MS,
+      correlationId: 'corr_workbook_creator_mismatch', idFactory,
+      importId: 'wbi_creator_mismatch', expectedVersion: 1,
+      idempotencyKey: 'workbook-creator-mismatch',
+    })).rejects.toThrow(/^NOT_FOUND$/)
+    expect(first).toHaveBeenCalledOnce()
+    expect(db.batch).not.toHaveBeenCalled()
+  })
+
   it('atomically preserves 2,232 accepted/3 quarantine while reconciling exact finance facts once', async () => {
     expect(Object.fromEntries(['english', 'expense', 'income', 'tus'].map((type) => [
       type, canonical.filter(({ recordType }) => recordType === type).length,

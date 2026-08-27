@@ -1,4 +1,5 @@
 import { decodeBase64Url, encodeBase64Url } from './encoding.js'
+import { compareUtf16CodeUnits } from '../../src/code-unit-order.js'
 
 const ARTIFACT_DOMAIN = 'workbook-artifact-v1'
 const ARTIFACT_AAD_DOMAIN = 'bwm/workbook-artifact/aes-gcm/v1'
@@ -84,8 +85,8 @@ const metadataFrom = (value) => ({
 
 const sameMetadata = (actual, expected) => {
   if (!actual || typeof actual !== 'object' || Array.isArray(actual)) return false
-  const expectedKeys = Object.keys(expected).sort()
-  const actualKeys = Object.keys(actual).sort()
+  const expectedKeys = Object.keys(expected).sort(compareUtf16CodeUnits)
+  const actualKeys = Object.keys(actual).sort(compareUtf16CodeUnits)
   return expectedKeys.length === actualKeys.length
     && expectedKeys.every((key, index) => key === actualKeys[index] && actual[key] === expected[key])
 }
@@ -114,7 +115,7 @@ const canonicalDigestValue = (value) => {
   if (Array.isArray(value)) return value.map(canonicalDigestValue)
   if (!value || typeof value !== 'object') panelInvalid()
   const result = {}
-  for (const key of Object.keys(value).sort()) {
+  for (const key of Object.keys(value).sort(compareUtf16CodeUnits)) {
     if (value[key] === undefined) panelInvalid()
     result[key] = canonicalDigestValue(value[key])
   }

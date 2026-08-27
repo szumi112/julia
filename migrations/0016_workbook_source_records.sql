@@ -594,6 +594,16 @@ CREATE UNIQUE INDEX workbook_finance_decisions_entry_idx
 CREATE INDEX workbook_finance_decisions_import_id_idx
   ON workbook_finance_decisions (import_id, id);
 
+CREATE TRIGGER workbook_finance_decisions_source_guard
+BEFORE INSERT ON workbook_finance_decisions
+WHEN NEW.source_record_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM workbook_source_records AS source
+  WHERE source.id = NEW.source_record_id AND source.import_id = NEW.import_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid_workbook_decision_source');
+END;
+
 CREATE TRIGGER workbook_finance_decisions_no_update
 BEFORE UPDATE ON workbook_finance_decisions
 BEGIN
@@ -669,6 +679,17 @@ BEGIN
   SELECT RAISE(ABORT, 'immutable_workbook_job_identity');
 END;
 
+CREATE TRIGGER workbook_materialization_jobs_import_creator_guard
+BEFORE INSERT ON workbook_materialization_jobs
+WHEN NOT EXISTS (
+  SELECT 1 FROM workbook_imports AS import
+  WHERE import.id = NEW.import_id
+    AND import.created_by_staff_id = NEW.created_by_staff_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid_workbook_job_creator');
+END;
+
 CREATE TRIGGER workbook_materialization_jobs_version_increment
 BEFORE UPDATE ON workbook_materialization_jobs
 WHEN typeof(NEW.version) != 'integer' OR NEW.version != OLD.version + 1
@@ -737,6 +758,17 @@ CREATE TABLE workbook_request_replays (
   PRIMARY KEY (actor_staff_id, operation, idempotency_key)
 );
 
+CREATE TRIGGER workbook_request_replays_import_creator_guard
+BEFORE INSERT ON workbook_request_replays
+WHEN NOT EXISTS (
+  SELECT 1 FROM workbook_imports AS import
+  WHERE import.id = NEW.import_id
+    AND import.created_by_staff_id = NEW.actor_staff_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid_workbook_replay_creator');
+END;
+
 CREATE TRIGGER workbook_request_replays_no_update
 BEFORE UPDATE ON workbook_request_replays
 BEGIN
@@ -779,6 +811,28 @@ CREATE INDEX finance_entry_voids_source_idx
 CREATE INDEX finance_entry_voids_workbook_import_idx
   ON finance_entry_voids (workbook_import_id, id);
 
+CREATE TRIGGER finance_entry_voids_import_creator_guard
+BEFORE INSERT ON finance_entry_voids
+WHEN NOT EXISTS (
+  SELECT 1 FROM workbook_imports AS import
+  WHERE import.id = NEW.workbook_import_id
+    AND import.created_by_staff_id = NEW.voided_by_staff_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid_finance_void_creator');
+END;
+
+CREATE TRIGGER finance_entry_voids_source_guard
+BEFORE INSERT ON finance_entry_voids
+WHEN NEW.workbook_source_record_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM workbook_source_records AS source
+  WHERE source.id = NEW.workbook_source_record_id
+    AND source.import_id = NEW.workbook_import_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid_finance_void_source');
+END;
+
 CREATE TRIGGER finance_entry_voids_no_update
 BEFORE UPDATE ON finance_entry_voids
 BEGIN
@@ -819,6 +873,19 @@ WHEN NOT EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT, 'invalid_finance_source_link');
+END;
+
+CREATE TRIGGER finance_source_links_creator_guard
+BEFORE INSERT ON finance_source_links
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM workbook_source_records AS source
+  JOIN workbook_imports AS import ON import.id = source.import_id
+  WHERE source.id = NEW.source_record_id
+    AND import.created_by_staff_id = NEW.created_by_staff_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'invalid_finance_source_link_creator');
 END;
 
 CREATE TRIGGER finance_source_links_no_update

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../worker/app.js'
+import { blindEmailIndex } from '../../worker/security/envelope.js'
+import { encodeBase64Url } from '../../worker/security/encoding.js'
+import { createKeyring } from '../../worker/security/keyring.js'
 
 const NOW_MS = Date.parse('2027-01-15T10:00:00.000Z')
 const ORIGIN = 'https://bearwithme-panel.app'
@@ -35,6 +38,7 @@ const depsFor = (overrides = {}) => ({
   now: () => NOW_MS,
   resolveAccessPrincipal: vi.fn(async () => principal),
   resolveActor: vi.fn(async () => actor),
+  resolvePreviewActor: vi.fn(async () => actor),
   verifyCsrfToken: vi.fn(async () => true),
   safeLog: vi.fn(),
   ...overrides,
@@ -56,6 +60,116 @@ const multipart = (fields, { idempotencyKey } = {}) => {
 }
 
 describe('protected workbook HTTP routes', () => {
+  it.each(['development', 'production'])(
+    'uniformly hides the whole workbook namespace before every HTTP boundary in %s',
+    async (appEnv) => {
+      const dependencyCalls = {
+        access: vi.fn(async () => { throw new Error('ACCESS_MUST_NOT_RUN') }),
+        actor: vi.fn(async () => { throw new Error('ACTOR_MUST_NOT_RUN') }),
+        csrf: vi.fn(async () => { throw new Error('CSRF_MUST_NOT_RUN') }),
+        multipart: vi.fn(async () => { throw new Error('BODY_MUST_NOT_RUN') }),
+      }
+      const db = {
+        prepare: vi.fn(() => { throw new Error('D1_MUST_NOT_RUN') }),
+        batch: vi.fn(() => { throw new Error('D1_MUST_NOT_RUN') }),
+      }
+      const app = createApp(depsFor({
+        config: { appEnv, appOrigin: ORIGIN, dataMode: 'fictional' },
+        db,
+        resolveAccessPrincipal: dependencyCalls.access,
+        resolveActor: dependencyCalls.actor,
+        resolvePreviewActor: dependencyCalls.actor,
+        verifyCsrfToken: dependencyCalls.csrf,
+        readMultipartBodyOnce: dependencyCalls.multipart,
+      }))
+      const paths = [
+        '/api/v1/workbooks/preview',
+        '/api/v1/workbooks/imports',
+        '/api/v1/workbooks/imports/wbi_route_one/continue',
+        '/api/v1/workbooks/imports/wbi_route_one',
+        '/api/v1/workbooks/export?format=panel-v2',
+        '/api/v1/workbooks/unrecognized',
+      ]
+      for (const path of paths) {
+        for (const method of ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+          const response = await app.request(path, { method })
+          expect(response.status, `${method} ${path}`).toBe(404)
+          if (method !== 'HEAD') expect((await response.json()).error.code).toBe('NOT_FOUND')
+        }
+      }
+      expect(dependencyCalls.access).not.toHaveBeenCalled()
+      expect(dependencyCalls.actor).not.toHaveBeenCalled()
+      expect(dependencyCalls.csrf).not.toHaveBeenCalled()
+      expect(dependencyCalls.multipart).not.toHaveBeenCalled()
+      expect(db.prepare).not.toHaveBeenCalled()
+      expect(db.batch).not.toHaveBeenCalled()
+    },
+  )
+
+  it('resolves preview through the active current lookup using reads only', async () => {
+    const lookupKey = encodeBase64Url(new Uint8Array(32).fill(27))
+    const keyring = await createKeyring({ BWM_LOOKUP_HMAC_V1: lookupKey }, {
+      activeLookupKeyVersion: 1,
+    })
+    const emailLookup = await blindEmailIndex(principal.normalizedEmail, keyring)
+    const sql = []
+    const bindings = []
+    const db = {
+      prepare: vi.fn((query) => {
+        sql.push(query)
+        const prepared = {
+          bind: vi.fn((...values) => {
+            bindings.push(values)
+            return prepared
+          }),
+          first: vi.fn(async () => ({
+            id: actor.id,
+            role: actor.role,
+            specialist_id: null,
+            version: actor.version,
+          })),
+          all: vi.fn(async () => ({ results: [] })),
+          raw: vi.fn(async () => []),
+          run: vi.fn(async () => { throw new Error('WRITE_TRAP') }),
+        }
+        return prepared
+      }),
+      batch: vi.fn(async () => { throw new Error('WRITE_TRAP') }),
+    }
+    const bucket = {
+      delete: vi.fn(async () => { throw new Error('R2_TRAP') }),
+      get: vi.fn(async () => { throw new Error('R2_TRAP') }),
+      put: vi.fn(async () => { throw new Error('R2_TRAP') }),
+    }
+    const previewWorkbook = vi.fn(async ({ actor: resolved }) => {
+      expect(resolved).toEqual(actor)
+      return { data: { previewToken: 'read-only-preview' } }
+    })
+    const deps = depsFor({
+      db,
+      bucket,
+      cryptoContext: { keyring, dataKey: {}, scope: {} },
+      previewWorkbook,
+      resolveAccessPrincipal: vi.fn(async () => principal),
+      resolveActor: vi.fn(async () => { throw new Error('MUTATING_RESOLVER_TRAP') }),
+      resolvePreviewActor: undefined,
+    })
+    const response = await createApp(deps).request('/api/v1/workbooks/preview', multipart({
+      workbook: new File([new Uint8Array([1, 2, 3])], 'fikcyjny-preview.xlsx'),
+    }))
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ data: { previewToken: 'read-only-preview' } })
+    expect(sql).toHaveLength(1)
+    expect(sql[0]).toContain('FROM staff_users')
+    expect(sql[0]).toContain("status='active'")
+    expect(bindings).toEqual([[emailLookup, principal.subject]])
+    expect(db.batch).not.toHaveBeenCalled()
+    expect(bucket.get).not.toHaveBeenCalled()
+    expect(bucket.put).not.toHaveBeenCalled()
+    expect(bucket.delete).not.toHaveBeenCalled()
+  })
+
   it('reads preview multipart once, preserves nonuniform File bytes and does not require idempotency', async () => {
     const bytes = new Uint8Array([0, 1, 17, 64, 127, 128, 254, 255])
     const previewWorkbook = vi.fn(async (input) => {

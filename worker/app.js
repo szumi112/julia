@@ -18,7 +18,10 @@ import {
   createRemoteAccessJwks,
   resolveAccessPrincipal as resolvePrincipal,
 } from './identity/access-jwt.js'
-import { resolveActor as resolveStaffActor } from './identity/staff.js'
+import {
+  resolveActiveActorReadOnly,
+  resolveActor as resolveStaffActor,
+} from './identity/staff.js'
 import { isCorrelationId, safeLog } from './logging/safe-log.js'
 import {
   getOperationalHealth,
@@ -179,6 +182,11 @@ const routeFor = (request) => {
     return { id: 'operations.action-resolution', expected: 'human', methods: ['POST', 'OPTIONS'], allow: OPERATIONS_MUTATION_ALLOW, service: 'resolveOperationalAction', actionId: resolution[1] }
   }
   return { id: 'unmatched', expected: 'human', methods: null }
+}
+
+const isWorkbookNamespace = (request) => {
+  const pathname = new URL(request.url).pathname
+  return pathname === '/api/v1/workbooks' || pathname.startsWith('/api/v1/workbooks/')
 }
 
 const runtimeConfig = (c, deps) => deps.config ?? loadConfig(c.env)
@@ -345,6 +353,11 @@ export function createApp(deps = {}) {
     c.set('routeId', route.id)
     c.set('routeAllow', route.allow)
     c.set('routeActionId', route.actionId)
+    const config = runtimeConfig(c, deps)
+    if (isWorkbookNamespace(request)
+      && !(config.appEnv === 'staging' && config.dataMode === 'fictional')) {
+      throw new AppError('NOT_FOUND')
+    }
     if (route.queryRejected) throw new AppError('NOT_FOUND')
     if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
     if (route.methods && !route.methods.includes(method)) throw new AppError('METHOD_NOT_ALLOWED')
@@ -357,7 +370,6 @@ export function createApp(deps = {}) {
       c.set('coreRecoveryDb', budget.recovery)
     }
 
-    const config = runtimeConfig(c, deps)
     const requestNowMs = route.expected === 'human' || isMutationMethod(method) ? nowMs(deps) : null
     c.set('nowMs', requestNowMs)
     if (isMutationMethod(method)) {
@@ -399,7 +411,10 @@ export function createApp(deps = {}) {
     if (route.expected === 'human') {
       const actorDb = route.core ? c.get('coreWorkDb') : c.env?.DB ?? deps.db
       const cryptoContext = await identityCryptoContext(c, config, deps, actorDb)
-      const actor = await (deps.resolveActor ?? resolveStaffActor)(
+      const actorResolver = route.id === 'workbooks.preview'
+        ? deps.resolvePreviewActor ?? resolveActiveActorReadOnly
+        : deps.resolveActor ?? resolveStaffActor
+      const actor = await actorResolver(
         actorDb,
         principal,
         cryptoContext,

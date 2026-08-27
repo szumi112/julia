@@ -36,6 +36,14 @@ const NOW = new Date(NOW_MS).toISOString()
 const actor = Object.freeze({
   id: 'stf_workbook_import_owner', role: 'owner', specialistId: null, version: 1,
 })
+const panelFinanceValues = (patch = {}) => ({
+  accountingMonth: '2025-09', occurredOn: '2025-09-02',
+  amountGrosze: 18_000, paidAmountGrosze: 18_000,
+  paymentMethod: 'cash', settlementStatus: 'paid',
+  invoiceStatus: 'not_required',
+  specialistId: 'sp_staging_workbook_anna_janowska',
+  ...patch,
+})
 const config = Object.freeze({
   appEnv: 'staging', dataMode: 'fictional',
   activeDataKekVersion: 1,
@@ -302,6 +310,61 @@ describe('workbook import reservation', () => {
       .toBe(beforeObjects)
   })
 
+  it('rejects an invalid merged Panel row at preview and exact-file commit before writes', async () => {
+    const bytes = new TextEncoder().encode('fictional-workbook-invalid-panel-row')
+    const callbacks = createWorkbookPanelMetadataCallbacks({
+      keyring, config, centreId: 'centre_1',
+    })
+    const readPanel = async () => ({
+      edits: [{
+        id: 'fin_panel_registry_edit', sheet: 'Panel — Wizyty',
+        values: { accountingMonth: '2025-13' },
+      }],
+      kind: 'panel-v2',
+      metadata: {
+        format: 'Panel-v2', scope: { id: 'centre_1', type: 'centre' },
+        rows: [{
+          id: 'fin_panel_registry_edit', type: 'finance_entry', baseVersion: 1,
+          fieldDigests: {
+            accountingMonth: await callbacks.digestField({
+              rowType: 'finance_entry', rowId: 'fin_panel_registry_edit',
+              field: 'accountingMonth', value: '2025-09',
+            }),
+          },
+        }],
+        voidIds: [],
+      },
+      voidIds: [],
+    })
+    const loadPanelState = (input) => loadWorkbookPanelState({
+      db: env.DB, keyring, ...input,
+    })
+    const preview = await previewWorkbook({
+      bytes, filename: 'fictional-panel.xlsx', actor, keyring, config,
+      centreId: 'centre_1', nowMs: NOW_MS, parse: parser, readPanel, loadPanelState,
+      nonceFactory: () => new Uint8Array(16).fill(13),
+    })
+    expect(preview.data.conflicts).toEqual([{
+      code: 'PANEL_VALUE_INVALID', field: 'accountingMonth',
+      recordId: 'fin_panel_registry_edit',
+    }])
+    const beforeArtifacts = (await env.DB.prepare(
+      'SELECT count(*) AS count FROM workbook_artifacts',
+    ).first()).count
+    const beforeObjects = (await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length
+
+    await expect(createWorkbookImport({
+      ...command(bytes, preview.data.previewToken, 'workbook-import-invalid-panel'),
+      readPanel,
+      loadPanelState,
+    })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+    expect((await env.DB.prepare(
+      'SELECT count(*) AS count FROM workbook_artifacts',
+    ).first()).count).toBe(beforeArtifacts)
+    expect((await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length)
+      .toBe(beforeObjects)
+  })
+
   it('converges concurrent identical idempotency requests to one import and one object', async () => {
     const bytes = new TextEncoder().encode('fictional-workbook-registry-race')
     const preview = await previewFor(bytes)
@@ -361,9 +424,10 @@ describe('workbook import reservation', () => {
     })
     const loadPanelState = async () => ({
       fieldsByType: { finance_entry: { amountGrosze: { type: 'cents' } } },
+      specialistIds: ['sp_staging_workbook_anna_janowska'],
       rows: [{
         id: 'fin_panel_registry_edit', type: 'finance_entry', version: 1,
-        values: { amountGrosze: 18_000 },
+        kind: 'income', recordType: 'income', values: panelFinanceValues(),
       }],
     })
     const preview = await previewWorkbook({
@@ -537,9 +601,11 @@ describe('workbook import reservation', () => {
     })
     const stateAt = (version) => async () => ({
       fieldsByType: { finance_entry: { amountGrosze: { type: 'cents' } } },
+      specialistIds: ['sp_staging_workbook_anna_janowska'],
       rows: [{
         id: 'fin_panel_registry_edit', type: 'finance_entry', version,
-        values: { amountGrosze: 20_000 },
+        kind: 'income', recordType: 'income',
+        values: panelFinanceValues({ amountGrosze: 20_000, paidAmountGrosze: 20_000 }),
       }],
     })
     const preview = await previewWorkbook({

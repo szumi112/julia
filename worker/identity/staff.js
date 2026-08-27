@@ -416,6 +416,29 @@ export async function resolveActor(db, principal, cryptoContext, options = {}) {
   }
 }
 
+export async function resolveActiveActorReadOnly(db, principal, cryptoContext) {
+  try {
+    const context = requireContext(cryptoContext)
+    if (!db?.prepare || principal?.kind !== 'human'
+      || typeof principal.subject !== 'string' || !principal.subject
+      || typeof principal.normalizedEmail !== 'string' || !principal.normalizedEmail) {
+      throw denied()
+    }
+    const activeLookup = await blindEmailIndex(principal.normalizedEmail, context.keyring)
+    const row = await db.prepare(
+      `SELECT id,role,specialist_id,version
+       FROM staff_users
+       WHERE email_lookup=? AND access_subject=? AND status='active'`,
+    ).bind(activeLookup, principal.subject).first()
+    if (!row) throw denied()
+    return asActor(row)
+  } catch (error) {
+    if (error?.message === 'ACCESS_DENIED') throw denied()
+    if (error?.message === 'IDENTITY_FAILURE') throw failure()
+    throw failure()
+  }
+}
+
 export async function reindexEmailLookupsBatch(db, cryptoContext, options = {}) {
   const context = requireContext(cryptoContext)
   const { table, afterId = '', limit, nowMs, correlationId, idFactory } = options

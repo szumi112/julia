@@ -1,3 +1,5 @@
+import { compareUtf16CodeUnits } from './code-unit-order.js'
+
 const META_FORMAT = 'Panel-v2'
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 const SAFE_KEY = /^[A-Za-z][A-Za-z0-9._:-]{0,63}$/
@@ -8,8 +10,8 @@ const fail = (code) => { throw new TypeError(code) }
 
 const exactKeys = (value, keys) => {
   if (!value || Array.isArray(value) || typeof value !== 'object') return false
-  const actual = Object.keys(value).sort()
-  const expected = [...keys].sort()
+  const actual = Object.keys(value).sort(compareUtf16CodeUnits)
+  const expected = [...keys].sort(compareUtf16CodeUnits)
   return actual.length === expected.length
     && actual.every((key, index) => key === expected[index])
 }
@@ -31,7 +33,7 @@ const normalizeRow = (row) => {
     || !row.fieldDigests || Array.isArray(row.fieldDigests)
     || typeof row.fieldDigests !== 'object') fail('PANEL_META_SCHEMA_INVALID')
   const fieldDigests = {}
-  for (const key of Object.keys(row.fieldDigests).sort()) {
+  for (const key of Object.keys(row.fieldDigests).sort(compareUtf16CodeUnits)) {
     const digest = row.fieldDigests[key]
     if (!SAFE_KEY.test(key) || typeof digest !== 'string' || !SAFE_DIGEST.test(digest)) {
       fail('PANEL_META_SCHEMA_INVALID')
@@ -52,14 +54,14 @@ const normalizedMetadata = (metadata) => {
     || metadata.format !== META_FORMAT || !Array.isArray(metadata.rows)
     || !Array.isArray(metadata.voidIds)) fail('PANEL_META_SCHEMA_INVALID')
   const rows = metadata.rows.map(normalizeRow).sort((left, right) => (
-    left.id.localeCompare(right.id) || left.type.localeCompare(right.type)
+    compareUtf16CodeUnits(left.id, right.id) || compareUtf16CodeUnits(left.type, right.type)
   ))
   const ids = new Set()
   for (const row of rows) {
     if (ids.has(row.id)) fail('PANEL_META_SCHEMA_INVALID')
     ids.add(row.id)
   }
-  const voidIds = [...metadata.voidIds].sort()
+  const voidIds = [...metadata.voidIds].sort(compareUtf16CodeUnits)
   if (new Set(voidIds).size !== voidIds.length
     || voidIds.some((id) => typeof id !== 'string' || !ids.has(id))) {
     fail('PANEL_META_SCHEMA_INVALID')
@@ -76,7 +78,9 @@ const canonicalValue = (value) => {
   if (Array.isArray(value)) return value.map(canonicalValue)
   if (value && typeof value === 'object') {
     const result = {}
-    for (const key of Object.keys(value).sort()) result[key] = canonicalValue(value[key])
+    for (const key of Object.keys(value).sort(compareUtf16CodeUnits)) {
+      result[key] = canonicalValue(value[key])
+    }
     return result
   }
   return typeof value === 'string' ? value.normalize('NFC') : value

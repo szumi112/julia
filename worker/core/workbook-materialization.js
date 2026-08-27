@@ -9,6 +9,12 @@ import {
   digestWorkbookSourcePayload,
   digestWorkbookSourceValue,
 } from '../security/workbook-artifacts.js'
+import { compareUtf16CodeUnits } from '../../src/code-unit-order.js'
+import {
+  invalidPanelFinanceField,
+  normalizePanelFinanceEdits,
+  prospectivePanelFinanceValues,
+} from './workbook-panel-finance.js'
 
 export const WORKBOOK_MATERIALIZATION_SLICE_SIZE = 64
 
@@ -66,7 +72,8 @@ const parseJson = (value, code = 'WORKBOOK_MATERIALIZATION_INVALID') => {
 const parseProgress = (value) => {
   const progress = parseJson(value)
   if (!progress || Array.isArray(progress) || typeof progress !== 'object'
-    || Object.keys(progress).sort().join('\n') !== [...PROGRESS_KEYS].sort().join('\n')
+    || Object.keys(progress).sort(compareUtf16CodeUnits).join('\n')
+      !== [...PROGRESS_KEYS].sort(compareUtf16CodeUnits).join('\n')
     || PROGRESS_KEYS.filter((key) => key !== 'financeBatchId').some((key) => (
       !Number.isSafeInteger(progress[key]) || progress[key] < 0
     ))
@@ -115,6 +122,7 @@ const loadState = async (db, importId, actorId) => {
             import.completed_at AS import_completed_at,
             job.id AS job_id,job.phase,job.status AS job_status,job.cursor,
             job.total_records,job.processed_records,job.progress_json,job.summary_json,
+            job.created_by_staff_id AS job_created_by_staff_id,
             job.version AS job_version,job.updated_at AS job_updated_at,
             job.completed_at AS job_completed_at,
             plan.workbook_kind,plan.plan_version,plan.plan_envelope,
@@ -125,7 +133,7 @@ const loadState = async (db, importId, actorId) => {
      JOIN workbook_artifacts AS artifact ON artifact.id=import.artifact_id
      WHERE import.id=? AND import.created_by_staff_id=?`,
   ).bind(importId, actorId).first()
-  if (!row) fail('NOT_FOUND')
+  if (!row || row.job_created_by_staff_id !== row.created_by_staff_id) fail('NOT_FOUND')
   parseProgress(row.progress_json)
   return row
 }
@@ -738,6 +746,8 @@ const applyLegacySlice = async (command, state, progress, sourceKeyRow, requestH
         sourceRecordId: row.source_record_id,
         financeEntryId: row.finance_entry_id,
         relationship: 'reconciled',
+        expectedVersion: row.expected_finance_version
+          + (row.accounting_month_changed || row.specialist_changed ? 1 : 0),
         actorId: command.actor.id,
         createdAt: now,
       })
@@ -786,6 +796,7 @@ const applyLegacySlice = async (command, state, progress, sourceKeyRow, requestH
         sourceRecordId: row.source_record_id,
         financeEntryId: entryId,
         relationship: 'materialized',
+        expectedVersion: 1,
         actorId: command.actor.id,
         createdAt: now,
       })
@@ -797,6 +808,7 @@ const applyLegacySlice = async (command, state, progress, sourceKeyRow, requestH
         workbookImportId: command.importId,
         sourceRecordId: row.source_record_id,
         reasonCode: row.reason_code,
+        expectedVersion: row.expected_finance_version,
         actorId: command.actor.id,
         createdAt: now,
       })
@@ -869,31 +881,54 @@ const applyFinanceStatements = (db, { updates, adjustments, inserts, voids, link
             1,json_extract(value,'$.actorId'),json_extract(value,'$.sourceLookup'),
             json_extract(value,'$.sourceLookup'),json_extract(value,'$.createdAt'),
             json_extract(value,'$.createdAt') FROM json_each(?)`, inserts))
-  if (voids.length) statements.push(jsonStatement(db,
-    `INSERT INTO finance_entry_voids
-     (id,finance_entry_id,workbook_import_id,workbook_source_record_id,reason_code,
-      voided_by_staff_id,created_at)
-     SELECT json_extract(value,'$.id'),json_extract(value,'$.financeEntryId'),
-            json_extract(value,'$.workbookImportId'),
-            json_extract(value,'$.sourceRecordId'),json_extract(value,'$.reasonCode'),
-            json_extract(value,'$.actorId'),json_extract(value,'$.createdAt')
-     FROM json_each(?)`, voids))
-  if (links.length) statements.push(jsonStatement(db,
-    `INSERT INTO finance_source_links
-     (id,source_record_id,finance_entry_id,relationship,created_by_staff_id,created_at)
-     SELECT json_extract(value,'$.id'),json_extract(value,'$.sourceRecordId'),
-            json_extract(value,'$.financeEntryId'),json_extract(value,'$.relationship'),
-            json_extract(value,'$.actorId'),json_extract(value,'$.createdAt')
-     FROM json_each(?)`, links))
+  if (voids.length) {
+    statements.push(jsonStatement(db,
+      `INSERT INTO finance_entry_voids
+       (id,finance_entry_id,workbook_import_id,workbook_source_record_id,reason_code,
+        voided_by_staff_id,created_at)
+       SELECT json_extract(item.value,'$.id'),entry.id,
+              json_extract(item.value,'$.workbookImportId'),
+              json_extract(item.value,'$.sourceRecordId'),
+              json_extract(item.value,'$.reasonCode'),
+              json_extract(item.value,'$.actorId'),json_extract(item.value,'$.createdAt')
+       FROM json_each(?) AS item
+       JOIN finance_entries AS entry
+         ON entry.id=json_extract(item.value,'$.financeEntryId')
+        AND entry.version=json_extract(item.value,'$.expectedVersion')
+       WHERE NOT EXISTS (SELECT 1 FROM finance_entry_voids AS existing
+         WHERE existing.finance_entry_id=entry.id)`, voids))
+    statements.push(invariant(db, 'changes()=?', voids.length))
+  }
+  if (links.length) {
+    statements.push(jsonStatement(db,
+      `INSERT INTO finance_source_links
+       (id,source_record_id,finance_entry_id,relationship,created_by_staff_id,created_at)
+       SELECT json_extract(item.value,'$.id'),json_extract(item.value,'$.sourceRecordId'),
+              entry.id,json_extract(item.value,'$.relationship'),
+              json_extract(item.value,'$.actorId'),json_extract(item.value,'$.createdAt')
+       FROM json_each(?) AS item
+       JOIN finance_entries AS entry
+         ON entry.id=json_extract(item.value,'$.financeEntryId')
+        AND entry.version=json_extract(item.value,'$.expectedVersion')
+       WHERE NOT EXISTS (SELECT 1 FROM finance_entry_voids AS existing
+         WHERE existing.finance_entry_id=entry.id)`, links))
+    statements.push(invariant(db, 'changes()=?', links.length))
+  }
   return statements
 }
 
 const applyPanelSlice = async (command, state, progress, plan, requestHash, now) => {
   const actions = [
-    ...plan.panel.updates.map((value) => ({ action: 'update', ...value })),
-    ...plan.panel.voids.map((value) => ({ action: 'void', ...value })),
+    ...plan.panel.updates.map((value) => ({ ...value, action: 'update' })),
+    ...plan.panel.voids.map((value) => ({ ...value, action: 'void' })),
   ]
-  if (actions.length !== state.total_records || actions.some(({ type }) => type !== 'finance_entry')) {
+  if (actions.length !== state.total_records
+    || new Set(actions.map(({ id }) => id)).size !== actions.length
+    || actions.some(({ id, type, expectedVersion }) => (
+      type !== 'finance_entry'
+      || typeof id !== 'string' || !/^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(id)
+      || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1
+    ))) {
     fail('WORKBOOK_MATERIALIZATION_INVALID')
   }
   const page = actions.slice(state.cursor, state.cursor + WORKBOOK_MATERIALIZATION_SLICE_SIZE)
@@ -904,7 +939,8 @@ const applyPanelSlice = async (command, state, progress, plan, requestHash, now)
   })
   const ids = page.map(({ id }) => id)
   const rows = (await command.db.prepare(
-    `SELECT id,accounting_month,occurred_on,amount_grosze,paid_amount_grosze,
+    `SELECT id,kind,record_type,accounting_month,occurred_on,amount_grosze,
+            paid_amount_grosze,
             payment_method,settlement_status,invoice_status,specialist_id,version,
             source_row_envelope
      FROM finance_entries WHERE id IN (${ids.map(() => '?').join(',')})
@@ -912,7 +948,61 @@ const applyPanelSlice = async (command, state, progress, plan, requestHash, now)
   ).bind(...ids).all()).results
   if (!Array.isArray(rows) || rows.length !== ids.length) fail('VERSION_CONFLICT')
   const byId = new Map(rows.map((row) => [row.id, row]))
-  const financeKey = await loadFinanceKey(command.db)
+  const proposedSpecialistIds = [...new Set(page
+    .filter(({ action }) => action === 'update')
+    .map(({ values }) => normalizePanelFinanceEdits(values))
+    .map((normalized) => {
+      if (normalized.field !== null || normalized.values === null) {
+        fail('WORKBOOK_IMPORT_CONFLICT')
+      }
+      return normalized.values.specialistId
+    })
+    .filter((id) => id !== null && id !== undefined))]
+    .sort(compareUtf16CodeUnits)
+  let foundSpecialists = []
+  if (proposedSpecialistIds.length) {
+    foundSpecialists = (await command.db.prepare(
+      `SELECT specialist.id FROM json_each(?) AS requested
+       JOIN specialists AS specialist ON specialist.id=requested.value
+       ORDER BY specialist.id`,
+    ).bind(JSON.stringify(proposedSpecialistIds)).all()).results
+    if (!Array.isArray(foundSpecialists)) fail('WORKBOOK_IMPORT_CONFLICT')
+  }
+  const knownSpecialistIds = [...new Set([
+    ...rows.map(({ specialist_id: id }) => id).filter(Boolean),
+    ...foundSpecialists.map(({ id }) => id),
+  ])]
+  const validated = new Map()
+  for (const action of page) {
+    const current = byId.get(action.id)
+    if (!current || current.version !== action.expectedVersion) fail('VERSION_CONFLICT')
+    if (action.action === 'void') continue
+    const normalized = normalizePanelFinanceEdits(action.values)
+    if (normalized.field !== null || normalized.values === null
+      || !Object.keys(normalized.values).length) fail('WORKBOOK_IMPORT_CONFLICT')
+    const currentValues = {
+      accountingMonth: current.accounting_month,
+      occurredOn: current.occurred_on,
+      amountGrosze: current.amount_grosze,
+      paidAmountGrosze: current.paid_amount_grosze,
+      paymentMethod: current.payment_method,
+      settlementStatus: current.settlement_status,
+      invoiceStatus: current.invoice_status,
+      specialistId: current.specialist_id,
+    }
+    const prospective = prospectivePanelFinanceValues(currentValues, normalized.values)
+    if (invalidPanelFinanceField({
+      kind: current.kind,
+      recordType: current.record_type,
+      values: prospective,
+      specialistIds: knownSpecialistIds,
+    })) fail('WORKBOOK_IMPORT_CONFLICT')
+    validated.set(action.id, Object.freeze({
+      prospective,
+      values: normalized.values,
+    }))
+  }
+  const financeKey = validated.size ? await loadFinanceKey(command.db) : null
   const updates = []
   const adjustments = []
   const voids = []
@@ -928,7 +1018,6 @@ const applyPanelSlice = async (command, state, progress, plan, requestHash, now)
   })
   for (const action of page) {
     const current = byId.get(action.id)
-    if (!current || current.version !== action.expectedVersion) fail('VERSION_CONFLICT')
     if (action.action === 'void') {
       voids.push({
         id: generated(command.idFactory, 'fev', /^fev_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/),
@@ -936,32 +1025,33 @@ const applyPanelSlice = async (command, state, progress, plan, requestHash, now)
         workbookImportId: command.importId,
         sourceRecordId: null,
         reasonCode: 'panel_signed_void',
+        expectedVersion: action.expectedVersion,
         actorId: command.actor.id,
         createdAt: now,
       })
       progress.voided += 1
       continue
     }
+    const prepared = validated.get(action.id)
+    if (!prepared) fail('WORKBOOK_IMPORT_CONFLICT')
     const values = {}
     const before = {}
-    const after = { ...action.values }
-    for (const [field, value] of Object.entries(action.values ?? {})) {
+    const after = { ...prepared.values }
+    for (const [field, value] of Object.entries(prepared.values)) {
       const column = columns[field]
       if (!column) fail('WORKBOOK_MATERIALIZATION_INVALID')
       values[column] = value
       before[field] = current[column]
     }
-    const nextSettlement = action.values?.settlementStatus ?? current.settlement_status
-    const nextAmount = action.values?.amountGrosze ?? current.amount_grosze
-    if (!Object.hasOwn(action.values ?? {}, 'paidAmountGrosze')) {
-      if (nextSettlement === 'paid') {
-        values.paid_amount_grosze = nextAmount
+    if (!Object.hasOwn(prepared.values, 'paidAmountGrosze')) {
+      if (prepared.prospective.settlementStatus === 'paid') {
+        values.paid_amount_grosze = prepared.prospective.paidAmountGrosze
         before.paidAmountGrosze = current.paid_amount_grosze
-        after.paidAmountGrosze = nextAmount
-      } else if (['unknown', 'unpaid'].includes(nextSettlement)) {
-        values.paid_amount_grosze = 0
+        after.paidAmountGrosze = prepared.prospective.paidAmountGrosze
+      } else if (['unknown', 'unpaid'].includes(prepared.prospective.settlementStatus)) {
+        values.paid_amount_grosze = prepared.prospective.paidAmountGrosze
         before.paidAmountGrosze = current.paid_amount_grosze
-        after.paidAmountGrosze = 0
+        after.paidAmountGrosze = prepared.prospective.paidAmountGrosze
       }
     }
     if (!Object.keys(values).length) continue
@@ -985,8 +1075,12 @@ const applyPanelSlice = async (command, state, progress, plan, requestHash, now)
       actorId: command.actor.id,
       createdAt: now,
     })
-    if (Object.hasOwn(action.values, 'accountingMonth')) progress.accountingMonthsCorrected += 1
-    if (Object.hasOwn(action.values, 'specialistId')) progress.specialistAssignmentsCorrected += 1
+    if (Object.hasOwn(prepared.values, 'accountingMonth')) {
+      progress.accountingMonthsCorrected += 1
+    }
+    if (Object.hasOwn(prepared.values, 'specialistId')) {
+      progress.specialistAssignmentsCorrected += 1
+    }
   }
   const statements = []
   if (updates.length) {
@@ -1121,7 +1215,8 @@ export async function continueWorkbookMaterialization(input) {
     fail('VERSION_CONFLICT')
   } catch (error) {
     if (['WORKBOOK_RECONCILIATION_CONFLICT', 'WORKBOOK_FINGERPRINT_REJECTED',
-      'WORKBOOK_MATERIALIZATION_INVALID', 'CRYPTO_FAILURE', 'VERSION_CONFLICT',
+      'WORKBOOK_IMPORT_CONFLICT', 'WORKBOOK_MATERIALIZATION_INVALID',
+      'CRYPTO_FAILURE', 'VERSION_CONFLICT',
     ].includes(error?.message)) throw error
     const winner = await replayRow(command.db, command.actor.id, command.idempotencyKey)
     if (winner) {

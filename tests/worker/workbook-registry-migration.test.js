@@ -10,6 +10,7 @@ import {
 
 const NOW = '2027-01-15T10:00:00.000Z'
 const OWNER_ID = 'stf_workbook_registry_owner'
+const OTHER_OWNER_ID = 'stf_workbook_registry_other'
 
 const run = (sql, ...bindings) => env.DB.prepare(sql).bind(...bindings).run()
 
@@ -25,6 +26,12 @@ beforeAll(async () => {
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   OWNER_ID, 'workbook_registry_owner_lookup', '{}', '{}', 'owner', 'active',
   'workbook-registry-owner-subject', null, 1, NOW, null, NOW, NOW)
+  await run(`INSERT INTO staff_users
+    (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
+     specialist_id,version,activated_at,disabled_at,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  OTHER_OWNER_ID, 'workbook_registry_other_lookup', '{}', '{}', 'owner', 'active',
+  'workbook-registry-other-subject', null, 1, NOW, null, NOW, NOW)
   await run(`INSERT INTO specialists
     (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
      archived_at,created_at,updated_at)
@@ -381,5 +388,74 @@ describe('workbook source registry migration', () => {
     'fsl_registry_quarantined', 'wbs_registry_quarantined',
     'fin_registry_quarantined', 'materialized', OWNER_ID, NOW))
       .rejects.toThrow(/invalid_finance_source_link/)
+  })
+
+  it('rejects cross-creator and cross-import job, replay, decision, link, and void provenance', async () => {
+    await expect(run(`INSERT INTO workbook_materialization_jobs
+      (id,import_id,phase,status,cursor,total_records,processed_records,progress_json,
+       summary_json,created_by_staff_id,version,created_at,updated_at,completed_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'wbj_registry_wrong_creator', 'wbi_registry_two', 'apply_finance', 'ready', 0, 0, 0,
+    '{}', null, OTHER_OWNER_ID, 1, NOW, NOW, null))
+      .rejects.toThrow(/invalid_workbook_job_creator/)
+
+    await expect(run(`INSERT INTO workbook_request_replays
+      (actor_staff_id,operation,idempotency_key,request_hash,import_id,created_at)
+      VALUES (?,?,?,?,?,?)`,
+    OTHER_OWNER_ID, 'workbooks.import', 'registry-wrong-replay', 'S'.repeat(43),
+    'wbi_registry_two', NOW)).rejects.toThrow(/invalid_workbook_replay_creator/)
+
+    await expect(run(`INSERT INTO workbook_finance_decisions
+      (id,import_id,source_record_id,finance_entry_id,action,reason_code,
+       target_accounting_month,target_specialist_id,expected_finance_version,
+       accounting_month_changed,specialist_changed,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'wfd_registry_wrong_source', 'wbi_registry_two', 'wbs_registry_one',
+    'fin_registry_one', 'link_update', null, '2025-09', 'sp_registry_julia', 1,
+    0, 0, NOW)).rejects.toThrow(/invalid_workbook_decision_source/)
+
+    await run(`INSERT INTO workbook_source_records
+      (id,import_id,source_key,sheet_index,sheet_name,row_number,block_index,
+       record_type,disposition,accounting_month,occurred_on,period_precision,
+       period_month,amount_grosze,payment_method,settlement_status,invoice_status,
+       initial_paid_amount_grosze,record_digest,record_digest_hmac_version,
+       specialist_source_digest,specialist_source_hmac_version,warning_codes_json,
+       source_payload_version,source_payload_envelope,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'wbs_registry_creator_guard', 'wbi_registry_two', 'workbook:v1:0:110:0', 0,
+    'Wrzesień', 110, 0, 'income', 'accepted', '2025-09', '2025-09-03', 'day',
+    '2025-09', 18000, 'cash', 'paid', 'not_required', 18000, 'T'.repeat(43), 1,
+    'U'.repeat(43), 1, '[]', 1, '{}', NOW)
+    await run(`INSERT INTO finance_entries
+      (id,batch_id,source_key,kind,record_type,accounting_month,occurred_on,
+       amount_grosze,paid_amount_grosze,payment_method,settlement_status,
+       invoice_status,specialist_id,appointment_id,counterparty_lookup,
+       details_envelope,source_row_envelope,version,created_by_staff_id,
+       created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'fin_registry_creator_guard', 'fib_registry_one', 'safe-registry-creator-guard',
+    'income', 'income', '2025-09', '2025-09-03', 18000, 18000, 'cash', 'paid',
+    'not_required', null, null, null, '{}', '{}', 1, OWNER_ID, NOW, NOW)
+
+    await expect(run(`INSERT INTO finance_source_links
+      (id,source_record_id,finance_entry_id,relationship,created_by_staff_id,created_at)
+      VALUES (?,?,?,?,?,?)`,
+    'fsl_registry_wrong_creator', 'wbs_registry_creator_guard',
+    'fin_registry_creator_guard', 'reconciled', OTHER_OWNER_ID, NOW))
+      .rejects.toThrow(/invalid_finance_source_link_creator/)
+
+    await expect(run(`INSERT INTO finance_entry_voids
+      (id,finance_entry_id,workbook_import_id,workbook_source_record_id,reason_code,
+       voided_by_staff_id,created_at) VALUES (?,?,?,?,?,?,?)`,
+    'fev_registry_wrong_creator', 'fin_registry_creator_guard', 'wbi_registry_two',
+    null, 'panel_signed_void', OTHER_OWNER_ID, NOW))
+      .rejects.toThrow(/invalid_finance_void_creator/)
+
+    await expect(run(`INSERT INTO finance_entry_voids
+      (id,finance_entry_id,workbook_import_id,workbook_source_record_id,reason_code,
+       voided_by_staff_id,created_at) VALUES (?,?,?,?,?,?,?)`,
+    'fev_registry_wrong_source', 'fin_registry_creator_guard', 'wbi_registry_two',
+    'wbs_registry_one', 'quarantined', OWNER_ID, NOW))
+      .rejects.toThrow(/invalid_finance_void_source/)
   })
 })

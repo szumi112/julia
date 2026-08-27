@@ -17,6 +17,17 @@ const config = Object.freeze({
 const owner = Object.freeze({
   id: 'stf_workbook_preview_owner', role: 'owner', specialistId: null, version: 1,
 })
+const panelFinanceValues = (patch = {}) => ({
+  accountingMonth: '2025-09',
+  occurredOn: '2025-09-02',
+  amountGrosze: 18_000,
+  paidAmountGrosze: 18_000,
+  paymentMethod: 'cash',
+  settlementStatus: 'paid',
+  invoiceStatus: 'not_required',
+  specialistId: null,
+  ...patch,
+})
 const key = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
 const ring = () => createKeyring({
   BWM_WORKBOOK_KEK_V1: key(9),
@@ -233,17 +244,21 @@ describe('no-write workbook preview', () => {
       }],
       voidIds: ['fin_panel_void'],
     }
-    const loadPanelState = vi.fn(async ({ centreId, rows }) => {
+    const loadPanelState = vi.fn(async ({ centreId, rows, specialistIds }) => {
       expect(centreId).toBe('centre_1')
       expect(rows.map(({ id }) => id)).toEqual(['fin_panel_edit', 'fin_panel_void'])
+      expect(specialistIds).toEqual([])
       return {
         fieldsByType: { finance_entry: { amountGrosze: { type: 'cents' } } },
+        specialistIds: [],
         rows: [{
           id: 'fin_panel_edit', type: 'finance_entry', version: 4,
-          values: { amountGrosze: 18_000 },
+          kind: 'income', recordType: 'income',
+          values: panelFinanceValues(),
         }, {
           id: 'fin_panel_void', type: 'finance_entry', version: 2,
-          values: { amountGrosze: 5_000 },
+          kind: 'income', recordType: 'income',
+          values: panelFinanceValues({ amountGrosze: 5_000, paidAmountGrosze: 5_000 }),
         }],
       }
     })
@@ -271,6 +286,145 @@ describe('no-write workbook preview', () => {
       }],
       voidIds: ['fin_panel_void'],
     })
+  })
+
+  it.each([
+    ['accountingMonth', '2025-13', 'accountingMonth'],
+    ['occurredOn', '2025-02-30', 'occurredOn'],
+    ['amountGrosze', 0, 'amountGrosze'],
+    ['amountGrosze', 100_000_001, 'amountGrosze'],
+    ['paidAmountGrosze', 18_001, 'paidAmountGrosze'],
+    ['paymentMethod', 'wire', 'paymentMethod'],
+    ['settlementStatus', 'partial', 'settlementStatus'],
+    ['invoiceStatus', 'pending', 'invoiceStatus'],
+    ['specialistId', 'sp_missing_panel_specialist', 'specialistId'],
+  ])('returns a stable conflict for invalid prospective Panel %s', async (
+    editedField, editedValue, conflictField,
+  ) => {
+    const keyring = await ring()
+    const callbacks = createWorkbookPanelMetadataCallbacks({
+      keyring, config, centreId: 'centre_1',
+    })
+    const currentValues = {
+      accountingMonth: '2025-09',
+      occurredOn: '2025-09-02',
+      amountGrosze: 18_000,
+      paidAmountGrosze: 18_000,
+      paymentMethod: 'cash',
+      settlementStatus: 'paid',
+      invoiceStatus: 'not_required',
+      specialistId: 'sp_existing_panel_specialist',
+    }
+    const metadata = {
+      format: 'Panel-v2',
+      scope: { id: 'centre_1', type: 'centre' },
+      rows: [{
+        id: 'fin_panel_validation', type: 'finance_entry', baseVersion: 3,
+        fieldDigests: {
+          [editedField]: await callbacks.digestField({
+            rowType: 'finance_entry', rowId: 'fin_panel_validation',
+            field: editedField, value: currentValues[editedField],
+          }),
+        },
+      }],
+      voidIds: [],
+    }
+    const result = await previewWorkbook({
+      bytes: new Uint8Array([8, 9]), filename: 'panel.xlsx', actor: owner, keyring, config,
+      centreId: 'centre_1', nowMs: 1_800_000_000_000,
+      parse: async () => parsed(),
+      readPanel: async () => ({
+        edits: [{
+          id: 'fin_panel_validation', sheet: 'Panel — Wizyty',
+          values: { [editedField]: editedValue },
+        }],
+        kind: 'panel-v2', metadata, voidIds: [],
+      }),
+      loadPanelState: async ({ specialistIds }) => {
+        expect(specialistIds).toEqual(editedField === 'specialistId'
+          ? ['sp_missing_panel_specialist'] : [])
+        return {
+          fieldsByType: {
+            finance_entry: {
+              accountingMonth: { type: 'text' },
+              occurredOn: { type: 'date' },
+              amountGrosze: { type: 'cents' },
+              paidAmountGrosze: { type: 'cents' },
+              paymentMethod: { type: 'enum', values: ['cash'] },
+              settlementStatus: { type: 'enum', values: ['paid', 'partial'] },
+              invoiceStatus: { type: 'enum', values: ['not_required'] },
+              specialistId: { type: 'text' },
+            },
+          },
+          specialistIds: ['sp_existing_panel_specialist'],
+          rows: [{
+            id: 'fin_panel_validation', type: 'finance_entry', version: 3,
+            kind: 'income', recordType: 'income', values: currentValues,
+          }],
+        }
+      },
+    })
+
+    expect(result.data.panelChanges).toEqual({
+      unchangedIds: [], updates: [], voidIds: [],
+    })
+    expect(result.data.conflicts).toEqual([{
+      code: 'PANEL_VALUE_INVALID', field: conflictField,
+      recordId: 'fin_panel_validation',
+    }])
+  })
+
+  it('orders authenticated Panel actions by UTF-16 code units', async () => {
+    const keyring = await ring()
+    const callbacks = createWorkbookPanelMetadataCallbacks({
+      keyring, config, centreId: 'centre_1',
+    })
+    const ids = ['fin_a', 'fin_A_', 'fin_A-', 'fin_A']
+    const metadataRows = await Promise.all(ids.map(async (id) => ({
+      id, type: 'finance_entry', baseVersion: 1,
+      fieldDigests: {
+        amountGrosze: await callbacks.digestField({
+          rowType: 'finance_entry', rowId: id, field: 'amountGrosze', value: 18_000,
+        }),
+      },
+    })))
+    const observed = []
+    const result = await previewWorkbook({
+      bytes: new Uint8Array([8, 9]), filename: 'panel.xlsx', actor: owner, keyring, config,
+      centreId: 'centre_1', nowMs: 1_800_000_000_000,
+      parse: async () => parsed(),
+      readPanel: async () => ({
+        edits: ids.map((id, index) => ({
+          id, sheet: 'Panel — Wizyty', values: { amountGrosze: 19_000 + index },
+        })),
+        kind: 'panel-v2',
+        metadata: {
+          format: 'Panel-v2', scope: { id: 'centre_1', type: 'centre' },
+          rows: metadataRows, voidIds: [],
+        },
+        voidIds: [],
+      }),
+      loadPanelState: async ({ rows, specialistIds }) => {
+        observed.push(...rows.map(({ id }) => id))
+        expect(specialistIds).toEqual([])
+        return {
+          fieldsByType: { finance_entry: { amountGrosze: { type: 'cents' } } },
+          specialistIds: [],
+          rows: rows.map(({ id }) => ({
+            id, type: 'finance_entry', version: 1, kind: 'income', recordType: 'income',
+            values: {
+              accountingMonth: '2025-09', occurredOn: '2025-09-02',
+              amountGrosze: 18_000, paidAmountGrosze: 18_000,
+              paymentMethod: 'cash', settlementStatus: 'paid',
+              invoiceStatus: 'not_required', specialistId: null,
+            },
+          })),
+        }
+      },
+    })
+
+    expect(observed).toEqual(['fin_A', 'fin_A-', 'fin_A_', 'fin_a'])
+    expect(result.data.panelChanges.updates.map(({ id }) => id)).toEqual(observed)
   })
 
   it('keeps digest/base conflicts and only permits signed voidIds, never missing rows', async () => {
@@ -307,9 +461,11 @@ describe('no-write workbook preview', () => {
       }),
       loadPanelState: async () => ({
         fieldsByType: { finance_entry: { amountGrosze: { type: 'cents' } } },
+        specialistIds: [],
         rows: [{
           id: 'fin_conflict', type: 'finance_entry', version: 5,
-          values: { amountGrosze: 19_000 },
+          kind: 'income', recordType: 'income',
+          values: panelFinanceValues({ amountGrosze: 19_000, paidAmountGrosze: 19_000 }),
         }],
       }),
     })

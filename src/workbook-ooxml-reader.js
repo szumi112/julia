@@ -7,6 +7,7 @@ import {
   xmlAttribute,
   xmlText,
 } from './workbook-ooxml-package.js'
+import { compareUtf16CodeUnits } from './code-unit-order.js'
 import {
   PANEL_META_SHEET,
   PANEL_PERMISSIONS_SHEET,
@@ -233,7 +234,7 @@ export const readPanelWorkbook = async (source, { verify } = {}) => {
   const edits = panelSheets
     .filter(({ name }) => name !== PANEL_META_SHEET && name !== 'Panel — Podsumowanie')
     .flatMap((sheet) => editsFromSheet(files, sheet, sharedStrings, signedRows, seenIds))
-    .sort((left, right) => left.id.localeCompare(right.id))
+    .sort((left, right) => compareUtf16CodeUnits(left.id, right.id))
   if (metadata.voidIds.some((id) => seenIds.has(id))) fail('PANEL_VOID_ROW_PRESENT')
   return {
     edits,

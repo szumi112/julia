@@ -23,6 +23,12 @@ import {
   loadDataKey,
 } from '../security/envelope.js'
 import { encodeBase64Url } from '../security/encoding.js'
+import { compareUtf16CodeUnits } from '../../src/code-unit-order.js'
+import {
+  invalidPanelFinanceField,
+  normalizePanelFinanceEdits,
+  prospectivePanelFinanceValues,
+} from './workbook-panel-finance.js'
 
 export const APPROVED_WORKBOOK_FINGERPRINT = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 
@@ -101,17 +107,24 @@ const WARSAW_DAY = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Europe/Warsaw', year: 'numeric', month: '2-digit', day: '2-digit',
 })
 
-export async function loadWorkbookPanelState({ db, keyring, centreId, rows } = {}) {
+export async function loadWorkbookPanelState({
+  db, keyring, centreId, rows, specialistIds = [],
+} = {}) {
   if (!db?.prepare || !keyring || centreId !== 'centre_1' || !Array.isArray(rows)
     || rows.length > 2_500 || rows.some((row) => (
       !row || row.type !== 'finance_entry' || typeof row.id !== 'string'
       || !/^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(row.id)
+    )) || !Array.isArray(specialistIds) || specialistIds.length > 2_500
+    || new Set(specialistIds).size !== specialistIds.length
+    || specialistIds.some((id) => (
+      typeof id !== 'string' || !/^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(id)
     ))) previewInvalid()
   const loaded = []
   for (let offset = 0; offset < rows.length; offset += 100) {
     const ids = rows.slice(offset, offset + 100).map(({ id }) => id)
     const result = (await db.prepare(
-      `SELECT entry.id,entry.accounting_month,entry.occurred_on,entry.amount_grosze,
+      `SELECT entry.id,entry.kind,entry.record_type,entry.accounting_month,
+              entry.occurred_on,entry.amount_grosze,
               entry.paid_amount_grosze,entry.payment_method,entry.settlement_status,
               entry.invoice_status,entry.specialist_id,entry.version
        FROM finance_entries AS entry
@@ -125,10 +138,26 @@ export async function loadWorkbookPanelState({ db, keyring, centreId, rows } = {
     if (!Array.isArray(result)) previewInvalid()
     loaded.push(...result)
   }
+  let foundSpecialists = []
+  if (specialistIds.length) {
+    foundSpecialists = (await db.prepare(
+      `SELECT specialist.id FROM json_each(?) AS requested
+       JOIN specialists AS specialist ON specialist.id=requested.value
+       ORDER BY specialist.id`,
+    ).bind(JSON.stringify(specialistIds)).all()).results
+    if (!Array.isArray(foundSpecialists)) previewInvalid()
+  }
+  const knownSpecialistIds = [...new Set([
+    ...loaded.map(({ specialist_id: id }) => id).filter(Boolean),
+    ...foundSpecialists.map(({ id }) => id),
+  ])].sort(compareUtf16CodeUnits)
   return Object.freeze({
     fieldsByType: Object.freeze({ finance_entry: PANEL_FINANCE_FIELDS }),
+    specialistIds: Object.freeze(knownSpecialistIds),
     rows: Object.freeze(loaded.map((row) => Object.freeze({
       id: row.id,
+      kind: row.kind,
+      recordType: row.record_type,
       type: 'finance_entry',
       version: row.version,
       values: Object.freeze({
@@ -649,6 +678,8 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
     previewInvalid()
   }
   const edits = new Map()
+  const normalizedEdits = new Map()
+  const invalidEditFields = new Map()
   for (const edit of panel.edits) {
     const signed = signedRows.get(edit?.id)
     if (!signed || edits.has(edit.id) || typeof edit.sheet !== 'string'
@@ -657,12 +688,15 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
       previewInvalid()
     }
     edits.set(edit.id, edit)
+    const normalized = normalizePanelFinanceEdits(edit.values)
+    if (normalized.field !== null) invalidEditFields.set(edit.id, normalized.field)
+    else normalizedEdits.set(edit.id, Object.freeze({ ...edit, values: normalized.values }))
   }
   if (panel.voidIds.some((id) => edits.has(id))) previewInvalid()
   const actionableIds = new Set([...edits.keys(), ...panel.voidIds])
   const requestedRows = metadata.rows
     .filter(({ id }) => actionableIds.has(id))
-    .sort((left, right) => left.id.localeCompare(right.id))
+    .sort((left, right) => compareUtf16CodeUnits(left.id, right.id))
   if (!requestedRows.length) return Object.freeze({
     conflicts: Object.freeze([]),
     plan: Object.freeze({ updates: Object.freeze([]), voids: Object.freeze([]) }),
@@ -671,10 +705,15 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
     }),
   })
   if (typeof loadPanelState !== 'function') previewInvalid()
+  const specialistIds = [...new Set([...normalizedEdits.values()]
+    .map(({ values }) => values.specialistId)
+    .filter((id) => id !== null && id !== undefined))]
+    .sort(compareUtf16CodeUnits)
   let loaded
   try {
     loaded = await loadPanelState(Object.freeze({
       centreId,
+      specialistIds: Object.freeze(specialistIds),
       rows: Object.freeze(requestedRows.map((row) => Object.freeze({
         baseVersion: row.baseVersion,
         fieldDigests: Object.freeze({ ...row.fieldDigests }),
@@ -687,7 +726,12 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
     previewInvalid()
   }
   if (!loaded || !loaded.fieldsByType || Array.isArray(loaded.fieldsByType)
-    || typeof loaded.fieldsByType !== 'object' || !Array.isArray(loaded.rows)) previewInvalid()
+    || typeof loaded.fieldsByType !== 'object' || !Array.isArray(loaded.rows)
+    || !Array.isArray(loaded.specialistIds)
+    || new Set(loaded.specialistIds).size !== loaded.specialistIds.length
+    || loaded.specialistIds.some((id) => (
+      typeof id !== 'string' || !/^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(id)
+    ))) previewInvalid()
   const currentRows = new Map()
   for (const row of loaded.rows) {
     if (!row || typeof row.id !== 'string' || !actionableIds.has(row.id)
@@ -715,10 +759,17 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
       previewInvalid()
     }
     if (edit) {
+      const invalidEditField = invalidEditFields.get(signed.id)
+      if (invalidEditField) {
+        conflicts.push(panelConflict('PANEL_VALUE_INVALID', signed.id, invalidEditField))
+        continue
+      }
+      const normalizedEdit = normalizedEdits.get(signed.id)
+      if (!normalizedEdit) previewInvalid()
       const baseValues = {}
       const currentValues = {}
       const editedValues = {}
-      for (const [field, editedValue] of Object.entries(edit.values)) {
+      for (const [field, editedValue] of Object.entries(normalizedEdit.values)) {
         if (!Object.hasOwn(current.values, field)) previewInvalid()
         const version = Number(PANEL_FIELD_DIGEST.exec(signed.fieldDigests[field])?.[1])
         const currentDigest = await callbacks.digestField({
@@ -751,6 +802,18 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
           fields,
         })
         if (merged.conflicts.length) previewInvalid()
+        const mergedValues = merged.updates[0]?.values ?? {}
+        const prospective = prospectivePanelFinanceValues(current.values, mergedValues)
+        const invalidField = invalidPanelFinanceField({
+          kind: current.kind,
+          recordType: current.recordType,
+          values: prospective,
+          specialistIds: loaded.specialistIds,
+        })
+        if (invalidField) {
+          conflicts.push(panelConflict('PANEL_VALUE_INVALID', signed.id, invalidField))
+          continue
+        }
         unchangedIds.push(...merged.unchangedIds)
         planUpdates.push(...merged.updates.map((update) => Object.freeze({
           ...update, expectedVersion: current.version, type: signed.type,
@@ -788,13 +851,13 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
     }))
   }
   conflicts.sort((left, right) => (
-    left.recordId.localeCompare(right.recordId)
-    || (left.field ?? '').localeCompare(right.field ?? '')
-    || left.code.localeCompare(right.code)
+    compareUtf16CodeUnits(left.recordId, right.recordId)
+    || compareUtf16CodeUnits(left.field ?? '', right.field ?? '')
+    || compareUtf16CodeUnits(left.code, right.code)
   ))
-  planUpdates.sort((left, right) => left.id.localeCompare(right.id))
-  planVoids.sort((left, right) => left.id.localeCompare(right.id))
-  unchangedIds.sort()
+  planUpdates.sort((left, right) => compareUtf16CodeUnits(left.id, right.id))
+  planVoids.sort((left, right) => compareUtf16CodeUnits(left.id, right.id))
+  unchangedIds.sort(compareUtf16CodeUnits)
   return Object.freeze({
     conflicts: Object.freeze(conflicts),
     plan: Object.freeze({
@@ -876,10 +939,10 @@ async function inspectWorkbook(input) {
   const proposedMappings = [...values]
     .map((sourceValue) => PROFILE_MAPPINGS[sourceValue] ?? null)
     .filter(Boolean)
-    .sort((left, right) => left.displayName.localeCompare(right.displayName, 'pl-PL'))
+    .sort((left, right) => compareUtf16CodeUnits(left.displayName, right.displayName))
   const mappingConflicts = [...values]
     .filter((sourceValue) => !Object.hasOwn(PROFILE_MAPPINGS, sourceValue))
-    .sort((left, right) => left.localeCompare(right, 'pl-PL'))
+    .sort(compareUtf16CodeUnits)
     .map((sourceValue) => Object.freeze({
       code: 'SPECIALIST_MAPPING_REQUIRED',
       sourceValue,

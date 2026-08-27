@@ -241,6 +241,30 @@ test('canonical Meta is stable across input ordering and rejects secret-bearing 
   }), /PANEL_META_SCHEMA_INVALID/)
 })
 
+test('canonical Meta orders punctuation and case by explicit UTF-16 code units', async () => {
+  const { canonicalPanelMetadata } = await workbookOoxml()
+  const row = (id) => ({
+    id,
+    type: 'appointment',
+    baseVersion: 1,
+    fieldDigests: {
+      a: `digest_${id.replaceAll(/[^A-Za-z0-9]/g, 'x')}_lower_1234`,
+      A: `digest_${id.replaceAll(/[^A-Za-z0-9]/g, 'x')}_upper_1234`,
+    },
+  })
+  const payload = new TextDecoder().decode(canonicalPanelMetadata(panelMeta({
+    rows: ['a', 'A_', 'A:', 'A.', 'A-', 'A'].map(row),
+    voidIds: ['a', 'A_', 'A:', 'A.', 'A-', 'A'],
+  })))
+  const parsedPayload = JSON.parse(payload)
+
+  assert.deepEqual(parsedPayload.rows.map(({ id }) => id), [
+    'A', 'A-', 'A.', 'A:', 'A_', 'a',
+  ])
+  assert.deepEqual(parsedPayload.voidIds, ['A', 'A-', 'A.', 'A:', 'A_', 'a'])
+  assert.deepEqual(Object.keys(parsedPayload.rows[0].fieldDigests), ['A', 'a'])
+})
+
 const legacyStyles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="1"><fill/></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="8"><xf/><xf numFmtId="14"/><xf/><xf/><xf/><xf applyFill="1"/><xf applyNumberFormat="1"/><xf applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0"/></cellStyles></styleSheet>`
 
