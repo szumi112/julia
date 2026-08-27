@@ -30,7 +30,7 @@ const sheetNameFromQualifier = (qualifier) => {
 }
 
 const shiftFormula = (formula, sheetName, beforeRow, count, { shiftUnqualified = true } = {}) => formula.replace(
-  /"(?:[^"]|"")*"|((?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_.]*)!)?(\$?[A-Z]{1,3}\$?\d+)(?::(\$?[A-Z]{1,3}\$?\d+))?/g,
+  /"(?:[^"]|"")*"|(?<![A-Za-z0-9_.])((?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_.]*)!)?(\$?[A-Z]{1,3}\$?\d+)(?::(\$?[A-Z]{1,3}\$?\d+))?(?![A-Za-z0-9_.(])/g,
   (match, qualifier, reference, rangeEnd) => {
     if (match.startsWith('"')) return match
     const qualifiedSheet = sheetNameFromQualifier(qualifier)
@@ -44,10 +44,19 @@ const shiftFormula = (formula, sheetName, beforeRow, count, { shiftUnqualified =
 
 const shiftFormulaCell = (cell, sheetName, beforeRow, count, {
   clearAllCaches = false,
+  shiftFormulaRef = false,
   shiftUnqualified = true,
 } = {}) => {
   let changed = false
-  let result = cell.replace(
+  let result = shiftFormulaRef ? cell.replace(
+    /<(?:[A-Za-z_][\w.-]*:)?f\b[^>]*(?:\/>|>)/g,
+    (open) => replaceAttribute(open, 'ref', (value) => {
+      const shifted = shiftRange(value, beforeRow, count)
+      changed ||= shifted !== value
+      return shifted
+    }),
+  ) : cell
+  result = result.replace(
     /(<(?:[A-Za-z_][\w.-]*:)?f\b[^>]*>)([\s\S]*?)(<\/(?:[A-Za-z_][\w.-]*:)?f\s*>)/g,
     (_, open, formula, close) => {
       const source = xmlText(formula)
@@ -79,7 +88,10 @@ const shiftRowXml = (rowXml, sheetName, beforeRow, count) => {
       shiftedReference(reference, beforeRow, count)
     ))
     if (/<(?:[A-Za-z_][\w.-]*:)?f\b/.test(result)) {
-      result = shiftFormulaCell(result, sheetName, beforeRow, count, { clearAllCaches: true })
+      result = shiftFormulaCell(result, sheetName, beforeRow, count, {
+        clearAllCaches: true,
+        shiftFormulaRef: true,
+      })
     }
     return result
   })

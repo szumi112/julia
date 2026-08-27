@@ -9,8 +9,10 @@ import {
   openWorkbookPackage,
   readXml,
   relationshipEntries,
+  relationshipPartPath,
   replaceRelationshipEntries,
   replaceWorkbookSheets,
+  safeWorkbookFormula,
   workbookSheets,
   withoutContentTypePart,
   xmlAttribute,
@@ -39,8 +41,8 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
 
 const fail = (code) => { throw new TypeError(code) }
 
-const cellXfCount = (files) => {
-  const styles = files['xl/styles.xml'] ? readXml(files, 'xl/styles.xml') : ''
+const cellXfCount = (files, path) => {
+  const styles = path ? readXml(files, path) : ''
   const match = /<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs\s*>/.exec(styles)
   return match ? [...match[1].matchAll(/<xf\b/g)].length : 1
 }
@@ -51,8 +53,7 @@ const sharedStringValues = (xml) => [...xml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si
   .map((match) => [...match[1].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t\s*>/g)]
     .map((textMatch) => xmlText(textMatch[1])).join('').normalize('NFC'))
 
-const sharedStringPool = (files) => {
-  const path = 'xl/sharedStrings.xml'
+const sharedStringPool = (files, path = 'xl/sharedStrings.xml') => {
   const existing = files[path] ? readXml(files, path) : null
   const existingValues = existing ? sharedStringValues(existing) : []
   const additions = []
@@ -85,14 +86,6 @@ const sharedStringPool = (files) => {
       files[path] = strToU8(xml)
     },
   }
-}
-
-const safeFormula = (formula) => {
-  if (typeof formula !== 'string' || !formula || formula.length > 8192
-    || /\[[^\]]*\]|\b(?:DDE|WEBSERVICE|RTD|CALL|EXEC|REGISTER)\s*\(/i.test(formula)) {
-    fail('WORKBOOK_FORMULA_FORBIDDEN')
-  }
-  return formula.normalize('NFC')
 }
 
 const normalizeColumns = (definition, xfCount) => {
@@ -181,7 +174,7 @@ const scalarCell = (reference, value, column, strings, { stripFormulas = false }
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       fail('PANEL_CELL_VALUE_INVALID')
     }
-    const formula = safeFormula(value.formula)
+    const formula = safeWorkbookFormula(value.formula)
     const cached = value.cached
     if (typeof cached === 'number' && Number.isFinite(cached)) {
       return `<c r="${reference}"${style}><f>${xmlEscape(formula)}</f><v>${cached}</v></c>`
@@ -255,11 +248,17 @@ export const patchPanelWorkbook = async (source, options, callbacks = {}) => {
   if (!options || !Array.isArray(options.sheets)) fail('PANEL_PATCH_INPUT_INVALID')
   const files = openWorkbookPackage(source)
   const catalog = workbookSheets(files)
+  const stylesPath = relationshipPartPath(
+    catalog.relationships, 'xl/workbook.xml', '/styles',
+  )
+  const sharedStringsPath = relationshipPartPath(
+    catalog.relationships, 'xl/workbook.xml', '/sharedStrings',
+  ) ?? 'xl/sharedStrings.xml'
   const allPanelNames = new Set([...PANEL_VISIBLE_SHEETS, PANEL_PERMISSIONS_SHEET, PANEL_META_SHEET])
   const existingPanel = new Map(catalog.sheets.filter(({ name }) => allPanelNames.has(name))
     .map((sheet) => [sheet.name, sheet]))
   const legacySheets = catalog.sheets.filter(({ name }) => !allPanelNames.has(name))
-  const xfCount = cellXfCount(files)
+  const xfCount = cellXfCount(files, stylesPath)
   applyWorkbookRowInsertions(files, legacySheets, options.rowInsertions, xfCount)
   const definitions = new Map()
   for (const definition of options.sheets) {
@@ -276,7 +275,13 @@ export const patchPanelWorkbook = async (source, options, callbacks = {}) => {
   }
   const panelNames = [...visibleNames, PANEL_META_SHEET]
   const signedMetadata = await signPanelMetadata(options.metadata, callbacks.sign)
-  const strings = sharedStringPool(files)
+  const strings = sharedStringPool(files, sharedStringsPath)
+  let nextRelationship = Math.max(
+    0,
+    ...catalog.relationships.map(({ id }) => relationshipIdNumber(id)),
+  ) + 1
+  let nextSheetId = Math.max(0, ...catalog.sheets.map(({ sheetId }) => sheetId)) + 1
+  let nextPath = Math.max(0, ...Object.keys(files).map(sheetPathNumber)) + 1
 
   for (const sheet of existingPanel.values()) {
     delete files[sheet.path]
@@ -288,9 +293,6 @@ export const patchPanelWorkbook = async (source, options, callbacks = {}) => {
     !existingPanel.has(catalog.sheets.find(({ relationshipId }) => relationshipId === relationship.id)?.name)
   ))
   relationships = removePartRelationship(relationships, '/calcChain')
-  let nextRelationship = Math.max(0, ...relationships.map(({ id }) => relationshipIdNumber(id))) + 1
-  let nextSheetId = Math.max(0, ...legacySheets.map(({ sheetId }) => sheetId) ) + 1
-  let nextPath = Math.max(0, ...Object.keys(files).map(sheetPathNumber)) + 1
   const generated = []
 
   for (const name of panelNames) {
@@ -336,7 +338,7 @@ export const patchPanelWorkbook = async (source, options, callbacks = {}) => {
     contentTypes = ensureContentTypePart(contentTypes, `/${path}`, WORKSHEET_CONTENT_TYPE)
   }
   contentTypes = ensureContentTypePart(
-    contentTypes, '/xl/sharedStrings.xml', SHARED_STRINGS_CONTENT_TYPE,
+    contentTypes, `/${sharedStringsPath}`, SHARED_STRINGS_CONTENT_TYPE,
   )
   files['[Content_Types].xml'] = strToU8(contentTypes)
   return closeWorkbookPackage(files)
@@ -355,14 +357,33 @@ const validatedAllowlist = (values, allowed, code) => {
   return new Set(values)
 }
 
+const withoutStyleId = (column) => {
+  if (!column || typeof column !== 'object' || Array.isArray(column)) return column
+  const { styleId: _styleId, ...result } = column
+  return result
+}
+
+const scopedSheetPolicies = (values) => {
+  if (!Array.isArray(values)) fail('PANEL_SCOPED_SHEETS_INVALID')
+  const policies = new Map()
+  for (const value of values) {
+    if (!value || Array.isArray(value) || typeof value !== 'object'
+      || typeof value.name !== 'string'
+      || !Array.isArray(value.columns)
+      || (!PANEL_VISIBLE_SHEETS.includes(value.name) && value.name !== PANEL_PERMISSIONS_SHEET)
+      || policies.has(value.name)) fail('PANEL_SCOPED_SHEETS_INVALID')
+    const columns = normalizeColumns({
+      columns: value.columns.map(withoutStyleId),
+    }, 1)
+    policies.set(value.name, { columns, name: value.name })
+  }
+  return policies
+}
+
 export const createScopedPanelWorkbook = async (input, callbacks = {}) => {
   if (!input || !Array.isArray(input.sheets)) fail('PANEL_SCOPED_INPUT_INVALID')
   canonicalPanelMetadata(input.metadata)
-  const allowedSheetSet = validatedAllowlist(
-    input.allowedSheets,
-    (name) => PANEL_VISIBLE_SHEETS.includes(name) || name === PANEL_PERMISSIONS_SHEET,
-    'PANEL_SCOPED_SHEETS_INVALID',
-  )
+  const sheetPolicies = scopedSheetPolicies(input.allowedSheets)
   const allowedRowSet = validatedAllowlist(
     input.allowedRowIds,
     (id) => SAFE_ID.test(id),
@@ -370,27 +391,58 @@ export const createScopedPanelWorkbook = async (input, callbacks = {}) => {
   )
   const metadataIds = new Set(input.metadata.rows.map(({ id }) => id))
   if ([...allowedRowSet].some((id) => !metadataIds.has(id))) fail('PANEL_SCOPED_ROW_UNSIGNED')
+  const sourceDefinitions = new Map()
+  for (const sourceDefinition of input.sheets) {
+    if (!sourceDefinition || typeof sourceDefinition.name !== 'string'
+      || sourceDefinitions.has(sourceDefinition.name)) fail('PANEL_SHEET_DUPLICATE')
+    sourceDefinitions.set(sourceDefinition.name, sourceDefinition)
+  }
+  const signedRows = new Map(input.metadata.rows.map((row) => [row.id, row]))
+  const normalizedSources = new Map()
+  for (const policy of sheetPolicies.values()) {
+    const sourceDefinition = sourceDefinitions.get(policy.name)
+    if (!sourceDefinition) continue
+    const normalized = normalizeSheet({
+      ...sourceDefinition,
+      columns: sourceDefinition.columns?.map(withoutStyleId),
+    }, 1)
+    normalizedSources.set(policy.name, normalized)
+  }
+  const authorizedFieldSet = new Set([...sheetPolicies.values()]
+    .flatMap(({ columns }) => columns.map(({ key }) => key)))
   const metadata = {
     format: 'Panel-v2',
-    rows: input.metadata.rows.filter(({ id }) => allowedRowSet.has(id)),
+    rows: input.metadata.rows.filter(({ id }) => allowedRowSet.has(id)).map((row) => {
+      const fieldDigests = Object.fromEntries(Object.entries(row.fieldDigests)
+        .filter(([key]) => authorizedFieldSet.has(key)))
+      if (!Object.keys(fieldDigests).length) fail('PANEL_SCOPED_ROW_FIELDS_INVALID')
+      return { ...row, fieldDigests }
+    }),
     scope: input.metadata.scope,
     voidIds: input.metadata.voidIds.filter((id) => allowedRowSet.has(id)),
   }
   const signedMetadata = await signPanelMetadata(metadata, callbacks.sign)
   const definitions = new Map()
-  for (const sourceDefinition of input.sheets) {
-    if (!sourceDefinition || typeof sourceDefinition.name !== 'string'
-      || definitions.has(sourceDefinition.name)) fail('PANEL_SHEET_DUPLICATE')
-    if (!allowedSheetSet.has(sourceDefinition.name)) continue
-    const neutralDefinition = {
-      ...sourceDefinition,
-      columns: sourceDefinition.columns?.map(({ styleId: _styleId, ...column }) => column),
-      rows: sourceDefinition.rows?.filter(({ id }) => allowedRowSet.has(id)),
-    }
-    definitions.set(sourceDefinition.name, normalizeSheet(neutralDefinition, 1))
+  for (const policy of sheetPolicies.values()) {
+    const source = normalizedSources.get(policy.name)
+    const rows = (source?.rows ?? []).filter(({ id }) => allowedRowSet.has(id)).map((row) => {
+      const signed = signedRows.get(row.id)
+      const values = {}
+      for (const { key } of policy.columns) {
+        if (Object.hasOwn(signed.fieldDigests, key) && Object.hasOwn(row.values, key)) {
+          values[key] = row.values[key]
+        }
+      }
+      return { id: row.id, values }
+    })
+    definitions.set(policy.name, normalizeSheet({
+      columns: policy.columns,
+      name: policy.name,
+      rows,
+    }, 1))
   }
   const visibleNames = [...PANEL_VISIBLE_SHEETS, PANEL_PERMISSIONS_SHEET]
-    .filter((name) => allowedSheetSet.has(name))
+    .filter((name) => sheetPolicies.has(name))
   const files = scopedFiles()
   const strings = sharedStringPool(files)
   const generated = []

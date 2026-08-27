@@ -153,10 +153,16 @@ const relationshipOwner = (path) => {
   return `${match[1]}${match[2]}`
 }
 
-const unsafeFormula = (formula) => /\b(?:CALL|DDE|EXEC|REGISTER|RTD|WEBSERVICE)\s*\(/i.test(formula)
+const unsafeFormula = (formula) => /\b(?:CALL|DDE|EXEC|HYPERLINK|REGISTER|RTD|WEBSERVICE)\s*\(/i.test(formula)
   || /(?:https?|file|mailto):/i.test(formula)
   || /\[[^\]]+\][^!]{0,128}!/.test(formula)
   || /(?:^|[=+\-])\s*(?:cmd|powershell|wscript|cscript)\s*\|/i.test(formula)
+
+export const safeWorkbookFormula = (formula) => {
+  if (typeof formula !== 'string' || !formula || formula.length > 8192
+    || unsafeFormula(formula)) fail('WORKBOOK_FORMULA_FORBIDDEN')
+  return formula.normalize('NFC')
+}
 
 const validatePackageFiles = (files, entries) => {
   const names = Object.keys(files)
@@ -195,7 +201,7 @@ const validatePackageFiles = (files, entries) => {
     && name.endsWith('.xml'))) {
     const xml = readXml(files, path)
     for (const match of xml.matchAll(/<(?:[A-Za-z_][\w.-]*:)?(?:f|definedName)\b[^>]*>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?(?:f|definedName)\s*>/g)) {
-      if (unsafeFormula(xmlText(match[1]))) fail('WORKBOOK_FORMULA_FORBIDDEN')
+      safeWorkbookFormula(xmlText(match[1]))
     }
   }
 }
@@ -269,6 +275,14 @@ export const resolveRelationshipTarget = (ownerPath, target) => {
   }
   if (!resolved.length) fail('WORKBOOK_RELATIONSHIP_INVALID')
   return resolved.join('/')
+}
+
+export const relationshipPartPath = (relationships, ownerPath, typeSuffix) => {
+  const matches = relationships.filter(({ type }) => type?.endsWith(typeSuffix))
+  if (matches.length > 1) fail('WORKBOOK_RELATIONSHIP_INVALID')
+  return matches.length
+    ? resolveRelationshipTarget(ownerPath, matches[0].target)
+    : null
 }
 
 export const workbookSheets = (files) => {

@@ -268,6 +268,20 @@ const syntheticTemplateFiles = (overrides = {}) => ({
 
 const syntheticTemplate = (overrides = {}) => zipSync(syntheticTemplateFiles(overrides))
 
+const relocateWorkbookPart = (files, { from, relationshipTarget, to }) => {
+  files[to] = files[from]
+  delete files[from]
+  files['xl/_rels/workbook.xml.rels'] = strToU8(
+    strFromU8(files['xl/_rels/workbook.xml.rels'])
+      .replace(`Target="${from.replace(/^xl\//, '')}"`, `Target="${relationshipTarget}"`),
+  )
+  files['[Content_Types].xml'] = strToU8(
+    strFromU8(files['[Content_Types].xml'])
+      .replace(`PartName="/${from}"`, `PartName="/${to}"`),
+  )
+  return files
+}
+
 const workbookSheetNames = (xml) => [...xml.matchAll(/<sheet\b([^>]*?)\/>/g)]
   .map((match) => /\bname="([^"]+)"/.exec(match[1])?.[1]
     .replaceAll('&amp;', '&').replaceAll('&quot;', '"'))
@@ -388,6 +402,54 @@ test('full-centre patch appends Panel-v2 while preserving legacy OOXML semantics
   assert.doesNotMatch(strFromU8(files['xl/worksheets/sheet1.xml']), /Panel \u2014/)
 })
 
+test('patch resolves and preserves a relocated styles part from workbook relationships', async () => {
+  const { patchPanelWorkbook } = await workbookOoxml()
+  const sourceFiles = relocateWorkbookPart(syntheticTemplateFiles(), {
+    from: 'xl/styles.xml',
+    relationshipTarget: 'parts/styles-main.xml',
+    to: 'xl/parts/styles-main.xml',
+  })
+  const patched = unzipSync(await patchPanelWorkbook(zipSync(sourceFiles), {
+    sheets: panelSheets(),
+    metadata: panelMetadata(),
+  }, { sign: signingCallbacks.sign }))
+
+  assert.equal(patched['xl/styles.xml'], undefined)
+  assert.deepEqual(patched['xl/parts/styles-main.xml'], strToU8(legacyStyles))
+  assert.match(strFromU8(patched['xl/_rels/workbook.xml.rels']), /Target="parts\/styles-main\.xml"/)
+  assert.match(strFromU8(patched['[Content_Types].xml']), /PartName="\/xl\/parts\/styles-main\.xml"/)
+})
+
+test('patch and read use a relocated shared-string part without creating an orphan', async () => {
+  const { patchPanelWorkbook, readPanelWorkbook } = await workbookOoxml()
+  const sourceFiles = relocateWorkbookPart(syntheticTemplateFiles(), {
+    from: 'xl/sharedStrings.xml',
+    relationshipTarget: 'parts/strings-main.xml',
+    to: 'xl/parts/strings-main.xml',
+  })
+  const patchedBytes = await patchPanelWorkbook(zipSync(sourceFiles), {
+    sheets: panelSheets(),
+    metadata: panelMetadata(),
+  }, { sign: signingCallbacks.sign })
+  const patched = unzipSync(patchedBytes)
+  const stringsXml = strFromU8(patched['xl/parts/strings-main.xml'])
+  const strings = sharedValuesFrom(stringsXml)
+  const indexes = Object.entries(patched)
+    .filter(([path]) => /^xl\/worksheets\/sheet\d+\.xml$/.test(path))
+    .flatMap(([, bytes]) => [...strFromU8(bytes).matchAll(/<c\b(?=[^>]*\bt="s")[^>]*><v>(\d+)<\/v><\/c>/g)]
+      .map((match) => Number(match[1])))
+
+  assert.equal(patched['xl/sharedStrings.xml'], undefined)
+  assert.match(stringsXml, /Klient Dozwolony/)
+  assert.match(stringsXml, /Panel-v2/)
+  assert.ok(indexes.every((index) => index >= 0 && index < strings.length))
+  assert.doesNotMatch(strFromU8(patched['[Content_Types].xml']), /PartName="\/xl\/sharedStrings\.xml"/)
+  assert.match(strFromU8(patched['[Content_Types].xml']), /PartName="\/xl\/parts\/strings-main\.xml"/)
+  const read = await readPanelWorkbook(patchedBytes, { verify: signingCallbacks.verify })
+  assert.equal(read.kind, 'panel-v2')
+  assert.equal(read.edits[0].values.note, '=2+2')
+})
+
 test('row insertion shifts references and drawing anchors without renumbering styles', async () => {
   const { patchPanelWorkbook } = await workbookOoxml()
   const files = unzipSync(await patchPanelWorkbook(syntheticTemplate(), {
@@ -426,6 +488,35 @@ test('row insertion shifts references and drawing anchors without renumbering st
     syntheticTemplateFiles()['xl/worksheets/_rels/sheet1.xml.rels'],
   )
   assert.equal((drawing.match(/<xdr:row>3<\/xdr:row>/g) ?? []).length, 2)
+})
+
+test('row insertion shifts formula tokens, sheet ranges, and shared or array refs precisely', async () => {
+  const { patchPanelWorkbook } = await workbookOoxml()
+  const sourceWorksheet = strFromU8(syntheticTemplateFiles()['xl/worksheets/sheet1.xml'])
+    .replace(
+      '<c r="B4" s="7"><f>SUM(B2:B3)</f><v>300</v></c>',
+      '<c r="B4" s="7"><f>LOG10(A10)+_A10+A10+SUM(B2:B10)+&quot;A10&quot;</f><v>300</v></c>'
+        + '<c r="C4" s="7"><f t="shared" ref="C3:C10" si="0">SUM(&apos;Arkusz A&apos;!A3:A10)</f><v>9</v></c>'
+        + '<c r="D4" s="7"><f t="array" ref="D2:D10">SUM(A2:A10)</f><v>9</v></c>',
+    )
+  const files = unzipSync(await patchPanelWorkbook(syntheticTemplate({
+    'xl/worksheets/sheet1.xml': strToU8(sourceWorksheet),
+  }), {
+    sheets: [],
+    metadata: panelMeta(),
+    rowInsertions: [{
+      sheet: 'Arkusz A',
+      beforeRow: 3,
+      rows: [{ cells: [{ type: 'text', value: 'Nowy' }] }],
+    }],
+  }, { sign: signingCallbacks.sign }))
+  const worksheet = strFromU8(files['xl/worksheets/sheet1.xml'])
+  const otherWorksheet = strFromU8(files['xl/worksheets/sheet2.xml'])
+
+  assert.match(worksheet, /<c r="B5" s="7"><f>LOG10\(A11\)\+_A10\+A11\+SUM\(B2:B11\)\+&quot;A10&quot;<\/f><\/c>/)
+  assert.match(worksheet, /<c r="C5" s="7"><f t="shared" ref="C4:C11" si="0">SUM\(&apos;Arkusz A&apos;!A4:A11\)<\/f><\/c>/)
+  assert.match(worksheet, /<c r="D5" s="7"><f t="array" ref="D2:D11">SUM\(A2:A11\)<\/f><\/c>/)
+  assert.match(otherWorksheet, /SUM\(&apos;Arkusz A&apos;!B2:B4\)/)
 })
 
 test('read verifies signed Meta and returns typed edits keyed by stable row IDs', async () => {
@@ -533,6 +624,40 @@ test('Meta verification survives client re-save representation and ZIP ordering 
   assert.equal(result.edits[0].values.note, '=2+2')
 })
 
+test('signed inline Meta cannot be downgraded by removing shared strings and renaming Panel sheets', async () => {
+  const { readPanelWorkbook } = await workbookOoxml()
+  const files = unzipSync(await patchedPanelWorkbook())
+  const strings = sharedValuesFrom(strFromU8(files['xl/sharedStrings.xml']))
+  for (const path of Object.keys(files).filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/.test(path))) {
+    files[path] = strToU8(resaveSharedCellsAsInline(strFromU8(files[path]), strings))
+  }
+  delete files['xl/sharedStrings.xml']
+  files['xl/_rels/workbook.xml.rels'] = strToU8(
+    strFromU8(files['xl/_rels/workbook.xml.rels']).replace(
+      /<Relationship\b(?=[^>]*\/sharedStrings)[^>]*\/>/,
+      '',
+    ),
+  )
+  files['[Content_Types].xml'] = strToU8(
+    strFromU8(files['[Content_Types].xml']).replace(
+      /<Override\b(?=[^>]*\/xl\/sharedStrings\.xml)[^>]*\/>/,
+      '',
+    ),
+  )
+  files['xl/workbook.xml'] = strToU8(
+    strFromU8(files['xl/workbook.xml']).replaceAll('Panel — ', 'Archive — '),
+  )
+  let verificationCalls = 0
+
+  await assert.rejects(readPanelWorkbook(zipSync(files), {
+    verify: async (...args) => {
+      verificationCalls++
+      return signingCallbacks.verify(...args)
+    },
+  }), /PANEL_META_REQUIRED/)
+  assert.equal(verificationCalls, 1)
+})
+
 test('missing worksheet rows never imply void while signed explicit void IDs survive', async () => {
   const { readPanelWorkbook } = await workbookOoxml()
   const withoutRow = panelSheets().map((sheet) => sheet.name === 'Panel \u2014 Wizyty'
@@ -603,7 +728,13 @@ test('scoped output rebuilds from explicit allowlists with compact strings and n
 
   const scoped = await createScopedPanelWorkbook({
     allowedRowIds: ['visit_allowed'],
-    allowedSheets: ['Panel \u2014 Wizyty'],
+    allowedSheets: [{
+      name: 'Panel \u2014 Wizyty',
+      columns: [
+        { key: 'note', label: 'Notatka', type: 'text' },
+        { key: 'calculated', label: 'Wyliczenie', type: 'formula' },
+      ],
+    }],
     metadata,
     sheets,
   }, { sign: signingCallbacks.sign })
@@ -631,6 +762,64 @@ test('scoped output rebuilds from explicit allowlists with compact strings and n
     sheet: 'Panel \u2014 Wizyty',
     values: { note: 'Bezpieczne' },
   }])
+})
+
+test('scoped output takes labels and fields only from the explicit authorized sheet schema', async () => {
+  const { createScopedPanelWorkbook, readPanelWorkbook } = await workbookOoxml()
+  const labelSentinel = 'DYNAMIC_LABEL_SENTINEL'
+  const fieldSentinel = 'UNAPPROVED_FIELD_SENTINEL'
+  const metadata = panelMeta({
+    rows: [{
+      id: 'visit_allowed',
+      type: 'appointment',
+      baseVersion: 1,
+      fieldDigests: {
+        internalNote: `digest_${fieldSentinel}`,
+        note: 'digest_note_allowed_1',
+      },
+    }],
+  })
+  const scoped = await createScopedPanelWorkbook({
+    allowedRowIds: ['visit_allowed'],
+    allowedSheets: [{
+      name: 'Panel — Wizyty',
+      columns: [{ key: 'note', label: 'Notatka zatwierdzona', type: 'text' }],
+    }],
+    metadata,
+    sheets: [{
+      name: 'Panel — Wizyty',
+      columns: [
+        { key: 'note', label: labelSentinel, type: 'text' },
+        { key: 'internalNote', label: 'Pole wewnętrzne', type: 'text' },
+      ],
+      rows: [{
+        id: 'visit_allowed',
+        values: { internalNote: fieldSentinel, note: 'Bezpieczna notatka' },
+      }],
+    }],
+  }, { sign: signingCallbacks.sign })
+  const files = unzipSync(scoped)
+  const allPartText = Object.values(files).map((bytes) => strFromU8(bytes)).join('\n')
+
+  assert.doesNotMatch(allPartText, new RegExp(labelSentinel))
+  assert.doesNotMatch(allPartText, new RegExp(fieldSentinel))
+  assert.match(allPartText, /Notatka zatwierdzona/)
+  const read = await readPanelWorkbook(scoped, { verify: signingCallbacks.verify })
+  assert.deepEqual(read.metadata.rows[0].fieldDigests, {
+    note: 'digest_note_allowed_1',
+  })
+  assert.deepEqual(read.edits, [{
+    id: 'visit_allowed',
+    sheet: 'Panel — Wizyty',
+    values: { note: 'Bezpieczna notatka' },
+  }])
+
+  await assert.rejects(createScopedPanelWorkbook({
+    allowedRowIds: ['visit_allowed'],
+    allowedSheets: ['Panel — Wizyty'],
+    metadata,
+    sheets: [],
+  }, { sign: signingCallbacks.sign }), /PANEL_SCOPED_SHEETS_INVALID/)
 })
 
 const withWorkbookRelationship = (relationship) => {
@@ -690,6 +879,24 @@ test('all OOXML entry points reject the ZIP and active-content security corpus',
     }),
     code: 'WORKBOOK_FORMULA_FORBIDDEN',
   }, {
+    name: 'HYPERLINK formula',
+    bytes: syntheticTemplate({
+      'xl/worksheets/sheet1.xml': strToU8(
+        strFromU8(syntheticTemplateFiles()['xl/worksheets/sheet1.xml'])
+          .replace('SUM(B2:B3)', 'HYPERLINK(&quot;#Arkusz A!A1&quot;,&quot;open&quot;)'),
+      ),
+    }),
+    code: 'WORKBOOK_FORMULA_FORBIDDEN',
+  }, {
+    name: 'pipe-style DDE formula',
+    bytes: syntheticTemplate({
+      'xl/worksheets/sheet1.xml': strToU8(
+        strFromU8(syntheticTemplateFiles()['xl/worksheets/sheet1.xml'])
+          .replace('SUM(B2:B3)', "cmd|' /C calc'!A0"),
+      ),
+    }),
+    code: 'WORKBOOK_FORMULA_FORBIDDEN',
+  }, {
     name: 'traversal path',
     bytes: syntheticTemplate({ '../escape.txt': strToU8('unsafe') }),
     code: 'WORKBOOK_ARCHIVE_PATH_INVALID',
@@ -716,11 +923,13 @@ test('all OOXML entry points reject the ZIP and active-content security corpus',
 })
 
 test('generated formulas are explicit trusted inputs and reject external or executable syntax', async () => {
-  const { patchPanelWorkbook } = await workbookOoxml()
+  const { patchPanelWorkbook, readPanelWorkbook } = await workbookOoxml()
   for (const formula of [
     'DDE("cmd","/c calc")',
+    'HYPERLINK("#Panel — Wizyty!A1","open")',
     "'[external.xlsx]Sheet 1'!A1",
     'WEBSERVICE("https://example.test/leak")',
+    "cmd|' /C calc'!A0",
   ]) {
     const sheets = panelSheets()
     sheets[0].rows[0].values.total.formula = formula
@@ -729,6 +938,11 @@ test('generated formulas are explicit trusted inputs and reject external or exec
       metadata: panelMetadata(),
     }, { sign: signingCallbacks.sign }), /WORKBOOK_FORMULA_FORBIDDEN/)
   }
+
+  const safe = await patchedPanelWorkbook()
+  assert.equal((await readPanelWorkbook(safe, {
+    verify: signingCallbacks.verify,
+  })).kind, 'panel-v2')
 })
 
 test('re-patching Panel-v2 replaces generated sheets and removes revoked optional parts', async () => {
@@ -770,4 +984,46 @@ test('re-patching Panel-v2 replaces generated sheets and removes revoked optiona
   const read = await readPanelWorkbook(second, { verify: signingCallbacks.verify })
   assert.equal(read.metadata.rows[0].baseVersion, 4)
   assert.equal(read.edits[0].values.note, 'Zmienione')
+})
+
+test('re-patching can add permissions without colliding with retained Panel identities or parts', async () => {
+  const { patchPanelWorkbook, readPanelWorkbook } = await workbookOoxml()
+  const withoutPermissions = await patchedPanelWorkbook({ includePermissions: false })
+  const withPermissions = await patchPanelWorkbook(withoutPermissions, {
+    includePermissions: true,
+    metadata: panelMetadata(),
+    sheets: panelSheets(),
+  }, { sign: signingCallbacks.sign })
+  const files = unzipSync(withPermissions)
+  const workbook = strFromU8(files['xl/workbook.xml'])
+  const relationshipsXml = strFromU8(files['xl/_rels/workbook.xml.rels'])
+  const attributes = (source) => Object.fromEntries(
+    [...source.matchAll(/([A-Za-z:]+)="([^"]*)"/g)].map((match) => [match[1], match[2]]),
+  )
+  const sheets = [...workbook.matchAll(/<sheet\b([^>]*?)\/>/g)].map((match) => attributes(match[1]))
+  const relationships = [...relationshipsXml.matchAll(/<Relationship\b([^>]*?)\/>/g)]
+    .map((match) => attributes(match[1]))
+  const worksheetRelationships = relationships.filter(({ Type }) => Type.endsWith('/worksheet'))
+
+  assert.equal(new Set(relationships.map(({ Id }) => Id)).size, relationships.length)
+  assert.equal(new Set(sheets.map(({ sheetId }) => sheetId)).size, sheets.length)
+  assert.equal(new Set(worksheetRelationships.map(({ Target }) => Target)).size,
+    worksheetRelationships.length)
+  assert.ok(worksheetRelationships.every(({ Target }) => files[`xl/${Target}`] instanceof Uint8Array))
+  const summary = sheets.find(({ name }) => name === 'Panel — Podsumowanie')
+  const summaryTarget = worksheetRelationships.find(({ Id }) => Id === summary['r:id']).Target
+  assert.match(strFromU8(files[`xl/${summaryTarget}`]), /SUM\(/)
+  assert.equal((await readPanelWorkbook(withPermissions, {
+    verify: signingCallbacks.verify,
+  })).kind, 'panel-v2')
+
+  const revoked = await patchPanelWorkbook(withPermissions, {
+    includePermissions: false,
+    metadata: panelMetadata(),
+    sheets: panelSheets(),
+  }, { sign: signingCallbacks.sign })
+  assert.doesNotMatch(
+    workbookSheetNames(strFromU8(unzipSync(revoked)['xl/workbook.xml'])).join('\n'),
+    /Panel — Uprawnienia/,
+  )
 })

@@ -2,6 +2,7 @@ import { verifyPanelMetadata } from './workbook-panel-meta.js'
 import {
   openWorkbookPackage,
   readXml,
+  relationshipPartPath,
   workbookSheets,
   xmlAttribute,
   xmlText,
@@ -24,9 +25,9 @@ const columnIndex = (reference) => {
   return value - 1
 }
 
-const sharedStringsFrom = (files) => {
-  if (!files['xl/sharedStrings.xml']) return []
-  const xml = readXml(files, 'xl/sharedStrings.xml')
+const sharedStringsFrom = (files, path) => {
+  if (!path) return []
+  const xml = readXml(files, path)
   return [...xml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si\s*>/g)].map((match) => (
     [...match[1].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t\s*>/g)]
       .map((textMatch) => xmlText(textMatch[1])).join('').normalize('NFC')
@@ -104,6 +105,16 @@ const readSignedMetadata = async (files, metaSheet, sharedStrings, verify) => {
   }, verify)
 }
 
+const hasMetadataMarker = (files, sheet, sharedStrings) => {
+  try {
+    const rows = worksheetRows(readXml(files, sheet.path), sharedStrings)
+    const marker = rows.get(1)?.get(0)
+    return Boolean(marker && !marker.formula && marker.value === 'Panel-v2')
+  } catch {
+    return false
+  }
+}
+
 const headerColumns = (rows) => {
   const header = rows.get(1)
   if (!header?.size || header.get(0)?.value !== '__id' || header.get(0)?.formula) {
@@ -155,17 +166,29 @@ const editsFromSheet = (files, sheet, sharedStrings, signedRows, seenIds) => {
 export const readPanelWorkbook = async (source, { verify } = {}) => {
   const files = openWorkbookPackage(source)
   const catalog = workbookSheets(files)
-  const sharedStrings = sharedStringsFrom(files)
+  const sharedStrings = sharedStringsFrom(files, relationshipPartPath(
+    catalog.relationships, 'xl/workbook.xml', '/sharedStrings',
+  ))
   const recognized = new Set([...PANEL_VISIBLE_SHEETS, PANEL_PERMISSIONS_SHEET, PANEL_META_SHEET])
   const panelSheets = catalog.sheets.filter(({ name }) => recognized.has(name))
+  const markerSheets = catalog.sheets.filter((sheet) => hasMetadataMarker(files, sheet, sharedStrings))
   const hasPanelArtifacts = panelSheets.length > 0
     || catalog.sheets.some(({ name }) => name.startsWith('Panel — '))
     || sharedStrings.includes('Panel-v2')
+    || markerSheets.length > 0
   if (!hasPanelArtifacts) {
     return { edits: [], kind: 'legacy', metadata: null, voidIds: [] }
   }
   const metaSheets = panelSheets.filter(({ name }) => name === PANEL_META_SHEET)
-  if (metaSheets.length !== 1) fail('PANEL_META_REQUIRED')
+  if (metaSheets.length !== 1) {
+    if (markerSheets.length === 1) {
+      await readSignedMetadata(files, markerSheets[0], sharedStrings, verify)
+    }
+    fail('PANEL_META_REQUIRED')
+  }
+  if (markerSheets.length !== 1 || markerSheets[0].path !== metaSheets[0].path) {
+    fail('PANEL_META_INVALID')
+  }
   const names = new Set()
   for (const sheet of panelSheets) {
     if (names.has(sheet.name)) fail('PANEL_SHEET_DUPLICATE')
