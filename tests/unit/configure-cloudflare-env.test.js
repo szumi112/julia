@@ -47,9 +47,17 @@ const baseConfig = () => ({
     ACTIVE_DATA_KEK_VERSION: '1',
     ACTIVE_LOOKUP_KEY_VERSION: '1',
     ACTIVE_BACKUP_KEK_VERSION: '1',
+    ACTIVE_WORKBOOK_KEK_VERSION: '1',
+    ACTIVE_WORKBOOK_HMAC_VERSION: '1',
   },
   secrets: {
-    required: ['BWM_BACKUP_KEK_V1', 'BWM_DATA_KEK_V1', 'BWM_LOOKUP_HMAC_V1'],
+    required: [
+      'BWM_BACKUP_KEK_V1',
+      'BWM_DATA_KEK_V1',
+      'BWM_LOOKUP_HMAC_V1',
+      'BWM_WORKBOOK_HMAC_V1',
+      'BWM_WORKBOOK_KEK_V1',
+    ],
   },
 })
 
@@ -107,6 +115,8 @@ const expectedEnvironmentBlock = (name, section) => {
     ACTIVE_DATA_KEK_VERSION: '1',
     ACTIVE_LOOKUP_KEY_VERSION: '1',
     ACTIVE_BACKUP_KEK_VERSION: '1',
+    ACTIVE_WORKBOOK_KEK_VERSION: '1',
+    ACTIVE_WORKBOOK_HMAC_VERSION: '1',
     CF_ACCOUNT_ID: section.accountId,
     CF_D1_DATABASE_ID: section.d1.id,
     CF_ACCESS_GROUP_ID: section.accessGroupId,
@@ -127,6 +137,8 @@ const expectedEnvironmentBlock = (name, section) => {
         'BWM_BACKUP_KEK_V1',
         'BWM_DATA_KEK_V1',
         'BWM_LOOKUP_HMAC_V1',
+        'BWM_WORKBOOK_HMAC_V1',
+        'BWM_WORKBOOK_KEK_V1',
         'CF_ACCESS_GROUP_TOKEN',
         'CF_D1_EXPORT_TOKEN',
         'SCW_SECRET_KEY',
@@ -176,6 +188,8 @@ test('CLI writes complete staging and production environments for a valid provid
     'BWM_BACKUP_KEK_V1',
     'BWM_DATA_KEK_V1',
     'BWM_LOOKUP_HMAC_V1',
+    'BWM_WORKBOOK_HMAC_V1',
+    'BWM_WORKBOOK_KEK_V1',
     'CF_ACCESS_GROUP_TOKEN',
     'CF_D1_EXPORT_TOKEN',
     'SCW_SECRET_KEY',
@@ -197,6 +211,8 @@ test('CLI writes complete staging and production environments for a valid provid
     'ACTIVE_DATA_KEK_VERSION',
     'ACTIVE_LOOKUP_KEY_VERSION',
     'ACTIVE_BACKUP_KEK_VERSION',
+    'ACTIVE_WORKBOOK_KEK_VERSION',
+    'ACTIVE_WORKBOOK_HMAC_VERSION',
     'CF_ACCOUNT_ID',
     'CF_D1_DATABASE_ID',
     'CF_ACCESS_GROUP_ID',
@@ -247,6 +263,8 @@ test('the writer accepts the live repo wrangler.json shape', () => {
     'BWM_BACKUP_KEK_V1',
     'BWM_DATA_KEK_V1',
     'BWM_LOOKUP_HMAC_V1',
+    'BWM_WORKBOOK_HMAC_V1',
+    'BWM_WORKBOOK_KEK_V1',
     'CF_ACCESS_GROUP_TOKEN',
     'CF_D1_EXPORT_TOKEN',
     'SCW_SECRET_KEY',
@@ -444,7 +462,13 @@ test('a present scaleway section is fully validated', () => {
 })
 
 test('the wrangler config must provide the inherited key-version vars', () => {
-  for (const name of ['ACTIVE_DATA_KEK_VERSION', 'ACTIVE_LOOKUP_KEY_VERSION', 'ACTIVE_BACKUP_KEK_VERSION']) {
+  for (const name of [
+    'ACTIVE_DATA_KEK_VERSION',
+    'ACTIVE_LOOKUP_KEY_VERSION',
+    'ACTIVE_BACKUP_KEK_VERSION',
+    'ACTIVE_WORKBOOK_KEK_VERSION',
+    'ACTIVE_WORKBOOK_HMAC_VERSION',
+  ]) {
     const config = baseConfig()
     delete config.vars[name]
     assert.throws(

@@ -22,9 +22,13 @@ const valid = {
   ACTIVE_DATA_KEK_VERSION: '1',
   ACTIVE_LOOKUP_KEY_VERSION: '1',
   ACTIVE_BACKUP_KEK_VERSION: '1',
+  ACTIVE_WORKBOOK_KEK_VERSION: '1',
+  ACTIVE_WORKBOOK_HMAC_VERSION: '1',
   BWM_DATA_KEK_V1: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
   BWM_LOOKUP_HMAC_V1: 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ',
   BWM_BACKUP_KEK_V1: 'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
+  BWM_WORKBOOK_KEK_V1: 'CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk',
+  BWM_WORKBOOK_HMAC_V1: 'CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo',
 }
 
 const backupConfig = Object.freeze({ appEnv: 'staging', activeBackupKekVersion: 1 })
@@ -77,6 +81,8 @@ describe('loadConfig', () => {
       activeDataKekVersion: 1,
       activeLookupKeyVersion: 1,
       activeBackupKekVersion: 1,
+      activeWorkbookKekVersion: 1,
+      activeWorkbookHmacVersion: 1,
       localAuth: false,
     })
     expect(Object.isFrozen(result)).toBe(true)
@@ -114,6 +120,10 @@ describe('loadConfig', () => {
     ['ACTIVE_DATA_KEK_VERSION', '1e0'],
     ['ACTIVE_DATA_KEK_VERSION', ' 1'],
     ['ACTIVE_DATA_KEK_VERSION', '0'],
+    ['ACTIVE_WORKBOOK_KEK_VERSION', '01'],
+    ['ACTIVE_WORKBOOK_HMAC_VERSION', '0'],
+    ['BWM_WORKBOOK_KEK_V1', 'short'],
+    ['BWM_WORKBOOK_HMAC_V1', 'short'],
   ])('fails closed for invalid %s', (key, value) => {
     expect(() => loadConfig({ ...valid, [key]: value })).toThrow()
   })

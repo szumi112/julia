@@ -14,7 +14,13 @@ import {
 } from '../../worker/security/envelope.js'
 
 const secret = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
-const config = { activeDataKekVersion: 1, activeLookupKeyVersion: 1, activeBackupKekVersion: 1 }
+const config = {
+  activeDataKekVersion: 1,
+  activeLookupKeyVersion: 1,
+  activeBackupKekVersion: 1,
+  activeWorkbookKekVersion: 1,
+  activeWorkbookHmacVersion: 1,
+}
 const scope = { type: 'staff_directory', id: 'centre_1', purpose: 'identity' }
 const now = '2026-07-29T10:00:00.000Z'
 const rowKeys = ['created_at', 'dek_version', 'id', 'kek_version', 'purpose', 'retired_at', 'scope_id', 'scope_type', 'wrap_nonce_b64', 'wrapped_key_b64']
@@ -25,6 +31,8 @@ const keyring = (overrides = {}, settings = config) => createKeyring({
   BWM_DATA_KEK_V1: secret(1),
   BWM_LOOKUP_HMAC_V1: secret(2),
   BWM_BACKUP_KEK_V1: secret(3),
+  BWM_WORKBOOK_KEK_V1: secret(6),
+  BWM_WORKBOOK_HMAC_V1: secret(7),
   ...overrides,
 }, settings)
 
@@ -62,13 +70,24 @@ describe('canonical base64url encoding', () => {
 
 describe('keyring', () => {
   it('imports retained keys as nonextractable minimal-usage keys with an active version below newest', async () => {
-    const ring = await keyring({ BWM_DATA_KEK_V2: secret(4), BWM_LOOKUP_HMAC_V2: secret(5) }, config)
+    const ring = await keyring({
+      BWM_DATA_KEK_V2: secret(4),
+      BWM_LOOKUP_HMAC_V2: secret(5),
+      BWM_WORKBOOK_KEK_V2: secret(8),
+      BWM_WORKBOOK_HMAC_V2: secret(9),
+    }, config)
     expect(ring.dataKekVersions).toEqual([2, 1])
     expect(ring.lookupKeyVersions).toEqual([2, 1])
+    expect(ring.workbookKekVersions).toEqual([2, 1])
+    expect(ring.workbookHmacVersions).toEqual([2, 1])
     expect(ring.activeDataKekVersion).toBe(1)
+    expect(ring.activeWorkbookKekVersion).toBe(1)
+    expect(ring.activeWorkbookHmacVersion).toBe(1)
     expect(ring.getDataKek(1)).toMatchObject({ extractable: false, usages: ['encrypt', 'decrypt'] })
     expect(ring.getLookupHmac(1)).toMatchObject({ extractable: false, usages: ['sign'] })
     expect(ring.getBackupKek(1)).toMatchObject({ extractable: false, usages: ['encrypt', 'decrypt'] })
+    expect(ring.getWorkbookKek(1)).toMatchObject({ extractable: false, usages: ['encrypt', 'decrypt'] })
+    expect(ring.getWorkbookHmac(1)).toMatchObject({ extractable: false, usages: ['sign', 'verify'] })
     expect(ring.getDataKek(99)).toBeNull()
     expect(Object.isFrozen(ring)).toBe(true)
     expect(Object.isFrozen(ring.dataKekVersions)).toBe(true)
@@ -79,6 +98,8 @@ describe('keyring', () => {
     [{ BWM_DATA_KEK_V01: secret(1) }, 'BWM_DATA_KEK_V01'],
     [{ BWM_LOOKUP_HMAC_V0: secret(2) }, 'BWM_LOOKUP_HMAC_V0'],
     [{ BWM_BACKUP_KEK_V9007199254740992: secret(3) }, 'BWM_BACKUP_KEK_V9007199254740992'],
+    [{ BWM_WORKBOOK_KEK_V01: secret(6) }, 'BWM_WORKBOOK_KEK_V01'],
+    [{ BWM_WORKBOOK_HMAC_V0: secret(7) }, 'BWM_WORKBOOK_HMAC_V0'],
     [{ BWM_DATA_KEK_V2: 'not_a_key' }, 'BWM_DATA_KEK_V2'],
     [{ BWM_LOOKUP_HMAC_V2: encodeBase64Url(new Uint8Array(31)) }, 'BWM_LOOKUP_HMAC_V2'],
   ])('rejects every malformed present reserved binding', async (binding, name) => {
@@ -87,6 +108,8 @@ describe('keyring', () => {
 
   it('rejects missing active versions', async () => {
     await expect(keyring({ BWM_DATA_KEK_V1: undefined }, config)).rejects.toThrow('KEYRING_INVALID:BWM_DATA_KEK_V1')
+    await expect(keyring({ BWM_WORKBOOK_KEK_V1: undefined }, config)).rejects.toThrow('KEYRING_INVALID:BWM_WORKBOOK_KEK_V1')
+    await expect(keyring({ BWM_WORKBOOK_HMAC_V1: undefined }, config)).rejects.toThrow('KEYRING_INVALID:BWM_WORKBOOK_HMAC_V1')
   })
 
   it.each([undefined, null, {}, 1])('rejects present malformed historical bindings of type %s', async (value) => {
@@ -94,6 +117,8 @@ describe('keyring', () => {
       BWM_DATA_KEK_V1: secret(1),
       BWM_LOOKUP_HMAC_V1: secret(2),
       BWM_BACKUP_KEK_V1: secret(3),
+      BWM_WORKBOOK_KEK_V1: secret(6),
+      BWM_WORKBOOK_HMAC_V1: secret(7),
       BWM_DATA_KEK_V2: value,
     }, config)).rejects.toThrow('KEYRING_INVALID:BWM_DATA_KEK_V2')
   })
@@ -190,6 +215,8 @@ describe('scoped field encryption', () => {
       BWM_DATA_KEK_V2: secret(4),
       BWM_LOOKUP_HMAC_V1: secret(2),
       BWM_BACKUP_KEK_V1: secret(3),
+      BWM_WORKBOOK_KEK_V1: secret(6),
+      BWM_WORKBOOK_HMAC_V1: secret(7),
     }, { ...config, activeDataKekVersion: 2 })
     await cryptoFailure(decryptForScope(v2Only, row, { expectedScope: { ...scope, id: 'centre_historical' }, recordId: 'stf_history', field: 'email', envelope }))
   })

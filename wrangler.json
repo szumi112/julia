@@ -43,13 +43,17 @@
     "ACCESS_TEAM_DOMAIN": "https://local.cloudflareaccess.com",
     "ACTIVE_DATA_KEK_VERSION": "1",
     "ACTIVE_LOOKUP_KEY_VERSION": "1",
-    "ACTIVE_BACKUP_KEK_VERSION": "1"
+    "ACTIVE_BACKUP_KEK_VERSION": "1",
+    "ACTIVE_WORKBOOK_KEK_VERSION": "1",
+    "ACTIVE_WORKBOOK_HMAC_VERSION": "1"
   },
   "secrets": {
     "required": [
       "BWM_BACKUP_KEK_V1",
       "BWM_DATA_KEK_V1",
       "BWM_LOOKUP_HMAC_V1",
+      "BWM_WORKBOOK_HMAC_V1",
+      "BWM_WORKBOOK_KEK_V1",
       "CF_ACCESS_GROUP_TOKEN",
       "CF_D1_EXPORT_TOKEN",
       "SCW_SECRET_KEY"
@@ -75,6 +79,8 @@
         "ACTIVE_DATA_KEK_VERSION": "1",
         "ACTIVE_LOOKUP_KEY_VERSION": "1",
         "ACTIVE_BACKUP_KEK_VERSION": "1",
+        "ACTIVE_WORKBOOK_KEK_VERSION": "1",
+        "ACTIVE_WORKBOOK_HMAC_VERSION": "1",
         "CF_ACCOUNT_ID": "2c7526d6afa1ee03407e35beefc21a0f",
         "CF_D1_DATABASE_ID": "df9375e3-b5a8-4fe2-83b2-52acf78beb17",
         "CF_ACCESS_GROUP_ID": "e7255a79-ecbd-499b-8918-073ae44252b7",
@@ -85,6 +91,8 @@
           "BWM_BACKUP_KEK_V1",
           "BWM_DATA_KEK_V1",
           "BWM_LOOKUP_HMAC_V1",
+          "BWM_WORKBOOK_HMAC_V1",
+          "BWM_WORKBOOK_KEK_V1",
           "CF_ACCESS_GROUP_TOKEN",
           "CF_D1_EXPORT_TOKEN",
           "SCW_SECRET_KEY"
@@ -128,6 +136,8 @@
         "ACTIVE_DATA_KEK_VERSION": "1",
         "ACTIVE_LOOKUP_KEY_VERSION": "1",
         "ACTIVE_BACKUP_KEK_VERSION": "1",
+        "ACTIVE_WORKBOOK_KEK_VERSION": "1",
+        "ACTIVE_WORKBOOK_HMAC_VERSION": "1",
         "CF_ACCOUNT_ID": "2c7526d6afa1ee03407e35beefc21a0f",
         "CF_D1_DATABASE_ID": "6f1eef07-18e5-4ecd-81d9-43e191f3ca72",
         "CF_ACCESS_GROUP_ID": "30c86cc6-eec5-45b7-8df6-975275e382d4",
@@ -138,6 +148,8 @@
           "BWM_BACKUP_KEK_V1",
           "BWM_DATA_KEK_V1",
           "BWM_LOOKUP_HMAC_V1",
+          "BWM_WORKBOOK_HMAC_V1",
+          "BWM_WORKBOOK_KEK_V1",
           "CF_ACCESS_GROUP_TOKEN",
           "CF_D1_EXPORT_TOKEN",
           "SCW_SECRET_KEY"

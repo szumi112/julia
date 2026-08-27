@@ -37,6 +37,7 @@ const valueFor = (type) => ({
   nullablePaymentId: null,
   paymentId: 'pay_one',
   version: 1,
+  workbookImportId: 'wbi_one',
 })[type]
 
 const eventFor = (action) => {
@@ -49,7 +50,8 @@ const eventFor = (action) => {
       : schema.entityIdKind === 'appointmentId' ? 'apt_one'
         : schema.entityIdKind === 'financeBatchId' ? 'fib_one'
           : schema.entityIdKind === 'financeEntryId' ? 'fin_one'
-            : schema.entityIdKind === 'specialistId' ? 'sp_one' : 'pay_one',
+            : schema.entityIdKind === 'specialistId' ? 'sp_one'
+              : schema.entityIdKind === 'workbookImportId' ? 'wbi_one' : 'pay_one',
     result: 'success',
     metadata: Object.fromEntries(Object.entries(schema.metadata)
       .map(([key, type]) => [key, valueFor(type)])),

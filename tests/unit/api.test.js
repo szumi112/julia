@@ -2985,6 +2985,211 @@ test('finance API exposes entries without an accounting month', async () => {
   assert.equal(calls[1].url, '/api/v1/finance?month=unknown')
 })
 
+const workbookImportDto = (overrides = {}) => ({
+  id: 'wbi_api_one',
+  artifactId: 'wba_api_one',
+  status: 'ready',
+  acceptedRecords: 2_232,
+  quarantinedRecords: 3,
+  createdByStaffId: 'stf_owner_1',
+  version: 1,
+  createdAt: '2026-08-27T10:00:00.000Z',
+  updatedAt: '2026-08-27T10:00:00.000Z',
+  completedAt: null,
+  ...overrides,
+})
+
+const workbookJobDto = (overrides = {}) => ({
+  id: 'wbj_api_one',
+  phase: 'index_finance',
+  status: 'running',
+  cursor: 64,
+  totalRecords: 2_234,
+  processedRecords: 64,
+  version: 2,
+  updatedAt: '2026-08-27T10:01:00.000Z',
+  completedAt: null,
+  ...overrides,
+})
+
+test('workbook API sends exact multipart lifecycles and accepts a bounded XLSX download', async () => {
+  assert.equal(typeof apiClient.previewWorkbook, 'function')
+  assert.equal(typeof apiClient.createWorkbookImport, 'function')
+  assert.equal(typeof apiClient.continueWorkbookImport, 'function')
+  assert.equal(typeof apiClient.getWorkbookImport, 'function')
+  assert.equal(typeof apiClient.exportWorkbook, 'function')
+
+  const previewToken = `v1.1.${'A'.repeat(86)}.${'B'.repeat(43)}`
+  const preview = {
+    fingerprint: 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a',
+    parserVersion: 2,
+    materializerVersion: 2,
+    planDigest: `v1_${'C'.repeat(43)}`,
+    previewToken,
+    counts: {
+      financeRows: 2_022,
+      datedFinanceRows: 1_999,
+      undatedFinanceRows: 23,
+      tusRows: 25,
+      englishRows: 165,
+      costOrAncillaryRows: 45,
+    },
+    warnings: [{ code: 'AMOUNT_STORED_AS_TEXT', count: 2 }],
+    reconciliation: {
+      sourceCandidates: 2_235,
+      acceptedRows: 2_232,
+      quarantinedRows: 3,
+      excludedFormulaBlocks: 39,
+      excludedFormulaRows: 5,
+    },
+    proposedMappings: [{
+      displayName: 'Julia Wolanin',
+      resolutionCode: 'blank_assigned_to_julia',
+      sourceValue: '',
+      sourceValueKind: 'blank',
+      specialistId: 'sp_staging_workbook_julia_wolanin',
+    }],
+    conflicts: [],
+    quarantine: [{
+      sourceKey: 'workbook:v1:12:10:0', sheet: 'Stałe koszty', rowNumber: 10,
+      recordType: 'expense', accountingMonth: null, reasonCode: 'ORPHAN_AMOUNT',
+      reasonCodes: ['ORPHAN_AMOUNT'], raw: { B: 300.5 },
+    }],
+    workbookKind: 'legacy',
+  }
+  const imported = workbookImportDto()
+  const progressing = workbookImportDto({
+    status: 'materializing', version: 2, updatedAt: '2026-08-27T10:01:00.000Z',
+  })
+  const fileBytes = new Uint8Array([80, 75, 3, 4, 17, 203, 0, 255])
+  const file = new File([fileBytes], 'fikcyjny-import.xlsx', {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+  const exportBytes = new Uint8Array([80, 75, 3, 4, 0, 255])
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse({ data: preview }),
+    jsonResponse({ data: { import: imported } }, 201),
+    jsonResponse({ data: { import: progressing, job: workbookJobDto() } }),
+    jsonResponse({ data: { import: progressing, job: workbookJobDto() } }),
+    new Response(exportBytes, {
+      headers: {
+        'cache-control': 'private, no-store',
+        'content-disposition': 'attachment; filename="bear-with-me-legacy-2026-08-27.xlsx"',
+        'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'x-content-type-options': 'nosniff',
+      },
+    }),
+  )
+  const client = createApiClient({
+    fetchImpl,
+    idempotencyKeyFactory: () => 'workbook-generated-key-0001',
+  })
+  await client.getSession()
+
+  assert.deepEqual(await client.previewWorkbook(file), preview)
+  assert.deepEqual(await client.createWorkbookImport(file, previewToken, {
+    idempotencyKey: 'workbook-import-key-0001',
+  }), imported)
+  assert.deepEqual(await client.continueWorkbookImport('wbi_api_one', 1, {
+    idempotencyKey: 'workbook-continue-key-0001',
+  }), { import: progressing, job: workbookJobDto() })
+  assert.deepEqual(await client.getWorkbookImport('wbi_api_one'), {
+    import: progressing, job: workbookJobDto(),
+  })
+  assert.deepEqual(await client.exportWorkbook('legacy'), {
+    bytes: exportBytes,
+    filename: 'bear-with-me-legacy-2026-08-27.xlsx',
+  })
+
+  assert.deepEqual(calls.map(({ url }) => url), [
+    '/api/v1/session',
+    '/api/v1/workbooks/preview',
+    '/api/v1/workbooks/imports',
+    '/api/v1/workbooks/imports/wbi_api_one/continue',
+    '/api/v1/workbooks/imports/wbi_api_one',
+    '/api/v1/workbooks/export?format=legacy',
+  ])
+  for (const call of calls.slice(1, 4)) {
+    assert.equal(call.init.method, 'POST')
+    assert.equal(call.init.credentials, 'same-origin')
+    assert.equal(header(call, 'Accept'), 'application/json')
+    assert.equal(header(call, 'Content-Type'), null)
+    assert.equal(header(call, 'X-CSRF-Token'), TOKEN_A)
+    assert.ok(call.init.body instanceof FormData)
+  }
+  assert.equal(header(calls[1], 'Idempotency-Key'), null)
+  assert.equal(header(calls[2], 'Idempotency-Key'), 'workbook-import-key-0001')
+  assert.equal(header(calls[3], 'Idempotency-Key'), 'workbook-continue-key-0001')
+  assert.equal(calls[1].init.body.get('workbook').name, file.name)
+  assert.deepEqual(
+    new Uint8Array(await calls[1].init.body.get('workbook').arrayBuffer()), fileBytes,
+  )
+  assert.equal(calls[2].init.body.get('previewToken'), previewToken)
+  assert.deepEqual(
+    new Uint8Array(await calls[2].init.body.get('workbook').arrayBuffer()), fileBytes,
+  )
+  assert.equal(calls[3].init.body.get('expectedVersion'), '1')
+  assert.equal(calls[4].init.method, 'GET')
+  assert.equal(header(calls[5], 'Accept'),
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+})
+
+test('workbook status accepts every legal import state with terminal invariants', async () => {
+  const states = ['uploading', 'ready', 'materializing', 'conflicts', 'complete', 'failed']
+  const responses = states.map((status, index) => {
+    const complete = status === 'complete'
+    const completedAt = complete ? '2026-08-27T10:02:00.000Z' : null
+    return jsonResponse({ data: {
+      import: workbookImportDto({
+        status, version: index + 1, completedAt,
+        updatedAt: complete ? completedAt : '2026-08-27T10:01:00.000Z',
+      }),
+      job: workbookJobDto({
+        phase: complete ? 'complete' : 'index_finance',
+        status: complete ? 'complete' : status === 'failed' ? 'failed' : 'running',
+        completedAt,
+      }),
+    } })
+  })
+  const { calls, fetchImpl } = queuedFetch(...responses)
+  const client = createApiClient({ fetchImpl })
+
+  for (const status of states) {
+    const result = await client.getWorkbookImport('wbi_api_one')
+    assert.equal(result.import.status, status)
+  }
+  assert.equal(calls.length, states.length)
+})
+
+test('workbook export cancels an undeclared stream as soon as the client byte cap is crossed', async () => {
+  let pulls = 0
+  let cancelled = false
+  const response = new Response(new ReadableStream({
+    pull(controller) {
+      pulls += 1
+      controller.enqueue(new Uint8Array(6 * 1024 * 1024).fill(pulls))
+      if (pulls === 3) controller.close()
+    },
+    cancel() { cancelled = true },
+  }, { highWaterMark: 0 }), {
+    headers: {
+      'cache-control': 'private, no-store',
+      'content-disposition': 'attachment; filename="bear-with-me-panel-v2-2026-08-27.xlsx"',
+      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'x-content-type-options': 'nosniff',
+    },
+  })
+  const { fetchImpl } = queuedFetch(response)
+  const client = createApiClient({ fetchImpl })
+
+  await assert.rejects(client.exportWorkbook('panel-v2'), {
+    code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE',
+  })
+  assert.equal(cancelled, true)
+  assert.equal(pulls, 2)
+})
+
 test('exposes client commands and sends canonical create, edit, and archive requests', async () => {
   assert.equal(typeof apiClient.createClient, 'function')
   assert.equal(typeof apiClient.editClient, 'function')

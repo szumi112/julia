@@ -588,6 +588,16 @@ export async function listFinanceEntries(input) {
     predicates.push('kind=?')
     bindings.push(command.kind)
   }
+  const hasWorkbookVoids = await command.db.prepare(
+    `SELECT 1 AS present FROM sqlite_master
+     WHERE type='table' AND name='finance_entry_voids'`,
+  ).first()
+  if (hasWorkbookVoids) {
+    predicates.push(`NOT EXISTS (
+      SELECT 1 FROM finance_entry_voids AS void
+      WHERE void.finance_entry_id=entry.id
+    )`)
+  }
   const rows = (await command.db.prepare(
     `SELECT entry.id,entry.batch_id,entry.source_key,entry.kind,entry.record_type,
             entry.accounting_month,entry.occurred_on,entry.amount_grosze,

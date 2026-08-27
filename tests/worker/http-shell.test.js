@@ -189,6 +189,11 @@ describe('closed core route descriptors', () => {
       { id: 'finance.import.start', capability: 'finance.centre.manage', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'finance.import.chunk', capability: 'finance.centre.manage', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'finance.import.commit', capability: 'finance.centre.manage', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.preview', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.import', capability: 'finance.centre.manage', auditActions: ['workbook.import.created'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.continue', capability: 'finance.centre.manage', auditActions: ['workbook.import.materialized'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.status', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.export', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
     ])
     expect(Object.isFrozen(CORE_ROUTE_DESCRIPTORS)).toBe(true)
     expect(CORE_ROUTE_DESCRIPTORS.every((route) => Object.isFrozen(route)

@@ -7,6 +7,7 @@ export {
   PANEL_META_SHEET,
   PANEL_PERMISSIONS_SHEET,
   PANEL_VISIBLE_SHEETS,
+  LEGACY_ADDITIONS_SHEET,
   createScopedPanelWorkbook,
   patchPanelWorkbook,
 } from './workbook-ooxml-engine.js'

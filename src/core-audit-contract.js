@@ -7,6 +7,7 @@ const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const FINANCE_BATCH_ID = /^fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const FINANCE_ENTRY_ID = /^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const WORKBOOK_IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 
 const schema = (entityType, entityIdKind, metadata) => Object.freeze({
   entityType,
@@ -29,6 +30,8 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'payment.recorded': schema('appointment', 'appointmentId', { appointmentVersion: 'version', paymentEntryId: 'paymentId' }),
   'specialist.profile.created': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
   'specialist.profile.updated': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
+  'workbook.import.created': schema('workbook_import', 'workbookImportId', { acceptedCount: 'count', importVersion: 'version', quarantinedCount: 'count' }),
+  'workbook.import.materialized': schema('workbook_import', 'workbookImportId', { accountingMonthsCorrected: 'count', importVersion: 'version', insertedCount: 'count', linkedCount: 'count', voidedCount: 'count' }),
 })
 
 export const CORE_AUDIT_ACTIONS = Object.freeze(Object.keys(CORE_AUDIT_SCHEMAS))
@@ -83,6 +86,7 @@ const acceptsEntityId = (kind, value) => typeof value === 'string' && ({
   financeEntryId: FINANCE_ENTRY_ID,
   paymentId: PAYMENT_ID,
   specialistId: SPECIALIST_ID,
+  workbookImportId: WORKBOOK_IMPORT_ID,
 })[kind].test(value)
 
 export const captureCoreAuditEvent = (value) => {

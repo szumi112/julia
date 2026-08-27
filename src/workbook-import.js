@@ -226,16 +226,23 @@ const makeSourceKey = ({ sheetIndex, rowNumber, block = 0 }) => (
   `workbook:v1:${sheetIndex}:${rowNumber}:${block}`
 )
 
+const sourcePeriod = ({ occurredOn = null, month = null }) => occurredOn
+  ? { periodPrecision: 'day', periodMonth: occurredOn.slice(0, 7) }
+  : month && MONTH_KEY.test(month)
+    ? { periodPrecision: 'month', periodMonth: month }
+    : { periodPrecision: 'unknown', periodMonth: null }
+
 const baseRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
   occurredOn = null, amount, counterparty, sourceLabel, method = 'unknown',
   settlement = 'unknown', invoice = 'unknown', invoiceNote = '', specialistName = '',
-  lessonCount = null, warningCodes = [], raw }) => ({
+  lessonCount = null, warningCodes = [], sourcePeriodMonth = null, raw }) => ({
   sourceKey,
   sheet: text(sheet),
   rowNumber,
   recordType,
   accountingMonth: accountingMonth && MONTH_KEY.test(accountingMonth) ? accountingMonth : null,
   occurredOn,
+  ...sourcePeriod({ occurredOn, month: sourcePeriodMonth }),
   amountGrosze: amount,
   counterparty: text(counterparty),
   sourceLabel: text(sourceLabel),
@@ -250,12 +257,14 @@ const baseRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
 })
 
 const quarantineRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
-  reasonCode, reasonCodes = [reasonCode], raw }) => ({
+  occurredOn = null, sourcePeriodMonth = null, reasonCode, reasonCodes = [reasonCode], raw }) => ({
   sourceKey,
   sheet: text(sheet),
   rowNumber,
   recordType,
   accountingMonth: accountingMonth && MONTH_KEY.test(accountingMonth) ? accountingMonth : null,
+  occurredOn,
+  ...sourcePeriod({ occurredOn, month: sourcePeriodMonth }),
   reasonCode,
   reasonCodes: Object.freeze([...reasonCodes]),
   raw,
@@ -285,6 +294,7 @@ const normalizeTransactions = (sheet, context) => {
     const client = text(scalar(valueAt(row, headers, 'klient')))
     const amountValue = scalar(valueAt(row, headers, 'cena'))
     const dateValue = scalar(valueAt(row, headers, 'data zakupu'))
+    const accountingMonthValue = valueAt(row, headers, 'miesiac ksiegowy')
     const candidateColumns = ['usluga', 'cena', 'klient', 'data zakupu']
       .map((name) => headers.get(name))
       .filter((column) => column !== undefined)
@@ -303,6 +313,7 @@ const normalizeTransactions = (sheet, context) => {
       row,
       rowNumber: headerIndex + index + 2,
       amountValue,
+      accountingMonthValue,
       dateValue,
       dateCellType: headers.has('data zakupu')
         ? cellType(sheet, rowIndex, headers.get('data zakupu'))
@@ -313,16 +324,34 @@ const normalizeTransactions = (sheet, context) => {
   })
   const datedMonths = candidates.map(({ occurredOn }) => occurredOn?.slice(0, 7)).filter(Boolean)
   const sheetMonth = inferredSheetMonth(sheet, datedMonths)
+  const accountingMonthColumn = headers.get('miesiac ksiegowy')
+  const sourcePeriodSheet = accountingMonthColumn === undefined
+    ? sheet
+    : {
+        ...sheet,
+        rows: sheet.rows.map((row) => row.map((value, column) => (
+          column === accountingMonthColumn ? '' : value
+        ))),
+      }
+  const sourceSheetMonth = inferredSheetMonth(sourcePeriodSheet, datedMonths)
   const tusSheet = searchText(sheet.name).includes('grupa tus')
   const rows = []
   const quarantinedRows = []
-  candidates.forEach(({ row, rowNumber, amountValue, dateValue, dateCellType, occurredOn,
-    amount }) => {
+  candidates.forEach(({ row, rowNumber, amountValue, accountingMonthValue, dateValue,
+    dateCellType, occurredOn, amount }) => {
     const label = valueAt(row, headers, 'usluga')
     const isTus = tusSheet || searchText(label).startsWith('grupa tus')
-    const accountingMonth = occurredOn?.slice(0, 7) ?? sheetMonth
+    const explicitMonth = text(scalar(accountingMonthValue))
+    const explicitMonthPresent = formulaValue(accountingMonthValue) || explicitMonth !== ''
+    const accountingMonth = explicitMonthPresent
+      ? MONTH_KEY.test(explicitMonth) ? explicitMonth : null
+      : occurredOn?.slice(0, 7) ?? sheetMonth
+    const sourcePeriodMonth = isTus && occurredOn === null ? sourceSheetMonth : null
     const sourceKey = makeSourceKey({ ...context, sheet: sheet.name, rowNumber })
     const reasonCodes = []
+    if (explicitMonthPresent && !MONTH_KEY.test(explicitMonth)) {
+      reasonCodes.push('ACCOUNTING_MONTH_INVALID')
+    }
     if (!text(label)) reasonCodes.push('SERVICE_MISSING')
     if (!text(valueAt(row, headers, 'klient'))) reasonCodes.push('COUNTERPARTY_MISSING')
     if (text(amountValue) === '') reasonCodes.push('AMOUNT_MISSING')
@@ -339,6 +368,8 @@ const normalizeTransactions = (sheet, context) => {
         rowNumber,
         recordType: isTus ? 'tus' : 'income',
         accountingMonth,
+        occurredOn,
+        sourcePeriodMonth,
         reasonCode: reasonCodes[0],
         reasonCodes,
         raw: rawRecord(headersRow, row),
@@ -352,6 +383,7 @@ const normalizeTransactions = (sheet, context) => {
       recordType: isTus ? 'tus' : 'income',
       accountingMonth,
       occurredOn,
+      sourcePeriodMonth,
       amount,
       counterparty: valueAt(row, headers, 'klient'),
       sourceLabel: label,
@@ -410,6 +442,7 @@ const normalizeEnglish = (sheet, context) => {
           rowNumber: index + 1,
           recordType: 'english',
           accountingMonth,
+          sourcePeriodMonth: accountingMonth,
           reasonCode,
           raw: {
             'Imię i nazwisko': counterparty,
@@ -425,6 +458,7 @@ const normalizeEnglish = (sheet, context) => {
         rowNumber: index + 1,
         recordType: 'english',
         accountingMonth,
+        sourcePeriodMonth: accountingMonth,
         amount,
         counterparty,
         sourceLabel: 'Lekcje języka angielskiego',
@@ -489,6 +523,7 @@ const normalizeFixedCosts = (sheet, context) => {
           rowNumber: index + 1,
           recordType: normalized === 'koszt' ? 'expense' : 'income',
           accountingMonth,
+          sourcePeriodMonth: accountingMonth,
           reasonCode: reasonCodes[0],
           reasonCodes,
           raw,
@@ -501,6 +536,7 @@ const normalizeFixedCosts = (sheet, context) => {
         rowNumber: index + 1,
         recordType: normalized === 'koszt' ? 'expense' : 'income',
         accountingMonth,
+        sourcePeriodMonth: accountingMonth,
         amount,
         counterparty: '',
         sourceLabel: label,

@@ -91,6 +91,8 @@ const schema = z.object({
   ACTIVE_DATA_KEK_VERSION: version,
   ACTIVE_LOOKUP_KEY_VERSION: version,
   ACTIVE_BACKUP_KEK_VERSION: version,
+  ACTIVE_WORKBOOK_KEK_VERSION: version,
+  ACTIVE_WORKBOOK_HMAC_VERSION: version,
 }).superRefine((value, context) => {
   const originIsValid = value.APP_ENV === 'development'
     ? isDevelopmentOrigin(value.APP_ORIGIN)
@@ -109,9 +111,13 @@ export function loadConfig(env) {
   const dataVersion = Number(value.ACTIVE_DATA_KEK_VERSION)
   const lookupVersion = Number(value.ACTIVE_LOOKUP_KEY_VERSION)
   const backupVersion = Number(value.ACTIVE_BACKUP_KEK_VERSION)
+  const workbookKekVersion = Number(value.ACTIVE_WORKBOOK_KEK_VERSION)
+  const workbookHmacVersion = Number(value.ACTIVE_WORKBOOK_HMAC_VERSION)
   key.parse(env[`BWM_DATA_KEK_V${dataVersion}`])
   key.parse(env[`BWM_LOOKUP_HMAC_V${lookupVersion}`])
   key.parse(env[`BWM_BACKUP_KEK_V${backupVersion}`])
+  key.parse(env[`BWM_WORKBOOK_KEK_V${workbookKekVersion}`])
+  key.parse(env[`BWM_WORKBOOK_HMAC_V${workbookHmacVersion}`])
 
   return Object.freeze({
     appEnv: value.APP_ENV,
@@ -123,6 +129,8 @@ export function loadConfig(env) {
     activeDataKekVersion: dataVersion,
     activeLookupKeyVersion: lookupVersion,
     activeBackupKekVersion: backupVersion,
+    activeWorkbookKekVersion: workbookKekVersion,
+    activeWorkbookHmacVersion: workbookHmacVersion,
     localAuth: value.APP_ENV === 'development',
   })
 }

@@ -52,3 +52,13 @@ export const applySpecialistProfilesStageD = () => {
     selectCoreMigrationStage(env.TEST_STAGE_D_MIGRATIONS, 'stage-d'),
   )
 }
+
+export const applyWorkbookRegistryStageE = () => {
+  if (env.CORE_DIRECTORY_STAGE !== 'stage-a-complete-before-fixtures') {
+    throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')
+  }
+  return applyD1Migrations(
+    env.DB,
+    selectCoreMigrationStage(env.TEST_STAGE_E_MIGRATIONS, 'stage-e'),
+  )
+}

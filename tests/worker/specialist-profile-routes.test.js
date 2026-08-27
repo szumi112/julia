@@ -339,7 +339,7 @@ describe('specialist profile creation', () => {
     })).toBe('Maria Testowa')
   })
 
-  it('seeds the two workbook profiles on staging exactly once without creating accounts', async () => {
+  it('seeds the three resolvable workbook profiles on staging exactly once without creating accounts', async () => {
     const stagingEnv = {
       ...env,
       APP_ENV: 'staging',
@@ -351,7 +351,7 @@ describe('specialist profile creation', () => {
     await expect(ensureStagingSpecialistProfiles({
       env: stagingEnv,
       scheduledTime: NOW_MS + 3_000,
-    })).resolves.toEqual({ createdOrConfirmed: 2 })
+    })).resolves.toEqual({ createdOrConfirmed: 3 })
     const invited = await inviteSpecialistProfile({
       db: env.DB, cryptoContext, actor,
       specialistId: 'sp_staging_workbook_anna_janowska',
@@ -363,16 +363,21 @@ describe('specialist profile creation', () => {
     await expect(ensureStagingSpecialistProfiles({
       env: stagingEnv,
       scheduledTime: NOW_MS + 4_000,
-    })).resolves.toEqual({ createdOrConfirmed: 2 })
+    })).resolves.toEqual({ createdOrConfirmed: 3 })
     expect((await env.DB.prepare(
       `SELECT id,staff_user_id,status FROM specialists
-       WHERE id IN ('sp_staging_workbook_anna_janowska','sp_staging_workbook_justyna_j_j')
+       WHERE id IN ('sp_staging_workbook_anna_janowska','sp_staging_workbook_julia_wolanin','sp_staging_workbook_justyna_j_j')
        ORDER BY id`,
     ).all()).results).toEqual([
       {
         id: 'sp_staging_workbook_anna_janowska',
         staff_user_id: invited.data.staff.id,
         status: 'pending',
+      },
+      {
+        id: 'sp_staging_workbook_julia_wolanin',
+        staff_user_id: null,
+        status: 'active',
       },
       {
         id: 'sp_staging_workbook_justyna_j_j',

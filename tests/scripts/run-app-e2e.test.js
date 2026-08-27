@@ -1427,7 +1427,7 @@ test('runner rejects an in-place private-config rewrite before the next spawn', 
 test('default harness writes only credential-free private configs with separated roots', {
   skip: process.platform !== 'darwin' && process.platform !== 'linux',
 }, async () => {
-  const generatedKeys = [key(1), key(2), key(3)]
+  const generatedKeys = [key(1), key(2), key(3), key(4), key(5)]
   let ownedRoot
   const result = await runAppE2E({
     argv: [],
@@ -1486,6 +1486,8 @@ test('default harness writes only credential-free private configs with separated
           key(1),
           key(2),
           key(3),
+          key(4),
+          key(5),
         ]) {
           assert.doesNotMatch(`${wrangler}\n${vite}\n${index}`, new RegExp(secret))
         }

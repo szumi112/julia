@@ -32,6 +32,8 @@ const REQUIRED_SECRETS = [
   'BWM_BACKUP_KEK_V1',
   'BWM_DATA_KEK_V1',
   'BWM_LOOKUP_HMAC_V1',
+  'BWM_WORKBOOK_HMAC_V1',
+  'BWM_WORKBOOK_KEK_V1',
   'CF_ACCESS_GROUP_TOKEN',
   'CF_D1_EXPORT_TOKEN',
   'SCW_SECRET_KEY',
@@ -45,6 +47,8 @@ const INHERITED_VAR_NAMES = [
   'ACTIVE_DATA_KEK_VERSION',
   'ACTIVE_LOOKUP_KEY_VERSION',
   'ACTIVE_BACKUP_KEK_VERSION',
+  'ACTIVE_WORKBOOK_KEK_VERSION',
+  'ACTIVE_WORKBOOK_HMAC_VERSION',
 ]
 // Environment-specific identifiers that staging and production must never share.
 const DISTINCT_FIELDS = [
@@ -238,6 +242,8 @@ const assertRuntimeAcceptsVars = (name, vars) => {
       [`BWM_DATA_KEK_V${vars.ACTIVE_DATA_KEK_VERSION}`]: DUMMY_SECRET_KEY,
       [`BWM_LOOKUP_HMAC_V${vars.ACTIVE_LOOKUP_KEY_VERSION}`]: DUMMY_SECRET_KEY,
       [`BWM_BACKUP_KEK_V${vars.ACTIVE_BACKUP_KEK_VERSION}`]: DUMMY_SECRET_KEY,
+      [`BWM_WORKBOOK_KEK_V${vars.ACTIVE_WORKBOOK_KEK_VERSION}`]: DUMMY_SECRET_KEY,
+      [`BWM_WORKBOOK_HMAC_V${vars.ACTIVE_WORKBOOK_HMAC_VERSION}`]: DUMMY_SECRET_KEY,
     })
   } catch (error) {
     const detail = Array.isArray(error?.issues)

@@ -8,6 +8,7 @@ import {
   applyApiSecurityHeaders,
   isMutationMethod,
   isSupportedMethod,
+  readMultipartBodyOnce,
   readJsonBodyOnce,
   validateMutationMetadata,
   validateOptionsOrigin,
@@ -54,6 +55,14 @@ import {
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
 import { loadDataKey } from './security/envelope.js'
 import { createKeyring } from './security/keyring.js'
+import {
+  createWorkbookImport,
+  continueWorkbookImport,
+  exportWorkbook,
+  getWorkbookImport,
+  loadWorkbookPanelState,
+  previewWorkbook,
+} from './core/workbooks.js'
 
 const IDENTITY_SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const verifiers = new WeakMap()
@@ -74,6 +83,7 @@ const CLIENT_PATH_ID = 'cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}'
 const APPOINTMENT_PATH_ID = 'apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const PAYMENT_PATH_ID = 'pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const FINANCE_BATCH_PATH_ID = 'fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const WORKBOOK_IMPORT_PATH_ID = 'wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const CORE_COMMAND_ALLOW = 'POST, OPTIONS'
 const CORE_READ_ALLOW = 'GET, HEAD, OPTIONS'
 const CORE_BUDGET = Object.freeze({ totalLimit: 50, recoveryReserve: 8 })
@@ -84,6 +94,10 @@ const descriptor = (value) => {
     methods: Object.freeze([...value.methods]),
     auditActions: Object.freeze([...value.auditActions]),
     bodyKeys: value.bodyKeys ? Object.freeze([...value.bodyKeys]) : null,
+    bodyMode: value.bodyMode ?? 'json',
+    freshAuth: value.freshAuth === true,
+    idempotency: value.idempotency !== false,
+    queryMode: value.queryMode ?? (value.bodyKeys === null ? 'any' : 'none'),
     sharedBudget: CORE_BUDGET,
     core: true,
     expected: 'human',
@@ -110,6 +124,11 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'finance.import.start', path: '/api/v1/finance/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'] }),
   descriptor({ id: 'finance.import.chunk', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/chunks$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'] }),
   descriptor({ id: 'finance.import.commit', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/commit$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'workbooks.preview', path: '/api/v1/workbooks/preview', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, bodyMode: 'workbook-multipart', idempotency: false, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.import', path: '/api/v1/workbooks/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['workbook.import.created'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['workbook.import.materialized'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.export', path: '/api/v1/workbooks/export', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, freshAuth: true, queryMode: 'handler' }),
 ])
 export const CORE_ROUTE_DESCRIPTORS = CORE_ROUTES
 if (CORE_ROUTES.some((route) => route.auditActions.some((action) => !isCoreAuditAction(action)))) {
@@ -135,7 +154,12 @@ const routeFor = (request) => {
     const pathMatches = typeof matcher === 'function'
       ? matcher(url.pathname)
       : matcher.test(url.pathname)
-    if (pathMatches && (route.bodyKeys === null || url.search === '')) return route
+    if (pathMatches) {
+      if (route.queryMode === 'none' && url.search !== '') {
+        return { id: 'unmatched', expected: 'human', methods: null, queryRejected: true }
+      }
+      return route
+    }
   }
   if (url.search === '' && url.pathname === STAFF_PATH) return { id: 'staff.list', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
   if (url.search === '' && url.pathname === STAFF_INVITATIONS_PATH) return { id: 'staff.invitations', expected: 'human', methods: ['POST', 'OPTIONS'] }
@@ -225,6 +249,56 @@ const validateResolutionIdempotency = (request) => {
   }
 }
 
+const requireRecentHumanPrincipal = (principal, requestNowMs) => {
+  const nowSeconds = Math.floor(requestNowMs / 1_000)
+  if (!Number.isSafeInteger(principal?.issuedAt)
+    || !Number.isSafeInteger(principal?.expiresAt)
+    || principal.issuedAt > nowSeconds
+    || nowSeconds - principal.issuedAt > 300
+    || principal.expiresAt <= nowSeconds) throw new AppError('REAUTH_REQUIRED')
+}
+
+const workbookForm = (value, keys) => {
+  if (!(value instanceof FormData)) throw new AppError('INVALID_MULTIPART')
+  const entries = [...value.entries()]
+  if (entries.length !== keys.length
+    || new Set(entries.map(([key]) => key)).size !== entries.length
+    || keys.some((key) => !entries.some(([actual]) => actual === key))) {
+    throw new AppError('VALIDATION_FAILED', { field: 'body' })
+  }
+  return Object.freeze(Object.fromEntries(entries))
+}
+
+const workbookFile = async (value) => {
+  if (!(value instanceof File) || value.size < 1 || value.size > 5 * 1024 * 1024
+    || typeof value.name !== 'string' || !value.name.toLowerCase().endsWith('.xlsx')
+    || value.name.includes('/') || value.name.includes('\\')) {
+    throw new AppError('VALIDATION_FAILED', { field: 'filename' })
+  }
+  return Object.freeze({
+    bytes: new Uint8Array(await value.arrayBuffer()),
+    filename: value.name,
+  })
+}
+
+const workbookStream = (source) => {
+  if (!(source instanceof Uint8Array) || source.byteLength < 1) throw new Error('INTERNAL_ERROR')
+  let offset = 0
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= source.byteLength) {
+        source.fill(0)
+        controller.close()
+        return
+      }
+      const end = Math.min(source.byteLength, offset + 64 * 1024)
+      controller.enqueue(source.slice(offset, end))
+      offset = end
+    },
+    cancel() { source.fill(0) },
+  })
+}
+
 const readResponse = (c, result) => {
   const response = c.json(result)
   return c.req.method === 'HEAD'
@@ -271,6 +345,7 @@ export function createApp(deps = {}) {
     c.set('routeId', route.id)
     c.set('routeAllow', route.allow)
     c.set('routeActionId', route.actionId)
+    if (route.queryRejected) throw new AppError('NOT_FOUND')
     if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
     if (route.methods && !route.methods.includes(method)) throw new AppError('METHOD_NOT_ALLOWED')
 
@@ -286,8 +361,9 @@ export function createApp(deps = {}) {
     const requestNowMs = route.expected === 'human' || isMutationMethod(method) ? nowMs(deps) : null
     c.set('nowMs', requestNowMs)
     if (isMutationMethod(method)) {
-      validateMutationMetadata(request, config)
-      if (route.id === 'operations.action-resolution' || route.core) validateResolutionIdempotency(request)
+      validateMutationMetadata(request, config, { bodyMode: route.bodyMode ?? 'json' })
+      if (route.id === 'operations.action-resolution'
+        || (route.core && route.idempotency !== false)) validateResolutionIdempotency(request)
     }
     else if (method === 'OPTIONS') validateOptionsOrigin(request, config)
 
@@ -299,6 +375,7 @@ export function createApp(deps = {}) {
     })
     if (principal?.kind !== route.expected) throw new Error('ACCESS_ASSERTION_INVALID')
     c.set('principal', principal)
+    if (route.freshAuth) requireRecentHumanPrincipal(principal, requestNowMs)
 
     let keyring
     if (isMutationMethod(method)) {
@@ -339,13 +416,18 @@ export function createApp(deps = {}) {
     }
 
     if (isMutationMethod(method)) {
-      c.set('jsonBody', await (deps.readJsonBodyOnce ?? readJsonBodyOnce)(request, {
-        rejectDuplicateTopLevelKeys: route.core || route.id === 'staff.invitations'
-          || route.id === 'specialists.invitations'
-          || route.id === 'staff.deactivation'
-          || route.id === 'operations.action-resolution',
-      }))
-      if (route.core) {
+      if (route.bodyMode === 'workbook-multipart') {
+        c.set('multipartBody', await (deps.readMultipartBodyOnce
+          ?? readMultipartBodyOnce)(request))
+      } else {
+        c.set('jsonBody', await (deps.readJsonBodyOnce ?? readJsonBodyOnce)(request, {
+          rejectDuplicateTopLevelKeys: route.core || route.id === 'staff.invitations'
+            || route.id === 'specialists.invitations'
+            || route.id === 'staff.deactivation'
+            || route.id === 'operations.action-resolution',
+        }))
+      }
+      if (route.core && route.bodyMode === 'json') {
         let descriptors
         try { descriptors = Object.getOwnPropertyDescriptors(c.get('jsonBody')) } catch {
           throw new AppError('VALIDATION_FAILED', { field: 'body' })
@@ -582,6 +664,146 @@ export function createApp(deps = {}) {
       ...(deps.commitFinanceImport ? { commit: deps.commitFinanceImport } : {}),
     })
     return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/workbooks/preview', async (c) => {
+    if (c.get('routeId') !== 'workbooks.preview') throw new AppError('NOT_FOUND')
+    const form = workbookForm(c.get('multipartBody'), ['workbook'])
+    const file = await workbookFile(form.workbook)
+    const config = runtimeConfig(c, deps)
+    try {
+      const stateLoader = deps.loadWorkbookPanelState ?? loadWorkbookPanelState
+      const result = await (deps.previewWorkbook ?? previewWorkbook)({
+        ...file,
+        actor: c.get('actor'),
+        keyring: c.get('cryptoContext')?.keyring,
+        config,
+        centreId: 'centre_1',
+        nowMs: c.get('nowMs'),
+        loadPanelState: (input) => stateLoader({
+          db: c.get('coreWorkDb'),
+          keyring: c.get('cryptoContext')?.keyring,
+          ...input,
+        }),
+      })
+      return c.json(result)
+    } finally {
+      file.bytes.fill(0)
+    }
+  })
+  app.post('/api/v1/workbooks/imports', async (c) => {
+    if (c.get('routeId') !== 'workbooks.import') throw new AppError('NOT_FOUND')
+    const form = workbookForm(c.get('multipartBody'), ['previewToken', 'workbook'])
+    if (typeof form.previewToken !== 'string') {
+      throw new AppError('VALIDATION_FAILED', { field: 'body' })
+    }
+    const file = await workbookFile(form.workbook)
+    const config = runtimeConfig(c, deps)
+    try {
+      const stateLoader = deps.loadWorkbookPanelState ?? loadWorkbookPanelState
+      const result = await (deps.createWorkbookImport ?? createWorkbookImport)({
+        db: c.get('coreWorkDb'),
+        bucket: c.env?.ARCHIVE ?? deps.bucket,
+        actor: c.get('actor'),
+        keyring: c.get('cryptoContext')?.keyring,
+        config,
+        centreId: 'centre_1',
+        nowMs: c.get('nowMs'),
+        correlationId: c.get('correlationId'),
+        idFactory: deps.idFactory ?? idFactory,
+        ...file,
+        previewToken: form.previewToken,
+        idempotencyKey: c.req.header('Idempotency-Key'),
+        loadPanelState: (input) => stateLoader({
+          db: c.get('coreWorkDb'),
+          keyring: c.get('cryptoContext')?.keyring,
+          ...input,
+        }),
+      })
+      return c.json(result.body, result.status)
+    } finally {
+      file.bytes.fill(0)
+    }
+  })
+  app.post('/api/v1/workbooks/imports/:importId/continue', async (c) => {
+    if (c.get('routeId') !== 'workbooks.continue') throw new AppError('NOT_FOUND')
+    const form = workbookForm(c.get('multipartBody'), ['expectedVersion'])
+    if (typeof form.expectedVersion !== 'string' || !/^[1-9]\d*$/.test(form.expectedVersion)) {
+      throw new AppError('VALIDATION_FAILED', { field: 'expectedVersion' })
+    }
+    const expectedVersion = Number(form.expectedVersion)
+    if (!Number.isSafeInteger(expectedVersion)) {
+      throw new AppError('VALIDATION_FAILED', { field: 'expectedVersion' })
+    }
+    const result = await (deps.continueWorkbookImport ?? continueWorkbookImport)({
+      db: c.get('coreWorkDb'),
+      actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring,
+      config: runtimeConfig(c, deps),
+      centreId: 'centre_1',
+      nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+      importId: c.req.param('importId'),
+      expectedVersion,
+      idempotencyKey: c.req.header('Idempotency-Key'),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/workbooks/imports/:importId', async (c) => {
+    if (c.get('routeId') !== 'workbooks.status') throw new AppError('NOT_FOUND')
+    const result = await (deps.getWorkbookImport ?? getWorkbookImport)({
+      db: c.get('coreWorkDb'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      importId: c.req.param('importId'),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/export', async (c) => {
+    if (c.get('routeId') !== 'workbooks.export') throw new AppError('NOT_FOUND')
+    const url = new URL(c.req.url)
+    const keys = [...url.searchParams.keys()]
+    if (keys.length !== 1 || keys[0] !== 'format') {
+      throw new AppError('VALIDATION_FAILED', { field: 'body' })
+    }
+    const format = url.searchParams.get('format')
+    if (!['legacy', 'panel-v2'].includes(format)) {
+      throw new AppError('VALIDATION_FAILED', { field: 'body' })
+    }
+    if (url.search !== `?format=${format}`) {
+      throw new AppError('VALIDATION_FAILED', { field: 'body' })
+    }
+    const result = await (deps.exportWorkbook ?? exportWorkbook)({
+      db: c.get('coreWorkDb'),
+      bucket: c.env?.ARCHIVE ?? deps.bucket,
+      actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring,
+      config: runtimeConfig(c, deps),
+      centreId: 'centre_1',
+      nowMs: c.get('nowMs'),
+      format,
+    })
+    if (result?.bytes instanceof Uint8Array && result.bytes.byteLength > 10 * 1024 * 1024) {
+      result.bytes.fill(0)
+      throw new Error('WORKBOOK_EXPORT_LIMIT')
+    }
+    if (!(result?.bytes instanceof Uint8Array)
+      || result.bytes.byteLength < 1
+      || typeof result.filename !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.xlsx$/.test(result.filename)) {
+      throw new Error('INTERNAL_ERROR')
+    }
+    const headers = {
+      'Cache-Control': 'private, no-store',
+      'Content-Disposition': `attachment; filename="${result.filename}"`,
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'X-Content-Type-Options': 'nosniff',
+    }
+    if (c.req.method === 'HEAD') {
+      result.bytes.fill(0)
+      return new Response(null, { status: 200, headers })
+    }
+    return new Response(workbookStream(result.bytes), { status: 200, headers })
   })
   app.options('/api/v1/session', (c) => new Response(null, {
     status: 204,

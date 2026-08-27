@@ -132,6 +132,8 @@ test('normalizes transactions with civil-date accounting months', () => {
     recordType: 'income',
     accountingMonth: '2024-08',
     occurredOn: '2024-08-20',
+    periodPrecision: 'day',
+    periodMonth: '2024-08',
     amountGrosze: 16000,
     counterparty: 'Joanna Testowa',
     sourceLabel: 'Konsultacja psychologiczna',
@@ -175,6 +177,111 @@ test('assigns every dated combined-sheet row to its civil month', () => {
     { accountingMonth: '2024-08', occurredOn: '2024-08-20' },
     { accountingMonth: '2024-09', occurredOn: '2024-09-30' },
   ])
+})
+
+test('explicit exported accounting month wins and malformed nonblank values quarantine', () => {
+  const header = [...transactionHeader, 'Miesiąc księgowy']
+  const preview = normalizeWorkbookRows({
+    filename: 'round-trip.xlsx',
+    fingerprint: '9'.repeat(64),
+    sheets: [{
+      name: 'Wrzesień 2025',
+      rows: [
+        header,
+        ['Konsultacja', 180, 'Osoba Pierwsza', '2025-09-02', '', '', '', '2025-10'],
+        ['Konsultacja', 180, 'Osoba Druga', '2025-09-03', '', '', '', ''],
+        ['Konsultacja', 180, 'Osoba Trzecia', '2025-09-04', '', '', '', '2025-13'],
+      ],
+    }],
+  })
+
+  assert.deepEqual(preview.rows.map(({ accountingMonth, rowNumber }) => ({
+    accountingMonth, rowNumber,
+  })), [
+    { accountingMonth: '2025-10', rowNumber: 2 },
+    { accountingMonth: '2025-09', rowNumber: 3 },
+  ])
+  assert.deepEqual(preview.quarantinedRows.map(({ accountingMonth, reasonCode, rowNumber }) => ({
+    accountingMonth, reasonCode, rowNumber,
+  })), [{ accountingMonth: null, reasonCode: 'ACCOUNTING_MONTH_INVALID', rowNumber: 4 }])
+})
+
+test('records source-period precision independently from the accounting month', () => {
+  const header = [...transactionHeader, 'Miesiąc księgowy']
+  const preview = normalizeWorkbookRows({
+    filename: 'source-periods.xlsx',
+    fingerprint: '8'.repeat(64),
+    sheets: [
+      {
+        name: 'Wrzesień 2025',
+        rows: [
+          header,
+          ['Konsultacja', 180, 'Osoba Dzienna', '2025-09-02', '', '', '', '2025-10'],
+          ['', 180, 'Osoba Kwarantanna', '2025-09-03', '', '', '', '2025-10'],
+        ],
+      },
+      {
+        name: 'GRUPA TUS Czerwiec 2025',
+        rows: [
+          header,
+          ['Grupa TUS', 300, 'Osoba Miesięczna', '', '', '', '', '2025-10'],
+        ],
+      },
+      {
+        name: 'GRUPA TUS',
+        rows: [transactionHeader, ['Grupa TUS', 300, 'Osoba Bez Okresu', '', '', '', '']],
+      },
+      {
+        name: 'Angielski',
+        rows: [
+          ['Lipiec 2025'],
+          ['Imię i nazwisko', 'Ilość lekcji', 'Kwota'],
+          ['Osoba Angielski', 2, 120],
+        ],
+      },
+      {
+        name: 'Stałe koszty',
+        rows: [
+          ['Koszt', 'Kwota', 'Miesiąc'],
+          ['Czynsz', 2_000, 'Sierpień 2025'],
+        ],
+      },
+    ],
+  })
+
+  assert.deepEqual(preview.rows.map((row) => ({
+    sourceLabel: row.sourceLabel,
+    accountingMonth: row.accountingMonth,
+    occurredOn: row.occurredOn,
+    periodPrecision: row.periodPrecision,
+    periodMonth: row.periodMonth,
+  })), [
+    {
+      sourceLabel: 'Konsultacja', accountingMonth: '2025-10', occurredOn: '2025-09-02',
+      periodPrecision: 'day', periodMonth: '2025-09',
+    },
+    {
+      sourceLabel: 'Grupa TUS', accountingMonth: '2025-10', occurredOn: null,
+      periodPrecision: 'month', periodMonth: '2025-06',
+    },
+    {
+      sourceLabel: 'Grupa TUS', accountingMonth: null, occurredOn: null,
+      periodPrecision: 'unknown', periodMonth: null,
+    },
+    {
+      sourceLabel: 'Lekcje języka angielskiego', accountingMonth: '2025-07',
+      occurredOn: null, periodPrecision: 'month', periodMonth: '2025-07',
+    },
+    {
+      sourceLabel: 'Czynsz', accountingMonth: '2025-08', occurredOn: null,
+      periodPrecision: 'month', periodMonth: '2025-08',
+    },
+  ])
+  assert.deepEqual(preview.quarantinedRows.map((row) => ({
+    occurredOn: row.occurredOn,
+    periodPrecision: row.periodPrecision,
+    periodMonth: row.periodMonth,
+  })), [{ occurredOn: '2025-09-03', periodPrecision: 'day', periodMonth: '2025-09' }])
 })
 
 test('returns stable quarantine reasons for populated candidates with unusable service dates', () => {

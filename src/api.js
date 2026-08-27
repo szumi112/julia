@@ -31,6 +31,14 @@ const CORRECTION_ID = /^cor_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const FINANCE_BATCH_ID = /^fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const FINANCE_FINGERPRINT = /^[0-9a-f]{64}$/
 const FINANCE_MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/
+const WORKBOOK_IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const WORKBOOK_ARTIFACT_ID = /^wba_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const WORKBOOK_JOB_ID = /^wbj_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const WORKBOOK_PREVIEW_TOKEN = /^v1\.[1-9]\d*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/
+const WORKBOOK_VERSIONED_DIGEST = /^v[1-9]\d*_[A-Za-z0-9_-]{43}$/
+const WORKBOOK_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+const MAX_WORKBOOK_BYTES = 5 * 1024 * 1024
+const MAX_WORKBOOK_EXPORT_BYTES = 10 * 1024 * 1024
 const OUTBOX_TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const AUDIT_CURSOR = /^v1\.([1-9]\d*)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -46,8 +54,16 @@ const workspaceDayFormatter = new Intl.DateTimeFormat('en-CA', {
 const SERVER_STATUS = Object.freeze({
   INVALID_CONTENT_LENGTH: 400,
   INVALID_JSON: 400,
+  INVALID_MULTIPART: 400,
   VALIDATION_FAILED: 400,
+  WORKBOOK_FINGERPRINT_REJECTED: 400,
+  WORKBOOK_IMPORT_INVALID: 400,
+  WORKBOOK_PANEL_SIGNATURE_INVALID: 400,
+  WORKBOOK_PREVIEW_INVALID: 400,
+  WORKBOOK_PREVIEW_TOKEN_INVALID: 400,
+  WORKBOOK_SCOPE_MISMATCH: 400,
   ACCESS_ASSERTION_INVALID: 401,
+  REAUTH_REQUIRED: 401,
   ACCESS_DENIED: 403,
   FORBIDDEN: 403,
   ORIGIN_INVALID: 403,
@@ -65,6 +81,10 @@ const SERVER_STATUS = Object.freeze({
   APPOINTMENT_PAYMENT_CONFLICT: 409,
   PAYMENT_AMOUNT_CONFLICT: 409,
   PAYMENT_CORRECTION_CONFLICT: 409,
+  WORKBOOK_IMPORT_CONFLICT: 409,
+  WORKBOOK_EXPORT_CONFLICT: 409,
+  WORKBOOK_EXPORT_LIMIT: 409,
+  WORKBOOK_RECONCILIATION_CONFLICT: 409,
   FINANCE_IMPORT_CLOSED: 409,
   FINANCE_IMPORT_DUPLICATE: 409,
   FINANCE_IMPORT_INCOMPLETE: 409,
@@ -84,7 +104,7 @@ const CLIENT_CODES = new Set([
   'NETWORK_ERROR',
   'SESSION_REQUIRED',
 ])
-const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED'])
+const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'REAUTH_REQUIRED'])
 const VALIDATION_FIELDS = new Set([
   'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
   'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes',
@@ -1413,6 +1433,185 @@ const acceptedFinanceList = (payload, month) => {
   return Object.freeze({ entries: Object.freeze(entries), summary: expected })
 }
 
+const captureWorkbookFile = (raw) => {
+  try {
+    if (typeof File !== 'function' || !(raw instanceof File)
+      || !Number.isSafeInteger(raw.size) || raw.size < 1 || raw.size > MAX_WORKBOOK_BYTES
+      || typeof raw.name !== 'string' || raw.name.length < 6 || raw.name.length > 255
+      || raw.name !== raw.name.trim() || raw.name !== raw.name.normalize('NFC')
+      || !raw.name.toLowerCase().endsWith('.xlsx') || raw.name.includes('/')
+      || raw.name.includes('\\') || INVALID_TEXT.test(raw.name)
+      || !['', WORKBOOK_MIME].includes(raw.type)) return null
+    return raw
+  } catch {
+    return null
+  }
+}
+
+const captureWorkbookJson = (raw, state = { nodes: 0 }, depth = 0) => {
+  state.nodes += 1
+  if (state.nodes > 25_000 || depth > 8) return null
+  if (raw === null || typeof raw === 'boolean') return raw
+  if (typeof raw === 'number') {
+    return Number.isFinite(raw) && Math.abs(raw) <= Number.MAX_SAFE_INTEGER ? raw : null
+  }
+  if (typeof raw === 'string') {
+    return raw.length <= 4_096 && isWellFormedUnicode(raw) && raw === raw.normalize('NFC')
+      ? raw
+      : null
+  }
+  if (Array.isArray(raw)) {
+    const values = captureArray(raw, 5_000)
+    if (!values) return null
+    const captured = []
+    for (const value of values) {
+      const item = captureWorkbookJson(value, state, depth + 1)
+      if (item === null && value !== null) return null
+      captured.push(item)
+    }
+    return Object.freeze(captured)
+  }
+  if (!plainObject(raw)) return null
+  const keys = Reflect.ownKeys(raw)
+  if (keys.length > 64 || keys.some((key) => typeof key !== 'string'
+    || key.length < 1 || key.length > 128 || ['__proto__', 'constructor', 'prototype'].includes(key))) {
+    return null
+  }
+  const captured = {}
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(raw, key)
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null
+    const item = captureWorkbookJson(descriptor.value, state, depth + 1)
+    if (item === null && descriptor.value !== null) return null
+    captured[key] = item
+  }
+  return Object.freeze(captured)
+}
+
+const captureWorkbookImport = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'artifactId', 'status', 'acceptedRecords', 'quarantinedRecords',
+    'createdByStaffId', 'version', 'createdAt', 'updatedAt', 'completedAt',
+  ])
+  if (!value || typeof value.id !== 'string' || !WORKBOOK_IMPORT_ID.test(value.id)
+    || typeof value.artifactId !== 'string' || !WORKBOOK_ARTIFACT_ID.test(value.artifactId)
+    || !['uploading', 'ready', 'materializing', 'conflicts', 'complete', 'failed']
+      .includes(value.status)
+    || !safeCount(value.acceptedRecords) || value.acceptedRecords > 5_000
+    || !safeCount(value.quarantinedRecords) || value.quarantinedRecords > 5_000
+    || typeof value.createdByStaffId !== 'string' || !STAFF_ID.test(value.createdByStaffId)
+    || !positive(value.version) || !validInstant(value.createdAt)
+    || !validInstant(value.updatedAt) || value.updatedAt < value.createdAt
+    || !(value.completedAt === null || validInstant(value.completedAt))
+    || (value.status === 'complete') !== (value.completedAt !== null)) return null
+  return Object.freeze({ ...value })
+}
+
+const captureWorkbookJob = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'phase', 'status', 'cursor', 'totalRecords', 'processedRecords',
+    'version', 'updatedAt', 'completedAt',
+  ])
+  if (!value || typeof value.id !== 'string' || !WORKBOOK_JOB_ID.test(value.id)
+    || ![
+      'index_finance', 'reconcile_sources', 'reconcile_unmatched', 'apply_finance', 'complete',
+    ].includes(value.phase)
+    || !['ready', 'running', 'complete', 'failed'].includes(value.status)
+    || !safeCount(value.cursor) || value.cursor > 10_000
+    || !safeCount(value.totalRecords) || value.totalRecords > 10_000
+    || !safeCount(value.processedRecords) || value.processedRecords > value.totalRecords
+    || value.cursor > value.totalRecords || !positive(value.version)
+    || !validInstant(value.updatedAt)
+    || !(value.completedAt === null || validInstant(value.completedAt))
+    || (value.status === 'complete') !== (value.completedAt !== null)
+    || (value.phase === 'complete') !== (value.status === 'complete')) return null
+  return Object.freeze({ ...value })
+}
+
+const acceptedWorkbookImport = (payload, status) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['import'])
+  const value = data && captureWorkbookImport(data.import)
+  return value && [200, 201].includes(status) ? value : null
+}
+
+const acceptedWorkbookStatus = (payload, status) => {
+  const outer = captureDataObject(payload, ['data'])
+  if (!outer || status !== 200 || !plainObject(outer.data)) return null
+  const hasReconciliation = Object.hasOwn(outer.data, 'reconciliation')
+  const data = captureDataObject(outer.data, [
+    'import', 'job', ...(hasReconciliation ? ['reconciliation'] : []),
+  ])
+  const imported = data && captureWorkbookImport(data.import)
+  const job = data && captureWorkbookJob(data.job)
+  if (!imported || !job || (imported.status === 'complete') !== (job.status === 'complete')) {
+    return null
+  }
+  const result = { import: imported, job }
+  if (hasReconciliation) {
+    const reconciliation = captureWorkbookJson(data.reconciliation)
+    if (!reconciliation || Array.isArray(reconciliation)
+      || Object.values(reconciliation).some((value) => !safeCount(value))) return null
+    result.reconciliation = reconciliation
+  }
+  return Object.freeze(result)
+}
+
+const acceptedWorkbookPreview = (payload, status) => {
+  const outer = captureDataObject(payload, ['data'])
+  if (!outer || status !== 200 || !plainObject(outer.data)) return null
+  const hasPanelChanges = Object.hasOwn(outer.data, 'panelChanges')
+  const keys = [
+    'fingerprint', 'parserVersion', 'materializerVersion', 'planDigest', 'previewToken',
+    'counts', 'warnings', 'reconciliation', 'proposedMappings', 'conflicts', 'quarantine',
+    'workbookKind', ...(hasPanelChanges ? ['panelChanges'] : []),
+  ]
+  const data = captureDataObject(outer.data, keys)
+  if (!data || typeof data.fingerprint !== 'string' || !FINANCE_FINGERPRINT.test(data.fingerprint)
+    || !positive(data.parserVersion) || !positive(data.materializerVersion)
+    || typeof data.planDigest !== 'string' || !WORKBOOK_VERSIONED_DIGEST.test(data.planDigest)
+    || typeof data.previewToken !== 'string' || data.previewToken.length > 4_096
+    || !WORKBOOK_PREVIEW_TOKEN.test(data.previewToken)
+    || !['legacy', 'panel-v2'].includes(data.workbookKind)) return null
+  const counts = captureDataObject(data.counts, [
+    'financeRows', 'datedFinanceRows', 'undatedFinanceRows', 'tusRows',
+    'englishRows', 'costOrAncillaryRows',
+  ])
+  const reconciliation = captureDataObject(data.reconciliation, [
+    'sourceCandidates', 'acceptedRows', 'quarantinedRows',
+    'excludedFormulaBlocks', 'excludedFormulaRows',
+  ])
+  const warnings = captureArray(data.warnings, 100)
+  const mappings = captureArray(data.proposedMappings, 100)
+  const conflicts = captureWorkbookJson(data.conflicts)
+  const quarantine = captureWorkbookJson(data.quarantine)
+  if (!counts || Object.values(counts).some((value) => !safeCount(value) || value > 5_000)
+    || !reconciliation
+    || Object.values(reconciliation).some((value) => !safeCount(value) || value > 10_000)
+    || !warnings || warnings.some((raw) => {
+      const warning = captureDataObject(raw, ['code', 'count'])
+      return !warning || !validText(warning.code, 128) || !positive(warning.count)
+    })
+    || !mappings || mappings.some((raw) => {
+      const mapping = captureDataObject(raw, [
+        'displayName', 'resolutionCode', 'sourceValue', 'sourceValueKind', 'specialistId',
+      ])
+      return !mapping || !validText(mapping.displayName, 120)
+        || !validText(mapping.resolutionCode, 128)
+        || typeof mapping.sourceValue !== 'string' || mapping.sourceValue.length > 120
+        || !['blank', 'explicit_name'].includes(mapping.sourceValueKind)
+        || typeof mapping.specialistId !== 'string' || !SPECIALIST_ID.test(mapping.specialistId)
+    })
+    || !Array.isArray(conflicts) || !Array.isArray(quarantine)) return null
+  if (hasPanelChanges) {
+    const panel = captureDataObject(data.panelChanges, ['unchangedIds', 'updates', 'voidIds'])
+    if (!panel || !captureWorkbookJson(panel.unchangedIds)
+      || !captureWorkbookJson(panel.updates) || !captureWorkbookJson(panel.voidIds)) return null
+  }
+  const captured = captureWorkbookJson(outer.data)
+  return captured && !Array.isArray(captured) ? captured : null
+}
+
 const idempotencyOptions = (options) => {
   try {
     if (!plainObject(options)) return null
@@ -1680,6 +1879,121 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     await getSession()
     return send()
   }
+  const multipartMutation = async (path, formFactory, validate, suppliedKey = null) => {
+    if (suppliedKey !== null && !acceptedKey(suppliedKey)) {
+      throw clientError('CLIENT_INPUT_INVALID')
+    }
+    if (!csrfToken) throw clientError('SESSION_REQUIRED')
+    const send = () => requestJson(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        ...baseHeaders(),
+        'X-CSRF-Token': csrfToken,
+        ...(suppliedKey === null ? {} : { 'Idempotency-Key': suppliedKey }),
+      },
+      body: formFactory(),
+    }, {
+      validate,
+      idempotencyKey: suppliedKey ?? undefined,
+    })
+    try {
+      return await send()
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.code !== 'CSRF_EXPIRED') throw error
+    }
+    await getSession()
+    return send()
+  }
+  const requestWorkbookExport = async (format) => {
+    let response
+    try {
+      response = await fetchImpl(`${API_ROOT}/workbooks/export?format=${format}`, {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: {
+          ...baseHeaders(),
+          Accept: WORKBOOK_MIME,
+        },
+      })
+    } catch {
+      throw clientError('NETWORK_ERROR')
+    }
+    const status = responseStatus(response)
+    let ok
+    try { ok = response?.ok } catch { throw clientError('INVALID_RESPONSE') }
+    if (!status || typeof ok !== 'boolean') throw clientError('INVALID_RESPONSE', { status })
+    if (!ok) {
+      let payload
+      try { payload = await response.json() } catch {
+        throw clientError('INVALID_RESPONSE', { status })
+      }
+      const error = serverError(payload, status)
+      if (AUTH_DENIAL_CODES.has(error.code)) clearSession()
+      throw error
+    }
+    let filename
+    let declaredLength
+    try {
+      if (status !== 200 || response.headers.get('content-type') !== WORKBOOK_MIME
+        || response.headers.get('x-content-type-options')?.toLowerCase() !== 'nosniff') {
+        throw new Error('invalid')
+      }
+      const cache = response.headers.get('cache-control')?.toLowerCase().split(',')
+        .map((value) => value.trim())
+      if (!cache?.includes('private') || !cache.includes('no-store')) throw new Error('invalid')
+      const disposition = response.headers.get('content-disposition')
+      const match = /^attachment; filename="([A-Za-z0-9][A-Za-z0-9._-]{0,127}\.xlsx)"$/
+        .exec(disposition ?? '')
+      if (!match) throw new Error('invalid')
+      filename = match[1]
+      const length = response.headers.get('content-length')
+      declaredLength = length === null ? null : Number(length)
+      if (declaredLength !== null && (!Number.isSafeInteger(declaredLength)
+        || declaredLength < 1 || declaredLength > MAX_WORKBOOK_EXPORT_BYTES)) {
+        throw new Error('invalid')
+      }
+    } catch {
+      throw clientError('INVALID_RESPONSE', { status })
+    }
+    let reader
+    try { reader = response.body?.getReader() } catch { /* Validated below. */ }
+    if (!reader || typeof reader.read !== 'function' || typeof reader.cancel !== 'function') {
+      throw clientError('INVALID_RESPONSE', { status })
+    }
+    const chunks = []
+    let total = 0
+    try {
+      while (true) {
+        const next = await reader.read()
+        if (!next || typeof next.done !== 'boolean') throw new Error('invalid')
+        if (next.done) break
+        if (!(next.value instanceof Uint8Array) || next.value.byteLength < 1) {
+          throw new Error('invalid')
+        }
+        total += next.value.byteLength
+        if (total > MAX_WORKBOOK_EXPORT_BYTES
+          || (declaredLength !== null && total > declaredLength)) {
+          await reader.cancel()
+          throw new Error('invalid')
+        }
+        chunks.push(next.value)
+      }
+    } catch {
+      try { await reader.cancel() } catch { /* The response is already unusable. */ }
+      throw clientError('INVALID_RESPONSE', { status })
+    }
+    if (total < 1 || (declaredLength !== null && declaredLength !== total)) {
+      throw clientError('INVALID_RESPONSE', { status })
+    }
+    const bytes = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    return Object.freeze({ bytes, filename })
+  }
   const createClient = (input, options) => {
     const requested = captureClientInput(input)
     const acceptedOptions = captureClientOptions(options)
@@ -1772,6 +2086,73 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       (payload, status) => acceptedFinanceBatch(payload, status, false, [200]),
       acceptedOptions.idempotencyKey,
     )
+  }
+  const previewWorkbook = (rawFile) => {
+    const file = captureWorkbookFile(rawFile)
+    if (!file) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return multipartMutation(
+      `${API_ROOT}/workbooks/preview`,
+      () => {
+        const form = new FormData()
+        form.append('workbook', file, file.name)
+        return form
+      },
+      acceptedWorkbookPreview,
+    )
+  }
+  const createWorkbookImport = (rawFile, previewToken, options) => {
+    const file = captureWorkbookFile(rawFile)
+    const acceptedOptions = captureClientOptions(options)
+    if (!file || typeof previewToken !== 'string' || previewToken.length > 4_096
+      || !WORKBOOK_PREVIEW_TOKEN.test(previewToken) || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    const idempotencyKey = acceptedOptions.idempotencyKey ?? createIdempotencyKey()
+    return multipartMutation(
+      `${API_ROOT}/workbooks/imports`,
+      () => {
+        const form = new FormData()
+        form.append('previewToken', previewToken)
+        form.append('workbook', file, file.name)
+        return form
+      },
+      acceptedWorkbookImport,
+      idempotencyKey,
+    )
+  }
+  const continueWorkbookImport = (importId, expectedVersion, options) => {
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)
+      || !positive(expectedVersion) || expectedVersion >= Number.MAX_SAFE_INTEGER
+      || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    const idempotencyKey = acceptedOptions.idempotencyKey ?? createIdempotencyKey()
+    return multipartMutation(
+      `${API_ROOT}/workbooks/imports/${importId}/continue`,
+      () => {
+        const form = new FormData()
+        form.append('expectedVersion', String(expectedVersion))
+        return form
+      },
+      acceptedWorkbookStatus,
+      idempotencyKey,
+    )
+  }
+  const getWorkbookImport = (importId) => {
+    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    return requestJson(`${API_ROOT}/workbooks/imports/${importId}`, {
+      method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
+    }, { validate: acceptedWorkbookStatus })
+  }
+  const exportWorkbook = (format) => {
+    if (!['legacy', 'panel-v2'].includes(format)) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    return requestWorkbookExport(format)
   }
   const editClient = (clientId, expectedVersion, input, options) => {
     const requested = captureClientInput(input)
@@ -2031,6 +2412,11 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     startFinanceImport,
     appendFinanceImportChunk,
     commitFinanceImport,
+    previewWorkbook,
+    createWorkbookImport,
+    continueWorkbookImport,
+    getWorkbookImport,
+    exportWorkbook,
     createAppointment,
     editAppointment,
     cancelAppointment,

@@ -4,6 +4,8 @@ const RESERVED = [
   ['BWM_DATA_KEK_V', 'data'],
   ['BWM_LOOKUP_HMAC_V', 'lookup'],
   ['BWM_BACKUP_KEK_V', 'backup'],
+  ['BWM_WORKBOOK_KEK_V', 'workbookKek'],
+  ['BWM_WORKBOOK_HMAC_V', 'workbookHmac'],
 ]
 const VERSION = /^[1-9]\d*$/
 
@@ -15,11 +17,18 @@ const validVersion = (value) => typeof value === 'number' && Number.isSafeIntege
 
 const importKey = async (kind, raw) => {
   if (kind === 'lookup') return crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  if (kind === 'workbookHmac') return crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
   return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
 }
 
 export async function createKeyring(env, config) {
-  const stores = { data: new Map(), lookup: new Map(), backup: new Map() }
+  const stores = {
+    data: new Map(),
+    lookup: new Map(),
+    backup: new Map(),
+    workbookKek: new Map(),
+    workbookHmac: new Map(),
+  }
   for (const [binding, value] of Object.entries(env ?? {})) {
     const reserved = RESERVED.find(([prefix]) => binding.startsWith(prefix))
     if (!reserved) continue
@@ -41,10 +50,14 @@ export async function createKeyring(env, config) {
   const activeDataKekVersion = config?.activeDataKekVersion
   const activeLookupKeyVersion = config?.activeLookupKeyVersion
   const activeBackupKekVersion = config?.activeBackupKekVersion
+  const activeWorkbookKekVersion = config?.activeWorkbookKekVersion
+  const activeWorkbookHmacVersion = config?.activeWorkbookHmacVersion
   for (const [binding, version, store] of [
     ['BWM_DATA_KEK_V', activeDataKekVersion, stores.data],
     ['BWM_LOOKUP_HMAC_V', activeLookupKeyVersion, stores.lookup],
     ['BWM_BACKUP_KEK_V', activeBackupKekVersion, stores.backup],
+    ['BWM_WORKBOOK_KEK_V', activeWorkbookKekVersion, stores.workbookKek],
+    ['BWM_WORKBOOK_HMAC_V', activeWorkbookHmacVersion, stores.workbookHmac],
   ]) {
     if (version === undefined) continue
     if (!validVersion(version)) fail(binding)
@@ -55,11 +68,17 @@ export async function createKeyring(env, config) {
     activeDataKekVersion,
     activeLookupKeyVersion,
     activeBackupKekVersion,
+    activeWorkbookKekVersion,
+    activeWorkbookHmacVersion,
     dataKekVersions: versions(stores.data),
     lookupKeyVersions: versions(stores.lookup),
     backupKekVersions: versions(stores.backup),
+    workbookKekVersions: versions(stores.workbookKek),
+    workbookHmacVersions: versions(stores.workbookHmac),
     getDataKek: (version) => stores.data.get(version) ?? null,
     getLookupHmac: (version) => stores.lookup.get(version) ?? null,
     getBackupKek: (version) => stores.backup.get(version) ?? null,
+    getWorkbookKek: (version) => stores.workbookKek.get(version) ?? null,
+    getWorkbookHmac: (version) => stores.workbookHmac.get(version) ?? null,
   })
 }

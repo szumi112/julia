@@ -108,6 +108,8 @@ const KEY_NAMES = Object.freeze([
   'BWM_BACKUP_KEK_V1',
   'BWM_DATA_KEK_V1',
   'BWM_LOOKUP_HMAC_V1',
+  'BWM_WORKBOOK_HMAC_V1',
+  'BWM_WORKBOOK_KEK_V1',
 ])
 const PHASE = Object.freeze({
   init: 0,

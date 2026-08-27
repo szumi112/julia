@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
+import { parseWorkbookFile } from '../../src/workbook-import.js'
 
 const workbookOoxml = () => import('../../src/workbook-ooxml.js')
 
@@ -400,6 +402,204 @@ test('full-centre patch appends Panel-v2 while preserving legacy OOXML semantics
   assert.match(sharedStrings, /<t>=2\+2<\/t>/)
   assert.match(contentTypes, /PartName="\/xl\/worksheets\/sheet3\.xml"/)
   assert.doesNotMatch(strFromU8(files['xl/worksheets/sheet1.xml']), /Panel \u2014/)
+})
+
+test('legacy patch keeps original sheet/row shape while applying canonical values and explicit voids', async () => {
+  const { patchPanelWorkbook, readPanelWorkbook } = await workbookOoxml()
+  const transactionSheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:E4"/><sheetData>
+<row r="1" ht="24" customHeight="1"><c r="A1" s="5" t="inlineStr"><is><t>Usługa</t></is></c><c r="B1" s="6" t="inlineStr"><is><t>Cena</t></is></c><c r="C1" s="5" t="inlineStr"><is><t>Klient</t></is></c><c r="D1" s="6" t="inlineStr"><is><t>Data zakupu</t></is></c><c r="E1" s="5" t="inlineStr"><is><t>Miesiąc księgowy</t></is></c></row>
+<row r="2" ht="20" customHeight="1"><c r="A2" s="5" t="inlineStr"><is><t>Konsultacja</t></is></c><c r="B2" s="6"><v>180</v></c><c r="C2" s="5" t="inlineStr"><is><t>Fikcyjna osoba</t></is></c><c r="D2" s="6" t="d"><v>2025-09-02</v></c><c r="E2" s="5" t="inlineStr"><is><t>2025-09</t></is></c></row>
+<row r="3" ht="20" customHeight="1"><c r="A3" s="5" t="inlineStr"><is><t>Wiersz do unieważnienia</t></is></c><c r="B3" s="6"><v>90</v></c><c r="C3" s="5" t="inlineStr"><is><t>Fikcyjna osoba 2</t></is></c><c r="D3" s="6" t="d"><v>2025-09-03</v></c><c r="E3" s="5" t="inlineStr"><is><t>2025-09</t></is></c></row>
+<row r="4"><c r="A4" s="5" t="inlineStr"><is><t>Suma</t></is></c><c r="B4" s="7"><f>SUM(B2:B3)</f><v>270</v></c></row>
+</sheetData></worksheet>`
+  const result = unzipSync(await patchPanelWorkbook(syntheticTemplate({
+    'xl/worksheets/sheet1.xml': strToU8(transactionSheet),
+  }), {
+    outputMode: 'legacy',
+    sheets: [],
+    legacyRows: [{
+      sheet: 'Arkusz A', rowNumber: 2, blockIndex: 0, recordType: 'income',
+      values: { accountingMonth: '2025-10', amountGrosze: 20_000 },
+    }],
+    legacyVoids: [{
+      sheet: 'Arkusz A', rowNumber: 3, blockIndex: 0, recordType: 'income',
+    }],
+  }))
+  const worksheet = strFromU8(result['xl/worksheets/sheet1.xml'])
+  const workbook = strFromU8(result['xl/workbook.xml'])
+
+  assert.deepEqual(workbookSheetNames(workbook), ['Arkusz A', 'Arkusz B'])
+  assert.match(worksheet, /<row r="2" ht="20" customHeight="1">/)
+  assert.match(worksheet, /<c r="B2" s="6"><v>200<\/v><\/c>/)
+  assert.match(worksheet, /<c r="E2" s="5" t="s"><v>\d+<\/v><\/c>/)
+  assert.match(strFromU8(result['xl/sharedStrings.xml']), /2025-10/)
+  assert.match(worksheet, /<row r="3" ht="20" customHeight="1"><\/row>/)
+  assert.doesNotMatch(worksheet, /Wiersz do unieważnienia|Fikcyjna osoba 2|<c r="B3"/)
+  assert.match(worksheet, /<c r="B4" s="7"><f>SUM\(B2:B3\)<\/f><\/c>/)
+  assert.equal(result['xl/calcChain.xml'], undefined)
+  assert.deepEqual(await readPanelWorkbook(zipSync(result), {
+    verify: () => { throw new Error('legacy export must not verify Panel metadata') },
+  }), { edits: [], kind: 'legacy', metadata: null, voidIds: [] })
+})
+
+test('legacy patch adds a styled accounting-month column to an approved transaction table', async () => {
+  const { patchPanelWorkbook } = await workbookOoxml()
+  const transactionSheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:H2"/><sheetData>
+<row r="1"><c r="A1" s="5" t="inlineStr"><is><t>Usługa</t></is></c><c r="B1" s="6" t="inlineStr"><is><t>Cena</t></is></c><c r="C1" s="5" t="inlineStr"><is><t>Klient</t></is></c><c r="D1" s="6" t="inlineStr"><is><t>Data zakupu</t></is></c><c r="E1" s="5" t="inlineStr"><is><t>Sposób płatności</t></is></c><c r="F1" s="5" t="inlineStr"><is><t>Status</t></is></c><c r="G1" s="5" t="inlineStr"><is><t>Faktura</t></is></c><c r="H1" s="5" t="inlineStr"><is><t>Psycholog</t></is></c></row>
+<row r="2" ht="20" customHeight="1"><c r="A2" s="5" t="inlineStr"><is><t>Konsultacja</t></is></c><c r="B2" s="6"><v>180</v></c><c r="C2" s="5" t="inlineStr"><is><t>Fikcyjna osoba</t></is></c><c r="D2" s="6" t="d"><v>2025-09-02</v></c><c r="E2" s="5" t="inlineStr"><is><t>Gotówka</t></is></c><c r="F2" s="5" t="inlineStr"><is><t>Opłacona</t></is></c><c r="G2" s="5"/><c r="H2" s="5" t="inlineStr"><is><t>Julia</t></is></c></row>
+</sheetData></worksheet>`
+  const result = unzipSync(await patchPanelWorkbook(syntheticTemplate({
+    'xl/worksheets/sheet1.xml': strToU8(transactionSheet),
+  }), {
+    outputMode: 'legacy',
+    sheets: [],
+    legacyRows: [{
+      sheet: 'Arkusz A', rowNumber: 2, blockIndex: 0, recordType: 'income',
+      values: {
+        accountingMonth: '2025-10',
+        invoiceStatus: 'action_required',
+        paymentMethod: 'transfer',
+        settlementStatus: 'partial',
+        specialistDisplayName: 'Julia Wolanin',
+      },
+    }],
+  }))
+  const worksheet = strFromU8(result['xl/worksheets/sheet1.xml'])
+  const sharedStrings = strFromU8(result['xl/sharedStrings.xml'])
+
+  assert.match(worksheet, /<dimension ref="A1:I2"\/>/)
+  assert.match(worksheet, /<c r="I1" s="5" t="inlineStr"><is><t>Miesiąc księgowy<\/t><\/is><\/c>/)
+  assert.match(worksheet, /<c r="I2" s="5" t="s"><v>\d+<\/v><\/c>/)
+  assert.match(sharedStrings, /2025-10/)
+  assert.match(sharedStrings, /Do wystawienia/)
+  assert.match(sharedStrings, /Przelew/)
+  assert.match(sharedStrings, /Częściowo opłacona/)
+  assert.match(sharedStrings, /Julia Wolanin/)
+  assert.match(worksheet, /<c r="E2" s="5" t="s"><v>\d+<\/v><\/c>/)
+  assert.match(worksheet, /<c r="F2" s="5" t="s"><v>\d+<\/v><\/c>/)
+  assert.match(worksheet, /<c r="G2" s="5" t="s"><v>\d+<\/v><\/c>/)
+  assert.match(worksheet, /<c r="H2" s="5" t="s"><v>\d+<\/v><\/c>/)
+})
+
+test('legacy patch surfaces non-native canonical facts in a dedicated non-Panel correction sheet', async () => {
+  const { patchPanelWorkbook, readPanelWorkbook } = await workbookOoxml()
+  const bytes = await patchPanelWorkbook(syntheticTemplate(), {
+    outputMode: 'legacy',
+    sheets: [],
+    legacyAdditions: [{
+      action: 'update', field: 'paidAmountGrosze', id: 'fin_non_native_paid',
+      value: '9000',
+    }, {
+      action: 'void', field: 'record', id: 'fin_unlinked_void',
+      value: 'Unieważniono w podpisanym pliku Panel-v2',
+    }],
+  })
+  const files = unzipSync(bytes)
+  const workbook = strFromU8(files['xl/workbook.xml'])
+  const allText = Object.values(files).map((value) => strFromU8(value)).join('\n')
+
+  assert.deepEqual(workbookSheetNames(workbook), [
+    'Arkusz A', 'Arkusz B', 'BWM — korekty eksportu',
+  ])
+  assert.match(allText, /Zapłacono \(gr\)/)
+  assert.match(allText, /fin_non_native_paid/)
+  assert.match(allText, /Unieważniono w podpisanym pliku Panel-v2/)
+  assert.doesNotMatch(workbook, /Panel — Meta/)
+  assert.equal((await readPanelWorkbook(bytes)).kind, 'legacy')
+})
+
+test('exact approved legacy workbook preserves audited aggregates across coordinate patches', {
+  skip: !process.env.BWM_APPROVED_WORKBOOK_PATH,
+}, async () => {
+  const { patchPanelWorkbook, readPanelWorkbook } = await workbookOoxml()
+  const source = new Uint8Array(await readFile(process.env.BWM_APPROVED_WORKBOOK_PATH))
+  const parsed = await parseWorkbookFile(source.buffer.slice(
+    source.byteOffset, source.byteOffset + source.byteLength,
+  ), { filename: 'approved.xlsx' })
+  assert.equal(parsed.fingerprint, 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a')
+  const periodCounts = {}
+  for (const [disposition, rows] of [
+    ['accepted', parsed.rows],
+    ['quarantined', parsed.quarantinedRows],
+  ]) for (const row of rows) {
+    const key = `${disposition}:${row.recordType}:${row.periodPrecision}`
+    periodCounts[key] = (periodCounts[key] ?? 0) + 1
+  }
+  assert.deepEqual(periodCounts, {
+    'accepted:income:day': 1_997,
+    'accepted:tus:day': 2,
+    'accepted:tus:month': 23,
+    'accepted:english:month': 165,
+    'accepted:expense:unknown': 39,
+    'accepted:income:unknown': 3,
+    'accepted:expense:month': 3,
+    'quarantined:income:day': 1,
+    'quarantined:income:unknown': 1,
+    'quarantined:expense:unknown': 1,
+  })
+  const coordinates = (row, values) => ({
+    sheet: row.sheet,
+    sheetIndex: Number(row.sourceKey.split(':')[2]),
+    rowNumber: row.rowNumber,
+    blockIndex: Number(row.sourceKey.split(':').at(-1)),
+    recordType: row.recordType,
+    values,
+  })
+  const transactionRows = parsed.rows.filter((row) => (
+    ['income', 'tus'].includes(row.recordType)
+    && row.sheet !== 'Stałe koszty'
+    && row.sourceKey.endsWith(':0')
+  ))
+  const monthRows = transactionRows.filter(({ recordType }) => recordType === 'income').slice(0, 45)
+  const fixedExpense = parsed.rows.find(({ recordType }) => recordType === 'expense')
+  const fixedRevenue = parsed.rows.find((row) => (
+    row.recordType === 'income' && row.sheet === 'Stałe koszty'
+  ))
+  const english = parsed.rows.find(({ recordType }) => recordType === 'english')
+  const tus = parsed.rows.find(({ recordType }) => recordType === 'tus')
+  assert.ok(fixedExpense && fixedRevenue && english && tus)
+  const monthTarget = '2026-12'
+  const legacyRows = [
+    ...monthRows.map((row, index) => coordinates(row, {
+      accountingMonth: monthTarget,
+      ...(index === 0 ? { specialistDisplayName: 'Julia Wolanin' } : {}),
+    })),
+    coordinates(fixedExpense, { amountGrosze: fixedExpense.amountGrosze + 100 }),
+    coordinates(fixedRevenue, { amountGrosze: fixedRevenue.amountGrosze + 100 }),
+    coordinates(english, { amountGrosze: english.amountGrosze + 100 }),
+    coordinates(tus, { amountGrosze: tus.amountGrosze + 100 }),
+  ]
+  const output = await patchPanelWorkbook(source, {
+    outputMode: 'legacy', sheets: [], legacyRows,
+  })
+  const reparsed = await parseWorkbookFile(output.buffer.slice(
+    output.byteOffset, output.byteOffset + output.byteLength,
+  ), { filename: 'approved-export.xlsx' })
+  const reparsedBySource = new Map(reparsed.rows.map((row) => [row.sourceKey, row]))
+
+  assert.equal((await readPanelWorkbook(output)).kind, 'legacy')
+  assert.deepEqual(reparsed.counts, parsed.counts)
+  assert.deepEqual(reparsed.reconciliation, parsed.reconciliation)
+  assert.equal(reparsed.rows.length, 2_232)
+  assert.equal(reparsed.quarantinedRows.length, 3)
+  assert.equal(reparsed.reconciliation.excludedFormulaRows, 5)
+  assert.ok(monthRows.every((row) => (
+    reparsedBySource.get(row.sourceKey)?.accountingMonth === monthTarget
+  )))
+  assert.equal(reparsedBySource.get(monthRows[0].sourceKey)?.specialistName, 'Julia Wolanin')
+  for (const row of [fixedExpense, fixedRevenue, english, tus]) {
+    assert.equal(reparsedBySource.get(row.sourceKey)?.amountGrosze, row.amountGrosze + 100)
+  }
+  assert.deepEqual(reparsed.quarantinedRows.map(({ reasonCode }) => reasonCode).sort(),
+    parsed.quarantinedRows.map(({ reasonCode }) => reasonCode).sort())
+  const files = unzipSync(output)
+  const worksheetText = Object.entries(files)
+    .filter(([path]) => /^xl\/worksheets\/[^/]+\.xml$/.test(path))
+    .map(([, bytes]) => strFromU8(bytes)).join('\n')
+  assert.doesNotMatch(worksheetText, /<f\b[^>]*>[\s\S]*?<\/f>\s*<v\b/)
+  assert.doesNotMatch(strFromU8(files['xl/workbook.xml']), /Panel — Meta/)
 })
 
 test('patch resolves and preserves a relocated styles part from workbook relationships', async () => {

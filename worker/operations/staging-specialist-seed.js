@@ -10,6 +10,11 @@ const PROFILES = Object.freeze([
     standardRateGrosze: 18000,
   }),
   Object.freeze({
+    displayName: 'Julia Wolanin',
+    id: 'sp_staging_workbook_julia_wolanin',
+    standardRateGrosze: 18000,
+  }),
+  Object.freeze({
     displayName: 'Justyna J-J',
     id: 'sp_staging_workbook_justyna_j_j',
     standardRateGrosze: 18000,

@@ -16,9 +16,12 @@ export default defineConfig({
             TEST_STAGE_B_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-b'),
             TEST_STAGE_C_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-c'),
             TEST_STAGE_D_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-d'),
+            TEST_STAGE_E_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-e'),
             BWM_DATA_KEK_V1: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
             BWM_LOOKUP_HMAC_V1: 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ',
             BWM_BACKUP_KEK_V1: 'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
+            BWM_WORKBOOK_KEK_V1: 'CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk',
+            BWM_WORKBOOK_HMAC_V1: 'CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo',
           },
         },
       }

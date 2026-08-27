@@ -4,7 +4,9 @@ import { AppError, apiError, publicError } from '../../worker/http/errors.js'
 import {
   hasDuplicateTopLevelJsonKey,
   parseCanonicalContentLength,
+  readMultipartBodyOnce,
   readJsonBodyOnce,
+  validateMutationMetadata,
 } from '../../worker/http/security.js'
 
 const correlationId = '11111111-1111-4111-8111-111111111111'
@@ -19,8 +21,16 @@ const actor = { id: 'stf_owner', role: 'owner', specialistId: 'sp_owner', versio
 const publicErrors = [
   ['INVALID_CONTENT_LENGTH', 400],
   ['INVALID_JSON', 400],
+  ['INVALID_MULTIPART', 400],
   ['VALIDATION_FAILED', 400],
+  ['WORKBOOK_FINGERPRINT_REJECTED', 400],
+  ['WORKBOOK_IMPORT_INVALID', 400],
+  ['WORKBOOK_PANEL_SIGNATURE_INVALID', 400],
+  ['WORKBOOK_PREVIEW_INVALID', 400],
+  ['WORKBOOK_PREVIEW_TOKEN_INVALID', 400],
+  ['WORKBOOK_SCOPE_MISMATCH', 400],
   ['ACCESS_ASSERTION_INVALID', 401],
+  ['REAUTH_REQUIRED', 401],
   ['ACCESS_DENIED', 403],
   ['FORBIDDEN', 403],
   ['ORIGIN_INVALID', 403],
@@ -38,6 +48,10 @@ const publicErrors = [
   ['APPOINTMENT_PAYMENT_CONFLICT', 409],
   ['PAYMENT_AMOUNT_CONFLICT', 409],
   ['PAYMENT_CORRECTION_CONFLICT', 409],
+  ['WORKBOOK_IMPORT_CONFLICT', 409],
+  ['WORKBOOK_EXPORT_CONFLICT', 409],
+  ['WORKBOOK_EXPORT_LIMIT', 409],
+  ['WORKBOOK_RECONCILIATION_CONFLICT', 409],
   ['LAST_ACTIVE_OWNER', 409],
   ['STAFF_INVITATION_CONFLICT', 409],
   ['VERSION_CONFLICT', 409],
@@ -184,6 +198,79 @@ describe('HTTP security primitives', () => {
     await expect(readJsonBodyOnce(request)).rejects.toThrow(/^PAYLOAD_TOO_LARGE$/)
     expect(cancelled).toBe(true)
     expect(request.bodyUsed).toBe(true)
+  })
+
+  it('accepts a dedicated multipart workbook mode without weakening the 64 KiB JSON mode', async () => {
+    const workbook = new Uint8Array(5 * 1024 * 1024)
+    for (let index = 0; index < workbook.length; index += 1) workbook[index] = index % 251
+    const form = new FormData()
+    form.append('workbook', new File([workbook], 'fictional.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    }))
+    form.append('previewToken', 'signed-token')
+    const multipart = new Request('https://example.test/api/v1/workbooks/imports', {
+      method: 'POST',
+      headers: { origin: config.appOrigin },
+      body: form,
+    })
+    expect(() => validateMutationMetadata(multipart, config, { bodyMode: 'workbook-multipart' }))
+      .not.toThrow()
+    const parsed = await readMultipartBodyOnce(multipart)
+    expect([...parsed.keys()]).toEqual(['workbook', 'previewToken'])
+    expect(parsed.get('workbook')).toBeInstanceOf(File)
+    expect(parsed.get('workbook').size).toBe(5 * 1024 * 1024)
+    expect(new Uint8Array(await parsed.get('workbook').arrayBuffer())).toEqual(workbook)
+
+    const json = new Request('https://example.test/api/v1/test', {
+      method: 'POST',
+      headers: { origin: config.appOrigin, 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 'x'.repeat(65_536) }),
+    })
+    expect(() => validateMutationMetadata(json, config)).not.toThrow()
+    await expect(readJsonBodyOnce(json)).rejects.toThrow(/^PAYLOAD_TOO_LARGE$/)
+  }, 15_000)
+
+  it('rejects workbook files above 5 MiB, malformed multipart, encodings and multipart on JSON routes', async () => {
+    const oversized = new FormData()
+    oversized.append('workbook', new File([
+      new Uint8Array(5 * 1024 * 1024 + 1),
+    ], 'too-large.xlsx'))
+    const request = new Request('https://example.test/api/v1/workbooks/preview', {
+      method: 'POST',
+      headers: { origin: config.appOrigin },
+      body: oversized,
+    })
+    expect(() => validateMutationMetadata(request, config, { bodyMode: 'workbook-multipart' }))
+      .not.toThrow()
+    await expect(readMultipartBodyOnce(request)).rejects.toThrow(/^PAYLOAD_TOO_LARGE$/)
+
+    const malformed = new Request('https://example.test', {
+      method: 'POST',
+      headers: {
+        origin: config.appOrigin,
+        'content-type': 'multipart/form-data; boundary=missing',
+      },
+      body: 'not multipart',
+    })
+    await expect(readMultipartBodyOnce(malformed)).rejects.toThrow(/^INVALID_MULTIPART$/)
+
+    const encoded = new Request('https://example.test', {
+      method: 'POST',
+      headers: {
+        origin: config.appOrigin,
+        'content-encoding': 'gzip',
+        'content-type': 'multipart/form-data; boundary=safe-boundary',
+      },
+      body: '--safe-boundary--\r\n',
+    })
+    expect(() => validateMutationMetadata(encoded, config, { bodyMode: 'workbook-multipart' }))
+      .toThrow(/^UNSUPPORTED_MEDIA_TYPE$/)
+
+    const form = new FormData()
+    form.append('workbook', new File(['x'], 'file.xlsx'))
+    expect(() => validateMutationMetadata(new Request('https://example.test', {
+      method: 'POST', headers: { origin: config.appOrigin }, body: form,
+    }), config)).toThrow(/^UNSUPPORTED_MEDIA_TYPE$/)
   })
 })
 
