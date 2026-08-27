@@ -3,6 +3,9 @@ import { strFromU8, unzipSync } from 'fflate'
 const MAX_WORKBOOK_BYTES = 5 * 1024 * 1024
 const FINGERPRINT = /^[0-9a-f]{64}$/
 const MONTH_KEY = /^\d{4}-(?:0[1-9]|1[0-2])$/
+const ACCOUNTING_MONTH_OVERRIDES = Object.freeze({
+  sierpienwrzesien: '2026-08',
+})
 const POLISH_MONTHS = Object.freeze({
   styczen: 1,
   luty: 2,
@@ -236,6 +239,10 @@ const normalizeTransactions = (sheet, context) => {
   })
   const datedMonths = candidates.map(({ occurredOn }) => occurredOn?.slice(0, 7)).filter(Boolean)
   const sheetMonth = inferredSheetMonth(sheet, datedMonths)
+  const normalizedSheetName = searchText(sheet.name)
+  const accountingMonthOverride = Object.hasOwn(ACCOUNTING_MONTH_OVERRIDES, normalizedSheetName)
+    ? ACCOUNTING_MONTH_OVERRIDES[normalizedSheetName]
+    : null
   const tusSheet = searchText(sheet.name).includes('grupa tus')
   return candidates.map(({ row, rowNumber, occurredOn, amount }) => {
     const label = valueAt(row, headers, 'usluga')
@@ -245,7 +252,8 @@ const normalizeTransactions = (sheet, context) => {
       sheet: sheet.name,
       rowNumber,
       recordType: isTus ? 'tus' : 'income',
-      accountingMonth: isTus ? sheetMonth : occurredOn?.slice(0, 7) ?? sheetMonth,
+      accountingMonth: accountingMonthOverride
+        ?? (isTus ? sheetMonth : occurredOn?.slice(0, 7) ?? sheetMonth),
       occurredOn,
       amount,
       counterparty: valueAt(row, headers, 'klient'),

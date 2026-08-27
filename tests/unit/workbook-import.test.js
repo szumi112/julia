@@ -90,7 +90,7 @@ const testWorkbook = () => {
   return zipSync(files)
 }
 
-test('normalizes transactions without inventing missing workbook facts', () => {
+test('normalizes transactions with the approved staging accounting month', () => {
   const preview = normalizeWorkbookRows({
     filename: 'fictional.xlsx',
     fingerprint: 'a'.repeat(64),
@@ -110,7 +110,7 @@ test('normalizes transactions without inventing missing workbook facts', () => {
     sheet: 'SierpieńWrzesień',
     rowNumber: 2,
     recordType: 'income',
-    accountingMonth: '2024-08',
+    accountingMonth: '2026-08',
     occurredOn: '2024-08-20',
     amountGrosze: 16000,
     counterparty: 'Joanna Testowa',
@@ -128,10 +128,33 @@ test('normalizes transactions without inventing missing workbook facts', () => {
   })
   const undated = preview.rows.find((row) => row.sourceLabel === 'Webinar online')
   assert.equal(undated.occurredOn, null)
-  assert.equal(undated.accountingMonth, '2024-09')
+  assert.equal(undated.accountingMonth, '2026-08')
   assert.equal(undated.paymentMethod, 'blik')
   assert.equal(undated.settlementStatus, 'unknown')
   assert.equal(undated.invoiceStatus, 'action_required')
+})
+
+test('assigns the combined staging sheet to August 2026 while preserving source dates', () => {
+  const preview = normalizeWorkbookRows({
+    filename: 'fictional.xlsx',
+    fingerprint: 'c'.repeat(64),
+    sheets: [{
+      name: 'SierpieńWrzesień',
+      rows: [
+        transactionHeader,
+        ['Konsultacja', 180, 'Osoba Sierpniowa', '2024-08-20', '', '', ''],
+        ['Konsultacja', 180, 'Osoba Wrześniowa', '2024-09-30', '', '', ''],
+      ],
+    }],
+  })
+
+  assert.deepEqual(preview.rows.map(({ accountingMonth, occurredOn }) => ({
+    accountingMonth,
+    occurredOn,
+  })), [
+    { accountingMonth: '2026-08', occurredOn: '2024-08-20' },
+    { accountingMonth: '2026-08', occurredOn: '2024-09-30' },
+  ])
 })
 
 test('preserves additive prices and never infers months from monetary amounts', () => {
