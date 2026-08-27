@@ -143,7 +143,8 @@ export function createRemoteAccessJwks({ issuer, fetchImpl = fetch } = {}) {
 }
 
 function validatePayload(payload, protectedHeader, nowMs) {
-  if (protectedHeader?.alg !== 'RS256' || protectedHeader?.typ !== 'JWT'
+  if (protectedHeader?.alg !== 'RS256'
+    || (protectedHeader.typ !== undefined && protectedHeader.typ !== 'JWT')
     || typeof protectedHeader?.kid !== 'string' || !protectedHeader.kid) {
     throw invalid('ACCESS_JWT_HEADER_INVALID')
   }

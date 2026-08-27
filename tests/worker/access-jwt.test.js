@@ -40,9 +40,20 @@ describe('Access assertion verification', () => {
     })
   })
 
+  it('accepts a signed Cloudflare assertion when the optional typ header is absent', async () => {
+    const assertion = await signAccessJwt(TEST_IDENTITIES.owner, {
+      header: { alg: 'RS256', kid: KID },
+    })
+
+    await expect(verifier().verifyHumanAccessAssertion(assertion)).resolves.toMatchObject({
+      kind: 'human',
+      subject: TEST_IDENTITIES.owner.sub,
+      normalizedEmail: TEST_IDENTITIES.owner.email,
+    })
+  })
+
   it('rejects unsafe protected headers, claims, and timestamps as one sanitized error', async () => {
     const malformed = [
-      signAccessJwt(TEST_IDENTITIES.owner, { header: { alg: 'RS256', kid: KID } }),
       signAccessJwt(TEST_IDENTITIES.owner, { kid: '' }),
       signAccessJwt(TEST_IDENTITIES.owner, { issuer: 'https://other.cloudflareaccess.com' }),
       signAccessJwt(TEST_IDENTITIES.owner, { audience: 'other' }),
@@ -72,7 +83,6 @@ describe('Access assertion verification', () => {
   })
 
   it.each([
-    ['header', TEST_IDENTITIES.owner, { header: { alg: 'RS256', kid: KID } }, 'ACCESS_JWT_HEADER_INVALID'],
     ['token type', { ...TEST_IDENTITIES.owner, type: 'other' }, {}, 'ACCESS_JWT_TYPE_INVALID'],
     ['lifetime', TEST_IDENTITIES.owner, { expiresAt: 1_800_029_000 }, 'ACCESS_JWT_LIFETIME_INVALID'],
     ['subject', { ...TEST_IDENTITIES.owner, sub: '' }, {}, 'ACCESS_JWT_SUBJECT_INVALID'],
