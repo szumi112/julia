@@ -216,9 +216,9 @@ test('bootstrap input accepts only the exact staging, fictional, provider-bound 
 
   const stagingOwner = normalizeBootstrapInput({
     ...baseEnv(),
-    BOOTSTRAP_OWNER_EMAIL: 'staging-owner@bearwithme-panel.app',
+    BOOTSTRAP_OWNER_EMAIL: 'kontakt@bearwithme.pl',
   }, [])
-  assert.equal(stagingOwner.ownerEmail, 'staging-owner@bearwithme-panel.app')
+  assert.equal(stagingOwner.ownerEmail, 'kontakt@bearwithme.pl')
 
   for (const [name, value] of [
     ['APP_ENV', 'development'],

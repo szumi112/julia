@@ -66,14 +66,14 @@ const rejectingCancel = (reason) => {
 
 describe('Cloudflare Access provider', () => {
   it('accepts only the exact protected staging role alias', async () => {
-    const desired = [{ email: { email: 'staging-owner@bearwithme-panel.app' } }]
+    const desired = [{ email: { email: 'kontakt@bearwithme.pl' } }]
     const fetch = vi.fn()
       .mockResolvedValueOnce(ok(group({ include: desired })))
       .mockResolvedValueOnce(ok(group({ include: desired })))
       .mockResolvedValueOnce(ok(group({ include: desired })))
 
     await expect(reconcileAccessGroup(input(fetch, {
-      emails: ['staging-owner@bearwithme-panel.app'],
+      emails: ['kontakt@bearwithme.pl'],
     }))).resolves.toEqual({ reconciled: true })
   })
 
@@ -563,7 +563,7 @@ describe('Cloudflare Access provider', () => {
   })
 
   it.each([
-    [{ appEnv: 'production', emails: ['staging-owner@bearwithme-panel.app'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
+    [{ appEnv: 'production', emails: ['kontakt@bearwithme.pl'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ appEnv: 'staging', emails: ['disabled@example.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ emails: ['PERSON@example.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],
     [{ emails: ['person@real.test'] }, 'ACCESS_PROVIDER_CONFIG_INVALID'],

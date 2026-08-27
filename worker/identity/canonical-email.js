@@ -3,7 +3,7 @@ const MAX_EMAIL_BYTES = 254
 const PHASE_ONE_ENVIRONMENTS = new Set(['development', 'production', 'staging'])
 
 export const ACCESS_DISABLED_EMAIL = 'disabled@example.test'
-export const STAGING_OWNER_EMAIL = 'staging-owner@bearwithme-panel.app'
+export const STAGING_OWNER_EMAIL = 'kontakt@bearwithme.pl'
 
 const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength
 

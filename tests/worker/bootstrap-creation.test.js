@@ -55,10 +55,10 @@ it('builds the encrypted staging bootstrap aggregate for the exact role alias', 
   const built = await buildBootstrapCreationBatch({
     ...bootstrapInput('alias'),
     keyring,
-    ownerEmail: 'staging-owner@bearwithme-panel.app',
+    ownerEmail: 'kontakt@bearwithme.pl',
   })
 
-  expect(JSON.stringify(built.batch)).not.toContain('staging-owner@bearwithme-panel.app')
+  expect(JSON.stringify(built.batch)).not.toContain('kontakt@bearwithme.pl')
 })
 
 const LEGACY_IDENTITY_AUDITS = Object.freeze({

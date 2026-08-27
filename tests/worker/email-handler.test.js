@@ -21,16 +21,19 @@ const invalidEmails = Object.freeze([
 ])
 
 describe('shared canonical email boundary', () => {
-  it('admits only the exact staging role alias beyond fictional addresses', () => {
+  it('admits only the public centre email as the staging owner address', () => {
     expect(acceptPhaseOneAccessEmail('owner@example.test', { appEnv: 'development' }))
       .toBe('owner@example.test')
     expect(acceptPhaseOneAccessEmail('owner@example.test', { appEnv: 'production' }))
       .toBe('owner@example.test')
+    expect(acceptPhaseOneAccessEmail('kontakt@bearwithme.pl', {
+      appEnv: 'staging',
+    })).toBe('kontakt@bearwithme.pl')
+    expect(acceptPhaseOneAccessEmail('kontakt@bearwithme.pl', {
+      appEnv: 'production',
+    })).toBeNull()
     expect(acceptPhaseOneAccessEmail('staging-owner@bearwithme-panel.app', {
       appEnv: 'staging',
-    })).toBe('staging-owner@bearwithme-panel.app')
-    expect(acceptPhaseOneAccessEmail('staging-owner@bearwithme-panel.app', {
-      appEnv: 'production',
     })).toBeNull()
     expect(acceptPhaseOneAccessEmail('another@bearwithme-panel.app', {
       appEnv: 'staging',

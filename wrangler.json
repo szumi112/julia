@@ -76,7 +76,7 @@
         "ACTIVE_LOOKUP_KEY_VERSION": "1",
         "ACTIVE_BACKUP_KEK_VERSION": "1",
         "CF_ACCOUNT_ID": "2c7526d6afa1ee03407e35beefc21a0f",
-        "CF_D1_DATABASE_ID": "adcc8cc6-2ca2-4f9c-8565-fe9c64f0df9e",
+        "CF_D1_DATABASE_ID": "df9375e3-b5a8-4fe2-83b2-52acf78beb17",
         "CF_ACCESS_GROUP_ID": "e7255a79-ecbd-499b-8918-073ae44252b7",
         "CF_ACCESS_GROUP_NAME": "Bear with me - panel - staging"
       },
@@ -93,8 +93,8 @@
       "d1_databases": [
         {
           "binding": "DB",
-          "database_name": "bearwithme-panel-staging",
-          "database_id": "adcc8cc6-2ca2-4f9c-8565-fe9c64f0df9e",
+          "database_name": "bearwithme-panel-staging-v3",
+          "database_id": "df9375e3-b5a8-4fe2-83b2-52acf78beb17",
           "migrations_dir": ".core-migrations/active"
         }
       ],
