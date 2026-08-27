@@ -1,5 +1,10 @@
 import { isD1OutboxOperationGuardFailure } from '../db/errors.js'
 import { decryptOutboxPayload } from '../jobs/outbox.js'
+import {
+  backupObjectKeys,
+  createBackupManifest,
+  expectedObjectMetadata,
+} from './backup-format.js'
 
 const BACKUP_JOB_LIMIT = 1
 const BACKUP_LEASE_MS = 12 * 60 * 1000
@@ -718,6 +723,311 @@ export async function processNextBackupCreate(input) {
     try { guardFailure = isD1OutboxOperationGuardFailure(error) === true } catch {}
     if (guardFailure) throw new Error('BACKUP_LEASE_LOST')
     throw new Error('BACKUP_STATE_INVALID')
+  }
+}
+
+const RUNNER_KEYS = Object.freeze([
+  'db', 'cryptoContext', 'keyring', 'archive', 'providerConfig', 'schedulerRun',
+  'now', 'wait', 'fetch', 'signal', 'idFactory', 'leaseOwnerFactory',
+  'nonceFactory', 'rawKeyFactory', 'pollExport', 'downloadExport',
+])
+
+function captureRunnerInput(input) {
+  const value = descriptorSnapshot(input, RUNNER_KEYS)
+  const providerConfig = descriptorSnapshot(value.providerConfig, [
+    'accountId', 'databaseId', 'token',
+  ])
+  if (!value.archive || typeof value.archive.put !== 'function'
+    || !value.keyring || typeof value.keyring.getBackupKek !== 'function'
+    || typeof value.now !== 'function'
+    || typeof value.wait !== 'function'
+    || typeof value.fetch !== 'function'
+    || typeof value.idFactory !== 'function'
+    || typeof value.leaseOwnerFactory !== 'function'
+    || typeof value.nonceFactory !== 'function'
+    || typeof value.rawKeyFactory !== 'function'
+    || typeof value.pollExport !== 'function'
+    || typeof value.downloadExport !== 'function'
+    || !(value.signal instanceof AbortSignal)) invalid()
+  return { ...value, providerConfig }
+}
+
+function expiryFor(backup) {
+  const [year, month, day] = backup.local_day.split('-').map(Number)
+  const targetMonth = month - 1 + 12
+  const lastTargetDay = new Date(Date.UTC(year, targetMonth + 1, 0)).getUTCDate()
+  const expiry = backup.retention_class === 'monthly'
+    ? Date.UTC(year, targetMonth, Math.min(day, lastTargetDay))
+    : Date.UTC(year, month - 1, day + 35)
+  return instantFromMs(expiry)
+}
+
+async function renewClaim(input, claim) {
+  const nowMs = input.now()
+  const now = instantFromMs(nowMs)
+  const leaseExpiresAt = instantFromMs(nowMs + BACKUP_LEASE_MS)
+  try {
+    const results = await input.db.batch([
+      input.db.prepare(
+        `UPDATE outbox_jobs
+         SET lease_expires_at=?,updated_at=?
+         WHERE id=? AND type='backup.create' AND status='processing'
+           AND attempt_count=? AND lease_owner=? AND lease_expires_at>?
+           AND EXISTS (
+             SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+           )`
+      ).bind(
+        leaseExpiresAt,
+        now,
+        claim.jobId,
+        claim.attemptNumber,
+        claim.leaseOwner,
+        now,
+        ...schedulerBindings({ scheduler: input.scheduler, claimNow: now }),
+      ),
+      operationGuard(
+        input.db,
+        `backup_renew_${claim.jobId}_${claim.attemptNumber}_${nowMs}`,
+        `changes()=1 AND EXISTS (
+           SELECT 1 FROM outbox_jobs
+           WHERE id=? AND status='processing' AND attempt_count=?
+             AND lease_owner=? AND lease_expires_at=? AND updated_at=?
+         )`,
+        [claim.jobId, claim.attemptNumber, claim.leaseOwner, leaseExpiresAt, now],
+      ),
+    ])
+    fixedArray(results, 2)
+    return { now, leaseExpiresAt }
+  } catch (error) {
+    if (isD1OutboxOperationGuardFailure(error)) throw new Error('BACKUP_LEASE_LOST')
+    throw error
+  }
+}
+
+async function completeClaim(input, candidate, claim, stored, manifestResult, keys, bookmark) {
+  const completedMs = input.now()
+  const completedAt = instantFromMs(completedMs)
+  const expiresAt = expiryFor(candidate.backup)
+  const statements = [
+    input.db.prepare(
+      `UPDATE backup_runs
+       SET status='stored',version=version+1,export_bookmark=?,object_key=?,manifest_key=?,
+           ssec_key_version=?,wrapped_ssec_key_b64=?,wrap_nonce_b64=?,object_etag=?,
+           object_size=?,completed_at=?,expires_at=?,last_error_code=NULL,updated_at=?
+       WHERE id=? AND status='exporting' AND version=2
+         AND EXISTS (
+           SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_jobs AS j
+           WHERE j.id=? AND j.status='processing' AND j.attempt_count=?
+             AND j.lease_owner=? AND j.lease_expires_at>?
+         )`
+    ).bind(
+      bookmark,
+      keys.objectKey,
+      keys.manifestKey,
+      manifestResult.databaseFields.ssecKeyVersion,
+      manifestResult.databaseFields.wrappedSsecKeyB64,
+      manifestResult.databaseFields.wrapNonceB64,
+      stored.etag,
+      stored.size,
+      completedAt,
+      expiresAt,
+      completedAt,
+      candidate.backup.id,
+      ...schedulerBindings({ scheduler: input.scheduler, claimNow: completedAt }),
+      claim.jobId,
+      claim.attemptNumber,
+      claim.leaseOwner,
+      completedAt,
+    ),
+    input.db.prepare(
+      `UPDATE outbox_attempts
+       SET completed_at=?,result='succeeded',error_code=NULL,provider_reference=NULL
+       WHERE id=? AND job_id=? AND attempt_number=? AND completed_at IS NULL`
+    ).bind(completedAt, claim.attemptId, claim.jobId, claim.attemptNumber),
+    input.db.prepare(
+      `UPDATE outbox_jobs
+       SET status='succeeded',lease_owner=NULL,lease_expires_at=NULL,last_error_code=NULL,
+           updated_at=?
+       WHERE id=? AND status='processing' AND attempt_count=? AND lease_owner=?
+         AND changes()=1`
+    ).bind(completedAt, claim.jobId, claim.attemptNumber, claim.leaseOwner),
+    operationGuard(
+      input.db,
+      `backup_complete_${claim.jobId}_${claim.attemptNumber}`,
+      `changes()=1
+       AND EXISTS (SELECT 1 FROM backup_runs WHERE id=? AND status='stored' AND version=3)
+       AND EXISTS (SELECT 1 FROM outbox_attempts WHERE id=? AND result='succeeded')
+       AND EXISTS (SELECT 1 FROM outbox_jobs WHERE id=? AND status='succeeded')`,
+      [candidate.backup.id, claim.attemptId, claim.jobId],
+    ),
+  ]
+  try {
+    fixedArray(await input.db.batch(statements), 4)
+  } catch (error) {
+    if (isD1OutboxOperationGuardFailure(error)) throw new Error('BACKUP_LEASE_LOST')
+    throw error
+  }
+}
+
+const stableFailureCode = (error) => {
+  const value = error?.message
+  return typeof value === 'string' && /^BACKUP_[A-Z0-9_]{1,55}$/.test(value)
+    ? value
+    : 'BACKUP_CREATE_FAILED'
+}
+
+async function failClaim(input, candidate, claim, error) {
+  const failedAt = instantFromMs(input.now())
+  const code = stableFailureCode(error)
+  try {
+    fixedArray(await input.db.batch([
+      input.db.prepare(
+        `UPDATE backup_runs
+         SET status='failed',version=version+1,last_error_code=?,updated_at=?
+         WHERE id=? AND status='exporting' AND version=2
+           AND EXISTS (
+             SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+           )
+           AND EXISTS (
+             SELECT 1 FROM outbox_jobs AS j
+             WHERE j.id=? AND j.status='processing' AND j.attempt_count=?
+               AND j.lease_owner=? AND j.lease_expires_at>?
+           )`
+      ).bind(
+        code,
+        failedAt,
+        candidate.backup.id,
+        ...schedulerBindings({ scheduler: input.scheduler, claimNow: failedAt }),
+        claim.jobId,
+        claim.attemptNumber,
+        claim.leaseOwner,
+        failedAt,
+      ),
+      input.db.prepare(
+        `UPDATE outbox_attempts
+         SET completed_at=?,result='dead',error_code=?,provider_reference=NULL
+         WHERE id=? AND job_id=? AND attempt_number=? AND completed_at IS NULL`
+      ).bind(failedAt, code, claim.attemptId, claim.jobId, claim.attemptNumber),
+      input.db.prepare(
+        `UPDATE outbox_jobs
+         SET status='dead',lease_owner=NULL,lease_expires_at=NULL,last_error_code=?,updated_at=?
+         WHERE id=? AND status='processing' AND attempt_count=? AND lease_owner=?
+           AND changes()=1`
+      ).bind(code, failedAt, claim.jobId, claim.attemptNumber, claim.leaseOwner),
+      operationGuard(
+        input.db,
+        `backup_fail_${claim.jobId}_${claim.attemptNumber}`,
+        `changes()=1
+         AND EXISTS (SELECT 1 FROM backup_runs WHERE id=? AND status='failed' AND version=3)
+         AND EXISTS (SELECT 1 FROM outbox_attempts WHERE id=? AND result='dead' AND error_code=?)
+         AND EXISTS (SELECT 1 FROM outbox_jobs WHERE id=? AND status='dead' AND last_error_code=?)`,
+        [candidate.backup.id, claim.attemptId, code, claim.jobId, code],
+      ),
+    ]), 4)
+  } catch {
+    throw new Error('BACKUP_LEASE_LOST')
+  }
+  return code
+}
+
+export async function runNextBackupCreate(input) {
+  const runner = captureRunnerInput(input)
+  const captured = captureInput({
+    db: runner.db,
+    cryptoContext: runner.cryptoContext,
+    config: runner.providerConfig,
+    bindings: runner.archive,
+    schedulerRun: runner.schedulerRun,
+    now: runner.now,
+    wait: runner.wait,
+    idFactory: runner.idFactory,
+    leaseOwnerFactory: runner.leaseOwnerFactory,
+    nonceFactory: runner.nonceFactory,
+    providers: {},
+  })
+  const row = await readCandidate(captured.db, captured.claimNow)
+  if (row === null) return { claimed: false, result: null, backupId: null }
+  const candidate = await validateCandidate(row, captured.cryptoContext, captured.claimNow)
+  const claim = await claimCandidate(captured, candidate)
+  let rawSsecKey
+  try {
+    const exported = await Reflect.apply(runner.pollExport, undefined, [{
+      ...runner.providerConfig,
+      fetch: runner.fetch,
+      wait: runner.wait,
+      now: runner.now,
+      signal: runner.signal,
+    }])
+    await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
+    const downloaded = await Reflect.apply(runner.downloadExport, undefined, [{
+      downloadUrl: exported.downloadUrl,
+      fetch: runner.fetch,
+      signal: runner.signal,
+    }])
+    rawSsecKey = runner.rawKeyFactory()
+    if (!(rawSsecKey instanceof Uint8Array) || rawSsecKey.byteLength !== 32) invalid()
+    const keys = backupObjectKeys({
+      backupId: candidate.backup.id,
+      localMonth: candidate.backup.local_month,
+    })
+    const metadata = {
+      backupId: candidate.backup.id,
+      format: 'bwm-d1-sql-v1',
+      retentionClass: candidate.backup.retention_class,
+    }
+    await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
+    const stored = await runner.archive.put(keys.objectKey, downloaded.body, {
+      ssecKey: rawSsecKey.buffer,
+      customMetadata: metadata,
+    })
+    if (!stored || typeof stored.etag !== 'string' || stored.etag.length === 0
+      || !Number.isSafeInteger(stored.size) || stored.size < 0) invalid()
+    const manifestResult = await createBackupManifest({
+      facts: {
+        format: 'bwm-d1-sql-v1',
+        backupId: candidate.backup.id,
+        createdAt: candidate.backup.created_at,
+        localDay: candidate.backup.local_day,
+        localMonth: candidate.backup.local_month,
+        retentionClass: candidate.backup.retention_class,
+        objectKey: keys.objectKey,
+        objectEtag: stored.etag,
+        objectSize: stored.size,
+        atBookmark: exported.atBookmark,
+      },
+      rawSsecKey,
+      keyring: runner.keyring,
+      nonceFactory: runner.nonceFactory,
+    })
+    if (JSON.stringify(expectedObjectMetadata(manifestResult.manifest)) !== JSON.stringify(metadata)) invalid()
+    await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
+    const storedManifest = await runner.archive.put(keys.manifestKey, manifestResult.bytes)
+    if (!storedManifest || typeof storedManifest.etag !== 'string'
+      || storedManifest.etag.length === 0
+      || storedManifest.size !== manifestResult.bytes.byteLength) invalid()
+    await completeClaim(
+      { ...runner, scheduler: captured.scheduler },
+      candidate,
+      claim,
+      stored,
+      manifestResult,
+      keys,
+      exported.atBookmark,
+    )
+    return { claimed: true, result: 'succeeded', backupId: candidate.backup.id }
+  } catch (error) {
+    const code = await failClaim(
+      { ...runner, scheduler: captured.scheduler },
+      candidate,
+      claim,
+      error,
+    )
+    return { claimed: true, result: 'dead', backupId: candidate.backup.id, errorCode: code }
+  } finally {
+    if (rawSsecKey instanceof Uint8Array) rawSsecKey.fill(0)
   }
 }
 

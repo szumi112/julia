@@ -1368,6 +1368,93 @@ describe('scheduled operational publication budget', () => {
 })
 
 describe('ordinary outbox integration and privacy', () => {
+  it('runs one bounded retention pass when no backup create job is claimed', async () => {
+    const context = await cryptoContext()
+    const scheduledTime = schedule(++serial)
+    const processBackupCreate = vi.fn(async () => ({
+      claimed: false, result: null, backupId: null,
+    }))
+    const processBackupRetention = vi.fn(async () => ({ selected: 0, pruned: 0 }))
+
+    await expect(runScheduled({
+      scheduledTime,
+      env: runtimeEnv(),
+      deps: schedulerDeps('backup_retention_pass', context, scheduledTime, {
+        processBackupCreate,
+        processBackupRetention,
+      }),
+    })).resolves.toMatchObject({ status: 'succeeded' })
+
+    expect(processBackupRetention).toHaveBeenCalledOnce()
+    expect(processBackupRetention.mock.calls[0][0]).toMatchObject({
+      db: expect.any(Object),
+      archive: env.ARCHIVE,
+      nowMs: scheduledTime,
+      limit: 20,
+    })
+  })
+
+  it('runs one dedicated backup before ordinary work and leaves provider jobs queued', async () => {
+    const context = await cryptoContext()
+    const scheduledTime = schedule(++serial)
+    const timestamp = nowIso(scheduledTime)
+    const backupId = 'bkp_scheduler_dedicated_processor'
+    await enqueueBackup(context, {
+      jobId: 'job_scheduler_dedicated_processor',
+      backupId,
+      localDay: dueFor(scheduledTime).localDay,
+      timestamp,
+    })
+    await enqueueOrdinary(context, {
+      id: 'job_scheduler_deferred_for_backup',
+      scheduledAt: timestamp,
+      suffix: 'scheduler_deferred_for_backup',
+    })
+    const processBackupCreate = vi.fn(async ({ schedulerRun, checkpoint }) => {
+      await checkpoint()
+      expect(schedulerRun).toMatchObject({
+        attemptCount: 1,
+        leaseOwner: expect.stringMatching(/^lease_/),
+      })
+      return { claimed: true, result: 'succeeded', backupId }
+    })
+    const ordinary = vi.fn(async () => [{
+      id: 'job_scheduler_deferred_for_backup', result: 'succeeded',
+    }])
+
+    const result = await runScheduled({
+      scheduledTime,
+      env: runtimeEnv(),
+      deps: schedulerDeps('dedicated_backup_processor', context, scheduledTime, {
+        processBackupCreate,
+        processOutboxBatch: ordinary,
+      }),
+    })
+
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      claimedJobs: 0,
+      succeededJobs: 0,
+      failedJobs: 0,
+    })
+    expect(processBackupCreate).toHaveBeenCalledOnce()
+    expect(ordinary).not.toHaveBeenCalled()
+    expect(await env.DB.prepare(
+      'SELECT status,attempt_count FROM outbox_jobs WHERE id=?'
+    ).bind('job_scheduler_deferred_for_backup').first()).toEqual({
+      status: 'queued', attempt_count: 0,
+    })
+    await env.DB.prepare(
+      "UPDATE outbox_jobs SET status='dead',last_error_code='TEST_CLEANUP' WHERE id=?"
+    ).bind('job_scheduler_dedicated_processor').run()
+    await env.DB.prepare(
+      "UPDATE backup_runs SET status='failed',version=version+1,last_error_code='TEST_CLEANUP' WHERE id=?"
+    ).bind(backupId).run()
+    await env.DB.prepare(
+      "UPDATE outbox_jobs SET scheduled_at='9999-12-31T23:59:59.999Z' WHERE id=?"
+    ).bind('job_scheduler_deferred_for_backup').run()
+  })
+
   it('leaves ordinary jobs queued when the dedicated drain processor is not injected', async () => {
     const context = await cryptoContext()
     const scheduledTime = schedule(++serial)

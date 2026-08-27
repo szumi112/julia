@@ -37,6 +37,7 @@ const schemas = Object.freeze({
   'staff.invitation.email_accepted': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ invitationVersion: 'version' }), reasonPolicy: 'null' }),
   'specialist.backfilled': Object.freeze({ entityTypes: ['specialist'], entityId: (value) => SPECIALIST_ID.test(value), result: 'success', metadata: Object.freeze({ specialistVersion: 'version', stateVersion: 'version' }), reasonPolicy: 'null', system: true }),
   'core_directory.upgrade.advanced': Object.freeze({ entityTypes: ['system_state'], entityId: (value) => value === 'core_directory_specialist_backfill_v1', result: 'success', metadata: Object.freeze({ stateVersion: 'version', processedCount: 'count', createdCount: 'count' }), reasonPolicy: 'null', system: true }),
+  'backup.pruned': Object.freeze({ entityTypes: ['backup_run'], result: 'success', metadata: Object.freeze({ backupVersion: 'version' }), reasonPolicy: 'null', system: true }),
 })
 
 const own = (object, key) => Object.hasOwn(object, key)

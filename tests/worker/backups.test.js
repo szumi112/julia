@@ -3,10 +3,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import * as backupsModule from '../../worker/operations/backups.js'
 import { enqueueOutboxStatement } from '../../worker/jobs/outbox.js'
+import { openBackupManifest, parseCanonicalManifest } from '../../worker/operations/backup-format.js'
 import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 
-const { downloadD1Export, pollD1Export, processNextBackupCreate } = backupsModule
+const {
+  downloadD1Export,
+  pollD1Export,
+  processNextBackupCreate,
+  runNextBackupCreate,
+} = backupsModule
 
 const CLAIM_MS = Date.UTC(2044, 6, 29, 10, 0, 0)
 const CLAIM_NOW = new Date(CLAIM_MS).toISOString()
@@ -474,6 +480,7 @@ describe('special backup create claim', () => {
       'downloadD1Export',
       'pollD1Export',
       'processNextBackupCreate',
+      'runNextBackupCreate',
     ])
 
     const context = await cryptoContext()
@@ -636,6 +643,324 @@ describe('special backup create claim', () => {
 
     expect(await job('job_ordinary_backup_isolation')).toEqual(ordinaryBefore)
     expect(provider).not.toHaveBeenCalled()
+  })
+})
+
+describe('operational backup create runner', () => {
+  it('stores the SSE-C SQL before its canonical manifest and atomically completes the claimed job', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_store',
+      backupId: 'bkp_backup_operational_store',
+      localDay: '2044-07-29',
+    })
+    const keyring = await createKeyring(env, {
+      activeBackupKekVersion: 1,
+    })
+    const sqlBytes = encoder.encode('PRAGMA foreign_keys=OFF;\n-- opaque-fixture\n')
+    const rawSsecKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1)
+    const calls = []
+    let storedSql = null
+    let storedManifest = null
+    const archive = {
+      async put(key, value, options) {
+        calls.push({ key, options })
+        if (key.endsWith('.sql')) {
+          const reader = value.getReader()
+          const chunks = []
+          while (true) {
+            const part = await reader.read()
+            if (part.done) break
+            chunks.push(part.value)
+          }
+          storedSql = Uint8Array.from(chunks.flatMap((chunk) => [...chunk]))
+          return { etag: 'etag-operational-1', size: storedSql.byteLength }
+        }
+        storedManifest = value
+        return { etag: 'manifest-etag-ignored', size: value.byteLength }
+      },
+    }
+    const pollExport = vi.fn(async () => ({
+      atBookmark: 'bookmark-operational-1',
+      downloadUrl: 'https://download.example.test/opaque?signature=secret',
+    }))
+    const downloadExport = vi.fn(async () => ({
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(sqlBytes)
+          controller.close()
+        },
+      }),
+    }))
+
+    const result = await runNextBackupCreate({
+      db: env.DB,
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => { throw new Error('real fetch must stay outside this test') },
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_operational'),
+      leaseOwnerFactory: sequence('owner_backup_operational'),
+      nonceFactory: () => new Uint8Array(12).fill(9),
+      rawKeyFactory: () => rawSsecKey,
+      pollExport,
+      downloadExport,
+    })
+
+    expect(result).toEqual({ claimed: true, result: 'succeeded', backupId: seeded.backupId })
+    expect(calls.map(({ key }) => key)).toEqual([
+      `backups/v1/2044/07/${seeded.backupId}.sql`,
+      `backups/v1/2044/07/${seeded.backupId}.manifest.json`,
+    ])
+    expect(calls[0].options.customMetadata).toEqual({
+      backupId: seeded.backupId,
+      format: 'bwm-d1-sql-v1',
+      retentionClass: 'daily',
+    })
+    expect(calls[0].options.ssecKey).toBeInstanceOf(ArrayBuffer)
+    expect(calls[1].options).toBeUndefined()
+    expect(storedSql).toEqual(sqlBytes)
+    const manifest = parseCanonicalManifest(storedManifest)
+    expect(manifest).toMatchObject({
+      backupId: seeded.backupId,
+      atBookmark: 'bookmark-operational-1',
+      objectEtag: 'etag-operational-1',
+      objectSize: sqlBytes.byteLength,
+    })
+    const opened = await openBackupManifest({ bytes: storedManifest, keyring })
+    expect(opened.rawSsecKey).toEqual(Uint8Array.from({ length: 32 }, (_, index) => index + 1))
+    opened.rawSsecKey.fill(0)
+    expect(rawSsecKey).toEqual(new Uint8Array(32))
+    expect(JSON.stringify(manifest)).not.toContain('signature=secret')
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'stored',
+      version: 3,
+      object_key: `backups/v1/2044/07/${seeded.backupId}.sql`,
+      manifest_key: `backups/v1/2044/07/${seeded.backupId}.manifest.json`,
+      object_etag: 'etag-operational-1',
+      object_size: sqlBytes.byteLength,
+      expires_at: '2044-09-02T00:00:00.000Z',
+      last_error_code: null,
+    })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'succeeded',
+      attempt_count: 1,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error_code: null,
+    })
+    expect(await attempts(seeded.jobId)).toMatchObject([{
+      result: 'succeeded',
+      error_code: null,
+      provider_reference: null,
+    }])
+    expect(pollExport).toHaveBeenCalledOnce()
+    expect(downloadExport).toHaveBeenCalledOnce()
+  })
+
+  it('fails the backup and outbox attempt with a fixed code when manifest-last storage fails', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_failure',
+      backupId: 'bkp_backup_operational_failure',
+      localDay: '2044-07-30',
+    })
+    const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+    const rawSsecKey = new Uint8Array(32).fill(7)
+    const providerMarker = 'signed-url@example.test provider-secret-body'
+    let puts = 0
+    const archive = {
+      async put(_key, value) {
+        puts += 1
+        if (puts === 1) {
+          await value.pipeTo(new WritableStream({ write() {} }))
+          return { etag: 'etag-operational-failure', size: 4 }
+        }
+        throw new Error(providerMarker)
+      },
+    }
+
+    await expect(runNextBackupCreate({
+      db: env.DB,
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_operational_failure'),
+      leaseOwnerFactory: sequence('owner_backup_operational_failure'),
+      nonceFactory: () => new Uint8Array(12).fill(5),
+      rawKeyFactory: () => rawSsecKey,
+      pollExport: async () => ({
+        atBookmark: 'bookmark-operational-failure',
+        downloadUrl: `https://download.example.test/dump?${providerMarker}`,
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3, 4]))
+            controller.close()
+          },
+        }),
+      }),
+    })).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_CREATE_FAILED',
+    })
+
+    expect(rawSsecKey).toEqual(new Uint8Array(32))
+    expect(JSON.stringify(await backup(seeded.backupId))).not.toContain(providerMarker)
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'failed', version: 3, last_error_code: 'BACKUP_CREATE_FAILED',
+    })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'dead',
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error_code: 'BACKUP_CREATE_FAILED',
+    })
+    expect(await attempts(seeded.jobId)).toMatchObject([{
+      result: 'dead',
+      error_code: 'BACKUP_CREATE_FAILED',
+      provider_reference: null,
+    }])
+  })
+
+  it('does not finalize a claim after the scheduler owner lease is lost', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler({
+      leaseExpiresAt: new Date(CLAIM_MS + 1).toISOString(),
+    })
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_owner_lost',
+      backupId: 'bkp_backup_operational_owner_lost',
+      localDay: '2044-07-31',
+    })
+    const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+    let clockCalls = 0
+    const archive = { put: vi.fn(async () => ({ etag: 'unused', size: 0 })) }
+
+    await expect(runNextBackupCreate({
+      db: env.DB,
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      schedulerRun,
+      now: () => CLAIM_MS + (clockCalls++ === 0 ? 0 : 2),
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_operational_owner_lost'),
+      leaseOwnerFactory: sequence('owner_backup_operational_owner_lost'),
+      nonceFactory: () => new Uint8Array(12).fill(4),
+      rawKeyFactory: () => new Uint8Array(32).fill(5),
+      pollExport: async () => ({
+        atBookmark: 'bookmark-operational-owner-lost',
+        downloadUrl: 'https://download.example.test/owner-lost',
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({ start(controller) { controller.close() } }),
+      }),
+    })).rejects.toThrow('BACKUP_LEASE_LOST')
+
+    expect(archive.put).not.toHaveBeenCalled()
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'exporting', version: 2, last_error_code: null,
+    })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'processing', attempt_count: 1, last_error_code: null,
+    })
+    expect(await attempts(seeded.jobId)).toMatchObject([{
+      completed_at: null, result: null, error_code: null,
+    }])
+  })
+
+  it('retains a monthly stored backup for 12 calendar months', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_monthly',
+      backupId: 'bkp_backup_operational_monthly',
+      localDay: '2046-02-01',
+      backup: { retention_class: 'monthly' },
+    })
+    const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+    let putCount = 0
+    const archive = {
+      async put(_key, value) {
+        putCount += 1
+        if (putCount === 1) {
+          await value.pipeTo(new WritableStream({ write() {} }))
+          return { etag: 'etag-operational-monthly', size: 1 }
+        }
+        return { etag: 'manifest-operational-monthly', size: value.byteLength }
+      },
+    }
+
+    await runNextBackupCreate({
+      db: env.DB,
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_operational_monthly'),
+      leaseOwnerFactory: sequence('owner_backup_operational_monthly'),
+      nonceFactory: () => new Uint8Array(12).fill(6),
+      rawKeyFactory: () => new Uint8Array(32).fill(8),
+      pollExport: async () => ({
+        atBookmark: 'bookmark-operational-monthly',
+        downloadUrl: 'https://download.example.test/monthly',
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]))
+            controller.close()
+          },
+        }),
+      }),
+    })
+
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'stored',
+      retention_class: 'monthly',
+      expires_at: '2047-02-01T00:00:00.000Z',
+    })
   })
 })
 
@@ -1270,6 +1595,7 @@ describe('strict D1 export adapter input boundary', () => {
       'downloadD1Export',
       'pollD1Export',
       'processNextBackupCreate',
+      'runNextBackupCreate',
     ])
     const poll = await pollD1Export(exportInput().input)
     expect(poll).toEqual({ downloadUrl: EXPORT_URL, atBookmark: EXPORT_BOOKMARK })

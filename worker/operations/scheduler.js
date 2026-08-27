@@ -1,4 +1,4 @@
-import { loadConfig } from '../config.js'
+import { loadBackupProviderConfig, loadConfig } from '../config.js'
 import { isD1IdentityCollision, isD1OutboxOperationGuardFailure } from '../db/errors.js'
 import { createD1QueryBudget } from '../db/query-budget.js'
 import { dispatchOutboxJob as dispatchJob } from '../jobs/handlers.js'
@@ -12,6 +12,12 @@ import { decodeBase64Url } from '../security/encoding.js'
 import { createKeyring as buildKeyring } from '../security/keyring.js'
 import { backupDue as calculateBackupDue, partsInWarsaw } from './clock.js'
 import { publishScheduledOperationalState } from './health.js'
+import {
+  downloadD1Export,
+  pollD1Export,
+  runNextBackupCreate,
+} from './backups.js'
+import { pruneExpiredBackups } from './backup-retention.js'
 
 const IDENTITY_SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const SCHEDULER_LEASE_MS = 900_000
@@ -64,6 +70,13 @@ const DEPENDENCY_FUNCTIONS = Object.freeze([
   'leaseOwnerFactory',
   'leaseNonceFactory',
   'correlationIdFactory',
+  'processBackupCreate',
+  'processBackupRetention',
+  'wait',
+  'fetch',
+  'rawKeyFactory',
+  'backupNonceFactory',
+  'abortControllerFactory',
 ])
 const DEPENDENCY_KEYS = Object.freeze([
   ...DEPENDENCY_FUNCTIONS,
@@ -159,6 +172,14 @@ function dependencies(deps) {
     leaseOwnerFactory: deps.leaseOwnerFactory ?? (() => randomId('lease_')),
     leaseNonceFactory: deps.leaseNonceFactory ?? (() => randomId('nonce_')),
     correlationIdFactory: deps.correlationIdFactory ?? (() => crypto.randomUUID()),
+    processBackupCreate: deps.processBackupCreate ?? runNextBackupCreate,
+    processBackupRetention: deps.processBackupRetention ?? pruneExpiredBackups,
+    wait: deps.wait ?? ((delay) => new Promise((resolve) => setTimeout(resolve, delay))),
+    fetch: deps.fetch ?? globalThis.fetch,
+    rawKeyFactory: deps.rawKeyFactory ?? (() => crypto.getRandomValues(new Uint8Array(32))),
+    backupNonceFactory: deps.backupNonceFactory
+      ?? (() => crypto.getRandomValues(new Uint8Array(12))),
+    abortControllerFactory: deps.abortControllerFactory ?? (() => new AbortController()),
   }
 }
 
@@ -805,8 +826,90 @@ export async function runScheduled(input) {
       )
     }
 
+    let backupProcessed = false
+    const injectedBackupProcessor = captured.deps.processBackupCreate !== undefined
+    if (injectedBackupProcessor || validated.config.appEnv !== 'development') {
+      const processorCheckpoint = () => ownershipCheckpoint(
+        validated.db,
+        validated.scheduledFor,
+        owned,
+        deps.now,
+      )
+      await processorCheckpoint()
+      let backupResult
+      if (injectedBackupProcessor) {
+        backupResult = await deps.processBackupCreate({
+          db: validated.db,
+          cryptoContext,
+          schedulerRun: { ...owned },
+          checkpoint: processorCheckpoint,
+          env: validated.env,
+          config: validated.config,
+          now: deps.now,
+        })
+      } else {
+        const providerConfig = loadBackupProviderConfig(validated.env, validated.config)
+        const controller = deps.abortControllerFactory()
+        if (!(controller instanceof AbortController)) invalidState()
+        backupResult = await deps.processBackupCreate({
+          db: validated.db,
+          cryptoContext,
+          keyring: cryptoContext.keyring,
+          archive: validated.env.ARCHIVE,
+          providerConfig,
+          schedulerRun: { ...owned },
+          now: deps.now,
+          wait: deps.wait,
+          fetch: deps.fetch,
+          signal: controller.signal,
+          idFactory: deps.idFactory,
+          leaseOwnerFactory: deps.leaseOwnerFactory,
+          nonceFactory: deps.backupNonceFactory,
+          rawKeyFactory: deps.rawKeyFactory,
+          pollExport: pollD1Export,
+          downloadExport: downloadD1Export,
+        })
+      }
+      if (!exactKeys(backupResult, backupResult?.claimed
+        ? (backupResult.result === 'dead'
+          ? ['claimed', 'result', 'backupId', 'errorCode']
+          : ['claimed', 'result', 'backupId'])
+        : ['claimed', 'result', 'backupId'])
+        || typeof backupResult.claimed !== 'boolean'
+        || ![null, 'succeeded', 'dead'].includes(backupResult.result)
+        || (backupResult.claimed && !BACKUP_ID.test(backupResult.backupId ?? ''))
+        || (!backupResult.claimed && (backupResult.result !== null || backupResult.backupId !== null))) {
+        invalidState()
+      }
+      backupProcessed = backupResult.claimed
+    }
+
+    const injectedRetentionProcessor = captured.deps.processBackupRetention !== undefined
+    if (!backupProcessed
+      && (injectedRetentionProcessor || validated.config.appEnv !== 'development')) {
+      const retentionCheckpoint = await ownershipCheckpoint(
+        validated.db,
+        validated.scheduledFor,
+        owned,
+        deps.now,
+      )
+      const retentionResult = await deps.processBackupRetention({
+        db: validated.db,
+        archive: validated.env.ARCHIVE,
+        nowMs: retentionCheckpoint.ms,
+        limit: 20,
+        idFactory: deps.idFactory,
+        correlationIdFactory: deps.correlationIdFactory,
+      })
+      if (!exactKeys(retentionResult, ['selected', 'pruned'])
+        || !validCount(retentionResult.selected)
+        || !validCount(retentionResult.pruned)
+        || retentionResult.selected > 20
+        || retentionResult.pruned > retentionResult.selected) invalidState()
+    }
+
     let outcomes = []
-    if (deps.processOutboxBatch) {
+    if (!backupProcessed && deps.processOutboxBatch) {
       const processorCheckpoint = await ownershipCheckpoint(
         validated.db,
         validated.scheduledFor,
