@@ -22,6 +22,12 @@ const SCHEDULER_EXPIRY = new Date(CLAIM_MS + 4 * 60 * 60 * 1000).toISOString()
 const EXPORT_ACCOUNT_ID = 'a'.repeat(32)
 const EXPORT_DATABASE_ID = '12345678-1234-4abc-8abc-123456789abc'
 const EXPORT_TOKEN = 'fictional-export-token'
+const BACKUP_SOURCE = Object.freeze({
+  accountId: EXPORT_ACCOUNT_ID,
+  appEnv: 'staging',
+  dataMode: 'fictional',
+  databaseId: EXPORT_DATABASE_ID,
+})
 const EXPORT_BOOKMARK = 'bookmark-fixture-1'
 const EXPORT_FILENAME = 'dump-fixture.sql'
 const EXPORT_URL = 'https://download.example.test/dump-fixture.sql?signature=fictional'
@@ -661,11 +667,22 @@ describe('operational backup create runner', () => {
     const sqlBytes = encoder.encode('PRAGMA foreign_keys=OFF;\n-- opaque-fixture\n')
     const rawSsecKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1)
     const calls = []
+    const evidenceOrder = []
+    const db = trackedDb(env.DB, {
+      all: async ({ sql, execute }) => {
+        const response = await execute()
+        if (/SELECT id,\s*name\s+FROM d1_migrations\s+ORDER BY id\s+LIMIT 257/i.test(sql)) {
+          evidenceOrder.push('migrations')
+        }
+        return response
+      },
+    })
     let storedSql = null
     let storedManifest = null
     const archive = {
       async put(key, value, options) {
         calls.push({ key, options })
+        evidenceOrder.push(key.endsWith('.sql') ? 'sql' : 'manifest')
         if (key.endsWith('.sql')) {
           const reader = value.getReader()
           const chunks = []
@@ -681,10 +698,13 @@ describe('operational backup create runner', () => {
         return { etag: 'manifest-etag-ignored', size: value.byteLength }
       },
     }
-    const pollExport = vi.fn(async () => ({
-      atBookmark: 'bookmark-operational-1',
-      downloadUrl: 'https://download.example.test/opaque?signature=secret',
-    }))
+    const pollExport = vi.fn(async () => {
+      evidenceOrder.push('export')
+      return {
+        atBookmark: 'bookmark-operational-1',
+        downloadUrl: 'https://download.example.test/opaque?signature=secret',
+      }
+    })
     const downloadExport = vi.fn(async () => ({
       body: new ReadableStream({
         start(controller) {
@@ -695,7 +715,7 @@ describe('operational backup create runner', () => {
     }))
 
     const result = await runNextBackupCreate({
-      db: env.DB,
+      db,
       cryptoContext: context,
       keyring,
       archive,
@@ -704,6 +724,7 @@ describe('operational backup create runner', () => {
         databaseId: EXPORT_DATABASE_ID,
         token: EXPORT_TOKEN,
       },
+      source: BACKUP_SOURCE,
       schedulerRun,
       now: () => CLAIM_MS,
       wait: async () => {},
@@ -719,24 +740,39 @@ describe('operational backup create runner', () => {
 
     expect(result).toEqual({ claimed: true, result: 'succeeded', backupId: seeded.backupId })
     expect(calls.map(({ key }) => key)).toEqual([
-      `backups/v1/2044/07/${seeded.backupId}.sql`,
-      `backups/v1/2044/07/${seeded.backupId}.manifest.json`,
+      `backups/v2/2044/07/${seeded.backupId}.sql`,
+      `backups/v2/2044/07/${seeded.backupId}.manifest.json`,
     ])
     expect(calls[0].options.customMetadata).toEqual({
       backupId: seeded.backupId,
-      format: 'bwm-d1-sql-v1',
+      format: 'bwm-d1-sql-v2',
       retentionClass: 'daily',
+      sourceAppEnv: 'staging',
+      sourceDatabaseId: EXPORT_DATABASE_ID,
     })
     expect(calls[0].options.ssecKey).toBeInstanceOf(ArrayBuffer)
     expect(calls[1].options).toBeUndefined()
     expect(storedSql).toEqual(sqlBytes)
     const manifest = parseCanonicalManifest(storedManifest)
     expect(manifest).toMatchObject({
+      format: 'bwm-d1-sql-v2',
       backupId: seeded.backupId,
       atBookmark: 'bookmark-operational-1',
       objectEtag: 'etag-operational-1',
       objectSize: sqlBytes.byteLength,
+      source: BACKUP_SOURCE,
+      restoreSentinel: {
+        kind: 'backup_run_v1',
+        backupId: seeded.backupId,
+        status: 'exporting',
+        version: 2,
+      },
     })
+    expect(manifest.appliedMigrations.length).toBeGreaterThan(0)
+    expect(manifest.appliedMigrations.every(({ id, name }) => (
+      Number.isSafeInteger(id) && /^\d{4}_[a-z0-9_-]+\.sql$/.test(name)
+    ))).toBe(true)
+    expect(evidenceOrder).toEqual(['migrations', 'export', 'migrations', 'sql', 'manifest'])
     const opened = await openBackupManifest({ bytes: storedManifest, keyring })
     expect(opened.rawSsecKey).toEqual(Uint8Array.from({ length: 32 }, (_, index) => index + 1))
     opened.rawSsecKey.fill(0)
@@ -745,8 +781,8 @@ describe('operational backup create runner', () => {
     expect(await backup(seeded.backupId)).toMatchObject({
       status: 'stored',
       version: 3,
-      object_key: `backups/v1/2044/07/${seeded.backupId}.sql`,
-      manifest_key: `backups/v1/2044/07/${seeded.backupId}.manifest.json`,
+      object_key: `backups/v2/2044/07/${seeded.backupId}.sql`,
+      manifest_key: `backups/v2/2044/07/${seeded.backupId}.manifest.json`,
       object_etag: 'etag-operational-1',
       object_size: sqlBytes.byteLength,
       expires_at: '2044-09-02T00:00:00.000Z',
@@ -801,6 +837,7 @@ describe('operational backup create runner', () => {
         databaseId: EXPORT_DATABASE_ID,
         token: EXPORT_TOKEN,
       },
+      source: BACKUP_SOURCE,
       schedulerRun,
       now: () => CLAIM_MS,
       wait: async () => {},
@@ -871,6 +908,7 @@ describe('operational backup create runner', () => {
         databaseId: EXPORT_DATABASE_ID,
         token: EXPORT_TOKEN,
       },
+      source: BACKUP_SOURCE,
       schedulerRun,
       now: () => CLAIM_MS + (clockCalls++ === 0 ? 0 : 2),
       wait: async () => {},
@@ -944,6 +982,7 @@ describe('operational backup create runner', () => {
         databaseId: EXPORT_DATABASE_ID,
         token: EXPORT_TOKEN,
       },
+      source: BACKUP_SOURCE,
       schedulerRun,
       now: () => nowMs,
       wait: async () => {},
@@ -1035,6 +1074,7 @@ describe('operational backup create runner', () => {
         databaseId: EXPORT_DATABASE_ID,
         token: EXPORT_TOKEN,
       },
+      source: BACKUP_SOURCE,
       schedulerRun,
       now: () => CLAIM_MS,
       wait: async () => {},
@@ -1063,6 +1103,68 @@ describe('operational backup create runner', () => {
       retention_class: 'monthly',
       expires_at: '2047-02-01T00:00:00.000Z',
     })
+  })
+
+  it('rejects a migration-set change after bookmark creation before downloading or storing artifacts', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_migration_drift',
+      backupId: 'bkp_backup_migration_drift',
+      localDay: '2046-03-01',
+    })
+    let migrationReads = 0
+    const db = trackedDb(env.DB, {
+      all: async ({ sql, execute }) => {
+        const response = await execute()
+        if (!/SELECT id,\s*name\s+FROM d1_migrations\s+ORDER BY id\s+LIMIT 257/i.test(sql)) {
+          return response
+        }
+        migrationReads += 1
+        if (migrationReads === 1) return response
+        return {
+          ...response,
+          results: [...response.results, { id: 9999, name: '9999_drift.sql' }],
+        }
+      },
+    })
+    const archive = { put: vi.fn() }
+    const downloadExport = vi.fn()
+
+    await expect(runNextBackupCreate({
+      db,
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_migration_drift'),
+      leaseOwnerFactory: sequence('owner_backup_migration_drift'),
+      nonceFactory: () => new Uint8Array(12).fill(6),
+      rawKeyFactory: () => new Uint8Array(32).fill(8),
+      pollExport: async () => ({
+        atBookmark: 'bookmark-migration-drift',
+        downloadUrl: 'https://download.example.test/migration-drift',
+      }),
+      downloadExport,
+    })).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_MIGRATION_SET_CHANGED',
+    })
+    expect(migrationReads).toBe(2)
+    expect(downloadExport).not.toHaveBeenCalled()
+    expect(archive.put).not.toHaveBeenCalled()
   })
 })
 

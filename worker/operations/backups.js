@@ -2,6 +2,7 @@ import { isD1OutboxOperationGuardFailure } from '../db/errors.js'
 import { decryptOutboxPayload } from '../jobs/outbox.js'
 import {
   backupObjectKeys,
+  canonicalJson,
   createBackupManifest,
   expectedObjectMetadata,
 } from './backup-format.js'
@@ -52,6 +53,9 @@ const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const LOCAL_DAY = /^\d{4}-\d{2}-\d{2}$/
 const LOCAL_MONTH = /^\d{4}-\d{2}$/
+const SOURCE_ACCOUNT_ID = /^[0-9a-f]{32}$/
+const SOURCE_DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const MIGRATION_NAME = /^\d{4}_[a-z0-9_-]+\.sql$/
 
 const invalid = () => { throw new Error('BACKUP_STATE_INVALID') }
 const ownRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -736,7 +740,7 @@ export async function processNextBackupCreate(input) {
 }
 
 const RUNNER_KEYS = Object.freeze([
-  'db', 'cryptoContext', 'keyring', 'archive', 'providerConfig', 'schedulerRun',
+  'db', 'cryptoContext', 'keyring', 'archive', 'providerConfig', 'source', 'schedulerRun',
   'now', 'wait', 'fetch', 'signal', 'idFactory', 'leaseOwnerFactory',
   'nonceFactory', 'rawKeyFactory', 'pollExport', 'downloadExport',
 ])
@@ -745,6 +749,9 @@ function captureRunnerInput(input) {
   const value = descriptorSnapshot(input, RUNNER_KEYS)
   const providerConfig = descriptorSnapshot(value.providerConfig, [
     'accountId', 'databaseId', 'token',
+  ])
+  const source = descriptorSnapshot(value.source, [
+    'accountId', 'appEnv', 'dataMode', 'databaseId',
   ])
   if (!value.archive || typeof value.archive.put !== 'function'
     || !value.keyring || typeof value.keyring.getBackupKek !== 'function'
@@ -758,7 +765,50 @@ function captureRunnerInput(input) {
     || typeof value.pollExport !== 'function'
     || typeof value.downloadExport !== 'function'
     || !(value.signal instanceof AbortSignal)) invalid()
-  return { ...value, providerConfig }
+  if (!SOURCE_ACCOUNT_ID.test(source.accountId)
+    || !SOURCE_DATABASE_ID.test(source.databaseId)
+    || !['staging', 'production'].includes(source.appEnv)
+    || source.dataMode !== 'fictional'
+    || source.accountId !== providerConfig.accountId
+    || source.databaseId !== providerConfig.databaseId) invalid()
+  return { ...value, providerConfig, source }
+}
+
+async function readAppliedMigrations(db) {
+  const response = await db.prepare(
+    `SELECT id,name
+     FROM d1_migrations
+     ORDER BY id
+     LIMIT 257`
+  ).all()
+  const rows = fixedArray(dataProperty(response, 'results'))
+  if (rows.length < 1 || rows.length > 256) invalid()
+  const migrations = []
+  const names = new Set()
+  let previousId = 0
+  for (const row of rows) {
+    const migration = dataSnapshot(row, ['id', 'name'])
+    if (!positiveInteger(migration.id) || migration.id <= previousId
+      || typeof migration.name !== 'string' || !MIGRATION_NAME.test(migration.name)
+      || names.has(migration.name)) invalid()
+    previousId = migration.id
+    names.add(migration.name)
+    migrations.push(migration)
+  }
+  return migrations
+}
+
+function restoreSentinelFor(backup) {
+  return {
+    kind: 'backup_run_v1',
+    backupId: backup.id,
+    createdAt: backup.created_at,
+    localDay: backup.local_day,
+    localMonth: backup.local_month,
+    retentionClass: backup.retention_class,
+    status: 'exporting',
+    version: 2,
+  }
 }
 
 function expiryFor(backup) {
@@ -1075,6 +1125,9 @@ export async function runNextBackupCreate(input) {
   const claim = await claimCandidate(captured, candidate)
   let rawSsecKey
   try {
+    const migrationsBefore = await readAppliedMigrations(runner.db)
+    const restoreSentinel = restoreSentinelFor(candidate.backup)
+    await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
     const exported = await Reflect.apply(runner.pollExport, undefined, [{
       ...runner.providerConfig,
       fetch: runner.fetch,
@@ -1082,6 +1135,10 @@ export async function runNextBackupCreate(input) {
       now: runner.now,
       signal: runner.signal,
     }])
+    const migrationsAfter = await readAppliedMigrations(runner.db)
+    if (canonicalJson(migrationsBefore) !== canonicalJson(migrationsAfter)) {
+      throw new Error('BACKUP_MIGRATION_SET_CHANGED')
+    }
     await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
     const downloaded = await Reflect.apply(runner.downloadExport, undefined, [{
       downloadUrl: exported.downloadUrl,
@@ -1093,11 +1150,14 @@ export async function runNextBackupCreate(input) {
     const keys = backupObjectKeys({
       backupId: candidate.backup.id,
       localMonth: candidate.backup.local_month,
+      version: 2,
     })
     const metadata = {
       backupId: candidate.backup.id,
-      format: 'bwm-d1-sql-v1',
+      format: 'bwm-d1-sql-v2',
       retentionClass: candidate.backup.retention_class,
+      sourceAppEnv: runner.source.appEnv,
+      sourceDatabaseId: runner.source.databaseId,
     }
     await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
     const stored = await runner.archive.put(keys.objectKey, downloaded.body, {
@@ -1108,12 +1168,15 @@ export async function runNextBackupCreate(input) {
       || !Number.isSafeInteger(stored.size) || stored.size < 0) invalid()
     const manifestResult = await createBackupManifest({
       facts: {
-        format: 'bwm-d1-sql-v1',
+        format: 'bwm-d1-sql-v2',
         backupId: candidate.backup.id,
         createdAt: candidate.backup.created_at,
         localDay: candidate.backup.local_day,
         localMonth: candidate.backup.local_month,
         retentionClass: candidate.backup.retention_class,
+        source: runner.source,
+        appliedMigrations: migrationsBefore,
+        restoreSentinel,
         objectKey: keys.objectKey,
         objectEtag: stored.etag,
         objectSize: stored.size,

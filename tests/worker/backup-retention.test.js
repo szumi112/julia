@@ -11,11 +11,14 @@ async function seedStored({
   retentionClass = 'daily',
   day = localDay,
   expiry = expiresAt,
+  formatVersion = 2,
+  objectKeyOverride = null,
 } = {}) {
   const month = day.slice(0, 7)
   const createdAt = `${day}T01:20:00.000Z`
-  const objectKey = `backups/v1/${month.replace('-', '/')}/${id}.sql`
-  const manifestKey = `backups/v1/${month.replace('-', '/')}/${id}.manifest.json`
+  const objectKey = objectKeyOverride
+    ?? `backups/v${formatVersion}/${month.replace('-', '/')}/${id}.sql`
+  const manifestKey = `backups/v${formatVersion}/${month.replace('-', '/')}/${id}.manifest.json`
   await env.DB.prepare(
     `INSERT INTO backup_runs
      (id,local_day,local_month,retention_class,status,version,export_bookmark,
@@ -63,8 +66,8 @@ describe('encrypted backup retention', () => {
       selected: 1, pruned: 1,
     })
     expect(archive.delete.mock.calls).toEqual([
-      [seeded.objectKey],
       [seeded.manifestKey],
+      [seeded.objectKey],
     ])
     expect(await env.DB.prepare(
       'SELECT status,version,updated_at FROM backup_runs WHERE id=?'
@@ -112,11 +115,54 @@ describe('encrypted backup retention', () => {
     })).resolves.toEqual({ selected: 1, pruned: 1 })
 
     expect(archive.delete.mock.calls).toEqual([
-      [`backups/v1/2044/09/${backupId}.sql`],
+      [`backups/v2/2044/09/${backupId}.manifest.json`],
+      [`backups/v2/2044/09/${backupId}.sql`],
       [`backups/v1/2044/09/${backupId}.manifest.json`],
+      [`backups/v1/2044/09/${backupId}.sql`],
     ])
     expect(await env.DB.prepare(
       'SELECT status,version FROM backup_runs WHERE id=?'
     ).bind(backupId).first()).toEqual({ status: 'pruned', version: 4 })
+  })
+
+  it('prunes a legacy completed pair manifest-first without crossing backup prefixes', async () => {
+    const seeded = await seedStored({
+      id: 'bkp_retention_legacy',
+      day: '2044-07-02',
+      expiry: expiresAt,
+      formatVersion: 1,
+    })
+    const archive = { delete: vi.fn(async () => {}) }
+    await expect(pruneExpiredBackups({
+      db: env.DB,
+      archive,
+      nowMs: Date.parse(expiresAt),
+      limit: 20,
+      idFactory: () => 'audit_backup_pruned_legacy',
+      correlationIdFactory: () => 'correlation_backup_pruned_legacy',
+    })).resolves.toEqual({ selected: 1, pruned: 1 })
+    expect(archive.delete.mock.calls).toEqual([
+      [seeded.manifestKey],
+      [seeded.objectKey],
+    ])
+  })
+
+  it('refuses malformed completed object facts before touching the shared archive bucket', async () => {
+    const seeded = await seedStored({
+      id: 'bkp_retention_prefix_escape',
+      day: '2044-07-03',
+      expiry: expiresAt,
+      objectKeyOverride: 'workbook-objects/v1/forbidden.bin',
+    })
+    const archive = { delete: vi.fn(async () => {}) }
+    await expect(pruneExpiredBackups({
+      db: env.DB,
+      archive,
+      nowMs: Date.parse(expiresAt),
+      limit: 20,
+      idFactory: () => 'audit_backup_pruned_escape',
+      correlationIdFactory: () => 'correlation_backup_pruned_escape',
+    })).rejects.toThrow('BACKUP_RETENTION_INVALID')
+    expect(archive.delete).not.toHaveBeenCalled()
   })
 })

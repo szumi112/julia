@@ -1,11 +1,16 @@
 import { execFile } from 'node:child_process'
-import { readFile, readdir } from 'node:fs/promises'
+import { lstat, readFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { createKeyring } from '../worker/security/keyring.js'
+import {
+  createDemandBackupStore,
+  createPinnedSourceRunner,
+  validateStagingBackupConfig,
+} from './backup-staging-lib.mjs'
 import {
   createPinnedWranglerRunner,
   restoreBackup,
@@ -14,26 +19,55 @@ import {
 
 const executeFile = promisify(execFile)
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
-const wranglerPath = join(projectRoot, 'node_modules/wrangler/bin/wrangler.js')
+const configuredWranglerPath = join(projectRoot, 'node_modules/wrangler/bin/wrangler.js')
 const MANIFEST_MAX_BYTES = 64 * 1024
+const RESPONSE_MAX_BYTES = 64 * 1024
+
+const refused = () => { throw new Error('RESTORE_REFUSED') }
+const failed = () => { throw new Error('RESTORE_FAILED') }
+const ownObject = (value) => value !== null && typeof value === 'object'
+  && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 
 function argumentsFrom(argv) {
-  const names = new Map([
-    ['--manifest', 'manifestKey'],
-    ['--target', 'target'],
-    ['--sentinel', 'sentinel'],
-  ])
-  const result = {}
-  for (let index = 0; index < argv.length; index += 2) {
-    const key = names.get(argv[index])
-    const value = argv[index + 1]
-    if (!key || typeof value !== 'string' || value.length === 0 || Object.hasOwn(result, key)) {
-      throw new Error('RESTORE_REFUSED')
+  const result = { allowLegacyUnverified: false }
+  for (let index = 0; index < argv.length;) {
+    const name = argv[index]
+    if (name === '--allow-legacy-unverified') {
+      if (result.allowLegacyUnverified) refused()
+      result.allowLegacyUnverified = true
+      index += 1
+      continue
     }
-    result[key] = value
+    if (!['--manifest', '--target'].includes(name)
+      || typeof argv[index + 1] !== 'string' || argv[index + 1].startsWith('--')) refused()
+    const key = name === '--manifest' ? 'manifestKey' : 'target'
+    if (Object.hasOwn(result, key) || argv[index + 1].length === 0) refused()
+    result[key] = argv[index + 1]
+    index += 2
   }
-  if (Object.keys(result).length !== names.size) throw new Error('RESTORE_REFUSED')
-  return result
+  if (!Object.hasOwn(result, 'manifestKey') || !Object.hasOwn(result, 'target')) refused()
+  return {
+    manifestKey: result.manifestKey,
+    target: result.target,
+    allowLegacyUnverified: result.allowLegacyUnverified,
+  }
+}
+
+function requiredEnvironment(environment, name) {
+  const value = environment[name]
+  if (typeof value !== 'string' || value.length === 0 || value !== value.trim()
+    || /[\s\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)) refused()
+  return value
+}
+
+async function pinnedWranglerPath() {
+  const stats = await lstat(configuredWranglerPath)
+  if (!stats.isFile() || stats.isSymbolicLink()) refused()
+  const resolved = await realpath(configuredWranglerPath)
+  const allowed = await realpath(join(projectRoot, 'node_modules/wrangler'))
+  const fromAllowed = relative(allowed, resolved)
+  if (fromAllowed === '' || fromAllowed === '..' || fromAllowed.startsWith('../') || isAbsolute(fromAllowed)) refused()
+  return resolved
 }
 
 const databaseFacts = (config) => {
@@ -50,140 +84,145 @@ const databaseFacts = (config) => {
   }
 }
 
-const requiredEnvironment = (environment, name) => {
-  const value = environment[name]
-  if (typeof value !== 'string' || value.length === 0) throw new Error('RESTORE_REFUSED')
-  return value
+async function boundedJson(response) {
+  if (!(response instanceof Response) || !response.ok || response.redirected || !(response.body instanceof ReadableStream)) failed()
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    while (true) {
+      const part = await reader.read()
+      if (part.done) break
+      if (!(part.value instanceof Uint8Array) || part.value.byteLength === 0) failed()
+      total += part.value.byteLength
+      if (total > RESPONSE_MAX_BYTES) failed()
+      chunks.push(part.value)
+    }
+  } finally { reader.releaseLock() }
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) } catch { failed() } finally { bytes.fill(0) }
 }
 
-const bodyBytes = async (body) => {
-  if (body instanceof Uint8Array) {
-    if (body.byteLength > MANIFEST_MAX_BYTES) throw new Error('RESTORE_FAILED')
-    return body
-  }
-  if (typeof body?.transformToByteArray === 'function') {
-    const bytes = new Uint8Array(await body.transformToByteArray())
-    if (bytes.byteLength > MANIFEST_MAX_BYTES) throw new Error('RESTORE_FAILED')
-    return bytes
-  }
-  throw new Error('RESTORE_FAILED')
-}
-
-const bodyStream = (body) => {
+function bodyStream(body) {
   if (body instanceof ReadableStream) return body
   if (typeof body?.transformToWebStream === 'function') return body.transformToWebStream()
-  throw new Error('RESTORE_FAILED')
+  failed()
+}
+
+async function boundedBody(body) {
+  const reader = bodyStream(body).getReader()
+  const chunks = []
+  let total = 0
+  try {
+    while (true) {
+      const part = await reader.read()
+      if (part.done) break
+      if (!(part.value instanceof Uint8Array) || part.value.byteLength === 0) failed()
+      total += part.value.byteLength
+      if (total > MANIFEST_MAX_BYTES) failed()
+      chunks.push(part.value)
+    }
+  } finally { reader.releaseLock() }
+  const result = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength }
+  return result
 }
 
 async function main() {
   const controller = new AbortController()
   const request = argumentsFrom(process.argv.slice(2))
   const config = JSON.parse(await readFile(join(projectRoot, 'wrangler.json'), 'utf8'))
+  const selection = validateStagingBackupConfig({ config, environment: process.env })
   const policy = databaseFacts(config)
   validateRestoreRequest({ request, ...policy })
-  const expectedMigrations = (await readdir(join(projectRoot, 'migrations')))
-    .filter((name) => /^\d{4}_[a-z0-9_-]+\.sql$/.test(name))
-    .sort()
-
-  const accountId = requiredEnvironment(process.env, 'CF_ACCOUNT_ID')
+  const apiToken = requiredEnvironment(process.env, 'CLOUDFLARE_API_TOKEN')
   const accessKeyId = requiredEnvironment(process.env, 'R2_ACCESS_KEY_ID')
   const secretAccessKey = requiredEnvironment(process.env, 'R2_SECRET_ACCESS_KEY')
-  const apiToken = requiredEnvironment(process.env, 'CLOUDFLARE_API_TOKEN')
-  const staging = config.env?.staging
-  const bucket = staging?.r2_buckets?.[0]?.bucket_name
-  if (typeof bucket !== 'string' || staging.r2_buckets[0].jurisdiction !== 'eu') {
-    throw new Error('RESTORE_REFUSED')
-  }
-  const activeBackupKekVersion = Number(staging.vars?.ACTIVE_BACKUP_KEK_VERSION)
-  const keyring = await createKeyring(process.env, { activeBackupKekVersion })
+  const keyring = await createKeyring(process.env, { activeBackupKekVersion: selection.activeBackupKekVersion })
+  const wranglerPath = await pinnedWranglerPath()
   const s3 = new S3Client({
     region: 'auto',
-    endpoint: `https://${accountId}.eu.r2.cloudflarestorage.com`,
+    endpoint: `https://${selection.source.accountId}.eu.r2.cloudflarestorage.com`,
     credentials: { accessKeyId, secretAccessKey },
   })
+  const execute = (args) => executeFile(process.execPath, args, {
+    cwd: projectRoot,
+    env: { PATH: process.env.PATH, CLOUDFLARE_API_TOKEN: apiToken },
+    maxBuffer: 1024 * 1024,
+    signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)]),
+  })
+  const targetRunner = createPinnedWranglerRunner({ tempRoot: tmpdir(), wranglerPath, execute })
+  const sourceRunner = createPinnedSourceRunner({ tempRoot: tmpdir(), wranglerPath, database: selection.database, execute })
+  const sourceStore = createDemandBackupStore({ query: sourceRunner.query })
   const customerParameters = (ssecKey) => ({
     SSECustomerAlgorithm: 'AES256',
     SSECustomerKey: Buffer.from(ssecKey).toString('base64'),
   })
+  const providerSignal = () => AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)])
   const provider = {
-    async describeDatabase(target) {
+    async describeDatabase(targetName) {
       const response = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database`,
-        {
-          headers: { Authorization: `Bearer ${apiToken}` },
-          redirect: 'error',
-          signal: controller.signal,
-        },
+        `https://api.cloudflare.com/client/v4/accounts/${selection.source.accountId}/d1/database?name=${encodeURIComponent(targetName)}&per_page=10`,
+        { headers: { Authorization: `Bearer ${apiToken}` }, redirect: 'error', signal: providerSignal() },
       )
-      if (!response.ok || response.redirected) throw new Error('RESTORE_FAILED')
-      const payload = await response.json()
-      const matches = payload?.success === true && Array.isArray(payload.result)
-        ? payload.result.filter(({ name }) => name === target)
+      const payload = await boundedJson(response)
+      const matches = ownObject(payload) && payload.success === true && Array.isArray(payload.result)
+        ? payload.result.filter((row) => ownObject(row) && row.name === targetName)
         : []
-      if (matches.length !== 1) throw new Error('RESTORE_REFUSED')
-      return {
-        name: matches[0].name,
-        id: matches[0].uuid,
-        jurisdiction: matches[0].jurisdiction,
-      }
+      if (matches.length !== 1) refused()
+      return { name: matches[0].name, id: matches[0].uuid, jurisdiction: matches[0].jurisdiction }
     },
     async getManifest(key) {
-      const response = await s3.send(
-        new GetObjectCommand({ Bucket: bucket, Key: key }),
-        { abortSignal: controller.signal },
-      )
-      return bodyBytes(response.Body)
+      const response = await s3.send(new GetObjectCommand({ Bucket: selection.archive.bucket, Key: key }), { abortSignal: providerSignal() })
+      return boundedBody(response.Body)
     },
     async headObject({ key, ssecKey }) {
-      const response = await s3.send(
-        new HeadObjectCommand({
-          Bucket: bucket, Key: key, ...customerParameters(ssecKey),
-        }),
-        { abortSignal: controller.signal },
-      )
-      return {
-        etag: response.ETag?.replace(/^"|"$/g, ''),
-        size: response.ContentLength,
-        customMetadata: {
-          backupId: response.Metadata?.backupid,
-          format: response.Metadata?.format,
-          retentionClass: response.Metadata?.retentionclass,
-        },
-      }
+      const response = await s3.send(new HeadObjectCommand({
+        Bucket: selection.archive.bucket, Key: key, ...customerParameters(ssecKey),
+      }), { abortSignal: providerSignal() })
+      const format = response.Metadata?.format
+      const customMetadata = format === 'bwm-d1-sql-v2'
+        ? {
+            backupId: response.Metadata?.backupid,
+            format,
+            retentionClass: response.Metadata?.retentionclass,
+            sourceAppEnv: response.Metadata?.sourceappenv,
+            sourceDatabaseId: response.Metadata?.sourcedatabaseid,
+          }
+        : {
+            backupId: response.Metadata?.backupid,
+            format,
+            retentionClass: response.Metadata?.retentionclass,
+          }
+      return { etag: response.ETag?.replace(/^"|"$/g, ''), size: response.ContentLength, customMetadata }
     },
     async getObject({ key, ssecKey }) {
-      const response = await s3.send(
-        new GetObjectCommand({
-          Bucket: bucket, Key: key, ...customerParameters(ssecKey),
-        }),
-        { abortSignal: controller.signal },
-      )
+      const response = await s3.send(new GetObjectCommand({
+        Bucket: selection.archive.bucket, Key: key, ...customerParameters(ssecKey),
+      }), { abortSignal: providerSignal() })
       return bodyStream(response.Body)
     },
+    async markRestoreVerified(facts) {
+      const verifiedAt = new Date().toISOString()
+      return sourceStore.markRestoreVerified({ ...facts, verifiedAt })
+    },
+    async readSourceBackup({ backupId }) { return sourceStore.readBackup({ backupId }) },
   }
-  const commandRunner = createPinnedWranglerRunner({
-    tempRoot: tmpdir(),
-    wranglerPath,
-    execute: (args) => executeFile(process.execPath, args, {
-      cwd: projectRoot,
-      env: { PATH: process.env.PATH, CLOUDFLARE_API_TOKEN: apiToken },
-      maxBuffer: 1024 * 1024,
-      signal: controller.signal,
-    }),
-  })
-
   const abort = () => controller.abort()
   process.once('SIGINT', abort)
   process.once('SIGTERM', abort)
   try {
     const result = await restoreBackup({
       request,
+      expectedSource: selection.source,
       ...policy,
-      expectedMigrations,
       tempRoot: tmpdir(),
       keyring,
       provider,
-      runCommand: commandRunner.runCommand,
+      runCommand: targetRunner.runCommand,
       log() {},
       signal: controller.signal,
     })
@@ -191,14 +230,18 @@ async function main() {
   } finally {
     process.removeListener('SIGINT', abort)
     process.removeListener('SIGTERM', abort)
-    await commandRunner.cleanup()
+    try { await targetRunner.cleanup() } catch {}
+    try { await sourceRunner.cleanup() } catch {}
+    try { s3.destroy() } catch {}
   }
 }
 
 try {
   await main()
 } catch (error) {
-  const status = error?.message === 'RESTORE_REFUSED' ? 'refused' : 'failed'
+  const status = error?.message === 'RESTORE_REFUSED' || error?.message === 'BACKUP_STAGING_REFUSED'
+    ? 'refused'
+    : 'failed'
   process.stderr.write(`${JSON.stringify({ status })}\n`)
   process.exitCode = 1
 }

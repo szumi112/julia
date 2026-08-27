@@ -857,6 +857,12 @@ export async function runScheduled(input) {
           keyring: cryptoContext.keyring,
           archive: validated.env.ARCHIVE,
           providerConfig,
+          source: {
+            accountId: providerConfig.accountId,
+            appEnv: validated.config.appEnv,
+            dataMode: validated.config.dataMode,
+            databaseId: providerConfig.databaseId,
+          },
           schedulerRun: { ...owned },
           now: deps.now,
           wait: deps.wait,

@@ -1,4 +1,5 @@
 import { auditEventStatement } from '../audit/events.js'
+import { backupObjectKeys } from './backup-format.js'
 
 const MAX_BATCH = 20
 const INCOMPLETE_MAX_AGE_MS = 24 * 60 * 60 * 1000
@@ -45,11 +46,34 @@ async function pruneOne(input, row) {
       || typeof row.manifest_key !== 'string' || row.manifest_key.length === 0
       || !validInstant(row.expires_at) || row.expires_at > input.now))
     || (!completed && row.created_at > input.incompleteBefore)) invalid()
-  const prefix = `backups/v1/${row.local_month.replace('-', '/')}/${row.id}`
-  const objectKey = completed ? row.object_key : `${prefix}.sql`
-  const manifestKey = completed ? row.manifest_key : `${prefix}.manifest.json`
-  await input.archive.delete(objectKey)
-  await input.archive.delete(manifestKey)
+  if (completed) {
+    let matched = null
+    for (const version of [1, 2]) {
+      let keys
+      try {
+        keys = backupObjectKeys({ backupId: row.id, localMonth: row.local_month, version })
+      } catch {
+        invalid()
+      }
+      if (row.object_key === keys.objectKey && row.manifest_key === keys.manifestKey) {
+        matched = keys
+      }
+    }
+    if (matched === null) invalid()
+    await input.archive.delete(matched.manifestKey)
+    await input.archive.delete(matched.objectKey)
+  } else {
+    for (const version of [2, 1]) {
+      let keys
+      try {
+        keys = backupObjectKeys({ backupId: row.id, localMonth: row.local_month, version })
+      } catch {
+        invalid()
+      }
+      await input.archive.delete(keys.manifestKey)
+      await input.archive.delete(keys.objectKey)
+    }
+  }
   const nextVersion = row.version + 1
   const auditId = input.idFactory()
   const correlationId = input.correlationIdFactory()

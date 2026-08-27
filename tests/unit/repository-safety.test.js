@@ -14,6 +14,7 @@ import { join, relative } from 'node:path'
 import {
   assertCoreMigrationConfiguration,
   assertDirectDependencyPins,
+  assertRecoveryPackageScripts,
   assertRuntimeIndex,
   assertTrackedFiles,
   inspectDeployArtifact,
@@ -142,6 +143,36 @@ test('package keeps the complete script regression suite addressable', () => {
     packageJson.scripts?.['test:scripts'],
     'node --test --test-concurrency=1 tests/scripts/*.test.js',
   )
+})
+
+test('recovery commands stay pinned to staging fictional mode with no production demand aliases', () => {
+  const packageJson = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
+  assert.doesNotThrow(() => assertRecoveryPackageScripts(packageJson))
+  const expected = {
+    'backup:create:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs create',
+    'backup:status:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs status',
+    'backup:migrations:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs migrations',
+    'backup:restore': 'APP_ENV=staging DATA_MODE=fictional node scripts/restore-backup.mjs',
+  }
+  for (const [name, value] of Object.entries(expected)) assert.equal(packageJson.scripts[name], value)
+  assert.throws(() => assertRecoveryPackageScripts({
+    ...packageJson,
+    scripts: { ...packageJson.scripts, 'backup:create:production': 'node forbidden.mjs' },
+  }), /production demand backup/i)
+  for (const alias of [
+    'backup:create:prod',
+    'backup:status:staging:copy',
+    'backup:migrations',
+  ]) {
+    assert.throws(() => assertRecoveryPackageScripts({
+      ...packageJson,
+      scripts: { ...packageJson.scripts, [alias]: 'node forbidden.mjs' },
+    }), /demand backup alias/i)
+  }
+  assert.throws(() => assertRecoveryPackageScripts({
+    ...packageJson,
+    scripts: { ...packageJson.scripts, 'backup:create:staging': 'node scripts/backup-staging.mjs create' },
+  }), /recovery package command/i)
 })
 
 test('workspace repositories remain pure and exclude persistence, queues, logging, and backend bindings', () => {

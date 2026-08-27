@@ -190,6 +190,33 @@ export const assertDirectDependencyPins = (packageJson) => {
   }
 }
 
+const RECOVERY_PACKAGE_COMMANDS = Object.freeze({
+  'backup:create:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs create',
+  'backup:status:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs status',
+  'backup:migrations:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs migrations',
+  'backup:restore': 'APP_ENV=staging DATA_MODE=fictional node scripts/restore-backup.mjs',
+})
+
+export const assertRecoveryPackageScripts = (packageJson) => {
+  const scripts = packageJson?.scripts
+  if (!scripts || typeof scripts !== 'object' || Array.isArray(scripts)) {
+    throw new Error('Recovery package commands are required')
+  }
+  for (const [name, command] of Object.entries(RECOVERY_PACKAGE_COMMANDS)) {
+    if (scripts[name] !== command) throw new Error(`Recovery package command must remain fixed: ${name}`)
+  }
+  const allowedDemandNames = new Set([
+    'backup:create:staging',
+    'backup:status:staging',
+    'backup:migrations:staging',
+  ])
+  for (const name of Object.keys(scripts)) {
+    if (/^backup:(?:create|status|migrations)(?::|$)/.test(name) && !allowedDemandNames.has(name)) {
+      throw new Error(`Production demand backup alias is forbidden: ${name}`)
+    }
+  }
+}
+
 export const assertRuntimeIndex = (html) => assertNoRuntimeHosts(html, 'index.html')
 
 const isLocalDevOrigin = (value) => {
@@ -357,6 +384,7 @@ const runCli = () => {
   const tracked = execFileSync('git', ['ls-files', '-z']).toString().split('\0').filter(Boolean)
   assertTrackedFiles(tracked)
   assertDirectDependencyPins(parseJson('package.json'))
+  assertRecoveryPackageScripts(parseJson('package.json'))
   assertCoreMigrationConfiguration(parseJson('wrangler.json'))
   assertRuntimeIndex(readFileSync('index.html', 'utf8'))
   if (args[0] === '--dist') {
