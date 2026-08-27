@@ -67,12 +67,13 @@ const columnName = (index) => {
 }
 
 const worksheetXml = (rows) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.map((row, rowIndex) => (
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.map((row, rowIndex) => (
   `<row r="${rowIndex + 1}">${row.map((value, columnIndex) => {
     const ref = `${columnName(columnIndex)}${rowIndex + 1}`
     if (value === '' || value === null || value === undefined) return `<c r="${ref}"/>`
     if (typeof value === 'object' && value.formula) {
-      return `<c r="${ref}"><f>${xmlEscape(value.formula)}</f><v>${value.cached}</v></c>`
+      const prefix = value.formulaPrefix ? `${value.formulaPrefix}:` : ''
+      return `<c r="${ref}"><${prefix}f>${xmlEscape(value.formula)}</${prefix}f><v>${value.cached}</v></c>`
     }
     if (typeof value === 'object' && Number.isSafeInteger(value.sharedString)) {
       return `<c r="${ref}" t="s"><v>${value.sharedString}</v></c>`
@@ -237,6 +238,107 @@ test('quarantines instead of silently dropping a populated transaction with an i
   }
 })
 
+test('accounts for every populated transaction shape after excluding formula rows', () => {
+  const preview = normalizeWorkbookRows({
+    filename: 'transaction-candidates.xlsx',
+    fingerprint: '2'.repeat(64),
+    sheets: [{
+      name: 'Maj 2025',
+      rows: [
+        transactionHeader,
+        ['', 180, 'Osoba Bez Usługi', '2025-05-02'],
+        ['Konsultacja', 180, '', '2025-05-03'],
+        ['Konsultacja', '', 'Osoba Bez Kwoty i Daty', ''],
+        ['Suma', { formula: 'SUM(B2:B4)', cached: 360 }, '', ''],
+        ['', '', '', ''],
+      ],
+    }],
+  })
+
+  assert.deepEqual(preview.quarantinedRows.map(({ rowNumber, reasonCode, reasonCodes }) => ({
+    rowNumber,
+    reasonCode,
+    reasonCodes,
+  })), [
+    { rowNumber: 2, reasonCode: 'SERVICE_MISSING', reasonCodes: ['SERVICE_MISSING'] },
+    { rowNumber: 3, reasonCode: 'COUNTERPARTY_MISSING', reasonCodes: ['COUNTERPARTY_MISSING'] },
+    {
+      rowNumber: 4,
+      reasonCode: 'AMOUNT_MISSING',
+      reasonCodes: ['AMOUNT_MISSING', 'SERVICE_DATE_MISSING'],
+    },
+  ])
+  assert.deepEqual(preview.reconciliation, {
+    sourceCandidates: 3,
+    acceptedRows: 0,
+    quarantinedRows: 3,
+    excludedFormulaBlocks: 1,
+    excludedFormulaRows: 1,
+  })
+})
+
+test('accounts for fixed-ledger partial records and ignores formula and empty rows', () => {
+  const preview = normalizeWorkbookRows({
+    filename: 'fixed-candidates.xlsx',
+    fingerprint: '3'.repeat(64),
+    sheets: [{
+      name: 'Stałe koszty',
+      rows: [
+        ['Koszt', 'Cena'],
+        ['Wynajem', 2200],
+        ['', 150],
+        ['Materiały', 'do ustalenia'],
+        ['Suma', { formula: 'SUM(B2:B4)', cached: 2350 }],
+        ['', ''],
+      ],
+    }],
+  })
+
+  assert.deepEqual(preview.rows.map(({ sourceLabel }) => sourceLabel), ['Wynajem'])
+  assert.deepEqual(preview.quarantinedRows.map(({ rowNumber, reasonCode, reasonCodes }) => ({
+    rowNumber,
+    reasonCode,
+    reasonCodes,
+  })), [
+    { rowNumber: 3, reasonCode: 'ORPHAN_AMOUNT', reasonCodes: ['ORPHAN_AMOUNT'] },
+    { rowNumber: 4, reasonCode: 'AMOUNT_INVALID', reasonCodes: ['AMOUNT_INVALID'] },
+  ])
+  assert.equal(preview.reconciliation.sourceCandidates, 3)
+  assert.equal(preview.reconciliation.excludedFormulaBlocks, 1)
+})
+
+test('accounts for English partial records after excluding formula-only summaries', () => {
+  const preview = normalizeWorkbookRows({
+    filename: 'english-candidates.xlsx',
+    fingerprint: '4'.repeat(64),
+    sheets: [{
+      name: 'Angielski Julia',
+      rows: [
+        ['Maj 2025'],
+        ['Imię i nazwisko', 'Ilość lekcji', 'Kwota'],
+        ['Uczeń Poprawny', 2, 100],
+        ['', 2, 100],
+        ['Uczeń Bez Liczby', 'do ustalenia', 100],
+        ['Uczeń Bez Kwoty', 2, 'do ustalenia'],
+        [{ formula: 'SUM(C3:C6)', cached: 300 }, '', ''],
+        ['', '', ''],
+      ],
+    }],
+  })
+
+  assert.equal(preview.rows.length, 1)
+  assert.deepEqual(preview.quarantinedRows.map(({ rowNumber, reasonCode }) => ({
+    rowNumber,
+    reasonCode,
+  })), [
+    { rowNumber: 4, reasonCode: 'COUNTERPARTY_MISSING' },
+    { rowNumber: 5, reasonCode: 'LESSON_COUNT_INVALID' },
+    { rowNumber: 6, reasonCode: 'AMOUNT_INVALID' },
+  ])
+  assert.equal(preview.reconciliation.sourceCandidates, 4)
+  assert.equal(preview.reconciliation.excludedFormulaBlocks, 1)
+})
+
 test('normalizes raw source strings before protected payload validation', () => {
   const preview = normalizeWorkbookRows({
     filename: 'whitespace.xlsx',
@@ -295,6 +397,29 @@ test('excludes formula-cache summaries but retains valid records after them', as
     bytes.byteOffset,
     bytes.byteOffset + bytes.byteLength,
   ), { filename: 'formula-cache.xlsx' })
+
+  assert.deepEqual(preview.rows.map(({ counterparty }) => counterparty), [
+    'Uczeń Pierwszy',
+    'Uczeń Po Podsumowaniu',
+  ])
+  assert.equal(preview.reconciliation.excludedFormulaBlocks, 1)
+})
+
+test('excludes namespace-qualified formula caches and retains later records', async () => {
+  const bytes = testWorkbook({ sheets: [{
+    name: 'Angielski Julia',
+    rows: [
+      ['Maj 2025'],
+      ['Imię i nazwisko', 'Ilość lekcji', 'Kwota'],
+      ['Uczeń Pierwszy', 2, 100],
+      ['Suma', '', { formulaPrefix: 'x', formula: 'SUM(C3:C3)', cached: 100 }],
+      ['Uczeń Po Podsumowaniu', 3, 150],
+    ],
+  }] })
+  const preview = await parseWorkbookFile(bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ), { filename: 'qualified-formula.xlsx' })
 
   assert.deepEqual(preview.rows.map(({ counterparty }) => counterparty), [
     'Uczeń Pierwszy',
@@ -402,6 +527,21 @@ test('rejects executable formulas and unsafe OOXML package relationships', async
         rows: [
           transactionHeader,
           ['Konsultacja', { formula: 'DDE("cmd","/c calc")', cached: 180 }, 'Osoba Testowa', '2025-05-02'],
+        ],
+      }] }),
+      code: 'WORKBOOK_FORMULA_FORBIDDEN',
+    },
+    {
+      name: 'qualified-dde.xlsx',
+      bytes: testWorkbook({ sheets: [{
+        name: 'Maj 2025',
+        rows: [
+          transactionHeader,
+          ['Konsultacja', {
+            formulaPrefix: 'x',
+            formula: 'DDE("cmd","/c calc")',
+            cached: 180,
+          }, 'Osoba Testowa', '2025-05-02'],
         ],
       }] }),
       code: 'WORKBOOK_FORMULA_FORBIDDEN',

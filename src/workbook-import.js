@@ -32,6 +32,9 @@ const rawScalar = (value) => typeof value === 'string' ? text(value) : value
 const formulaValue = (value) => value && typeof value === 'object'
   && !Array.isArray(value) && typeof value.formula === 'string'
 
+const FORMULA_ELEMENT = /<(?:[A-Za-z_][\w.-]*:)?f\b/
+const FORMULA_CONTENT = /<(?:[A-Za-z_][\w.-]*:)?f\b[^>]*>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?f\s*>/
+
 const scalar = (value) => formulaValue(value) ? '' : value
 
 const searchText = (value) => text(value).normalize('NFD')
@@ -247,13 +250,14 @@ const baseRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
 })
 
 const quarantineRow = ({ sourceKey, sheet, rowNumber, recordType, accountingMonth,
-  reasonCode, raw }) => ({
+  reasonCode, reasonCodes = [reasonCode], raw }) => ({
   sourceKey,
   sheet: text(sheet),
   rowNumber,
   recordType,
   accountingMonth: accountingMonth && MONTH_KEY.test(accountingMonth) ? accountingMonth : null,
   reasonCode,
+  reasonCodes: Object.freeze([...reasonCodes]),
   raw,
 })
 
@@ -291,8 +295,10 @@ const normalizeTransactions = (sheet, context) => {
         && hasFormula(sheet, formulas, rowIndex, amountColumn)) excludedFormulaRows++
       return
     }
-    if (!service || !client || (!text(amountValue) && !text(dateValue))) return
     if (searchText(service) === 'usluga' && searchText(client) === 'klient') return
+    const populatedCoreCells = [service, client, text(amountValue), text(dateValue)]
+      .filter(Boolean).length
+    if (populatedCoreCells < 2 || (!client && !text(dateValue))) return
     candidates.push({
       row,
       rowNumber: headerIndex + index + 2,
@@ -316,21 +322,25 @@ const normalizeTransactions = (sheet, context) => {
     const isTus = tusSheet || searchText(label).startsWith('grupa tus')
     const accountingMonth = occurredOn?.slice(0, 7) ?? sheetMonth
     const sourceKey = makeSourceKey({ ...context, sheet: sheet.name, rowNumber })
-    let reasonCode = null
-    if (amount === null) reasonCode = 'AMOUNT_INVALID'
-    else if (!isTus && text(dateValue) === '') reasonCode = 'SERVICE_DATE_MISSING'
+    const reasonCodes = []
+    if (!text(label)) reasonCodes.push('SERVICE_MISSING')
+    if (!text(valueAt(row, headers, 'klient'))) reasonCodes.push('COUNTERPARTY_MISSING')
+    if (text(amountValue) === '') reasonCodes.push('AMOUNT_MISSING')
+    else if (amount === null) reasonCodes.push('AMOUNT_INVALID')
+    if (!isTus && text(dateValue) === '') reasonCodes.push('SERVICE_DATE_MISSING')
     else if (!isTus && (occurredOn === null
       || (dateCellType !== null && !['n', 'd'].includes(dateCellType)))) {
-      reasonCode = 'SERVICE_DATE_INVALID'
+      reasonCodes.push('SERVICE_DATE_INVALID')
     }
-    if (reasonCode) {
+    if (reasonCodes.length) {
       quarantinedRows.push(quarantineRow({
         sourceKey,
         sheet: sheet.name,
         rowNumber,
         recordType: isTus ? 'tus' : 'income',
         accountingMonth,
-        reasonCode,
+        reasonCode: reasonCodes[0],
+        reasonCodes,
         raw: rawRecord(headersRow, row),
       }))
       return
@@ -379,13 +389,13 @@ const normalizeEnglish = (sheet, context) => {
     const accountingMonth = monthFromValue(monthRow[column], null, { allowSerial: true })
     for (let index = 2; index < sheet.rows.length; index++) {
       const block = sheet.rows[index].slice(column, column + 3)
-      if (block.every((item) => text(scalar(item)) === '')) continue
       if ([column, column + 1, column + 2].some((cellColumn) => (
         hasFormula(sheet, formulas, index, cellColumn)
       ))) {
         excludedFormulaBlocks++
         continue
       }
+      if (block.every((item) => text(scalar(item)) === '')) continue
       const counterparty = text(scalar(sheet.rows[index][column]))
       const lessons = integer(scalar(sheet.rows[index][column + 1]), { allowZero: true })
       const amount = amountGrosze(scalar(sheet.rows[index][column + 2]), { allowZero: true })
@@ -446,22 +456,47 @@ const normalizeFixedCosts = (sheet, context) => {
     for (let index = 1; index < sheet.rows.length; index++) {
       const labelValue = scalar(sheet.rows[index][column])
       const amountValue = scalar(sheet.rows[index][column + 1])
-      if (!text(labelValue)) continue
       if ([column, column + 1].some((cellColumn) => (
         hasFormula(sheet, formulas, index, cellColumn)
       ))) {
         excludedFormulaBlocks++
         continue
       }
+      if (!text(amountValue)) continue
       const label = text(labelValue)
       const amount = amountGrosze(amountValue)
-      if (amount === null) continue
       sourceCandidates++
       const nearby = sheet.rows[index].slice(Math.max(0, column - 1), column + 4)
       const accountingMonth = nearby.map((item) => monthFromValue(scalar(item))).find(Boolean)
         ?? monthFromValue(sheet.name)
+      const reasonCodes = []
+      if (!label) reasonCodes.push('ORPHAN_AMOUNT')
+      if (amount === null) reasonCodes.push('AMOUNT_INVALID')
+      const sourceKey = makeSourceKey({
+        ...context,
+        sheet: sheet.name,
+        rowNumber: index + 1,
+        block: column + 1,
+      })
+      const raw = {
+        [text(value)]: label,
+        [text(headers[column + 1]) || 'Kwota']: rawScalar(sheet.rows[index][column + 1]),
+      }
+      if (reasonCodes.length) {
+        quarantinedRows.push(quarantineRow({
+          sourceKey,
+          sheet: sheet.name,
+          rowNumber: index + 1,
+          recordType: normalized === 'koszt' ? 'expense' : 'income',
+          accountingMonth,
+          reasonCode: reasonCodes[0],
+          reasonCodes,
+          raw,
+        }))
+        continue
+      }
       rows.push(baseRow({
-        sourceKey: makeSourceKey({ ...context, sheet: sheet.name, rowNumber: index + 1, block: column + 1 }),
+        sourceKey,
         sheet: sheet.name,
         rowNumber: index + 1,
         recordType: normalized === 'koszt' ? 'expense' : 'income',
@@ -469,10 +504,7 @@ const normalizeFixedCosts = (sheet, context) => {
         amount,
         counterparty: '',
         sourceLabel: label,
-        raw: {
-          [text(value)]: label,
-          [text(headers[column + 1]) || 'Kwota']: rawScalar(sheet.rows[index][column + 1]),
-        },
+        raw,
       }))
     }
   })
@@ -577,7 +609,7 @@ const parseWorksheet = (xml, sharedStrings) => {
       const ref = attribute(cellMatch[1], 'r')
       const type = attribute(cellMatch[1], 't')
       const body = cellMatch[2] ?? ''
-      if (/<f\b/.test(body)) formulaCells.push(ref)
+      if (FORMULA_ELEMENT.test(body)) formulaCells.push(ref)
       cellTypes[ref] = type ?? 'n'
       const raw = /<v\b[^>]*>([\s\S]*?)<\/v>/.exec(body)?.[1] ?? ''
       let value = ''
@@ -587,8 +619,8 @@ const parseWorksheet = (xml, sharedStrings) => {
       else if (type === 'str') value = xmlText(raw)
       else if (raw !== '' && Number.isFinite(Number(raw))) value = Number(raw)
       else value = xmlText(raw)
-      const formulaElement = /<f\b/.test(body)
-      const formula = /<f\b[^>]*>([\s\S]*?)<\/f>/.exec(body)?.[1] ?? ''
+      const formulaElement = FORMULA_ELEMENT.test(body)
+      const formula = FORMULA_CONTENT.exec(body)?.[1] ?? ''
       row[columnIndex(ref)] = !formulaElement
         ? value
         : { formula: xmlText(formula), cached: value }
@@ -688,7 +720,7 @@ const validateArchiveFiles = (files, decompressedBytes) => {
     if (path.endsWith('.rels')) validateRelationshipXml(strFromU8(value))
     if (/^xl\/worksheets\/[^/]+\.xml$/i.test(path)) {
       const xml = strFromU8(value)
-      for (const formula of xml.matchAll(/<f\b[^>]*>([\s\S]*?)<\/f>/g)) {
+      for (const formula of xml.matchAll(new RegExp(FORMULA_CONTENT.source, 'g'))) {
         if (/\bDDE\s*\(/i.test(xmlText(formula[1]))) fail('WORKBOOK_FORMULA_FORBIDDEN')
       }
     }

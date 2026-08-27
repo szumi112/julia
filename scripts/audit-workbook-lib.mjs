@@ -13,7 +13,7 @@ export const AUTHORITATIVE_WORKBOOK_RECONCILIATION = Object.freeze({
   tusRows: 25,
   englishRows: 165,
   acceptedTotal: 2_232,
-  quarantinedTotal: 2,
+  quarantinedTotal: 3,
   combinedAugustVisits: 3,
   combinedSeptemberVisits: 40,
   datedTusRows: 2,
