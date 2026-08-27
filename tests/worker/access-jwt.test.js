@@ -40,9 +40,20 @@ describe('Access assertion verification', () => {
     })
   })
 
+  it('accepts a signed Cloudflare assertion when the optional typ header is absent', async () => {
+    const assertion = await signAccessJwt(TEST_IDENTITIES.owner, {
+      header: { alg: 'RS256', kid: KID },
+    })
+
+    await expect(verifier().verifyHumanAccessAssertion(assertion)).resolves.toMatchObject({
+      kind: 'human',
+      subject: TEST_IDENTITIES.owner.sub,
+      normalizedEmail: TEST_IDENTITIES.owner.email,
+    })
+  })
+
   it('rejects unsafe protected headers, claims, and timestamps as one sanitized error', async () => {
     const malformed = [
-      signAccessJwt(TEST_IDENTITIES.owner, { header: { alg: 'RS256', kid: KID } }),
       signAccessJwt(TEST_IDENTITIES.owner, { kid: '' }),
       signAccessJwt(TEST_IDENTITIES.owner, { issuer: 'https://other.cloudflareaccess.com' }),
       signAccessJwt(TEST_IDENTITIES.owner, { audience: 'other' }),
@@ -59,6 +70,30 @@ describe('Access assertion verification', () => {
     for (const assertion of await Promise.all(malformed)) {
       await expect(verifier().verifyHumanAccessAssertion(assertion)).rejects.toThrow(/^ACCESS_ASSERTION_INVALID$/)
     }
+  })
+
+  it('keeps a non-public diagnostic category for a rejected audience', async () => {
+    const assertion = await signAccessJwt(TEST_IDENTITIES.owner, { audience: 'other' })
+    const error = await verifier().verifyHumanAccessAssertion(assertion).catch((reason) => reason)
+
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe('ACCESS_ASSERTION_INVALID')
+    expect(error.diagnosticCode).toBe('ACCESS_JWT_AUDIENCE_INVALID')
+    expect(Object.keys(error)).not.toContain('diagnosticCode')
+  })
+
+  it.each([
+    ['token type', { ...TEST_IDENTITIES.owner, type: 'other' }, {}, 'ACCESS_JWT_TYPE_INVALID'],
+    ['lifetime', TEST_IDENTITIES.owner, { expiresAt: 1_800_029_000 }, 'ACCESS_JWT_LIFETIME_INVALID'],
+    ['subject', { ...TEST_IDENTITIES.owner, sub: '' }, {}, 'ACCESS_JWT_SUBJECT_INVALID'],
+    ['email', { ...TEST_IDENTITIES.owner, email: '' }, {}, 'ACCESS_JWT_EMAIL_INVALID'],
+    ['principal kind', { ...TEST_IDENTITIES.owner, common_name: null }, {}, 'ACCESS_JWT_PRINCIPAL_KIND_INVALID'],
+  ])('classifies an invalid %s without exposing claim values', async (_label, claims, options, expected) => {
+    const assertion = await signAccessJwt(claims, options)
+    const error = await verifier().verifyHumanAccessAssertion(assertion).catch((reason) => reason)
+
+    expect(error.message).toBe('ACCESS_ASSERTION_INVALID')
+    expect(error.diagnosticCode).toBe(expected)
   })
 
   it('accepts an audience array containing the exact audience and rejects human-service confusion', async () => {

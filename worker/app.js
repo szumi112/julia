@@ -232,6 +232,10 @@ export function createApp(deps = {}) {
     c.res = applyApiSecurityHeaders(c.res, correlationId)
     const mapped = c.error ? publicError(c.error)
       : c.get('errorCode') ? new AppError(c.get('errorCode')) : null
+    const jwtDiagnostic = typeof c.error?.diagnosticCode === 'string'
+      && /^ACCESS_JWT_[A-Z0-9_]{1,48}$/.test(c.error.diagnosticCode)
+      ? c.error.diagnosticCode
+      : null
     const actor = c.get('actor')
     const log = deps.safeLog ?? safeLog
     log(c.res.status >= 500 ? 'error' : c.res.status >= 400 ? 'warn' : 'info', {
@@ -243,7 +247,7 @@ export function createApp(deps = {}) {
       routeId: c.get('routeId'),
       status: c.res.status,
       ...(actor?.id ? { actorId: actor.id } : {}),
-      ...(mapped ? { errorCode: mapped.code } : {}),
+      ...(mapped ? { errorCode: jwtDiagnostic ?? mapped.code } : {}),
     })
   })
 

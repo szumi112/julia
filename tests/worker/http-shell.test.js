@@ -126,6 +126,29 @@ describe('API shell', () => {
       status: 500,
     }))
   })
+
+  it('logs only a safe JWT diagnostic category while keeping the response generic', async () => {
+    const log = vi.fn()
+    const failure = new Error('ACCESS_ASSERTION_INVALID')
+    Object.defineProperty(failure, 'diagnosticCode', {
+      enumerable: false,
+      value: 'ACCESS_JWT_AUDIENCE_INVALID',
+    })
+    const response = await createApp(deps({
+      resolveAccessPrincipal: vi.fn(async () => { throw failure }),
+      safeLog: log,
+    })).request('/api/v1/session')
+
+    expect(response.status).toBe(401)
+    expect(await response.json()).toMatchObject({
+      error: { code: 'ACCESS_ASSERTION_INVALID' },
+    })
+    expect(log).toHaveBeenCalledWith('warn', expect.objectContaining({
+      errorCode: 'ACCESS_JWT_AUDIENCE_INVALID',
+      routeId: 'session',
+      status: 401,
+    }))
+  })
 })
 
 describe('closed core route descriptors', () => {
