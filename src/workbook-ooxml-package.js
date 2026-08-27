@@ -153,10 +153,23 @@ const relationshipOwner = (path) => {
   return `${match[1]}${match[2]}`
 }
 
+const unsafeFormulaPipe = (formula) => {
+  let inString = false
+  for (let index = 0; index < formula.length; index++) {
+    if (formula[index] === '"') {
+      if (inString && formula[index + 1] === '"') index++
+      else inString = !inString
+    } else if (formula[index] === '|' && !inString) {
+      return true
+    }
+  }
+  return inString
+}
+
 const unsafeFormula = (formula) => /\b(?:CALL|DDE|EXEC|HYPERLINK|REGISTER|RTD|WEBSERVICE)\s*\(/i.test(formula)
   || /(?:https?|file|mailto):/i.test(formula)
   || /\[[^\]]+\][^!]{0,128}!/.test(formula)
-  || /(?:^|[=+\-])\s*(?:cmd|powershell|wscript|cscript)\s*\|/i.test(formula)
+  || unsafeFormulaPipe(formula)
 
 export const safeWorkbookFormula = (formula) => {
   if (typeof formula !== 'string' || !formula || formula.length > 8192

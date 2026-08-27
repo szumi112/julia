@@ -408,13 +408,24 @@ export const createScopedPanelWorkbook = async (input, callbacks = {}) => {
     }, 1)
     normalizedSources.set(policy.name, normalized)
   }
-  const authorizedFieldSet = new Set([...sheetPolicies.values()]
-    .flatMap(({ columns }) => columns.map(({ key }) => key)))
+  const rowPolicies = new Map()
+  for (const policy of sheetPolicies.values()) {
+    const source = normalizedSources.get(policy.name)
+    for (const row of source?.rows ?? []) {
+      if (!allowedRowSet.has(row.id)) continue
+      if (rowPolicies.has(row.id)) fail('PANEL_SCOPED_ROW_SHEET_AMBIGUOUS')
+      rowPolicies.set(row.id, policy)
+    }
+  }
+  if ([...allowedRowSet].some((id) => !rowPolicies.has(id))) {
+    fail('PANEL_SCOPED_ROW_SHEET_AMBIGUOUS')
+  }
   const metadata = {
     format: 'Panel-v2',
     rows: input.metadata.rows.filter(({ id }) => allowedRowSet.has(id)).map((row) => {
+      const authorizedFields = new Set(rowPolicies.get(row.id).columns.map(({ key }) => key))
       const fieldDigests = Object.fromEntries(Object.entries(row.fieldDigests)
-        .filter(([key]) => authorizedFieldSet.has(key)))
+        .filter(([key]) => authorizedFields.has(key)))
       if (!Object.keys(fieldDigests).length) fail('PANEL_SCOPED_ROW_FIELDS_INVALID')
       return { ...row, fieldDigests }
     }),

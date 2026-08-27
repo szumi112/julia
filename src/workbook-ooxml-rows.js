@@ -30,9 +30,9 @@ const sheetNameFromQualifier = (qualifier) => {
 }
 
 const shiftFormula = (formula, sheetName, beforeRow, count, { shiftUnqualified = true } = {}) => formula.replace(
-  /"(?:[^"]|"")*"|(?<![A-Za-z0-9_.])((?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_.]*)!)?(\$?[A-Z]{1,3}\$?\d+)(?::(\$?[A-Z]{1,3}\$?\d+))?(?![A-Za-z0-9_.(])/g,
+  /"(?:[^"]|"")*"|\[[^\]]*\]|(?<![A-Za-z0-9_.])((?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_.]*)!)?(\$?[A-Z]{1,3}\$?\d+)(?::(\$?[A-Z]{1,3}\$?\d+))?(?![A-Za-z0-9_.(])/g,
   (match, qualifier, reference, rangeEnd) => {
-    if (match.startsWith('"')) return match
+    if (!reference) return match
     const qualifiedSheet = sheetNameFromQualifier(qualifier)
     if (qualifiedSheet === null && !shiftUnqualified) return match
     if (qualifiedSheet !== null && qualifiedSheet !== sheetName) return match

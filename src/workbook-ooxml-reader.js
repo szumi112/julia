@@ -105,14 +105,26 @@ const readSignedMetadata = async (files, metaSheet, sharedStrings, verify) => {
   }, verify)
 }
 
-const hasMetadataMarker = (files, sheet, sharedStrings) => {
-  try {
-    const rows = worksheetRows(readXml(files, sheet.path), sharedStrings)
-    const marker = rows.get(1)?.get(0)
-    return Boolean(marker && !marker.formula && marker.value === 'Panel-v2')
-  } catch {
-    return false
+const hasMetadataEnvelope = (files, sheet, sharedStrings) => {
+  const envelopeCells = new Set()
+  const markerValues = []
+  const xml = readXml(files, sheet.path)
+  for (const match of xml.matchAll(/<c\b([^>]*?)>([\s\S]*?)<\/c\s*>/g)) {
+    const reference = xmlAttribute(match[1], 'r')
+    if (reference !== 'A1' && reference !== 'A2' && reference !== 'A3') continue
+    const type = xmlAttribute(match[1], 't')
+    if (reference !== 'A1' && ['inlineStr', 's', 'str'].includes(type)) {
+      envelopeCells.add(reference)
+    }
+    try {
+      const value = cellValue(match[1], match[2], sharedStrings)
+      if (reference === 'A1' && typeof value === 'string') markerValues.push(value)
+      else if (typeof value === 'string') envelopeCells.add(reference)
+    } catch {}
   }
+  return markerValues.includes('Panel-v2')
+    && envelopeCells.has('A2')
+    && envelopeCells.has('A3')
 }
 
 const headerColumns = (rows) => {
@@ -171,22 +183,23 @@ export const readPanelWorkbook = async (source, { verify } = {}) => {
   ))
   const recognized = new Set([...PANEL_VISIBLE_SHEETS, PANEL_PERMISSIONS_SHEET, PANEL_META_SHEET])
   const panelSheets = catalog.sheets.filter(({ name }) => recognized.has(name))
-  const markerSheets = catalog.sheets.filter((sheet) => hasMetadataMarker(files, sheet, sharedStrings))
+  const envelopeSheets = catalog.sheets.filter((sheet) => (
+    hasMetadataEnvelope(files, sheet, sharedStrings)
+  ))
   const hasPanelArtifacts = panelSheets.length > 0
     || catalog.sheets.some(({ name }) => name.startsWith('Panel — '))
-    || sharedStrings.includes('Panel-v2')
-    || markerSheets.length > 0
+    || envelopeSheets.length > 0
   if (!hasPanelArtifacts) {
     return { edits: [], kind: 'legacy', metadata: null, voidIds: [] }
   }
   const metaSheets = panelSheets.filter(({ name }) => name === PANEL_META_SHEET)
   if (metaSheets.length !== 1) {
-    if (markerSheets.length === 1) {
-      await readSignedMetadata(files, markerSheets[0], sharedStrings, verify)
+    if (envelopeSheets.length === 1) {
+      await readSignedMetadata(files, envelopeSheets[0], sharedStrings, verify)
     }
     fail('PANEL_META_REQUIRED')
   }
-  if (markerSheets.length !== 1 || markerSheets[0].path !== metaSheets[0].path) {
+  if (envelopeSheets.length !== 1 || envelopeSheets[0].path !== metaSheets[0].path) {
     fail('PANEL_META_INVALID')
   }
   const names = new Set()
