@@ -115,6 +115,9 @@ const emptyWorkspaceBody = (from = '2026-08-01', to = '2026-08-31') => ({
     specialists: [],
     clients: [],
     appointments: [],
+    historicalClients: [],
+    historicalOccurrences: [],
+    latestPopulatedMonth: null,
   },
 })
 
@@ -196,8 +199,66 @@ const fullWorkspaceBody = () => ({
         replacementEntryId: null,
       }],
     }],
+    historicalClients: [],
+    historicalOccurrences: [],
+    latestPopulatedMonth: null,
   },
 })
+
+const historicalWorkspaceBody = () => {
+  const body = fullWorkspaceBody()
+  body.data.historicalClients = [{
+    id: 'hcl_ola_history',
+    name: 'Ola Historyczna',
+    status: 'historical',
+    activeClientId: null,
+    version: 1,
+    createdAt: '2026-08-27T10:00:00.000Z',
+    updatedAt: '2026-08-27T10:00:00.000Z',
+  }]
+  body.data.historicalOccurrences = [{
+    id: 'hoc_ola_day',
+    historicalClientId: 'hcl_ola_history',
+    counterparty: null,
+    specialistId: 'sp_anna',
+    serviceId: 'zajecia',
+    serviceLabel: 'Konsultacja psychologiczna',
+    period: { precision: 'day', day: '2026-08-12', month: '2026-08' },
+    status: 'recorded',
+    version: 1,
+    sourceRecordId: 'wbs_ola_day',
+    createdAt: '2026-08-27T10:00:00.000Z',
+    updatedAt: '2026-08-27T10:00:00.000Z',
+  }, {
+    id: 'hoc_school_month',
+    historicalClientId: null,
+    counterparty: { id: 'hcp_school', name: 'Szkoła Podstawowa nr 1' },
+    specialistId: 'sp_anna',
+    serviceId: null,
+    serviceLabel: 'Superwizja zespołu',
+    period: { precision: 'month', day: null, month: '2026-08' },
+    status: 'recorded',
+    version: 1,
+    sourceRecordId: 'wbs_school_month',
+    createdAt: '2026-08-27T10:00:00.000Z',
+    updatedAt: '2026-08-27T10:00:00.000Z',
+  }, {
+    id: 'hoc_ola_unknown',
+    historicalClientId: 'hcl_ola_history',
+    counterparty: null,
+    specialistId: 'sp_anna',
+    serviceId: null,
+    serviceLabel: 'Usługa historyczna',
+    period: { precision: 'unknown', day: null, month: null },
+    status: 'voided',
+    version: 2,
+    sourceRecordId: 'wbs_ola_unknown',
+    createdAt: '2026-08-27T10:00:00.000Z',
+    updatedAt: '2026-08-27T10:01:00.000Z',
+  }]
+  body.data.latestPopulatedMonth = '2026-08'
+  return body
+}
 
 test('rejects invalid workspace windows without fetching and constructs the exact GET', async () => {
   assert.equal(typeof apiClient.loadWorkspaceWindow, 'function')
@@ -345,6 +406,133 @@ test('captures and deeply freezes a complete workspace response independently of
   assert.equal(result.appointments[0].paymentEntries[1].amountGrosze, 18000)
 })
 
+test('captures historical people, counterparties, source precision, and scoped latest month without inventing timed facts', async () => {
+  const source = historicalWorkspaceBody()
+  const { fetchImpl } = queuedFetch(parsedResponse(source))
+
+  const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+
+  assert.deepEqual(result.historicalClients, source.data.historicalClients)
+  assert.deepEqual(result.historicalOccurrences, source.data.historicalOccurrences)
+  assert.equal(result.latestPopulatedMonth, '2026-08')
+  assert.deepEqual(result.historicalOccurrences.map(({ period }) => period.precision), [
+    'day', 'month', 'unknown',
+  ])
+  assert.equal(result.historicalOccurrences[1].serviceId, null)
+  assert.deepEqual(Object.keys(result.historicalOccurrences[0]).sort(), [
+    'counterparty', 'createdAt', 'historicalClientId', 'id', 'period', 'serviceId',
+    'serviceLabel', 'sourceRecordId', 'specialistId', 'status', 'updatedAt', 'version',
+  ])
+  assert.equal(Object.hasOwn(result.historicalOccurrences[0], 'startsAt'), false)
+  assert.equal(Object.hasOwn(result.historicalOccurrences[0], 'amountGrosze'), false)
+  assertDeepFrozen(result.historicalClients)
+  assertDeepFrozen(result.historicalOccurrences)
+
+  source.data.historicalClients[0].name = 'Zmienione źródło'
+  source.data.historicalOccurrences[0].period.day = '2026-08-30'
+  assert.equal(result.historicalClients[0].name, 'Ola Historyczna')
+  assert.equal(result.historicalOccurrences[0].period.day, '2026-08-12')
+})
+
+test('accepts only archived specialist profiles referenced by historical occurrences', async () => {
+  const source = historicalWorkspaceBody()
+  source.data.specialists.push({
+    id: 'sp_archived_history', displayName: 'Zofia Archiwalna',
+    standardRateGrosze: 19000, status: 'archived', version: 4, staffVersion: 6,
+  })
+  source.data.historicalOccurrences[1].specialistId = 'sp_archived_history'
+  const { fetchImpl } = queuedFetch(parsedResponse(source))
+  const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+  assert.equal(result.specialists[1].status, 'archived')
+  assert.equal(result.historicalOccurrences[1].specialistId, 'sp_archived_history')
+
+  const leaked = historicalWorkspaceBody()
+  leaked.data.specialists.push(structuredClone(source.data.specialists[1]))
+  await rejectWorkspaceBody(leaked)
+})
+
+test('workspace historical DTOs enforce exact shapes, cross references, precision windows, ordering, and scoped activation links', async () => {
+  const cases = [
+    (body) => { body.data.historicalClients[0].name = 'Ola\u200DHistoryczna' },
+    (body) => { body.data.historicalClients[0].status = 'activated'; body.data.historicalClients[0].activeClientId = 'cl_missing' },
+    (body) => { body.data.historicalClients[0].status = 'historical'; body.data.historicalClients[0].activeClientId = 'cl_ola' },
+    (body) => { body.data.historicalOccurrences[0].historicalClientId = 'hcl_missing' },
+    (body) => { body.data.historicalOccurrences[0].specialistId = 'sp_missing' },
+    (body) => { body.data.historicalOccurrences[0].counterparty = { id: 'hcp_bad', name: 'Firma' } },
+    (body) => { body.data.historicalOccurrences[1].counterparty.name = 'Firma\u0000' },
+    (body) => { body.data.historicalOccurrences[0].period.day = '2026-09-01'; body.data.historicalOccurrences[0].period.month = '2026-09' },
+    (body) => { body.data.historicalOccurrences[1].period.month = '2026-09' },
+    (body) => { body.data.historicalOccurrences[0].sourceRecordId = body.data.historicalOccurrences[1].sourceRecordId },
+    (body) => { body.data.historicalOccurrences.reverse() },
+    (body) => { body.data.historicalClients.push(structuredClone(body.data.historicalClients[0])) },
+    (body) => { body.data.historicalOccurrences.push(structuredClone(body.data.historicalOccurrences[0])) },
+    (body) => { body.data.latestPopulatedMonth = '2026-07' },
+    (body) => { body.data.latestPopulatedMonth = null },
+  ]
+  for (const mutate of cases) {
+    const body = historicalWorkspaceBody()
+    mutate(body)
+    await rejectWorkspaceBody(body)
+  }
+
+  const scoped = historicalWorkspaceBody()
+  scoped.data.historicalClients[0].status = 'activated'
+  scoped.data.historicalClients[0].version = 2
+  scoped.data.historicalClients[0].activeClientId = null
+  const { fetchImpl } = queuedFetch(parsedResponse(scoped))
+  const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+  assert.equal(result.historicalClients[0].status, 'activated')
+  assert.equal(result.historicalClients[0].activeClientId, null)
+})
+
+test('workspace historical arrays enforce bounded cap plus one without truncation', async () => {
+  const boundary = fullWorkspaceBody()
+  boundary.data.historicalClients = Array.from({ length: 1_000 }, (_, index) => ({
+    id: `hcl_${String(index).padStart(4, '0')}`,
+    name: `Osoba ${String(index).padStart(4, '0')}`,
+    status: 'historical', activeClientId: null, version: 1,
+    createdAt: '2026-08-27T10:00:00.000Z', updatedAt: '2026-08-27T10:00:00.000Z',
+  }))
+  boundary.data.historicalOccurrences = boundary.data.historicalClients.map((client, index) => ({
+    id: `hoc_${String(index).padStart(4, '0')}`,
+    historicalClientId: client.id, counterparty: null, specialistId: 'sp_anna',
+    serviceId: null, serviceLabel: 'Usługa historyczna',
+    period: { precision: 'unknown', day: null, month: null }, status: 'recorded',
+    version: 1, sourceRecordId: `wbs_${String(index).padStart(4, '0')}`,
+    createdAt: '2026-08-27T10:00:00.000Z', updatedAt: '2026-08-27T10:00:00.000Z',
+  }))
+  const { fetchImpl } = queuedFetch(parsedResponse(boundary))
+  const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+  assert.equal(result.historicalClients.length, 1_000)
+  assert.equal(result.historicalOccurrences.length, 1_000)
+
+  for (const field of ['historicalClients', 'historicalOccurrences']) {
+    const overflow = structuredClone(boundary)
+    const extra = structuredClone(overflow.data[field].at(-1))
+    extra.id = field === 'historicalClients' ? 'hcl_overflow' : 'hoc_overflow'
+    if (field === 'historicalClients') {
+      extra.name = 'Żaneta Overflow'
+      overflow.data.historicalOccurrences.push({
+        ...structuredClone(overflow.data.historicalOccurrences.at(-1)),
+        id: 'hoc_overflow_client', historicalClientId: extra.id,
+        sourceRecordId: 'wbs_overflow_client',
+      })
+    } else {
+      extra.sourceRecordId = 'wbs_overflow_occurrence'
+    }
+    overflow.data[field].push(extra)
+    await rejectWorkspaceBody(overflow)
+  }
+})
+
 test('workspace text rejects malformed Unicode and preserves valid astral pairs', async () => {
   const malformed = [
     '\uD800',
@@ -407,20 +595,24 @@ test('rejects missing, extra, and wrong-typed workspace keys at every nesting le
     ['data', 'appointments', 0, 'charge'],
     ['data', 'appointments', 0, 'payment'],
     ['data', 'appointments', 0, 'paymentEntries', 0],
+    ['data', 'historicalClients', 0],
+    ['data', 'historicalOccurrences', 0],
+    ['data', 'historicalOccurrences', 0, 'period'],
+    ['data', 'historicalOccurrences', 1, 'counterparty'],
   ]
   for (const path of objectPaths) {
-    const template = fullWorkspaceBody()
+    const template = historicalWorkspaceBody()
     const keys = Object.keys(workspaceAt(template, path))
     for (const key of keys) {
-      const missing = fullWorkspaceBody()
+      const missing = historicalWorkspaceBody()
       delete workspaceAt(missing, path)[key]
       await rejectWorkspaceBody(missing)
 
-      const wrong = fullWorkspaceBody()
+      const wrong = historicalWorkspaceBody()
       workspaceAt(wrong, path)[key] = { invalid: true }
       await rejectWorkspaceBody(wrong)
     }
-    const extra = fullWorkspaceBody()
+    const extra = historicalWorkspaceBody()
     workspaceAt(extra, path).contact = 'private@example.test'
     await rejectWorkspaceBody(extra)
   }
@@ -2895,6 +3087,27 @@ const clientDto = (overrides = {}) => ({
 
 const clientEnvelope = (client) => ({ data: { client } })
 
+const historicalActivationEnvelope = (overrides = {}) => {
+  const createdAt = '2026-08-27T10:00:00.000Z'
+  return {
+    data: {
+      historicalClient: {
+        id: 'hcl_ola_history', name: 'Ola Historyczna', status: 'activated',
+        activeClientId: 'cl_activated_ola', version: 2,
+        createdAt: '2026-08-01T10:00:00.000Z', updatedAt: createdAt,
+      },
+      client: clientDto({
+        id: 'cl_activated_ola', name: 'Ola Historyczna', age: null,
+        createdAt, updatedAt: createdAt,
+        assignment: {
+          id: 'asg_activated_ola', specialistId: 'sp_anna', startsAt: createdAt, version: 1,
+        },
+      }),
+      ...overrides,
+    },
+  }
+}
+
 test('finance API lists a month and sends the exact import lifecycle requests', async () => {
   const batch = {
     id: 'fib_api_one', fingerprint: 'a'.repeat(64), formatVersion: 1,
@@ -3188,6 +3401,78 @@ test('workbook export cancels an undeclared stream as soon as the client byte ca
   })
   assert.equal(cancelled, true)
   assert.equal(pulls, 2)
+})
+
+test('historical activation sends the exact protected command and authenticates the linked result', async () => {
+  assert.equal(typeof apiClient.activateHistoricalClient, 'function')
+  const response = historicalActivationEnvelope()
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse(response, 201),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  const result = await client.activateHistoricalClient(
+    'hcl_ola_history', 1, 'sp_anna', { idempotencyKey: 'historical-activate-key-0001' },
+  )
+
+  assert.deepEqual(result, response.data)
+  assertDeepFrozen(result)
+  assert.notEqual(result, response.data)
+  assert.notEqual(result.historicalClient, response.data.historicalClient)
+  assert.notEqual(result.client, response.data.client)
+  assert.equal(calls[1].url, '/api/v1/historical-clients/hcl_ola_history/activation')
+  assert.equal(calls[1].init.method, 'POST')
+  assert.equal(calls[1].init.body, '{"expectedVersion":1,"specialistId":"sp_anna"}')
+  assert.equal(header(calls[1], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(calls[1], 'Idempotency-Key'), 'historical-activate-key-0001')
+})
+
+test('historical activation rejects hostile inputs and incoherent success links before exposing data', async () => {
+  let generated = 0
+  const invalidCalls = [
+    (client) => client.activateHistoricalClient('cl_wrong', 1, 'sp_anna'),
+    (client) => client.activateHistoricalClient('hcl_ola_history', 0, 'sp_anna'),
+    (client) => client.activateHistoricalClient('hcl_ola_history', 1, 'staff_anna'),
+    (client) => client.activateHistoricalClient('hcl_ola_history', 1, 'sp_anna', {}),
+    (client) => client.activateHistoricalClient(
+      'hcl_ola_history', 1, 'sp_anna', { idempotencyKey: 'bad key' },
+    ),
+  ]
+  for (const invoke of invalidCalls) {
+    const queued = queuedFetch()
+    const client = createApiClient({
+      fetchImpl: queued.fetchImpl,
+      idempotencyKeyFactory: () => { generated += 1; return 'unused-history-key-0001' },
+    })
+    await assert.rejects(Promise.resolve().then(() => invoke(client)), assertClientInput)
+    assert.equal(queued.calls.length, 0)
+  }
+  assert.equal(generated, 0)
+
+  const malformed = [
+    (body) => { body.extra = true },
+    (body) => { body.data.historicalClient.id = 'hcl_other' },
+    (body) => { body.data.historicalClient.version = 1 },
+    (body) => { body.data.historicalClient.status = 'historical'; body.data.historicalClient.activeClientId = null },
+    (body) => { body.data.historicalClient.activeClientId = 'cl_other' },
+    (body) => { body.data.client.id = 'cl_other' },
+    (body) => { body.data.client.name = 'Inna osoba' },
+    (body) => { body.data.client.age = 12 },
+    (body) => { body.data.client.assignment.specialistId = 'sp_other' },
+    (body) => { body.data.client.version = 2 },
+  ]
+  for (const mutate of malformed) {
+    const body = historicalActivationEnvelope()
+    mutate(body)
+    const queued = queuedFetch(jsonResponse(sessionBody()), jsonResponse(body, 201))
+    const client = createApiClient({ fetchImpl: queued.fetchImpl })
+    await client.getSession()
+    await assert.rejects(client.activateHistoricalClient(
+      'hcl_ola_history', 1, 'sp_anna', { idempotencyKey: 'history-invalid-key-0001' },
+    ), assertInvalidResponse)
+  }
 })
 
 test('exposes client commands and sends canonical create, edit, and archive requests', async () => {

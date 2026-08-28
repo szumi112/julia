@@ -55,8 +55,13 @@ const VALIDATION_FIELDS = new Set([
   'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
   'entries', 'accountingMonth', 'kind',
   'standardRateGrosze',
+  'historicalClientId', 'importId', 'expectedJobVersion', 'conflictId',
+  'classification', 'existingSubjectId',
 ])
-const WORKSPACE_FIELDS = new Set(['specialists', 'clients', 'appointments', 'paymentEntries'])
+const WORKSPACE_FIELDS = new Set([
+  'specialists', 'clients', 'appointments', 'paymentEntries',
+  'historicalClients', 'historicalOccurrences',
+])
 const EXACT_INTERNAL_MESSAGES = new Set(Object.keys(STATUS_BY_CODE))
 
 const safeDetails = (code, details) => {

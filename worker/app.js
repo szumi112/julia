@@ -37,6 +37,12 @@ import {
   postSpecialistInvitation,
 } from './routes/staff.js'
 import { getWorkspace } from './routes/workspace.js'
+import {
+  getHistoricalProjectionStatus,
+  postHistoricalClientActivation,
+  postHistoricalProjectionContinue,
+  postHistoricalProjectionResolution,
+} from './routes/historical-clients.js'
 import { postClient, postClientArchive, postClientEdit } from './routes/clients.js'
 import {
   postAppointment,
@@ -87,6 +93,7 @@ const APPOINTMENT_PATH_ID = 'apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const PAYMENT_PATH_ID = 'pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const FINANCE_BATCH_PATH_ID = 'fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const WORKBOOK_IMPORT_PATH_ID = 'wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const HISTORICAL_CLIENT_PATH_ID = 'hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const CORE_COMMAND_ALLOW = 'POST, OPTIONS'
 const CORE_READ_ALLOW = 'GET, HEAD, OPTIONS'
 const CORE_BUDGET = Object.freeze({ totalLimit: 50, recoveryReserve: 8 })
@@ -132,6 +139,10 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'workbooks.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['workbook.import.materialized'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
   descriptor({ id: 'workbooks.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, queryMode: 'none' }),
   descriptor({ id: 'workbooks.export', path: '/api/v1/workbooks/export', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, freshAuth: true, queryMode: 'handler' }),
+  descriptor({ id: 'historical.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedVersion'], freshAuth: true }),
+  descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], freshAuth: true }),
+  descriptor({ id: 'historical.clients.activate', pathPattern: `^/api/v1/historical-clients/${HISTORICAL_CLIENT_PATH_ID}/activation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'] }),
 ])
 export const CORE_ROUTE_DESCRIPTORS = CORE_ROUTES
 if (CORE_ROUTES.some((route) => route.auditActions.some((action) => !isCoreAuditAction(action)))) {
@@ -819,6 +830,57 @@ export function createApp(deps = {}) {
       return new Response(null, { status: 200, headers })
     }
     return new Response(workbookStream(result.bytes), { status: 200, headers })
+  })
+  app.get('/api/v1/workbooks/imports/:importId/historical-projection', async (c) => {
+    if (c.get('routeId') !== 'historical.projection.status') throw new AppError('NOT_FOUND')
+    const result = await getHistoricalProjectionStatus({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, importId: c.req.param('importId'),
+      service: deps.getHistoricalProjectionStatus,
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/workbooks/imports/:importId/historical-projection/continue', async (c) => {
+    if (c.get('routeId') !== 'historical.projection.continue') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await postHistoricalProjectionContinue({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, config: runtimeConfig(c, deps),
+      centreId: 'centre_1', importId: c.req.param('importId'),
+      body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      idFactory: deps.idFactory ?? idFactory, nowMs: c.get('nowMs'),
+      service: deps.postHistoricalProjectionContinue,
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/workbooks/imports/:importId/historical-projection/resolutions', async (c) => {
+    if (c.get('routeId') !== 'historical.projection.resolve') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await postHistoricalProjectionResolution({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, config: runtimeConfig(c, deps),
+      centreId: 'centre_1', importId: c.req.param('importId'),
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+      idFactory: deps.idFactory ?? idFactory, nowMs: c.get('nowMs'),
+      service: deps.postHistoricalProjectionResolution,
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/historical-clients/:historicalClientId/activation', async (c) => {
+    if (c.get('routeId') !== 'historical.clients.activate') throw new AppError('NOT_FOUND')
+    const result = await postHistoricalClientActivation({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring,
+      historicalClientId: c.req.param('historicalClientId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      nowMs: c.get('nowMs'),
+      service: deps.postHistoricalClientActivation,
+    })
+    return c.json(result.body, result.status)
   })
   app.options('/api/v1/session', (c) => new Response(null, {
     status: 204,

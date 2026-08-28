@@ -164,13 +164,42 @@ const reversedPaymentAppointment = {
   }],
 }
 
+const historicalWorkbookClient = {
+  id: 'hcl_workbook_history', name: 'Historia bez godziny', status: 'historical',
+  activeClientId: null, version: 1,
+  createdAt: '2026-07-20T08:00:00.000Z', updatedAt: '2026-07-20T08:00:00.000Z',
+}
+
+const historicalWorkbookOccurrence = {
+  id: 'hoc_workbook_history', historicalClientId: 'hcl_workbook_history',
+  counterparty: null, specialistId: 'sp_anna', serviceId: 'zajecia',
+  serviceLabel: 'Wizyta historyczna bez godziny',
+  period: { precision: 'month', day: null, month: '2026-07' },
+  status: 'recorded', version: 1, sourceRecordId: 'wbs_workbook_history',
+  createdAt: '2026-07-20T08:00:00.000Z', updatedAt: '2026-07-20T08:00:00.000Z',
+}
+
+const workspaceData = (from, to, {
+  specialists = [activeSpecialist],
+  clients = [activeClient],
+  appointments = [],
+  historicalClients = [],
+  historicalOccurrences = [],
+  latestPopulatedMonth = null,
+} = {}) => ({
+  window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
+  specialists,
+  clients,
+  appointments,
+  historicalClients,
+  historicalOccurrences,
+  latestPopulatedMonth,
+})
+
 const workspaceEnvelope = (from, to, appointment = null) => json(200, {
-  data: {
-    window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
-    specialists: [activeSpecialist],
-    clients: [activeClient],
+  data: workspaceData(from, to, {
     appointments: appointment === null ? [] : [appointment],
-  },
+  }),
 })
 
 const containsHistory = (from, to) => from <= '2026-07-15' && to >= '2026-07-15'
@@ -238,6 +267,31 @@ test('@owner falls back from invalid civil report months without rendering error
   expect(windows).toEqual([{ from: '2026-07-01', to: '2026-07-31' }])
 })
 
+test('@owner keeps untimed workbook history outside Calendar sessions', async ({ page }) => {
+  const pageErrors = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const url = new URL(route.request().url())
+    await route.fulfill(json(200, { data: workspaceData(
+      url.searchParams.get('from'), url.searchParams.get('to'), {
+        appointments: [scheduledAppointment],
+        historicalClients: [historicalWorkbookClient],
+        historicalOccurrences: [historicalWorkbookOccurrence],
+        latestPopulatedMonth: '2026-07',
+      },
+    ) }))
+  })
+
+  await page.goto('./#/calendar?date=2026-07-15')
+  const plan = page.getByRole('region', { name: 'Plan dnia' })
+  await expect(plan.getByText('Ola Aktywna', { exact: true })).toBeVisible()
+  await expect(plan.getByText('Historia bez godziny', { exact: true })).toHaveCount(0)
+  await expect(plan.getByText('Wizyta historyczna bez godziny', { exact: true }))
+    .toHaveCount(0)
+  expect(pageErrors).toEqual([])
+})
+
 test('@owner renders only complete canonical workspace windows as read-only history', async ({ page }) => {
   const pageErrors = []
   let workspaceReads = 0
@@ -252,14 +306,10 @@ test('@owner renders only complete canonical workspace windows as read-only hist
       await new Promise((resolve) => setTimeout(resolve, 600))
     }
     const history = containsHistory(from, to)
-    await route.fulfill(json(200, {
-      data: {
-        window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
-        specialists: [activeSpecialist],
-        clients: history ? [activeClient, archivedClient] : [activeClient],
-        appointments: history ? [historicalAppointment, scheduledAppointment] : [],
-      },
-    }))
+    await route.fulfill(json(200, { data: workspaceData(from, to, {
+      clients: history ? [activeClient, archivedClient] : [activeClient],
+      appointments: history ? [historicalAppointment, scheduledAppointment] : [],
+    }) }))
   })
 
   await page.goto('./#/clients')
@@ -331,17 +381,11 @@ test('@owner does not drag a read-only Calendar appointment', async ({ page }) =
   await freezeTime(page, '2026-07-15T08:00:00.000Z')
   await page.route('**/api/v1/workspace?*', async (route) => {
     const url = new URL(route.request().url())
-    await route.fulfill(json(200, {
-      data: {
-        window: {
-          from: url.searchParams.get('from'), to: url.searchParams.get('to'),
-          timeZone: 'Europe/Warsaw', complete: true,
-        },
-        specialists: [activeSpecialist],
-        clients: [archivedClient],
-        appointments: [archivedScheduledAppointment],
+    await route.fulfill(json(200, { data: workspaceData(
+      url.searchParams.get('from'), url.searchParams.get('to'), {
+        clients: [archivedClient], appointments: [archivedScheduledAppointment],
       },
-    }))
+    ) }))
   })
   await page.route('**/api/v1/appointments/apt_history/edits', async (route) => {
     edits += 1

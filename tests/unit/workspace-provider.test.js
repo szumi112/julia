@@ -6,9 +6,9 @@ import * as workspaceProvider from '../../src/workspace-provider.js'
 const { createWorkspaceProviderController } = workspaceProvider
 
 const WORKSPACE_KEYS = [
-  'archiveClient', 'cancelAppointment', 'correctPayment', 'createAppointment',
-  'createClient', 'editAppointment', 'editClient', 'loadWindow', 'loadedRanges',
-  'recordPayment', 'status',
+  'activateHistoricalClient', 'archiveClient', 'cancelAppointment', 'correctPayment',
+  'createAppointment', 'createClient', 'editAppointment', 'editClient', 'loadWindow',
+  'loadedRanges', 'recordPayment', 'status',
 ]
 const range = (from, to = from) => ({ from, to })
 const specialist = () => ({ id: 'sp_anna', displayName: 'Anna', status: 'active', version: 1 })
@@ -26,9 +26,24 @@ const paymentEntry = (overrides = {}) => ({
   receivedAt: '2026-08-04T10:00:00.000Z', correctedAt: null, replacementEntryId: null,
   ...overrides,
 })
-const payload = (from, to = from, appointments = []) => ({
+const historicalClient = (overrides = {}) => ({
+  id: 'hcl_ola', name: 'Ola Historyczna', status: 'historical', activeClientId: null,
+  version: 1, createdAt: '2026-07-01T08:00:00.000Z',
+  updatedAt: '2026-07-01T08:00:00.000Z', ...overrides,
+})
+const historicalOccurrence = () => ({
+  id: 'hoc_ola', historicalClientId: 'hcl_ola', counterparty: null,
+  specialistId: 'sp_anna', serviceId: null, serviceLabel: 'Usługa historyczna',
+  period: { precision: 'month', day: null, month: '2026-07' }, status: 'recorded',
+  version: 1, sourceRecordId: 'wbs_ola', createdAt: '2026-07-01T08:00:00.000Z',
+  updatedAt: '2026-07-01T08:00:00.000Z',
+})
+const payload = (from, to = from, appointments = [], historical = null) => ({
   window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
   specialists: [specialist()], clients: [client()], appointments,
+  historicalClients: historical === null ? [] : [historicalClient(historical)],
+  historicalOccurrences: historical === null ? [] : [historicalOccurrence()],
+  latestPopulatedMonth: historical === null ? null : '2026-07',
 })
 const deferred = () => {
   let resolve
@@ -40,6 +55,7 @@ const repositoryWith = (overrides = {}) => Object.freeze({
   loadWindow: async ({ from, to }) => payload(from, to),
   createClient: async (input) => ({ id: 'cl_created', input }),
   editClient: async () => ({}), archiveClient: async () => ({}),
+  activateHistoricalClient: async () => ({}),
   createAppointment: async () => ({}), editAppointment: async () => ({}),
   cancelAppointment: async () => ({}), recordPayment: async () => ({}),
   correctPayment: async () => ({}), ...overrides,
@@ -127,7 +143,7 @@ test('authority reset replaces repository, clears state and toasts, and rejects 
 
 test('every old-authority mutation completion is replaced by one fixed stale error', async () => {
   const methods = [
-    'createClient', 'editClient', 'archiveClient', 'createAppointment',
+    'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient', 'createAppointment',
     'editAppointment', 'cancelAppointment', 'recordPayment', 'correctPayment',
   ]
   for (const method of methods) {
@@ -153,6 +169,10 @@ test('every old-authority mutation completion is replaced by one fixed stale err
         ? controller.getSnapshot().workspace.correctPayment('pay_ola', 1, {
           reason: 'Korekta', replacement: null,
         })
+        : method === 'activateHistoricalClient'
+          ? controller.getSnapshot().workspace.activateHistoricalClient('hcl_ola', {
+            expectedVersion: 1, specialistId: 'sp_anna',
+          })
         : controller.getSnapshot().workspace[method]('private-input', { secret: true })
     controller.resetAuthority(`next-${method}`)
     turn.resolve({ secretDto: method })
@@ -413,6 +433,53 @@ test('successful client commands stay locked until canonical reconciliation or a
   assert.equal(controller.getSnapshot().clientMutationLocked, true)
   controller.resetAuthority('authority-two')
   assert.equal(controller.getSnapshot().clientMutationLocked, false)
+})
+
+test('accepted historical activation shares the client lock and unlocks only after the activated version is canonically reloaded', async () => {
+  const conflict = Object.assign(new Error('conflict'), {
+    code: 'VERSION_CONFLICT', status: 409,
+  })
+  let julyLoads = 0
+  let activationCalls = 0
+  const controller = makeController(() => repositoryWith({
+    loadWindow: async ({ from, to }) => {
+      if (from.startsWith('2026-07')) {
+        julyLoads += 1
+        if (julyLoads === 2) throw conflict
+        return payload(from, to, [], julyLoads === 1 ? {} : {
+          status: 'activated', activeClientId: 'cl_ola', version: 2,
+          updatedAt: '2026-07-20T08:00:00.000Z',
+        })
+      }
+      return {
+        ...payload(from, to),
+        latestPopulatedMonth: '2026-07',
+      }
+    },
+    activateHistoricalClient: async () => { activationCalls += 1; return {} },
+  }))
+  await controller.getSnapshot().workspace.loadWindow(range('2026-07-01', '2026-07-31'))
+  await controller.getSnapshot().workspace.activateHistoricalClient('hcl_ola', {
+    expectedVersion: 1, specialistId: 'sp_anna',
+  })
+  assert.equal(controller.getSnapshot().clientMutationLocked, true)
+  await assert.rejects(controller.getSnapshot().workspace.activateHistoricalClient('hcl_ola', {
+    expectedVersion: 1, specialistId: 'sp_anna',
+  }), { code: 'WORKSPACE_RECONCILIATION_REQUIRED' })
+
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-01'))
+  assert.equal(controller.getSnapshot().clientMutationLocked, true)
+  await assert.rejects(
+    controller.getSnapshot().workspace.loadWindow(range('2026-07-01', '2026-07-31')),
+    conflict,
+  )
+  assert.equal(controller.getSnapshot().clientMutationLocked, true)
+
+  await controller.getSnapshot().workspace.loadWindow(range('2026-07-01', '2026-07-31'))
+  assert.equal(controller.getSnapshot().clientMutationLocked, false)
+  assert.equal(controller.getSnapshot().loadedState.historicalClientsById.hcl_ola.status,
+    'activated')
+  assert.equal(activationCalls, 1)
 })
 
 test('successful appointment create, edit, and cancellation stay locked until canonical reconciliation', async () => {

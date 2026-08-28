@@ -23,12 +23,14 @@ import { SERVICE_BY_ID } from './services.js'
 
 const API_METHODS = Object.freeze([
   'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
+  'activateHistoricalClient',
   'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
   'correctPayment', 'createIdempotencyKey',
 ])
 const REPOSITORY_METHODS = Object.freeze([
-  'loadWindow', 'createClient', 'editClient', 'archiveClient', 'createAppointment',
-  'editAppointment', 'cancelAppointment', 'recordPayment', 'correctPayment',
+  'loadWindow', 'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient',
+  'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
+  'correctPayment',
 ])
 const CLIENT_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'])
 const APPOINTMENT_KEYS = Object.freeze([
@@ -38,10 +40,12 @@ const APPOINTMENT_KEYS = Object.freeze([
 const APPOINTMENT_EDIT_KEYS = Object.freeze(APPOINTMENT_KEYS.filter((key) => key !== 'clientId'))
 const PAYMENT_KEYS = Object.freeze(['amountGrosze', 'method', 'paidDate'])
 const CORRECTION_KEYS = Object.freeze(['reason', 'replacement'])
+const HISTORICAL_ACTIVATION_KEYS = Object.freeze(['expectedVersion', 'specialistId'])
 const STATE_KEYS = Object.freeze(['psychologists', 'clients', 'sessions'])
 const collator = new Intl.Collator('pl-PL', { sensitivity: 'base', usage: 'sort' })
 const actionKey = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const legacyIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const historicalClientIdPattern = /^hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const demoStatuses = new Set(['scheduled', 'completed', 'cancelled', 'noshow'])
 const demoPaymentStatuses = new Set(['paid', 'partial', 'unpaid'])
 const demoMethods = new Set(['cash', 'card', 'transfer', 'monthly'])
@@ -162,6 +166,13 @@ const captureCorrection = (input) => {
   }
 }
 
+const captureHistoricalActivation = (input) => {
+  const captured = captureRecord(input, HISTORICAL_ACTIVATION_KEYS, 'body')
+  clientVersion(captured.expectedVersion)
+  capturedId(captured.specialistId, 'specialist')
+  return captured
+}
+
 const captureWindow = (input) => {
   const captured = captureRecord(input, ['from', 'to'], 'window')
   validateWarsawDateWindow(captured.from, captured.to)
@@ -204,6 +215,15 @@ export function createApiWorkspaceRepository(options) {
       capturedId(id, 'client')
       clientVersion(expectedVersion)
       return action((options) => api.archiveClient(id, expectedVersion, options))
+    },
+    async activateHistoricalClient(id, input) {
+      if (typeof id !== 'string' || !historicalClientIdPattern.test(id)) {
+        fail('historicalClientId')
+      }
+      const requested = captureHistoricalActivation(input)
+      return action((options) => api.activateHistoricalClient(
+        id, requested.expectedVersion, requested.specialistId, options,
+      ))
     },
     async createAppointment(input) {
       const requested = captureAppointment(input)
@@ -717,7 +737,13 @@ export function createDemoWorkspaceRepository(options) {
       return deepFreeze({
         window: { ...requested, timeZone: 'Europe/Warsaw', complete: true },
         specialists: specialistDtos, clients: clientDtos, appointments: appointmentDtos,
+        historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: null,
       })
+    },
+    async activateHistoricalClient() {
+      const error = new Error('WORKSPACE_READ_ONLY')
+      error.code = 'WORKSPACE_READ_ONLY'
+      throw error
     },
     async createClient(input) {
       const requested = captureClient(input)

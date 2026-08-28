@@ -70,6 +70,7 @@ test('protected app adapts the full API client to the exact bound workspace depe
   const calls = []
   const methodNames = [
     'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
+    'activateHistoricalClient',
     'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
     'correctPayment', 'createIdempotencyKey',
   ]

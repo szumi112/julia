@@ -4,20 +4,39 @@ import { parseWorkspaceQuery, readWorkspace } from '../../worker/core/workspace.
 import { getWorkspace } from '../../worker/routes/workspace.js'
 import { createApp } from '../../worker/app.js'
 import { areSiblingD1QueryBudgetViews, createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db/query-budget.js'
-import { applyCoreDirectoryStageB, completeCoreDirectoryStageA } from './apply-migrations.js'
+import {
+  applyCoreDirectoryStageB,
+  applyFinanceStageC,
+  applySpecialistProfilesStageD,
+  applyWorkbookRegistryStageE,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { buildClientDataKey, encryptClientIdentity } from '../../worker/core/crypto.js'
 
 await completeCoreDirectoryStageA()
 await applyCoreDirectoryStageB()
+await applyFinanceStageC()
+await applySpecialistProfilesStageD()
+await applyWorkbookRegistryStageE()
 
 const instant = (day, hour = '10') => `2026-08-${day}T${hour}:00:00.000Z`
 
-const scriptedDb = ({ specialists = [], appointments = [], clients = [], payments = [] } = {}) => {
+const scriptedDb = ({
+  specialists = [], appointments = [], clients = [], payments = [],
+  historicalClients = [], historicalCounterparties = [], historicalOccurrences = [],
+  historicalLatest = [{ latest_month: null }],
+} = {}) => {
   const calls = []
-  const rowsFor = (sql) => sql.includes('FROM specialists AS specialist') ? specialists
-    : sql.includes('charge.id AS charge_id') ? appointments
+  const rowsFor = (sql) => sql.includes('MAX(occurrence.occurred_month)') ? historicalLatest
+    : sql.includes('FROM specialists AS specialist') ? specialists
+      : sql.includes('FROM historical_clients AS historical_client') ? historicalClients
+      : sql.includes('FROM historical_counterparties AS historical_counterparty')
+        ? historicalCounterparties
+        : sql.includes('FROM historical_service_occurrences AS occurrence')
+          ? historicalOccurrences
+          : sql.includes('charge.id AS charge_id') ? appointments
       : sql.includes('FROM clients AS client') ? clients
         : sql.includes('correction.id AS correction_id') ? payments
           : null
@@ -45,6 +64,11 @@ const specialistRow = (id, staffId, version = 1) => ({
   id, staff_user_id: staffId, standard_rate_grosze: 18000, status: 'active', version,
   staff_id: staffId, staff_specialist_id: id, staff_status: 'active',
   staff_version: version + 2, display_name_envelope: `staff:${staffId}`,
+})
+
+const archivedSpecialistRow = (id, staffId, version = 2) => ({
+  ...specialistRow(id, staffId, version),
+  status: 'archived', staff_status: 'disabled',
 })
 
 const clientRow = (id, status, assignment = null) => ({
@@ -87,6 +111,44 @@ const withoutClientKey = (row) => ({
   key_id: null, key_scope_type: null, key_scope_id: null, key_purpose: null,
   key_dek_version: null, key_wrapped_key_b64: null, key_wrap_nonce_b64: null,
   key_kek_version: null, key_created_at: null, key_retired_at: null,
+})
+
+const historicalSubjectKey = (id, kind) => ({
+  key_id: `key_${id}`, key_scope_type: kind === 'person'
+    ? 'historical_client' : 'historical_counterparty',
+  key_scope_id: id, key_purpose: 'identity', key_dek_version: 1,
+  key_wrapped_key_b64: 'A'.repeat(64), key_wrap_nonce_b64: 'A'.repeat(16),
+  key_kek_version: 1, key_created_at: instant('01'), key_retired_at: null,
+})
+
+const historicalClientRow = (id, status = 'historical', activeClientId = null) => ({
+  id, identity_envelope: JSON.stringify({
+    format: 1, algorithm: 'A256GCM', dataKeyId: `key_${id}`, dataKeyVersion: 1,
+    nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAA',
+  }), status, active_client_id: activeClientId, version: status === 'activated' ? 2 : 1,
+  created_at: instant('01'), updated_at: instant(status === 'activated' ? '02' : '01'),
+  ...historicalSubjectKey(id, 'person'),
+})
+
+const historicalCounterpartyRow = (id) => ({
+  id, identity_envelope: JSON.stringify({
+    format: 1, algorithm: 'A256GCM', dataKeyId: `key_${id}`, dataKeyVersion: 1,
+    nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAA',
+  }), version: 1, created_at: instant('01'), updated_at: instant('01'),
+  ...historicalSubjectKey(id, 'counterparty'),
+})
+
+const historicalOccurrenceRow = ({
+  id, sourceRecordId, specialistId, historicalClientId = null, counterpartyId = null,
+  precision, day = null, month = null,
+}) => ({
+  id, source_record_id: sourceRecordId, historical_client_id: historicalClientId,
+  counterparty_id: counterpartyId, specialist_id: specialistId, service_id: 'zajecia',
+  service_label_envelope: JSON.stringify({
+    format: 1, algorithm: 'A256GCM', dataKeyId: `key_${historicalClientId ?? counterpartyId}`,
+    dataKeyVersion: 1, nonce: 'AAAAAAAAAAAAAAAA', ciphertext: 'AAAAAAAAAAAAAAAAAAAAAA',
+  }), period_precision: precision, occurred_on: day, occurred_month: month,
+  status: 'recorded', version: 1, created_at: instant('01'), updated_at: instant('01'),
 })
 
 describe('workspace read model', () => {
@@ -198,8 +260,9 @@ describe('workspace read model', () => {
           { id: 'pay_replacement', amountGrosze: 12000, method: 'card', receivedAt: instant('05', '09'), correctedAt: null, replacementEntryId: null },
         ],
       }],
+      historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: null,
     } })
-    expect(calls).toHaveLength(4)
+    expect(calls).toHaveLength(8)
     expect(calls[0].sql).toContain("specialist.status IN ('active','pending')")
     expect(calls[0].sql).toContain("staff.status IN ('pending','active')")
     expect(calls[0].sql).not.toContain("staff.role='specialist'")
@@ -225,7 +288,7 @@ describe('workspace read model', () => {
       decryptSpecialist: async () => 'Never',
       decryptClient: async () => ({ name: 'Never', age: null }),
     })
-    expect(calls).toHaveLength(4)
+    expect(calls).toHaveLength(8)
     expect(calls[1].sql).toContain('appointment.specialist_id=?')
     expect(calls[2].sql).toContain('assignment.specialist_id=?')
     expect(calls[2].sql).toContain('history.specialist_id=?')
@@ -233,6 +296,135 @@ describe('workspace read model', () => {
     expect(calls[1].bindings).toEqual(['sp_spec', window.lower, window.upper, 501])
     expect(calls[2].bindings).toEqual(['sp_spec', 'sp_spec', window.lower, window.upper, 1001])
     expect(calls[3].bindings).toEqual(['sp_spec', window.lower, window.upper, 1001])
+    for (const call of calls.slice(4)) expect(call.sql).toContain('occurrence.specialist_id=?')
+    expect(calls[4].bindings).toEqual([
+      'sp_spec', '2026-08-01', '2026-08-02', '2026-08', '2026-08', 1001,
+    ])
+    expect(calls[5].bindings).toEqual(calls[4].bindings)
+    expect(calls[6].bindings).toEqual(calls[4].bindings)
+    expect(calls[7].bindings).toEqual(['sp_spec'])
+  })
+
+  it('returns scoped historical precision without exposing an out-of-scope activated client link', async () => {
+    const window = parseWorkspaceQuery(
+      'https://panel.example/api/v1/workspace?from=2026-08-10&to=2026-09-05'
+    )
+    const historicalClients = [
+      historicalClientRow('hcl_scoped', 'historical'),
+      historicalClientRow('hcl_activated', 'activated', 'cl_other_scope'),
+    ]
+    const historicalCounterparties = [historicalCounterpartyRow('hcp_scoped')]
+    const historicalOccurrences = [
+      historicalOccurrenceRow({
+        id: 'hoc_day', sourceRecordId: 'wbs_day', specialistId: 'sp_spec',
+        historicalClientId: 'hcl_scoped', precision: 'day', day: '2026-08-12',
+        month: '2026-08',
+      }),
+      historicalOccurrenceRow({
+        id: 'hoc_month', sourceRecordId: 'wbs_month', specialistId: 'sp_spec',
+        historicalClientId: 'hcl_activated', precision: 'month', month: '2026-09',
+      }),
+      historicalOccurrenceRow({
+        id: 'hoc_unknown', sourceRecordId: 'wbs_unknown', specialistId: 'sp_spec',
+        counterpartyId: 'hcp_scoped', precision: 'unknown',
+      }),
+    ]
+    const { db, calls } = scriptedDb({
+      specialists: [specialistRow('sp_spec', 'stf_spec')],
+      historicalClients, historicalCounterparties, historicalOccurrences,
+      historicalLatest: [{ latest_month: '2026-09' }],
+    })
+    const result = await readWorkspace({
+      db,
+      actor: { id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec', version: 1 },
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+      window,
+      decryptSpecialist: async () => 'Fikcyjna',
+      decryptClient: async () => ({ name: 'Fikcyjna', age: null }),
+      decryptHistoricalIdentity: async ({ id }) => ({
+        hcl_scoped: 'Anna Fikcyjna', hcl_activated: 'Beata Fikcyjna',
+        hcp_scoped: 'Poradnia Fikcyjna',
+      })[id],
+      decryptHistoricalField: async () => 'Zajęcia indywidualne',
+    })
+
+    expect(result.data.historicalClients).toEqual([
+      {
+        id: 'hcl_scoped', name: 'Anna Fikcyjna', status: 'historical',
+        activeClientId: null, version: 1, createdAt: instant('01'), updatedAt: instant('01'),
+      },
+      {
+        id: 'hcl_activated', name: 'Beata Fikcyjna', status: 'activated',
+        activeClientId: null, version: 2, createdAt: instant('01'), updatedAt: instant('02'),
+      },
+    ])
+    expect(result.data.historicalOccurrences).toEqual([
+      {
+        id: 'hoc_day', historicalClientId: 'hcl_scoped', counterparty: null,
+        specialistId: 'sp_spec', serviceId: 'zajecia', serviceLabel: 'Zajęcia indywidualne',
+        period: { precision: 'day', day: '2026-08-12', month: '2026-08' },
+        status: 'recorded', version: 1, sourceRecordId: 'wbs_day',
+        createdAt: instant('01'), updatedAt: instant('01'),
+      },
+      {
+        id: 'hoc_month', historicalClientId: 'hcl_activated', counterparty: null,
+        specialistId: 'sp_spec', serviceId: 'zajecia', serviceLabel: 'Zajęcia indywidualne',
+        period: { precision: 'month', day: null, month: '2026-09' },
+        status: 'recorded', version: 1, sourceRecordId: 'wbs_month',
+        createdAt: instant('01'), updatedAt: instant('01'),
+      },
+      {
+        id: 'hoc_unknown', historicalClientId: null,
+        counterparty: { id: 'hcp_scoped', name: 'Poradnia Fikcyjna' },
+        specialistId: 'sp_spec', serviceId: 'zajecia', serviceLabel: 'Zajęcia indywidualne',
+        period: { precision: 'unknown', day: null, month: null },
+        status: 'recorded', version: 1, sourceRecordId: 'wbs_unknown',
+        createdAt: instant('01'), updatedAt: instant('01'),
+      },
+    ])
+    expect(result.data.latestPopulatedMonth).toBe('2026-09')
+    expect(calls.slice(4)).toHaveLength(4)
+    for (const call of calls.slice(4)) {
+      expect(call.sql).toContain('occurrence.specialist_id=?')
+    }
+    expect(JSON.stringify(result)).not.toContain('cl_other_scope')
+  })
+
+  it('returns only D1-referenced archived specialist profiles for historical occurrences', async () => {
+    const window = parseWorkspaceQuery(
+      'https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31',
+    )
+    const historicalClients = [historicalClientRow('hcl_archived_specialist')]
+    const historicalOccurrences = [historicalOccurrenceRow({
+      id: 'hoc_archived_specialist', sourceRecordId: 'wbs_archived_specialist',
+      specialistId: 'sp_archived_history', historicalClientId: 'hcl_archived_specialist',
+      precision: 'day', day: '2026-08-12', month: '2026-08',
+    })]
+    const { db, calls } = scriptedDb({
+      specialists: [archivedSpecialistRow(
+        'sp_archived_history', 'stf_archived_history',
+      )],
+      historicalClients, historicalOccurrences,
+      historicalLatest: [{ latest_month: '2026-08' }],
+    })
+    const result = await readWorkspace({
+      db,
+      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+      window,
+      decryptSpecialist: async () => 'Archiwalna Fikcyjna',
+      decryptClient: async () => ({ name: 'Fikcyjna', age: null }),
+      decryptHistoricalIdentity: async () => 'Klient Fikcyjny',
+      decryptHistoricalField: async () => 'Zajęcia psychologiczne',
+    })
+    expect(result.data.specialists).toEqual([{
+      id: 'sp_archived_history', displayName: 'Archiwalna Fikcyjna',
+      standardRateGrosze: 18000, status: 'archived', version: 2, staffVersion: 4,
+    }])
+    expect(result.data.historicalOccurrences[0].specialistId).toBe('sp_archived_history')
+    expect(calls[0].sql).toContain("specialist.status='archived'")
+    expect(calls[0].sql).toContain('FROM historical_service_occurrences AS occurrence')
+    expect(calls[0].sql).toContain('occurrence.specialist_id=specialist.id')
   })
 
   it.each([
@@ -255,7 +447,7 @@ describe('workspace read model', () => {
     expect(calls).toHaveLength(queryCount)
   })
 
-  it('returns every row at all public maxima without truncation in four statements', async () => {
+  it('returns every row at all public maxima without truncation in eight statements', async () => {
     const specialists = Array.from({ length: 50 }, (_, index) => (
       specialistRow(`sp_max_${index}`, `stf_max_${index}`)
     ))
@@ -285,7 +477,7 @@ describe('workspace read model', () => {
     expect(result.data.appointments).toHaveLength(500)
     expect(result.data.appointments.find(({ id }) => id === 'apt_max_0').paymentEntries)
       .toHaveLength(1000)
-    expect(calls).toHaveLength(4)
+    expect(calls).toHaveLength(8)
   })
 
   it('rejects dangling and duplicate appointment facts from a malformed result surface', async () => {
@@ -568,6 +760,7 @@ describe('workspace read model', () => {
     const read = vi.fn(async ({ window }) => ({ data: {
       window: { from: window.from, to: window.to, timeZone: 'Europe/Warsaw', complete: true },
       specialists: [], clients: [], appointments: [],
+      historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: null,
     } }))
     const result = await getWorkspace({
       db, actor, cryptoContext,
@@ -594,6 +787,7 @@ describe('workspace read model', () => {
       return { data: {
         window: { from: '2026-08-01', to: '2026-08-02', timeZone: 'Europe/Warsaw', complete: true },
         specialists: [], clients: [], appointments: [],
+        historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: null,
       } }
     })
     const app = createApp({
@@ -614,6 +808,7 @@ describe('workspace read model', () => {
     expect(await get.json()).toEqual({ data: {
       window: { from: '2026-08-01', to: '2026-08-02', timeZone: 'Europe/Warsaw', complete: true },
       specialists: [], clients: [], appointments: [],
+      historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: null,
     } })
     const head = await app.request(url, { method: 'HEAD' })
     expect(head.status).toBe(200)
@@ -627,7 +822,7 @@ describe('workspace read model', () => {
     expect(usageForD1QueryBudgetViews(actorViews.work, actorViews.recovery).used).toBe(0)
   })
 
-  it('executes the real empty D1 read in four domain statements and seven full-route statements', async () => {
+  it('executes the real empty D1 read in eight domain statements within the route budget', async () => {
     let views
     const response = await createApp({
       db: env.DB,
@@ -646,9 +841,10 @@ describe('workspace read model', () => {
     expect(await response.json()).toEqual({ data: {
       window: { from: '2026-08-01', to: '2026-08-02', timeZone: 'Europe/Warsaw', complete: true },
       specialists: [], clients: [], appointments: [],
+      historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: null,
     } })
     expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
-      used: 8, remaining: 42, workRemaining: 34, totalLimit: 50, recoveryReserve: 8,
+      used: 11, remaining: 39, workRemaining: 31, totalLimit: 50, recoveryReserve: 8,
     })
   })
 
@@ -663,13 +859,14 @@ describe('workspace read model', () => {
         `INSERT INTO staff_users
          (id,email_lookup,email_envelope,display_name_envelope,role,status,
           access_subject,specialist_id,version,activated_at,disabled_at,created_at,updated_at)
-         VALUES (?,?, '{}','{}','coordinator','disabled',?,?,1,?,?,?,?)`
+         VALUES (?,?, '{}','{}','specialist','active',?,?,1,?,NULL,?,?)`
       ).bind(staffId, `${staffId}@example.test`, `access-${staffId}`, specialistId,
-        createdAt, createdAt, createdAt, createdAt),
+        createdAt, createdAt, createdAt),
       env.DB.prepare(
         `INSERT INTO specialists
-         (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
-         VALUES (?,?,18000,'active',1,NULL,?,?)`
+         (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
+          archived_at,created_at,updated_at)
+         VALUES (?,?, '{}',18000,'active',1,NULL,?,?)`
       ).bind(specialistId, staffId, createdAt, createdAt),
     ])
     const missingEnvelope = (id) => JSON.stringify({
@@ -774,6 +971,16 @@ describe('workspace read model', () => {
          version=version+1,updated_at='2026-11-01T10:00:00.000Z'
          WHERE id IN ('cl_real_missing_key','cl_real_history_key','cl_real_missing_charge')`
       ),
+      env.DB.prepare(
+        `UPDATE specialists SET status='archived',archived_at='2026-11-01T10:00:00.000Z',
+         version=version+1,updated_at='2026-11-01T10:00:00.000Z'
+         WHERE id IN ('sp_key_current','sp_key_history','sp_key_other')`
+      ),
+      env.DB.prepare(
+        `UPDATE staff_users SET status='disabled',disabled_at='2026-11-01T10:00:00.000Z',
+         version=version+1,updated_at='2026-11-01T10:00:00.000Z'
+         WHERE id IN ('stf_key_current','stf_key_history','stf_key_other')`
+      ),
     ])
   })
 
@@ -798,7 +1005,7 @@ describe('workspace read model', () => {
     }
     expect(plans[0]).toEqual(expect.arrayContaining([
       expect.stringContaining('specialists_status_id_idx'),
-      expect.stringContaining('staff_users_specialist_id_idx'),
+      expect.stringContaining('sqlite_autoindex_staff_users_1'),
     ]))
     expect(plans[1]).toEqual(expect.arrayContaining([
       expect.stringContaining('appointments_specialist_starts_id_idx (specialist_id=? AND starts_at>? AND starts_at<?)'),
@@ -843,14 +1050,15 @@ describe('workspace read model', () => {
         `INSERT INTO staff_users
          (id,email_lookup,email_envelope,display_name_envelope,role,status,
           access_subject,specialist_id,version,activated_at,created_at,updated_at)
-         VALUES (?,?,?,?,'coordinator','active',?,?,4,?,?,?)`
+         VALUES (?,?,?,?,'specialist','active',?,?,4,?,?,?)`
       ).bind(staffId, 'workspace@example.test', '{}', displayEnvelope,
         'access-workspace-practitioner', specialistId, instant('01'), instant('01'), instant('01')),
       env.DB.prepare(
         `INSERT INTO specialists
-         (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
-         VALUES (?,?,19000,'active',2,NULL,?,?)`
-      ).bind(specialistId, staffId, instant('01'), instant('02')),
+         (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
+          archived_at,created_at,updated_at)
+         VALUES (?,?,?,19000,'active',2,NULL,?,?)`
+      ).bind(specialistId, staffId, displayEnvelope, instant('01'), instant('02')),
       built.statement,
       env.DB.prepare(
         `INSERT INTO clients
@@ -895,14 +1103,14 @@ describe('workspace read model', () => {
     })
     expect(result.data.specialists).toEqual([{
       id: specialistId, displayName: 'Żaneta Fikcyjna', standardRateGrosze: 19000,
-      status: 'active', version: 2, staffVersion: 4,
+      status: 'active', version: 2, staffVersion: 4, accessStatus: 'enabled',
     }])
     expect(result.data.clients[0]).toMatchObject({ id: clientId, name: 'Łucja Fikcyjna', age: 11 })
     expect(result.data.appointments[0].payment).toEqual({
       status: 'paid', collectedGrosze: 20000, outstandingGrosze: 0,
       latestMethod: 'transfer', latestReceivedAt: instant('05'),
     })
-    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery).used).toBe(5)
+    expect(usageForD1QueryBudgetViews(budget.work, budget.recovery).used).toBe(8)
     expect(JSON.stringify(result)).not.toContain('workspace@example.test')
     expect(JSON.stringify(result)).not.toContain('access-workspace-practitioner')
     expect(JSON.stringify(result)).not.toContain('ciphertext')

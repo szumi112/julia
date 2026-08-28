@@ -9,10 +9,11 @@ import {
   recordLoadedWorkspaceWrite,
   resetLoadedWorkspaceAuthority,
 } from '../../src/loaded-windows.js'
+import { projectLoadedWorkspace } from '../../src/workspace-view.js'
 
 const range = (from, to = from) => ({ from, to })
-const specialist = (id = 'sp_anna', displayName = 'Anna') => ({
-  id, displayName, status: 'active', version: 1,
+const specialist = (id = 'sp_anna', displayName = 'Anna', status = 'active') => ({
+  id, displayName, status, version: status === 'archived' ? 2 : 1,
 })
 const client = (id = 'cl_ola', status = 'active', specialistId = 'sp_anna') => ({
   id,
@@ -26,11 +27,45 @@ const appointment = (id, clientId, startsAt, specialistId = 'sp_anna') => ({
   charge: { id: `chg_${id}`, expectedAmountGrosze: 18000 },
   paymentEntries: [],
 })
-const payload = ({ from, to = from, specialists = [], clients = [], appointments = [] }) => ({
+const historicalClient = (id = 'hcl_ola', overrides = {}) => ({
+  id, name: id, status: 'historical', activeClientId: null, version: 1,
+  createdAt: '2026-07-01T08:00:00.000Z', updatedAt: '2026-07-01T08:00:00.000Z',
+  ...overrides,
+})
+const historicalOccurrence = ({
+  id, historicalClientId = 'hcl_ola', counterparty = null,
+  specialistId = 'sp_anna', precision = 'day', value = '2026-08-01',
+  status = 'recorded', sourceRecordId = `wbs_${id}`,
+}) => ({
+  id,
+  historicalClientId,
+  counterparty,
+  specialistId,
+  serviceId: null,
+  serviceLabel: 'Usługa historyczna',
+  period: precision === 'day'
+    ? { precision, day: value, month: value.slice(0, 7) }
+    : precision === 'month'
+      ? { precision, day: null, month: value }
+      : { precision, day: null, month: null },
+  status,
+  version: status === 'voided' ? 2 : 1,
+  sourceRecordId,
+  createdAt: '2026-07-01T08:00:00.000Z',
+  updatedAt: status === 'voided'
+    ? '2026-07-01T08:01:00.000Z' : '2026-07-01T08:00:00.000Z',
+})
+const payload = ({
+  from, to = from, specialists = [], clients = [], appointments = [],
+  historicalClients = [], historicalOccurrences = [], latestPopulatedMonth = null,
+}) => ({
   window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
   specialists,
   clients,
   appointments,
+  historicalClients,
+  historicalOccurrences,
+  latestPopulatedMonth,
 })
 const load = (state, input) => {
   const capture = captureLoadedWorkspaceLoad(state, range(input.from, input.to))
@@ -43,10 +78,15 @@ test('creates a deeply frozen empty loaded-workspace state', () => {
   assert.equal(Object.getPrototypeOf(state.specialistsById), null)
   assert.equal(Object.getPrototypeOf(state.clientsById), null)
   assert.equal(Object.getPrototypeOf(state.appointmentsById), null)
+  assert.equal(Object.getPrototypeOf(state.historicalClientsById), null)
+  assert.equal(Object.getPrototypeOf(state.historicalOccurrencesById), null)
+  assert.equal(state.latestPopulatedMonth, null)
   assert.deepEqual([state.authorityGeneration, state.writeEpoch], [0, 0])
   assert.ok(Object.isFrozen(state))
   assert.ok(Object.isFrozen(state.loadedRanges))
   assert.ok(Object.isFrozen(state.clientsById))
+  assert.ok(Object.isFrozen(state.historicalClientsById))
+  assert.ok(Object.isFrozen(state.historicalOccurrencesById))
 })
 
 test('rejects invalid, impossible, reversed, and inexact civil ranges', () => {
@@ -148,6 +188,131 @@ test('replaces appointments inside a complete Warsaw start-date window and retai
   assert.deepEqual(Object.keys(state.appointmentsById), ['apt_later'])
 })
 
+test('historical cache replaces day and month coverage separately, replaces every unknown row, and retains outside precision', () => {
+  let state = createLoadedWorkspaceState()
+  const julyClients = [
+    historicalClient('hcl_july_day'),
+    historicalClient('hcl_july_month'),
+    historicalClient('hcl_old_unknown'),
+  ]
+  state = load(state, {
+    from: '2026-07-01', to: '2026-07-31', specialists: [specialist()],
+    historicalClients: julyClients,
+    historicalOccurrences: [
+      historicalOccurrence({ id: 'hoc_july_day', historicalClientId: 'hcl_july_day', value: '2026-07-12' }),
+      historicalOccurrence({ id: 'hoc_july_month', historicalClientId: 'hcl_july_month', precision: 'month', value: '2026-07' }),
+      historicalOccurrence({ id: 'hoc_old_unknown', historicalClientId: 'hcl_old_unknown', precision: 'unknown', value: null }),
+    ],
+    latestPopulatedMonth: '2026-07',
+  })
+  state = load(state, {
+    from: '2026-08-10', to: '2026-08-20', specialists: [specialist()],
+    historicalClients: [
+      historicalClient('hcl_august_day'),
+      historicalClient('hcl_august_month'),
+      historicalClient('hcl_new_unknown'),
+    ],
+    historicalOccurrences: [
+      historicalOccurrence({ id: 'hoc_august_day', historicalClientId: 'hcl_august_day', value: '2026-08-12' }),
+      historicalOccurrence({ id: 'hoc_august_month', historicalClientId: 'hcl_august_month', precision: 'month', value: '2026-08' }),
+      historicalOccurrence({ id: 'hoc_new_unknown', historicalClientId: 'hcl_new_unknown', precision: 'unknown', value: null }),
+    ],
+    latestPopulatedMonth: '2026-08',
+  })
+
+  assert.deepEqual(Object.keys(state.historicalOccurrencesById).sort(), [
+    'hoc_august_day', 'hoc_august_month', 'hoc_july_day', 'hoc_july_month',
+    'hoc_new_unknown',
+  ])
+  assert.deepEqual(Object.keys(state.historicalClientsById).sort(), [
+    'hcl_august_day', 'hcl_august_month', 'hcl_july_day', 'hcl_july_month',
+    'hcl_new_unknown',
+  ])
+  assert.equal(state.latestPopulatedMonth, '2026-08')
+
+  state = load(state, {
+    from: '2026-08-15', to: '2026-08-15', specialists: [specialist()],
+    historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: '2026-08',
+  })
+  assert.deepEqual(Object.keys(state.historicalOccurrencesById).sort(), [
+    'hoc_august_day', 'hoc_july_day', 'hoc_july_month',
+  ])
+  assert.deepEqual(Object.keys(state.historicalClientsById).sort(), [
+    'hcl_august_day', 'hcl_july_day', 'hcl_july_month',
+  ])
+  assert.equal(state.latestPopulatedMonth, '2026-08')
+})
+
+test('historical month replacement follows month overlap while exact days follow civil coverage', () => {
+  let state = createLoadedWorkspaceState()
+  state = load(state, {
+    from: '2026-08-01', to: '2026-08-31', specialists: [specialist()],
+    historicalClients: [historicalClient('hcl_day'), historicalClient('hcl_month')],
+    historicalOccurrences: [
+      historicalOccurrence({ id: 'hoc_day', historicalClientId: 'hcl_day', value: '2026-08-20' }),
+      historicalOccurrence({ id: 'hoc_month', historicalClientId: 'hcl_month', precision: 'month', value: '2026-08' }),
+    ],
+    latestPopulatedMonth: '2026-08',
+  })
+  state = load(state, {
+    from: '2026-08-01', to: '2026-08-01', specialists: [specialist()],
+    historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: '2026-08',
+  })
+  assert.deepEqual(Object.keys(state.historicalOccurrencesById), ['hoc_day'])
+  assert.deepEqual(Object.keys(state.historicalClientsById), ['hcl_day'])
+})
+
+test('historical merge rejects unresolved subjects, specialist leaks, invalid precision windows, and outside collisions', () => {
+  const state = createLoadedWorkspaceState()
+  const capture = captureLoadedWorkspaceLoad(state, range('2026-08-01', '2026-08-31'))
+  const cases = [
+    payload({
+      from: '2026-08-01', to: '2026-08-31', specialists: [specialist()],
+      historicalOccurrences: [historicalOccurrence({ id: 'hoc_orphan' })],
+      latestPopulatedMonth: '2026-08',
+    }),
+    payload({
+      from: '2026-08-01', to: '2026-08-31', specialists: [specialist()],
+      historicalClients: [historicalClient()],
+      historicalOccurrences: [historicalOccurrence({ id: 'hoc_leak', specialistId: 'sp_other' })],
+      latestPopulatedMonth: '2026-08',
+    }),
+    payload({
+      from: '2026-08-01', to: '2026-08-31', specialists: [specialist()],
+      historicalClients: [historicalClient()],
+      historicalOccurrences: [historicalOccurrence({ id: 'hoc_outside', value: '2026-09-01' })],
+      latestPopulatedMonth: '2026-09',
+    }),
+    payload({
+      from: '2026-08-01', to: '2026-08-31', specialists: [specialist()],
+      historicalClients: [historicalClient()],
+      historicalOccurrences: [historicalOccurrence({ id: 'hoc_latest' })],
+      latestPopulatedMonth: null,
+    }),
+  ]
+  for (const value of cases) {
+    assert.throws(() => mergeLoadedWorkspaceLoad(state, capture, value), TypeError)
+  }
+
+  let retained = load(state, {
+    from: '2026-07-01', to: '2026-07-31', specialists: [specialist()],
+    historicalClients: [historicalClient()],
+    historicalOccurrences: [historicalOccurrence({ id: 'hoc_same', value: '2026-07-01' })],
+    latestPopulatedMonth: '2026-07',
+  })
+  const next = captureLoadedWorkspaceLoad(retained, range('2026-08-01', '2026-08-31'))
+  for (const occurrence of [
+    historicalOccurrence({ id: 'hoc_same', value: '2026-08-01', sourceRecordId: 'wbs_new' }),
+    historicalOccurrence({ id: 'hoc_new', value: '2026-08-01', sourceRecordId: 'wbs_hoc_same' }),
+  ]) {
+    assert.throws(() => mergeLoadedWorkspaceLoad(retained, next, payload({
+      from: '2026-08-01', to: '2026-08-31', specialists: [specialist()],
+      historicalClients: [historicalClient()], historicalOccurrences: [occurrence],
+      latestPopulatedMonth: '2026-08',
+    })), TypeError)
+  }
+})
+
 test('replaces complete specialist and active-client directories instead of unioning stale rows', () => {
   let state = createLoadedWorkspaceState()
   state = load(state, {
@@ -160,6 +325,79 @@ test('replaces complete specialist and active-client directories instead of unio
   })
   assert.deepEqual(Object.keys(state.specialistsById), ['sp_beata'])
   assert.deepEqual(Object.keys(state.clientsById), ['cl_jan'])
+})
+
+test('retains only archived specialists referenced by historical records across disjoint loads', () => {
+  let state = createLoadedWorkspaceState()
+  state = load(state, {
+    from: '2026-08-01', to: '2026-08-31',
+    specialists: [
+      specialist(), specialist('sp_archived', 'Archiwalna', 'archived'),
+    ],
+    historicalClients: [historicalClient()],
+    historicalOccurrences: [historicalOccurrence({
+      id: 'hoc_archived_specialist', specialistId: 'sp_archived', value: '2026-08-12',
+    })],
+    latestPopulatedMonth: '2026-08',
+  })
+  state = load(state, {
+    from: '2026-09-01', to: '2026-09-30', specialists: [specialist()],
+    latestPopulatedMonth: '2026-08',
+  })
+  assert.deepEqual(Object.keys(state.specialistsById).sort(), ['sp_anna', 'sp_archived'])
+  assert.equal(state.specialistsById.sp_archived.status, 'archived')
+  assert.equal(state.historicalOccurrencesById.hoc_archived_specialist.specialistId,
+    'sp_archived')
+
+  assert.throws(() => load(state, {
+    from: '2026-10-01', to: '2026-10-31',
+    specialists: [specialist(), specialist('sp_leaked', 'Ukryta', 'archived')],
+    latestPopulatedMonth: '2026-08',
+  }), TypeError)
+
+  state = load(state, {
+    from: '2026-08-01', to: '2026-08-31', specialists: [specialist()],
+    latestPopulatedMonth: null,
+  })
+  assert.deepEqual(Object.keys(state.specialistsById), ['sp_anna'])
+  assert.deepEqual(Object.keys(state.historicalOccurrencesById), [])
+})
+
+test('downgrades an omitted active specialist to historical-only attribution', () => {
+  const previouslyActive = {
+    id: 'sp_transitioned', displayName: 'Specjalistka Historyczna',
+    standardRateGrosze: 18000, status: 'active', version: 3, staffVersion: 4,
+    accessStatus: 'enabled',
+  }
+  const currentActive = {
+    id: 'sp_current', displayName: 'Specjalistka Aktywna',
+    standardRateGrosze: 19000, status: 'active', version: 1, staffVersion: 2,
+    accessStatus: 'enabled',
+  }
+  let state = createLoadedWorkspaceState()
+  state = load(state, {
+    from: '2026-08-01', to: '2026-08-31', specialists: [previouslyActive],
+    historicalClients: [historicalClient()],
+    historicalOccurrences: [historicalOccurrence({
+      id: 'hoc_transitioned_specialist', specialistId: 'sp_transitioned',
+      value: '2026-08-12',
+    })],
+    latestPopulatedMonth: '2026-08',
+  })
+  state = load(state, {
+    from: '2026-09-01', to: '2026-09-30', specialists: [currentActive],
+    latestPopulatedMonth: '2026-08',
+  })
+
+  assert.equal(state.specialistsById.sp_transitioned.status, 'archived')
+  assert.equal(Object.hasOwn(state.specialistsById.sp_transitioned, 'accessStatus'), false)
+  assert.equal(state.historicalOccurrencesById.hoc_transitioned_specialist.specialistId,
+    'sp_transitioned')
+  const view = projectLoadedWorkspace(state)
+  assert.deepEqual(view.psychologists.map(({ id }) => id), ['sp_current'])
+  assert.deepEqual(view.historicalSpecialists.map(({ id, status }) => ({ id, status })), [{
+    id: 'sp_transitioned', status: 'archived',
+  }])
 })
 
 test('retains archived clients referenced across windows and prunes the last unreferenced archive', () => {
@@ -283,6 +521,9 @@ test('resets authority to a fresh empty generation and ignores old loads', () =>
   state = resetLoadedWorkspaceAuthority(state)
   assert.deepEqual([state.authorityGeneration, state.writeEpoch], [1, 0])
   assert.deepEqual(state.loadedRanges, [])
+  assert.deepEqual(Object.keys(state.historicalClientsById), [])
+  assert.deepEqual(Object.keys(state.historicalOccurrencesById), [])
+  assert.equal(state.latestPopulatedMonth, null)
   const result = mergeLoadedWorkspaceLoad(state, capture, payload({ from: '2026-08-01' }))
   assert.deepEqual(
     { outcome: result.outcome, refetch: result.refetch, same: result.state === state },

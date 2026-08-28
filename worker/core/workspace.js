@@ -15,7 +15,18 @@ import {
   isPaymentId,
   isSpecialistId,
 } from '../../src/core-records.js'
+import {
+  captureHistoricalClient,
+  captureHistoricalOccurrence,
+  captureHistoricalPeriod,
+  compareHistoricalClients,
+  compareHistoricalOccurrences,
+  isHistoricalClientId,
+  isHistoricalCounterpartyId,
+  isHistoricalOccurrenceId,
+} from '../../src/historical-records.js'
 import { SERVICE_BY_ID } from '../../src/services.js'
+import { decryptHistoricalIdentityWithDataKey } from './historical-crypto.js'
 
 const validation = (field) => { throw new AppError('VALIDATION_FAILED', { field }) }
 const DATE = /^(\d{4})-(\d{2})-(\d{2})$/
@@ -25,7 +36,10 @@ const dayFormatter = new Intl.DateTimeFormat('en-CA', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 })
 const collator = new Intl.Collator('pl-PL', { sensitivity: 'base', usage: 'sort' })
-const CAPS = Object.freeze({ specialists: 50, clients: 1_000, appointments: 500, paymentEntries: 1_000 })
+const CAPS = Object.freeze({
+  specialists: 50, clients: 1_000, appointments: 500, paymentEntries: 1_000,
+  historicalClients: 1_000, historicalOccurrences: 1_000,
+})
 const STAFF_KEYS = Object.freeze([
   'id', 'staff_user_id', 'standard_rate_grosze', 'status', 'version', 'staff_id',
   'staff_specialist_id', 'staff_status', 'staff_version', 'display_name_envelope',
@@ -51,6 +65,24 @@ const DATA_KEY_KEYS = Object.freeze([
   'id', 'scope_type', 'scope_id', 'purpose', 'dek_version', 'wrapped_key_b64',
   'wrap_nonce_b64', 'kek_version', 'created_at', 'retired_at',
 ])
+const HISTORICAL_CLIENT_KEYS = Object.freeze([
+  'id', 'identity_envelope', 'status', 'active_client_id', 'version', 'created_at',
+  'updated_at', 'key_id', 'key_scope_type', 'key_scope_id', 'key_purpose',
+  'key_dek_version', 'key_wrapped_key_b64', 'key_wrap_nonce_b64', 'key_kek_version',
+  'key_created_at', 'key_retired_at',
+])
+const HISTORICAL_COUNTERPARTY_KEYS = Object.freeze([
+  'id', 'identity_envelope', 'version', 'created_at', 'updated_at', 'key_id',
+  'key_scope_type', 'key_scope_id', 'key_purpose', 'key_dek_version',
+  'key_wrapped_key_b64', 'key_wrap_nonce_b64', 'key_kek_version', 'key_created_at',
+  'key_retired_at',
+])
+const HISTORICAL_OCCURRENCE_KEYS = Object.freeze([
+  'id', 'source_record_id', 'historical_client_id', 'counterparty_id', 'specialist_id',
+  'service_id', 'service_label_envelope', 'period_precision', 'occurred_on',
+  'occurred_month', 'status', 'version', 'created_at', 'updated_at',
+])
+const HISTORICAL_LATEST_KEYS = Object.freeze(['latest_month'])
 
 const invalid = () => { throw new Error('INTERNAL_ERROR') }
 const cryptoFailure = () => { throw new Error('CRYPTO_FAILURE') }
@@ -241,7 +273,7 @@ const DIRECTORY_SQL = `
   ORDER BY specialist.id
   LIMIT ?`
 
-const DIRECTORY_V2_SQL = `
+const directoryV2Sql = (specialist) => `
   SELECT specialist.id, specialist.staff_user_id, specialist.standard_rate_grosze,
          specialist.status, specialist.version, staff.id AS staff_id,
          staff.specialist_id AS staff_specialist_id, staff.status AS staff_status,
@@ -249,8 +281,13 @@ const DIRECTORY_V2_SQL = `
   FROM specialists AS specialist
   LEFT JOIN staff_users AS staff
     ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
-  WHERE specialist.status IN ('active','pending')
-    AND (specialist.staff_user_id IS NULL OR staff.status IN ('pending','active'))
+  WHERE (specialist.status IN ('active','pending')
+      AND (specialist.staff_user_id IS NULL OR staff.status IN ('pending','active')))
+    OR (specialist.status='archived' AND EXISTS (
+      SELECT 1 FROM historical_service_occurrences AS occurrence
+      WHERE occurrence.specialist_id=specialist.id
+        AND ${historicalWindowSql(specialist)}
+    ))
   ORDER BY specialist.id
   LIMIT ?`
 
@@ -334,6 +371,70 @@ const paymentSql = (specialist) => `
   ORDER BY payment.received_at,payment.id
   LIMIT ?`
 
+const historicalWindowSql = (specialist) => `
+  ${specialist ? 'occurrence.specialist_id=? AND ' : ''}(
+    (occurrence.period_precision='day'
+      AND occurrence.occurred_on>=? AND occurrence.occurred_on<=?)
+    OR (occurrence.period_precision='month'
+      AND occurrence.occurred_month>=? AND occurrence.occurred_month<=?)
+    OR occurrence.period_precision='unknown'
+  )`
+
+const historicalSubjectSql = ({ specialist, kind }) => {
+  const person = kind === 'person'
+  const table = person ? 'historical_clients' : 'historical_counterparties'
+  const alias = person ? 'historical_client' : 'historical_counterparty'
+  const subjectColumn = person ? 'historical_client_id' : 'counterparty_id'
+  return `
+    SELECT ${alias}.id,${alias}.identity_envelope,
+           ${person ? `${alias}.status,${alias}.active_client_id,` : ''}
+           ${alias}.version,${alias}.created_at,${alias}.updated_at,
+           data_key.id AS key_id,data_key.scope_type AS key_scope_type,
+           data_key.scope_id AS key_scope_id,data_key.purpose AS key_purpose,
+           data_key.dek_version AS key_dek_version,
+           data_key.wrapped_key_b64 AS key_wrapped_key_b64,
+           data_key.wrap_nonce_b64 AS key_wrap_nonce_b64,
+           data_key.kek_version AS key_kek_version,
+           data_key.created_at AS key_created_at,
+           data_key.retired_at AS key_retired_at
+    FROM ${table} AS ${alias}
+    LEFT JOIN data_keys AS data_key
+      ON data_key.id=CASE WHEN json_valid(${alias}.identity_envelope)
+                          THEN json_extract(${alias}.identity_envelope,'$.dataKeyId') END
+     AND data_key.dek_version=CASE WHEN json_valid(${alias}.identity_envelope)
+                                   THEN json_extract(${alias}.identity_envelope,'$.dataKeyVersion') END
+     AND data_key.scope_type='${person ? 'historical_client' : 'historical_counterparty'}'
+     AND data_key.scope_id=${alias}.id AND data_key.purpose='identity'
+    WHERE EXISTS (
+      SELECT 1 FROM historical_service_occurrences AS occurrence
+      WHERE occurrence.${subjectColumn}=${alias}.id
+        AND ${historicalWindowSql(specialist)}
+    )
+    ORDER BY ${alias}.id
+    LIMIT ?`
+}
+
+const historicalOccurrenceSql = (specialist) => `
+  SELECT occurrence.id,occurrence.source_record_id,occurrence.historical_client_id,
+         occurrence.counterparty_id,occurrence.specialist_id,occurrence.service_id,
+         occurrence.service_label_envelope,occurrence.period_precision,
+         occurrence.occurred_on,occurrence.occurred_month,occurrence.status,
+         occurrence.version,occurrence.created_at,occurrence.updated_at
+  FROM historical_service_occurrences AS occurrence
+  WHERE ${historicalWindowSql(specialist)}
+  ORDER BY CASE occurrence.period_precision WHEN 'day' THEN 0 WHEN 'month' THEN 1 ELSE 2 END,
+           CASE occurrence.period_precision WHEN 'day' THEN occurrence.occurred_on
+             WHEN 'month' THEN occurrence.occurred_month ELSE '' END,
+           occurrence.id
+  LIMIT ?`
+
+const historicalLatestSql = (specialist) => `
+  SELECT MAX(occurrence.occurred_month) AS latest_month
+  FROM historical_service_occurrences AS occurrence
+  WHERE ${specialist ? 'occurrence.specialist_id=? AND ' : ''}
+        occurrence.status='recorded'
+    AND occurrence.period_precision IN ('day','month')`
+
 const limit = (rows, field) => {
   if (rows.length > CAPS[field]) throw new AppError('WORKSPACE_RESULT_LIMIT', {
     field, limit: CAPS[field],
@@ -356,6 +457,10 @@ const dataKeyFromClient = (row) => Object.freeze(Object.fromEntries(DATA_KEY_KEY
   const source = `key_${key}`
   return [key, row[source]]
 })))
+
+const dataKeyFromHistoricalSubject = (row) => Object.freeze(Object.fromEntries(
+  DATA_KEY_KEYS.map((key) => [key, row[`key_${key}`]]),
+))
 
 const decodedBytes = (value, length, minimum = false) => {
   let decoded
@@ -388,7 +493,47 @@ const validatedClientKey = (row) => {
   return dataKey
 }
 
+const validatedHistoricalSubjectKey = (row, kind) => {
+  const envelope = captureExact(parseEnvelope(row.identity_envelope), [
+    'format', 'algorithm', 'dataKeyId', 'dataKeyVersion', 'nonce', 'ciphertext',
+  ], cryptoFailure)
+  if (envelope.format !== 1 || envelope.algorithm !== 'A256GCM'
+    || typeof envelope.dataKeyId !== 'string' || !OPAQUE_ID.test(envelope.dataKeyId)
+    || !positive(envelope.dataKeyVersion)) cryptoFailure()
+  decodedBytes(envelope.nonce, 12)
+  decodedBytes(envelope.ciphertext, 16, true)
+  const dataKey = dataKeyFromHistoricalSubject(row)
+  const scopeType = kind === 'person' ? 'historical_client' : 'historical_counterparty'
+  if (dataKey.id !== envelope.dataKeyId || dataKey.dek_version !== envelope.dataKeyVersion
+    || typeof dataKey.id !== 'string' || !OPAQUE_ID.test(dataKey.id)
+    || dataKey.scope_type !== scopeType || dataKey.scope_id !== row.id
+    || dataKey.purpose !== 'identity' || !positive(dataKey.dek_version)
+    || !positive(dataKey.kek_version) || !isCanonicalUtc(dataKey.created_at)
+    || !nullableInstant(dataKey.retired_at)) cryptoFailure()
+  decodedBytes(dataKey.wrapped_key_b64, 48)
+  decodedBytes(dataKey.wrap_nonce_b64, 12)
+  return dataKey
+}
+
+const defaultDecryptHistoricalIdentity = async ({ kind, id, envelope, dataKey, keyring }) => (
+  decryptHistoricalIdentityWithDataKey(keyring, { kind, id, envelope, dataKey })
+)
+
+const defaultDecryptHistoricalField = async ({
+  kind, subjectId, recordId, envelope, dataKey, keyring,
+}) => decryptForScope(keyring, dataKey, {
+  expectedScope: {
+    type: kind === 'person' ? 'historical_client' : 'historical_counterparty',
+    id: subjectId,
+    purpose: 'identity',
+  },
+  recordId,
+  field: 'service_label',
+  envelope: parseEnvelope(envelope),
+})
+
 const specialistDto = async (row, context, decrypt, profileV2) => {
+  const archived = row.status === 'archived'
   const accessStatus = row.staff_user_id === null
     ? 'unclaimed'
     : row.staff_status === 'pending' ? 'invited'
@@ -396,10 +541,12 @@ const specialistDto = async (row, context, decrypt, profileV2) => {
   if (!isSpecialistId(row.id) || !positive(row.standard_rate_grosze, 1_000_000)
     || !positive(row.version) || typeof row.display_name_envelope !== 'string'
     || (profileV2
-      ? (!['active', 'pending'].includes(row.status) || accessStatus === null
+      ? (!['active', 'pending', 'archived'].includes(row.status)
+        || (!archived && accessStatus === null)
         || (row.staff_user_id !== null && (
           row.staff_user_id !== row.staff_id || row.staff_specialist_id !== row.id
           || !positive(row.staff_version)
+          || (archived && !['pending', 'active', 'disabled'].includes(row.staff_status))
         )))
       : (typeof row.staff_user_id !== 'string' || row.staff_user_id !== row.staff_id
         || row.staff_specialist_id !== row.id || row.status !== 'active'
@@ -422,6 +569,10 @@ const specialistDto = async (row, context, decrypt, profileV2) => {
     })
   }
   const displayName = canonicalName(decryptedName)
+  if (profileV2 && archived) return freeze({
+    id: row.id, displayName, standardRateGrosze: row.standard_rate_grosze,
+    status: 'archived', version: row.version, staffVersion: row.staff_version,
+  })
   return freeze(profileV2 ? {
     id: row.id, displayName, standardRateGrosze: row.standard_rate_grosze,
     status: 'active', version: row.version, staffVersion: row.staff_version,
@@ -483,6 +634,86 @@ const clientDto = async (row, actor, context, decrypt, appointmentByClient) => {
     id: row.id, name: identity.name, age: identity.age, status: row.status,
     version: row.version, archivedAt: row.archived_at, createdAt: row.created_at,
     updatedAt: row.updated_at, readOnly: row.status === 'archived', assignment,
+  })
+}
+
+const historicalClientRecord = async ({
+  row, visibleClientIds, keyring, decryptIdentity,
+}) => {
+  if (!isHistoricalClientId(row.id) || !['historical', 'activated'].includes(row.status)
+    || !positive(row.version) || !isCanonicalUtc(row.created_at)
+    || !isCanonicalUtc(row.updated_at) || row.created_at > row.updated_at
+    || typeof row.identity_envelope !== 'string'
+    || (row.status === 'historical' ? row.active_client_id !== null
+      : !isClientId(row.active_client_id))) invalid()
+  const dataKey = validatedHistoricalSubjectKey(row, 'person')
+  const name = await decryptIdentity({
+    kind: 'person', id: row.id, envelope: row.identity_envelope, dataKey, keyring,
+  })
+  const dto = captureHistoricalClient({
+    id: row.id, name, status: row.status,
+    activeClientId: visibleClientIds.has(row.active_client_id) ? row.active_client_id : null,
+    version: row.version, createdAt: row.created_at, updatedAt: row.updated_at,
+  })
+  return Object.freeze({ dto, dataKey })
+}
+
+const historicalCounterpartyRecord = async ({ row, keyring, decryptIdentity }) => {
+  if (!isHistoricalCounterpartyId(row.id) || !positive(row.version)
+    || !isCanonicalUtc(row.created_at) || !isCanonicalUtc(row.updated_at)
+    || row.created_at > row.updated_at || typeof row.identity_envelope !== 'string') invalid()
+  const dataKey = validatedHistoricalSubjectKey(row, 'counterparty')
+  const name = await decryptIdentity({
+    kind: 'counterparty', id: row.id, envelope: row.identity_envelope, dataKey, keyring,
+  })
+  return Object.freeze({ id: row.id, name, dataKey })
+}
+
+const historicalOccurrenceBase = (row, actor) => {
+  if (!isHistoricalOccurrenceId(row.id)
+    || (row.historical_client_id === null) === (row.counterparty_id === null)
+    || !(row.historical_client_id === null || isHistoricalClientId(row.historical_client_id))
+    || !(row.counterparty_id === null || isHistoricalCounterpartyId(row.counterparty_id))
+    || !isSpecialistId(row.specialist_id)
+    || (actor.role === 'specialist' && row.specialist_id !== actor.specialistId)
+    || !(row.service_id === null || Object.hasOwn(SERVICE_BY_ID, row.service_id))
+    || typeof row.service_label_envelope !== 'string'
+    || !['recorded', 'voided'].includes(row.status) || !positive(row.version)
+    || !isCanonicalUtc(row.created_at) || !isCanonicalUtc(row.updated_at)
+    || row.created_at > row.updated_at) invalid()
+  captureHistoricalPeriod({
+    precision: row.period_precision, day: row.occurred_on, month: row.occurred_month,
+  })
+  return row
+}
+
+const historicalOccurrenceDto = async ({
+  row, clientsById, counterpartiesById, keyring, decryptField,
+}) => {
+  const kind = row.historical_client_id === null ? 'counterparty' : 'person'
+  const subjectId = row.historical_client_id ?? row.counterparty_id
+  const subject = kind === 'person'
+    ? clientsById.get(subjectId) : counterpartiesById.get(subjectId)
+  if (!subject) invalid()
+  const serviceLabel = await decryptField({
+    kind, subjectId, recordId: row.id, envelope: row.service_label_envelope,
+    dataKey: subject.dataKey, keyring,
+  })
+  return captureHistoricalOccurrence({
+    id: row.id,
+    historicalClientId: row.historical_client_id,
+    counterparty: kind === 'counterparty' ? { id: subject.id, name: subject.name } : null,
+    specialistId: row.specialist_id,
+    serviceId: row.service_id,
+    serviceLabel,
+    period: {
+      precision: row.period_precision, day: row.occurred_on, month: row.occurred_month,
+    },
+    status: row.status,
+    version: row.version,
+    sourceRecordId: row.source_record_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   })
 }
 
@@ -589,9 +820,14 @@ export async function readWorkspace(input) {
   const keys = (() => {
     try { return Reflect.ownKeys(Object.getOwnPropertyDescriptors(input)) } catch { invalid() }
   })()
-  const expected = keys.includes('decryptSpecialist') || keys.includes('decryptClient')
-    ? ['db', 'actor', 'cryptoContext', 'window', 'decryptSpecialist', 'decryptClient']
-    : ['db', 'actor', 'cryptoContext', 'window']
+  const hasCoreDecrypt = keys.includes('decryptSpecialist') || keys.includes('decryptClient')
+  const hasHistoricalDecrypt = keys.includes('decryptHistoricalIdentity')
+    || keys.includes('decryptHistoricalField')
+  const expected = ['db', 'actor', 'cryptoContext', 'window']
+  if (hasCoreDecrypt) expected.push('decryptSpecialist', 'decryptClient')
+  if (hasHistoricalDecrypt) {
+    expected.push('decryptHistoricalIdentity', 'decryptHistoricalField')
+  }
   const captured = captureExact(input, expected)
   const actor = validActor(captured.actor)
   const window = captureExact(captured.window, ['from', 'to', 'lower', 'upper'])
@@ -600,10 +836,15 @@ export async function readWorkspace(input) {
     || window.lower >= window.upper) invalid()
   const decryptSpecialist = captured.decryptSpecialist ?? defaultDecryptSpecialist
   const decryptClient = captured.decryptClient ?? defaultDecryptClient
+  const decryptHistoricalIdentity = captured.decryptHistoricalIdentity
+    ?? defaultDecryptHistoricalIdentity
+  const decryptHistoricalField = captured.decryptHistoricalField ?? defaultDecryptHistoricalField
   const cryptoContext = captureExact(
     captured.cryptoContext, ['keyring', 'dataKey', 'scope'], cryptoFailure,
   )
   if (typeof decryptSpecialist !== 'function' || typeof decryptClient !== 'function'
+    || typeof decryptHistoricalIdentity !== 'function'
+    || typeof decryptHistoricalField !== 'function'
     || !cryptoContext.keyring || typeof cryptoContext.keyring !== 'object') invalid()
   const db = captureDb(captured.db)
   if (!authorize(actor, 'specialist.directory.read', {
@@ -611,11 +852,15 @@ export async function readWorkspace(input) {
   }, { nowMs: 0 })) invalid()
 
   const scoped = actor.role === 'specialist'
+  const historicalBindings = [
+    ...(scoped ? [actor.specialistId] : []),
+    window.from, window.to, window.from.slice(0, 7), window.to.slice(0, 7),
+  ]
   let specialistRows
   let profileV2 = true
   try {
     specialistRows = limit(await query(
-      db, DIRECTORY_V2_SQL, [CAPS.specialists + 1], STAFF_KEYS,
+      db, directoryV2Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_KEYS,
     ), 'specialists')
   } catch (error) {
     if (!/no such column: specialist\.display_name_envelope/.test(error?.message ?? '')) {
@@ -655,6 +900,49 @@ export async function readWorkspace(input) {
   ), 'paymentEntries')
   if (new Set(paymentRows.map((row) => row.id)).size !== paymentRows.length) invalid()
 
+  const historicalOccurrenceRows = limit(await query(
+    db, historicalOccurrenceSql(scoped),
+    [...historicalBindings, CAPS.historicalOccurrences + 1],
+    HISTORICAL_OCCURRENCE_KEYS,
+  ), 'historicalOccurrences').map((row) => historicalOccurrenceBase(row, actor))
+  if (new Set(historicalOccurrenceRows.map((row) => row.id)).size
+      !== historicalOccurrenceRows.length
+    || new Set(historicalOccurrenceRows.map((row) => row.source_record_id)).size
+      !== historicalOccurrenceRows.length) invalid()
+  const historicalSpecialistIds = new Set(historicalOccurrenceRows.map(
+    (row) => row.specialist_id,
+  ))
+  const returnedSpecialistIds = new Set(specialistRows.map((row) => row.id))
+  if ([...historicalSpecialistIds].some((id) => !returnedSpecialistIds.has(id))
+    || specialistRows.some((row) => row.status === 'archived'
+      && !historicalSpecialistIds.has(row.id))) invalid()
+  const historicalClientRows = limit(await query(
+    db, historicalSubjectSql({ specialist: scoped, kind: 'person' }),
+    [...historicalBindings, CAPS.historicalClients + 1], HISTORICAL_CLIENT_KEYS,
+  ), 'historicalClients')
+  if (new Set(historicalClientRows.map((row) => row.id)).size
+      !== historicalClientRows.length) invalid()
+  const historicalCounterpartyRows = await query(
+    db, historicalSubjectSql({ specialist: scoped, kind: 'counterparty' }),
+    [...historicalBindings, CAPS.historicalOccurrences + 1],
+    HISTORICAL_COUNTERPARTY_KEYS,
+  )
+  if (historicalCounterpartyRows.length > CAPS.historicalOccurrences) {
+    throw new AppError('WORKSPACE_RESULT_LIMIT', {
+      field: 'historicalOccurrences', limit: CAPS.historicalOccurrences,
+    })
+  }
+  if (new Set(historicalCounterpartyRows.map((row) => row.id)).size
+      !== historicalCounterpartyRows.length) invalid()
+  const latestRows = await query(
+    db, historicalLatestSql(scoped), scoped ? [actor.specialistId] : [], HISTORICAL_LATEST_KEYS,
+  )
+  if (latestRows.length !== 1) invalid()
+  const latestPopulatedMonth = latestRows[0].latest_month
+  if (latestPopulatedMonth !== null) captureHistoricalPeriod({
+    precision: 'month', day: null, month: latestPopulatedMonth,
+  })
+
   const appointmentByClient = new Map()
   for (const row of appointmentRows) {
     const values = appointmentByClient.get(row.client_id) ?? []
@@ -667,6 +955,44 @@ export async function readWorkspace(input) {
   const clients = await Promise.all(clientRows.map((row) => (
     clientDto(row, actor, cryptoContext, decryptClient, appointmentByClient)
   )))
+  const visibleClientIds = new Set(clients.map(({ id }) => id))
+  const historicalClientRecords = await Promise.all(historicalClientRows.map((row) => (
+    historicalClientRecord({
+      row, visibleClientIds, keyring: cryptoContext.keyring,
+      decryptIdentity: decryptHistoricalIdentity,
+    })
+  )))
+  const historicalCounterpartyRecords = await Promise.all(
+    historicalCounterpartyRows.map((row) => historicalCounterpartyRecord({
+      row, keyring: cryptoContext.keyring, decryptIdentity: decryptHistoricalIdentity,
+    })),
+  )
+  const historicalClientsById = new Map(historicalClientRecords.map((record) => (
+    [record.dto.id, record]
+  )))
+  const historicalCounterpartiesById = new Map(historicalCounterpartyRecords.map((record) => (
+    [record.id, record]
+  )))
+  const referencedHistoricalClients = new Set(historicalOccurrenceRows
+    .map((row) => row.historical_client_id).filter(Boolean))
+  const referencedHistoricalCounterparties = new Set(historicalOccurrenceRows
+    .map((row) => row.counterparty_id).filter(Boolean))
+  if (historicalClientRecords.some((record) => !referencedHistoricalClients.has(record.dto.id))
+    || historicalCounterpartyRecords.some(
+      (record) => !referencedHistoricalCounterparties.has(record.id),
+    )
+    || [...referencedHistoricalClients].some((id) => !historicalClientsById.has(id))
+    || [...referencedHistoricalCounterparties].some(
+      (id) => !historicalCounterpartiesById.has(id),
+    )) invalid()
+  const historicalOccurrences = await Promise.all(historicalOccurrenceRows.map((row) => (
+    historicalOccurrenceDto({
+      row, clientsById: historicalClientsById,
+      counterpartiesById: historicalCounterpartiesById,
+      keyring: cryptoContext.keyring, decryptField: decryptHistoricalField,
+    })
+  )))
+  const historicalClients = historicalClientRecords.map(({ dto }) => dto)
   const paymentsByAppointment = new Map()
   for (const row of paymentRows) {
     if (!appointmentRows.some((appointment) => appointment.id === row.appointment_id)) invalid()
@@ -697,8 +1023,11 @@ export async function readWorkspace(input) {
     || left.id.localeCompare(right.id))
   appointments.sort((left, right) => left.startsAt.localeCompare(right.startsAt)
     || left.id.localeCompare(right.id))
+  historicalClients.sort(compareHistoricalClients)
+  historicalOccurrences.sort(compareHistoricalOccurrences)
   return freeze({ data: {
     window: { from: window.from, to: window.to, timeZone: 'Europe/Warsaw', complete: true },
-    specialists, clients, appointments,
+    specialists, clients, appointments, historicalClients, historicalOccurrences,
+    latestPopulatedMonth,
   } })
 }

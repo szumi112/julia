@@ -7,8 +7,9 @@ import {
 import { warsawDateFromUtc } from '../../src/core-records.js'
 
 const METHODS = [
-  'archiveClient', 'cancelAppointment', 'correctPayment', 'createAppointment',
-  'createClient', 'editAppointment', 'editClient', 'loadWindow', 'recordPayment',
+  'activateHistoricalClient', 'archiveClient', 'cancelAppointment', 'correctPayment',
+  'createAppointment', 'createClient', 'editAppointment', 'editClient', 'loadWindow',
+  'recordPayment',
 ]
 
 const clientInput = (overrides = {}) => ({
@@ -29,6 +30,7 @@ const apiDouble = () => {
     createClient: async (...args) => (calls.push(['createClient', ...args]), Object.freeze({ kind: 'client' })),
     editClient: async (...args) => (calls.push(['editClient', ...args]), Object.freeze({ kind: 'client' })),
     archiveClient: async (...args) => (calls.push(['archiveClient', ...args]), Object.freeze({ kind: 'client' })),
+    activateHistoricalClient: async (...args) => (calls.push(['activateHistoricalClient', ...args]), Object.freeze({ kind: 'historical-activation' })),
     createAppointment: async (...args) => (calls.push(['createAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
     editAppointment: async (...args) => (calls.push(['editAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
     cancelAppointment: async (...args) => (calls.push(['cancelAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
@@ -64,6 +66,9 @@ test('API repository delegates every command with exact captured arguments and f
     repository.createClient(create),
     repository.editClient('cl_ola', 1, edit),
     repository.archiveClient('cl_ola', 2),
+    repository.activateHistoricalClient('hcl_ola', {
+      expectedVersion: 3, specialistId: 'sp_anna',
+    }),
     repository.createAppointment(appointment),
     repository.editAppointment('apt_visit', 3, appointmentEdit),
     repository.cancelAppointment('apt_visit', 4),
@@ -72,7 +77,7 @@ test('API repository delegates every command with exact captured arguments and f
   ])
 
   assert.deepEqual(results.map((value) => value.kind), [
-    'window', 'client', 'client', 'client', 'appointment', 'appointment',
+    'window', 'client', 'client', 'client', 'historical-activation', 'appointment', 'appointment',
     'appointment', 'appointment', 'appointment',
   ])
   assert.deepEqual(calls, [
@@ -80,11 +85,12 @@ test('API repository delegates every command with exact captured arguments and f
     ['createClient', create, { idempotencyKey: 'repository-key-0001' }],
     ['editClient', 'cl_ola', 1, edit, { idempotencyKey: 'repository-key-0002' }],
     ['archiveClient', 'cl_ola', 2, { idempotencyKey: 'repository-key-0003' }],
-    ['createAppointment', appointment, { idempotencyKey: 'repository-key-0004' }],
-    ['editAppointment', 'apt_visit', 3, appointmentEdit, { idempotencyKey: 'repository-key-0005' }],
-    ['cancelAppointment', 'apt_visit', 4, { idempotencyKey: 'repository-key-0006' }],
-    ['recordPayment', 'apt_visit', 5, { amountGrosze: 7_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }, { idempotencyKey: 'repository-key-0007' }],
-    ['correctPayment', 'pay_entry', 6, { reason: 'Zmiana metody', replacement: { amountGrosze: 6_000, method: 'transfer', receivedAt: '2026-01-04T11:00:00.000Z' } }, { idempotencyKey: 'repository-key-0008' }],
+    ['activateHistoricalClient', 'hcl_ola', 3, 'sp_anna', { idempotencyKey: 'repository-key-0004' }],
+    ['createAppointment', appointment, { idempotencyKey: 'repository-key-0005' }],
+    ['editAppointment', 'apt_visit', 3, appointmentEdit, { idempotencyKey: 'repository-key-0006' }],
+    ['cancelAppointment', 'apt_visit', 4, { idempotencyKey: 'repository-key-0007' }],
+    ['recordPayment', 'apt_visit', 5, { amountGrosze: 7_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }, { idempotencyKey: 'repository-key-0008' }],
+    ['correctPayment', 'pay_entry', 6, { reason: 'Zmiana metody', replacement: { amountGrosze: 6_000, method: 'transfer', receivedAt: '2026-01-04T11:00:00.000Z' } }, { idempotencyKey: 'repository-key-0009' }],
   ])
   assert.deepEqual(create, clientInput())
   assert.deepEqual(appointment, appointmentInput())
@@ -186,9 +192,42 @@ test('demo load projects a complete ordered canonical window without excluded fi
   assert.equal(result.appointments[0].location, 'Gabinet 1')
   assert.equal(result.appointments[0].payment.collectedGrosze, 7_000)
   assert.equal(result.appointments[0].paymentEntries[0].receivedAt, '2026-08-05T10:00:00.000Z')
+  assert.deepEqual(result.historicalClients, [])
+  assert.deepEqual(result.historicalOccurrences, [])
+  assert.equal(result.latestPopulatedMonth, null)
   assert.equal(JSON.stringify(result).includes('private@example.test'), false)
   assert.equal(JSON.stringify(result).includes('secret'), false)
   assert.equal(Object.isFrozen(result.appointments[0].paymentEntries[0]), true)
+  assert.equal(harness.actions.length, 0)
+})
+
+test('historical activation validates the exact API command while demo stays fixed read-only and API-free', async () => {
+  const { api, calls } = apiDouble()
+  const repository = createApiWorkspaceRepository({ api })
+  await repository.activateHistoricalClient('hcl_ola', {
+    expectedVersion: 2, specialistId: 'sp_anna',
+  })
+  assert.deepEqual(calls, [[
+    'activateHistoricalClient', 'hcl_ola', 2, 'sp_anna',
+    { idempotencyKey: 'repository-key-0001' },
+  ]])
+  for (const [id, command] of [
+    ['cl_ola', { expectedVersion: 2, specialistId: 'sp_anna' }],
+    ['hcl_ola', { expectedVersion: 0, specialistId: 'sp_anna' }],
+    ['hcl_ola', { expectedVersion: 2, specialistId: 'stf_anna' }],
+    ['hcl_ola', { expectedVersion: 2, specialistId: 'sp_anna', extra: true }],
+  ]) {
+    await assert.rejects(repository.activateHistoricalClient(id, command), /VALIDATION_FAILED/)
+  }
+  assert.equal(calls.length, 1)
+
+  const harness = demoHarness()
+  const demo = createDemoWorkspaceRepository({
+    dispatch: harness.dispatch, getState: harness.getState,
+  })
+  await assert.rejects(demo.activateHistoricalClient('hcl_ola', {
+    expectedVersion: 2, specialistId: 'sp_demo_p1',
+  }), (error) => error?.code === 'WORKSPACE_READ_ONLY')
   assert.equal(harness.actions.length, 0)
 })
 

@@ -5,23 +5,23 @@ import {
   loadDataKey,
 } from '../security/envelope.js'
 import { encodeBase64Url } from '../security/encoding.js'
-import {
-  digestWorkbookSourcePayload,
-  digestWorkbookSourceValue,
-} from '../security/workbook-artifacts.js'
 import { compareUtf16CodeUnits } from '../../src/code-unit-order.js'
 import {
   invalidPanelFinanceField,
   normalizePanelFinanceEdits,
   prospectivePanelFinanceValues,
 } from './workbook-panel-finance.js'
+import {
+  loadAuthenticatedWorkbookSpecialistMappings,
+  openAuthenticatedWorkbookSource,
+  resolveAuthenticatedWorkbookSpecialist,
+  WORKBOOK_SOURCE_SCOPE,
+} from './workbook-source-registry.js'
 
 export const WORKBOOK_MATERIALIZATION_SLICE_SIZE = 64
 
 const APPROVED = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
-const SOURCE_SCOPE = Object.freeze({
-  type: 'workbook_source_registry', id: 'centre_1', purpose: 'source_registry',
-})
+const SOURCE_SCOPE = WORKBOOK_SOURCE_SCOPE
 const FINANCE_SCOPE = Object.freeze({
   type: 'centre_finance', id: 'centre_1', purpose: 'ledger',
 })
@@ -168,75 +168,6 @@ const replayStatement = (db, command, requestHash, now) => db.prepare(
    (actor_staff_id,operation,idempotency_key,request_hash,import_id,created_at)
    VALUES (?,'workbooks.continue',?,?,?,?)`,
 ).bind(command.actor.id, command.idempotencyKey, requestHash, command.importId, now)
-
-const sourceOpen = async (keyring, dataKey, row) => {
-  let payload
-  try {
-    payload = JSON.parse(await decryptForScope(keyring, dataKey, {
-      expectedScope: SOURCE_SCOPE,
-      recordId: row.source_record_id,
-      field: 'source_payload',
-      envelope: parseJson(row.source_payload_envelope, 'CRYPTO_FAILURE'),
-    }))
-  } catch { fail('CRYPTO_FAILURE') }
-  if (!payload || payload.schema !== 'workbook_source_payload.v1'
-    || !payload.normalized || Array.isArray(payload.normalized)
-    || typeof payload.normalized !== 'object' || !payload.raw || Array.isArray(payload.raw)
-    || typeof payload.raw !== 'object') fail('CRYPTO_FAILURE')
-  const provenance = await digestWorkbookSourcePayload({
-    keyring,
-    config: row.config,
-    centreId: 'centre_1',
-    sourceKey: row.source_key,
-    payload,
-    hmacVersion: row.record_digest_hmac_version,
-  })
-  if (provenance.digest !== row.record_digest
-    || payload.normalized.sourceKey !== row.source_key
-    || payload.normalized.sheet !== row.sheet_name
-    || payload.normalized.rowNumber !== row.row_number
-    || payload.normalized.recordType !== row.record_type
-    || payload.normalized.periodPrecision !== row.period_precision
-    || payload.normalized.periodMonth !== row.period_month) fail('CRYPTO_FAILURE')
-  return payload
-}
-
-const mappingSnapshot = async (db, command, dataKey) => {
-  const rows = (await db.prepare(
-    `SELECT id,source_value_kind,source_value_digest,source_value_hmac_version,
-            source_value_envelope,specialist_id
-     FROM workbook_resolutions
-     WHERE import_id=? AND kind='specialist_mapping' ORDER BY id`,
-  ).bind(command.importId).all()).results
-  if (!Array.isArray(rows)) fail()
-  const mappings = new Map()
-  for (const row of rows) {
-    let value
-    try {
-      value = JSON.parse(await decryptForScope(command.keyring, dataKey, {
-        expectedScope: SOURCE_SCOPE,
-        recordId: row.id,
-        field: 'source_value',
-        envelope: parseJson(row.source_value_envelope, 'CRYPTO_FAILURE'),
-      }))
-    } catch { fail('CRYPTO_FAILURE') }
-    if (!value || value.schema !== 'workbook_specialist_source.v1'
-      || typeof value.sourceValue !== 'string') fail('CRYPTO_FAILURE')
-    const provenance = await digestWorkbookSourceValue({
-      keyring: command.keyring,
-      config: command.config,
-      centreId: command.centreId,
-      sourceValueKind: row.source_value_kind,
-      sourceValue: value.sourceValue,
-      hmacVersion: row.source_value_hmac_version,
-    })
-    if (provenance.digest !== row.source_value_digest || mappings.has(value.sourceValue)) {
-      fail('CRYPTO_FAILURE')
-    }
-    mappings.set(value.sourceValue, row.specialist_id)
-  }
-  return mappings
-}
 
 const financeOpen = async (keyring, dataKey, recordId, field, serialized) => {
   try {
@@ -483,8 +414,9 @@ const reconcileSourceSlice = async (command, state, progress, sourceKeyRow, requ
   const rows = (await command.db.prepare(
     `SELECT source.id AS source_record_id,source.source_key,source.sheet_name,
             source.row_number,source.record_type,source.disposition,
-            source.period_precision,source.period_month,
+            source.occurred_on,source.period_precision,source.period_month,
             source.record_digest,source.record_digest_hmac_version,
+            source.specialist_source_digest,source.specialist_source_hmac_version,
             source.source_payload_envelope,quarantine.primary_reason
      FROM workbook_source_records AS source
      LEFT JOIN workbook_quarantine_records AS quarantine
@@ -493,7 +425,10 @@ const reconcileSourceSlice = async (command, state, progress, sourceKeyRow, requ
      LIMIT ? OFFSET ?`,
   ).bind(command.importId, WORKBOOK_MATERIALIZATION_SLICE_SIZE, state.cursor).all()).results
   if (!Array.isArray(rows) || !rows.length) fail('WORKBOOK_RECONCILIATION_CONFLICT')
-  const mappings = await mappingSnapshot(command.db, command, sourceKeyRow)
+  const mappings = await loadAuthenticatedWorkbookSpecialistMappings({
+    db: command.db, keyring: command.keyring, dataKey: sourceKeyRow,
+    importId: command.importId, config: command.config, centreId: command.centreId,
+  })
   const keys = rows.map(({ source_key: key }) => key)
   const candidates = (await command.db.prepare(
     `SELECT id,finance_entry_id,source_key,accounting_month,specialist_id,
@@ -504,17 +439,19 @@ const reconcileSourceSlice = async (command, state, progress, sourceKeyRow, requ
   const bySource = new Map(candidates.map((row) => [row.source_key, row]))
   const decisions = []
   for (const source of rows) {
-    source.config = command.config
-    const payload = await sourceOpen(command.keyring, sourceKeyRow, source)
+    const payload = await openAuthenticatedWorkbookSource({
+      keyring: command.keyring, dataKey: sourceKeyRow, row: source,
+      config: command.config, centreId: command.centreId,
+    })
     const row = payload.normalized
     const candidate = bySource.get(source.source_key)
     if (source.disposition === 'accepted') {
       progress.accepted += 1
       progress.linked += 1
-      const sourceValue = ['english', 'tus'].includes(row.recordType)
-        ? '' : row.specialistName ?? ''
-      const specialistId = mappings.get(sourceValue)
-      if (!specialistId) fail('WORKBOOK_RECONCILIATION_CONFLICT')
+      const specialistId = await resolveAuthenticatedWorkbookSpecialist({
+        keyring: command.keyring, config: command.config, centreId: command.centreId,
+        mappings, row: source, payload,
+      })
       if (candidate) {
         const accountingMonthChanged = candidate.accounting_month !== row.accountingMonth
         const specialistChanged = candidate.specialist_id !== specialistId
@@ -683,7 +620,7 @@ const applyLegacySlice = async (command, state, progress, sourceKeyRow, requestH
             decision.target_specialist_id,decision.expected_finance_version,
             decision.accounting_month_changed,decision.specialist_changed,
             source.source_key,source.sheet_name,source.row_number,source.record_type,
-            source.period_precision,source.period_month,
+            source.occurred_on,source.period_precision,source.period_month,
             source.record_digest,source.record_digest_hmac_version,
             source.source_payload_envelope,
             entry.accounting_month AS current_accounting_month,
@@ -752,8 +689,10 @@ const applyLegacySlice = async (command, state, progress, sourceKeyRow, requestH
         createdAt: now,
       })
     } else if (row.action === 'insert') {
-      row.config = command.config
-      const payload = await sourceOpen(command.keyring, sourceKeyRow, row)
+      const payload = await openAuthenticatedWorkbookSource({
+        keyring: command.keyring, dataKey: sourceKeyRow, row,
+        config: command.config, centreId: command.centreId,
+      })
       const value = payload.normalized
       const entryId = generated(command.idFactory, 'fin', /^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/)
       inserts.push({

@@ -60,6 +60,7 @@ const workspace = (from, to, { specialists, clients, appointments = [] }) => jso
   data: {
     window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
     specialists, clients, appointments,
+    historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: null,
   },
 })
 

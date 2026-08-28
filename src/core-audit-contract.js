@@ -8,6 +8,7 @@ const FINANCE_BATCH_ID = /^fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const FINANCE_ENTRY_ID = /^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const WORKBOOK_IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const HISTORICAL_CLIENT_ID = /^hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 
 const schema = (entityType, entityIdKind, metadata) => Object.freeze({
   entityType,
@@ -32,6 +33,7 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'specialist.profile.updated': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
   'workbook.import.created': schema('workbook_import', 'workbookImportId', { acceptedCount: 'count', importVersion: 'version', quarantinedCount: 'count' }),
   'workbook.import.materialized': schema('workbook_import', 'workbookImportId', { accountingMonthsCorrected: 'count', importVersion: 'version', insertedCount: 'count', linkedCount: 'count', voidedCount: 'count' }),
+  'historical_client.activated': schema('historical_client', 'historicalClientId', { activeClientId: 'clientId', activeClientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version', historicalClientVersion: 'version' }),
 })
 
 export const CORE_AUDIT_ACTIONS = Object.freeze(Object.keys(CORE_AUDIT_SCHEMAS))
@@ -62,6 +64,7 @@ const acceptsType = (type, value) => {
   if (type === 'version') return Number.isSafeInteger(value) && value > 0
   if (type === 'count') return Number.isSafeInteger(value) && value >= 0
   if (type === 'assignmentId') return typeof value === 'string' && ASSIGNMENT_ID.test(value)
+  if (type === 'clientId') return typeof value === 'string' && CLIENT_ID.test(value)
   if (type === 'correctionId') return typeof value === 'string' && CORRECTION_ID.test(value)
   if (type === 'paymentId') return typeof value === 'string' && PAYMENT_ID.test(value)
   return type === 'nullablePaymentId'
@@ -87,6 +90,7 @@ const acceptsEntityId = (kind, value) => typeof value === 'string' && ({
   paymentId: PAYMENT_ID,
   specialistId: SPECIALIST_ID,
   workbookImportId: WORKBOOK_IMPORT_ID,
+  historicalClientId: HISTORICAL_CLIENT_ID,
 })[kind].test(value)
 
 export const captureCoreAuditEvent = (value) => {

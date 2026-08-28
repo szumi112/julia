@@ -13,11 +13,14 @@ const AUTHORITY_KEYS = Object.freeze([
   'capabilities', 'demoRoleId', 'demoAuthGeneration',
 ])
 const REPOSITORY_METHODS = Object.freeze([
-  'loadWindow', 'createClient', 'editClient', 'archiveClient', 'createAppointment',
-  'editAppointment', 'cancelAppointment', 'recordPayment', 'correctPayment',
+  'loadWindow', 'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient',
+  'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
+  'correctPayment',
 ])
 const WORKSPACE_METHODS = Object.freeze(REPOSITORY_METHODS.filter((name) => name !== 'loadWindow'))
-const CLIENT_MUTATION_METHODS = new Set(['createClient', 'editClient', 'archiveClient'])
+const CLIENT_MUTATION_METHODS = new Set([
+  'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient',
+])
 const APPOINTMENT_MUTATION_METHODS = new Set(['createAppointment', 'editAppointment', 'cancelAppointment'])
 const PAYMENT_MUTATION_METHODS = new Set(['recordPayment', 'correctPayment'])
 const PAYMENT_ENTRY_KEYS = new Set([
@@ -305,6 +308,46 @@ const paymentLockForCommand = (name, state, args) => {
 const paymentLockReconciledBy = (lock, capture) => lock !== null
   && lock.date !== null && capture.from <= lock.date && lock.date <= capture.to
 
+const historicalActivationLockFor = (args) => {
+  try {
+    if (!Array.isArray(args) || args.length !== 2
+      || typeof args[0] !== 'string'
+      || !/^hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(args[0])) {
+      throw new TypeError('Invalid activation command')
+    }
+    const body = captureExactRecord(
+      args[1], ['expectedVersion', 'specialistId'], 'historical activation command',
+    )
+    if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 1
+      || body.expectedVersion >= Number.MAX_SAFE_INTEGER
+      || typeof body.specialistId !== 'string'
+      || !/^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(body.specialistId)) {
+      throw new TypeError('Invalid activation command')
+    }
+    return Object.freeze({
+      historicalClientId: args[0], version: body.expectedVersion + 1,
+    })
+  } catch {
+    throw fixedError('WORKSPACE_RECONCILIATION_REQUIRED')
+  }
+}
+
+const historicalActivationReconciled = (state, lock) => {
+  if (lock === null) return true
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      state.historicalClientsById, lock.historicalClientId,
+    )
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return false
+    const value = descriptor.value
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    return descriptors.status?.value === 'activated'
+      && descriptors.version?.value >= lock.version
+      && typeof descriptors.activeClientId?.value === 'string'
+      && /^cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(descriptors.activeClientId.value)
+  } catch { return false }
+}
+
 export const createWorkspaceProviderController = (options) => {
   const captured = captureExactRecord(options, [
     'repositoryFactory', 'dispatch', 'getState', 'authorityKey', 'clearToasts',
@@ -321,6 +364,7 @@ export const createWorkspaceProviderController = (options) => {
   let pendingLoads = 0
   let readOnly = false
   let clientMutationLocked = false
+  let historicalActivationLock = null
   let appointmentMutationLocked = false
   let paymentMutationLock = null
   let infrastructureError = null
@@ -341,6 +385,7 @@ export const createWorkspaceProviderController = (options) => {
         createClient: commands.createClient,
         editClient: commands.editClient,
         archiveClient: commands.archiveClient,
+        activateHistoricalClient: commands.activateHistoricalClient,
         createAppointment: commands.createAppointment,
         editAppointment: commands.editAppointment,
         cancelAppointment: commands.cancelAppointment,
@@ -389,7 +434,10 @@ export const createWorkspaceProviderController = (options) => {
         }
         loadedState = merged.state
         if (!merged.refetch || refetches === 1) {
-          clientMutationLocked = false
+          if (historicalActivationReconciled(loadedState, historicalActivationLock)) {
+            clientMutationLocked = false
+            historicalActivationLock = null
+          }
           appointmentMutationLocked = false
           if (paymentLockReconciledBy(paymentMutationLock, capture)) paymentMutationLock = null
           publish()
@@ -426,10 +474,16 @@ export const createWorkspaceProviderController = (options) => {
       const nextPaymentMutationLock = PAYMENT_MUTATION_METHODS.has(name)
         ? paymentLockForCommand(name, loadedState, args)
         : null
+      const nextHistoricalActivationLock = name === 'activateHistoricalClient'
+        ? historicalActivationLockFor(args)
+        : null
       try {
         const result = await operationRepository[name](...args)
         if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
         if (CLIENT_MUTATION_METHODS.has(name)) clientMutationLocked = true
+        if (name === 'activateHistoricalClient') {
+          historicalActivationLock = nextHistoricalActivationLock
+        }
         if (APPOINTMENT_MUTATION_METHODS.has(name)) appointmentMutationLocked = true
         if (PAYMENT_MUTATION_METHODS.has(name)) paymentMutationLock = nextPaymentMutationLock
         loadedState = recordLoadedWorkspaceWrite(loadedState)
@@ -452,6 +506,7 @@ export const createWorkspaceProviderController = (options) => {
     pendingLoads = 0
     readOnly = true
     clientMutationLocked = false
+    historicalActivationLock = null
     appointmentMutationLocked = false
     paymentMutationLock = null
     infrastructureError = resetFailedError()

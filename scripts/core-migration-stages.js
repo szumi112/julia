@@ -27,6 +27,7 @@ export const CORE_MIGRATION_STAGE_D_NAMES = Object.freeze([
 
 export const CORE_MIGRATION_STAGE_E_NAMES = Object.freeze([
   '0016_workbook_source_records.sql',
+  '0017_historical_workspace.sql',
 ])
 
 export const CORE_MIGRATION_REMOTE_ENV_NAMES = Object.freeze(['production', 'staging'])

@@ -58,6 +58,9 @@ const workspace = (from, to, clients, appointments = []) => json(200, {
     specialists,
     clients: clients.toSorted((left, right) => left.name.localeCompare(right.name, 'pl')),
     appointments,
+    historicalClients: [],
+    historicalOccurrences: [],
+    latestPopulatedMonth: null,
   },
 })
 

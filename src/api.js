@@ -13,6 +13,13 @@ import {
   CORE_AUDIT_SCHEMAS,
   isCoreAuditAction,
 } from './core-audit-contract.js'
+import {
+  captureHistoricalClient,
+  captureHistoricalOccurrence,
+  captureHistoricalPeriod,
+  compareHistoricalClients,
+  compareHistoricalOccurrences,
+} from './historical-records.js'
 
 const API_ROOT = '/api/v1'
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -23,6 +30,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const CLIENT_ID = /^cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const HISTORICAL_CLIENT_ID = /^hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ASSIGNMENT_ID = /^asg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const APPOINTMENT_ID = /^apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CHARGE_ID = /^chg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -110,12 +118,16 @@ const VALIDATION_FIELDS = new Set([
   'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes',
   'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt',
   'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to',
-  'specialists', 'clients', 'appointments', 'paymentEntries',
+  'specialists', 'clients', 'appointments', 'paymentEntries', 'historicalClients',
+  'historicalOccurrences',
   'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
   'entries', 'accountingMonth', 'kind',
   'standardRateGrosze',
 ])
-const WORKSPACE_FIELDS = new Set(['specialists', 'clients', 'appointments', 'paymentEntries'])
+const WORKSPACE_FIELDS = new Set([
+  'specialists', 'clients', 'appointments', 'paymentEntries', 'historicalClients',
+  'historicalOccurrences',
+])
 const CAPABILITIES = Object.freeze([
   'appointment.charge.read',
   'appointment.manage',
@@ -371,15 +383,16 @@ const captureWorkspaceSpecialist = (raw) => {
   if (!value || typeof value.id !== 'string' || !SPECIALIST_ID.test(value.id)
     || !validWorkspaceText(value.displayName, 120)
     || !workspacePositive(value.standardRateGrosze, 1_000_000)
-    || value.status !== 'active' || !workspacePositive(value.version)
+    || !['active', 'archived'].includes(value.status) || !workspacePositive(value.version)
     || !(value.staffVersion === null || workspacePositive(value.staffVersion))
     || (Object.hasOwn(value, 'accessStatus')
-      && !['unclaimed', 'invited', 'enabled'].includes(value.accessStatus))) return null
+      && (value.status !== 'active'
+        || !['unclaimed', 'invited', 'enabled'].includes(value.accessStatus)))) return null
   return Object.freeze(Object.hasOwn(value, 'accessStatus') ? {
     id: value.id,
     displayName: value.displayName,
     standardRateGrosze: value.standardRateGrosze,
-    status: 'active',
+    status: value.status,
     version: value.version,
     staffVersion: value.staffVersion,
     accessStatus: value.accessStatus,
@@ -387,7 +400,7 @@ const captureWorkspaceSpecialist = (raw) => {
     id: value.id,
     displayName: value.displayName,
     standardRateGrosze: value.standardRateGrosze,
-    status: 'active',
+    status: value.status,
     version: value.version,
     staffVersion: value.staffVersion,
   })
@@ -849,17 +862,65 @@ const acceptedCorrectedPayment = (
     ? appointment : null
 }
 
+const captureWorkspaceHistoricalClient = (raw) => {
+  try { return captureHistoricalClient(raw) } catch { return null }
+}
+
+const captureWorkspaceHistoricalOccurrence = (raw) => {
+  try { return captureHistoricalOccurrence(raw) } catch { return null }
+}
+
+const validHistoricalOccurrenceWindow = (occurrence, requested) => {
+  const { period } = occurrence
+  if (period.precision === 'day') {
+    return period.day >= requested.from && period.day <= requested.to
+  }
+  if (period.precision === 'month') {
+    return period.month >= requested.from.slice(0, 7)
+      && period.month <= requested.to.slice(0, 7)
+  }
+  return true
+}
+
+const acceptedHistoricalActivation = (
+  payload, status, historicalClientId, expectedVersion, specialistId,
+) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['historicalClient', 'client'])
+  const historicalClient = data
+    ? captureWorkspaceHistoricalClient(data.historicalClient) : null
+  const client = data ? captureWorkspaceClient(data.client) : null
+  if (status !== 201 || !historicalClient || !client
+    || historicalClient.id !== historicalClientId
+    || historicalClient.status !== 'activated'
+    || historicalClient.version !== expectedVersion + 1
+    || historicalClient.activeClientId !== client.id
+    || historicalClient.name !== client.name
+    || historicalClient.updatedAt !== client.createdAt
+    || client.age !== null || client.status !== 'active' || client.version !== 1
+    || client.archivedAt !== null || client.readOnly !== false
+    || client.createdAt !== client.updatedAt || client.assignment === null
+    || client.assignment.specialistId !== specialistId
+    || client.assignment.startsAt !== client.createdAt
+    || client.assignment.version !== 1) return null
+  return Object.freeze({ historicalClient, client })
+}
+
 const acceptedWorkspace = (payload, requested) => {
   const outer = captureDataObject(payload, ['data'])
   const data = outer && captureDataObject(outer.data, [
-    'window', 'specialists', 'clients', 'appointments',
+    'window', 'specialists', 'clients', 'appointments', 'historicalClients',
+    'historicalOccurrences', 'latestPopulatedMonth',
   ])
   const window = data && captureDataObject(data.window, ['from', 'to', 'timeZone', 'complete'])
   const specialists = data && captureDenseArray(data.specialists, 50)
   const clients = data && captureDenseArray(data.clients, 1_000)
   const appointments = data && captureDenseArray(data.appointments, 500)
+  const historicalClients = data && captureDenseArray(data.historicalClients, 1_000)
+  const historicalOccurrences = data && captureDenseArray(data.historicalOccurrences, 1_000)
   const bounds = workspaceBounds(requested)
-  if (!window || !specialists || !clients || !appointments || !bounds
+  if (!window || !specialists || !clients || !appointments || !historicalClients
+    || !historicalOccurrences || !bounds
     || window.from !== requested.from || window.to !== requested.to
     || window.timeZone !== 'Europe/Warsaw' || window.complete !== true) return null
   const acceptedSpecialists = specialists.map(captureWorkspaceSpecialist)
@@ -867,9 +928,14 @@ const acceptedWorkspace = (payload, requested) => {
   const acceptedAppointments = appointments.map((value) => (
     captureWorkspaceAppointment(value, bounds)
   ))
+  const acceptedHistoricalClients = historicalClients.map(captureWorkspaceHistoricalClient)
+  const acceptedHistoricalOccurrences = historicalOccurrences
+    .map(captureWorkspaceHistoricalOccurrence)
   if (acceptedSpecialists.some((value) => !value)
     || acceptedClients.some((value) => !value)
-    || acceptedAppointments.some((value) => !value)) return null
+    || acceptedAppointments.some((value) => !value)
+    || acceptedHistoricalClients.some((value) => !value)
+    || acceptedHistoricalOccurrences.some((value) => !value)) return null
   const specialistIds = new Set()
   let previousSpecialist = null
   for (const specialist of acceptedSpecialists) {
@@ -920,11 +986,69 @@ const acceptedWorkspace = (payload, requested) => {
     (client.status === 'archived' || client.assignment === null)
       && !referencedClients.has(client.id)
   ))) return null
+
+  const historicalClientIds = new Set()
+  let previousHistoricalClient = null
+  for (const client of acceptedHistoricalClients) {
+    if (historicalClientIds.has(client.id)
+      || (previousHistoricalClient
+        && compareHistoricalClients(previousHistoricalClient, client) >= 0)
+      || (client.activeClientId !== null && !clientIds.has(client.activeClientId))) return null
+    historicalClientIds.add(client.id)
+    previousHistoricalClient = client
+  }
+  const historicalOccurrenceIds = new Set()
+  const historicalSourceIds = new Set()
+  const historicalCounterparties = new Map()
+  const referencedHistoricalClients = new Set()
+  const referencedHistoricalSpecialists = new Set()
+  let previousHistoricalOccurrence = null
+  let latestVisibleMonth = null
+  for (const occurrence of acceptedHistoricalOccurrences) {
+    if (historicalOccurrenceIds.has(occurrence.id)
+      || historicalSourceIds.has(occurrence.sourceRecordId)
+      || !specialistIds.has(occurrence.specialistId)
+      || !validHistoricalOccurrenceWindow(occurrence, requested)
+      || (previousHistoricalOccurrence
+        && compareHistoricalOccurrences(previousHistoricalOccurrence, occurrence) >= 0)) return null
+    referencedHistoricalSpecialists.add(occurrence.specialistId)
+    if (occurrence.historicalClientId !== null) {
+      if (!historicalClientIds.has(occurrence.historicalClientId)) return null
+      referencedHistoricalClients.add(occurrence.historicalClientId)
+    } else {
+      const previousName = historicalCounterparties.get(occurrence.counterparty.id)
+      if (previousName !== undefined && previousName !== occurrence.counterparty.name) return null
+      historicalCounterparties.set(occurrence.counterparty.id, occurrence.counterparty.name)
+    }
+    if (occurrence.status === 'recorded' && occurrence.period.precision !== 'unknown') {
+      const month = occurrence.period.month
+      if (latestVisibleMonth === null || month > latestVisibleMonth) latestVisibleMonth = month
+    }
+    historicalOccurrenceIds.add(occurrence.id)
+    historicalSourceIds.add(occurrence.sourceRecordId)
+    previousHistoricalOccurrence = occurrence
+  }
+  if (acceptedSpecialists.some((specialist) => specialist.status === 'archived'
+    && !referencedHistoricalSpecialists.has(specialist.id))) return null
+  if (acceptedHistoricalClients.some(({ id }) => !referencedHistoricalClients.has(id))) return null
+  let latestPopulatedMonth = data.latestPopulatedMonth
+  if (latestPopulatedMonth !== null) {
+    try {
+      latestPopulatedMonth = captureHistoricalPeriod({
+        precision: 'month', day: null, month: latestPopulatedMonth,
+      }).month
+    } catch { return null }
+  }
+  if ((latestVisibleMonth !== null && latestPopulatedMonth === null)
+    || (latestVisibleMonth !== null && latestPopulatedMonth < latestVisibleMonth)) return null
   return Object.freeze({
     window: Object.freeze({ ...window }),
     specialists: Object.freeze(acceptedSpecialists),
     clients: Object.freeze(acceptedClients),
     appointments: Object.freeze(acceptedAppointments),
+    historicalClients: Object.freeze(acceptedHistoricalClients),
+    historicalOccurrences: Object.freeze(acceptedHistoricalOccurrences),
+    latestPopulatedMonth,
   })
 }
 const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
@@ -2192,6 +2316,25 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
+  const activateHistoricalClient = (
+    historicalClientId, expectedVersion, specialistId, options,
+  ) => {
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof historicalClientId !== 'string'
+      || !HISTORICAL_CLIENT_ID.test(historicalClientId)
+      || !positive(expectedVersion) || expectedVersion >= Number.MAX_SAFE_INTEGER
+      || typeof specialistId !== 'string' || !SPECIALIST_ID.test(specialistId)
+      || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/historical-clients/${historicalClientId}/activation`,
+      JSON.stringify({ expectedVersion, specialistId }),
+      (payload, status) => acceptedHistoricalActivation(
+        payload, status, historicalClientId, expectedVersion, specialistId,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
   const createAppointment = (input, options) => {
     const requested = captureAppointmentInput(input)
     const acceptedOptions = captureClientOptions(options)
@@ -2405,6 +2548,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     getSecurityAudit,
     listFinance,
     createClient,
+    activateHistoricalClient,
     createSpecialistProfile,
     updateSpecialistProfile,
     editClient,

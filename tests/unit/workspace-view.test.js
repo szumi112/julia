@@ -49,6 +49,19 @@ const appointment = (overrides = {}) => Object.freeze({
 })
 
 const nullMap = (values) => Object.freeze(Object.assign(Object.create(null), values))
+const historicalClient = (overrides = {}) => Object.freeze({
+  id: 'hcl_ola', name: 'Ola Historyczna', status: 'historical', activeClientId: null,
+  version: 1, createdAt: '2026-07-01T08:00:00.000Z',
+  updatedAt: '2026-07-01T08:00:00.000Z', ...overrides,
+})
+const historicalOccurrence = (overrides = {}) => Object.freeze({
+  id: 'hoc_ola', historicalClientId: 'hcl_ola', counterparty: null,
+  specialistId: 'sp_anna', serviceId: null, serviceLabel: 'Usługa historyczna',
+  period: Object.freeze({ precision: 'month', day: null, month: '2026-07' }),
+  status: 'recorded', version: 1, sourceRecordId: 'wbs_ola',
+  createdAt: '2026-07-01T08:00:00.000Z', updatedAt: '2026-07-01T08:00:00.000Z',
+  ...overrides,
+})
 const loadedState = (overrides = {}) => Object.freeze({
   loadedRanges: Object.freeze([{ from: '2026-07-01', to: '2026-07-31' }]),
   specialistsById: nullMap({ sp_anna: specialist() }),
@@ -67,6 +80,9 @@ const loadedState = (overrides = {}) => Object.freeze({
     }),
   }),
   appointmentsById: nullMap({ apt_history: appointment() }),
+  historicalClientsById: nullMap({}),
+  historicalOccurrencesById: nullMap({}),
+  latestPopulatedMonth: null,
   authorityGeneration: 2,
   writeEpoch: 5,
   ...overrides,
@@ -101,6 +117,9 @@ test('projects canonical records into immutable legacy view records without priv
     payment: 'partial', paidAmount: 80.25, method: 'transfer', paidDate: '2026-07-16',
     readOnly: true,
   }])
+  assert.deepEqual(projected.historicalClients, [])
+  assert.deepEqual(projected.historicalOccurrences, [])
+  assert.equal(projected.latestPopulatedMonth, null)
   assert.equal(Object.hasOwn(projected.clients[0], 'phone'), false)
   assert.equal(Object.hasOwn(projected.clients[0], 'notes'), false)
   assert.equal(Object.hasOwn(projected.sessions[0], 'notes'), false)
@@ -108,6 +127,64 @@ test('projects canonical records into immutable legacy view records without priv
   assert.ok(Object.isFrozen(projected.clients))
   assert.ok(Object.isFrozen(projected.sessions[0]))
   assert.notEqual(projected.clients[0], source.clientsById.cl_paused)
+})
+
+test('projects canonical historical DTOs separately from timed sessions and preserves source precision', () => {
+  const sourceClient = historicalClient({
+    status: 'activated', activeClientId: 'cl_ola', version: 2,
+    updatedAt: '2026-07-20T08:00:00.000Z',
+  })
+  const monthOccurrence = historicalOccurrence()
+  const unknownCounterparty = historicalOccurrence({
+    id: 'hoc_school', historicalClientId: null,
+    counterparty: Object.freeze({ id: 'hcp_school', name: 'Szkoła Podstawowa nr 1' }),
+    serviceLabel: 'Superwizja zespołu',
+    period: Object.freeze({ precision: 'unknown', day: null, month: null }),
+    sourceRecordId: 'wbs_school',
+  })
+  const projected = projectLoadedWorkspace(loadedState({
+    historicalClientsById: nullMap({ hcl_ola: sourceClient }),
+    historicalOccurrencesById: nullMap({
+      hoc_ola: monthOccurrence, hoc_school: unknownCounterparty,
+    }),
+    latestPopulatedMonth: '2026-07',
+  }))
+
+  assert.deepEqual(projected.historicalClients, [sourceClient])
+  assert.deepEqual(projected.historicalOccurrences, [monthOccurrence, unknownCounterparty])
+  assert.equal(projected.latestPopulatedMonth, '2026-07')
+  assert.equal(projected.sessions.length, 1)
+  assert.equal(projected.sessions.some(({ id }) => id === 'hoc_ola'), false)
+  assert.equal(Object.hasOwn(projected.historicalOccurrences[0], 'date'), false)
+  assert.equal(Object.hasOwn(projected.historicalOccurrences[0], 'time'), false)
+  assert.notEqual(projected.historicalClients[0], sourceClient)
+  assert.notEqual(projected.historicalOccurrences[0], monthOccurrence)
+  assert.ok(Object.isFrozen(projected.historicalOccurrences[0].period))
+})
+
+test('keeps archived historical specialist identities out of the active team directory', () => {
+  const archived = specialist({
+    id: 'sp_archived_history', displayName: 'Zofia Archiwalna',
+    status: 'archived', version: 5, staffVersion: 7,
+  })
+  const projected = projectLoadedWorkspace(loadedState({
+    specialistsById: nullMap({ sp_anna: specialist(), sp_archived_history: archived }),
+    historicalClientsById: nullMap({ hcl_ola: historicalClient() }),
+    historicalOccurrencesById: nullMap({
+      hoc_ola: historicalOccurrence({ specialistId: 'sp_archived_history' }),
+    }),
+    latestPopulatedMonth: '2026-07',
+  }))
+  assert.deepEqual(projected.psychologists.map(({ id }) => id), ['sp_anna'])
+  assert.deepEqual(projected.historicalSpecialists, [{
+    id: 'sp_archived_history', name: 'Zofia Archiwalna', rate: 180,
+    color: 'var(--sky-deep)', status: 'archived', version: 5, staffVersion: 7,
+  }])
+  assert.deepEqual(specialistIdentityFor(
+    projected.historicalSpecialists, 'sp_archived_history',
+  ), {
+    name: 'Zofia Archiwalna', color: 'var(--sky-deep)', available: true,
+  })
 })
 
 test('does not manufacture unreferenced archived clients and marks missing identities safely', () => {
@@ -161,6 +238,31 @@ test('rejects hostile projection boundaries without invoking accessors or coerci
     }),
   })), TypeError)
   assert.equal(reads, 0)
+})
+
+test('rejects corrupt historical projection links and scoped active-client leaks', () => {
+  const occurrence = historicalOccurrence()
+  for (const state of [
+    loadedState({
+      historicalClientsById: nullMap({}),
+      historicalOccurrencesById: nullMap({ hoc_ola: occurrence }),
+      latestPopulatedMonth: '2026-07',
+    }),
+    loadedState({
+      historicalClientsById: nullMap({
+        hcl_ola: historicalClient({ status: 'activated', activeClientId: 'cl_missing' }),
+      }),
+      historicalOccurrencesById: nullMap({ hoc_ola: occurrence }),
+      latestPopulatedMonth: '2026-07',
+    }),
+    loadedState({
+      historicalClientsById: nullMap({ hcl_ola: historicalClient() }),
+      historicalOccurrencesById: nullMap({
+        hoc_ola: historicalOccurrence({ specialistId: 'sp_missing' }),
+      }),
+      latestPopulatedMonth: '2026-07',
+    }),
+  ]) assert.throws(() => projectLoadedWorkspace(state), TypeError)
 })
 
 test('builds exact leap-safe month, Monday week, and bounded rolling windows', () => {

@@ -424,7 +424,7 @@ test('runner applies stage A, upgrades, applies stage B, seeds, then starts exac
 
   assert.deepEqual(result, { code: 'APP_E2E_READY', ok: true })
   const runs = calls.filter(({ kind }) => kind === 'run')
-  assert.equal(runs.length, 6)
+  assert.equal(runs.length, 7)
   assert.match(runs[0].args.join(' '), /d1 migrations apply DB --local/)
   assert.deepEqual(
     runs[0].args.slice(-2),
@@ -453,6 +453,9 @@ test('runner applies stage A, upgrades, applies stage B, seeds, then starts exac
   assert.match(runs[5].args.join(' '), /scripts\/apply-core-migration-stage\.js stage-d --local/)
   assert.equal(runs[5].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
   assert.equal(runs[5].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
+  assert.match(runs[6].args.join(' '), /scripts\/apply-core-migration-stage\.js stage-e --local/)
+  assert.equal(runs[6].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
+  assert.equal(runs[6].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
   const start = calls.find(({ kind }) => kind === 'start')
   assert.ok(start)
   assert.deepEqual(start.args.slice(1), [

@@ -390,7 +390,7 @@ const guardStatement = (db, values) => {
   )
 }
 
-const loadActivePractitioner = async (db, specialistId, actor) => db.prepare(
+export const loadActivePractitioner = async (db, specialistId, actor) => db.prepare(
   `SELECT specialist.id, specialist.staff_user_id
    FROM specialists AS specialist
    JOIN staff_users AS staff

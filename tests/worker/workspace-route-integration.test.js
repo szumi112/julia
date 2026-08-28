@@ -9,6 +9,9 @@ import {
 } from '../../worker/security/envelope.js'
 import {
   applyCoreDirectoryStageB,
+  applyFinanceStageC,
+  applySpecialistProfilesStageD,
+  applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
 
@@ -54,8 +57,12 @@ const seedActor = async (cryptoContext, { role, specialistId = null }) => {
   if (specialistId) {
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO specialists
-        (id,staff_user_id,standard_rate_grosze,status,version,archived_at,created_at,updated_at)
-        VALUES (?,?,18000,'active',1,NULL,?,?)`).bind(specialistId, id, now, now),
+        (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
+         archived_at,created_at,updated_at)
+        VALUES (?,?,?,18000,'active',1,NULL,?,?)`).bind(
+        specialistId, id,
+        await encrypt(cryptoContext, id, 'display_name', `Fikcyjna ${role}`), now, now,
+      ),
       env.DB.prepare(`INSERT INTO record_versions
         (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
          changed_at,correlation_id) VALUES (?,'specialist',?,1,'{}',NULL,?,?)`).bind(
@@ -94,6 +101,9 @@ const createClient = (name, specialistId) => ({
 beforeAll(async () => {
   expect(await completeCoreDirectoryStageA()).toMatchObject({ status: 'complete' })
   await applyCoreDirectoryStageB()
+  await applyFinanceStageC()
+  await applySpecialistProfilesStageD()
+  await applyWorkbookRegistryStageE()
 })
 
 describe('real workspace route authorization', () => {

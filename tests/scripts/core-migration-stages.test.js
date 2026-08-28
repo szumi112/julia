@@ -38,6 +38,7 @@ const STAGE_D_NAMES = Object.freeze([
 ])
 const STAGE_E_NAMES = Object.freeze([
   '0016_workbook_source_records.sql',
+  '0017_historical_workspace.sql',
 ])
 
 const migration = (name) => Object.freeze({
@@ -136,7 +137,7 @@ test('stage D selects only the unclaimed specialist profile migration', async ()
   assert.equal(Object.isFrozen(selected), true)
 })
 
-test('stage E selects only the workbook source registry migration', async () => {
+test('stage E selects the ordered workbook workspace migrations', async () => {
   const module = await loadStageModule()
   assert.ok(module, 'core migration stage selector must exist')
   const source = [
@@ -151,7 +152,7 @@ test('stage E selects only the workbook source registry migration', async () => 
 
   assert.deepEqual(module.CORE_MIGRATION_STAGE_E_NAMES, STAGE_E_NAMES)
   assert.deepEqual(selected.map(({ name }) => name), STAGE_E_NAMES)
-  assert.equal(selected[0], source.at(-1))
+  assert.equal(selected.at(-1), source.at(-1))
   assert.equal(Object.isFrozen(selected), true)
 })
 
