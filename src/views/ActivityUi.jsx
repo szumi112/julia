@@ -9,18 +9,23 @@ const SETTLEMENT_LABELS = Object.freeze({
 
 export const activityMoney = (grosze) => grosze === null ? '—' : fmtMoney(grosze / 100)
 
-export function ActivityLoadState({ state }) {
+export function ActivityLoadState({ state, title }) {
   if (state === 'ready') return null
   return (
-    <section role="status" aria-label="Stan danych zajęć">
-      <EmptyState
-        icon="group"
-        title={state === 'loading' ? 'Wczytywanie danych…' : 'Dane są teraz niedostępne'}
-        hint={state === 'loading'
-          ? 'Pobieramy kompletny wybrany miesiąc.'
-          : 'Nie pokazujemy ani nie edytujemy niepełnych danych.'}
-      />
-    </section>
+    <div>
+      <div className="view-head">
+        <h1 className="display view-head__title">{title}</h1>
+      </div>
+      <section role="status" aria-label="Stan danych zajęć">
+        <EmptyState
+          icon="group"
+          title={state === 'loading' ? 'Wczytywanie danych…' : 'Dane są teraz niedostępne'}
+          hint={state === 'loading'
+            ? 'Pobieramy kompletny wybrany miesiąc.'
+            : 'Nie pokazujemy ani nie edytujemy niepełnych danych.'}
+        />
+      </section>
+    </div>
   )
 }
 

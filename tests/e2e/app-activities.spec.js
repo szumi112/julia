@@ -10,8 +10,9 @@ const program = (code) => ({
 const activityWorkspace = ({
   from, to, attendanceStatus = 'present', createdClass = null,
   createdGroupLabel = null, createdMembership = null, createdParticipantName = null,
-  emptyTusMonth = null, englishCount = 1, includeClass = false, latestTus = '2026-08',
-  specialistScope = false, tusCount = 1,
+  emptyTusMonth = null, englishCount = 1, englishGroupCount = 1, includeClass = false,
+  latestTus = '2026-08', specialistScope = false, tusCount = 1,
+  tusGroupLabel = 'Fikcyjna grupa TUS', tusGroupVersion = 1,
 }) => ({
   data: {
     from, to, complete: true, currentDay: '2026-08-28',
@@ -22,13 +23,17 @@ const activityWorkspace = ({
         id: 'agr_english', programId: 'apg_english', label: 'Fikcyjny program angielski',
         details: null, status: 'active', version: 1, createdAt: NOW, updatedAt: NOW,
       },
+      ...(englishGroupCount > 1 ? [{
+        id: 'agr_english_second', programId: 'apg_english', label: 'Drugi fikcyjny program',
+        details: null, status: 'active', version: 1, createdAt: NOW, updatedAt: NOW,
+      }] : []),
       ...(createdGroupLabel ? [{
         id: 'agr_created', programId: 'apg_tus', label: createdGroupLabel,
         details: null, status: 'active', version: 1, createdAt: NOW, updatedAt: NOW,
       }] : []),
       {
-      id: 'agr_fikcyjna', programId: 'apg_tus', label: 'Fikcyjna grupa TUS',
-      details: null, status: 'active', version: 1, createdAt: NOW, updatedAt: NOW,
+      id: 'agr_fikcyjna', programId: 'apg_tus', label: tusGroupLabel,
+      details: null, status: 'active', version: tusGroupVersion, createdAt: NOW, updatedAt: NOW,
       },
     ].sort((left, right) => left.id.localeCompare(right.id)),
     groupLeaders: specialistScope ? [{
@@ -150,18 +155,34 @@ const activityWorkspace = ({
 })
 
 const installActivityFixture = async (page, {
-  emptyTusMonth = null, groupConflict = false, includeClass = false,
-  latestTus = '2026-08', specialistScope = false, tusCount = 1, englishCount = 1,
+  acceptedReloadFailure = false, editGroupConflict = false, emptyTusMonth = null,
+  englishCount = 1, englishGroupCount = 1, includeClass = false, latestTus = '2026-08',
+  specialistScope = false, tusCount = 1, workspaceDelayMs = 0, workspaceFailure = false,
 } = {}) => {
   let attendanceStatus = 'present'
   let createdClass = null
   let createdGroupLabel = null
   let createdMembership = null
   let createdParticipantName = null
+  let failNextReload = false
+  let tusGroupLabel = 'Fikcyjna grupa TUS'
+  let tusGroupVersion = 1
+  let editConflictRemaining = editGroupConflict ? 1 : 0
   let loads = 0
   const commands = []
-  await page.route('**/api/v1/activities/workspace?*', (route) => {
+  await page.route('**/api/v1/activities/workspace?*', async (route) => {
     loads += 1
+    if (workspaceDelayMs) await new Promise((resolve) => setTimeout(resolve, workspaceDelayMs))
+    if (workspaceFailure || failNextReload) {
+      failNextReload = false
+      return route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: {
+          code: 'INTERNAL_ERROR', correlationId: 'cor_activity_workspace_failure',
+        } }),
+      })
+    }
     const url = new URL(route.request().url())
     const from = url.searchParams.get('from')
     const to = url.searchParams.get('to')
@@ -171,23 +192,16 @@ const installActivityFixture = async (page, {
       body: JSON.stringify(activityWorkspace({
         from, to, attendanceStatus, createdClass, createdGroupLabel,
         createdMembership, createdParticipantName, includeClass,
-        emptyTusMonth, englishCount, latestTus, specialistScope, tusCount,
+        emptyTusMonth, englishCount, englishGroupCount, latestTus, specialistScope, tusCount,
+        tusGroupLabel, tusGroupVersion,
       })),
     })
   })
   await page.route('**/api/v1/activities/groups', async (route) => {
     const input = route.request().postDataJSON()
     commands.push({ kind: 'group', body: input, headers: route.request().headers() })
-    if (groupConflict) {
-      return route.fulfill({
-        status: 409,
-        contentType: 'application/json',
-        body: JSON.stringify({ error: {
-          code: 'VERSION_CONFLICT', correlationId: 'cor_activity_group_conflict',
-        } }),
-      })
-    }
     createdGroupLabel = input.label
+    if (acceptedReloadFailure) failNextReload = true
     return route.fulfill({
       status: 201,
       contentType: 'application/json',
@@ -199,6 +213,42 @@ const installActivityFixture = async (page, {
         },
         groupLeaders: [],
       } }),
+    })
+  })
+  await page.route('**/api/v1/activities/groups/agr_fikcyjna/edits', async (route) => {
+    const input = route.request().postDataJSON()
+    commands.push({ kind: 'group-edit', body: input, headers: route.request().headers() })
+    if (editConflictRemaining > 0) {
+      editConflictRemaining -= 1
+      tusGroupLabel = 'Fikcyjna zmiana z innego okna'
+      tusGroupVersion = 2
+      return route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: {
+          code: 'VERSION_CONFLICT', correlationId: 'cor_activity_group_conflict',
+        } }),
+      })
+    }
+    if (input.expectedVersion !== tusGroupVersion) {
+      return route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: {
+          code: 'VERSION_CONFLICT', correlationId: 'cor_activity_group_retry_conflict',
+        } }),
+      })
+    }
+    tusGroupLabel = input.label
+    tusGroupVersion = input.expectedVersion + 1
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ data: { group: {
+        id: 'agr_fikcyjna', programId: 'apg_tus', label: input.label,
+        details: input.details, status: input.status, version: tusGroupVersion,
+        createdAt: NOW, updatedAt: NOW,
+      }, groupLeaders: [] } }),
     })
   })
   await page.route('**/api/v1/activities/participants', async (route) => {
@@ -271,13 +321,14 @@ test('@owner protected TUS renders canonical group facts without demo schedule o
   await expect(page.getByText(/co tydzień/i)).toHaveCount(0)
 })
 
-test('@owner English keeps an explicit zero-lesson zero-amount ungrouped row', async ({ page }) => {
-  await installActivityFixture(page)
+test('@owner English keeps zero facts and uniquely labels each group article', async ({ page }) => {
+  await installActivityFixture(page, { englishGroupCount: 2 })
   await page.goto('./#/english?ym=2026-08')
 
   await expect(page.getByRole('heading', { level: 1, name: 'Angielski' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Nowa grupa angielskiego' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Edytuj grupę angielskiego' })).toBeVisible()
+  await expect(page.getByRole('article', { name: 'Fikcyjny program angielski' })).toBeVisible()
+  await expect(page.getByRole('article', { name: 'Drugi fikcyjny program' })).toBeVisible()
   const row = page.getByRole('row', { name: /Fikcyjny Zero/ })
   await expect(row).toContainText('Bez przypisanej grupy')
   await expect(row.getByRole('cell').nth(2)).toHaveText('0')
@@ -319,24 +370,31 @@ test('@owner TUS exposes the canonical participant command to centre scope', asy
 })
 
 test('@owner protected group exposes an explicit dated membership drawer', async ({ page }) => {
-  await installActivityFixture(page)
+  const fixture = await installActivityFixture(page)
   await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
 
   await page.getByRole('button', { name: 'Dodaj przypisanie' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowe przypisanie do grupy' })
   await expect(drawer.getByLabel('Uczestnik')).toBeVisible()
-  await expect(drawer.getByLabel('Data rozpoczęcia')).toHaveValue('2026-08-01')
+  await expect(drawer.getByLabel('Data rozpoczęcia')).toHaveValue('')
+  await drawer.getByLabel('Uczestnik').selectOption({ label: 'Fikcyjny Nieprzypisany' })
+  await drawer.getByRole('button', { name: 'Dodaj przypisanie' }).click()
+  await expect(drawer.getByRole('alert')).toContainText('poprawny zakres dat')
+  expect(fixture.commands.filter(({ kind }) => kind === 'membership')).toHaveLength(0)
 })
 
 test('@owner protected group creates only a one-off civil-dated class', async ({ page }) => {
-  await installActivityFixture(page)
+  const fixture = await installActivityFixture(page)
   await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
 
   await page.getByRole('button', { name: 'Dodaj zajęcia' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowe zajęcia TUS' })
-  await expect(drawer.getByLabel('Data zajęć')).toBeVisible()
+  await expect(drawer.getByLabel('Data zajęć')).toHaveValue('')
   await expect(drawer.getByLabel('Godzina')).toHaveValue('')
   await expect(drawer.getByLabel(/cykl|co tydzień|liczba spotkań/i)).toHaveCount(0)
+  await drawer.getByRole('button', { name: 'Dodaj zajęcia' }).click()
+  await expect(drawer.getByRole('alert')).toContainText('poprawną datę')
+  expect(fixture.commands.filter(({ kind }) => kind === 'class')).toHaveLength(0)
 })
 
 test('@owner attendance toggles only a real class participant and reconciles canonical state', async ({ page }) => {
@@ -354,19 +412,58 @@ test('@owner attendance toggles only a real class participant and reconciles can
   expect(fixture.loads()).toBeGreaterThanOrEqual(2)
 })
 
-test('@owner activity conflict keeps the draft open and reloads the canonical month', async ({ page }) => {
-  const fixture = await installActivityFixture(page, { groupConflict: true })
-  await page.goto('./#/tus?ym=2026-08')
+test('@owner edit conflict rebases canonical version, retains draft, and retries successfully', async ({ page }) => {
+  const fixture = await installActivityFixture(page, { editGroupConflict: true })
+  await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
 
-  await page.getByRole('button', { name: 'Nowa grupa' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
+  await page.getByRole('button', { name: 'Edytuj grupę' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Edytuj grupę TUS' })
   await drawer.getByLabel('Nazwa grupy').fill('Fikcyjny szkic konfliktu')
-  await drawer.getByRole('button', { name: 'Utwórz grupę' }).click()
+  await drawer.getByRole('button', { name: 'Zapisz grupę' }).click()
 
   await expect(drawer).toBeVisible()
   await expect(drawer.getByLabel('Nazwa grupy')).toHaveValue('Fikcyjny szkic konfliktu')
   await expect(drawer.getByRole('alert')).toContainText('Grupa zmieniła się w innym oknie')
+  await expect(drawer).toContainText('Fikcyjna zmiana z innego okna')
+  await drawer.getByRole('button', { name: 'Zapisz grupę' }).click()
+  await expect(drawer).toHaveCount(0)
+  await expect(page.getByRole('heading', { level: 1, name: 'Fikcyjny szkic konfliktu' })).toBeVisible()
+  expect(fixture.commands.filter(({ kind }) => kind === 'group-edit').map(({ body }) => body))
+    .toMatchObject([
+      { expectedVersion: 1, label: 'Fikcyjny szkic konfliktu' },
+      { expectedVersion: 2, label: 'Fikcyjny szkic konfliktu' },
+    ])
   expect(fixture.loads()).toBeGreaterThanOrEqual(2)
+})
+
+test('@owner accepted write reload failure closes mutation UI and prevents replay', async ({ page }) => {
+  const fixture = await installActivityFixture(page, { acceptedReloadFailure: true })
+  await page.goto('./#/tus?ym=2026-08')
+  await page.getByRole('button', { name: 'Nowa grupa' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
+  await drawer.getByLabel('Nazwa grupy').fill('Fikcyjna zaakceptowana grupa')
+  await drawer.getByRole('button', { name: 'Utwórz grupę' }).click()
+
+  await expect(drawer).toHaveCount(0)
+  await expect(page.getByRole('heading', { level: 1, name: 'Grupy TUS' })).toBeVisible()
+  await expect(page.getByText('Dane są teraz niedostępne')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Nowa grupa' })).toHaveCount(0)
+  expect(fixture.commands.filter(({ kind }) => kind === 'group')).toHaveLength(1)
+})
+
+test('@owner activity loading state retains the route heading', async ({ page }) => {
+  await installActivityFixture(page, { workspaceDelayMs: 3_000 })
+  await page.goto('./#/tus?ym=2026-08')
+  await expect(page.getByRole('heading', { level: 1, name: 'Grupy TUS' })).toBeVisible({ timeout: 1_000 })
+  await expect(page.getByText('Wczytywanie danych…')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Fikcyjna grupa TUS' })).toBeVisible()
+})
+
+test('@owner activity error state retains the route heading', async ({ page }) => {
+  await installActivityFixture(page, { workspaceFailure: true })
+  await page.goto('./#/english?ym=2026-08')
+  await expect(page.getByRole('heading', { level: 1, name: 'Angielski' })).toBeVisible()
+  await expect(page.getByText('Dane są teraz niedostępne')).toBeVisible()
 })
 
 test('@owner participant create posts the exact canonical DTO and renders the refreshed record', async ({ page }) => {
@@ -394,6 +491,7 @@ test('@owner membership create posts explicit dates and renders the refreshed as
   await page.getByRole('button', { name: 'Dodaj przypisanie' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowe przypisanie do grupy' })
   await drawer.getByLabel('Uczestnik').selectOption({ label: 'Fikcyjny Nieprzypisany' })
+  await drawer.getByLabel('Data rozpoczęcia').fill('2026-08-01')
   await drawer.getByRole('button', { name: 'Dodaj przypisanie' }).click()
 
   await expect(drawer).toHaveCount(0)

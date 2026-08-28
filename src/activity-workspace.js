@@ -214,6 +214,7 @@ export function activityGroupView(state, { groupId, month }) {
     leaders,
     memberships,
     participantRows: membershipRows,
+    participantOptions: [...facts.participants].sort(byPolishName),
     classes,
     chargeRows,
     summary: summaryFor({ memberships, charges, classes: groupClasses }),
@@ -222,7 +223,7 @@ export function activityGroupView(state, { groupId, month }) {
 
 export function activityActionAvailability({ actor, role, capabilities, group }) {
   const centre = role?.scope === 'centre'
-  const specialistId = actor?.specialistId ?? actor?.psychId ?? null
+  const specialistId = actor?.specialistId ?? null
   const led = Boolean(group?.leaders?.some((leader) => leader.specialistId === specialistId))
   const eligibleToManageGroup = centre || led
   const allowed = (actionId, eligible) => canPerformAction(capabilities, actionId) && eligible

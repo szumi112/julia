@@ -49,7 +49,7 @@ export function English({ params = {} }) {
   const overview = useMemo(() => loadState === 'ready'
     ? activityProgramOverview(workspace.activities.state, { program: 'english', month })
     : null, [loadState, month, workspace.activities])
-  if (!overview) return <ActivityLoadState state={loadState} />
+  if (!overview) return <ActivityLoadState state={loadState} title="Angielski" />
 
   const pages = pageCount(overview.rows.length, PAGE_SIZE)
   const visibleRows = pageSlice(overview.rows, page, PAGE_SIZE)
@@ -94,13 +94,14 @@ export function English({ params = {} }) {
           <h2 className="card-title" id="english-groups-title">Grupy i programy</h2>
           <div className="grid-2 activity-group-grid">
             {overview.groups.map(({ group, leaders }) => {
+              const titleId = `protected-english-group-${group.id}`
               const groupActions = activityActionAvailability({
                 actor, role, capabilities, group: { leaders },
               })
               return (
-              <article className="card card--pad activity-group-card" key={group.id}>
+              <article className="card card--pad activity-group-card" key={group.id} aria-labelledby={titleId}>
                 <div className="row row--between">
-                  <h3 className="card-title activity-wrap">{group.label}</h3>
+                  <h3 className="card-title activity-wrap" id={titleId}>{group.label}</h3>
                   {groupActions.editGroup && (
                     <Button size="sm" variant="ghost" onClick={() => openActivityGroupForm({
                       group,

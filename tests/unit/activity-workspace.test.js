@@ -138,4 +138,34 @@ test('combines the global TUS grant with centre and proved leader eligibility', 
   assert.equal(activityActionAvailability({
     actor: { specialistId: 'sp_julia' }, role: { scope: 'own' }, capabilities: [], group,
   }).createClass, false)
+
+  const mismatchedProfessionalLink = activityActionAvailability({
+    actor: { specialistId: null, psychId: 'sp_julia' }, role: { scope: 'own' },
+    capabilities: ['tus.manage'], group,
+  })
+  assert.equal(mismatchedProfessionalLink.editGroup, false)
+  assert.equal(mismatchedProfessionalLink.createClass, false)
+})
+
+test('group participant choices are active-only and sort by Polish name then ID', () => {
+  const participantsById = frozenMap({
+    ...state.participantsById,
+    acp_same_b: Object.freeze({
+      id: 'acp_same_b', programId: 'apg_tus', name: 'Ądam', status: 'active', version: 1,
+    }),
+    acp_same_a: Object.freeze({
+      id: 'acp_same_a', programId: 'apg_tus', name: 'Ądam', status: 'active', version: 1,
+    }),
+    acp_inactive: Object.freeze({
+      id: 'acp_inactive', programId: 'apg_tus', name: 'Aaa Ukryty', status: 'inactive', version: 1,
+    }),
+  })
+  const view = activityGroupView(Object.freeze({ ...state, participantsById }), {
+    groupId: 'agr_a', month: '2026-08',
+  })
+
+  assert.deepEqual(
+    view.participantOptions.map(({ id }) => id),
+    ['acp_same_a', 'acp_same_b', 'acp_tus'],
+  )
 })

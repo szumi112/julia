@@ -113,7 +113,7 @@ export function ProtectedTusOverview({ params }) {
     ? activityProgramOverview(workspace.activities.state, { program: 'tus', month })
     : null, [loadState, month, workspace.activities])
 
-  if (!overview) return <ActivityLoadState state={loadState} />
+  if (!overview) return <ActivityLoadState state={loadState} title="Grupy TUS" />
   const actions = activityActionAvailability({ actor, role, capabilities, group: null })
   return (
     <div ref={ref}>
@@ -199,7 +199,7 @@ export function ProtectedTusGroup({ params }) {
     ? activityGroupView(workspace.activities.state, { groupId: params.id, month })
     : undefined, [loadState, month, params.id, workspace.activities])
 
-  if (loadState !== 'ready') return <ActivityLoadState state={loadState} />
+  if (loadState !== 'ready') return <ActivityLoadState state={loadState} title="Grupa TUS" />
   if (view === null) {
     return (
       <EmptyState
@@ -213,9 +213,7 @@ export function ProtectedTusGroup({ params }) {
   const actions = activityActionAvailability({
     actor, role, capabilities, group: { leaders: view.leaders },
   })
-  const participants = Object.values(workspace.activities.state.participantsById)
-    .filter((participant) => participant.programId === view.group.programId)
-    .sort((left, right) => left.name.localeCompare(right.name, 'pl'))
+  const participants = view.participantOptions
   return (
     <div ref={ref}>
       <ActivityBackLink month={month} />

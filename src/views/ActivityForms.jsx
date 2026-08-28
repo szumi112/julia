@@ -8,12 +8,21 @@ import { Icon } from '../icons.jsx'
 const staleAuthority = (error) => ['SESSION_AUTHORITY_STALE', 'WORKSPACE_AUTHORITY_STALE']
   .includes(error?.code)
 
+const useCloseOnReadOnly = (readOnly, forceClose) => {
+  useEffect(() => {
+    if (readOnly) forceClose()
+  }, [forceClose, readOnly])
+}
+
 export function ActivityGroupDrawer({ opts, onClose }) {
   const { toast, workspace } = useApp()
   const { registerLeaveGuard } = useShell()
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const editing = opts.group ?? null
+  const canonical = editing
+    ? workspace.activities.state.groupsById[editing.id] ?? editing
+    : null
   const [label, setLabel] = useState(editing?.label ?? '')
   const [details, setDetails] = useState(editing?.details ?? '')
   const [error, setError] = useState(null)
@@ -25,6 +34,8 @@ export function ActivityGroupDrawer({ opts, onClose }) {
   const { close, forceClose, shake } = useDrawerFX(
     drawerRef, backRef, onClose, discard.guard,
   )
+  const readOnly = workspace.activities.status === 'read-only-error'
+  useCloseOnReadOnly(readOnly, forceClose)
   useEffect(() => registerLeaveGuard(discard.check), [discard.check, registerLeaveGuard])
 
   const submit = async (event) => {
@@ -36,17 +47,17 @@ export function ActivityGroupDrawer({ opts, onClose }) {
       shake()
       return
     }
-    if (saving) return
+    if (saving || readOnly) return
     setSaving(true)
     setError(null)
     const reconciliation = { from: opts.month, to: opts.month }
     try {
       if (editing) {
         await workspace.activities.editGroup(editing.id, {
-          expectedVersion: editing.version,
+          expectedVersion: canonical.version,
           label: cleanLabel,
           details: cleanDetails || null,
-          status: editing.status,
+          status: canonical.status,
           leaderSpecialistIds: opts.leaderSpecialistIds ?? [],
         }, reconciliation)
       } else {
@@ -106,10 +117,13 @@ export function ActivityGroupDrawer({ opts, onClose }) {
               <Icon name="alert" size={15} /> <span>{error}</span>
             </div>
           )}
+          {error && canonical && canonical.version !== editing.version && (
+            <p className="muted activity-wrap">Aktualna wersja w panelu: {canonical.label}</p>
+          )}
         </form>
         {discard.confirming && <DiscardConfirm onStay={discard.hide} onDiscard={forceClose} />}
         <div className="drawer__foot">
-          <Button onClick={submit} disabled={saving}>{editing ? 'Zapisz grupę' : 'Utwórz grupę'}</Button>
+          <Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz grupę' : 'Utwórz grupę'}</Button>
           <Button variant="ghost" onClick={close}>Anuluj</Button>
         </div>
       </aside>
@@ -123,6 +137,9 @@ export function ActivityParticipantDrawer({ opts, onClose }) {
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const editing = opts.participant ?? null
+  const canonical = editing
+    ? workspace.activities.state.participantsById[editing.id] ?? editing
+    : null
   const [name, setName] = useState(editing?.name ?? '')
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -130,6 +147,8 @@ export function ActivityParticipantDrawer({ opts, onClose }) {
   const { close, forceClose, shake } = useDrawerFX(
     drawerRef, backRef, onClose, discard.guard,
   )
+  const readOnly = workspace.activities.status === 'read-only-error'
+  useCloseOnReadOnly(readOnly, forceClose)
   useEffect(() => registerLeaveGuard(discard.check), [discard.check, registerLeaveGuard])
 
   const submit = async (event) => {
@@ -140,18 +159,18 @@ export function ActivityParticipantDrawer({ opts, onClose }) {
       shake()
       return
     }
-    if (saving) return
+    if (saving || readOnly) return
     setSaving(true)
     setError(null)
     const reconciliation = { from: opts.month, to: opts.month }
     try {
       if (editing) {
         await workspace.activities.editParticipant(editing.id, {
-          expectedVersion: editing.version,
+          expectedVersion: canonical.version,
           name: cleanName,
-          clientId: editing.clientId,
-          historicalClientId: editing.historicalClientId,
-          status: editing.status,
+          clientId: canonical.clientId,
+          historicalClientId: canonical.historicalClientId,
+          status: canonical.status,
         }, reconciliation)
       } else {
         await workspace.activities.createParticipant({
@@ -204,7 +223,7 @@ export function ActivityParticipantDrawer({ opts, onClose }) {
         </form>
         {discard.confirming && <DiscardConfirm onStay={discard.hide} onDiscard={forceClose} />}
         <div className="drawer__foot">
-          <Button onClick={submit} disabled={saving}>{editing ? 'Zapisz uczestnika' : 'Utwórz uczestnika'}</Button>
+          <Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz uczestnika' : 'Utwórz uczestnika'}</Button>
           <Button variant="ghost" onClick={close}>Anuluj</Button>
         </div>
       </aside>
@@ -218,20 +237,25 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const editing = opts.membership ?? null
+  const canonical = editing
+    ? workspace.activities.state.membershipsById[editing.id] ?? editing
+    : null
   const [participantId, setParticipantId] = useState(editing?.participantId ?? '')
-  const [startsOn, setStartsOn] = useState(editing?.startsOn ?? `${opts.month}-01`)
+  const [startsOn, setStartsOn] = useState(editing?.startsOn ?? '')
   const [endsOn, setEndsOn] = useState(editing?.endsOn ?? '')
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
   const initial = JSON.stringify({
     participantId: editing?.participantId ?? '',
-    startsOn: editing?.startsOn ?? `${opts.month}-01`, endsOn: editing?.endsOn ?? '',
+    startsOn: editing?.startsOn ?? '', endsOn: editing?.endsOn ?? '',
   })
   const dirty = JSON.stringify({ participantId, startsOn, endsOn }) !== initial
   const discard = useDiscardGuard(dirty)
   const { close, forceClose, shake } = useDrawerFX(
     drawerRef, backRef, onClose, discard.guard,
   )
+  const readOnly = workspace.activities.status === 'read-only-error'
+  useCloseOnReadOnly(readOnly, forceClose)
   useEffect(() => registerLeaveGuard(discard.check), [discard.check, registerLeaveGuard])
 
   const submit = async (event) => {
@@ -242,17 +266,17 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
       shake()
       return
     }
-    if (saving) return
+    if (saving || readOnly) return
     setSaving(true)
     setError(null)
     const reconciliation = { from: opts.month, to: opts.month }
     try {
       if (editing) {
         await workspace.activities.editMembership(editing.id, {
-          expectedVersion: editing.version,
+          expectedVersion: canonical.version,
           startsOn,
           endsOn: endsOn || null,
-          status: editing.status,
+          status: canonical.status,
         }, reconciliation)
       } else {
         await workspace.activities.createMembership({
@@ -310,7 +334,7 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
         </form>
         {discard.confirming && <DiscardConfirm onStay={discard.hide} onDiscard={forceClose} />}
         <div className="drawer__foot">
-          <Button onClick={submit} disabled={saving}>{editing ? 'Zapisz przypisanie' : 'Dodaj przypisanie'}</Button>
+          <Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz przypisanie' : 'Dodaj przypisanie'}</Button>
           <Button variant="ghost" onClick={close}>Anuluj</Button>
         </div>
       </aside>
@@ -324,7 +348,10 @@ export function ActivityClassDrawer({ opts, onClose }) {
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const editing = opts.activityClass ?? null
-  const [date, setDate] = useState(editing?.date ?? `${opts.month}-01`)
+  const canonical = editing
+    ? workspace.activities.state.classesById[editing.id] ?? editing
+    : null
+  const [date, setDate] = useState(editing?.date ?? '')
   const [time, setTime] = useState(editing?.time ?? '')
   const [duration, setDuration] = useState(editing?.durationMinutes ?? '')
   const [topic, setTopic] = useState(editing?.topic ?? '')
@@ -337,6 +364,8 @@ export function ActivityClassDrawer({ opts, onClose }) {
   const { close, forceClose, shake } = useDrawerFX(
     drawerRef, backRef, onClose, discard.guard,
   )
+  const readOnly = workspace.activities.status === 'read-only-error'
+  useCloseOnReadOnly(readOnly, forceClose)
   useEffect(() => registerLeaveGuard(discard.check), [discard.check, registerLeaveGuard])
 
   const submit = async (event) => {
@@ -348,7 +377,7 @@ export function ActivityClassDrawer({ opts, onClose }) {
       shake()
       return
     }
-    if (saving) return
+    if (saving || readOnly) return
     setSaving(true)
     setError(null)
     const fields = {
@@ -362,7 +391,7 @@ export function ActivityClassDrawer({ opts, onClose }) {
     try {
       if (editing) {
         await workspace.activities.editClass(editing.id, {
-          expectedVersion: editing.version, ...fields,
+          expectedVersion: canonical.version, ...fields,
         }, reconciliation)
       } else {
         await workspace.activities.createClass({ groupId: opts.groupId, ...fields }, reconciliation)
@@ -402,7 +431,7 @@ export function ActivityClassDrawer({ opts, onClose }) {
           {error && <div className="form-warn form-warn--error" role="alert"><Icon name="alert" size={15} /> <span>{error}</span></div>}
         </form>
         {discard.confirming && <DiscardConfirm onStay={discard.hide} onDiscard={forceClose} />}
-        <div className="drawer__foot"><Button onClick={submit} disabled={saving}>{editing ? 'Zapisz zajęcia' : 'Dodaj zajęcia'}</Button><Button variant="ghost" onClick={close}>Anuluj</Button></div>
+        <div className="drawer__foot"><Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz zajęcia' : 'Dodaj zajęcia'}</Button><Button variant="ghost" onClick={close}>Anuluj</Button></div>
       </aside>
     </>
   )
