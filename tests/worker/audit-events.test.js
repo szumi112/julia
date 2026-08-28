@@ -37,6 +37,8 @@ describe('shared audit statement constructor', () => {
     ['appointment.cancelled', 'appointment', 'apt_cancelled', { appointmentVersion: 2, chargeVersion: 1 }],
     ['payment.recorded', 'appointment', 'apt_paid', { appointmentVersion: 2, paymentEntryId: 'pay_recorded' }],
     ['payment.corrected', 'payment_entry', 'pay_reversed', { appointmentVersion: 3, correctionId: 'cor_corrected', reversedEntryId: 'pay_reversed', replacementEntryId: null }],
+    ['activity.group.created', 'activity_group', 'agr_created', { groupVersion: 1, leaderCount: 2 }],
+    ['activity.projection.advanced', 'activity_projection_job', 'apj_advanced', { jobVersion: 2, processedCount: 1, projectedCount: 1 }],
   ])('accepts only the exact core schema for %s/%s', async (action, entityType, entityId, metadata) => {
     await env.DB.prepare(
       `INSERT INTO staff_users

@@ -11,6 +11,7 @@ const METHODS = [
   'createAppointment', 'createClient', 'editAppointment', 'editClient', 'loadWindow',
   'recordPayment',
 ]
+const REPOSITORY_KEYS = [...METHODS, 'activities'].sort()
 
 const clientInput = (overrides = {}) => ({
   name: 'Ola Nowak', age: 12, status: 'active', specialistId: 'sp_anna', ...overrides,
@@ -36,6 +37,16 @@ const apiDouble = () => {
     cancelAppointment: async (...args) => (calls.push(['cancelAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
     recordPayment: async (...args) => (calls.push(['recordPayment', ...args]), Object.freeze({ kind: 'appointment' })),
     correctPayment: async (...args) => (calls.push(['correctPayment', ...args]), Object.freeze({ kind: 'appointment' })),
+    loadActivityWorkspace: async (...args) => (calls.push(['loadActivityWorkspace', ...args]), Object.freeze({ kind: 'activity-workspace' })),
+    createActivityGroup: async (...args) => (calls.push(['createActivityGroup', ...args]), Object.freeze({ kind: 'activity-group' })),
+    editActivityGroup: async (...args) => (calls.push(['editActivityGroup', ...args]), Object.freeze({ kind: 'activity-group' })),
+    createActivityParticipant: async (...args) => (calls.push(['createActivityParticipant', ...args]), Object.freeze({ kind: 'activity-participant' })),
+    editActivityParticipant: async (...args) => (calls.push(['editActivityParticipant', ...args]), Object.freeze({ kind: 'activity-participant' })),
+    createActivityMembership: async (...args) => (calls.push(['createActivityMembership', ...args]), Object.freeze({ kind: 'activity-membership' })),
+    editActivityMembership: async (...args) => (calls.push(['editActivityMembership', ...args]), Object.freeze({ kind: 'activity-membership' })),
+    createActivityClass: async (...args) => (calls.push(['createActivityClass', ...args]), Object.freeze({ kind: 'activity-class' })),
+    editActivityClass: async (...args) => (calls.push(['editActivityClass', ...args]), Object.freeze({ kind: 'activity-class' })),
+    setActivityAttendance: async (...args) => (calls.push(['setActivityAttendance', ...args]), Object.freeze({ kind: 'activity-attendance' })),
     createIdempotencyKey: () => `repository-key-${String(++key).padStart(4, '0')}`,
   }
   return { api, calls }
@@ -46,10 +57,13 @@ test('constructors expose one exact frozen repository interface', () => {
   const apiRepository = createApiWorkspaceRepository({ api })
   const demoRepository = createDemoWorkspaceRepository({ dispatch() {}, getState: () => ({ psychologists: [], clients: [], sessions: [] }) })
   for (const repository of [apiRepository, demoRepository]) {
-    assert.deepEqual(Object.keys(repository).sort(), METHODS)
+    assert.deepEqual(Object.keys(repository).sort(), REPOSITORY_KEYS)
     assert.equal(Object.isFrozen(repository), true)
     for (const method of METHODS) assert.equal(typeof repository[method], 'function')
   }
+  assert.equal(Object.isFrozen(apiRepository.activities), true)
+  assert.equal(apiRepository.activities.loadWindow instanceof Function, true)
+  assert.equal(demoRepository.activities, null)
 })
 
 test('API repository delegates every command with exact captured arguments and fresh action keys', async () => {

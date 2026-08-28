@@ -4,6 +4,7 @@ import {
   compareHistoricalClients,
   compareHistoricalOccurrences,
 } from './historical-records.js'
+import { captureLoadedActivitiesState } from './loaded-activities.js'
 
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
 const CIVIL_MONTH = /^(\d{4})-(\d{2})$/
@@ -20,6 +21,70 @@ const warsawDateTime = new Intl.DateTimeFormat('en-CA', {
 
 const fail = (label) => {
   throw new TypeError(`Invalid ${label}`)
+}
+
+const cloneCanonicalActivityValue = (value) => {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean'
+    || (typeof value === 'number' && Number.isSafeInteger(value))) return value
+  let descriptors
+  try {
+    if (!value || typeof value !== 'object') fail('activity projection')
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) fail('activity projection')
+      descriptors = Object.getOwnPropertyDescriptors(value)
+      const length = descriptors.length?.value
+      if (!Number.isSafeInteger(length) || length < 0
+        || Reflect.ownKeys(descriptors).length !== length + 1) fail('activity projection')
+      const result = []
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = descriptors[String(index)]
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) {
+          fail('activity projection')
+        }
+        result.push(cloneCanonicalActivityValue(descriptor.value))
+      }
+      return Object.freeze(result)
+    }
+    if (Object.getPrototypeOf(value) !== Object.prototype) fail('activity projection')
+    descriptors = Object.getOwnPropertyDescriptors(value)
+  } catch { fail('activity projection') }
+  const result = {}
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key]
+    if (typeof key !== 'string' || !descriptor?.enumerable
+      || !Object.hasOwn(descriptor, 'value')) fail('activity projection')
+    result[key] = cloneCanonicalActivityValue(descriptor.value)
+  }
+  return Object.freeze(result)
+}
+
+const projectedActivityMap = (map) => {
+  const descriptors = Object.getOwnPropertyDescriptors(map)
+  const result = []
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key]
+    if (typeof key !== 'string' || !descriptor?.enumerable
+      || !Object.hasOwn(descriptor, 'value')) fail('activity projection')
+    result.push(cloneCanonicalActivityValue(descriptor.value))
+  }
+  return Object.freeze(result.sort((left, right) => left.id.localeCompare(right.id)))
+}
+
+export const projectLoadedActivities = (source) => {
+  const state = captureLoadedActivitiesState(source)
+  return Object.freeze({
+    loadedMonths: cloneCanonicalActivityValue(state.loadedMonths),
+    latestPopulatedMonths: cloneCanonicalActivityValue(state.latestPopulatedMonths),
+    programs: projectedActivityMap(state.programsById),
+    groups: projectedActivityMap(state.groupsById),
+    groupLeaders: projectedActivityMap(state.groupLeadersById),
+    participants: projectedActivityMap(state.participantsById),
+    memberships: projectedActivityMap(state.membershipsById),
+    classes: projectedActivityMap(state.classesById),
+    attendance: projectedActivityMap(state.attendanceById),
+    charges: projectedActivityMap(state.chargesById),
+    payments: projectedActivityMap(state.paymentsById),
+  })
 }
 
 const daysInMonth = (year, month) => {

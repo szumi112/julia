@@ -66,13 +66,34 @@ test('workspace authority identity rejects accessor-backed mutable session input
   assert.throws(() => createWorkspaceAuthorityKey(authority), TypeError)
 })
 
+test('protected specialist authority requires one canonical specialist profile', () => {
+  const authority = {
+    repositoryMode: 'api', dataMode: 'fictional', actorId: 'stf_specialist', actorVersion: 1,
+    role: 'specialist', specialistId: 'sp_specialist', capabilities: [],
+    demoRoleId: null, demoAuthGeneration: null,
+  }
+  assert.doesNotThrow(() => createWorkspaceAuthorityKey(authority))
+  for (const specialistId of [null, '', 'staff_specialist', '../sp_specialist']) {
+    assert.throws(
+      () => createWorkspaceAuthorityKey({ ...authority, specialistId }),
+      TypeError,
+    )
+  }
+})
+
 test('protected app adapts the full API client to the exact bound workspace dependency', async () => {
   const calls = []
   const methodNames = [
     'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
     'activateHistoricalClient',
     'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
-    'correctPayment', 'createIdempotencyKey',
+    'correctPayment',
+    'loadActivityWorkspace',
+    'createActivityGroup', 'editActivityGroup',
+    'createActivityParticipant', 'editActivityParticipant',
+    'createActivityMembership', 'editActivityMembership',
+    'createActivityClass', 'editActivityClass', 'setActivityAttendance',
+    'createIdempotencyKey',
   ]
   const source = { marker: 'trusted-api', unrelatedMethod() {} }
   for (const name of methodNames) {

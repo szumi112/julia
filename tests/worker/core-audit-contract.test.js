@@ -48,6 +48,12 @@ const eventFor = (action) => {
     actorStaffId: 'stf_one',
     entityType: schema.entityType,
     entityId: schema.entityIdKind === 'clientId' ? 'cl_one'
+      : schema.entityIdKind === 'activityGroupId' ? 'agr_one'
+        : schema.entityIdKind === 'activityParticipantId' ? 'acp_one'
+          : schema.entityIdKind === 'activityMembershipId' ? 'amb_one'
+            : schema.entityIdKind === 'activityClassId' ? 'acl_one'
+              : schema.entityIdKind === 'activityAttendanceId' ? 'aat_one'
+                : schema.entityIdKind === 'activityProjectionJobId' ? 'apj_one'
       : schema.entityIdKind === 'appointmentId' ? 'apt_one'
         : schema.entityIdKind === 'financeBatchId' ? 'fib_one'
           : schema.entityIdKind === 'financeEntryId' ? 'fin_one'

@@ -72,6 +72,29 @@ describe('authorization matrix', () => {
     }
   })
 
+  it('authorizes activity centre, led-group, and responsible-record facts exactly', () => {
+    const activityCentre = { kind: 'activity_centre', centreId: 'centre_1' }
+    const ledGroup = {
+      kind: 'activity_group', groupId: 'agr_sowy', leaderSpecialistIds: ['sp_spec'],
+    }
+    const responsible = {
+      kind: 'activity_record', activityId: 'acp_ola',
+      leaderSpecialistIds: [], responsibleSpecialistId: 'sp_spec',
+    }
+    expect(authorize(ACTORS.owner, 'tus.manage', activityCentre, { nowMs: NOW_MS })).toBe(true)
+    expect(authorize(ACTORS.coordinator, 'tus.manage', activityCentre, { nowMs: NOW_MS })).toBe(true)
+    expect(authorize(ACTORS.specialist, 'tus.manage', activityCentre, { nowMs: NOW_MS })).toBe(false)
+    expect(authorize(ACTORS.specialist, 'tus.manage', ledGroup, { nowMs: NOW_MS })).toBe(true)
+    expect(authorize(ACTORS.specialist, 'tus.manage', responsible, { nowMs: NOW_MS })).toBe(true)
+    for (const hostile of [
+      { ...ledGroup, groupId: 'tus_legacy' },
+      { ...ledGroup, extra: true },
+      { ...responsible, responsibleSpecialistId: 'sp_other' },
+      { ...responsible, leaderSpecialistIds: ['sp_other'], responsibleSpecialistId: null },
+    ]) expect(authorize(ACTORS.specialist, 'tus.manage', hostile, { nowMs: NOW_MS }))
+      .toBe(false)
+  })
+
   it('requires exact centre and directory identities and contains hostile facts', () => {
     for (const [capability, resource] of [
       ['centre.manage', { ...centre, centreId: 'centre_2' }],

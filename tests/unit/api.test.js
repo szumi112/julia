@@ -6,6 +6,68 @@ import { isWellFormedUnicode, validateClientInput } from '../../src/core-records
 import { validateCreateClientBody } from '../../worker/core/clients.js'
 import { capabilitiesForActor } from '../../worker/identity/policy.js'
 
+const ACTIVITY_NOW = '2026-08-01T10:00:00.000Z'
+const ACTIVITY_LATER = '2026-08-02T10:00:00.000Z'
+
+const activityWorkspaceBody = (currentDay = '2026-08-28') => ({
+  data: {
+    from: '2026-08', to: '2026-09', complete: true,
+    currentDay,
+    latestPopulatedMonths: { tus: null, english: null },
+    programs: [], groups: [], groupLeaders: [], participants: [], memberships: [],
+    classes: [], attendance: [], charges: [], payments: [],
+  },
+})
+
+const withFixedDate = async (value, callback) => {
+  const NativeDate = globalThis.Date
+  class FixedDate extends NativeDate {
+    constructor(...args) { super(...(args.length === 0 ? [value] : args)) }
+    static now() { return new NativeDate(value).getTime() }
+  }
+  globalThis.Date = FixedDate
+  try { return await callback() } finally { globalThis.Date = NativeDate }
+}
+
+const activityGroup = (overrides = {}) => ({
+  id: 'agr_tus', programId: 'apg_tus', label: 'Grupa TUS', details: null,
+  status: 'active', version: 1, createdAt: ACTIVITY_NOW, updatedAt: ACTIVITY_NOW,
+  ...overrides,
+})
+const activityLeader = (overrides = {}) => ({
+  id: 'agl_tus_anna', groupId: 'agr_tus', specialistId: 'sp_anna',
+  startsOn: '2026-08-01', endsOn: null, status: 'active', version: 1,
+  createdAt: ACTIVITY_NOW, updatedAt: ACTIVITY_NOW, ...overrides,
+})
+const activityParticipant = (overrides = {}) => ({
+  id: 'acp_tusia', programId: 'apg_tus', name: 'Fikcyjna Tusia', clientId: null,
+  historicalClientId: 'hcl_tusia', status: 'active', version: 1,
+  createdAt: ACTIVITY_NOW, updatedAt: ACTIVITY_NOW, ...overrides,
+})
+const activityMembership = (overrides = {}) => ({
+  id: 'amb_tusia', participantId: 'acp_tusia', programId: 'apg_tus',
+  groupId: 'agr_tus', membershipKind: 'interval',
+  period: { precision: 'unknown', day: null, month: null },
+  startsOn: '2026-08-01', endsOn: null, status: 'active', version: 1,
+  createdAt: ACTIVITY_NOW, updatedAt: ACTIVITY_NOW, ...overrides,
+})
+const activityClass = (overrides = {}) => ({
+  id: 'acl_tus_august', groupId: 'agr_tus', date: '2026-08-12', time: '16:30',
+  durationMinutes: 90, topic: 'Emocje', status: 'scheduled', version: 1,
+  createdAt: ACTIVITY_NOW, updatedAt: ACTIVITY_NOW, ...overrides,
+})
+const activityAttendance = (overrides = {}) => ({
+  id: 'aat_tus_august', classId: 'acl_tus_august', participantId: 'acp_tusia',
+  status: 'present', version: 1, createdAt: ACTIVITY_NOW, updatedAt: ACTIVITY_NOW,
+  ...overrides,
+})
+const activityProjectionJob = (overrides = {}) => ({
+  id: 'apj_import', importId: 'wbi_import', status: 'ready',
+  afterSourceRecordId: null, totalRecords: 2, processedRecords: 0,
+  projectedRecords: 0, version: 1, updatedAt: ACTIVITY_NOW, completedAt: null,
+  ...overrides,
+})
+
 const CORRELATION_ID = '77777777-7777-4777-8777-777777777777'
 const TOKEN_A = 'v1.1999999999.AAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'
 const TOKEN_B = 'v1.1999999998.CCCCCCCCCCCCCCCCCCCCCC.DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD'
@@ -4388,4 +4450,217 @@ test('ledger correction responses must prove a post-creation mutation instant', 
   await assert.rejects(client.correctPayment('pay_original', 1, {
     reason: 'Usunięcie wpisu', replacement: null,
   }, { idempotencyKey: 'ledger-instant-key-0001' }), assertInvalidResponse)
+})
+
+test('activity client uses exact month, CRUD, attendance and projection HTTP contracts', async () => {
+  const groupCreate = {
+    programId: 'apg_tus', label: 'Grupa TUS', details: null,
+    leaderSpecialistIds: ['sp_anna'],
+  }
+  const groupEdit = {
+    expectedVersion: 1, label: 'Grupa TUS A', details: 'Wtorki', status: 'active',
+    leaderSpecialistIds: ['sp_anna'],
+  }
+  const participantCreate = {
+    programId: 'apg_tus', name: 'Fikcyjna Tusia', clientId: null,
+    historicalClientId: 'hcl_tusia',
+  }
+  const participantEdit = {
+    expectedVersion: 1, name: 'Fikcyjna Tusia A', clientId: 'cl_tusia',
+    historicalClientId: null, status: 'active',
+  }
+  const membershipCreate = {
+    participantId: 'acp_tusia', groupId: 'agr_tus', startsOn: '2026-08-01', endsOn: null,
+  }
+  const membershipEdit = {
+    expectedVersion: 1, startsOn: '2026-08-02', endsOn: '2026-12-31', status: 'active',
+  }
+  const classCreate = {
+    groupId: 'agr_tus', date: '2026-08-12', time: '16:30', durationMinutes: 90,
+    topic: 'Emocje', status: 'scheduled',
+  }
+  const classEdit = {
+    expectedVersion: 1, date: '2026-09-02', time: null, durationMinutes: null,
+    topic: null, status: 'completed',
+  }
+  const attendanceCreate = {
+    participantId: 'acp_tusia', status: 'present', expectedVersion: 0,
+  }
+  const editedGroup = activityGroup({
+    label: groupEdit.label, details: groupEdit.details, version: 2,
+    updatedAt: ACTIVITY_LATER,
+  })
+  const editedParticipant = activityParticipant({
+    name: participantEdit.name, clientId: participantEdit.clientId,
+    historicalClientId: null, version: 2, updatedAt: ACTIVITY_LATER,
+  })
+  const editedMembership = activityMembership({
+    startsOn: membershipEdit.startsOn, endsOn: membershipEdit.endsOn,
+    version: 2, updatedAt: ACTIVITY_LATER,
+  })
+  const editedClass = activityClass({
+    date: classEdit.date, time: null, durationMinutes: null, topic: null,
+    status: classEdit.status, version: 2, updatedAt: ACTIVITY_LATER,
+  })
+  const runningJob = activityProjectionJob({
+    status: 'running', afterSourceRecordId: 'wbs_source', processedRecords: 1,
+    projectedRecords: 1, version: 2, updatedAt: ACTIVITY_LATER,
+  })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse(activityWorkspaceBody()),
+    jsonResponse({ data: { job: activityProjectionJob() } }),
+    jsonResponse({ data: { group: activityGroup(), groupLeaders: [activityLeader()] } }, 201),
+    jsonResponse({ data: { group: editedGroup, groupLeaders: [activityLeader()] } }),
+    jsonResponse({ data: { participant: activityParticipant() } }, 201),
+    jsonResponse({ data: { participant: editedParticipant } }),
+    jsonResponse({ data: { membership: activityMembership() } }, 201),
+    jsonResponse({ data: { membership: editedMembership } }),
+    jsonResponse({ data: { class: activityClass() } }, 201),
+    jsonResponse({ data: { class: editedClass } }),
+    jsonResponse({ data: { attendance: activityAttendance() } }, 201),
+    jsonResponse({ data: { job: runningJob } }),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+  assert.deepEqual(await client.loadActivityWorkspace({ from: '2026-08', to: '2026-09' }),
+    activityWorkspaceBody().data)
+  assert.deepEqual(await client.getActivityProjection('wbi_import'), activityProjectionJob())
+  const key = (suffix) => ({ idempotencyKey: `activity-client-key-${suffix}` })
+  await client.createActivityGroup(groupCreate, key('group-create'))
+  await client.editActivityGroup('agr_tus', groupEdit, key('group-edit'))
+  await client.createActivityParticipant(participantCreate, key('participant-create'))
+  await client.editActivityParticipant('acp_tusia', participantEdit, key('participant-edit'))
+  await client.createActivityMembership(membershipCreate, key('membership-create'))
+  await client.editActivityMembership('amb_tusia', membershipEdit, key('membership-edit'))
+  await client.createActivityClass(classCreate, key('class-create'))
+  await client.editActivityClass('acl_tus_august', classEdit, key('class-edit'))
+  await client.setActivityAttendance('acl_tus_august', attendanceCreate, key('attendance'))
+  assert.deepEqual(
+    await client.continueActivityProjection('wbi_import', 1, key('projection')),
+    runningJob,
+  )
+
+  assert.deepEqual(queued.calls.map(({ url }) => url), [
+    '/api/v1/session',
+    '/api/v1/activities/workspace?from=2026-08&to=2026-09',
+    '/api/v1/workbooks/imports/wbi_import/activity-projection',
+    '/api/v1/activities/groups',
+    '/api/v1/activities/groups/agr_tus/edits',
+    '/api/v1/activities/participants',
+    '/api/v1/activities/participants/acp_tusia/edits',
+    '/api/v1/activities/memberships',
+    '/api/v1/activities/memberships/amb_tusia/edits',
+    '/api/v1/activities/classes',
+    '/api/v1/activities/classes/acl_tus_august/edits',
+    '/api/v1/activities/classes/acl_tus_august/attendance',
+    '/api/v1/workbooks/imports/wbi_import/activity-projection/continue',
+  ])
+  assert.deepEqual(queued.calls.slice(3).map(({ init }) => JSON.parse(init.body)), [
+    groupCreate, groupEdit, participantCreate, participantEdit, membershipCreate,
+    membershipEdit, classCreate, classEdit, attendanceCreate, { expectedVersion: 1 },
+  ])
+  assert.equal(queued.calls[1].init.method, 'GET')
+  assert.equal(queued.calls[2].init.method, 'GET')
+  for (const call of queued.calls.slice(3)) {
+    assert.equal(call.init.method, 'POST')
+    assert.equal(call.init.credentials, 'same-origin')
+    assert.match(header(call, 'Idempotency-Key'), /^activity-client-key-/)
+  }
+})
+
+test('activity workspace validation uses embedded currentDay across browser month rollover', async () => {
+  const queued = queuedFetch(jsonResponse(activityWorkspaceBody('2026-08-31')))
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  const workspace = await withFixedDate('2026-09-01T00:30:00.000Z', () => (
+    client.loadActivityWorkspace({ from: '2026-08', to: '2026-09' })
+  ))
+  assert.equal(workspace.currentDay, '2026-08-31')
+})
+
+test('activity client rejects invalid inputs and response envelopes without partial mutation calls', async () => {
+  const malformedWorkspace = activityWorkspaceBody()
+  malformedWorkspace.data.payments = [{ secret: 'private' }]
+  const queued = queuedFetch(jsonResponse(malformedWorkspace))
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await assert.rejects(
+    client.loadActivityWorkspace({ from: '2026-08', to: '2026-09' }),
+    { code: 'INVALID_RESPONSE' },
+  )
+  await assert.rejects(
+    client.loadActivityWorkspace({ from: '2026-01', to: '2027-01' }),
+    { code: 'CLIENT_INPUT_INVALID' },
+  )
+  await assert.rejects(client.createActivityGroup({
+    programId: 'apg_tus', label: 'Grupa TUS', details: null,
+    leaderSpecialistIds: ['bad-id'],
+  }), { code: 'CLIENT_INPUT_INVALID' })
+  assert.equal(queued.calls.length, 1)
+})
+
+test('activity result-limit and validation errors preserve only allow-listed safe details', async () => {
+  const queued = queuedFetch(
+    errorResponse('ACTIVITY_RESULT_LIMIT', 409, {
+      details: { field: 'charges', limit: 5_000, identity: 'private' },
+    }),
+    errorResponse('VALIDATION_FAILED', 400, {
+      details: { field: 'leaderSpecialistIds', identity: 'private' },
+    }),
+    errorResponse('ACTIVITY_CONFLICT', 409, {
+      details: { identity: 'private' },
+    }),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await assert.rejects(client.loadActivityWorkspace({ from: '2026-08', to: '2026-08' }), {
+    code: 'ACTIVITY_RESULT_LIMIT', details: { field: 'charges', limit: 5_000 },
+  })
+  await assert.rejects(client.getActivityProjection('wbi_import'), {
+    code: 'VALIDATION_FAILED', details: { field: 'leaderSpecialistIds' },
+  })
+  await assert.rejects(
+    client.loadActivityWorkspace({ from: '2026-08', to: '2026-08' }),
+    (error) => {
+      assert.equal(error.code, 'ACTIVITY_CONFLICT')
+      assert.equal(Object.hasOwn(error, 'details'), false)
+      assert.doesNotMatch(JSON.stringify(error), /private/)
+      return true
+    },
+  )
+})
+
+test('activity projection continuation creates version one from expected version zero only at 201', async () => {
+  const beforeCreation = queuedFetch(jsonResponse({ data: { job: null } }))
+  assert.equal(
+    await createApiClient({ fetchImpl: beforeCreation.fetchImpl })
+      .getActivityProjection('wbi_import'),
+    null,
+  )
+
+  const ready = activityProjectionJob()
+  const accepted = queuedFetch(
+    jsonResponse(sessionBody()), jsonResponse({ data: { job: ready } }, 201),
+  )
+  const client = createApiClient({ fetchImpl: accepted.fetchImpl })
+  await client.getSession()
+  assert.deepEqual(await client.continueActivityProjection('wbi_import', 0, {
+    idempotencyKey: 'activity-projection-create-key',
+  }), ready)
+  assert.deepEqual(JSON.parse(accepted.calls[1].init.body), { expectedVersion: 0 })
+
+  for (const [expectedVersion, status, job] of [
+    [0, 200, ready],
+    [1, 201, activityProjectionJob({
+      status: 'running', afterSourceRecordId: 'wbs_source', processedRecords: 1,
+      projectedRecords: 1, version: 2, updatedAt: ACTIVITY_LATER,
+    })],
+  ]) {
+    const queued = queuedFetch(
+      jsonResponse(sessionBody()), jsonResponse({ data: { job } }, status),
+    )
+    const invalid = createApiClient({ fetchImpl: queued.fetchImpl })
+    await invalid.getSession()
+    await assert.rejects(invalid.continueActivityProjection('wbi_import', expectedVersion, {
+      idempotencyKey: `activity-projection-wrong-${expectedVersion}-${status}`,
+    }), { code: 'INVALID_RESPONSE' })
+  }
 })

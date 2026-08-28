@@ -194,6 +194,22 @@ describe('closed core route descriptors', () => {
       { id: 'workbooks.continue', capability: 'finance.centre.manage', auditActions: ['workbook.import.materialized'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.status', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.export', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'historical.projection.status', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'historical.projection.continue', capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'historical.projection.resolve', capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'historical.clients.activate', capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.workspace', capability: 'tus.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.groups.create', capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.groups.edit', capability: 'tus.manage', auditActions: ['activity.group.updated'], bodyKeys: ['expectedVersion', 'label', 'details', 'status', 'leaderSpecialistIds'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.participants.create', capability: 'tus.manage', auditActions: ['activity.participant.created'], bodyKeys: ['programId', 'name', 'clientId', 'historicalClientId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.participants.edit', capability: 'tus.manage', auditActions: ['activity.participant.updated'], bodyKeys: ['expectedVersion', 'name', 'clientId', 'historicalClientId', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.memberships.create', capability: 'tus.manage', auditActions: ['activity.membership.created'], bodyKeys: ['participantId', 'groupId', 'startsOn', 'endsOn'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.memberships.edit', capability: 'tus.manage', auditActions: ['activity.membership.updated'], bodyKeys: ['expectedVersion', 'startsOn', 'endsOn', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.classes.create', capability: 'tus.manage', auditActions: ['activity.class.created'], bodyKeys: ['groupId', 'date', 'time', 'durationMinutes', 'topic', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.classes.edit', capability: 'tus.manage', auditActions: ['activity.class.updated'], bodyKeys: ['expectedVersion', 'date', 'time', 'durationMinutes', 'topic', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.attendance.set', capability: 'tus.manage', auditActions: ['activity.attendance.set'], bodyKeys: ['participantId', 'status', 'expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.projection.status', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.projection.continue', capability: 'finance.centre.manage', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
     ])
     expect(Object.isFrozen(CORE_ROUTE_DESCRIPTORS)).toBe(true)
     expect(CORE_ROUTE_DESCRIPTORS.every((route) => Object.isFrozen(route)

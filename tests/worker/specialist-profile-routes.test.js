@@ -24,6 +24,7 @@ import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
   applySpecialistProfilesStageD,
+  applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
 
@@ -49,6 +50,7 @@ describe('specialist profile creation', () => {
     await applyCoreDirectoryStageB()
     await applyFinanceStageC()
     await applySpecialistProfilesStageD()
+    await applyWorkbookRegistryStageE()
     const keyring = await createKeyring(env, {
       activeDataKekVersion: 1,
       activeLookupKeyVersion: 1,

@@ -20,12 +20,27 @@ import {
 } from './core-records.js'
 import { isBillable } from './format.js'
 import { SERVICE_BY_ID } from './services.js'
+import { createApiActivityRepository } from './activity-repository.js'
 
 const API_METHODS = Object.freeze([
   'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
   'activateHistoricalClient',
   'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
-  'correctPayment', 'createIdempotencyKey',
+  'correctPayment',
+  'loadActivityWorkspace',
+  'createActivityGroup', 'editActivityGroup',
+  'createActivityParticipant', 'editActivityParticipant',
+  'createActivityMembership', 'editActivityMembership',
+  'createActivityClass', 'editActivityClass', 'setActivityAttendance',
+  'createIdempotencyKey',
+])
+const ACTIVITY_API_METHODS = Object.freeze([
+  'loadActivityWorkspace',
+  'createActivityGroup', 'editActivityGroup',
+  'createActivityParticipant', 'editActivityParticipant',
+  'createActivityMembership', 'editActivityMembership',
+  'createActivityClass', 'editActivityClass', 'setActivityAttendance',
+  'createIdempotencyKey',
 ])
 const REPOSITORY_METHODS = Object.freeze([
   'loadWindow', 'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient',
@@ -181,15 +196,20 @@ const captureWindow = (input) => {
 
 const capturedId = (value, kind, field) => assertId(value, kind, field)
 
-const makeRepository = (methods) => {
+const makeRepository = (methods, activities = null) => {
   const repository = {}
   for (const name of REPOSITORY_METHODS) repository[name] = methods[name]
+  repository.activities = activities
   return Object.freeze(repository)
 }
 
 export function createApiWorkspaceRepository(options) {
   const { api: source } = captureRecord(options, ['api'], 'repository')
   const api = captureFunctionRecord(source, API_METHODS, 'api')
+  const activityApi = Object.freeze(Object.fromEntries(
+    ACTIVITY_API_METHODS.map((name) => [name, api[name]]),
+  ))
+  const activities = createApiActivityRepository({ api: activityApi })
   const action = async (invoke) => {
     const idempotencyKey = api.createIdempotencyKey()
     if (typeof idempotencyKey !== 'string' || !actionKey.test(idempotencyKey)) fail('idempotencyKey')
@@ -257,7 +277,7 @@ export function createApiWorkspaceRepository(options) {
       }
       return action((options) => api.correctPayment(id, expectedVersion, canonical, options))
     },
-  })
+  }, activities)
 }
 
 const demoId = (kind, legacyId) => `${kind}_demo_${legacyId}`

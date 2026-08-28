@@ -5,12 +5,18 @@ import {
   clientIdentityFor,
   isWorkspaceRangeCovered,
   monthWorkspaceRange,
+  projectLoadedActivities,
   projectLoadedWorkspace,
   rollingWorkspaceRange,
   specialistIdentityFor,
   weekWorkspaceRange,
   workspaceRangeState,
 } from '../../src/workspace-view.js'
+import {
+  captureLoadedActivitiesLoad,
+  createLoadedActivitiesState,
+  mergeLoadedActivitiesLoad,
+} from '../../src/loaded-activities.js'
 
 const specialist = (overrides = {}) => Object.freeze({
   id: 'sp_anna', displayName: 'Anna Nowak', standardRateGrosze: 18_000,
@@ -86,6 +92,76 @@ const loadedState = (overrides = {}) => Object.freeze({
   authorityGeneration: 2,
   writeEpoch: 5,
   ...overrides,
+})
+
+const loadedActivitiesState = () => {
+  const initial = createLoadedActivitiesState()
+  const capture = captureLoadedActivitiesLoad(initial, { from: '2026-08', to: '2026-08' })
+  return mergeLoadedActivitiesLoad(initial, capture, {
+    from: '2026-08', to: '2026-08', complete: true,
+    currentDay: '2026-08-28',
+    latestPopulatedMonths: { tus: null, english: '2026-08' },
+    programs: [{
+      id: 'apg_english', code: 'english', label: 'Angielski', status: 'active',
+      version: 1, createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+    }],
+    groups: [], groupLeaders: [],
+    participants: [{
+      id: 'acp_english', programId: 'apg_english', name: 'Fikcyjny Anglista',
+      clientId: null, historicalClientId: null, status: 'active', version: 1,
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+    }],
+    memberships: [], classes: [], attendance: [],
+    charges: [{
+      id: 'ach_english', participantId: 'acp_english', programId: 'apg_english',
+      groupId: null, membershipId: null,
+      period: { precision: 'month', day: null, month: '2026-08' }, lessonCount: 0,
+      responsibleSpecialistId: 'sp_anna', financeEntryId: 'fin_english',
+      status: 'active', version: 1,
+      finance: {
+        amountGrosze: 18_000, paidAmountGrosze: 7_000,
+        paymentMethod: 'transfer', settlementStatus: 'partial',
+      },
+      createdAt: '2026-08-01T10:00:00.000Z',
+      updatedAt: '2026-08-01T10:00:00.000Z',
+    }],
+    payments: [],
+  }).state
+}
+
+test('projects the canonical activity cache as exact immutable ID-ordered arrays', () => {
+  const source = loadedActivitiesState()
+  const projected = projectLoadedActivities(source)
+  assert.deepEqual(Object.keys(projected), [
+    'loadedMonths', 'latestPopulatedMonths', 'programs', 'groups', 'groupLeaders',
+    'participants', 'memberships', 'classes', 'attendance', 'charges', 'payments',
+  ])
+  assert.deepEqual(projected.loadedMonths, [{ from: '2026-08', to: '2026-08' }])
+  assert.deepEqual(projected.programs.map(({ id }) => id), ['apg_english'])
+  assert.deepEqual(projected.participants.map(({ id }) => id), ['acp_english'])
+  assert.deepEqual(projected.charges[0].finance, {
+    amountGrosze: 18_000, paidAmountGrosze: 7_000,
+    paymentMethod: 'transfer', settlementStatus: 'partial',
+  })
+  assert.equal(Object.hasOwn(projected.charges[0], 'amountGrosze'), false)
+  assert.deepEqual(projected.payments, [])
+  assert.equal(Object.isFrozen(projected), true)
+  assert.equal(Object.isFrozen(projected.charges[0].finance), true)
+  assert.notEqual(projected.charges[0], source.chargesById.ach_english)
+})
+
+test('activity projection rejects forged cache shells before reading their entity maps', () => {
+  const source = loadedActivitiesState()
+  let reads = 0
+  const forged = { ...source }
+  Object.defineProperty(forged, 'chargesById', {
+    enumerable: true,
+    get() { reads += 1; return source.chargesById },
+  })
+  assert.throws(() => projectLoadedActivities(forged), TypeError)
+  assert.equal(reads, 0)
 })
 
 test('projects canonical records into immutable legacy view records without private demo fields', () => {

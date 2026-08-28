@@ -25,6 +25,10 @@ const nonempty = (value) => typeof value === 'string'
   && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
 const staffId = (value) => typeof value === 'string'
   && /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value)
+const activityGroupId = (value) => typeof value === 'string'
+  && /^agr_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value)
+const activityId = (value) => typeof value === 'string'
+  && /^(?:agr|acp|amb|acl|aat)_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value)
 
 const captureFields = (value, keys) => {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
@@ -77,6 +81,17 @@ const ids = (values) => {
 }
 
 const has = (values, value) => ids(values)?.includes(value) === true
+const activitySpecialistIds = (values) => {
+  if (!Array.isArray(values) || values.length > 1_000) return null
+  const captured = []
+  for (let index = 0; index < values.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(values, String(index))
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')
+      || !isSpecialistId(descriptor.value)) return null
+    captured.push(descriptor.value)
+  }
+  return captured
+}
 const ownSpecialist = (actor, value) => nonempty(actor.specialistId)
   && actor.specialistId === value
 
@@ -178,6 +193,29 @@ export function authorize(value, capability, resource, options = {}) {
         && (actor.role !== 'specialist' || ownSpecialist(actor, appointment.specialistId)))
     }
     if (capability === 'tus.manage') {
+      const activityCentre = captureExact(resource, ['kind', 'centreId'])
+      if (activityCentre?.kind === 'activity_centre') {
+        return activityCentre.centreId === 'centre_1' && actor.role !== 'specialist'
+      }
+      const activityGroup = captureExact(
+        resource, ['kind', 'groupId', 'leaderSpecialistIds'],
+      )
+      if (activityGroup?.kind === 'activity_group') {
+        const leaders = activitySpecialistIds(activityGroup.leaderSpecialistIds)
+        return Boolean(activityGroupId(activityGroup.groupId) && leaders
+          && (actor.role !== 'specialist' || leaders.includes(actor.specialistId)))
+      }
+      const activityRecord = captureExact(resource, [
+        'kind', 'activityId', 'leaderSpecialistIds', 'responsibleSpecialistId',
+      ])
+      if (activityRecord?.kind === 'activity_record') {
+        const leaders = activitySpecialistIds(activityRecord.leaderSpecialistIds)
+        const responsible = activityRecord.responsibleSpecialistId
+        if (!activityId(activityRecord.activityId) || !leaders
+          || !(responsible === null || isSpecialistId(responsible))) return false
+        return actor.role !== 'specialist' || leaders.includes(actor.specialistId)
+          || responsible === actor.specialistId
+      }
       const group = captureFields(resource, ['kind', 'groupId', 'leaderSpecialistIds'])
       if (group?.kind !== 'tus_group' || !nonempty(group.groupId)
         || !ids(group.leaderSpecialistIds)) return false

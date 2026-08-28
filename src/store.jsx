@@ -19,6 +19,8 @@ import {
   projectLoadedWorkspace,
   workspaceRangeState,
 } from './workspace-view.js'
+import { activityWindowLoadOutcome, trackActivityWindowLoad } from './activity-load-request.js'
+import { activityLoadRequestKey, isActivityWindowLoaded } from './loaded-activities.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -428,6 +430,63 @@ export const useWorkspaceWindow = (range, enabled = true) => {
 export const useWorkspaceRefresh = () => {
   const { workspace } = useApp()
   return useCallback((range) => workspace.loadWindow(range), [workspace])
+}
+
+export const useActivityWorkspaceWindow = (range, enabled = true) => {
+  const { workspace } = useApp()
+  const activities = workspace.activities
+  const requested = useRef(new Set())
+  const rejected = useRef(null)
+  const mounted = useRef(false)
+  const currentKey = useRef('')
+  const [rejectedKey, setRejectedKey] = useState(null)
+  const key = activities !== null && range
+    ? activityLoadRequestKey(activities.state, range)
+    : ''
+  currentKey.current = key
+  const covered = activities !== null && range
+    ? isActivityWindowLoaded(activities.state, range)
+    : false
+
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
+
+  useEffect(() => {
+    if (!enabled || activities === null || !range) {
+      if (rejected.current !== null) {
+        rejected.current = null
+        setRejectedKey(null)
+      }
+      return
+    }
+    if (covered || activities.status === 'read-only-error' || rejected.current === key
+      || requested.current.has(key)) return
+    rejected.current = null
+    setRejectedKey(null)
+    trackActivityWindowLoad({
+      key,
+      requested: requested.current,
+      load: () => activities.loadWindow(range),
+      onRejected: (failedKey) => {
+        if (mounted.current && currentKey.current === failedKey) {
+          rejected.current = failedKey
+          setRejectedKey(failedKey)
+        }
+      },
+    }).catch(() => {})
+  }, [activities, covered, enabled, key, range, rejectedKey])
+
+  return activityWindowLoadOutcome({
+    enabled,
+    hasActivities: activities !== null,
+    hasRange: range !== null && range !== undefined,
+    readOnly: activities?.status === 'read-only-error',
+    covered,
+    key,
+    rejectedKey,
+  })
 }
 
 // ---------- selectors ----------

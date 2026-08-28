@@ -61,6 +61,16 @@ const ACTION_COPY = Object.freeze({
 })
 
 const AUDIT_ACTIONS = Object.freeze({
+  'activity.attendance.set': 'Ustawienie obecności na zajęciach',
+  'activity.class.created': 'Utworzenie zajęć grupowych',
+  'activity.class.updated': 'Aktualizacja zajęć grupowych',
+  'activity.group.created': 'Utworzenie grupy zajęciowej',
+  'activity.group.updated': 'Aktualizacja grupy zajęciowej',
+  'activity.membership.created': 'Dodanie uczestnika do grupy',
+  'activity.membership.updated': 'Aktualizacja członkostwa w grupie',
+  'activity.participant.created': 'Utworzenie uczestnika zajęć',
+  'activity.participant.updated': 'Aktualizacja uczestnika zajęć',
+  'activity.projection.advanced': 'Postęp importu aktywności',
   'authorization.denied': 'Odmowa autoryzacji',
   'backup.pruned': 'Usunięcie wygasłej kopii zapasowej',
   'data_key.rewrapped': 'Ponowne zabezpieczenie klucza danych',

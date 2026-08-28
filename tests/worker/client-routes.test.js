@@ -29,6 +29,8 @@ import { createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db
 import { createApp } from '../../worker/app.js'
 import {
   applyCoreDirectoryStageB,
+  applyFinanceStageC,
+  applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
 
@@ -767,6 +769,8 @@ const ring = () => createKeyring(env, {
 beforeAll(async () => {
   expect(await completeCoreDirectoryStageA()).toMatchObject({ status: 'complete' })
   await applyCoreDirectoryStageB()
+  await applyFinanceStageC()
+  await applyWorkbookRegistryStageE()
   const instant = new Date(NOW_MS).toISOString()
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO staff_users

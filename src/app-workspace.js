@@ -2,7 +2,13 @@ const WORKSPACE_API_METHODS = Object.freeze([
   'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
   'activateHistoricalClient',
   'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
-  'correctPayment', 'createIdempotencyKey',
+  'correctPayment',
+  'loadActivityWorkspace',
+  'createActivityGroup', 'editActivityGroup',
+  'createActivityParticipant', 'editActivityParticipant',
+  'createActivityMembership', 'editActivityMembership',
+  'createActivityClass', 'editActivityClass', 'setActivityAttendance',
+  'createIdempotencyKey',
 ])
 
 export const createWorkspaceApiDependency = (source) => {

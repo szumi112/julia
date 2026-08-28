@@ -21,6 +21,8 @@ const STATUS_BY_CODE = Object.freeze({
   METHOD_NOT_ALLOWED: 405,
   IDEMPOTENCY_CONFLICT: 409,
   WORKSPACE_RESULT_LIMIT: 409,
+  ACTIVITY_RESULT_LIMIT: 409,
+  ACTIVITY_CONFLICT: 409,
   CLIENT_STATUS_CONFLICT: 409,
   CLIENT_ASSIGNMENT_CONFLICT: 409,
   CLIENT_ARCHIVE_CONFLICT: 409,
@@ -57,10 +59,17 @@ const VALIDATION_FIELDS = new Set([
   'standardRateGrosze',
   'historicalClientId', 'importId', 'expectedJobVersion', 'conflictId',
   'classification', 'existingSubjectId',
+  'programId', 'label', 'details', 'leaderSpecialistIds', 'participantId',
+  'groupId', 'membershipId', 'classId', 'startsOn', 'endsOn', 'date', 'time',
+  'topic',
 ])
 const WORKSPACE_FIELDS = new Set([
   'specialists', 'clients', 'appointments', 'paymentEntries',
   'historicalClients', 'historicalOccurrences',
+])
+const ACTIVITY_FIELDS = new Set([
+  'programs', 'groups', 'groupLeaders', 'participants', 'memberships', 'classes',
+  'attendance', 'charges', 'payments',
 ])
 const EXACT_INTERNAL_MESSAGES = new Set(Object.keys(STATUS_BY_CODE))
 
@@ -87,6 +96,13 @@ const safeDetails = (code, details) => {
       const field = value('field')
       const limit = value('limit')
       return WORKSPACE_FIELDS.has(field) && Number.isSafeInteger(limit) && limit >= 0
+        ? { field, limit }
+        : undefined
+    }
+    if (code === 'ACTIVITY_RESULT_LIMIT') {
+      const field = value('field')
+      const limit = value('limit')
+      return ACTIVITY_FIELDS.has(field) && Number.isSafeInteger(limit) && limit >= 0
         ? { field, limit }
         : undefined
     }

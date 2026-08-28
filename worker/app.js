@@ -43,6 +43,20 @@ import {
   postHistoricalProjectionContinue,
   postHistoricalProjectionResolution,
 } from './routes/historical-clients.js'
+import {
+  getActivityProjectionStatus,
+  getActivityWorkspace,
+  postActivityAttendance,
+  postActivityClass,
+  postActivityClassEdit,
+  postActivityGroup,
+  postActivityGroupEdit,
+  postActivityMembership,
+  postActivityMembershipEdit,
+  postActivityParticipant,
+  postActivityParticipantEdit,
+  postActivityProjectionContinue,
+} from './routes/activities.js'
 import { postClient, postClientArchive, postClientEdit } from './routes/clients.js'
 import {
   postAppointment,
@@ -94,6 +108,10 @@ const PAYMENT_PATH_ID = 'pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const FINANCE_BATCH_PATH_ID = 'fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const WORKBOOK_IMPORT_PATH_ID = 'wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const HISTORICAL_CLIENT_PATH_ID = 'hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const ACTIVITY_GROUP_PATH_ID = 'agr_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const ACTIVITY_PARTICIPANT_PATH_ID = 'acp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const ACTIVITY_MEMBERSHIP_PATH_ID = 'amb_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const ACTIVITY_CLASS_PATH_ID = 'acl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const CORE_COMMAND_ALLOW = 'POST, OPTIONS'
 const CORE_READ_ALLOW = 'GET, HEAD, OPTIONS'
 const CORE_BUDGET = Object.freeze({ totalLimit: 50, recoveryReserve: 8 })
@@ -143,6 +161,18 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedVersion'], freshAuth: true }),
   descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], freshAuth: true }),
   descriptor({ id: 'historical.clients.activate', pathPattern: `^/api/v1/historical-clients/${HISTORICAL_CLIENT_PATH_ID}/activation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'] }),
+  descriptor({ id: 'activities.workspace', path: '/api/v1/activities/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'tus.manage', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'activities.groups.create', path: '/api/v1/activities/groups', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'] }),
+  descriptor({ id: 'activities.groups.edit', pathPattern: `^/api/v1/activities/groups/${ACTIVITY_GROUP_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.updated'], bodyKeys: ['expectedVersion', 'label', 'details', 'status', 'leaderSpecialistIds'] }),
+  descriptor({ id: 'activities.participants.create', path: '/api/v1/activities/participants', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.participant.created'], bodyKeys: ['programId', 'name', 'clientId', 'historicalClientId'] }),
+  descriptor({ id: 'activities.participants.edit', pathPattern: `^/api/v1/activities/participants/${ACTIVITY_PARTICIPANT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.participant.updated'], bodyKeys: ['expectedVersion', 'name', 'clientId', 'historicalClientId', 'status'] }),
+  descriptor({ id: 'activities.memberships.create', path: '/api/v1/activities/memberships', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.membership.created'], bodyKeys: ['participantId', 'groupId', 'startsOn', 'endsOn'] }),
+  descriptor({ id: 'activities.memberships.edit', pathPattern: `^/api/v1/activities/memberships/${ACTIVITY_MEMBERSHIP_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.membership.updated'], bodyKeys: ['expectedVersion', 'startsOn', 'endsOn', 'status'] }),
+  descriptor({ id: 'activities.classes.create', path: '/api/v1/activities/classes', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.class.created'], bodyKeys: ['groupId', 'date', 'time', 'durationMinutes', 'topic', 'status'] }),
+  descriptor({ id: 'activities.classes.edit', pathPattern: `^/api/v1/activities/classes/${ACTIVITY_CLASS_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.class.updated'], bodyKeys: ['expectedVersion', 'date', 'time', 'durationMinutes', 'topic', 'status'] }),
+  descriptor({ id: 'activities.attendance.set', pathPattern: `^/api/v1/activities/classes/${ACTIVITY_CLASS_PATH_ID}/attendance$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.attendance.set'], bodyKeys: ['participantId', 'status', 'expectedVersion'] }),
+  descriptor({ id: 'activities.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'activities.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], freshAuth: true }),
 ])
 export const CORE_ROUTE_DESCRIPTORS = CORE_ROUTES
 if (CORE_ROUTES.some((route) => route.auditActions.some((action) => !isCoreAuditAction(action)))) {
@@ -364,14 +394,26 @@ export function createApp(deps = {}) {
     c.set('routeId', route.id)
     c.set('routeAllow', route.allow)
     c.set('routeActionId', route.actionId)
+    const workbookNamespace = isWorkbookNamespace(request)
+    if (!workbookNamespace) {
+      if (route.queryRejected) throw new AppError('NOT_FOUND')
+      if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
+      if (route.methods && !route.methods.includes(method)) {
+        throw new AppError('METHOD_NOT_ALLOWED')
+      }
+    }
     const config = runtimeConfig(c, deps)
-    if (isWorkbookNamespace(request)
+    if (workbookNamespace
       && !(config.appEnv === 'staging' && config.dataMode === 'fictional')) {
       throw new AppError('NOT_FOUND')
     }
-    if (route.queryRejected) throw new AppError('NOT_FOUND')
-    if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
-    if (route.methods && !route.methods.includes(method)) throw new AppError('METHOD_NOT_ALLOWED')
+    if (workbookNamespace) {
+      if (route.queryRejected) throw new AppError('NOT_FOUND')
+      if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
+      if (route.methods && !route.methods.includes(method)) {
+        throw new AppError('METHOD_NOT_ALLOWED')
+      }
+    }
 
     if (route.core) {
       const rawDb = c.env?.DB ?? deps.db
@@ -879,6 +921,118 @@ export function createApp(deps = {}) {
       correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
       nowMs: c.get('nowMs'),
       service: deps.postHistoricalClientActivation,
+    })
+    return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/activities/workspace', async (c) => {
+    if (c.get('routeId') !== 'activities.workspace') throw new AppError('NOT_FOUND')
+    const result = await (deps.getActivityWorkspace ?? getActivityWorkspace)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      url: c.req.url,
+    })
+    return readResponse(c, result)
+  })
+  const activityCommandInput = (c, target = {}) => ({
+    db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+    actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+    nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+    idFactory: deps.idFactory ?? idFactory, body: c.get('jsonBody'),
+    idempotencyKey: c.req.header('Idempotency-Key'), ...target,
+  })
+  app.post('/api/v1/activities/groups', async (c) => {
+    if (c.get('routeId') !== 'activities.groups.create') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityGroup ?? postActivityGroup)(
+      activityCommandInput(c),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/groups/:groupId/edits', async (c) => {
+    if (c.get('routeId') !== 'activities.groups.edit') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityGroupEdit ?? postActivityGroupEdit)(
+      activityCommandInput(c, { groupId: c.req.param('groupId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/participants', async (c) => {
+    if (c.get('routeId') !== 'activities.participants.create') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.postActivityParticipant ?? postActivityParticipant)(
+      activityCommandInput(c),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/participants/:participantId/edits', async (c) => {
+    if (c.get('routeId') !== 'activities.participants.edit') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.postActivityParticipantEdit ?? postActivityParticipantEdit)(
+      activityCommandInput(c, { participantId: c.req.param('participantId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/memberships', async (c) => {
+    if (c.get('routeId') !== 'activities.memberships.create') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.postActivityMembership ?? postActivityMembership)(
+      activityCommandInput(c),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/memberships/:membershipId/edits', async (c) => {
+    if (c.get('routeId') !== 'activities.memberships.edit') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.postActivityMembershipEdit ?? postActivityMembershipEdit)(
+      activityCommandInput(c, { membershipId: c.req.param('membershipId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/classes', async (c) => {
+    if (c.get('routeId') !== 'activities.classes.create') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityClass ?? postActivityClass)(
+      activityCommandInput(c),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/classes/:classId/edits', async (c) => {
+    if (c.get('routeId') !== 'activities.classes.edit') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityClassEdit ?? postActivityClassEdit)(
+      activityCommandInput(c, { classId: c.req.param('classId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/classes/:classId/attendance', async (c) => {
+    if (c.get('routeId') !== 'activities.attendance.set') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityAttendance ?? postActivityAttendance)(
+      activityCommandInput(c, { classId: c.req.param('classId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/workbooks/imports/:importId/activity-projection', async (c) => {
+    if (c.get('routeId') !== 'activities.projection.status') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await getActivityProjectionStatus({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      importId: c.req.param('importId'), service: deps.getActivityProjectionStatus,
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/workbooks/imports/:importId/activity-projection/continue', async (c) => {
+    if (c.get('routeId') !== 'activities.projection.continue') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await postActivityProjectionContinue({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      config: runtimeConfig(c, deps), centreId: 'centre_1',
+      importId: c.req.param('importId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      idFactory: deps.idFactory ?? idFactory, nowMs: c.get('nowMs'),
+      service: deps.postActivityProjectionContinue,
     })
     return c.json(result.body, result.status)
   })

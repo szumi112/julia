@@ -20,6 +20,30 @@ import {
   compareHistoricalClients,
   compareHistoricalOccurrences,
 } from './historical-records.js'
+import {
+  captureActivityAttendance,
+  captureActivityClass,
+  captureActivityGroup,
+  captureActivityGroupLeader,
+  captureActivityMembership,
+  captureActivityMonthWindow,
+  captureActivityParticipant,
+  captureActivityProjectionJob,
+  captureActivityWorkspace,
+  captureCreateActivityClassCommand,
+  captureCreateActivityGroupCommand,
+  captureCreateActivityMembershipCommand,
+  captureCreateActivityParticipantCommand,
+  captureEditActivityClassCommand,
+  captureEditActivityGroupCommand,
+  captureEditActivityMembershipCommand,
+  captureEditActivityParticipantCommand,
+  captureSetActivityAttendanceCommand,
+  isActivityClassId,
+  isActivityGroupId,
+  isActivityMembershipId,
+  isActivityParticipantId,
+} from './activity-records.js'
 
 const API_ROOT = '/api/v1'
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -82,6 +106,8 @@ const SERVER_STATUS = Object.freeze({
   METHOD_NOT_ALLOWED: 405,
   IDEMPOTENCY_CONFLICT: 409,
   WORKSPACE_RESULT_LIMIT: 409,
+  ACTIVITY_RESULT_LIMIT: 409,
+  ACTIVITY_CONFLICT: 409,
   CLIENT_STATUS_CONFLICT: 409,
   CLIENT_ASSIGNMENT_CONFLICT: 409,
   CLIENT_ARCHIVE_CONFLICT: 409,
@@ -123,10 +149,17 @@ const VALIDATION_FIELDS = new Set([
   'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
   'entries', 'accountingMonth', 'kind',
   'standardRateGrosze',
+  'programId', 'label', 'details', 'leaderSpecialistIds', 'historicalClientId',
+  'participantId', 'groupId', 'membershipId', 'classId', 'startsOn', 'endsOn',
+  'date', 'time', 'topic', 'importId',
 ])
 const WORKSPACE_FIELDS = new Set([
   'specialists', 'clients', 'appointments', 'paymentEntries', 'historicalClients',
   'historicalOccurrences',
+])
+const ACTIVITY_FIELDS = new Set([
+  'programs', 'groups', 'groupLeaders', 'participants', 'memberships', 'classes',
+  'attendance', 'charges', 'payments',
 ])
 const CAPABILITIES = Object.freeze([
   'appointment.charge.read',
@@ -1090,6 +1123,13 @@ const safeDetails = (code, details) => {
         ? { field, limit }
         : undefined
     }
+    if (code === 'ACTIVITY_RESULT_LIMIT') {
+      const field = value('field')
+      const limit = value('limit')
+      return ACTIVITY_FIELDS.has(field) && Number.isSafeInteger(limit) && limit >= 0
+        ? { field, limit }
+        : undefined
+    }
     if (code === 'RATE_LIMITED') {
       const retryAfterSeconds = value('retryAfterSeconds')
       return Number.isSafeInteger(retryAfterSeconds) && retryAfterSeconds >= 0
@@ -1736,6 +1776,141 @@ const acceptedWorkbookPreview = (payload, status) => {
   return captured && !Array.isArray(captured) ? captured : null
 }
 
+const activityCapture = (capture, value) => {
+  try { return capture(value) } catch { return null }
+}
+
+const acceptedActivityWorkspace = (payload, status, requested) => {
+  const outer = captureDataObject(payload, ['data'])
+  const workspace = outer && status === 200
+    ? activityCapture(captureActivityWorkspace, outer.data)
+    : null
+  return workspace && workspace.from === requested.from && workspace.to === requested.to
+    ? workspace
+    : null
+}
+
+const activityEnvelope = (payload, status, expectedStatus, key, capture) => {
+  const outer = status === expectedStatus ? captureDataObject(payload, ['data']) : null
+  const data = outer && captureDataObject(outer.data, [key])
+  return data ? activityCapture(capture, data[key]) : null
+}
+
+const activityLeaders = (raw, groupId, specialistIds) => {
+  const values = captureDenseArray(raw, 2_000)
+  if (!values) return null
+  const leaders = []
+  let previous = null
+  for (const rawLeader of values) {
+    const leader = activityCapture(captureActivityGroupLeader, rawLeader)
+    if (!leader || leader.groupId !== groupId || leader.status !== 'active'
+      || (previous !== null && leader.id <= previous)) return null
+    previous = leader.id
+    leaders.push(leader)
+  }
+  const returnedSpecialists = leaders.map(({ specialistId }) => specialistId).sort()
+  if (returnedSpecialists.length !== specialistIds.length
+    || returnedSpecialists.some((id, index) => id !== specialistIds[index])) return null
+  return Object.freeze(leaders)
+}
+
+const acceptedActivityGroup = (payload, status, expectedStatus, requested, {
+  id = null, expectedVersion = 0,
+} = {}) => {
+  const outer = status === expectedStatus ? captureDataObject(payload, ['data']) : null
+  const data = outer && captureDataObject(outer.data, ['group', 'groupLeaders'])
+  const group = data && activityCapture(captureActivityGroup, data.group)
+  const expectedId = id === null ? group?.id : id
+  const leaders = group && activityLeaders(
+    data.groupLeaders, expectedId, requested.leaderSpecialistIds,
+  )
+  if (!group || !leaders || group.id !== expectedId
+    || (id === null && (group.programId !== requested.programId || group.status !== 'active'))
+    || group.label !== requested.label || group.details !== requested.details
+    || (id !== null && group.status !== requested.status)
+    || group.version !== expectedVersion + 1
+    || (expectedVersion === 0 && group.updatedAt !== group.createdAt)) return null
+  return Object.freeze({ group, groupLeaders: leaders })
+}
+
+const acceptedActivityParticipant = (payload, status, expectedStatus, requested, {
+  id = null, expectedVersion = 0,
+} = {}) => {
+  const participant = activityEnvelope(
+    payload, status, expectedStatus, 'participant', captureActivityParticipant,
+  )
+  if (!participant || (id !== null && participant.id !== id)
+    || (id === null && (participant.programId !== requested.programId
+      || participant.status !== 'active'))
+    || participant.name !== requested.name || participant.clientId !== requested.clientId
+    || participant.historicalClientId !== requested.historicalClientId
+    || (id !== null && participant.status !== requested.status)
+    || participant.version !== expectedVersion + 1
+    || (expectedVersion === 0 && participant.updatedAt !== participant.createdAt)) return null
+  return participant
+}
+
+const acceptedActivityMembership = (payload, status, expectedStatus, requested, {
+  id = null, expectedVersion = 0,
+} = {}) => {
+  const membership = activityEnvelope(
+    payload, status, expectedStatus, 'membership', captureActivityMembership,
+  )
+  if (!membership || (id !== null && membership.id !== id)
+    || membership.membershipKind !== 'interval'
+    || (id === null && (membership.participantId !== requested.participantId
+      || membership.groupId !== requested.groupId || membership.status !== 'active'))
+    || membership.startsOn !== requested.startsOn || membership.endsOn !== requested.endsOn
+    || (id !== null && membership.status !== requested.status)
+    || membership.version !== expectedVersion + 1
+    || (expectedVersion === 0 && membership.updatedAt !== membership.createdAt)) return null
+  return membership
+}
+
+const acceptedActivityClass = (payload, status, expectedStatus, requested, {
+  id = null, expectedVersion = 0,
+} = {}) => {
+  const value = activityEnvelope(
+    payload, status, expectedStatus, 'class', captureActivityClass,
+  )
+  if (!value || (id !== null && value.id !== id)
+    || (id === null && value.groupId !== requested.groupId)
+    || value.date !== requested.date || value.time !== requested.time
+    || value.durationMinutes !== requested.durationMinutes || value.topic !== requested.topic
+    || value.status !== requested.status || value.version !== expectedVersion + 1
+    || (expectedVersion === 0 && value.updatedAt !== value.createdAt)) return null
+  return value
+}
+
+const acceptedActivityAttendance = (
+  payload, status, expectedStatus, classId, requested,
+) => {
+  const value = activityEnvelope(
+    payload, status, expectedStatus, 'attendance', captureActivityAttendance,
+  )
+  if (!value || value.classId !== classId || value.participantId !== requested.participantId
+    || value.status !== requested.status || value.version !== requested.expectedVersion + 1
+    || (requested.expectedVersion === 0 && value.updatedAt !== value.createdAt)) return null
+  return value
+}
+
+const NO_ACTIVITY_PROJECTION = Object.freeze({ kind: 'no-activity-projection' })
+
+const acceptedActivityProjection = (payload, status, importId, expectedVersion = null) => {
+  const expectedStatus = expectedVersion === 0 ? 201 : 200
+  if (expectedVersion === null && status === 200) {
+    const outer = captureDataObject(payload, ['data'])
+    const data = outer && captureDataObject(outer.data, ['job'])
+    if (data && data.job === null) return NO_ACTIVITY_PROJECTION
+  }
+  const job = activityEnvelope(
+    payload, status, expectedStatus, 'job', captureActivityProjectionJob,
+  )
+  if (!job || job.importId !== importId
+    || (expectedVersion !== null && job.version !== expectedVersion + 1)) return null
+  return job
+}
+
 const idempotencyOptions = (options) => {
   try {
     if (!plainObject(options)) return null
@@ -1905,6 +2080,19 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
         headers: baseHeaders(),
       },
       { validate: (payload) => acceptedWorkspace(payload, accepted) },
+    )
+  }
+  const loadActivityWorkspace = (options) => {
+    const requested = activityCapture(
+      captureActivityMonthWindow, options,
+    )
+    if (!requested) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    return requestJson(
+      `${API_ROOT}/activities/workspace?from=${requested.from}&to=${requested.to}`,
+      {
+        method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
+      },
+      { validate: (payload, status) => acceptedActivityWorkspace(payload, status, requested) },
     )
   }
   const getOperationsHealth = () => requestJson(`${API_ROOT}/operations/health`, {
@@ -2138,6 +2326,139 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
+  const createActivityGroup = (input, options) => {
+    const requested = activityCapture(captureCreateActivityGroupCommand, input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/activities/groups`, JSON.stringify(requested),
+      (payload, status) => acceptedActivityGroup(payload, status, 201, requested),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const editActivityGroup = (groupId, input, options) => {
+    const requested = activityCapture(captureEditActivityGroupCommand, input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!isActivityGroupId(groupId) || !requested
+      || requested.expectedVersion >= Number.MAX_SAFE_INTEGER || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/activities/groups/${groupId}/edits`, JSON.stringify(requested),
+      (payload, status) => acceptedActivityGroup(payload, status, 200, requested, {
+        id: groupId, expectedVersion: requested.expectedVersion,
+      }),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const createActivityParticipant = (input, options) => {
+    const requested = activityCapture(captureCreateActivityParticipantCommand, input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/activities/participants`, JSON.stringify(requested),
+      (payload, status) => acceptedActivityParticipant(payload, status, 201, requested),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const editActivityParticipant = (participantId, input, options) => {
+    const requested = activityCapture(captureEditActivityParticipantCommand, input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!isActivityParticipantId(participantId) || !requested
+      || requested.expectedVersion >= Number.MAX_SAFE_INTEGER || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/activities/participants/${participantId}/edits`, JSON.stringify(requested),
+      (payload, status) => acceptedActivityParticipant(payload, status, 200, requested, {
+        id: participantId, expectedVersion: requested.expectedVersion,
+      }),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const createActivityMembership = (input, options) => {
+    const requested = activityCapture(captureCreateActivityMembershipCommand, input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/activities/memberships`, JSON.stringify(requested),
+      (payload, status) => acceptedActivityMembership(payload, status, 201, requested),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const editActivityMembership = (membershipId, input, options) => {
+    const requested = activityCapture(captureEditActivityMembershipCommand, input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!isActivityMembershipId(membershipId) || !requested
+      || requested.expectedVersion >= Number.MAX_SAFE_INTEGER || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/activities/memberships/${membershipId}/edits`, JSON.stringify(requested),
+      (payload, status) => acceptedActivityMembership(payload, status, 200, requested, {
+        id: membershipId, expectedVersion: requested.expectedVersion,
+      }),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const createActivityClass = (input, options) => {
+    const requested = activityCapture(captureCreateActivityClassCommand, input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/activities/classes`, JSON.stringify(requested),
+      (payload, status) => acceptedActivityClass(payload, status, 201, requested),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const editActivityClass = (classId, input, options) => {
+    const requested = activityCapture(captureEditActivityClassCommand, input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!isActivityClassId(classId) || !requested
+      || requested.expectedVersion >= Number.MAX_SAFE_INTEGER || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/activities/classes/${classId}/edits`, JSON.stringify(requested),
+      (payload, status) => acceptedActivityClass(payload, status, 200, requested, {
+        id: classId, expectedVersion: requested.expectedVersion,
+      }),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const setActivityAttendance = (classId, input, options) => {
+    const requested = activityCapture(captureSetActivityAttendanceCommand, input)
+    const acceptedOptions = captureClientOptions(options)
+    if (!isActivityClassId(classId) || !requested
+      || requested.expectedVersion >= Number.MAX_SAFE_INTEGER || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    const expectedStatus = requested.expectedVersion === 0 ? 201 : 200
+    return mutation(
+      `${API_ROOT}/activities/classes/${classId}/attendance`, JSON.stringify(requested),
+      (payload, status) => acceptedActivityAttendance(
+        payload, status, expectedStatus, classId, requested,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
   const createSpecialistProfile = (input, options) => {
     const requested = captureSpecialistProfileInput(input)
     const acceptedOptions = captureClientOptions(options)
@@ -2271,6 +2592,32 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     return requestJson(`${API_ROOT}/workbooks/imports/${importId}`, {
       method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
     }, { validate: acceptedWorkbookStatus })
+  }
+  const getActivityProjection = (importId) => {
+    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    return requestJson(
+      `${API_ROOT}/workbooks/imports/${importId}/activity-projection`,
+      { method: 'GET', credentials: 'same-origin', headers: baseHeaders() },
+      { validate: (payload, status) => acceptedActivityProjection(payload, status, importId) },
+    ).then((result) => result === NO_ACTIVITY_PROJECTION ? null : result)
+  }
+  const continueActivityProjection = (importId, expectedVersion, options) => {
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)
+      || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0
+      || expectedVersion >= Number.MAX_SAFE_INTEGER
+      || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/workbooks/imports/${importId}/activity-projection/continue`,
+      JSON.stringify({ expectedVersion }),
+      (payload, status) => acceptedActivityProjection(
+        payload, status, importId, expectedVersion,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
   }
   const exportWorkbook = (format) => {
     if (!['legacy', 'panel-v2'].includes(format)) {
@@ -2543,11 +2890,21 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     getSession,
     listStaff,
     loadWorkspaceWindow,
+    loadActivityWorkspace,
     getOperationsHealth,
     getOperationalActions,
     getSecurityAudit,
     listFinance,
     createClient,
+    createActivityGroup,
+    editActivityGroup,
+    createActivityParticipant,
+    editActivityParticipant,
+    createActivityMembership,
+    editActivityMembership,
+    createActivityClass,
+    editActivityClass,
+    setActivityAttendance,
     activateHistoricalClient,
     createSpecialistProfile,
     updateSpecialistProfile,
@@ -2560,6 +2917,8 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     createWorkbookImport,
     continueWorkbookImport,
     getWorkbookImport,
+    getActivityProjection,
+    continueActivityProjection,
     exportWorkbook,
     createAppointment,
     editAppointment,
