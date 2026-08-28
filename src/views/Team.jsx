@@ -16,6 +16,7 @@ import { rollingWorkspaceRange } from '../workspace-view.js'
 import { useAuth } from '../auth.jsx'
 import { SpecialistAccessForm, SpecialistProfileForm } from './SpecialistProfileForms.jsx'
 import { canPerformAction } from '../capability-access.js'
+import { sortProfessionalDirectory } from '../historical-workspace-view.js'
 
 const TEAM_FILTERS = [
   { value: 'all', label: 'Cały zespół' },
@@ -33,7 +34,10 @@ const ACCESS_TONES = Object.freeze({ enabled: 'sage', invited: 'amber', unclaime
 function AppTeamDirectory({ onRefresh, psychologists }) {
   const { refresh: refreshSession, session } = useAuth()
   const { capabilities } = useShell()
-  const canManageStaff = canPerformAction(capabilities, 'specialist.edit')
+  const canCreate = canPerformAction(capabilities, 'specialist.create')
+  const canEdit = canPerformAction(capabilities, 'specialist.edit')
+  const canLink = canPerformAction(capabilities, 'specialist.link')
+  const canManageStaff = canCreate || canEdit || canLink
   const [surface, setSurface] = useState(null)
   const refreshEditedProfile = async (profileId) => {
     await onRefresh()
@@ -49,7 +53,7 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
             ? 'Twórz i edytuj profile oraz aktywuj dostęp do panelu.'
             : 'Lista aktywnych specjalistek jest dostępna tylko do odczytu.'}</p>
         </div>
-        {canManageStaff ? <div className="view-head__actions">
+        {canCreate ? <div className="view-head__actions">
           <Button icon="plus" onClick={() => setSurface({ kind: 'create' })}>Dodaj specjalistkę</Button>
         </div> : null}
       </div>
@@ -66,12 +70,12 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
                 </Pill>
               </div>
             </div>
-            {canManageStaff ? (
+            {canEdit || canLink ? (
               <div className="team-card__footer">
-                <Button size="sm" variant="ghost" onClick={() => setSurface({
+                {canEdit ? <Button size="sm" variant="ghost" onClick={() => setSurface({
                   kind: 'edit', profile: psychologist,
-                })}>Edytuj profil</Button>
-                {psychologist.accessStatus === 'unclaimed' ? (
+                })}>Edytuj profil</Button> : null}
+                {canLink && psychologist.accessStatus === 'unclaimed' ? (
                   <Button size="sm" variant="soft" onClick={() => setSurface({
                     kind: 'access', profile: psychologist,
                   })}>Aktywuj dostęp</Button>
@@ -226,7 +230,7 @@ export function Team() {
     return TEAM_FILTERS.some((option) => option.value === saved.filter) ? saved.filter : 'all'
   })
   const psychologists = useMemo(
-    () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
+    () => sortProfessionalDirectory(state.psychologists),
     [state.psychologists]
   )
   const loads = useMemo(

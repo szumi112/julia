@@ -12,7 +12,7 @@ import { serviceBadge } from '../services.js'
 import {
   monthKey, addMonths, fmtMonthYear, toISODate, parseISO, pad2, cap,
   fmtWeekday, fmtDayMonth, fmtWeekRange, fmtMoney, sessionsWord, timeToMin,
-  STATUS_LABELS, PAY_LABELS,
+  STATUS_LABELS, PAY_LABELS, fmtMonthLocative, plural,
 } from '../format.js'
 import {
   clientIdentityFor,
@@ -22,6 +22,17 @@ import {
 } from '../workspace-view.js'
 import { ApiError } from '../api.js'
 import { canPerformAction } from '../capability-access.js'
+import {
+  historicalCalendarModel,
+  latestPopulatedMonthAction,
+  resolveCalendarHistoricalViewState,
+} from '../historical-workspace-view.js'
+import {
+  HistoricalMonthSection,
+  HistoricalOccurrenceRow,
+  HistoricalUnknownReview,
+  HistoricalUnknownSummary,
+} from './historical-bits.jsx'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
 const STRIP_DOW = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
@@ -68,11 +79,12 @@ function initialCalendarViewState(getViewState, params, today) {
     mode: 'agenda',
     filters: defaultCalendarFilters(),
     filtersOpen: false,
+    review: null,
   }
   const persisted = getViewState('calendar', defaults)
+  const historicalState = resolveCalendarHistoricalViewState({ params, persisted, today })
   const paramDate = isISODate(params?.date) ? params.date : null
-  const persistedDate = isISODate(persisted.selected) ? persisted.selected : today
-  const selected = paramDate || persistedDate
+  const selected = historicalState.selected
   // URL params win over the registry — a shared link must reproduce its scope
   const payment = PAYMENT_FILTERS.some(({ value }) => value === params?.payment)
     ? params.payment
@@ -84,16 +96,14 @@ function initialCalendarViewState(getViewState, params, today) {
     : ATTENDANCE_FILTERS.some(({ value }) => value === persisted.filters?.attendance)
       ? persisted.filters.attendance
       : 'all'
-  const paramYm = /^\d{4}-\d{2}$/.test(params?.ym || '') ? params.ym : null
 
   return {
-    ym: paramDate
-      ? monthKey(paramDate)
-      : paramYm || (/^\d{4}-\d{2}$/.test(persisted.ym || '') ? persisted.ym : monthKey(selected)),
+    ym: historicalState.ym,
     selected,
     mode: params?.mode === 'cal' ? 'cal' : persisted.mode === 'cal' ? 'cal' : 'agenda',
     filters: { payment, attendance },
     filtersOpen: Boolean(persisted.filtersOpen),
+    review: historicalState.review,
   }
 }
 
@@ -133,7 +143,7 @@ const appointmentEditInput = (session, patch = {}) => ({
 // Seven-day, Monday-first strip. The toolbar above owns week navigation, so the
 // strip is purely the day picker. Keyboard movement updates selection and focus
 // together so only the active date participates in the tab order.
-function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
+function DayStrip({ days, selected, today, byDate, historicalByDate, psychOf, onSelect }) {
   const ref = useRef(null)
   const first = useRef(true)
   const focusDate = useRef(null)
@@ -176,6 +186,8 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
     <div className="day-strip" ref={ref} role="group" aria-label="Tydzień">
       {days.map((iso) => {
         const items = byDate[iso] || []
+        const historicalItems = historicalByDate[iso] || []
+        const itemCount = items.length + historicalItems.length
         const dowIdx = (parseISO(iso).getDay() + 6) % 7
         return (
           <button
@@ -191,7 +203,7 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
             onClick={() => onSelect(iso)}
             onKeyDown={(event) => onDayKeyDown(event, iso)}
             aria-pressed={iso === selected}
-            aria-label={`${fmtDayMonth(iso)} — ${items.length} ${sessionsWord(items.length)}`}
+            aria-label={`${fmtDayMonth(iso)} — ${itemCount} ${plural(itemCount, 'wpis', 'wpisy', 'wpisów')}`}
             tabIndex={iso === selected ? 0 : -1}
           >
             <span className="day-strip__dow">{STRIP_DOW[dowIdx]}</span>
@@ -199,6 +211,9 @@ function DayStrip({ days, selected, today, byDate, psychOf, onSelect }) {
             <span className="day-strip__dots">
               {items.slice(0, 3).map((session) => (
                 <span key={session.id} className="dot" style={{ background: psychOf(session.psychId)?.color }} />
+              ))}
+              {historicalItems.slice(0, Math.max(0, 3 - items.length)).map((row) => (
+                <span key={row.id} className="dot dot--historical" style={{ background: psychOf(row.specialistId)?.color }} />
               ))}
             </span>
           </button>
@@ -222,6 +237,7 @@ export function CalendarView({ params = {} }) {
   const [selected, setSelected] = useState(initialViewState.selected)
   const [filters, setFilters] = useState(initialViewState.filters)
   const [filtersOpen, setFiltersOpen] = useState(initialViewState.filtersOpen)
+  const [review, setReview] = useState(initialViewState.review)
   const isPhone = useIsPhone()
   // dragging an agenda row or a month-grid chip would trap touch scrolling,
   // so it stays a fine-pointer affordance (reschedule via the session form)
@@ -266,6 +282,24 @@ export function CalendarView({ params = {} }) {
     )),
     [filters, highlightedSessionIds, roleSessions]
   )
+  const showHistorical = filters.payment === 'all' && filters.attendance === 'all'
+  const historicalModel = useMemo(() => historicalCalendarModel({
+    occurrences: isApp ? state.historicalOccurrences : [],
+    historicalClients: isApp ? state.historicalClients : [],
+    specialists: isApp
+      ? [...state.psychologists, ...(state.historicalSpecialists ?? [])]
+      : [],
+    ym,
+    showHistorical,
+  }), [
+    isApp,
+    showHistorical,
+    state.historicalClients,
+    state.historicalOccurrences,
+    state.historicalSpecialists,
+    state.psychologists,
+    ym,
+  ])
   const monthSessions = useMemo(
     () => sessionsInMonth(filteredSessions, ym),
     [filteredSessions, ym]
@@ -284,8 +318,8 @@ export function CalendarView({ params = {} }) {
   }, [filteredSessions])
 
   useEffect(() => {
-    patchViewState('calendar', { ym, selected, mode, filters, filtersOpen })
-  }, [filters, filtersOpen, mode, patchViewState, selected, ym])
+    patchViewState('calendar', { ym, selected, mode, filters, filtersOpen, review })
+  }, [filters, filtersOpen, mode, patchViewState, review, selected, ym])
 
   // the whole visible scope lives in the URL — deep-link params pass through
   useRouteParamsSync('calendar', {
@@ -294,11 +328,23 @@ export function CalendarView({ params = {} }) {
     mode: mode === 'cal' ? 'cal' : undefined,
     payment: filters.payment !== 'all' ? filters.payment : undefined,
     attendance: filters.attendance !== 'all' ? filters.attendance : undefined,
+    review: review === 'unknown' ? 'unknown' : undefined,
     highlightSessionIds: params.highlightSessionIds?.length ? params.highlightSessionIds : undefined,
   })
 
-  const clientOf = (id) => state.clients.find((c) => c.id === id)
-  const psychOf = (id) => state.psychologists.find((p) => p.id === id)
+  const clientsById = useMemo(
+    () => new Map(state.clients.map((client) => [client.id, client])),
+    [state.clients],
+  )
+  const specialistsById = useMemo(
+    () => new Map([
+      ...state.psychologists,
+      ...(state.historicalSpecialists ?? []),
+    ].map((specialist) => [specialist.id, specialist])),
+    [state.historicalSpecialists, state.psychologists],
+  )
+  const clientOf = (id) => clientsById.get(id)
+  const psychOf = (id) => specialistsById.get(id)
 
   // --- drag & drop: reschedule by dragging a session chip onto another day ---
   const onChipDown = (e, s) => {
@@ -539,6 +585,7 @@ export function CalendarView({ params = {} }) {
   }
 
   const daySessions = selected ? (byDate[selected] || []) : []
+  const dayHistoricalRows = selected ? (historicalModel.exactByDay[selected] || []) : []
 
   const agendaSel = selected || (ym === curYm ? today : `${ym}-01`)
   const agendaSessions = useMemo(
@@ -551,6 +598,18 @@ export function CalendarView({ params = {} }) {
     [agendaSel, mode, ym]
   )
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const canonicalMonthAppointmentCount = useMemo(
+    () => sessionsInMonth(roleSessions, ym).length,
+    [roleSessions, ym],
+  )
+  const latestMonthAction = isApp && mode === 'cal' && workspaceState === 'ready'
+    ? latestPopulatedMonthAction({
+        selectedMonth: ym,
+        appointmentCount: canonicalMonthAppointmentCount,
+        historicalCount: historicalModel.historicalCount,
+        latestPopulatedMonth: state.latestPopulatedMonth,
+      })
+    : null
   const canManageAppointments = !isApp || (
     canPerformAction(capabilities, 'appointment.edit')
     && workspaceState === 'ready'
@@ -603,7 +662,7 @@ export function CalendarView({ params = {} }) {
       prevOff: !isApp && monthKey(addDays(weekDays[0], -7)) < firstMonth,
       nextOff: !isApp && monthKey(addDays(weekDays[6], 7)) > lastMonth,
       atToday: agendaSel === today,
-      count: `${agendaSessions.length} ${sessionsWord(agendaSessions.length)} tego dnia`,
+      count: `${agendaSessions.length + (historicalModel.exactByDay[agendaSel]?.length ?? 0)} ${plural(agendaSessions.length + (historicalModel.exactByDay[agendaSel]?.length ?? 0), 'wpis', 'wpisy', 'wpisów')} tego dnia`,
     }
     : {
       label: fmtMonthYear(ym),
@@ -614,7 +673,7 @@ export function CalendarView({ params = {} }) {
       prevOff: !isApp && ym <= firstMonth,
       nextOff: !isApp && ym >= lastMonth,
       atToday: ym === curYm,
-      count: `${monthSessions.length} ${sessionsWord(monthSessions.length)} w tym miesiącu`,
+      count: `${monthSessions.length + historicalModel.visibleCount} ${plural(monthSessions.length + historicalModel.visibleCount, 'wpis', 'wpisy', 'wpisów')} w tym miesiącu`,
     }
   const focusedHighlightKey = useRef(null)
   useEffect(() => {
@@ -726,7 +785,7 @@ export function CalendarView({ params = {} }) {
 
   // a day's rows on the day thread, with the "teraz" marker when it is today.
   // `wide` lays each row out on one line where the column allows it.
-  const dayThread = (sessions, dragOk, iso, flipRef, wide = false) => {
+  const dayThread = (sessions, historicalRows, dragOk, iso, flipRef, wide = false) => {
     const now = new Date()
     const nowMin = now.getHours() * 60 + now.getMinutes()
     const isToday = iso === today
@@ -744,8 +803,20 @@ export function CalendarView({ params = {} }) {
             </Fragment>
           )
         })}
+        {historicalRows.map((row) => (
+          <HistoricalOccurrenceRow key={row.id} row={row} date={iso} />
+        ))}
       </div>
     )
+  }
+
+  const historicalRouteParams = {
+    date: selected,
+    ym: mode === 'cal' ? ym : undefined,
+    mode: mode === 'cal' ? 'cal' : undefined,
+    payment: filters.payment !== 'all' ? filters.payment : undefined,
+    attendance: filters.attendance !== 'all' ? filters.attendance : undefined,
+    highlightSessionIds: params.highlightSessionIds?.length ? params.highlightSessionIds : undefined,
   }
 
   return (
@@ -835,6 +906,7 @@ export function CalendarView({ params = {} }) {
             selected={agendaSel}
             today={today}
             byDate={weekByDate}
+            historicalByDate={historicalModel.exactByDay}
             psychOf={psychOf}
             onSelect={selectDay}
           />
@@ -848,7 +920,7 @@ export function CalendarView({ params = {} }) {
                 {agendaSessions.length} {sessionsWord(agendaSessions.length)}
               </span>
             </h2>
-            {agendaSessions.length === 0 ? (
+            {agendaSessions.length === 0 && (historicalModel.exactByDay[agendaSel]?.length ?? 0) === 0 ? (
               <EmptyState
                 compact
                 icon="calendar"
@@ -856,7 +928,14 @@ export function CalendarView({ params = {} }) {
                 hint={isApp ? 'W tym kompletnym zakresie nie ma zaplanowanych sesji.' : 'Dodaj pierwszą sesję przyciskiem poniżej.'}
               />
             ) : (
-              dayThread(agendaSessions, false, agendaSel, agendaFlipRef, true)
+              dayThread(
+                agendaSessions,
+                historicalModel.exactByDay[agendaSel] || [],
+                false,
+                agendaSel,
+                agendaFlipRef,
+                true,
+              )
             )}
             {canManageAppointments && <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
               onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId, workspaceRange })}>
@@ -878,7 +957,9 @@ export function CalendarView({ params = {} }) {
               style={{ gridTemplateColumns: `repeat(${showWeekends ? 7 : 5}, 1fr)` }}
             >
               {cells.map((cell) => {
-                const items = (byDate[cell.iso] || []).sort((a, b) => (a.time < b.time ? -1 : 1))
+                const items = (byDate[cell.iso] || []).toSorted((a, b) => a.time.localeCompare(b.time) || a.id.localeCompare(b.id))
+                const historicalItems = historicalModel.exactByDay[cell.iso] || []
+                const itemCount = items.length + historicalItems.length
                 return (
                   <button
                     key={cell.iso}
@@ -893,7 +974,7 @@ export function CalendarView({ params = {} }) {
                     ].join(' ')}
                     onClick={() => { if (!suppressClick.current) selectDay(cell.iso) }}
                     onKeyDown={(event) => onGridDayKeyDown(event, cell.iso)}
-                    aria-label={`${fmtDayMonth(cell.iso)} — ${items.length} ${sessionsWord(items.length)}`}
+                    aria-label={`${fmtDayMonth(cell.iso)} — ${itemCount} ${plural(itemCount, 'wpis', 'wpisy', 'wpisów')}`}
                     aria-pressed={cell.iso === selected}
                     aria-current={cell.iso === today ? 'date' : undefined}
                     tabIndex={cell.iso === selected ? 0 : -1}
@@ -904,7 +985,10 @@ export function CalendarView({ params = {} }) {
                         {items.slice(0, 4).map((s) => (
                           <span key={s.id} className="dot" style={{ background: psychOf(s.psychId)?.color }} />
                         ))}
-                        {items.length > 4 && <span className="cal__more">+{items.length - 4}</span>}
+                        {historicalItems.slice(0, Math.max(0, 4 - items.length)).map((row) => (
+                          <span key={row.id} className="dot dot--historical" style={{ background: psychOf(row.specialistId)?.color }} />
+                        ))}
+                        {itemCount > 4 && <span className="cal__more">+{itemCount - 4}</span>}
                       </span>
                     ) : (
                       <span className="cal__items">
@@ -921,7 +1005,13 @@ export function CalendarView({ params = {} }) {
                             <span className="cal__item-name">{clientIdentityFor(state.clients, s.clientId).name.split(' ')[0]}</span>
                           </span>
                         ))}
-                        {items.length > 3 && <span className="cal__more">+{items.length - 3} więcej</span>}
+                        {historicalItems.slice(0, Math.max(0, 3 - items.length)).map((row) => (
+                          <span key={row.id} className="cal__item cal__item--historical">
+                            <span className="cal__item-time">bez godz.</span>
+                            <span className="cal__item-name">{row.subjectName.split(' ')[0]}</span>
+                          </span>
+                        ))}
+                        {itemCount > 3 && <span className="cal__more">+{itemCount - 3} więcej</span>}
                       </span>
                     )}
                   </button>
@@ -949,12 +1039,12 @@ export function CalendarView({ params = {} }) {
                 </span>
                 {selected && (
                   <span className="faint" style={{ fontFamily: 'var(--font-ui)', fontSize: 12.5, fontWeight: 550 }}>
-                    {daySessions.length} {sessionsWord(daySessions.length)}
+                    {daySessions.length + dayHistoricalRows.length} {plural(daySessions.length + dayHistoricalRows.length, 'wpis', 'wpisy', 'wpisów')}
                   </span>
                 )}
               </h2>
               <div className="cal-day-panel__list">
-                {selected && daySessions.length === 0 && (
+                {selected && daySessions.length === 0 && dayHistoricalRows.length === 0 && (
                   <EmptyState
                     compact
                     icon="calendar"
@@ -962,8 +1052,13 @@ export function CalendarView({ params = {} }) {
                     hint={isApp ? 'W tym kompletnym zakresie nie ma zaplanowanych sesji.' : 'Dodaj pierwszą sesję przyciskiem poniżej.'}
                   />
                 )}
-                {daySessions.length > 0 &&
-                  dayThread(daySessions.slice().sort((a, b) => (a.time < b.time ? -1 : 1)), canDrag, selected)}
+                {(daySessions.length > 0 || dayHistoricalRows.length > 0) &&
+                  dayThread(
+                    daySessions.toSorted((a, b) => a.time.localeCompare(b.time) || a.id.localeCompare(b.id)),
+                    dayHistoricalRows,
+                    canDrag,
+                    selected,
+                  )}
               </div>
               {selected && canManageAppointments && (
                 <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
@@ -974,6 +1069,46 @@ export function CalendarView({ params = {} }) {
             </div>
           </div>
         </div>
+      )}
+      {isApp && historicalModel.suppressedCount > 0 && (
+        <p className="historical-filter-note" role="status">
+          Wpisy ze skoroszytu bez statusu i płatności są ukryte przez aktywny filtr.
+        </p>
+      )}
+      {isApp && mode === 'cal' && workspaceState === 'ready' && showHistorical
+        && canonicalMonthAppointmentCount + historicalModel.historicalCount === 0 && (
+        <section className="card card--pad historical-zero" aria-live="polite">
+          <h2 className="card-title">Brak wpisów w tym miesiącu</h2>
+          <p>W {fmtMonthLocative(ym)} {ym.slice(0, 4)} nie ma wpisów kalendarza ani skoroszytu.</p>
+          {latestMonthAction && (
+            <Button
+              variant="soft"
+              onClick={() => {
+                setYm(latestMonthAction.month)
+                setSelected(`${latestMonthAction.month}-01`)
+                setMode('cal')
+                setReview(null)
+              }}
+            >
+              {latestMonthAction.label}
+            </Button>
+          )}
+        </section>
+      )}
+      {isApp && showHistorical && (
+        <HistoricalMonthSection rows={historicalModel.monthOnlyRows} ym={ym} />
+      )}
+      {isApp && showHistorical && review !== 'unknown' && (
+        <HistoricalUnknownSummary
+          count={historicalModel.unknownRows.length}
+          routeParams={historicalRouteParams}
+        />
+      )}
+      {isApp && showHistorical && review === 'unknown' && (
+        <HistoricalUnknownReview
+          rows={historicalModel.unknownRows}
+          onClose={() => setReview(null)}
+        />
       )}
     </div>
   )

@@ -156,6 +156,33 @@ test('the mock-data workspace opens after login', async ({ page }) => {
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
 })
 
+test('demo Calendar, Clients, and Team stay reducer-backed without protected history surfaces', async ({ page }) => {
+  const apiRequests = []
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.startsWith('/api/')) apiRequests.push(request.url())
+  })
+  await login(page)
+  const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+
+  await navigation.getByRole('link', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('heading', { name: /Kalendarz/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Przejrzyj.*okres/ })).toHaveCount(0)
+
+  await navigation.getByRole('link', { name: 'Klienci' }).click()
+  await expect(page.getByRole('heading', { name: /Klienci/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Historyczni/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Aktywuj klienta' })).toHaveCount(0)
+
+  await navigation.getByRole('link', { name: 'Zespół' }).click()
+  await expect(page.getByRole('heading', { name: 'Zespół centrum' })).toBeVisible()
+  expect(apiRequests).toEqual([])
+  expect(await page.evaluate(async () => ({
+    databases: typeof indexedDB.databases === 'function' ? await indexedDB.databases() : [],
+    local: Object.keys(localStorage),
+    session: Object.keys(sessionStorage),
+  }))).toEqual({ databases: [], local: [], session: [] })
+})
+
 test('demo login and logout remount a clean workspace', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation', { name: 'Nawigacja główna' })
@@ -1541,7 +1568,7 @@ test.describe('Task 3 daily-care redesign', () => {
 
     const adjacentDay = page.getByRole('group', { name: 'Tydzień' })
       .locator('[data-iso="2026-06-30"]')
-    await expect(adjacentDay).toHaveAccessibleName('30 czerwca — 1 sesja')
+    await expect(adjacentDay).toHaveAccessibleName('30 czerwca — 1 wpis')
     await expect(adjacentDay.locator('.day-strip__dots .dot')).toHaveCount(1)
   })
 

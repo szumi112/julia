@@ -490,6 +490,9 @@ input, select, textarea { font-family: inherit; color: inherit; }
 .mobile-account__identity small {
   color: var(--ink-faint);
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .mobile-account__roles { display: flex; flex-direction: column; gap: 3px; }
 .mobile-account__label {
@@ -1975,6 +1978,8 @@ kbd {
 .cal__item-time { flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .cal__item-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cal__more { font-size: 10.5px; font-weight: 700; color: var(--ink-faint); padding-left: 6px; }
+.cal__item--historical { border-left-color: var(--sky-deep); background: var(--sky-ghost); }
+.dot--historical { outline: 1px solid var(--sky-deep); outline-offset: 1px; }
 
 /* phone: compact month grid — days show colored dots, the agenda below the
    grid carries the detail (Calendar.jsx renders dots instead of chips) */
@@ -2274,6 +2279,74 @@ button.spine__row:hover { background: rgba(252, 232, 226, 0.45); }
 .agenda__client { font-weight: 650; font-size: 14.5px; }
 .agenda__meta { font-size: 12.5px; color: var(--ink-faint); display: flex; align-items: center; gap: 6px; margin-top: 1px; flex-wrap: wrap; }
 .agenda__pills { display: flex; align-items: center; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+
+/* Workbook occurrences remain a separate, read-only visual path. Their
+   deliberately wider precision label never impersonates a session hour. */
+.historical-row { --node-color: var(--sky-deep); }
+.historical-row__period {
+  width: 126px;
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+.historical-row__subject { color: var(--coral-deep); font-weight: 650; }
+span.historical-row__subject { color: var(--ink); }
+.historical-section, .historical-zero, .historical-filter-note { margin-top: 18px; }
+.historical-list { display: flex; flex-direction: column; }
+.historical-section .card-title { margin-bottom: 8px; }
+.historical-section__head { align-items: flex-start; }
+.historical-review-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.historical-review-summary .card-title { margin-bottom: 3px; }
+.historical-zero p { margin: 6px 0 14px; color: var(--ink-soft); }
+.historical-filter-note {
+  padding: 11px 14px;
+  border-radius: var(--r-sm);
+  background: var(--amber-ghost);
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+.historical-directory__actions { flex-wrap: wrap; }
+.historical-directory__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.historical-client-row .td--actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px 14px; }
+.historical-back-link { gap: 7px; margin-bottom: 20px; width: fit-content; }
+.historical-client-band { --band-color: var(--sky-deep); }
+.historical-client-history { display: grid; gap: 18px; }
+.historical-client-history__entry > time {
+  display: block;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 700;
+  margin-top: 8px;
+}
+.historical-client-history__entry + .historical-client-history__entry {
+  border-top: 1px solid var(--line-soft);
+  margin-top: 6px;
+  padding-top: 6px;
+}
+.historical-activation .form-warn { flex-wrap: wrap; }
+
+@media (max-width: 640px) {
+  .historical-row { flex-wrap: wrap; gap: 5px 10px; }
+  .historical-row__period { width: 100%; }
+  .historical-review-summary { align-items: stretch; flex-direction: column; }
+  .historical-review-summary .btn { min-height: 44px; justify-content: center; }
+  .historical-directory__actions, .historical-directory__toolbar { align-items: stretch; flex-direction: column; }
+  .historical-directory__actions .seg, .historical-directory__toolbar .seg { width: 100%; }
+  .historical-client-row .td--actions { justify-content: flex-start; min-height: 44px; }
+}
 
 /* settled sessions keep their place in the day, one step back */
 .agenda__row[data-terminal='true'] { opacity: 0.68; }

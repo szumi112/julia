@@ -2,19 +2,28 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp, useClientMutationLock, useWorkspaceWindow, clientOutstanding, lastSessionOf } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
-import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, usePagination, Pager } from '../ui.jsx'
+import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, Segmented, usePagination, Pager } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
 import { ClientDrawer } from './ClientForm.jsx'
-import { ageLabel, fmtMoney, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, sessionsWord, toISODate, pad2, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
+import { ageLabel, addMonths, fmtMoney, fmtMonthYear, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, monthKey, sessionsWord, toISODate, pad2, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
 import { clientMatchesQuery, clientsForRole, sessionsForRole } from '../workspace.js'
 import { serviceBadge, serviceShort } from '../services.js'
-import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
+import { EntityLink, FilterBar, FilterGroup, useRouteParamsSync } from '../ux-patterns.jsx'
 import {
+  monthWorkspaceRange,
   rollingWorkspaceRange,
   specialistIdentityFor,
 } from '../workspace-view.js'
 import { canPerformAction } from '../capability-access.js'
+import {
+  historicalClientDirectoryModel,
+  historicalClientHistoryModel,
+  latestPopulatedMonthAction,
+  resolveClientCatalogViewState,
+} from '../historical-workspace-view.js'
+import { HistoricalOccurrenceRow } from './historical-bits.jsx'
+import { HistoricalClientActivation } from './HistoricalClientActivation.jsx'
 
 // the client's next scheduled visit — sessions stay sorted by date+time
 const nextSessionOf = (sessions, clientId) => {
@@ -27,13 +36,224 @@ const nextSessionOf = (sessions, clientId) => {
   )
 }
 
+function HistoricalHistorySections({ history }) {
+  return (
+    <div className="historical-client-history">
+      <section className="card card--pad historical-section" aria-labelledby="historical-exact-title">
+        <h2 className="card-title" id="historical-exact-title">Dokładne daty</h2>
+        {history.exactDayRows.length > 0 ? history.exactDayRows.map((row) => (
+          <div className="historical-client-history__entry" key={row.id}>
+            <time dateTime={row.day}>{fmtFullDate(row.day)}</time>
+            <HistoricalOccurrenceRow row={row} date={row.day} />
+          </div>
+        )) : <p className="faint">Brak wpisów z dokładną datą w widocznym zakresie.</p>}
+      </section>
+      <section className="card card--pad historical-section" aria-labelledby="historical-months-title">
+        <h2 className="card-title" id="historical-months-title">Miesiące bez dnia</h2>
+        {history.monthOnlyRows.length > 0 ? history.monthOnlyRows.map((row) => (
+          <div className="historical-client-history__entry" key={row.id}>
+            <time dateTime={row.month}>{fmtMonthYear(row.month)}</time>
+            <HistoricalOccurrenceRow row={row} />
+          </div>
+        )) : <p className="faint">Brak wpisów miesięcznych w widocznym zakresie.</p>}
+      </section>
+      <section className="card card--pad historical-section" aria-labelledby="historical-unknown-title">
+        <h2 className="card-title" id="historical-unknown-title">Okres nieustalony</h2>
+        {history.unknownRows.length > 0 ? history.unknownRows.map((row) => (
+          <HistoricalOccurrenceRow key={row.id} row={row} />
+        )) : <p className="faint">Brak wpisów z nieustalonym okresem.</p>}
+      </section>
+    </div>
+  )
+}
+
+function HistoricalClientsPanel({
+  directory, historyPeriod, historyYm, latestAction, onCatalog, onHistoryPeriod,
+  onHistoryYm, query, setQuery,
+}) {
+  return (
+    <div>
+      <div className="view-head">
+        <div>
+          <div className="eyebrow">Kartoteka źródłowa</div>
+          <h1 className="display view-head__title">Klienci <em>historyczni</em></h1>
+          <p className="view-head__sub">Profile i wizyty odtworzone ze skoroszytu, bez dopisywania bieżącej opieki.</p>
+        </div>
+        <div className="view-head__actions historical-directory__actions">
+          <SearchInput value={query} onChange={setQuery} placeholder="Imię, usługa lub specjalistka…" />
+          <Segmented
+            ariaLabel="Kartoteka klientów"
+            value="historical"
+            onChange={onCatalog}
+            options={[
+              { value: 'current', label: 'Bieżący' },
+              { value: 'historical', label: 'Historia skoroszytu' },
+            ]}
+          />
+        </div>
+      </div>
+      <div className="historical-directory__toolbar">
+        <div className="month-nav">
+          <IconBtn name="chevL" label="Poprzedni miesiąc" onClick={() => onHistoryYm(addMonths(historyYm, -1))} />
+          <span className="month-nav__label month-nav__label--sentence">{cap(fmtMonthYear(historyYm))}</span>
+          <IconBtn name="chevR" label="Następny miesiąc" onClick={() => onHistoryYm(addMonths(historyYm, 1))} />
+        </div>
+        <Segmented
+          ariaLabel="Okres historii"
+          value={historyPeriod}
+          onChange={onHistoryPeriod}
+          options={[
+            { value: 'known', label: 'Znany okres' },
+            { value: 'unknown', label: 'Okres nieustalony' },
+          ]}
+        />
+      </div>
+      {directory.length === 0 ? (
+        <section className="card card--pad historical-zero" aria-live="polite">
+          <h2 className="card-title">Brak profili historycznych</h2>
+          <p>{historyPeriod === 'unknown'
+            ? 'Nie ma klientów z wpisami o nieustalonym okresie.'
+            : `W ${fmtMonthYear(historyYm)} nie ma profili ze skoroszytu.`}</p>
+          {latestAction && <Button variant="soft" onClick={() => onHistoryYm(latestAction.month)}>{latestAction.label}</Button>}
+        </section>
+      ) : (
+        <div className="card card--table">
+          <div className="table-scroll table-scroll--until-tablet">
+            <table className="table table--cards" aria-label="Klienci historyczni">
+              <thead>
+                <tr><th>Klient</th><th>Wpisy źródłowe</th><th>Okres</th><th>Status</th><th></th></tr>
+              </thead>
+              <tbody>
+                {directory.map((client) => (
+                  <tr key={client.id} className="historical-client-row" data-history-client-id={client.id}>
+                    <td data-th="Klient"><strong>{client.name}</strong></td>
+                    <td data-th="Wpisy źródłowe">{client.visitCount}</td>
+                    <td data-th="Okres">{client.periodSummary}</td>
+                    <td data-th="Status"><Pill tone={client.activeClientId ? 'sage' : 'sky'}>{client.lifecycle}</Pill></td>
+                    <td data-th="Karta" className="td--actions">
+                      <EntityLink
+                        route="client"
+                        params={historyPeriod === 'unknown'
+                          ? { id: client.id, historyPeriod: 'unknown' }
+                          : { id: client.id, ym: historyYm }}
+                        label={`Otwórz historię — ${client.name}`}
+                        className="link"
+                      >
+                        Historia
+                      </EntityLink>
+                      {client.activeClientId && (
+                        <EntityLink
+                          route="client"
+                          params={{ id: client.activeClientId, ym: historyYm }}
+                          label={`Otwórz aktywną kartę — ${client.name}`}
+                          className="link"
+                        >
+                          Aktywna karta
+                        </EntityLink>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function HistoricalClientDetail({ historicalClient, occurrences, specialists, workspaceRange }) {
+  const { capabilities, role } = useShell()
+  const { locked: clientMutationLocked } = useClientMutationLock()
+  const identityRef = useRef(null)
+  const [activationOpen, setActivationOpen] = useState(false)
+  const history = useMemo(() => historicalClientHistoryModel({
+    historicalClient, occurrences, specialists,
+  }), [historicalClient, occurrences, specialists])
+  const canActivate = historicalClient.status === 'historical'
+    && role.scope === 'centre'
+    && ['owner', 'coordinator'].includes(role.id)
+    && canPerformAction(capabilities, 'client.historical.activate')
+  const closeActivation = () => {
+    setActivationOpen(false)
+    requestAnimationFrame(() => {
+      const active = document.activeElement
+      if (!active || active === document.body || !active.isConnected) {
+        identityRef.current?.focus()
+      }
+    })
+  }
+  return (
+    <div>
+      <EntityLink route="clients" params={{ catalog: 'historical' }} className="link row historical-back-link">
+        <Icon name="arrowL" size={16} /> Wróć do klientów historycznych
+      </EntityLink>
+      <div className="id-band historical-client-band" ref={identityRef} tabIndex={-1}>
+        <Avatar name={historicalClient.name} size={64} />
+        <div className="id-band__main">
+          <p className="eyebrow id-band__eyebrow">Profil ze skoroszytu</p>
+          <h1 className="display id-band__name">{historicalClient.name}</h1>
+          <div className="id-band__pills">
+            <Pill tone={historicalClient.activeClientId ? 'sage' : 'sky'}>
+              {historicalClient.activeClientId ? 'Aktywowano' : 'Historyczny'}
+            </Pill>
+          </div>
+        </div>
+        {historicalClient.activeClientId && (
+          <div className="id-band__actions">
+            <EntityLink route="client" params={{ id: historicalClient.activeClientId }} className="btn btn--soft">
+              Otwórz aktywną kartę
+            </EntityLink>
+          </div>
+        )}
+        {canActivate && (
+          <div className="id-band__actions">
+            <Button
+              variant="primary"
+              disabled={clientMutationLocked}
+              onClick={() => setActivationOpen(true)}
+            >
+              Aktywuj klienta
+            </Button>
+          </div>
+        )}
+      </div>
+      <HistoricalHistorySections history={history} />
+      {activationOpen && (
+        <HistoricalClientActivation
+          historicalClient={historicalClient}
+          workspaceRange={workspaceRange}
+          onClose={closeActivation}
+        />
+      )}
+    </div>
+  )
+}
+
+function HistoricalSourceHistory({ historicalClient, occurrences, specialists, workspaceRange }) {
+  const history = useMemo(() => historicalClientHistoryModel({
+    historicalClient, occurrences, specialists,
+  }), [historicalClient, occurrences, specialists])
+  return (
+    <section className="client-record__section" aria-label="Historia ze skoroszytu">
+      <div className="card card--pad">
+        <h2 className="card-title">Historia ze skoroszytu</h2>
+        <p className="faint">
+          Widoczny zakres: {fmtFullDate(workspaceRange.from)} – {fmtFullDate(workspaceRange.to)}.
+          To odrębne wpisy źródłowe, nie historia frekwencji.
+        </p>
+        <HistoricalHistorySections history={history} />
+      </div>
+    </section>
+  )
+}
+
 export function Clients({ params = {} }) {
   const { state } = useApp()
   const { appMode, capabilities, getViewState, openClientForm, patchViewState, role } = useShell()
   const isApp = appMode === 'app'
   const today = toISODate(new Date())
-  const workspaceRange = useMemo(() => rollingWorkspaceRange(today), [today])
-  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const ref = useReveal()
   const initialState = useRef(null)
   if (!initialState.current) {
@@ -43,7 +263,11 @@ export function Clients({ params = {} }) {
       debtOnly: false,
       status: 'all',
       page: 1,
+      catalog: 'current',
+      historyYm: monthKey(today),
+      historyPeriod: 'known',
     })
+    const catalogState = resolveClientCatalogViewState({ params, persisted: saved, today })
     const requestedSpecialist = role.scope !== 'own'
       && typeof params.specialist === 'string'
       && state.psychologists.some((psychologist) => psychologist.id === params.specialist)
@@ -59,13 +283,24 @@ export function Clients({ params = {} }) {
       debtOnly: saved.debtOnly === true,
       status: ['active', 'paused'].includes(saved.status) ? saved.status : 'all',
       page: Math.max(1, Number(saved.page) || 1),
+      ...catalogState,
     }
   }
   const [query, setQuery] = useState(initialState.current.query)
   const [psychFilter, setPsychFilter] = useState(initialState.current.specialist)
   const [debtOnly, setDebtOnly] = useState(initialState.current.debtOnly)
   const [statusFilter, setStatusFilter] = useState(initialState.current.status)
+  const [catalog, setCatalog] = useState(initialState.current.catalog)
+  const [historyYm, setHistoryYm] = useState(initialState.current.historyYm)
+  const [historyPeriod, setHistoryPeriod] = useState(initialState.current.historyPeriod)
   const [clientForm, setClientForm] = useState(null)
+  const workspaceRange = useMemo(
+    () => isApp && catalog === 'historical'
+      ? monthWorkspaceRange(historyYm)
+      : rollingWorkspaceRange(today),
+    [catalog, historyYm, isApp, today],
+  )
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const { locked: clientMutationLocked } = useClientMutationLock()
   const canManageClients = !isApp || canPerformAction(capabilities, 'client.create')
   const clientActionsLocked = isApp && clientMutationLocked
@@ -101,6 +336,42 @@ export function Clients({ params = {} }) {
     () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
     [state.psychologists]
   )
+  const historySpecialists = useMemo(
+    () => [...state.psychologists, ...(state.historicalSpecialists ?? [])],
+    [state.historicalSpecialists, state.psychologists],
+  )
+  const historicalDirectory = useMemo(() => historicalClientDirectoryModel({
+    historicalClients: isApp ? state.historicalClients : [],
+    occurrences: isApp ? state.historicalOccurrences : [],
+    specialists: isApp ? historySpecialists : [],
+    ym: historyYm,
+    periodMode: historyPeriod,
+    query,
+  }), [
+    historyPeriod,
+    historyYm,
+    isApp,
+    query,
+    state.historicalClients,
+    state.historicalOccurrences,
+    historySpecialists,
+  ])
+  const historicalMonthCount = useMemo(() => isApp
+    ? state.historicalOccurrences.filter((occurrence) => (
+        occurrence.status === 'recorded'
+        && occurrence.period.precision !== 'unknown'
+        && occurrence.period.month === historyYm
+      )).length
+    : 0, [historyYm, isApp, state.historicalOccurrences])
+  const latestHistoryAction = isApp && catalog === 'historical'
+    && historyPeriod === 'known' && workspaceState === 'ready'
+    ? latestPopulatedMonthAction({
+        selectedMonth: historyYm,
+        appointmentCount: 0,
+        historicalCount: historicalMonthCount,
+        latestPopulatedMonth: state.latestPopulatedMonth,
+      })
+    : null
 
   useEffect(() => {
     patchViewState('clients', {
@@ -109,8 +380,15 @@ export function Clients({ params = {} }) {
       debtOnly,
       status: statusFilter,
       page,
+      catalog,
+      historyYm,
+      historyPeriod,
     })
-  }, [debtOnly, page, patchViewState, psychFilter, query, role.scope, statusFilter])
+  }, [catalog, debtOnly, historyPeriod, historyYm, page, patchViewState, psychFilter, query, role.scope, statusFilter])
+
+  useRouteParamsSync('clients', catalog === 'historical'
+    ? { catalog: 'historical', historyPeriod, ym: historyYm }
+    : { specialist: role.scope !== 'own' ? psychFilter || undefined : undefined })
 
   const psychOf = (id) => state.psychologists.find((p) => p.id === id)
   const activeFilterCount =
@@ -145,6 +423,24 @@ export function Clients({ params = {} }) {
     )
   }
 
+  if (isApp && catalog === 'historical') {
+    return (
+      <div ref={ref}>
+        <HistoricalClientsPanel
+          directory={historicalDirectory}
+          historyPeriod={historyPeriod}
+          historyYm={historyYm}
+          latestAction={latestHistoryAction}
+          onCatalog={setCatalog}
+          onHistoryPeriod={setHistoryPeriod}
+          onHistoryYm={setHistoryYm}
+          query={query}
+          setQuery={setQuery}
+        />
+      </div>
+    )
+  }
+
   return (
     <div ref={ref}>
       <div className="view-head" data-reveal>
@@ -162,6 +458,17 @@ export function Clients({ params = {} }) {
         </div>
         <div className="view-head__actions">
           <SearchInput value={query} onChange={setQuery} placeholder="Imię, e-mail lub telefon…" />
+          {isApp && (
+            <Segmented
+              ariaLabel="Kartoteka klientów"
+              value={catalog}
+              onChange={setCatalog}
+              options={[
+                { value: 'current', label: 'Bieżący' },
+                { value: 'historical', label: 'Historia skoroszytu' },
+              ]}
+            />
+          )}
           {canManageClients && (
             <Button icon="plus" magnetic disabled={clientActionsLocked} onClick={() => openClient({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
               Dodaj klienta
@@ -311,13 +618,33 @@ export function ClientDetail({ params }) {
   const { appMode, capabilities, openSessionForm, openClientForm, role } = useShell()
   const isApp = appMode === 'app'
   const todayIso = toISODate(new Date())
-  const workspaceRange = useMemo(() => rollingWorkspaceRange(todayIso), [todayIso])
+  const detailYm = /^\d{4}-(0[1-9]|1[0-2])$/.test(params?.ym || '')
+    ? params.ym : monthKey(todayIso)
+  const usesHistoricalWindow = isApp && (
+    /^hcl_/.test(params?.id || '')
+    || /^\d{4}-(0[1-9]|1[0-2])$/.test(params?.ym || '')
+    || params?.historyPeriod === 'unknown'
+  )
+  const workspaceRange = useMemo(
+    () => usesHistoricalWindow ? monthWorkspaceRange(detailYm) : rollingWorkspaceRange(todayIso),
+    [detailYm, todayIso, usesHistoricalWindow],
+  )
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
   const [clientForm, setClientForm] = useState(null)
   const { locked: clientMutationLocked } = useClientMutationLock()
   const client = clientsForRole(state, role).find((candidate) => candidate.id === params.id)
+  const historicalClient = isApp
+    ? state.historicalClients.find((candidate) => candidate.id === params.id)
+    : null
+  const historySpecialists = useMemo(
+    () => [...state.psychologists, ...(state.historicalSpecialists ?? [])],
+    [state.historicalSpecialists, state.psychologists],
+  )
+  const linkedHistoricalClient = isApp && client
+    ? state.historicalClients.find((candidate) => candidate.activeClientId === client.id)
+    : null
   const all = client
     ? sessionsForRole(state, role).filter((session) => session.clientId === client.id)
     : []
@@ -339,6 +666,18 @@ export function ClientDetail({ params }) {
           hint="Wyświetlimy wyłącznie dane z uprawnionego, kompletnego zakresu."
         />
       </section>
+    )
+  }
+  if (historicalClient) {
+    return (
+      <div ref={ref}>
+        <HistoricalClientDetail
+          historicalClient={historicalClient}
+          occurrences={state.historicalOccurrences}
+          specialists={historySpecialists}
+          workspaceRange={workspaceRange}
+        />
+      </div>
     )
   }
   if (!client) {
@@ -617,6 +956,15 @@ export function ClientDetail({ params }) {
             )}
           </div>
         </section>
+
+        {isApp && linkedHistoricalClient && (
+          <HistoricalSourceHistory
+            historicalClient={linkedHistoricalClient}
+            occurrences={state.historicalOccurrences}
+            specialists={historySpecialists}
+            workspaceRange={workspaceRange}
+          />
+        )}
 
         {!isApp && <section className="client-record__section" aria-labelledby="clinical-notes-title" data-reveal>
           <div className="card card--pad">

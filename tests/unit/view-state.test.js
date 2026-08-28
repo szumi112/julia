@@ -34,6 +34,33 @@ test('view state is isolated by role and route', () => {
   assert.deepEqual(readRouteViewState(registry, 'therapist', 'clients'), { query: 'Marta' })
 })
 
+test('calendar review and client catalog month stay independent by role and route', () => {
+  let registry = {}
+  registry = patchRouteViewState(registry, 'owner', 'calendar', {
+    ym: '2026-07', review: 'unknown',
+  })
+  registry = patchRouteViewState(registry, 'owner', 'clients', {
+    catalog: 'historical', historyYm: '2026-06', historyPeriod: 'known',
+  })
+  registry = patchRouteViewState(registry, 'therapist', 'calendar', {
+    ym: '2026-05', review: null,
+  })
+
+  assert.deepEqual(readRouteViewState(registry, 'owner', 'calendar'), {
+    ym: '2026-07', review: 'unknown',
+  })
+  assert.deepEqual(readRouteViewState(registry, 'owner', 'clients'), {
+    catalog: 'historical', historyYm: '2026-06', historyPeriod: 'known',
+  })
+  assert.deepEqual(readRouteViewState(registry, 'therapist', 'calendar'), {
+    ym: '2026-05', review: null,
+  })
+
+  const reset = resetRouteViewState(registry, 'owner', 'calendar')
+  assert.deepEqual(reset.owner.clients, registry.owner.clients)
+  assert.deepEqual(registry.owner.calendar, { ym: '2026-07', review: 'unknown' })
+})
+
 test('reading merges stored state over defaults without changing either input', () => {
   const defaults = { query: '', filters: { status: 'all' }, page: 1, scrollY: 0 }
   const registry = { owner: { clients: { query: 'Ola', page: 3 } } }

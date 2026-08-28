@@ -1,5 +1,50 @@
 import { expect, test } from '@playwright/test'
 
+test('@owner orders protected Team by professional name and presents Julia without an owner badge', async ({ page }) => {
+  await page.route('**/api/v1/session', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.actor = {
+      ...body.data.actor,
+      displayName: 'Julia Wolanin',
+      professionalTitle: 'Specjalistka',
+      specialistId: 'sp_julia',
+    }
+    await route.fulfill({ response, json: body })
+  })
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.specialists = [
+      ...body.data.specialists,
+      {
+        id: 'sp_julia',
+        displayName: 'Julia Wolanin',
+        professionalTitle: 'Specjalistka',
+        standardRateGrosze: 18_000,
+        status: 'active',
+        version: 1,
+        staffVersion: 1,
+        accessStatus: 'enabled',
+      },
+    ].toSorted((left, right) => left.displayName.localeCompare(right.displayName, 'pl')
+      || left.id.localeCompare(right.id))
+    await route.fulfill({ response, json: body })
+  })
+
+  await page.goto('./#/team')
+
+  const julia = page.locator('.team-card').filter({ hasText: 'Julia Wolanin' })
+  await expect(julia).toBeVisible()
+  const names = await page.locator('.team-grid .team-card__name').allTextContents()
+  expect(names).toEqual(names.toSorted((left, right) => left.localeCompare(right, 'pl')))
+  expect(names).toContain('Julia Wolanin')
+  await expect(julia).toContainText('Specjalistka')
+  await expect(julia).toContainText(/180\s*zł \/ sesja/)
+  await expect(julia).toContainText('Dostęp aktywny')
+  await expect(julia).not.toContainText('Właściciel')
+})
+
 test('@owner creates, edits, and invites one stable specialist profile', async ({ page }) => {
   await page.goto('.')
   await page.getByRole('navigation', { name: 'Nawigacja główna' })

@@ -167,6 +167,25 @@ test('@owner presents a linked owner as an ordinary specialist without losing ow
     }
     await route.fulfill({ response, json: body })
   })
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.specialists = [
+      ...body.data.specialists,
+      {
+        id: 'sp_julia',
+        displayName: 'Julia Wolanin',
+        professionalTitle: 'Specjalistka',
+        standardRateGrosze: 18_000,
+        status: 'active',
+        version: 1,
+        staffVersion: 1,
+        accessStatus: 'enabled',
+      },
+    ].toSorted((left, right) => left.displayName.localeCompare(right.displayName, 'pl')
+      || left.id.localeCompare(right.id))
+    await route.fulfill({ response, json: body })
+  })
 
   await page.goto('.')
 
@@ -185,6 +204,19 @@ test('@owner presents a linked owner as an ordinary specialist without losing ow
   await expect(mobileAccount).toContainText('Julia Wolanin')
   await expect(mobileAccount).toContainText('Specjalistka')
   await expect(mobileAccount).not.toContainText('Właściciel')
+
+  await page.keyboard.press('Escape')
+  await page.setViewportSize({ width: 1280, height: 844 })
+  await page.goto('./#/team')
+  const julia = page.locator('article').filter({ hasText: 'Julia Wolanin' })
+  await expect(julia).toContainText('Specjalistka')
+  await expect(julia).not.toContainText('Właściciel')
+
+  await page.goto('./#/settings')
+  const settingsIdentity = page.locator('.settings-account-identity')
+  await expect(settingsIdentity).toContainText('Julia Wolanin')
+  await expect(settingsIdentity).toContainText('Specjalistka')
+  await expect(settingsIdentity).not.toContainText('Właściciel')
 })
 
 for (const [status, code] of [
@@ -482,7 +514,8 @@ test('@owner renders immutable identity and keeps browser application storage em
   await expect(page.getByRole('heading', { name: 'Twoje konto' })).toBeVisible()
   const account = page.locator('.settings-account-identity')
   await expect(account).toContainText('Alicja Testowa')
-  await expect(account).toContainText('Właściciel')
+  await expect(account).toContainText('Konto centrum')
+  await expect(account).not.toContainText('Właściciel')
   await expect(account).toContainText('jednorazowym kodem e-mail')
   await expect(account).toContainText('panel nie przechowuje hasła')
   await expect(account.getByRole('textbox')).toHaveCount(0)

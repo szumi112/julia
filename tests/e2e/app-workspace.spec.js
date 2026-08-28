@@ -231,7 +231,8 @@ test('@owner gates deferred surfaces and waits for a complete monthly report', a
   await expect(page.getByRole('link', { name: 'Otwórz profil — Anna Nowak' })).toHaveCount(0)
 
   await page.goto('./#/psych?id=sp_anna')
-  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
+  await expect(page.locator('.topbar__title b')).toHaveText('Profil specjalistki')
+  await expect(page.getByRole('heading', { level: 1, name: 'Anna Nowak' })).toBeVisible()
 
   await page.goto('./#/settings')
   await expect(page.getByText('Google Calendar', { exact: true })).toHaveCount(0)
@@ -343,8 +344,8 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await expect(page.getByRole('main').getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(1)
 
   await page.goto('./#/psych?id=sp_anna')
-  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
-  await expect(page.getByRole('heading', { level: 1, name: 'Anna Nowak' })).toHaveCount(0)
+  await expect(page.locator('.topbar__title b')).toHaveText('Profil specjalistki')
+  await expect(page.getByRole('heading', { level: 1, name: 'Anna Nowak' })).toBeVisible()
 
   await page.setViewportSize({ width: 390, height: 844 })
   const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })

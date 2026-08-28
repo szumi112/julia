@@ -326,8 +326,8 @@ export function Settings({ params = {} }) {
                   <strong>{actor.displayName}</strong>
                 </div>
                 <div>
-                  <span className="settings-account-identity__label">Rola</span>
-                  <strong>{role.label}</strong>
+                  <span className="settings-account-identity__label">Profil w panelu</span>
+                  <strong>{role.professionalTitle ?? 'Konto centrum'}</strong>
                 </div>
                 <p>
                   Logujesz się jednorazowym kodem e-mail — panel nie przechowuje hasła.
