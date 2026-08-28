@@ -11,6 +11,7 @@ import {
   tusAssignmentStatusLabel, tusGroupsForRole, tusMonthSummary, unassignedKids,
 } from '../tus.js'
 import { EntityLink } from '../ux-patterns.jsx'
+import { ProtectedTusOverview } from './ProtectedTus.jsx'
 
 export const kidsWord = (n) => plural(n, 'dziecko', 'dzieci', 'dzieci')
 
@@ -136,10 +137,9 @@ function GroupCard({ centre, group, leaders, monthSummary, next, roster }) {
   )
 }
 
-export function TusGroups() {
+function DemoTusGroups() {
   const { state } = useApp()
   const { appMode, getViewState, patchViewState, role, openTusGroupForm, openTusKidForm } = useShell()
-  if (appMode === 'app') return null
   const ref = useReveal()
   const searchRef = useRef(null)
   const centre = role.scope !== 'own'
@@ -347,4 +347,9 @@ export function TusGroups() {
       ) : null}
     </div>
   )
+}
+
+export function TusGroups({ params = {} }) {
+  const { appMode } = useShell()
+  return appMode === 'app' ? <ProtectedTusOverview params={params} /> : <DemoTusGroups />
 }

@@ -150,7 +150,7 @@ test('@owner window focus authority refresh closes the cockpit and restores view
   await expect(page.locator('.view')).toBeFocused()
 })
 
-test('@owner capability shell keeps incomplete workspace and unfinished activity routes out of phone navigation', async ({ page }) => {
+test('@owner capability shell exposes protected activity routes and keeps incomplete workspace routes out', async ({ page }) => {
   await installSession(page, [
     'appointment.charge.read',
     'client.operational.read',
@@ -160,25 +160,35 @@ test('@owner capability shell keeps incomplete workspace and unfinished activity
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('./#/calendar')
 
-  await expect(page).toHaveURL(/#\/payments(?:\?|$)/)
+  await expect(page).toHaveURL(/#\/tus(?:\?|$)/)
   const tabbar = page.getByRole('navigation', { name: 'Nawigacja dolna' })
-  await expect(tabbar.getByRole('link', { name: 'TUS' })).toHaveCount(0)
+  await expect(tabbar.getByRole('link', { name: 'TUS' })).toHaveCount(1)
   await expect(tabbar.getByRole('link', { name: 'Dziś' })).toHaveCount(0)
   await expect(tabbar.getByRole('link', { name: 'Kalendarz' })).toHaveCount(0)
 
   await tabbar.getByRole('button', { name: 'Menu' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nawigacja' })
   await expect(drawer.getByRole('navigation', { name: 'Nawigacja główna' })
-    .getByRole('link')).toHaveText(['Finanse', 'Ustawienia'])
+    .getByRole('link')).toHaveText(['Angielski', 'Finanse', 'Ustawienia'])
   await page.keyboard.press('Escape')
 
   await page.keyboard.press('Control+K')
   const palette = page.getByRole('dialog', { name: 'Szukaj w panelu' })
   const search = palette.getByRole('combobox', { name: 'Szukaj w panelu' })
   await search.fill('tus')
-  await expect(palette.getByRole('option', { name: 'Zajęcia TUS' })).toHaveCount(0)
+  await expect(palette.getByRole('option', { name: 'Zajęcia TUS' })).toHaveCount(1)
   await search.fill('kalendarz')
   await expect(palette.getByRole('option', { name: 'Kalendarz' })).toHaveCount(0)
+})
+
+test('@owner direct protected activity routes fail closed without TUS authority', async ({ page }) => {
+  await installSession(page, ['finance.centre.read', 'permissions.manage'])
+
+  for (const route of ['tus', 'tusGroup?id=agr_hidden', 'english']) {
+    await page.goto(`./#/${route}`)
+    await expect(page).toHaveURL(/#\/payments(?:\?|$)/)
+  }
+  await expect(page.getByRole('heading', { name: /Grupy TUS|Angielski/ })).toHaveCount(0)
 })
 
 test('@owner capability shell redirects and closes stale overlays after authority refresh', async ({ page }) => {
@@ -214,6 +224,30 @@ test('@owner capability shell redirects and closes stale overlays after authorit
   await expect(navigation.getByRole('link', { name: 'Finanse' }))
     .toHaveAttribute('aria-current', 'page')
   await expect(navigation.getByRole('link', { name: 'Zespół' })).toHaveCount(0)
+})
+
+test('@owner revoking TUS authority closes a dirty activity drawer and redirects without stale content', async ({ page }) => {
+  let refreshed = false
+  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope({
+    authorityRevision: refreshed ? 2 : 1,
+    capabilities: refreshed
+      ? ['finance.centre.read', 'permissions.manage']
+      : ['finance.centre.read', 'permissions.manage', 'tus.manage'],
+  })))
+  await page.goto('./#/tus')
+  await expect(page.getByRole('heading', { level: 1, name: 'Grupy TUS' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Nowa grupa' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
+  await drawer.getByLabel('Nazwa grupy').fill('Fikcyjny sekret starej władzy')
+
+  refreshed = true
+  await page.evaluate(() => window.dispatchEvent(new Event('bwm:test-auth-refresh')))
+
+  await expect(page).toHaveURL(/#\/payments(?:\?|$)/)
+  await expect(drawer).toHaveCount(0)
+  await expect(page.getByText('Fikcyjny sekret starej władzy')).toHaveCount(0)
+  await expect(page.getByRole('status').filter({ hasText: 'Nowa grupa została utworzona' })).toHaveCount(0)
 })
 
 test('@owner visibility refresh clears a dirty role drawer on a same-capability revision', async ({ page }) => {

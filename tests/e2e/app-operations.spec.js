@@ -262,9 +262,13 @@ async function openSettings(page) {
 async function openOperations(page) {
   await openSettings(page)
   const choice = page.getByRole('button', { name: 'Stan i bezpieczeństwo' })
+  const sectionChanged = await choice.count()
+    ? await choice.getAttribute('aria-current') !== 'true'
+    : await page.getByLabel('Sekcja ustawień').inputValue() !== 'operations'
   if (await choice.count()) await choice.click()
   else await page.getByLabel('Sekcja ustawień').selectOption('operations')
   await expect(page.getByRole('heading', { name: 'Stan i bezpieczeństwo' })).toBeVisible()
+  if (sectionChanged) await expect(page).toHaveURL(/#\/settings\?section=operations$/)
 }
 
 async function openActions(page) {

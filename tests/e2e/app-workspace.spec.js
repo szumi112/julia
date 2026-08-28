@@ -205,7 +205,7 @@ const workspaceEnvelope = (from, to, appointment = null) => json(200, {
 
 const containsHistory = (from, to) => from <= '2026-07-15' && to >= '2026-07-15'
 
-test('@owner gates deferred surfaces and waits for a complete monthly report', async ({ page }) => {
+test('@owner exposes protected activities and waits for a complete monthly report', async ({ page }) => {
   await freezeTime(page, '2026-07-15T08:00:00.000Z')
   await page.route('**/api/v1/workspace?*', async (route) => {
     const url = new URL(route.request().url())
@@ -218,8 +218,8 @@ test('@owner gates deferred surfaces and waits for a complete monthly report', a
   })
 
   await page.goto('./#/tus')
-  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
-  await expect(page.getByRole('link', { name: 'Zajęcia TUS', exact: true })).toHaveCount(0)
+  await expect(page.locator('.topbar__title b')).toHaveText('Zajęcia TUS')
+  await expect(page.getByRole('link', { name: 'Zajęcia TUS', exact: true })).toHaveCount(1)
 
   await page.goto('./#/team')
   await expect(page.getByRole('status', { name: 'Stan zespołu' })).toContainText('Wczytywanie zespołu')

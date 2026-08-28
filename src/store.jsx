@@ -21,6 +21,7 @@ import {
 } from './workspace-view.js'
 import { activityWindowLoadOutcome, trackActivityWindowLoad } from './activity-load-request.js'
 import { activityLoadRequestKey, isActivityWindowLoaded } from './loaded-activities.js'
+import { activityMonthRange } from './activity-workspace.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
@@ -487,6 +488,11 @@ export const useActivityWorkspaceWindow = (range, enabled = true) => {
     key,
     rejectedKey,
   })
+}
+
+export const useActivityMonth = (month, enabled = true) => {
+  const range = useMemo(() => enabled ? activityMonthRange(month) : null, [enabled, month])
+  return useActivityWorkspaceWindow(range, enabled)
 }
 
 // ---------- selectors ----------

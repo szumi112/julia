@@ -15,6 +15,7 @@ import {
 } from '../tus.js'
 import { kidsWord } from './Tus.jsx'
 import { EntityLink, useRouteParamsSync } from '../ux-patterns.jsx'
+import { ProtectedTusGroup } from './ProtectedTus.jsx'
 
 function MethodPick({ payment, onPick }) {
   const [open, setOpen] = useState(false)
@@ -68,7 +69,7 @@ function TusPayPill({ payment, onPatch }) {
   )
 }
 
-export function TusGroupDetail({ params }) {
+function DemoTusGroupDetail({ params }) {
   const { state, dispatch, toast } = useApp()
   const { role, openTusGroupForm, openTusKidForm, openTusClassForm } = useShell()
   const ref = useReveal([params.id])
@@ -425,4 +426,11 @@ export function TusGroupDetail({ params }) {
       </div>
     </div>
   )
+}
+
+export function TusGroupDetail({ params }) {
+  const { appMode } = useShell()
+  return appMode === 'app'
+    ? <ProtectedTusGroup params={params} />
+    : <DemoTusGroupDetail params={params} />
 }

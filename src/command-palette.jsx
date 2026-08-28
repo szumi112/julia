@@ -14,6 +14,7 @@ const VIEW_ITEMS = [
   { view: 'calendar', label: 'Kalendarz', icon: 'calendar' },
   { view: 'clients', label: 'Klienci', icon: 'clients' },
   { view: 'tus', label: 'Zajęcia TUS', icon: 'group' },
+  { view: 'english', label: 'Angielski', icon: 'clients' },
   { view: 'team', label: 'Zespół', icon: 'team' },
   { view: 'payments', label: 'Finanse', icon: 'payments' },
   { view: 'ledger', label: 'Rejestr', icon: 'reports' },

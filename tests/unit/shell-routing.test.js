@@ -54,7 +54,7 @@ test('maps every rendered protected route to capabilities instead of role labels
     },
     {
       capabilities: ['tus.manage'],
-      accessible: ['settings'],
+      accessible: ['tus', 'tusGroup', 'english', 'settings'],
     },
     {
       capabilities: ['staff.manage'],
@@ -115,7 +115,7 @@ test('selects the first accessible top-level route in product navigation order',
   )
   assert.equal(
     shellRouting.firstAccessibleShellRoute(appContext(['tus.manage'])),
-    'settings',
+    'tus',
   )
   assert.equal(
     shellRouting.firstAccessibleShellRoute(appContext(['finance.centre.read'])),

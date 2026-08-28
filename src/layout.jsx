@@ -21,6 +21,7 @@ import { Clients, ClientDetail } from './views/Clients.jsx'
 import { Team, PsychDetail } from './views/Team.jsx'
 import { TusGroups } from './views/Tus.jsx'
 import { TusGroupDetail } from './views/TusGroup.jsx'
+import { English } from './views/English.jsx'
 import { Payments } from './views/Payments.jsx'
 import { Finance } from './views/Finance.jsx'
 import { Reports } from './views/Reports.jsx'
@@ -29,6 +30,10 @@ import { SessionDrawer } from './views/SessionForm.jsx'
 import { ClientDrawer } from './views/ClientForm.jsx'
 import { PsychDrawer } from './views/PsychForm.jsx'
 import { TusGroupDrawer, TusKidDrawer, TusClassDrawer } from './views/TusForms.jsx'
+import {
+  ActivityClassDrawer, ActivityGroupDrawer, ActivityMembershipDrawer,
+  ActivityParticipantDrawer,
+} from './views/ActivityForms.jsx'
 import { CommandPalette } from './command-palette.jsx'
 import {
   patchRouteViewState as patchRegistryRoute,
@@ -42,6 +47,7 @@ const NAV = [
   { id: 'calendar', label: 'Kalendarz', icon: 'calendar' },
   { id: 'clients', label: 'Klienci', icon: 'clients' },
   { id: 'tus', label: 'Zajęcia TUS', icon: 'group' },
+  { id: 'english', label: 'Angielski', icon: 'clients' },
   { id: 'team', label: 'Zespół', icon: 'team' },
   { id: 'payments', label: 'Finanse', icon: 'payments' },
   { id: 'ledger', label: 'Rejestr', icon: 'reports' },
@@ -62,6 +68,7 @@ const TITLES = {
   client: 'Karta klienta',
   tus: 'Zajęcia TUS',
   tusGroup: 'Grupa TUS',
+  english: 'Angielski',
   team: 'Zespół',
   psych: 'Profil specjalistki',
   payments: 'Finanse',
@@ -77,6 +84,7 @@ const VIEWS = {
   client: ClientDetail,
   tus: TusGroups,
   tusGroup: TusGroupDetail,
+  english: English,
   team: Team,
   psych: PsychDetail,
   payments: Payments,
@@ -265,7 +273,7 @@ function MobileRoleControls({ appMode, role, onRoleChange, onLogout }) {
 
 // Compact-shell navigation: the sidebar slides in from the left as a drawer,
 // with the same GSAP choreography as the form drawers (mirrored).
-const PHONE_MENU_IDS = ['clients', 'team', 'ledger', 'payments', 'reports', 'settings']
+const PHONE_MENU_IDS = ['clients', 'english', 'team', 'ledger', 'payments', 'reports', 'settings']
 
 function MobileNavDrawer({
   appMode,
@@ -975,6 +983,30 @@ export function Shell({
     setDrawer({ kind: 'tusClass', opts })
     openOverlay('drawer')
   }, [isApp, openOverlay])
+  const openActivityGroupForm = useCallback((opts = {}) => {
+    const actionId = opts.group ? 'activity.group.edit' : 'activity.group.create'
+    if (!isApp || !canPerformAction(capabilities, actionId)) return
+    setDrawer({ kind: 'activityGroup', opts })
+    openOverlay('drawer')
+  }, [capabilities, isApp, openOverlay])
+  const openActivityParticipantForm = useCallback((opts = {}) => {
+    const actionId = opts.participant ? 'activity.participant.edit' : 'activity.participant.create'
+    if (!isApp || !canPerformAction(capabilities, actionId)) return
+    setDrawer({ kind: 'activityParticipant', opts })
+    openOverlay('drawer')
+  }, [capabilities, isApp, openOverlay])
+  const openActivityMembershipForm = useCallback((opts = {}) => {
+    const actionId = opts.membership ? 'activity.membership.edit' : 'activity.membership.create'
+    if (!isApp || !canPerformAction(capabilities, actionId)) return
+    setDrawer({ kind: 'activityMembership', opts })
+    openOverlay('drawer')
+  }, [capabilities, isApp, openOverlay])
+  const openActivityClassForm = useCallback((opts = {}) => {
+    const actionId = opts.activityClass ? 'activity.class.edit' : 'activity.class.create'
+    if (!isApp || !canPerformAction(capabilities, actionId)) return
+    setDrawer({ kind: 'activityClass', opts })
+    openOverlay('drawer')
+  }, [capabilities, isApp, openOverlay])
   const openTeamBoard = useCallback(() => {
     if (isApp) return
     setDrawer({ kind: 'board' })
@@ -1025,10 +1057,15 @@ export function Shell({
     openTusGroupForm,
     openTusKidForm,
     openTusClassForm,
+    openActivityGroupForm,
+    openActivityParticipantForm,
+    openActivityMembershipForm,
+    openActivityClassForm,
     openTeamBoard,
     registerLeaveGuard,
   }), [
     getViewState, navigate, openClientForm, openPsychForm, openSessionForm, openTeamBoard,
+    openActivityClassForm, openActivityGroupForm, openActivityMembershipForm, openActivityParticipantForm,
     openTusClassForm, openTusGroupForm, openTusKidForm, patchViewState, registerLeaveGuard,
     actor, appMode, canAccessRoute, capabilities, dataMode, isApp, resetViewState,
     role, route, setDemoRole,
@@ -1114,6 +1151,10 @@ export function Shell({
       {!isApp && overlay === 'drawer' && drawer?.kind === 'tusGroup' && <TusGroupDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'tusKid' && <TusKidDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'tusClass' && <TusClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {isApp && overlay === 'drawer' && drawer?.kind === 'activityGroup' && <ActivityGroupDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {isApp && overlay === 'drawer' && drawer?.kind === 'activityParticipant' && <ActivityParticipantDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {isApp && overlay === 'drawer' && drawer?.kind === 'activityMembership' && <ActivityMembershipDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {isApp && overlay === 'drawer' && drawer?.kind === 'activityClass' && <ActivityClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'board' && <BoardDrawer onClose={closeDrawer} />}
       {overlay === 'palette' && <CommandPalette onClose={() => closeOverlay('palette')} />}
       {pendingLeave && (

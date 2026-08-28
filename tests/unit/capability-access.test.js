@@ -92,9 +92,11 @@ test('workspace-backed routes require every capability consumed by the workspace
   }
 })
 
-test('protected activity routes stay unavailable until their UI is implemented', () => {
+test('protected activity routes require the TUS management capability', () => {
   for (const routeName of ['tus', 'tusGroup', 'english']) {
-    assert.equal(canAccessProtectedRoute(['tus.manage'], routeName), false)
+    assert.equal(canAccessProtectedRoute(['tus.manage'], routeName), true)
+    assert.equal(canAccessProtectedRoute([], routeName), false)
+    assert.equal(canAccessProtectedRoute(['chat.general'], routeName), false)
   }
 })
 
@@ -126,7 +128,7 @@ test('catalog-ordered effective subsets preserve every mapped grant', () => {
   assert.equal(canAccessProtectedRoute(capabilities, 'payments'), true)
   assert.equal(canAccessProtectedRoute(capabilities, 'reports'), true)
   assert.equal(canAccessProtectedRoute(capabilities, 'team'), true)
-  assert.equal(canAccessProtectedRoute(capabilities, 'english'), false)
+  assert.equal(canAccessProtectedRoute(capabilities, 'english'), true)
   assert.equal(canPerformAction(capabilities, 'appointment.create'), true)
   assert.equal(canPerformAction(capabilities, 'activity.attendance.edit'), true)
 })

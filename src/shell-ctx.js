@@ -19,10 +19,10 @@ const DETAIL_PARENT = Object.freeze({
 })
 const SHELL_ROUTE_NAMES = new Set([
   'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'team',
-  'psych', 'payments', 'ledger', 'reports', 'settings',
+  'psych', 'payments', 'ledger', 'reports', 'settings', 'english',
 ])
 const SAFE_ROUTE_ORDER = Object.freeze([
-  'dashboard', 'calendar', 'clients', 'tus', 'team', 'payments', 'ledger',
+  'dashboard', 'calendar', 'clients', 'tus', 'english', 'team', 'payments', 'ledger',
   'reports', 'settings',
 ])
 
