@@ -6,10 +6,11 @@ import {
   canAccessShellRoute,
   resolveShellRoute,
   ShellCtx,
+  useShell,
 } from './shell-ctx.js'
 import { DEMO_ROLES } from './data.js'
 import { shellRoleFor } from './auth-role.js'
-import { canPerformAction } from './capability-access.js'
+import { canPerformAction, protectedPaymentsSurface } from './capability-access.js'
 import { useIsCompact, useIsPhone } from './responsive.js'
 import { TodayCockpit } from './cockpit.jsx'
 import { motionOK, brandBurst } from './anim.js'
@@ -25,6 +26,10 @@ import { English } from './views/English.jsx'
 import { Payments } from './views/Payments.jsx'
 import { Finance } from './views/Finance.jsx'
 import { Reports } from './views/Reports.jsx'
+import { ProtectedFinance } from './views/ProtectedFinance.jsx'
+import { ProtectedReports } from './views/ProtectedReports.jsx'
+import { Registry } from './views/Registry.jsx'
+import { WorkbookExport } from './views/WorkbookExport.jsx'
 import { Settings } from './views/Settings.jsx'
 import { SessionDrawer } from './views/SessionForm.jsx'
 import { ClientDrawer } from './views/ClientForm.jsx'
@@ -50,7 +55,7 @@ const NAV = [
   { id: 'english', label: 'Angielski', icon: 'clients' },
   { id: 'team', label: 'Zespół', icon: 'team' },
   { id: 'payments', label: 'Finanse', icon: 'payments' },
-  { id: 'ledger', label: 'Rejestr', icon: 'reports' },
+  { id: 'ledger', label: 'Rejestr', icon: 'ledger' },
   { id: 'reports', label: 'Raporty', icon: 'reports' },
 ]
 
@@ -99,24 +104,21 @@ const ACTIVE_OF = { client: 'clients', psych: 'team', tusGroup: 'tus' }
 const META_K = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent) ? '⌘ K' : 'Ctrl K'
 
 function AppSpecialistPayments() {
+  const { actor } = useShell()
   return (
     <div>
-      <div className="view-head">
-        <div>
-          <div className="eyebrow">Twoje finanse</div>
-          <h1 className="display view-head__title">Rozliczenia <em>specjalisty</em></h1>
-          <p className="view-head__sub">Widoczne są wyłącznie rozliczenia przypisane do tego konta.</p>
-        </div>
-      </div>
-      <section className="specialist-payments-empty" aria-label="Rozliczenia specjalisty">
-        <EmptyState
-          icon="payments"
-          title="Brak rozliczeń specjalisty"
-          hint="W środowisku testowym nie ma rozliczeń przypisanych do tego konta."
-        />
-      </section>
+      <Payments ownSpecialistId={actor.specialistId} />
+      <WorkbookExport own />
     </div>
   )
+}
+
+function AppUnavailablePayments() {
+  return <div className="view-head"><div>
+    <div className="eyebrow">Zakres uprawnień</div>
+    <h1 className="display view-head__title">Finanse <em>niedostępne</em></h1>
+    <p className="view-head__sub">Bieżące uprawnienia nie obejmują widoku finansowego.</p>
+  </div></div>
 }
 
 // Real hash links wherever the shell navigates: plain clicks go through the
@@ -663,6 +665,7 @@ export function Shell({
   const actor = isApp ? session.actor : null
   const capabilities = isApp ? session.capabilities : EMPTY_CAPABILITIES
   const dataMode = isApp ? session.dataMode : 'fictional'
+  const authorityGeneration = isApp ? session.authorityRevision : 0
   const routeAuthority = useMemo(() => ({
     appMode,
     capabilities,
@@ -1023,9 +1026,15 @@ export function Shell({
     viewRef.current?.focus({ preventScroll: true })
   }, [role.id, route.name, routeParamsKey])
 
-  const View = isApp && route.name === 'payments' && role.id === 'therapist'
-    ? AppSpecialistPayments
-    : VIEWS[route.name] || Dashboard
+  const paymentsSurface = isApp
+    ? protectedPaymentsSurface(capabilities, actor?.specialistId) : null
+  const View = !isApp ? VIEWS[route.name] || Dashboard
+    : route.name === 'payments' && paymentsSurface === 'own' ? AppSpecialistPayments
+      : route.name === 'payments' && paymentsSurface === 'centre' ? ProtectedFinance
+        : route.name === 'payments' ? AppUnavailablePayments
+        : route.name === 'ledger' ? Registry
+          : route.name === 'reports' ? ProtectedReports
+            : VIEWS[route.name] || Dashboard
   const hasOverlay = overlay !== null
   const handleCockpitChange = useCallback((open) => {
     if (open) openOverlay('cockpit')
@@ -1041,6 +1050,7 @@ export function Shell({
   const shellValue = useMemo(() => ({
     actor,
     appMode,
+    authorityGeneration,
     capabilities,
     dataMode,
     role,
@@ -1067,13 +1077,22 @@ export function Shell({
     getViewState, navigate, openClientForm, openPsychForm, openSessionForm, openTeamBoard,
     openActivityClassForm, openActivityGroupForm, openActivityMembershipForm, openActivityParticipantForm,
     openTusClassForm, openTusGroupForm, openTusKidForm, patchViewState, registerLeaveGuard,
-    actor, appMode, canAccessRoute, capabilities, dataMode, isApp, resetViewState,
+    actor, appMode, authorityGeneration, canAccessRoute, capabilities, dataMode, isApp, resetViewState,
     role, route, setDemoRole,
   ])
 
   return (
     <ShellCtx.Provider value={shellValue}>
-      <a className="skip-link" href="#main-content" inert={hasOverlay ? '' : undefined}>Przejdź do treści</a>
+      <a
+        className="skip-link"
+        href="#main-content"
+        inert={hasOverlay ? '' : undefined}
+        onClick={(event) => {
+          event.preventDefault()
+          contentRef.current?.focus({ preventScroll: true })
+          contentRef.current?.scrollIntoView({ block: 'start' })
+        }}
+      >Przejdź do treści</a>
       <div
         className="shell"
         ref={shellRef}

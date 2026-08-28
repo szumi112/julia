@@ -4,8 +4,8 @@ const allOf = (...capabilities) => Object.freeze({
   allOf: Object.freeze(capabilities),
 })
 
-const anyOf = (...capabilities) => Object.freeze({
-  anyOf: Object.freeze(capabilities),
+const anyRule = (...rules) => Object.freeze({
+  anyRule: Object.freeze(rules),
 })
 
 const WORKSPACE_READ = allOf(
@@ -24,7 +24,7 @@ const PROTECTED_ROUTE_RULES = Object.freeze({
   english: allOf('tus.manage'),
   team: allOf('staff.manage'),
   psych: allOf('staff.manage'),
-  payments: anyOf('appointment.charge.read', 'finance.centre.read'),
+  payments: anyRule(allOf('finance.centre.read'), WORKSPACE_READ),
   ledger: allOf('finance.centre.read'),
   reports: allOf('finance.centre.read'),
   settings: allOf(),
@@ -54,6 +54,7 @@ const PROTECTED_ACTION_RULES = Object.freeze({
   'finance.import.create': allOf('finance.import'),
   'finance.import.continue': allOf('finance.import'),
   'finance.import.status': allOf('finance.import'),
+  'finance.entry.void': allOf('finance.centre.manage'),
   'workbook.export.centre': allOf('workbook.centre.export'),
   'workbook.export.own': allOf('workbook.own.export'),
   'activity.group.create': allOf('tus.manage'),
@@ -119,6 +120,9 @@ function acceptedRule(rules, id) {
 }
 
 function satisfiesRule(capabilities, rule) {
+  if (rule.anyRule && !rule.anyRule.some((candidate) => (
+    satisfiesRule(capabilities, candidate)
+  ))) return false
   if (rule.allOf && !rule.allOf.every((capability) => capabilities.has(capability))) {
     return false
   }
@@ -138,4 +142,13 @@ export function canPerformAction(capabilities, actionId) {
   const accepted = acceptedCapabilitySet(capabilities)
   const rule = acceptedRule(PROTECTED_ACTION_RULES, actionId)
   return Boolean(accepted && rule && satisfiesRule(accepted, rule))
+}
+
+export function protectedPaymentsSurface(capabilities, specialistId) {
+  const accepted = acceptedCapabilitySet(capabilities)
+  if (!accepted) return 'unavailable'
+  if (accepted.has('finance.centre.read')) return 'centre'
+  if (typeof specialistId === 'string' && specialistId.startsWith('sp_')
+    && satisfiesRule(accepted, WORKSPACE_READ)) return 'own'
+  return 'unavailable'
 }

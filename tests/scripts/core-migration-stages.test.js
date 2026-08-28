@@ -42,6 +42,7 @@ const STAGE_E_NAMES = Object.freeze([
   '0018_activity_workspace.sql',
   '0019_dual_role_specialists.sql',
   '0020_capability_overrides.sql',
+  '0021_finance_reporting_registry.sql',
 ])
 
 const migration = (name) => Object.freeze({

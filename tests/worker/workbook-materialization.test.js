@@ -3,7 +3,7 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   continueWorkbookImport,
   createWorkbookImport,
-  previewWorkbook,
+  previewWorkbook as previewWorkbookCore,
 } from '../../worker/core/workbooks.js'
 import { FINANCE_SCOPE } from '../../worker/core/finance.js'
 import { listFinanceEntries } from '../../worker/core/finance.js'
@@ -28,6 +28,9 @@ const APPROVED = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe9
 const NOW_MS = Date.parse('2027-02-10T08:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
 const FINANCE_BATCH = 'fib_workbook_materialization_current'
+const IDENTITY_SCOPE = Object.freeze({
+  type: 'staff_directory', id: 'centre_1', purpose: 'identity',
+})
 const actor = authorityActor({ id: 'stf_workbook_materialization_owner', role: 'owner' })
 const otherOwner = authorityActor({
   id: 'stf_workbook_materialization_other', role: 'owner',
@@ -131,6 +134,7 @@ let keyring
 let financeKey
 let sequence = 0
 const idFactory = () => `materialization_${++sequence}`
+const previewWorkbook = (input) => previewWorkbookCore({ db: env.DB, ...input })
 const sealFinance = async (recordId, field, value) => JSON.stringify(await encryptForScope(
   keyring,
   financeKey,
@@ -153,6 +157,15 @@ beforeAll(async () => {
   await applyWorkbookRegistryStageE()
   await insertStaff(actor)
   await insertStaff(otherOwner)
+  keyring = await createKeyring({
+    BWM_DATA_KEK_V1: key(1),
+    BWM_LOOKUP_HMAC_V1: key(2),
+    BWM_WORKBOOK_KEK_V1: key(9),
+    BWM_WORKBOOK_HMAC_V1: key(10),
+  }, config)
+  const identityKey = await getOrCreateDataKey(env.DB, keyring, IDENTITY_SCOPE, {
+    id: 'key_workbook_materialization_identity', createdAt: NOW,
+  })
   for (const [id, name] of [
     ['sp_staging_workbook_anna_janowska', 'Anna'],
     ['sp_staging_workbook_julia_wolanin', 'Julia'],
@@ -160,14 +173,10 @@ beforeAll(async () => {
   ]) await env.DB.prepare(`INSERT INTO specialists
     (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
      archived_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(
-    id, null, JSON.stringify({ name }), 18_000, 'active', 1, null, NOW, NOW,
+    id, null, JSON.stringify(await encryptForScope(keyring, identityKey, {
+      expectedScope: IDENTITY_SCOPE, recordId: id, field: 'display_name', plaintext: name,
+    })), 18_000, 'active', 1, null, NOW, NOW,
   ).run()
-  keyring = await createKeyring({
-    BWM_DATA_KEK_V1: key(1),
-    BWM_LOOKUP_HMAC_V1: key(2),
-    BWM_WORKBOOK_KEK_V1: key(9),
-    BWM_WORKBOOK_HMAC_V1: key(10),
-  }, config)
   financeKey = await getOrCreateDataKey(env.DB, keyring, FINANCE_SCOPE, {
     id: 'key_workbook_materialization_finance', createdAt: NOW,
   })
@@ -531,5 +540,26 @@ describe('approved workbook materialization', () => {
       (SELECT count(*) FROM finance_adjustments) AS adjustments,
       (SELECT count(*) FROM finance_entry_voids) AS voids,
       (SELECT count(*) FROM finance_source_links) AS links`).first()).toEqual(beforeReplayCounts)
+
+    const revokedDb = {
+      prepare(sql) {
+        if (sql.includes('FROM staff_authorities AS authority')) return {
+          bind() { return this },
+          async all() { return { results: [] } },
+        }
+        return env.DB.prepare(sql)
+      },
+      batch(statements) { return env.DB.batch(statements) },
+    }
+    await expect(continueWorkbookImport({
+      ...continuation, db: revokedDb,
+    })).rejects.toThrow(/^NOT_FOUND$/)
+    await expect(continueWorkbookImport({
+      ...continuation,
+      db: revokedDb,
+      expectedVersion: left.body.data.import.version,
+      idempotencyKey: 'workbook-materialization-complete-revoked',
+      correlationId: 'corr_workbook_materialization_complete_revoked',
+    })).rejects.toThrow(/^NOT_FOUND$/)
   }, 30_000)
 })

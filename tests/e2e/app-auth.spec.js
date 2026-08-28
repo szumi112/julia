@@ -1400,8 +1400,8 @@ test('@specialist keeps authenticated identity, gains Finances, and stays fictio
   await expect(financesLink).toBeVisible()
   await financesLink.click()
   await expect(page.locator('.topbar__title b')).toHaveText('Finanse')
-  await expect(page.getByText('Brak rozliczeń specjalisty', { exact: true })).toBeVisible()
-  await expect(page.locator('.finance-ledger, .figures, table')).toHaveCount(0)
+  await expect(page.getByText('Brak rozliczeń w tym miesiącu', { exact: true })).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'Przychody' })).toHaveCount(0)
   for (const fictionalIdentity of [
     'Anna Maria Janowska',
     'Justyna Jarosz-Jarszewska',

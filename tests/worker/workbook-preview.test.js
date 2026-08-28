@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createWorkbookImport, previewWorkbook } from '../../worker/core/workbooks.js'
+import {
+  createWorkbookImport,
+  previewWorkbook as previewWorkbookCore,
+} from '../../worker/core/workbooks.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import {
@@ -21,6 +24,27 @@ const config = Object.freeze({
 const owner = Object.freeze({
   id: 'stf_workbook_preview_owner', role: 'owner', specialistId: null, version: 1,
   authorityRevision: 1, capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+})
+const authorityDbFor = (actor) => ({
+  prepare(sql) {
+    return {
+      bind() { return this },
+      async all() {
+        if (sql.includes('FROM specialists')) return { results: [] }
+        const allow = actor.role === 'coordinator'
+          && actor.capabilities.includes('finance.import')
+        return { results: [{
+          authority_revision: actor.authorityRevision,
+          capability: allow ? 'finance.import' : null,
+          decision: allow ? 'allow' : null,
+        }] }
+      },
+    }
+  },
+})
+const previewWorkbook = (input) => previewWorkbookCore({
+  db: authorityDbFor(input.actor),
+  ...input,
 })
 const panelFinanceValues = (patch = {}) => ({
   accountingMonth: '2025-09',
@@ -85,6 +109,40 @@ const parsed = (fingerprint = APPROVED) => Object.freeze({
 })
 
 describe('no-write workbook preview', () => {
+  it('fails closed when current D1 authority is revoked while parsing', async () => {
+    let active = true
+    const db = {
+      prepare() {
+        return {
+          bind() { return this },
+          async all() {
+            return { results: active ? [{
+              authority_revision: owner.authorityRevision,
+              capability: null,
+              decision: null,
+            }] : [] }
+          },
+        }
+      },
+    }
+
+    await expect(previewWorkbook({
+      db,
+      bytes: new Uint8Array([1]),
+      filename: 'fictional.xlsx',
+      actor: owner,
+      keyring: await ring(),
+      config,
+      centreId: 'centre_1',
+      nowMs: 1_800_000_000_000,
+      parse: async () => {
+        active = false
+        return parsed()
+      },
+      readPanel: async () => ({ edits: [], kind: 'legacy', metadata: null, voidIds: [] }),
+    })).rejects.toThrow(/^NOT_FOUND$/)
+  })
+
   it('accepts an explicitly granted coordinator and rejects import without finance.import', async () => {
     const parse = vi.fn(async () => parsed())
     const common = {
@@ -181,6 +239,8 @@ describe('no-write workbook preview', () => {
       conflicts: [],
       quarantine: [parsed().quarantinedRows[0]],
       workbookKind: 'legacy',
+      specialistOptions: [],
+      specialistLabels: [],
     })
     await expect(verifyWorkbookPreviewToken({
       token: result.data.previewToken,
@@ -221,20 +281,21 @@ describe('no-write workbook preview', () => {
     })
     expect(unknown.data.proposedMappings).toEqual([])
     expect(unknown.data.conflicts).toEqual([{
+      id: expect.stringMatching(/^wmc_[A-Za-z0-9_-]{43}$/),
       code: 'SPECIALIST_MAPPING_REQUIRED',
       sourceValue: 'Nieznana Osoba',
     }])
   })
 
-  it('has no D1, R2, audit or outbox dependency surface', async () => {
+  it('has only the final current-authority D1 read and no write dependency surface', async () => {
     await expect(previewWorkbook({
       bytes: new Uint8Array([1]), filename: 'fictional.xlsx', actor: owner,
       keyring: await ring(),
       config, centreId: 'centre_1', nowMs: 1_800_000_000_000,
       parse: async () => parsed(),
       readPanel: async () => ({ edits: [], kind: 'legacy', metadata: null, voidIds: [] }),
-      db: { prepare: () => { throw new Error('WRITE_TRAP') } },
-    })).rejects.toThrow(/^WORKBOOK_PREVIEW_INVALID$/)
+      db: authorityDbFor(owner),
+    })).resolves.toMatchObject({ data: { workbookKind: 'legacy' } })
   })
 
   it('normalizes malformed parser input at the public preview boundary', async () => {
@@ -417,6 +478,159 @@ describe('no-write workbook preview', () => {
     }])
   })
 
+  it.each(['edit', 'void'])('blocks a signed Panel %s for an active dependent row', async (action) => {
+    const keyring = await ring()
+    const callbacks = createWorkbookPanelMetadataCallbacks({
+      keyring, config, centreId: 'centre_1',
+    })
+    const id = `fin_panel_dependency_${action}`
+    const digest = await callbacks.digestField({
+      rowType: 'finance_entry', rowId: id, field: 'amountGrosze', value: 18_000,
+    })
+    const result = await previewWorkbook({
+      bytes: new Uint8Array([8, 9]), filename: 'panel.xlsx', actor: owner, keyring, config,
+      centreId: 'centre_1', nowMs: 1_800_000_000_000,
+      parse: async () => parsed(),
+      readPanel: async () => ({
+        edits: action === 'edit' ? [{
+          id, sheet: 'Panel — Wizyty', values: { amountGrosze: 20_000 },
+        }] : [],
+        kind: 'panel-v2',
+        metadata: {
+          format: 'Panel-v2', scope: { id: 'centre_1', type: 'centre' },
+          rows: [{
+            id, type: 'finance_entry', baseVersion: 1,
+            fieldDigests: { amountGrosze: digest },
+          }],
+          voidIds: action === 'void' ? [id] : [],
+        },
+        voidIds: action === 'void' ? [id] : [],
+      }),
+      loadPanelState: async () => ({
+        fieldsByType: { finance_entry: { amountGrosze: { type: 'cents' } } },
+        specialistIds: [],
+        rows: [{
+          id, type: 'finance_entry', version: 1, kind: 'income', recordType: 'income',
+          mutationBlocked: true, values: panelFinanceValues(),
+        }],
+      }),
+    })
+    expect(result.data.conflicts).toEqual([{
+      code: 'PANEL_DEPENDENCY_CONFLICT', field: null, recordId: id,
+    }])
+    expect(result.data.panelChanges).toEqual({
+      unchangedIds: [], updates: [], voidIds: [],
+    })
+  })
+
+  it('classifies a nonexistent concurrently edited specialist before resolving labels', async () => {
+    const keyring = await ring()
+    const callbacks = createWorkbookPanelMetadataCallbacks({
+      keyring, config, centreId: 'centre_1',
+    })
+    const id = 'fin_panel_missing_specialist_concurrent'
+    const digest = await callbacks.digestField({
+      rowType: 'finance_entry', rowId: id, field: 'specialistId',
+      value: 'sp_original_panel_specialist',
+    })
+    const result = await previewWorkbook({
+      bytes: new Uint8Array([8, 9]), filename: 'panel.xlsx', actor: owner, keyring, config,
+      centreId: 'centre_1', nowMs: 1_800_000_000_000,
+      parse: async () => parsed(),
+      readPanel: async () => ({
+        edits: [{
+          id, sheet: 'Panel — Wizyty',
+          values: { specialistId: 'sp_missing_panel_specialist' },
+        }],
+        kind: 'panel-v2', metadata: {
+          format: 'Panel-v2', scope: { id: 'centre_1', type: 'centre' },
+          rows: [{
+            id, type: 'finance_entry', baseVersion: 1,
+            fieldDigests: { specialistId: digest },
+          }], voidIds: [],
+        }, voidIds: [],
+      }),
+      loadPanelState: async () => ({
+        fieldsByType: { finance_entry: { specialistId: { type: 'text' } } },
+        specialistIds: [],
+        rows: [{
+          id, type: 'finance_entry', version: 2, kind: 'income', recordType: 'income',
+          values: panelFinanceValues({ specialistId: 'sp_concurrent_panel_specialist' }),
+        }],
+      }),
+    })
+
+    expect(result.data.conflicts).toEqual([{
+      code: 'PANEL_VALUE_INVALID', field: 'specialistId', recordId: id,
+    }])
+    expect(result.data.specialistLabels).toEqual([])
+  })
+
+  it('retains an unchanged archived assignment without letting it authorize another row', async () => {
+    const keyring = await ring()
+    const callbacks = createWorkbookPanelMetadataCallbacks({
+      keyring, config, centreId: 'centre_1',
+    })
+    const archivedId = 'sp_archived_panel_target'
+    const amountDigest = await callbacks.digestField({
+      rowType: 'finance_entry', rowId: 'fin_panel_archived_owner',
+      field: 'amountGrosze', value: 18_000,
+    })
+    const specialistDigest = await callbacks.digestField({
+      rowType: 'finance_entry', rowId: 'fin_panel_archived_reuse',
+      field: 'specialistId', value: null,
+    })
+    const result = await previewWorkbook({
+      bytes: new Uint8Array([8, 9]), filename: 'panel.xlsx', actor: owner, keyring, config,
+      centreId: 'centre_1', nowMs: 1_800_000_000_000,
+      parse: async () => parsed(),
+      readPanel: async () => ({
+        edits: [{
+          id: 'fin_panel_archived_owner', sheet: 'Panel — Wizyty',
+          values: { amountGrosze: 19_000 },
+        }, {
+          id: 'fin_panel_archived_reuse', sheet: 'Panel — Wizyty',
+          values: { specialistId: archivedId },
+        }],
+        kind: 'panel-v2',
+        metadata: {
+          format: 'Panel-v2', scope: { id: 'centre_1', type: 'centre' },
+          rows: [{
+            id: 'fin_panel_archived_owner', type: 'finance_entry', baseVersion: 1,
+            fieldDigests: { amountGrosze: amountDigest },
+          }, {
+            id: 'fin_panel_archived_reuse', type: 'finance_entry', baseVersion: 1,
+            fieldDigests: { specialistId: specialistDigest },
+          }], voidIds: [],
+        }, voidIds: [],
+      }),
+      loadPanelState: async ({ specialistIds }) => {
+        expect(specialistIds).toEqual([archivedId])
+        return {
+          fieldsByType: { finance_entry: {
+            amountGrosze: { type: 'cents' }, specialistId: { type: 'text' },
+          } },
+          specialistIds: [],
+          rows: [{
+            id: 'fin_panel_archived_owner', type: 'finance_entry', version: 1,
+            kind: 'income', recordType: 'income',
+            values: panelFinanceValues({ specialistId: archivedId }),
+          }, {
+            id: 'fin_panel_archived_reuse', type: 'finance_entry', version: 1,
+            kind: 'income', recordType: 'income', values: panelFinanceValues(),
+          }],
+        }
+      },
+    })
+    expect(result.data.panelChanges.updates).toEqual([{
+      id: 'fin_panel_archived_owner', type: 'finance_entry', values: { amountGrosze: 19_000 },
+    }])
+    expect(result.data.conflicts).toEqual([{
+      code: 'PANEL_VALUE_INVALID', field: 'specialistId',
+      recordId: 'fin_panel_archived_reuse',
+    }])
+  })
+
   it('rejects a malformed Panel specialist at exact-file commit before D1 or R2 writes', async () => {
     const keyring = await ring()
     const callbacks = createWorkbookPanelMetadataCallbacks({
@@ -465,8 +679,17 @@ describe('no-write workbook preview', () => {
       code: 'PANEL_VALUE_INVALID', field: 'specialistId',
       recordId: 'fin_panel_bad_specialist',
     }])
+    const readOnly = {
+      bind: vi.fn(() => readOnly),
+      first: vi.fn(async () => null),
+      all: vi.fn(async () => { throw new Error('D1_WRITE_TRAP') }),
+      run: vi.fn(async () => { throw new Error('D1_WRITE_TRAP') }),
+    }
     const db = {
-      prepare: vi.fn(() => { throw new Error('D1_WRITE_TRAP') }),
+      prepare: vi.fn((sql) => {
+        expect(sql).toContain('FROM workbook_request_replays')
+        return readOnly
+      }),
       batch: vi.fn(async () => { throw new Error('D1_WRITE_TRAP') }),
     }
     const bucket = {
@@ -495,7 +718,9 @@ describe('no-write workbook preview', () => {
         return loadedState
       },
     })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
-    expect(db.prepare).not.toHaveBeenCalled()
+    expect(db.prepare).toHaveBeenCalledOnce()
+    expect(readOnly.first).toHaveBeenCalledOnce()
+    expect(readOnly.run).not.toHaveBeenCalled()
     expect(db.batch).not.toHaveBeenCalled()
     expect(bucket.delete).not.toHaveBeenCalled()
     expect(bucket.put).not.toHaveBeenCalled()

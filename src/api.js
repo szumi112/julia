@@ -1,4 +1,5 @@
 import { APP_MODE } from './app-mode.js'
+import { compareUtf16CodeUnits } from './code-unit-order.js'
 import {
   CAPABILITIES,
   acceptEffectiveCapabilities,
@@ -9,6 +10,8 @@ import {
 import { isWellFormedUnicode, validateAppointmentInput } from './core-records.js'
 import { SERVICE_BY_ID } from './services.js'
 import {
+  FINANCE_METHODS,
+  INVOICE_STATES,
   financeEntryDto,
   financeMonthSummary,
   validateFinanceEntryInput,
@@ -74,11 +77,24 @@ const FINANCE_MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/
 const WORKBOOK_IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const WORKBOOK_ARTIFACT_ID = /^wba_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const WORKBOOK_JOB_ID = /^wbj_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const WORKBOOK_EXPORT_ID = /^wbe_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const WORKBOOK_SOURCE_ID = /^wbs_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const WORKBOOK_QUARANTINE_ID = /^wbq_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const WORKBOOK_RESOLUTION_ID = /^(?:wbr|wrs|hcr)_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const WORKBOOK_CONFLICT_ID = /^(?:wmc|hcf)_[A-Za-z0-9_-]{1,123}$/
+const WORKBOOK_DUPLICATE_ID = /^dup_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const WORKBOOK_CURSOR = /^c_(0|[1-9]\d{0,5})_r([1-9]\d*)$/
 const WORKBOOK_PREVIEW_TOKEN = /^v1\.[1-9]\d*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/
 const WORKBOOK_VERSIONED_DIGEST = /^v[1-9]\d*_[A-Za-z0-9_-]{43}$/
 const WORKBOOK_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 const MAX_WORKBOOK_BYTES = 5 * 1024 * 1024
 const MAX_WORKBOOK_EXPORT_BYTES = 10 * 1024 * 1024
+const MAX_FINANCE_ENTRY_GROSZE = 100_000_000
+const FINANCE_WINDOW_CAP = 1_000
+const WORKBOOK_REGISTRY_PAGE_SIZE = 20
+const FINANCE_METHOD_SET = new Set(FINANCE_METHODS)
+const INVOICE_STATE_SET = new Set(INVOICE_STATES)
+const FINANCE_RECORD_TYPES = new Set(['english', 'expense', 'income', 'tus'])
 const OUTBOX_TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const AUDIT_CURSOR = /^v1\.([1-9]\d*)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -126,11 +142,18 @@ const SERVER_STATUS = Object.freeze({
   WORKBOOK_IMPORT_CONFLICT: 409,
   WORKBOOK_EXPORT_CONFLICT: 409,
   WORKBOOK_EXPORT_LIMIT: 409,
+  WORKBOOK_REGISTRY_LIMIT: 409,
+  WORKBOOK_REGISTRY_RETRY: 409,
   WORKBOOK_RECONCILIATION_CONFLICT: 409,
   FINANCE_IMPORT_CLOSED: 409,
   FINANCE_IMPORT_DUPLICATE: 409,
   FINANCE_IMPORT_INCOMPLETE: 409,
   FINANCE_IMPORT_OVERFLOW: 409,
+  FINANCE_ENTRY_VOIDED: 409,
+  FINANCE_ENTRY_NOT_READY: 409,
+  FINANCE_ENTRY_DEPENDENCY_CONFLICT: 409,
+  FINANCE_WINDOW_LIMIT: 409,
+  FINANCE_WINDOW_RETRY: 409,
   STAFF_INVITATION_CONFLICT: 409,
   SPECIALIST_LINK_CONFLICT: 409,
   LAST_ACTIVE_OWNER: 409,
@@ -162,7 +185,8 @@ const VALIDATION_FIELDS = new Set([
   'expectedSpecialistVersion', 'expectedStaffVersion',
   'programId', 'label', 'details', 'leaderSpecialistIds', 'historicalClientId',
   'participantId', 'groupId', 'membershipId', 'classId', 'startsOn', 'endsOn',
-  'date', 'time', 'topic', 'importId',
+  'date', 'time', 'topic', 'importId', 'month', 'registry', 'registryDetail',
+  'resolutions',
 ])
 const WORKSPACE_FIELDS = new Set([
   'specialists', 'clients', 'appointments', 'paymentEntries', 'historicalClients',
@@ -265,6 +289,11 @@ const validInstant = (value) => typeof value === 'string' && INSTANT.test(value)
   && validIso(value)
 const positive = (value) => Number.isSafeInteger(value) && value > 0
 const safeCount = (value) => Number.isSafeInteger(value) && value >= 0
+const financeEntryAmount = (value) => safeCount(value) && value <= MAX_FINANCE_ENTRY_GROSZE
+const checkedAdd = (left, right) => {
+  const sum = left + right
+  return Number.isSafeInteger(sum) ? sum : null
+}
 const exactObject = (value, keys) => {
   if (!plainObject(value)) return false
   const ownKeys = Reflect.ownKeys(value)
@@ -1756,6 +1785,251 @@ const acceptedFinanceList = (payload, month) => {
   return Object.freeze({ entries: Object.freeze(entries), summary: expected })
 }
 
+const captureSignalOptions = (raw, { idempotency = false } = {}) => {
+  if (raw === undefined) return Object.freeze({
+    ...(idempotency ? { idempotencyKey: undefined } : {}), signal: undefined,
+  })
+  try {
+    if (!plainObject(raw)) return null
+    const descriptors = Object.getOwnPropertyDescriptors(raw)
+    const keys = Reflect.ownKeys(descriptors)
+    const allowed = idempotency ? ['idempotencyKey', 'signal'] : ['signal']
+    if (keys.some((key) => typeof key !== 'string' || !allowed.includes(key))) return null
+    const value = Object.create(null)
+    for (const key of keys) {
+      const descriptor = descriptors[key]
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return null
+      value[key] = descriptor.value
+    }
+    if (idempotency && value.idempotencyKey !== undefined
+      && !acceptedKey(value.idempotencyKey)) return null
+    if (value.signal !== undefined) {
+      const aborted = typeof AbortSignal === 'function'
+        ? Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get
+        : null
+      if (typeof aborted !== 'function' || typeof aborted.call(value.signal) !== 'boolean') {
+        return null
+      }
+    }
+    return Object.freeze({
+      ...(idempotency ? { idempotencyKey: value.idempotencyKey } : {}),
+      signal: value.signal,
+    })
+  } catch {
+    return null
+  }
+}
+
+const nextFinanceMonth = (month) => {
+  const year = Number(month.slice(0, 4))
+  const number = Number(month.slice(5, 7))
+  return number === 12
+    ? `${String(year + 1).padStart(4, '0')}-01`
+    : `${String(year).padStart(4, '0')}-${String(number + 1).padStart(2, '0')}`
+}
+const supportedFinanceWindowMonth = (month) => FINANCE_MONTH.test(month) && month >= '2000-06'
+  && month >= '2000-06'
+
+const captureMoneyKpis = (raw) => {
+  const value = captureDataObject(raw, [
+    'revenueGrosze', 'collectedGrosze', 'outstandingGrosze', 'expensesGrosze',
+    'incomeGrosze',
+  ])
+  if (!value || !safeCount(value.revenueGrosze) || !safeCount(value.collectedGrosze)
+    || !safeCount(value.outstandingGrosze) || !safeCount(value.expensesGrosze)
+    || !Number.isSafeInteger(value.incomeGrosze)
+    || checkedAdd(value.collectedGrosze, value.outstandingGrosze) !== value.revenueGrosze
+    || value.incomeGrosze !== value.revenueGrosze - value.expensesGrosze) return null
+  return Object.freeze({ ...value })
+}
+
+const captureFinanceWindowRow = (raw, selectedMonth) => {
+  const value = captureDataObject(raw, [
+    'id', 'sourceKind', 'appointmentId', 'accountingMonth', 'occurredOn', 'kind',
+    'recordType', 'revenueGrosze', 'receivableGrosze', 'collectedGrosze',
+    'expenseGrosze', 'specialistId', 'serviceId', 'program', 'paymentMethod',
+    'invoiceStatus', 'version',
+  ])
+  if (!value || typeof value.id !== 'string' || !/^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value.id)
+    || !['panel', 'workbook'].includes(value.sourceKind)
+    || !(value.appointmentId === null || (typeof value.appointmentId === 'string'
+      && APPOINTMENT_ID.test(value.appointmentId)))
+    || value.accountingMonth !== selectedMonth
+    || !(value.occurredOn === null || workspaceCivil(value.occurredOn))
+    || !['expense', 'income'].includes(value.kind) || !FINANCE_RECORD_TYPES.has(value.recordType)
+    || (value.kind === 'expense') !== (value.recordType === 'expense')
+    || !financeEntryAmount(value.revenueGrosze)
+    || !financeEntryAmount(value.receivableGrosze)
+    || !financeEntryAmount(value.collectedGrosze)
+    || !financeEntryAmount(value.expenseGrosze)
+    || value.collectedGrosze > value.receivableGrosze
+    || (value.kind === 'income' && (value.expenseGrosze !== 0
+      || value.revenueGrosze !== value.receivableGrosze))
+    || (value.kind === 'expense' && (value.revenueGrosze !== 0
+      || value.receivableGrosze !== 0 || value.collectedGrosze !== 0))
+    || !(value.specialistId === null || (typeof value.specialistId === 'string'
+      && SPECIALIST_ID.test(value.specialistId)))
+    || !(value.serviceId === null || (typeof value.serviceId === 'string'
+      && WORKSPACE_SERVICE_IDS.has(value.serviceId)))
+    || ![null, 'english', 'tus'].includes(value.program)
+    || (value.program !== null && value.recordType !== value.program)
+    || !FINANCE_METHOD_SET.has(value.paymentMethod)
+    || !INVOICE_STATE_SET.has(value.invoiceStatus) || !positive(value.version)) return null
+  return Object.freeze({ ...value })
+}
+
+const captureMoneyMap = (raw, { domain, invoice = false } = {}) => {
+  try {
+    if (!plainObject(raw)) return null
+    const descriptors = Object.getOwnPropertyDescriptors(raw)
+    const keys = Reflect.ownKeys(descriptors)
+    if (keys.length > 250 || keys.some((key) => typeof key !== 'string'
+      || key.length < 1 || key.length > 128)
+      || keys.some((key, index) => index > 0 && keys[index - 1] >= key)) return null
+    const acceptedKeyForDomain = (key) => {
+      if (domain === 'specialist') return key === 'Nie ustalono' || SPECIALIST_ID.test(key)
+      if (domain === 'service') return key === 'Nie ustalono' || WORKSPACE_SERVICE_IDS.has(key)
+      if (domain === 'payment') return key === 'outstanding' || FINANCE_METHOD_SET.has(key)
+      return INVOICE_STATE_SET.has(key)
+    }
+    if (keys.some((key) => !acceptedKeyForDomain(key))) return null
+    const entries = []
+    for (const key of keys) {
+      const descriptor = descriptors[key]
+      if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null
+      if (invoice) {
+        const item = captureDataObject(descriptor.value, ['count', 'revenueGrosze'])
+        if (!item || !safeCount(item.count) || !safeCount(item.revenueGrosze)) return null
+        entries.push([key, Object.freeze({ ...item })])
+      } else {
+        if (!safeCount(descriptor.value)) return null
+        entries.push([key, descriptor.value])
+      }
+    }
+    return Object.freeze(Object.fromEntries(entries))
+  } catch {
+    return null
+  }
+}
+
+const moneyMapTotal = (map, field = null) => {
+  let total = 0
+  for (const value of Object.values(map)) {
+    total = checkedAdd(total, field === null ? value : value[field])
+    if (total === null) return null
+  }
+  return total
+}
+
+const acceptedFinanceWindow = (payload, status, selectedMonth) => {
+  const outer = status === 200 ? captureDataObject(payload, ['data']) : null
+  const data = outer && captureDataObject(outer.data, [
+    'currentMonth', 'selectedMonth', 'fromMonth', 'toMonth', 'months',
+    'latestPopulatedMonth', 'kpis', 'trend', 'splits', 'specialistLabels', 'rows', 'coverage',
+    'unknownPeriodCount', 'complete',
+  ])
+  const months = data && captureDenseArray(data.months, 6)
+  const trendValues = data && captureDenseArray(data.trend, 6)
+  const rowValues = data && captureDenseArray(data.rows, FINANCE_WINDOW_CAP)
+  if (!data || data.selectedMonth !== selectedMonth
+    || !supportedFinanceWindowMonth(data.currentMonth)
+    || selectedMonth > data.currentMonth || !months || months.length !== 6
+    || months[0] !== data.fromMonth || months.at(-1) !== data.toMonth
+    || data.toMonth !== selectedMonth
+    || months.some((month, index) => !FINANCE_MONTH.test(month)
+      || (index > 0 && month !== nextFinanceMonth(months[index - 1])))
+    || !(data.latestPopulatedMonth === null
+      || (supportedFinanceWindowMonth(data.latestPopulatedMonth)
+        && data.latestPopulatedMonth <= data.currentMonth))
+    || data.complete !== true || !trendValues || trendValues.length !== 6 || !rowValues
+    || !safeCount(data.unknownPeriodCount) || data.unknownPeriodCount > FINANCE_WINDOW_CAP) return null
+  const kpis = captureMoneyKpis(data.kpis)
+  const rows = rowValues.map((row) => captureFinanceWindowRow(row, selectedMonth))
+  if (!kpis || rows.some((row) => !row)
+    || new Set(rows.map(({ id }) => id)).size !== rows.length) return null
+  const rowKpis = {
+    revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0, expensesGrosze: 0,
+  }
+  for (const row of rows) {
+    rowKpis.revenueGrosze = checkedAdd(rowKpis.revenueGrosze, row.revenueGrosze)
+    rowKpis.collectedGrosze = checkedAdd(rowKpis.collectedGrosze, row.collectedGrosze)
+    rowKpis.outstandingGrosze = checkedAdd(
+      rowKpis.outstandingGrosze, row.receivableGrosze - row.collectedGrosze,
+    )
+    rowKpis.expensesGrosze = checkedAdd(rowKpis.expensesGrosze, row.expenseGrosze)
+    if (Object.values(rowKpis).includes(null)) return null
+  }
+  rowKpis.incomeGrosze = rowKpis.revenueGrosze - rowKpis.expensesGrosze
+  if (Object.keys(rowKpis).some((key) => rowKpis[key] !== kpis[key])) return null
+  const trend = []
+  for (let index = 0; index < trendValues.length; index += 1) {
+    const item = captureDataObject(trendValues[index], [
+      'month', 'revenueGrosze', 'collectedGrosze', 'outstandingGrosze',
+      'expensesGrosze', 'incomeGrosze',
+    ])
+    const values = item && captureMoneyKpis({
+      revenueGrosze: item.revenueGrosze,
+      collectedGrosze: item.collectedGrosze,
+      outstandingGrosze: item.outstandingGrosze,
+      expensesGrosze: item.expensesGrosze,
+      incomeGrosze: item.incomeGrosze,
+    })
+    if (!item || item.month !== months[index] || !values) return null
+    trend.push(Object.freeze({ month: item.month, ...values }))
+  }
+  if (Object.keys(kpis).some((key) => trend.at(-1)[key] !== kpis[key])) return null
+  const splits = captureDataObject(data.splits, [
+    'specialist', 'service', 'payment', 'invoice', 'program',
+  ])
+  const specialist = splits && captureMoneyMap(splits.specialist, { domain: 'specialist' })
+  const service = splits && captureMoneyMap(splits.service, { domain: 'service' })
+  const payment = splits && captureMoneyMap(splits.payment, { domain: 'payment' })
+  const invoice = splits && captureMoneyMap(splits.invoice, { domain: 'invoice', invoice: true })
+  const program = splits && captureDataObject(splits.program, ['english', 'tus'])
+  const english = program && captureDataObject(program.english, ['count', 'revenueGrosze'])
+  const tus = program && captureDataObject(program.tus, ['count', 'revenueGrosze'])
+  const specialistLabels = captureWorkbookSpecialistOptions(data.specialistLabels)
+  const requiredSpecialists = new Set([
+    ...rows.map(({ specialistId }) => specialistId).filter(Boolean),
+    ...Object.keys(specialist ?? {}).filter((id) => id !== 'Nie ustalono'),
+  ])
+  if (!specialist || !service || !payment || !invoice || !english || !tus
+    || !specialistLabels || specialistLabels.length !== requiredSpecialists.size
+    || specialistLabels.some(({ id }) => !requiredSpecialists.has(id))
+    || !safeCount(english.count) || !safeCount(english.revenueGrosze)
+    || !safeCount(tus.count) || !safeCount(tus.revenueGrosze)
+    || moneyMapTotal(specialist) !== kpis.revenueGrosze
+    || moneyMapTotal(service) !== kpis.revenueGrosze
+    || moneyMapTotal(payment) !== kpis.collectedGrosze + kpis.outstandingGrosze
+    || moneyMapTotal(invoice, 'revenueGrosze') !== kpis.revenueGrosze
+    || moneyMapTotal(invoice, 'count') !== rows.filter(({ kind }) => kind === 'income').length
+    || checkedAdd(english.revenueGrosze, tus.revenueGrosze) === null
+    || checkedAdd(english.revenueGrosze, tus.revenueGrosze) > kpis.revenueGrosze) return null
+  const coverage = captureDataObject(data.coverage, [
+    'dateOnlyCount', 'monthOnlyCount', 'timedCount', 'unknownCount',
+  ])
+  if (!coverage || Object.values(coverage).some((value) => !safeCount(value)
+    || value > FINANCE_WINDOW_CAP)
+    || Object.values(coverage).reduce((total, value) => total + value, 0) !== rows.length) {
+    return null
+  }
+  return Object.freeze({
+    currentMonth: data.currentMonth, selectedMonth, fromMonth: data.fromMonth,
+    toMonth: data.toMonth, months: Object.freeze([...months]),
+    latestPopulatedMonth: data.latestPopulatedMonth, kpis,
+    trend: Object.freeze(trend),
+    splits: Object.freeze({
+      specialist, service, payment, invoice,
+      program: Object.freeze({
+        english: Object.freeze({ ...english }), tus: Object.freeze({ ...tus }),
+      }),
+    }),
+    specialistLabels,
+    rows: Object.freeze(rows), coverage: Object.freeze({ ...coverage }),
+    unknownPeriodCount: data.unknownPeriodCount, complete: true,
+  })
+}
+
 const captureWorkbookFile = (raw) => {
   try {
     if (typeof File !== 'function' || !(raw instanceof File)
@@ -1771,6 +2045,23 @@ const captureWorkbookFile = (raw) => {
   }
 }
 
+const captureWorkbookResolutions = (raw, { requireOne = false } = {}) => {
+  const values = captureDenseArray(raw, 100)
+  if (!values || (requireOne && values.length < 1)) return null
+  const resolutions = []
+  const ids = new Set()
+  for (const rawResolution of values) {
+    const value = captureDataObject(rawResolution, ['conflictId', 'specialistId'])
+    if (!value || typeof value.conflictId !== 'string'
+      || !/^wmc_[A-Za-z0-9_-]{1,123}$/.test(value.conflictId)
+      || typeof value.specialistId !== 'string' || !SPECIALIST_ID.test(value.specialistId)
+      || ids.has(value.conflictId)) return null
+    ids.add(value.conflictId)
+    resolutions.push(Object.freeze({ ...value }))
+  }
+  return Object.freeze(resolutions)
+}
+
 const captureWorkbookJson = (raw, state = { nodes: 0 }, depth = 0) => {
   state.nodes += 1
   if (state.nodes > 25_000 || depth > 8) return null
@@ -1784,7 +2075,7 @@ const captureWorkbookJson = (raw, state = { nodes: 0 }, depth = 0) => {
       : null
   }
   if (Array.isArray(raw)) {
-    const values = captureArray(raw, 5_000)
+    const values = captureDenseArray(raw, 5_000)
     if (!values) return null
     const captured = []
     for (const value of values) {
@@ -1858,26 +2149,251 @@ const acceptedWorkbookImport = (payload, status) => {
   return value && [200, 201].includes(status) ? value : null
 }
 
+const capturePreviewConflictValue = (value) => (
+  value === null || typeof value === 'boolean'
+    || (typeof value === 'string' && value.length <= 500 && value === value.normalize('NFC')
+      && !INVALID_TEXT.test(value))
+    || (typeof value === 'number' && Number.isSafeInteger(value))
+) ? value : undefined
+
+const capturePreviewConflicts = (raw) => {
+  const values = captureDenseArray(raw, 100)
+  if (!values) return null
+  const conflicts = []
+  const mappingConflicts = []
+  const ids = new Set()
+  let reachedPanel = false
+  for (const rawConflict of values) {
+    const mapping = captureDataObject(rawConflict, ['id', 'code', 'sourceValue'])
+    if (mapping) {
+      if (reachedPanel || !/^wmc_[A-Za-z0-9_-]{43}$/.test(mapping.id ?? '')
+        || mapping.code !== 'SPECIALIST_MAPPING_REQUIRED'
+        || typeof mapping.sourceValue !== 'string' || mapping.sourceValue.length > 200
+        || mapping.sourceValue !== mapping.sourceValue.trim().normalize('NFC')
+        || INVALID_TEXT.test(mapping.sourceValue) || ids.has(mapping.id)) return null
+      const conflict = Object.freeze({ ...mapping })
+      ids.add(mapping.id)
+      conflicts.push(conflict)
+      mappingConflicts.push(conflict)
+      continue
+    }
+    reachedPanel = true
+    const concurrent = captureDataObject(rawConflict, [
+      'code', 'current', 'edited', 'field', 'recordId',
+    ])
+    const ordinary = concurrent ? null : captureDataObject(rawConflict, [
+      'code', 'field', 'recordId',
+    ])
+    const conflict = concurrent ?? ordinary
+    const code = conflict?.code
+    const field = conflict?.field
+    if (!conflict || ![
+      'PANEL_CONCURRENT_EDIT', 'PANEL_CONCURRENT_VOID', 'PANEL_ROW_MISSING',
+      'PANEL_VALUE_INVALID', 'PANEL_DEPENDENCY_CONFLICT',
+    ].includes(code)
+      || typeof conflict.recordId !== 'string'
+      || !/^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(conflict.recordId)
+      || ids.has(`${code}:${conflict.recordId}:${field ?? ''}`)
+      || !(field === null || (typeof field === 'string' && [
+        'accountingMonth', 'occurredOn', 'amountGrosze', 'paidAmountGrosze',
+        'paymentMethod', 'settlementStatus', 'invoiceStatus', 'specialistId',
+      ].includes(field)))
+      || (code === 'PANEL_VALUE_INVALID' && field === null)
+      || (code !== 'PANEL_VALUE_INVALID' && code !== 'PANEL_CONCURRENT_EDIT' && field !== null)
+      || (code === 'PANEL_CONCURRENT_EDIT' && (!concurrent || field === null
+        || capturePreviewConflictValue(concurrent.current) === undefined
+        || capturePreviewConflictValue(concurrent.edited) === undefined))
+      || (code !== 'PANEL_CONCURRENT_EDIT' && !ordinary)) return null
+    const key = `${code}:${conflict.recordId}:${field ?? ''}`
+    ids.add(key)
+    conflicts.push(Object.freeze(concurrent ? {
+      code, current: concurrent.current, edited: concurrent.edited, field,
+      recordId: concurrent.recordId,
+    } : { code, field, recordId: ordinary.recordId }))
+  }
+  return Object.freeze({
+    conflicts: Object.freeze(conflicts),
+    mappingConflicts: Object.freeze(mappingConflicts),
+    hasBlockingConflicts: conflicts.length !== mappingConflicts.length,
+  })
+}
+
+const captureWorkbookSpecialistOptions = (raw) => {
+  const values = captureDenseArray(raw, 100)
+  if (!values) return null
+  const result = []
+  const ids = new Set()
+  for (const rawOption of values) {
+    const option = captureDataObject(rawOption, ['id', 'label'])
+    if (!option || typeof option.id !== 'string' || !SPECIALIST_ID.test(option.id)
+      || !validText(option.label, 120) || ids.has(option.id)) return null
+    if (result.length > 0) {
+      const previous = result.at(-1)
+      if (compareUtf16CodeUnits(previous.label, option.label) > 0
+        || (previous.label === option.label
+          && compareUtf16CodeUnits(previous.id, option.id) >= 0)) return null
+    }
+    ids.add(option.id)
+    result.push(Object.freeze({ ...option }))
+  }
+  return Object.freeze(result)
+}
+
+const capturePreviewQuarantine = (raw) => {
+  const values = captureDenseArray(raw, 5_000)
+  if (!values) return null
+  const result = []
+  const ids = new Set()
+  for (const rawRow of values) {
+    const row = captureDataObject(rawRow, [
+      'sourceKey', 'sheet', 'rowNumber', 'recordType', 'accountingMonth', 'occurredOn',
+      'periodPrecision', 'periodMonth', 'reasonCode', 'reasonCodes', 'raw',
+    ])
+    const reasons = row && captureDenseArray(row.reasonCodes, 20)
+    const rawCells = row && captureWorkbookJson(row.raw, { nodes: 0 })
+    if (!row || !/^workbook:v1:\d{1,5}:\d{1,6}:\d{1,5}$/.test(row.sourceKey ?? '')
+      || ids.has(row.sourceKey) || !validText(row.sheet, 240)
+      || !positive(row.rowNumber) || row.rowNumber > 100_000
+      || !FINANCE_RECORD_TYPES.has(row.recordType)
+      || !(row.accountingMonth === null || FINANCE_MONTH.test(row.accountingMonth))
+      || !(row.occurredOn === null || workspaceCivil(row.occurredOn))
+      || !['day', 'month', 'unknown'].includes(row.periodPrecision)
+      || !(row.periodMonth === null || FINANCE_MONTH.test(row.periodMonth))
+      || (row.periodPrecision === 'day' && (row.occurredOn === null
+        || row.periodMonth !== row.occurredOn.slice(0, 7)))
+      || (row.periodPrecision === 'month' && (row.occurredOn !== null
+        || row.periodMonth === null))
+      || (row.periodPrecision === 'unknown' && (row.occurredOn !== null
+        || row.periodMonth !== null))
+      || typeof row.reasonCode !== 'string'
+      || !/^[A-Z][A-Z0-9_]{2,63}$/.test(row.reasonCode)
+      || !reasons || reasons.length < 1 || reasons[0] !== row.reasonCode
+      || reasons.some((code) => typeof code !== 'string'
+        || !/^[A-Z][A-Z0-9_]{2,63}$/.test(code))
+      || new Set(reasons).size !== reasons.length
+      || !rawCells || Array.isArray(rawCells)) return null
+    ids.add(row.sourceKey)
+    result.push(Object.freeze({
+      sheet: row.sheet, rowNumber: row.rowNumber, recordType: row.recordType,
+      reasonCode: row.reasonCode, reasonCodes: Object.freeze(reasons),
+    }))
+  }
+  return Object.freeze(result)
+}
+
 const acceptedWorkbookStatus = (payload, status) => {
   const outer = captureDataObject(payload, ['data'])
   if (!outer || status !== 200 || !plainObject(outer.data)) return null
   const hasReconciliation = Object.hasOwn(outer.data, 'reconciliation')
   const data = captureDataObject(outer.data, [
-    'import', 'job', ...(hasReconciliation ? ['reconciliation'] : []),
+    'import', 'job', 'evidence', ...(hasReconciliation ? ['reconciliation'] : []),
   ])
   const imported = data && captureWorkbookImport(data.import)
   const job = data && captureWorkbookJob(data.job)
+  const evidence = data && captureDataObject(data.evidence, [
+    'createdRecords', 'voidedRecords', 'converged',
+  ])
   if (!imported || !job || (imported.status === 'complete') !== (job.status === 'complete')) {
     return null
   }
-  const result = { import: imported, job }
+  if (!evidence || !safeCount(evidence.createdRecords) || !safeCount(evidence.voidedRecords)
+    || typeof evidence.converged !== 'boolean'
+    || evidence.converged !== (imported.status === 'complete' && job.status === 'complete')) {
+    return null
+  }
+  const result = { import: imported, job, evidence: Object.freeze({ ...evidence }) }
   if (hasReconciliation) {
-    const reconciliation = captureWorkbookJson(data.reconciliation)
-    if (!reconciliation || Array.isArray(reconciliation)
-      || Object.values(reconciliation).some((value) => !safeCount(value))) return null
-    result.reconciliation = reconciliation
+    const reconciliation = captureDataObject(data.reconciliation, [
+      'accepted', 'quarantined', 'linked', 'voided', 'inserted',
+      'accountingMonthsCorrected', 'specialistAssignmentsCorrected',
+      'fixedRevenuesInserted', 'formulaGhostsVoided', 'quarantinedVoided',
+      'textAmountVisitsInserted',
+    ])
+    if (!reconciliation || Object.values(reconciliation).some((value) => !safeCount(value))) {
+      return null
+    }
+    result.reconciliation = Object.freeze({ ...reconciliation })
   }
   return Object.freeze(result)
+}
+
+const acceptedWorkbookStatusFor = (importId, minimumVersion = null) => (payload, status) => {
+  const result = acceptedWorkbookStatus(payload, status)
+  if (!result || result.import.id !== importId
+    || (minimumVersion !== null && result.import.version <= minimumVersion)) return null
+  return result
+}
+
+const PANEL_FINANCE_ID = /^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const PANEL_FIELDS = Object.freeze([
+  'accountingMonth', 'occurredOn', 'amountGrosze', 'paidAmountGrosze',
+  'paymentMethod', 'settlementStatus', 'invoiceStatus', 'specialistId',
+])
+const PANEL_SETTLEMENTS = new Set(['paid', 'partial', 'unknown', 'unpaid'])
+const PANEL_INVOICES = new Set([
+  'action_required', 'issued', 'not_issued', 'not_required', 'unknown',
+])
+const sortedPanelIds = (raw) => {
+  const values = captureDenseArray(raw, FINANCE_WINDOW_CAP)
+  if (!values) return null
+  let previous = null
+  const ids = []
+  for (const id of values) {
+    if (typeof id !== 'string' || !PANEL_FINANCE_ID.test(id)
+      || (previous !== null && binaryCompare(previous, id) >= 0)) return null
+    previous = id
+    ids.push(id)
+  }
+  return Object.freeze(ids)
+}
+const validPanelValue = (field, value) => {
+  if (field === 'accountingMonth') return value === null || FINANCE_MONTH.test(value)
+  if (field === 'occurredOn') return value === null || workspaceCivil(value) !== null
+  if (field === 'amountGrosze') return financeEntryAmount(value)
+  if (field === 'paidAmountGrosze') return financeEntryAmount(value)
+  if (field === 'paymentMethod') return typeof value === 'string' && FINANCE_METHOD_SET.has(value)
+  if (field === 'settlementStatus') return typeof value === 'string'
+    && PANEL_SETTLEMENTS.has(value)
+  if (field === 'invoiceStatus') return typeof value === 'string' && PANEL_INVOICES.has(value)
+  return value === null || (typeof value === 'string' && SPECIALIST_ID.test(value))
+}
+const capturePanelChanges = (raw) => {
+  const panel = captureDataObject(raw, ['unchangedIds', 'updates', 'voidIds'])
+  const unchangedIds = panel && sortedPanelIds(panel.unchangedIds)
+  const voidIds = panel && sortedPanelIds(panel.voidIds)
+  const rawUpdates = panel && captureDenseArray(panel.updates, FINANCE_WINDOW_CAP)
+  if (!panel || !unchangedIds || !voidIds || !rawUpdates) return null
+  const updates = []
+  let previous = null
+  for (const rawUpdate of rawUpdates) {
+    const update = captureDataObject(rawUpdate, ['id', 'type', 'values'])
+    if (!update || !PANEL_FINANCE_ID.test(update.id ?? '') || update.type !== 'finance_entry'
+      || (previous !== null && binaryCompare(previous, update.id) >= 0)
+      || !plainObject(update.values)) return null
+    const descriptors = Object.getOwnPropertyDescriptors(update.values)
+    const fields = Reflect.ownKeys(descriptors)
+    if (fields.length < 1 || fields.length > PANEL_FIELDS.length
+      || fields.some((field) => typeof field !== 'string' || !PANEL_FIELDS.includes(field))) {
+      return null
+    }
+    const values = {}
+    for (const field of PANEL_FIELDS) {
+      if (!Object.hasOwn(descriptors, field)) continue
+      const descriptor = descriptors[field]
+      if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable
+        || !validPanelValue(field, descriptor.value)) return null
+      values[field] = descriptor.value
+    }
+    previous = update.id
+    updates.push(Object.freeze({
+      id: update.id, type: 'finance_entry', values: Object.freeze(values),
+    }))
+  }
+  const ids = [...unchangedIds, ...updates.map(({ id }) => id), ...voidIds]
+  if (new Set(ids).size !== ids.length) return null
+  return Object.freeze({
+    unchangedIds, updates: Object.freeze(updates), voidIds,
+  })
 }
 
 const acceptedWorkbookPreview = (payload, status) => {
@@ -1887,10 +2403,12 @@ const acceptedWorkbookPreview = (payload, status) => {
   const keys = [
     'fingerprint', 'parserVersion', 'materializerVersion', 'planDigest', 'previewToken',
     'counts', 'warnings', 'reconciliation', 'proposedMappings', 'conflicts', 'quarantine',
-    'workbookKind', ...(hasPanelChanges ? ['panelChanges'] : []),
+    'workbookKind', 'specialistOptions', 'specialistLabels',
+    ...(hasPanelChanges ? ['panelChanges'] : []),
   ]
   const data = captureDataObject(outer.data, keys)
-  if (!data || typeof data.fingerprint !== 'string' || !FINANCE_FINGERPRINT.test(data.fingerprint)
+  if (!data || hasPanelChanges !== (data.workbookKind === 'panel-v2')
+    || typeof data.fingerprint !== 'string' || !FINANCE_FINGERPRINT.test(data.fingerprint)
     || !positive(data.parserVersion) || !positive(data.materializerVersion)
     || typeof data.planDigest !== 'string' || !WORKBOOK_VERSIONED_DIGEST.test(data.planDigest)
     || typeof data.previewToken !== 'string' || data.previewToken.length > 4_096
@@ -1904,35 +2422,442 @@ const acceptedWorkbookPreview = (payload, status) => {
     'sourceCandidates', 'acceptedRows', 'quarantinedRows',
     'excludedFormulaBlocks', 'excludedFormulaRows',
   ])
-  const warnings = captureArray(data.warnings, 100)
-  const mappings = captureArray(data.proposedMappings, 100)
-  const conflicts = captureWorkbookJson(data.conflicts)
-  const quarantine = captureWorkbookJson(data.quarantine)
+  const warnings = captureDenseArray(data.warnings, 100)
+  const mappings = captureDenseArray(data.proposedMappings, 100)
+  const conflictProjection = capturePreviewConflicts(data.conflicts)
+  const quarantine = capturePreviewQuarantine(data.quarantine)
+  const specialistOptions = captureWorkbookSpecialistOptions(data.specialistOptions)
+  const specialistLabels = captureWorkbookSpecialistOptions(data.specialistLabels)
   if (!counts || Object.values(counts).some((value) => !safeCount(value) || value > 5_000)
     || !reconciliation
     || Object.values(reconciliation).some((value) => !safeCount(value) || value > 10_000)
-    || !warnings || warnings.some((raw) => {
-      const warning = captureDataObject(raw, ['code', 'count'])
-      return !warning || !validText(warning.code, 128) || !positive(warning.count)
-    })
-    || !mappings || mappings.some((raw) => {
-      const mapping = captureDataObject(raw, [
-        'displayName', 'resolutionCode', 'sourceValue', 'sourceValueKind', 'specialistId',
-      ])
-      return !mapping || !validText(mapping.displayName, 120)
-        || !validText(mapping.resolutionCode, 128)
-        || typeof mapping.sourceValue !== 'string' || mapping.sourceValue.length > 120
-        || !['blank', 'explicit_name'].includes(mapping.sourceValueKind)
-        || typeof mapping.specialistId !== 'string' || !SPECIALIST_ID.test(mapping.specialistId)
-    })
-    || !Array.isArray(conflicts) || !Array.isArray(quarantine)) return null
-  if (hasPanelChanges) {
-    const panel = captureDataObject(data.panelChanges, ['unchangedIds', 'updates', 'voidIds'])
-    if (!panel || !captureWorkbookJson(panel.unchangedIds)
-      || !captureWorkbookJson(panel.updates) || !captureWorkbookJson(panel.voidIds)) return null
+    || !warnings || !mappings || !conflictProjection || !quarantine
+    || !specialistOptions || !specialistLabels) return null
+  const capturedWarnings = []
+  for (const rawWarning of warnings) {
+    const warning = captureDataObject(rawWarning, ['code', 'count'])
+    if (!warning || !validText(warning.code, 128) || !positive(warning.count)) return null
+    capturedWarnings.push(Object.freeze({ ...warning }))
   }
-  const captured = captureWorkbookJson(outer.data)
-  return captured && !Array.isArray(captured) ? captured : null
+  const capturedMappings = []
+  for (const rawMapping of mappings) {
+    const mapping = captureDataObject(rawMapping, [
+      'displayName', 'resolutionCode', 'sourceValue', 'sourceValueKind', 'specialistId',
+    ])
+    if (!mapping || !validText(mapping.displayName, 120)
+      || !validText(mapping.resolutionCode, 128)
+      || typeof mapping.sourceValue !== 'string' || mapping.sourceValue.length > 120
+      || !['blank', 'explicit_name'].includes(mapping.sourceValueKind)
+      || typeof mapping.specialistId !== 'string' || !SPECIALIST_ID.test(mapping.specialistId)) {
+      return null
+    }
+    capturedMappings.push(Object.freeze({ ...mapping }))
+  }
+  let panelChanges
+  if (hasPanelChanges) {
+    panelChanges = capturePanelChanges(data.panelChanges)
+    if (!panelChanges) return null
+  }
+  const referencedPanelSpecialists = new Set([
+    ...(panelChanges?.updates ?? []).flatMap(({ values }) => (
+      typeof values.specialistId === 'string' ? [values.specialistId] : []
+    )),
+    ...conflictProjection.conflicts.flatMap(({ field, current, edited }) => (
+      field === 'specialistId'
+        ? [current, edited].filter((value) => typeof value === 'string')
+        : []
+    )),
+  ])
+  if (specialistLabels.length !== referencedPanelSpecialists.size
+    || specialistLabels.some(({ id }) => !referencedPanelSpecialists.has(id))) return null
+  return Object.freeze({
+    fingerprint: data.fingerprint,
+    parserVersion: data.parserVersion,
+    materializerVersion: data.materializerVersion,
+    planDigest: data.planDigest,
+    previewToken: data.previewToken,
+    counts: Object.freeze({ ...counts }),
+    warnings: Object.freeze(capturedWarnings),
+    reconciliation: Object.freeze({ ...reconciliation }),
+    proposedMappings: Object.freeze(capturedMappings),
+    conflicts: conflictProjection.conflicts,
+    mappingConflicts: conflictProjection.mappingConflicts,
+    hasBlockingConflicts: conflictProjection.hasBlockingConflicts,
+    quarantine,
+    specialistOptions,
+    specialistLabels,
+    workbookKind: data.workbookKind,
+    ...(hasPanelChanges ? { panelChanges } : {}),
+  })
+}
+
+const captureRegistryArtifact = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'fingerprint', 'byteSize', 'parserVersion', 'materializerVersion', 'createdAt',
+  ])
+  if (!value || typeof value.id !== 'string' || !WORKBOOK_ARTIFACT_ID.test(value.id)
+    || typeof value.fingerprint !== 'string' || !FINANCE_FINGERPRINT.test(value.fingerprint)
+    || !positive(value.byteSize) || value.byteSize > MAX_WORKBOOK_BYTES
+    || !positive(value.parserVersion) || !positive(value.materializerVersion)
+    || !validInstant(value.createdAt)) return null
+  return Object.freeze({ ...value })
+}
+
+const captureRegistryImport = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'artifact', 'status', 'version', 'phase', 'progress', 'summary',
+    'resolutionVersion', 'createdByStaffId', 'createdAt', 'updatedAt',
+  ])
+  const artifact = value && captureRegistryArtifact(value.artifact)
+  const summary = value && captureDataObject(value.summary, [
+    'sourceCount', 'quarantineCount', 'conflictCount', 'duplicateCount', 'resolutionCount',
+  ])
+  const progress = value?.progress === null ? null : captureDataObject(value?.progress, [
+    'processed', 'total',
+  ])
+  if (!value || !artifact || typeof value.id !== 'string'
+    || !WORKBOOK_IMPORT_ID.test(value.id)
+    || !['uploading', 'ready', 'materializing', 'conflicts', 'complete', 'failed']
+      .includes(value.status)
+    || !positive(value.version)
+    || !(value.phase === null || [
+      'index_finance', 'reconcile_sources', 'reconcile_unmatched', 'apply_finance', 'complete',
+    ].includes(value.phase))
+    || (value.phase === null) !== (value.progress === null)
+    || (progress && (!safeCount(progress.processed) || !safeCount(progress.total)
+      || progress.processed > progress.total || progress.total > 10_000))
+    || !summary || Object.values(summary).some((item) => !safeCount(item) || item > 10_000)
+    || summary.quarantineCount > summary.sourceCount
+    || !safeCount(value.resolutionVersion)
+    || typeof value.createdByStaffId !== 'string' || !STAFF_ID.test(value.createdByStaffId)
+    || !validInstant(value.createdAt) || !validInstant(value.updatedAt)
+    || value.updatedAt < value.createdAt
+    || (value.status === 'complete') !== (value.phase === 'complete')) return null
+  return Object.freeze({
+    id: value.id, artifact, status: value.status, version: value.version,
+    phase: value.phase, progress: progress ? Object.freeze({ ...progress }) : null,
+    summary: Object.freeze({ ...summary }), resolutionVersion: value.resolutionVersion,
+    createdByStaffId: value.createdByStaffId,
+    createdAt: value.createdAt, updatedAt: value.updatedAt,
+  })
+}
+
+const captureRegistryExport = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'format', 'scope', 'byteSize', 'filename', 'createdAt', 'version',
+  ])
+  if (!value || typeof value.id !== 'string' || !WORKBOOK_EXPORT_ID.test(value.id)
+    || !['legacy', 'panel-v2'].includes(value.format)
+    || !['centre', 'own'].includes(value.scope)
+    || (value.scope === 'own' && value.format !== 'panel-v2')
+    || !positive(value.byteSize) || value.byteSize > MAX_WORKBOOK_EXPORT_BYTES
+    || typeof value.filename !== 'string'
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.xlsx$/.test(value.filename)
+    || !validInstant(value.createdAt) || value.version !== 1) return null
+  return Object.freeze({ ...value })
+}
+
+const captureRegistryEntry = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'importId', 'state', 'voidType', 'kind', 'recordType', 'accountingMonth',
+    'amountGrosze', 'version',
+  ])
+  if (!value || typeof value.id !== 'string'
+    || !/^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value.id)
+    || !(value.importId === null
+      || (typeof value.importId === 'string' && WORKBOOK_IMPORT_ID.test(value.importId)))
+    || !['active', 'void'].includes(value.state)
+    || ![null, 'manual', 'workbook'].includes(value.voidType)
+    || (value.state === 'active') !== (value.voidType === null)
+    || !['expense', 'income'].includes(value.kind) || !FINANCE_RECORD_TYPES.has(value.recordType)
+    || (value.kind === 'expense') !== (value.recordType === 'expense')
+    || !(value.accountingMonth === null || FINANCE_MONTH.test(value.accountingMonth))
+    || !financeEntryAmount(value.amountGrosze)
+    || (value.recordType !== 'english' && value.amountGrosze < 1)
+    || !positive(value.version)) return null
+  return Object.freeze({ ...value })
+}
+
+const orderedRegistryRows = (values, capture) => {
+  const result = []
+  const ids = new Set()
+  let previous = null
+  for (const raw of values) {
+    const item = capture(raw)
+    if (!item || ids.has(item.id)) return null
+    if (previous && Object.hasOwn(item, 'createdAt')
+      && (previous.createdAt < item.createdAt
+        || (previous.createdAt === item.createdAt && previous.id <= item.id))) return null
+    ids.add(item.id)
+    result.push(item)
+    previous = item
+  }
+  return Object.freeze(result)
+}
+
+const canonicalWorkbookPage = (
+  cursor, nextCursor, complete, length, pageSize = WORKBOOK_REGISTRY_PAGE_SIZE,
+) => {
+  if (nextCursor === null) return complete === true
+  const next = WORKBOOK_CURSOR.exec(nextCursor)
+  const current = cursor === null ? null : WORKBOOK_CURSOR.exec(cursor)
+  if (!next || (current && current[2] !== next[2])) return false
+  const offset = current === null ? 0 : Number(current[1])
+  return complete === false && length === pageSize
+    && Number(next[1]) === offset + pageSize
+}
+
+const acceptedWorkbookRegistry = (payload, status, request) => {
+  const outer = status === 200 ? captureDataObject(payload, ['data']) : null
+  const data = outer && captureDataObject(outer.data, [
+    'cursor', 'nextCursor', 'imports', 'exports', 'entries', 'complete',
+  ])
+  const imports = data && captureDenseArray(data.imports, WORKBOOK_REGISTRY_PAGE_SIZE)
+  const exports = data && captureDenseArray(data.exports, WORKBOOK_REGISTRY_PAGE_SIZE)
+  const entries = data && captureDenseArray(data.entries, WORKBOOK_REGISTRY_PAGE_SIZE)
+  if (!data || data.cursor !== request.cursor || !imports || !exports || !entries
+    || !(data.nextCursor === null || WORKBOOK_CURSOR.test(data.nextCursor))
+    || !canonicalWorkbookPage(data.cursor, data.nextCursor, data.complete,
+      Math.max(imports.length, exports.length, entries.length))
+    || (request.section === 'imports' && (exports.length || entries.length))
+    || (request.section === 'exports' && (imports.length || entries.length))
+    || (request.section === 'entries' && (imports.length || exports.length))) return null
+  const capturedImports = orderedRegistryRows(imports, captureRegistryImport)
+  const capturedExports = orderedRegistryRows(exports, captureRegistryExport)
+  const capturedEntries = orderedRegistryRows(entries, captureRegistryEntry)
+  if (!capturedImports || !capturedExports || !capturedEntries) return null
+  if (request.section === 'unknown' && (capturedImports.length || capturedExports.length
+    || capturedEntries.some(({ accountingMonth }) => accountingMonth !== null))) return null
+  return Object.freeze({
+    cursor: data.cursor, nextCursor: data.nextCursor, imports: capturedImports,
+    exports: capturedExports, entries: capturedEntries, complete: data.complete,
+  })
+}
+
+const captureRegistrySource = (raw) => {
+  const value = captureDataObject(raw, [
+    'id', 'recordType', 'disposition', 'sheetName', 'rowNumber', 'display',
+  ])
+  const display = value && captureDataObject(value.display, [
+    'accountingMonth', 'occurredOn', 'periodPrecision', 'periodMonth', 'amountGrosze',
+    'paymentMethod', 'settlementStatus', 'invoiceStatus', 'specialistName',
+    'counterparty', 'sourceLabel',
+  ])
+  const nullableText = (item) => item === null || (typeof item === 'string'
+    && item.length <= 200 && item === item.normalize('NFC') && !INVALID_TEXT.test(item))
+  const settlementFields = display && [
+    display.paymentMethod, display.settlementStatus, display.invoiceStatus,
+  ]
+  const hasSettlement = settlementFields?.every((item) => item !== null) ?? false
+  const hasNoSettlement = settlementFields?.every((item) => item === null) ?? false
+  if (!value || !display || typeof value.id !== 'string' || !WORKBOOK_SOURCE_ID.test(value.id)
+    || !FINANCE_RECORD_TYPES.has(value.recordType)
+    || !['accepted', 'quarantined'].includes(value.disposition)
+    || !validText(value.sheetName, 240) || !positive(value.rowNumber) || value.rowNumber > 100_000
+    || !(display.accountingMonth === null || FINANCE_MONTH.test(display.accountingMonth))
+    || !(display.occurredOn === null || workspaceCivil(display.occurredOn))
+    || !['day', 'month', 'unknown'].includes(display.periodPrecision)
+    || !(display.periodMonth === null || FINANCE_MONTH.test(display.periodMonth))
+    || (display.periodPrecision === 'day' && (display.occurredOn === null
+      || display.periodMonth !== display.occurredOn.slice(0, 7)))
+    || (display.periodPrecision === 'month' && (display.occurredOn !== null
+      || display.periodMonth === null))
+    || (display.periodPrecision === 'unknown' && (display.occurredOn !== null
+      || display.periodMonth !== null))
+    || !(display.amountGrosze === null || financeEntryAmount(display.amountGrosze))
+    || !(display.paymentMethod === null || FINANCE_METHOD_SET.has(display.paymentMethod))
+    || !(display.settlementStatus === null
+      || ['paid', 'partial', 'unknown', 'unpaid'].includes(display.settlementStatus))
+    || !(display.invoiceStatus === null || INVOICE_STATE_SET.has(display.invoiceStatus))
+    || (!hasSettlement && !hasNoSettlement)
+    || (value.disposition === 'accepted'
+      && (display.amountGrosze === null || !hasSettlement))
+    || !nullableText(display.specialistName) || !nullableText(display.counterparty)
+    || !nullableText(display.sourceLabel)) return null
+  return Object.freeze({ ...value, display: Object.freeze({ ...display }) })
+}
+
+const captureRegistryDetailItem = (raw, section) => {
+  if (section === 'source') return captureRegistrySource(raw)
+  if (section === 'quarantine') {
+    const value = captureDataObject(raw, [
+      'id', 'sourceRecordId', 'primaryReason', 'reasonCodes',
+    ])
+    const codes = value && captureDenseArray(value.reasonCodes, 20)
+    if (!value || typeof value.id !== 'string' || !WORKBOOK_QUARANTINE_ID.test(value.id)
+      || typeof value.sourceRecordId !== 'string' || !WORKBOOK_SOURCE_ID.test(value.sourceRecordId)
+      || !codes || codes.length < 1 || codes[0] !== value.primaryReason
+      || codes.some((code) => typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{2,63}$/.test(code))
+      || new Set(codes).size !== codes.length) return null
+    return Object.freeze({ ...value, reasonCodes: Object.freeze(codes) })
+  }
+  if (section === 'conflicts') {
+    const workbookValue = captureDataObject(raw, ['id', 'kind', 'resolved', 'sourceValue'])
+    const value = workbookValue ?? captureDataObject(raw, ['id', 'kind', 'resolved'])
+    if (!value || typeof value.id !== 'string' || !WORKBOOK_CONFLICT_ID.test(value.id)
+      || !validText(value.kind, 128) || typeof value.resolved !== 'boolean'
+      || (value.id.startsWith('wmc_') && (!workbookValue
+        || value.kind !== 'specialist_mapping'
+        || typeof value.sourceValue !== 'string' || value.sourceValue.length > 200
+        || value.sourceValue !== value.sourceValue.trim().normalize('NFC')
+        || INVALID_TEXT.test(value.sourceValue)))
+      || (!value.id.startsWith('wmc_') && workbookValue)) return null
+    return Object.freeze({ ...value })
+  }
+  if (section === 'duplicates') {
+    const value = captureDataObject(raw, ['id', 'count'])
+    if (!value || typeof value.id !== 'string' || !WORKBOOK_DUPLICATE_ID.test(value.id)
+      || !positive(value.count) || value.count > 5_000) return null
+    return Object.freeze({ ...value })
+  }
+  if (section === 'resolutions') {
+    const value = captureDataObject(raw, [
+      'id', 'kind', 'decision', 'specialistId', 'serviceId', 'targetId',
+      'resolvedByStaffId', 'sourceRecordId', 'conflictId',
+      'sourceValue', 'version', 'createdAt', 'choices',
+    ])
+    const choices = value && captureDenseArray(value.choices, 100)
+    if (!value || typeof value.id !== 'string' || !WORKBOOK_RESOLUTION_ID.test(value.id)
+      || !validText(value.kind, 128) || !validText(value.decision, 128)
+      || !(value.specialistId === null || (typeof value.specialistId === 'string'
+        && SPECIALIST_ID.test(value.specialistId)))
+      || !(value.serviceId === null || (typeof value.serviceId === 'string'
+        && WORKSPACE_SERVICE_IDS.has(value.serviceId)))
+      || !(value.targetId === null || (typeof value.targetId === 'string'
+        && /^(?:hcl|hcp)_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value.targetId)))
+      || typeof value.resolvedByStaffId !== 'string'
+      || !STAFF_ID.test(value.resolvedByStaffId)
+      || !(value.sourceRecordId === null || (typeof value.sourceRecordId === 'string'
+        && WORKBOOK_SOURCE_ID.test(value.sourceRecordId)))
+      || !(value.conflictId === null || (typeof value.conflictId === 'string'
+        && /^hcf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value.conflictId)))
+      || !(value.sourceValue === null || (typeof value.sourceValue === 'string'
+        && value.sourceValue.length <= 200
+        && value.sourceValue === value.sourceValue.trim().normalize('NFC')
+        && !INVALID_TEXT.test(value.sourceValue)))
+      || !positive(value.version) || !validInstant(value.createdAt) || !choices) return null
+    const resolutionSet = value?.id?.startsWith('wrs_') ?? false
+    const captured = []
+    for (const rawChoice of choices) {
+      const choice = captureDataObject(rawChoice, ['conflictId', 'specialistId'])
+      if (!choice || typeof choice.conflictId !== 'string'
+        || !/^wmc_[A-Za-z0-9_-]{1,123}$/.test(choice.conflictId)
+        || typeof choice.specialistId !== 'string' || !SPECIALIST_ID.test(choice.specialistId)) {
+        return null
+      }
+      captured.push(Object.freeze({ ...choice }))
+    }
+    const historical = value?.id?.startsWith('hcr_') ?? false
+    const invalidBranch = resolutionSet
+      ? (value.kind !== 'resolution_set' || value.decision !== 'recorded'
+        || value.specialistId !== null || value.serviceId !== null
+        || value.targetId !== null || value.sourceRecordId !== null
+        || value.conflictId !== null || value.sourceValue !== null || captured.length < 1)
+      : (value.version !== 1 || captured.length !== 0
+        || !['specialist_mapping', 'quarantine_resolution', 'historical_resolution'].includes(value.kind)
+        || (historical && (value.kind !== 'historical_resolution'
+          || !['person', 'counterparty', 'exclude'].includes(value.decision)
+          || value.specialistId !== null || value.conflictId === null
+          || value.sourceRecordId !== null))
+        || (!historical && value.kind === 'historical_resolution')
+        || (!historical && (value.serviceId !== null || value.targetId !== null
+          || value.conflictId !== null))
+        || (value.kind === 'specialist_mapping'
+          && (!['explicit_match', 'blank_assigned_to_julia'].includes(value.decision)
+            || value.specialistId === null || value.sourceRecordId !== null
+            || value.sourceValue === null))
+        || (value.kind === 'quarantine_resolution'
+          && (!['accepted', 'rejected'].includes(value.decision)
+            || value.specialistId !== null || value.sourceRecordId === null
+            || value.sourceValue !== null))
+        || (historical && value.sourceValue !== null))
+    if (new Set(captured.map(({ conflictId }) => conflictId)).size !== captured.length
+      || captured.some(({ conflictId }, index) => index > 0
+        && captured[index - 1].conflictId >= conflictId)
+      || invalidBranch) return null
+    return Object.freeze({ ...value, choices: Object.freeze(captured) })
+  }
+  return captureRegistryEntry(raw)
+}
+
+const orderedRegistryDetailItem = (previous, item, section) => {
+  if (previous === null || ['source', 'quarantine', 'entries'].includes(section)) return true
+  if (section === 'resolutions') {
+    return previous.createdAt < item.createdAt
+      || (previous.createdAt === item.createdAt && previous.id < item.id)
+  }
+  return previous.id < item.id
+}
+
+const acceptedWorkbookRegistryDetail = (payload, status, request) => {
+  const outer = status === 200 ? captureDataObject(payload, ['data']) : null
+  const data = outer && captureDataObject(outer.data, [
+    'importId', 'section', 'cursor', 'nextCursor', 'items', 'complete',
+    ...(request.section === 'conflicts' ? ['planDigest', 'specialistOptions'] : []),
+    ...(request.section === 'resolutions' ? ['specialistLabels'] : []),
+  ])
+  const values = data && captureDenseArray(data.items, WORKBOOK_REGISTRY_PAGE_SIZE)
+  if (!data || data.importId !== request.importId || data.section !== request.section
+    || data.cursor !== request.cursor || !values
+    || !(data.nextCursor === null || WORKBOOK_CURSOR.test(data.nextCursor))
+    || !canonicalWorkbookPage(
+      data.cursor, data.nextCursor, data.complete, values.length,
+      request.section === 'resolutions' ? 1 : WORKBOOK_REGISTRY_PAGE_SIZE,
+    )
+    || (request.section === 'conflicts'
+      && (!WORKBOOK_VERSIONED_DIGEST.test(data.planDigest ?? '')
+        || !captureWorkbookSpecialistOptions(data.specialistOptions)))) return null
+  const specialistOptions = request.section === 'conflicts'
+    ? captureWorkbookSpecialistOptions(data.specialistOptions) : null
+  const specialistLabels = request.section === 'resolutions'
+    ? captureWorkbookSpecialistOptions(data.specialistLabels) : null
+  if (request.section === 'resolutions' && !specialistLabels) return null
+  const items = []
+  const ids = new Set()
+  let previous = null
+  for (const raw of values) {
+    const item = captureRegistryDetailItem(raw, request.section)
+    if (!item || ids.has(item.id)
+      || !orderedRegistryDetailItem(previous, item, request.section)) return null
+    ids.add(item.id)
+    items.push(item)
+    previous = item
+  }
+  if (request.section === 'resolutions') {
+    const required = new Set(items.flatMap((item) => [
+      item.specialistId, ...item.choices.map(({ specialistId }) => specialistId),
+    ]).filter(Boolean))
+    if (specialistLabels.length !== required.size
+      || specialistLabels.some(({ id }) => !required.has(id))) return null
+  }
+  return Object.freeze({
+    importId: data.importId, section: data.section, cursor: data.cursor,
+    nextCursor: data.nextCursor, items: Object.freeze(items), complete: data.complete,
+    ...(request.section === 'conflicts' ? {
+      planDigest: data.planDigest, specialistOptions,
+    } : {}),
+    ...(request.section === 'resolutions' ? { specialistLabels } : {}),
+  })
+}
+
+const acceptedWorkbookResolution = (payload, status, importId, requested) => {
+  const outer = status === 200 ? captureDataObject(payload, ['data']) : null
+  const data = outer && captureDataObject(outer.data, [
+    'importId', 'resolutionCount', 'importVersion', 'resolutionVersion',
+  ])
+  return data && data.importId === importId
+    && data.resolutionCount === requested.resolutions.length
+    && positive(data.importVersion)
+    && positive(data.resolutionVersion)
+    && data.resolutionVersion === requested.expectedVersion + 1
+    ? Object.freeze({ ...data }) : null
+}
+
+const acceptedFinanceVoid = (payload, status, entryId, expectedVersion) => {
+  const outer = status === 200 ? captureDataObject(payload, ['data']) : null
+  const data = outer && captureDataObject(outer.data, ['entryId', 'state', 'version'])
+  return data && data.entryId === entryId && data.state === 'void'
+    && data.version === expectedVersion ? Object.freeze({ ...data }) : null
 }
 
 const activityCapture = (capture, value) => {
@@ -2130,6 +3055,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   let sessionGeneration = 0
   let requestAuthorityGeneration = 0
   let installedAuthority = null
+  const exportReplayKeys = new Map()
   const listeners = new Set()
   const baseHeaders = () => ({
     Accept: 'application/json',
@@ -2154,6 +3080,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     sessionRequest = null
     newestSessionRequest = null
     csrfToken = null
+    exportReplayKeys.clear()
     notifySession(null)
   }
   const authorityFingerprintFor = (session) => JSON.stringify([
@@ -2252,6 +3179,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
         if (nextAuthority !== installedAuthority) {
           installedAuthority = nextAuthority
           requestAuthorityGeneration += 1
+          exportReplayKeys.clear()
         }
         csrfToken = accepted.csrfToken
         notifySession(accepted.session)
@@ -2390,6 +3318,62 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
     }, { validate: (payload) => acceptedFinanceList(payload, accepted.month) })
   }
+  const loadFinanceWindow = (input, options) => {
+    const requested = captureDataObject(input, ['selectedMonth'])
+    const acceptedOptions = captureSignalOptions(options)
+    if (!requested || !supportedFinanceWindowMonth(requested.selectedMonth ?? '')
+      || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    const selectedMonth = requested.selectedMonth
+    return requestJson(`${API_ROOT}/finance/window?month=${selectedMonth}`, {
+      method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
+      signal: acceptedOptions.signal,
+    }, { validate: (payload, status) => acceptedFinanceWindow(payload, status, selectedMonth) })
+  }
+  const loadWorkbookRegistry = (input, options) => {
+    const requested = captureDataObject(input, ['cursor', 'section'])
+    const acceptedOptions = captureSignalOptions(options)
+    if (!requested || !['all', 'imports', 'exports', 'entries', 'unknown'].includes(requested.section)
+      || !(requested.cursor === null || WORKBOOK_CURSOR.test(requested.cursor))
+      || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    const query = `section=${requested.section}${requested.cursor === null
+      ? '' : `&cursor=${requested.cursor}`}`
+    return requestJson(`${API_ROOT}/workbooks/registry?${query}`, {
+      method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
+      signal: acceptedOptions.signal,
+    }, { validate: (payload, status) => (
+      acceptedWorkbookRegistry(payload, status, requested)
+    ) })
+  }
+  const loadWorkbookRegistryDetail = async (input, options) => {
+    const requested = captureDataObject(input, ['importId', 'section', 'cursor'])
+    const acceptedOptions = captureSignalOptions(options)
+    const sections = ['source', 'quarantine', 'conflicts', 'duplicates', 'resolutions', 'entries']
+    if (!requested || !WORKBOOK_IMPORT_ID.test(requested.importId ?? '')
+      || !sections.includes(requested.section)
+      || !(requested.cursor === null || WORKBOOK_CURSOR.test(requested.cursor))
+      || !acceptedOptions) throw clientError('CLIENT_INPUT_INVALID')
+    if (!csrfToken) throw clientError('SESSION_REQUIRED')
+    const body = JSON.stringify({
+      importId: requested.importId, section: requested.section, cursor: requested.cursor,
+    })
+    const send = () => requestJson(`${API_ROOT}/workbooks/registry/details`, {
+      method: 'POST', credentials: 'same-origin', headers: {
+        ...baseHeaders(), 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken,
+      }, body, signal: acceptedOptions.signal,
+    }, { validate: (payload, status) => (
+      acceptedWorkbookRegistryDetail(payload, status, requested)
+    ) })
+    try {
+      return await send()
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.code !== 'CSRF_EXPIRED') throw error
+    }
+    const eventSequence = sessionRequestSequence
+    await refreshSessionAfter(eventSequence)
+    return send()
+  }
   const createIdempotencyKey = () => {
     let value
     try {
@@ -2400,7 +3384,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     if (!acceptedKey(value)) throw clientError('CLIENT_INPUT_INVALID')
     return value
   }
-  const mutationOutcome = async (path, body, validate, suppliedKey) => {
+  const mutationOutcome = async (path, body, validate, suppliedKey, signal = undefined) => {
     const idempotencyKey = suppliedKey === undefined
       ? createIdempotencyKey()
       : suppliedKey
@@ -2418,6 +3402,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
           'Idempotency-Key': idempotencyKey,
         },
         body,
+        signal,
       }, {
         validate,
         idempotencyKey,
@@ -2475,7 +3460,9 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
-  const multipartMutation = async (path, formFactory, validate, suppliedKey = null) => {
+  const multipartMutation = async (
+    path, formFactory, validate, suppliedKey = null, signal = undefined,
+  ) => {
     if (suppliedKey !== null && !acceptedKey(suppliedKey)) {
       throw clientError('CLIENT_INPUT_INVALID')
     }
@@ -2489,6 +3476,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
         ...(suppliedKey === null ? {} : { 'Idempotency-Key': suppliedKey }),
       },
       body: formFactory(),
+      signal,
     }, {
       validate,
       idempotencyKey: suppliedKey ?? undefined,
@@ -2498,108 +3486,243 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     } catch (error) {
       if (!(error instanceof ApiError) || error.code !== 'CSRF_EXPIRED') throw error
     }
-    await getSession()
+    const eventSequence = sessionRequestSequence
+    await refreshSessionAfter(eventSequence)
     return send()
   }
-  const requestWorkbookExport = async (format) => {
+  const requestWorkbookExport = async (format, idempotencyKey, signal) => {
+    if (!csrfToken) throw clientError('SESSION_REQUIRED')
+    const cancelResponseBody = async (response, reader = null, cancel = null) => {
+      if (reader && typeof cancel === 'function') {
+        try {
+          await cancel.call(reader)
+          return
+        } catch { /* Fall through to the response body. */ }
+      }
+      try {
+        const body = response?.body
+        const cancelBody = body?.cancel
+        if (typeof cancelBody === 'function') await cancelBody.call(body)
+      } catch { /* Cancellation is best effort after a rejected response. */ }
+    }
+    const wipeChunk = (chunk) => {
+      try {
+        if (chunk instanceof Uint8Array) chunk.fill(0)
+      } catch { /* A detached or hostile view no longer exposes usable bytes. */ }
+    }
+    const captureReadResult = (raw) => {
+      let candidate = null
+      try {
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+          return Object.freeze({ candidate, next: null })
+        }
+        const descriptors = Object.getOwnPropertyDescriptors(raw)
+        const valueDescriptor = descriptors.value
+        if (valueDescriptor && Object.hasOwn(valueDescriptor, 'value')) {
+          candidate = valueDescriptor.value
+        }
+        const doneDescriptor = descriptors.done
+        const keys = Reflect.ownKeys(descriptors)
+        if (Object.getPrototypeOf(raw) !== Object.prototype || keys.length !== 2
+          || keys.some((key) => typeof key !== 'string' || !['done', 'value'].includes(key))
+          || !doneDescriptor?.enumerable || !Object.hasOwn(doneDescriptor, 'value')
+          || !valueDescriptor?.enumerable || !Object.hasOwn(valueDescriptor, 'value')) {
+          return Object.freeze({ candidate, next: null })
+        }
+        return Object.freeze({
+          candidate,
+          next: Object.freeze({ done: doneDescriptor.value, value: candidate }),
+        })
+      } catch {
+        return Object.freeze({ candidate, next: null })
+      }
+    }
+    const send = async () => {
     const authorityGeneration = requestAuthorityGeneration
     let response
     try {
-      response = await fetchImpl(`${API_ROOT}/workbooks/export?format=${format}`, {
-        method: 'GET',
+      response = await fetchImpl(`${API_ROOT}/workbooks/exports`, {
+        method: 'POST',
         credentials: 'same-origin',
         headers: {
           ...baseHeaders(),
           Accept: WORKBOOK_MIME,
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+          'Idempotency-Key': idempotencyKey,
         },
+        body: JSON.stringify({ format }),
+        signal,
       })
     } catch {
-      assertCurrentRequestAuthority(authorityGeneration)
-      throw clientError('NETWORK_ERROR')
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+      throw clientError('NETWORK_ERROR', { idempotencyKey })
     }
-    assertCurrentRequestAuthority(authorityGeneration)
-    const status = responseStatus(response)
+    try {
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+    } catch (error) {
+      await cancelResponseBody(response)
+      throw error
+    }
+    let status
     let ok
-    try { ok = response?.ok } catch { throw clientError('INVALID_RESPONSE') }
-    if (!status || typeof ok !== 'boolean') throw clientError('INVALID_RESPONSE', { status })
+    let parseJson
+    try {
+      status = responseStatus(response)
+      ok = response?.ok
+      parseJson = response?.json
+    } catch {
+      await cancelResponseBody(response)
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+      throw clientError('INVALID_RESPONSE', { idempotencyKey })
+    }
+    if (!status || typeof ok !== 'boolean') {
+      await cancelResponseBody(response)
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+      throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
+    }
     if (!ok) {
       let payload
-      try { payload = await response.json() } catch {
-        assertCurrentRequestAuthority(authorityGeneration)
-        throw clientError('INVALID_RESPONSE', { status })
+      try {
+        if (typeof parseJson !== 'function') throw new Error('invalid')
+        payload = await parseJson.call(response)
+      } catch {
+        await cancelResponseBody(response)
+        assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+        throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
       }
-      assertCurrentRequestAuthority(authorityGeneration)
-      const error = serverError(payload, status)
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+      let error
+      try {
+        error = serverError(payload, status, idempotencyKey)
+      } catch {
+        throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
+      }
       if (error.code === 'FORBIDDEN') {
-        void getSession().catch(() => {})
+        const eventSequence = sessionRequestSequence
+        void refreshSessionAfter(eventSequence).catch(() => {})
       } else if (AUTH_DENIAL_CODES.has(error.code)) clearSession()
       throw error
     }
     let filename
     let declaredLength
     try {
-      if (status !== 200 || response.headers.get('content-type') !== WORKBOOK_MIME
-        || response.headers.get('x-content-type-options')?.toLowerCase() !== 'nosniff') {
+      const headers = response?.headers
+      const getHeader = headers?.get
+      if (typeof getHeader !== 'function') throw new Error('invalid')
+      const header = (name) => getHeader.call(headers, name)
+      const noSniff = header('x-content-type-options')
+      if (status !== 200 || header('content-type') !== WORKBOOK_MIME
+        || typeof noSniff !== 'string' || noSniff.toLowerCase() !== 'nosniff') {
         throw new Error('invalid')
       }
-      const cache = response.headers.get('cache-control')?.toLowerCase().split(',')
-        .map((value) => value.trim())
-      if (!cache?.includes('private') || !cache.includes('no-store')) throw new Error('invalid')
-      const disposition = response.headers.get('content-disposition')
+      const cacheControl = header('cache-control')
+      const canonicalCache = typeof cacheControl === 'string'
+        ? cacheControl.split(',').map((value) => value.trim().toLowerCase()).join(', ')
+        : null
+      if (canonicalCache !== 'private, no-store') throw new Error('invalid')
+      const disposition = header('content-disposition')
       const match = /^attachment; filename="([A-Za-z0-9][A-Za-z0-9._-]{0,127}\.xlsx)"$/
-        .exec(disposition ?? '')
+        .exec(typeof disposition === 'string' ? disposition : '')
       if (!match) throw new Error('invalid')
       filename = match[1]
-      const length = response.headers.get('content-length')
-      declaredLength = length === null ? null : Number(length)
-      if (declaredLength !== null && (!Number.isSafeInteger(declaredLength)
-        || declaredLength < 1 || declaredLength > MAX_WORKBOOK_EXPORT_BYTES)) {
+      const length = header('content-length')
+      if (typeof length !== 'string' || !/^[1-9]\d*$/.test(length)) {
+        throw new Error('invalid')
+      }
+      declaredLength = Number(length)
+      if (!Number.isSafeInteger(declaredLength)
+        || declaredLength > MAX_WORKBOOK_EXPORT_BYTES) {
         throw new Error('invalid')
       }
     } catch {
-      assertCurrentRequestAuthority(authorityGeneration)
-      throw clientError('INVALID_RESPONSE', { status })
+      await cancelResponseBody(response)
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+      throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     }
     let reader
-    try { reader = response.body?.getReader() } catch { /* Validated below. */ }
-    if (!reader || typeof reader.read !== 'function' || typeof reader.cancel !== 'function') {
-      throw clientError('INVALID_RESPONSE', { status })
+    let read
+    let cancel
+    try {
+      const body = response?.body
+      const getReader = body?.getReader
+      if (typeof getReader === 'function') reader = getReader.call(body)
+      cancel = reader?.cancel
+      read = reader?.read
+    } catch { /* Validated below. */ }
+    if (!reader || typeof read !== 'function' || typeof cancel !== 'function') {
+      await cancelResponseBody(response, reader, cancel)
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+      throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     }
     const chunks = []
     let total = 0
+    let currentChunk = null
     try {
       while (true) {
-        const next = await reader.read()
-        assertCurrentRequestAuthority(authorityGeneration)
+        const captured = captureReadResult(await read.call(reader))
+        const next = captured.next
+        currentChunk = captured.candidate
         if (!next || typeof next.done !== 'boolean') throw new Error('invalid')
-        if (next.done) break
-        if (!(next.value instanceof Uint8Array) || next.value.byteLength < 1) {
+        assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+        if (next.done) {
+          if (currentChunk !== undefined) throw new Error('invalid')
+          currentChunk = null
+          break
+        }
+        if (!(currentChunk instanceof Uint8Array) || currentChunk.byteLength < 1) {
           throw new Error('invalid')
         }
-        total += next.value.byteLength
+        total += currentChunk.byteLength
         if (total > MAX_WORKBOOK_EXPORT_BYTES
-          || (declaredLength !== null && total > declaredLength)) {
-          await reader.cancel()
-          throw new Error('invalid')
-        }
-        chunks.push(next.value)
+          || total > declaredLength) throw new Error('invalid')
+        chunks.push(currentChunk)
+        currentChunk = null
       }
     } catch {
-      try { await reader.cancel() } catch { /* The response is already unusable. */ }
-      assertCurrentRequestAuthority(authorityGeneration)
-      throw clientError('INVALID_RESPONSE', { status })
+      await cancelResponseBody(response, reader, cancel)
+      wipeChunk(currentChunk)
+      for (const chunk of chunks) wipeChunk(chunk)
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+      throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     }
-    if (total < 1 || (declaredLength !== null && declaredLength !== total)) {
-      throw clientError('INVALID_RESPONSE', { status })
+    if (total < 1 || declaredLength !== total) {
+      await cancelResponseBody(response, reader, cancel)
+      for (const chunk of chunks) wipeChunk(chunk)
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+      throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     }
-    const bytes = new Uint8Array(total)
-    let offset = 0
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset)
-      offset += chunk.byteLength
+    let bytes
+    try {
+      bytes = new Uint8Array(total)
+      let offset = 0
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+    } catch {
+      wipeChunk(bytes)
+      for (const chunk of chunks) wipeChunk(chunk)
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+      throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     }
-    assertCurrentRequestAuthority(authorityGeneration)
+    for (const chunk of chunks) wipeChunk(chunk)
+    try {
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
+    } catch (error) {
+      bytes.fill(0)
+      throw error
+    }
     return Object.freeze({ bytes, filename })
+    }
+    try {
+      return await send()
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.code !== 'CSRF_EXPIRED') throw error
+    }
+    const eventSequence = sessionRequestSequence
+    await refreshSessionAfter(eventSequence)
+    return send()
   }
   const createClient = (input, options) => {
     const requested = captureClientInput(input)
@@ -2844,9 +3967,10 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
-  const previewWorkbook = (rawFile) => {
+  const previewWorkbook = (rawFile, options) => {
     const file = captureWorkbookFile(rawFile)
-    if (!file) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    const acceptedOptions = captureSignalOptions(options)
+    if (!file || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
     return multipartMutation(
       `${API_ROOT}/workbooks/preview`,
@@ -2856,13 +3980,16 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
         return form
       },
       acceptedWorkbookPreview,
+      null,
+      acceptedOptions.signal,
     )
   }
-  const createWorkbookImport = (rawFile, previewToken, options) => {
+  const createWorkbookImport = (rawFile, previewToken, rawResolutions, options) => {
     const file = captureWorkbookFile(rawFile)
-    const acceptedOptions = captureClientOptions(options)
+    const resolutions = captureWorkbookResolutions(rawResolutions)
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
     if (!file || typeof previewToken !== 'string' || previewToken.length > 4_096
-      || !WORKBOOK_PREVIEW_TOKEN.test(previewToken) || !acceptedOptions) {
+      || !WORKBOOK_PREVIEW_TOKEN.test(previewToken) || !resolutions || !acceptedOptions) {
       return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     }
     if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
@@ -2872,15 +3999,17 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       () => {
         const form = new FormData()
         form.append('previewToken', previewToken)
+        form.append('resolutions', JSON.stringify(resolutions))
         form.append('workbook', file, file.name)
         return form
       },
       acceptedWorkbookImport,
       idempotencyKey,
+      acceptedOptions.signal,
     )
   }
   const continueWorkbookImport = (importId, expectedVersion, options) => {
-    const acceptedOptions = captureClientOptions(options)
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
     if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)
       || !positive(expectedVersion) || expectedVersion >= Number.MAX_SAFE_INTEGER
       || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
@@ -2893,17 +4022,21 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
         form.append('expectedVersion', String(expectedVersion))
         return form
       },
-      acceptedWorkbookStatus,
+      acceptedWorkbookStatusFor(importId, expectedVersion),
       idempotencyKey,
+      acceptedOptions.signal,
     )
   }
-  const getWorkbookImport = (importId) => {
-    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)) {
+  const getWorkbookImport = (importId, options) => {
+    const acceptedOptions = captureSignalOptions(options)
+    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)
+      || !acceptedOptions) {
       return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     }
     return requestJson(`${API_ROOT}/workbooks/imports/${importId}`, {
       method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
-    }, { validate: acceptedWorkbookStatus })
+      signal: acceptedOptions.signal,
+    }, { validate: acceptedWorkbookStatusFor(importId) })
   }
   const getActivityProjection = (importId) => {
     if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)) {
@@ -2931,11 +4064,74 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
-  const exportWorkbook = (format) => {
-    if (!['legacy', 'panel-v2'].includes(format)) {
+  const recordWorkbookResolutions = (importId, input, options) => {
+    const requested = captureDataObject(input, [
+      'expectedVersion', 'planDigest', 'resolutions',
+    ])
+    const resolutions = requested && captureWorkbookResolutions(
+      requested.resolutions, { requireOne: true },
+    )
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
+    if (!WORKBOOK_IMPORT_ID.test(importId ?? '') || !requested
+      || !safeCount(requested.expectedVersion)
+      || !WORKBOOK_VERSIONED_DIGEST.test(requested.planDigest ?? '')
+      || !resolutions || !acceptedOptions) {
       return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     }
-    return requestWorkbookExport(format)
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    const idempotencyKey = acceptedOptions.idempotencyKey ?? createIdempotencyKey()
+    const body = Object.freeze({
+      expectedVersion: requested.expectedVersion, planDigest: requested.planDigest, resolutions,
+    })
+    return mutation(
+      `${API_ROOT}/workbooks/imports/${importId}/resolutions`,
+      JSON.stringify(body),
+      (payload, status) => acceptedWorkbookResolution(payload, status, importId, body),
+      idempotencyKey,
+      acceptedOptions.signal,
+    )
+  }
+  const exportWorkbook = async (input, options) => {
+    const requested = captureDataObject(input, ['format'])
+    const acceptedOptions = captureSignalOptions(options)
+    if (!requested || !['legacy', 'panel-v2'].includes(requested.format)
+      || !acceptedOptions) throw clientError('CLIENT_INPUT_INVALID')
+    const idempotencyKey = exportReplayKeys.get(requested.format)
+      ?? createIdempotencyKey()
+    exportReplayKeys.set(requested.format, idempotencyKey)
+    try {
+      const result = await requestWorkbookExport(
+        requested.format, idempotencyKey, acceptedOptions.signal,
+      )
+      if (exportReplayKeys.get(requested.format) === idempotencyKey) {
+        exportReplayKeys.delete(requested.format)
+      }
+      return result
+    } catch (error) {
+      const ambiguous = error instanceof ApiError && error.idempotencyKey === idempotencyKey
+      if (!ambiguous && exportReplayKeys.get(requested.format) === idempotencyKey) {
+        exportReplayKeys.delete(requested.format)
+      }
+      throw error
+    }
+  }
+  const voidLedgerEntry = (entryId, expectedVersion, reason, options) => {
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
+    if (typeof entryId !== 'string'
+      || !/^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(entryId)
+      || !positive(expectedVersion) || expectedVersion >= Number.MAX_SAFE_INTEGER
+      || typeof reason !== 'string' || reason !== reason.trim()
+      || reason.length < 3 || reason.length > 500 || INVALID_TEXT.test(reason)
+      || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    const idempotencyKey = acceptedOptions.idempotencyKey ?? createIdempotencyKey()
+    return mutation(
+      `${API_ROOT}/finance/entries/${entryId}/voids`,
+      JSON.stringify({ expectedVersion, reason }),
+      (payload, status) => acceptedFinanceVoid(payload, status, entryId, expectedVersion),
+      idempotencyKey,
+      acceptedOptions.signal,
+    )
   }
   const editClient = (clientId, expectedVersion, input, options) => {
     const requested = captureClientInput(input)
@@ -3235,6 +4431,9 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     getOperationalActions,
     getSecurityAudit,
     listFinance,
+    loadFinanceWindow,
+    loadWorkbookRegistry,
+    loadWorkbookRegistryDetail,
     createClient,
     createActivityGroup,
     editActivityGroup,
@@ -3258,9 +4457,11 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     createWorkbookImport,
     continueWorkbookImport,
     getWorkbookImport,
+    recordWorkbookResolutions,
     getActivityProjection,
     continueActivityProjection,
     exportWorkbook,
+    voidLedgerEntry,
     createAppointment,
     editAppointment,
     cancelAppointment,

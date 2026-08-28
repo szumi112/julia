@@ -1491,6 +1491,10 @@ button.figures__item:hover .figures__value { color: var(--coral-deep); }
     radial-gradient(farthest-side at 0 50%, rgba(43, 31, 74, 0.14), transparent) left / 14px 100% no-repeat scroll,
     radial-gradient(farthest-side at 100% 50%, rgba(43, 31, 74, 0.14), transparent) right / 14px 100% no-repeat scroll;
 }
+.table-scroll:focus-visible {
+  outline: 3px solid var(--coral);
+  outline-offset: 2px;
+}
 /* separate borders — collapsed borders detach from sticky cells in Chrome.
    Card-mode tables and full-width empty-state cells ([colspan]) are exempt. */
 .table-scroll .table { border-collapse: separate; border-spacing: 0; }
@@ -3800,6 +3804,155 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
   .today-chip::after { inset-block: -5px; }
   .toggle { margin-block: 9px; }
   .toggle::before { content: ''; position: absolute; inset: -10px 0; border-radius: 99px; }
+}
+
+/* Protected finance reporting and workbook provenance. */
+.finance-window,
+.report-window,
+.registry-view { min-width: 0; }
+.finance-window__kpis {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 22px;
+}
+.finance-window__kpi {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.finance-window__kpi span { display: block; color: var(--ink-faint); font-size: 13px; }
+.finance-window__kpi strong { display: block; margin-top: 4px; font-size: 22px; overflow-wrap: anywhere; }
+.finance-window__empty { margin: 0 0 14px; color: var(--ink-faint); }
+.finance-window__table { margin-top: 18px; }
+.finance-window__payment-actions { display: grid; justify-items: end; gap: 8px; min-width: 220px; }
+.finance-window__payment-actions [role="region"] { display: grid; gap: 6px; width: 100%; text-align: left; }
+.finance-window__payment-entry { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tabs { min-width: 0; }
+.tabs__list {
+  display: flex;
+  max-width: 100%;
+  gap: 4px;
+  padding: 4px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-warm);
+}
+.tabs__tab {
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--ink-soft);
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.tabs__tab.is-on { color: var(--coral-deep); background: var(--surface); box-shadow: var(--shadow-1); }
+.tabs__tab:focus-visible { outline: 3px solid var(--coral); outline-offset: 1px; }
+.tabs__panel { min-width: 0; outline: none; }
+.report-window__trend { margin-top: 18px; }
+.report-window__splits,
+.registry-view__workflows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 20px 0;
+}
+.report-window__split dl,
+.report-window__coverage dl,
+.workbook-import__counts { margin: 14px 0 0; }
+.report-window__split dl > div,
+.report-window__coverage dl > div,
+.workbook-import__counts > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.report-window__split dd,
+.report-window__coverage dd,
+.workbook-import__counts dd { margin: 0; font-weight: 700; text-align: right; }
+.report-window__coverage { margin-top: 16px; }
+.workbook-export__actions { margin-top: 14px; }
+.workbook-import__review { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
+.workbook-import__review .field { margin: 14px 0; }
+.workbook-import__evidence { margin-top: 18px; }
+.workbook-import__evidence h4 { margin-bottom: 8px; }
+.workbook-import__evidence ul { display: grid; gap: 6px; margin: 0; padding-left: 22px; }
+.workbook-import__evidence li,
+.workbook-import__conflict,
+.registry-resolutions__source,
+.registry-detail__items article,
+.registry-list__item h3 { overflow-wrap: anywhere; }
+.workbook-import__evidence li span { display: block; color: var(--ink-soft); }
+.workbook-import__conflict {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+}
+.registry-provenance {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+}
+.registry-provenance > div { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.registry-provenance dt { color: var(--ink-soft); }
+.registry-provenance dd { margin: 0; overflow-wrap: anywhere; }
+.registry-list,
+.registry-detail__items { display: grid; gap: 10px; margin-top: 16px; }
+.registry-list__item,
+.registry-detail__items article {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.registry-detail__items article { display: block; }
+.registry-list__item h3,
+.registry-detail__items h4 { margin: 0 0 6px; }
+.registry-list__actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.registry-progress { display: grid; gap: 4px; max-width: 360px; }
+.registry-progress progress { width: 100%; accent-color: var(--coral); }
+.registry-detail { margin-top: 20px; }
+.registry-detail__head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.quick-dialog.registry-void {
+  width: min(520px, 100%);
+  max-height: calc(100vh - 40px);
+  padding: 24px;
+  overflow: auto;
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+}
+.registry-void .textarea { min-height: 100px; resize: vertical; }
+.registry-resolutions,
+.report-window__unknown { margin: 20px 0; }
+.registry-paging { margin-top: 12px; }
+
+@media (max-width: 1024px) {
+  .finance-window__kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+  .report-window__splits,
+  .registry-view__workflows { grid-template-columns: minmax(0, 1fr); }
+  .finance-window__kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .finance-window__kpi { padding: 14px; }
+  .registry-list__item { align-items: flex-start; flex-direction: column; }
+  .registry-list__actions { width: 100%; }
+  .registry-detail__head { align-items: flex-start; flex-direction: column; }
 }
 
 /* hover-revealed delete buttons must stay reachable without a cursor */

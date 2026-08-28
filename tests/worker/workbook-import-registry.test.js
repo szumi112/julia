@@ -1,12 +1,13 @@
 import { env } from 'cloudflare:workers'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
+  APPROVED_WORKBOOK_FINGERPRINT,
   createWorkbookImport,
   continueWorkbookImport,
   exportWorkbook,
   getWorkbookImport,
   loadWorkbookPanelState,
-  previewWorkbook,
+  previewWorkbook as previewWorkbookCore,
 } from '../../worker/core/workbooks.js'
 import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import { createKeyring } from '../../worker/security/keyring.js'
@@ -21,6 +22,7 @@ import { FINANCE_SCOPE } from '../../worker/core/finance.js'
 import { createWorkbookPanelMetadataCallbacks } from '../../worker/security/workbook-artifacts.js'
 import {
   createScopedPanelWorkbook,
+  patchPanelWorkbook,
   readPanelWorkbook,
 } from '../../src/workbook-ooxml.js'
 import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
@@ -46,6 +48,16 @@ const panelFinanceValues = (patch = {}) => ({
   specialistId: 'sp_staging_workbook_anna_janowska',
   ...patch,
 })
+const PANEL_FINANCE_COLUMNS = Object.freeze([
+  Object.freeze({ key: 'accountingMonth', label: 'Miesiąc księgowy', type: 'text', width: 16 }),
+  Object.freeze({ key: 'occurredOn', label: 'Data', type: 'date', width: 14 }),
+  Object.freeze({ key: 'amountGrosze', label: 'Kwota (gr)', type: 'cents', width: 16 }),
+  Object.freeze({ key: 'paidAmountGrosze', label: 'Zapłacono (gr)', type: 'cents', width: 18 }),
+  Object.freeze({ key: 'paymentMethod', label: 'Sposób płatności', type: 'enum', values: ['blik', 'card', 'cash', 'monthly', 'other', 'transfer', 'unknown'], width: 18 }),
+  Object.freeze({ key: 'settlementStatus', label: 'Rozliczenie', type: 'enum', values: ['paid', 'partial', 'unknown', 'unpaid'], width: 16 }),
+  Object.freeze({ key: 'invoiceStatus', label: 'Faktura', type: 'enum', values: ['action_required', 'issued', 'not_issued', 'not_required', 'unknown'], width: 18 }),
+  Object.freeze({ key: 'specialistId', label: 'ID specjalisty', type: 'text', width: 28 }),
+])
 const config = Object.freeze({
   appEnv: 'staging', dataMode: 'fictional',
   activeDataKekVersion: 1,
@@ -102,6 +114,17 @@ const parser = async (arrayBuffer, { filename }) => {
 
 let keyring
 let financeKey
+let panelExportSeed
+const previewDb = Object.freeze({
+  prepare(sql) {
+    if (sql.includes('SELECT id,display_name_envelope FROM specialists')) return {
+      async all() { return { results: [] } },
+    }
+    return env.DB.prepare(sql)
+  },
+  batch(statements) { return env.DB.batch(statements) },
+})
+const previewWorkbook = (input) => previewWorkbookCore({ db: previewDb, ...input })
 
 beforeAll(async () => {
   await completeCoreDirectoryStageA()
@@ -174,9 +197,53 @@ beforeAll(async () => {
     }),
     1, actor.id, NOW, NOW,
   ).run()
+  for (const action of [
+    'edit', 'void', 'race', 'preview_edit', 'preview_void', 'historical', 'historical_race',
+  ]) {
+    const entryId = `fin_panel_dependency_${action}`
+    const historical = action.startsWith('historical')
+    const seal = async (field, value) => JSON.stringify(await encryptForScope(
+      keyring, financeKey, {
+        expectedScope: FINANCE_SCOPE, recordId: entryId, field,
+        plaintext: JSON.stringify(value),
+      },
+    ))
+    await env.DB.prepare(`INSERT INTO finance_entries
+      (id,batch_id,source_key,kind,record_type,accounting_month,occurred_on,
+       amount_grosze,paid_amount_grosze,payment_method,settlement_status,
+       invoice_status,specialist_id,appointment_id,counterparty_lookup,
+       details_envelope,source_row_envelope,version,created_by_staff_id,
+       created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      entryId, 'fib_workbook_panel_registry', `panel-dependency-${action}`,
+      'income', historical ? 'income' : 'english', '2025-09', '2025-09-02',
+      34_000, 0, 'unknown', 'unpaid',
+      'not_required', 'sp_staging_workbook_anna_janowska', null, null,
+      await seal('details', {
+        schema: 'finance_entry_details.v1', counterparty: 'Fikcyjna osoba',
+        sourceLabel: historical ? 'Fikcyjna konsultacja historyczna' : 'Fikcyjny angielski',
+        invoiceNote: '', lessonCount: historical ? null : 1,
+      }),
+      await seal('source_row', {
+        schema: 'finance_entry_source.v1', source: {
+          batchId: 'fib_workbook_panel_registry', sourceKey: `panel-dependency-${action}`,
+          sheet: 'Panel — Wizyty',
+          rowNumber: action === 'edit' ? 4 : action === 'void' ? 5 : 6, raw: {},
+        },
+      }),
+      1, actor.id, NOW, NOW,
+    ).run()
+    if (!historical) await env.DB.prepare(`INSERT INTO activity_participants
+      (id,program_id,identity_envelope,client_id,historical_client_id,status,version,
+       created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(
+      `acp_panel_dependency_${action}`, 'apg_english', '{}', null, null,
+      'active', 1, NOW, NOW,
+    ).run()
+  }
 })
 
 afterAll(async () => {
+  panelExportSeed?.fill(0)
   await Promise.all(createdObjects.map((objectKey) => env.ARCHIVE.delete(objectKey)))
 })
 
@@ -204,8 +271,195 @@ const command = (bytes, token, idempotencyKey) => ({
   readPanel: panel,
   artifactNonceFactory: () => new Uint8Array(12).fill(14),
 })
+const exportedPanelMutation = async ({ action, entryId }) => {
+  const callbacks = createWorkbookPanelMetadataCallbacks({
+    keyring, config, centreId: 'centre_1',
+  })
+  expect(panelExportSeed).toBeInstanceOf(Uint8Array)
+  const panelExport = await readPanelWorkbook(panelExportSeed, { verify: callbacks.verify })
+  const source = panelExport.edits.find(({ id }) => id === entryId)
+  const metadataRow = panelExport.metadata.rows.find(({ id }) => id === entryId)
+  expect(source).toBeDefined()
+  expect(metadataRow).toBeDefined()
+  const values = action === 'edit'
+    ? { ...source.values, amountGrosze: source.values.amountGrosze + 1_000 }
+    : source.values
+  const scoped = await createScopedPanelWorkbook({
+    allowedRowIds: [entryId],
+    allowedSheets: [{ name: 'Panel — Wizyty', columns: PANEL_FINANCE_COLUMNS }],
+    metadata: {
+      format: 'Panel-v2', rows: [metadataRow], scope: panelExport.metadata.scope,
+      voidIds: action === 'void' ? [entryId] : [],
+    },
+    sheets: [{
+      name: 'Panel — Wizyty', columns: PANEL_FINANCE_COLUMNS,
+      rows: [{ id: entryId, values }],
+    }],
+  }, { sign: callbacks.sign })
+  if (action !== 'void') return scoped
+  const patched = await patchPanelWorkbook(scoped, {
+    includePermissions: false,
+    metadata: {
+      format: 'Panel-v2', rows: [metadataRow], scope: panelExport.metadata.scope,
+      voidIds: [entryId],
+    },
+    sheets: [{ name: 'Panel — Wizyty', columns: PANEL_FINANCE_COLUMNS, rows: [] }],
+  }, { sign: callbacks.sign })
+  scoped.fill(0)
+  return patched
+}
+const addHistoricalDependency = async (entryId, suffix) => {
+  const sourceImportId = await env.DB.prepare(`SELECT id FROM workbook_imports
+    WHERE status='complete' ORDER BY completed_at DESC,id DESC LIMIT 1`).first('id')
+  expect(sourceImportId).toMatch(/^wbi_/)
+  const sourceId = `wbs_panel_dependency_${suffix}`
+  await env.DB.prepare(`INSERT INTO workbook_source_records
+    (id,import_id,source_key,sheet_index,sheet_name,row_number,block_index,record_type,
+     disposition,accounting_month,occurred_on,period_precision,period_month,amount_grosze,
+     payment_method,settlement_status,invoice_status,initial_paid_amount_grosze,
+     record_digest,record_digest_hmac_version,specialist_source_digest,
+     specialist_source_hmac_version,warning_codes_json,source_payload_version,
+     source_payload_envelope,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+    sourceId, sourceImportId, `workbook:v1:9:${suffix.length + 10}:0`, 9,
+    'Fikcyjna historia', suffix.length + 10, 0, 'income', 'accepted', '2025-09',
+    '2025-09-02', 'day', '2025-09', 34_000, 'unknown', 'unpaid', 'not_required', 0,
+    'R'.repeat(43), 1, 'S'.repeat(43), 1, '[]', 1, '{}', NOW,
+  ).run()
+  await env.DB.prepare(`INSERT INTO finance_source_links
+    (id,source_record_id,finance_entry_id,relationship,created_by_staff_id,created_at)
+    VALUES (?,?,?,?,?,?)`).bind(
+    `fsl_panel_dependency_${suffix}`, sourceId, entryId, 'reconciled', actor.id, NOW,
+  ).run()
+  await env.DB.prepare(`INSERT INTO historical_clients
+    (id,identity_envelope,status,active_client_id,version,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?)`).bind(
+    `hcl_panel_dependency_${suffix}`, '{}', 'historical', null, 1, NOW, NOW,
+  ).run()
+  await env.DB.prepare(`INSERT INTO historical_client_source_links
+    (id,historical_client_id,source_record_id,created_at) VALUES (?,?,?,?)`).bind(
+    `hcs_panel_dependency_${suffix}`, `hcl_panel_dependency_${suffix}`, sourceId, NOW,
+  ).run()
+  await env.DB.prepare(`INSERT INTO historical_service_occurrences
+    (id,source_record_id,historical_client_id,counterparty_id,specialist_id,
+     service_id,service_label_envelope,period_precision,occurred_on,occurred_month,
+     status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+    `hoc_panel_dependency_${suffix}`, sourceId, `hcl_panel_dependency_${suffix}`, null,
+    'sp_staging_workbook_anna_janowska', 'konsultacja', '{}', 'day', '2025-09-02',
+    '2025-09', 'recorded', 1, NOW, NOW,
+  ).run()
+}
+const importWriteEvidence = async () => ({
+  artifacts: (await env.DB.prepare('SELECT count(*) AS count FROM workbook_artifacts').first()).count,
+  audits: (await env.DB.prepare("SELECT count(*) AS count FROM audit_events WHERE action LIKE 'workbook.%'").first()).count,
+  imports: (await env.DB.prepare('SELECT count(*) AS count FROM workbook_imports').first()).count,
+  objects: (await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length,
+  outbox: (await env.DB.prepare('SELECT count(*) AS count FROM outbox_jobs').first()).count,
+  replays: (await env.DB.prepare("SELECT count(*) AS count FROM workbook_request_replays WHERE operation='workbooks.import'").first()).count,
+})
+const withoutCurrentAuthority = Object.freeze({
+  prepare(sql) {
+    if (sql.includes('FROM staff_authorities AS authority')) return {
+      bind() { return this },
+      async all() { return { results: [] } },
+    }
+    return env.DB.prepare(sql)
+  },
+  batch(statements) { return env.DB.batch(statements) },
+})
 
 describe('workbook import reservation', () => {
+  it('requires exact opaque mapping choices and persists an effective versioned mapping', async () => {
+    const bytes = new TextEncoder().encode('fictional-legacy-mapping-resolution')
+    let parses = 0
+    const parseUnknown = async (arrayBuffer, options) => {
+      parses += 1
+      const value = await parser(arrayBuffer, options)
+      return Object.freeze({
+        ...value,
+        fingerprint: APPROVED_WORKBOOK_FINGERPRINT,
+        rows: Object.freeze([Object.freeze({
+          ...value.rows[0], specialistName: 'Fikcyjna Nieznana Specjalistka',
+          periodPrecision: 'day', periodMonth: '2025-09',
+        })]),
+        quarantinedRows: Object.freeze([]),
+      })
+    }
+    const readLegacy = async () => ({
+      edits: [], kind: 'legacy', metadata: null, voidIds: [],
+    })
+    const preview = await previewWorkbook({
+      bytes, filename: 'fictional-legacy.xlsx', actor, keyring, config,
+      centreId: 'centre_1', nowMs: NOW_MS, parse: parseUnknown,
+      readPanel: readLegacy, nonceFactory: () => new Uint8Array(16).fill(13),
+    })
+    const conflict = preview.data.conflicts[0]
+    expect(conflict).toMatchObject({
+      id: expect.stringMatching(/^wmc_[A-Za-z0-9_-]{43}$/),
+      code: 'SPECIALIST_MAPPING_REQUIRED',
+      sourceValue: 'Fikcyjna Nieznana Specjalistka',
+    })
+    const storeArtifact = async ({ objectKey }) => ({
+      environment: 'staging', centreId: 'centre_1', objectKey,
+      fingerprint: APPROVED_WORKBOOK_FINGERPRINT, byteSize: bytes.byteLength,
+      parserVersion: 2, materializerVersion: 2, contentNonce: 'A'.repeat(16),
+      workbookKekVersion: 1, metadataHmacVersion: 1,
+      metadataSignature: 'B'.repeat(43),
+    })
+    const base = {
+      ...command(bytes, preview.data.previewToken, 'workbook-import-mapping'),
+      filename: 'fictional-legacy.xlsx', parse: parseUnknown, readPanel: readLegacy,
+      storeArtifact,
+    }
+    await expect(createWorkbookImport(base)).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+    await expect(createWorkbookImport({
+      ...base,
+      idempotencyKey: 'workbook-import-mapping-extra',
+      resolutions: [{
+        conflictId: `wmc_${'x'.repeat(43)}`,
+        specialistId: 'sp_staging_workbook_anna_janowska',
+      }],
+    })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+    const imported = await createWorkbookImport({
+      ...base,
+      resolutions: [{
+        conflictId: conflict.id,
+        specialistId: 'sp_staging_workbook_anna_janowska',
+      }],
+    })
+    const afterImported = await importWriteEvidence()
+    for (const resolutions of [[], [{
+      conflictId: `wmc_${'x'.repeat(43)}`,
+      specialistId: 'sp_staging_workbook_anna_janowska',
+    }], [{
+      conflictId: conflict.id,
+      specialistId: 'sp_staging_workbook_julia_wolanin',
+    }]]) await expect(createWorkbookImport({
+      ...base,
+      idFactory: () => 'must_not_generate',
+      resolutions,
+    })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+    expect(await importWriteEvidence()).toEqual(afterImported)
+    expect(parses).toBe(4)
+    expect(await env.DB.prepare(`SELECT specialist_id FROM workbook_resolutions
+      WHERE import_id=? AND kind='specialist_mapping'`).bind(
+      imported.body.data.import.id,
+    ).first('specialist_id')).toBe('sp_staging_workbook_anna_janowska')
+    expect(await env.DB.prepare(`SELECT version,resolution_count
+      FROM workbook_import_resolution_sets WHERE import_id=?`).bind(
+      imported.body.data.import.id,
+    ).first()).toEqual({ version: 1, resolution_count: 1 })
+    const endedAt = new Date(NOW_MS + 2_000).toISOString()
+    await env.DB.prepare(`UPDATE workbook_materialization_jobs
+      SET status='failed',version=version+1,updated_at=? WHERE import_id=?`).bind(
+      endedAt, imported.body.data.import.id,
+    ).run()
+    await env.DB.prepare(`UPDATE workbook_imports
+      SET status='failed',version=version+1,updated_at=? WHERE id=?`).bind(
+      endedAt, imported.body.data.import.id,
+    ).run()
+  })
+
   it('loads the maximum Panel preview scope within the 42-query Worker budget', async () => {
     const budget = createD1QueryBudget(env.DB, {
       totalLimit: 50, recoveryReserve: 8,
@@ -222,6 +476,21 @@ describe('workbook import reservation', () => {
 
     expect(result.rows).toEqual([])
     expect(budget.usage()).toMatchObject({ used: 25, workRemaining: 17 })
+  })
+
+  it('does not authorize a new Panel assignment to a non-active specialist', async () => {
+    await env.DB.prepare(`INSERT INTO specialists
+      (id,staff_user_id,display_name_envelope,professional_title_envelope,
+       standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(
+      'sp_panel_pending_assignment', null, '{}', '{}', 18_000, 'pending', 1,
+      null, NOW, NOW,
+    ).run()
+    const state = await loadWorkbookPanelState({
+      db: env.DB, keyring, centreId: 'centre_1', rows: [],
+      specialistIds: ['sp_panel_pending_assignment'],
+    })
+    expect(state.specialistIds).toEqual([])
   })
 
   it('re-hashes/re-parses exact Panel bytes, stores its R2 template without duplicating source authority, then replays safely', async () => {
@@ -265,17 +534,50 @@ describe('workbook import reservation', () => {
       'SELECT count(*) AS count FROM workbook_resolutions WHERE import_id=?',
     ).bind(first.body.data.import.id).first()).count).toBe(0)
 
-    const replay = await createWorkbookImport(command(
-      bytes, preview.data.previewToken, 'workbook-import-one',
-    ))
+    await expect(createWorkbookImport({
+      ...command(bytes, preview.data.previewToken, 'workbook-import-one'),
+      db: withoutCurrentAuthority,
+    })).rejects.toThrow(/^NOT_FOUND$/)
+
+    const beforeExpiredReplay = await importWriteEvidence()
+    const replay = await createWorkbookImport({
+      ...command(bytes, preview.data.previewToken, 'workbook-import-one'),
+      nowMs: NOW_MS + 10 * 60_000,
+    })
     expect(replay.status).toBe(200)
     expect(replay.body).toEqual(first.body)
+    expect(await importWriteEvidence()).toEqual(beforeExpiredReplay)
+
+    const changedToken = await previewWorkbook({
+      bytes, filename: 'fictional-panel.xlsx', actor, keyring, config,
+      centreId: 'centre_1', nowMs: NOW_MS + 1, parse: parser, readPanel: panel,
+      nonceFactory: () => new Uint8Array(16).fill(12),
+    })
+    await expect(createWorkbookImport({
+      ...command(bytes, changedToken.data.previewToken, 'workbook-import-one'),
+      nowMs: NOW_MS + 2,
+    })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+    expect(await importWriteEvidence()).toEqual(beforeExpiredReplay)
+    await expect(createWorkbookImport({
+      ...command(
+        new TextEncoder().encode('fictional-workbook-registry-one-altered'),
+        preview.data.previewToken,
+        'workbook-import-one',
+      ),
+      nowMs: NOW_MS + 2,
+    })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+    expect(await importWriteEvidence()).toEqual(beforeExpiredReplay)
     const status = await getWorkbookImport({
       db: env.DB, actor, nowMs: NOW_MS + 2_000, importId: first.body.data.import.id,
     })
+    await expect(getWorkbookImport({
+      db: withoutCurrentAuthority, actor, nowMs: NOW_MS + 2_000,
+      importId: first.body.data.import.id,
+    })).rejects.toThrow(/^NOT_FOUND$/)
     expect(status).toEqual({
       data: {
         import: first.body.data.import,
+        evidence: { createdRecords: 0, voidedRecords: 0, converged: false },
         job: {
           id: expect.stringMatching(/^wbj_/),
           phase: 'apply_finance',
@@ -310,6 +612,19 @@ describe('workbook import reservation', () => {
     ).first()).count).toBe(beforeArtifacts)
     expect((await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length)
       .toBe(beforeObjects)
+  })
+
+  it('rejects an expired preview with no replay before any D1 or R2 write', async () => {
+    const bytes = new TextEncoder().encode('fictional-workbook-registry-expired')
+    const preview = await previewFor(bytes)
+    const before = await importWriteEvidence()
+
+    await expect(createWorkbookImport({
+      ...command(bytes, preview.data.previewToken, 'workbook-import-expired-new'),
+      nowMs: NOW_MS + 10 * 60_000,
+    })).rejects.toThrow(/^WORKBOOK_PREVIEW_TOKEN_INVALID$/)
+
+    expect(await importWriteEvidence()).toEqual(before)
   })
 
   it('rejects an invalid merged Panel row at preview and exact-file commit before writes', async () => {
@@ -387,6 +702,37 @@ describe('workbook import reservation', () => {
       .toBe(beforeObjects + 1)
   })
 
+  it('preserves a committed artifact when D1 reports a lost batch response', async () => {
+    const bytes = new TextEncoder().encode('fictional-workbook-commit-response-lost')
+    const preview = await previewFor(bytes)
+    const beforeObjects = (await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length
+    let loseResponse = true
+    const commitThenThrowDb = {
+      prepare(sql) { return env.DB.prepare(sql) },
+      async batch(statements) {
+        const result = await env.DB.batch(statements)
+        if (loseResponse) {
+          loseResponse = false
+          throw new Error('D1_RESPONSE_LOST')
+        }
+        return result
+      },
+    }
+    const operation = command(bytes, preview.data.previewToken, 'workbook-import-lost-batch')
+    const recovered = await createWorkbookImport({ ...operation, db: commitThenThrowDb })
+    const artifact = await env.DB.prepare(
+      'SELECT object_key FROM workbook_artifacts WHERE id=?',
+    ).bind(recovered.body.data.import.artifactId).first()
+    createdObjects.push(artifact.object_key)
+    expect(await env.ARCHIVE.get(artifact.object_key)).not.toBeNull()
+    expect((await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length)
+      .toBe(beforeObjects + 1)
+    const replayed = await createWorkbookImport(operation)
+    expect(replayed.body).toEqual(recovered.body)
+    expect((await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length)
+      .toBe(beforeObjects + 1)
+  })
+
   it('re-runs and commits a literal valid Panel field edit into an encrypted continuation plan', async () => {
     const callbacks = createWorkbookPanelMetadataCallbacks({
       keyring, config, centreId: 'centre_1',
@@ -424,14 +770,18 @@ describe('workbook import reservation', () => {
       }],
       kind: 'panel-v2', metadata, voidIds: [],
     })
-    const loadPanelState = async () => ({
+    let liveInspectionAllowed = true
+    const loadPanelState = async () => {
+      if (!liveInspectionAllowed) throw new Error('LIVE_LEDGER_CHANGED')
+      return ({
       fieldsByType: { finance_entry: { amountGrosze: { type: 'cents' } } },
       specialistIds: ['sp_staging_workbook_anna_janowska'],
       rows: [{
         id: 'fin_panel_registry_edit', type: 'finance_entry', version: 1,
         kind: 'income', recordType: 'income', values: panelFinanceValues(),
       }],
-    })
+      })
+    }
     const preview = await previewWorkbook({
       bytes, filename: 'fictional-panel.xlsx', actor, keyring, config, centreId: 'centre_1',
       nowMs: NOW_MS, parse: parser, readPanel, loadPanelState,
@@ -449,6 +799,13 @@ describe('workbook import reservation', () => {
       readPanel,
       loadPanelState,
     })
+    liveInspectionAllowed = false
+    const recovered = await createWorkbookImport({
+      ...command(bytes, preview.data.previewToken, 'workbook-import-panel-edit'),
+      readPanel,
+      loadPanelState,
+    })
+    expect(recovered.body).toEqual(imported.body)
     const artifact = await env.DB.prepare(
       'SELECT object_key FROM workbook_artifacts WHERE id=?',
     ).bind(imported.body.data.import.artifactId).first()
@@ -480,6 +837,8 @@ describe('workbook import reservation', () => {
       schema: 'workbook_import_plan.v1',
       workbookKind: 'panel-v2',
       previewPlanDigest: expect.stringMatching(/^v1_[A-Za-z0-9_-]{43}$/),
+      conflicts: [],
+      appliedResolutions: [],
       panel: {
         updates: [{
           expectedVersion: 1,
@@ -536,7 +895,9 @@ describe('workbook import reservation', () => {
       db: exportBudget.work, bucket: env.ARCHIVE, actor, keyring, config,
       centreId: 'centre_1', nowMs: NOW_MS + 4_000, format: 'panel-v2',
     })
-    expect(exportBudget.usage()).toMatchObject({ used: 4, workRemaining: 38 })
+    panelExportSeed?.fill(0)
+    panelExportSeed = exported.bytes.slice()
+    expect(exportBudget.usage()).toMatchObject({ used: 6, workRemaining: 36 })
     expect(exported.filename).toBe('bear-with-me-panel-v2-2027-01-15.xlsx')
     const exportedPanel = await readPanelWorkbook(exported.bytes, { verify: callbacks.verify })
     expect(exportedPanel.kind).toBe('panel-v2')
@@ -573,6 +934,203 @@ describe('workbook import reservation', () => {
     expect(rePreview.data.panelChanges.unchangedIds).toContain('fin_panel_registry_edit')
     expect((await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length)
       .toBe(objectCount)
+  })
+
+  it.each(['edit', 'void'])(
+    'rejects a generated Panel %s when an activity dependency appears after preview',
+    async (action) => {
+      const entryId = `fin_panel_dependency_${action}`
+      const bytes = await exportedPanelMutation({ action, entryId })
+      const loadPanelState = (input) => loadWorkbookPanelState({
+        db: env.DB, keyring, ...input,
+      })
+      const preview = await previewWorkbook({
+        bytes, filename: 'fictional-panel.xlsx', actor, keyring, config, centreId: 'centre_1',
+        nowMs: NOW_MS, parse: parser, readPanel: readPanelWorkbook, loadPanelState,
+        nonceFactory: () => new Uint8Array(16).fill(13),
+      })
+      expect(preview.data.conflicts).toEqual([])
+      const imported = await createWorkbookImport({
+        ...command(bytes, preview.data.previewToken, `workbook-panel-dependency-${action}`),
+        readPanel: readPanelWorkbook, loadPanelState,
+      })
+      const artifact = await env.DB.prepare(
+        'SELECT object_key FROM workbook_artifacts WHERE id=?',
+      ).bind(imported.body.data.import.artifactId).first()
+      createdObjects.push(artifact.object_key)
+      await env.DB.prepare(`INSERT INTO activity_charges
+        (id,participant_id,program_id,group_id,membership_id,period_precision,
+         occurred_on,accounting_month,lesson_count,responsible_specialist_id,
+         finance_entry_id,status,version,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        `ach_panel_dependency_${action}`, `acp_panel_dependency_${action}`,
+        'apg_english', null, null, 'day', '2025-09-02', '2025-09', 1,
+        'sp_staging_workbook_anna_janowska', entryId, 'active', 1, NOW, NOW,
+      ).run()
+      await expect(continueWorkbookImport({
+        db: env.DB, actor, keyring, config, centreId: 'centre_1',
+        nowMs: NOW_MS + 2_000, correlationId: `corr_panel_dependency_${action}`,
+        idFactory, importId: imported.body.data.import.id, expectedVersion: 1,
+        idempotencyKey: `workbook-panel-dependency-continue-${action}`,
+      })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+      expect(await env.DB.prepare(`SELECT version FROM finance_entries WHERE id=?`).bind(
+        entryId,
+      ).first('version')).toBe(1)
+      expect(await env.DB.prepare(`SELECT status,cursor,version
+        FROM workbook_materialization_jobs WHERE import_id=?`).bind(
+        imported.body.data.import.id,
+      ).first()).toEqual({ status: 'ready', cursor: 0, version: 1 })
+    },
+  )
+
+  it.each([
+    ['edit', 'preview_edit'],
+    ['void', 'preview_void'],
+  ])('blocks a generated activity-linked Panel %s during real preview', async (action, suffix) => {
+    const entryId = `fin_panel_dependency_${suffix}`
+    await env.DB.prepare(`INSERT INTO activity_charges
+      (id,participant_id,program_id,group_id,membership_id,period_precision,
+       occurred_on,accounting_month,lesson_count,responsible_specialist_id,
+       finance_entry_id,status,version,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+      `ach_panel_dependency_${suffix}`, `acp_panel_dependency_${suffix}`,
+      'apg_english', null, null, 'day', '2025-09-02', '2025-09', 1,
+      'sp_staging_workbook_anna_janowska', entryId, 'active', 1, NOW, NOW,
+    ).run()
+    const bytes = await exportedPanelMutation({ action, entryId })
+    const preview = await previewWorkbook({
+      bytes, filename: 'fictional-panel.xlsx', actor, keyring, config, centreId: 'centre_1',
+      nowMs: NOW_MS, parse: parser, readPanel: readPanelWorkbook,
+      loadPanelState: (input) => loadWorkbookPanelState({ db: env.DB, keyring, ...input }),
+      nonceFactory: () => new Uint8Array(16).fill(13),
+    })
+    expect(preview.data.conflicts).toEqual([{
+      code: 'PANEL_DEPENDENCY_CONFLICT', field: null, recordId: entryId,
+    }])
+    expect(preview.data.panelChanges).toEqual({
+      unchangedIds: [], updates: [], voidIds: [],
+    })
+  })
+
+  it('blocks a generated historical-occurrence-linked signed void during real preview', async () => {
+    const entryId = 'fin_panel_dependency_historical'
+    await addHistoricalDependency(entryId, 'historical')
+    const bytes = await exportedPanelMutation({ action: 'void', entryId })
+    const preview = await previewWorkbook({
+      bytes, filename: 'fictional-panel.xlsx', actor, keyring, config, centreId: 'centre_1',
+      nowMs: NOW_MS, parse: parser, readPanel: readPanelWorkbook,
+      loadPanelState: (input) => loadWorkbookPanelState({ db: env.DB, keyring, ...input }),
+      nonceFactory: () => new Uint8Array(16).fill(13),
+    })
+    expect(preview.data.conflicts).toEqual([{
+      code: 'PANEL_DEPENDENCY_CONFLICT', field: null, recordId: entryId,
+    }])
+    expect(preview.data.panelChanges.voidIds).toEqual([])
+  })
+
+  it('rejects a generated signed void when a historical dependency appears after preview', async () => {
+    const entryId = 'fin_panel_dependency_historical_race'
+    const bytes = await exportedPanelMutation({ action: 'void', entryId })
+    const loadPanelState = (input) => loadWorkbookPanelState({
+      db: env.DB, keyring, ...input,
+    })
+    const preview = await previewWorkbook({
+      bytes, filename: 'fictional-panel.xlsx', actor, keyring, config, centreId: 'centre_1',
+      nowMs: NOW_MS, parse: parser, readPanel: readPanelWorkbook, loadPanelState,
+      nonceFactory: () => new Uint8Array(16).fill(13),
+    })
+    expect(preview.data.conflicts).toEqual([])
+    const imported = await createWorkbookImport({
+      ...command(bytes, preview.data.previewToken, 'workbook-panel-historical-race'),
+      readPanel: readPanelWorkbook, loadPanelState,
+    })
+    const artifact = await env.DB.prepare(
+      'SELECT object_key FROM workbook_artifacts WHERE id=?',
+    ).bind(imported.body.data.import.artifactId).first()
+    createdObjects.push(artifact.object_key)
+    await addHistoricalDependency(entryId, 'historical_race')
+    await expect(continueWorkbookImport({
+      db: env.DB, actor, keyring, config, centreId: 'centre_1',
+      nowMs: NOW_MS + 2_000, correlationId: 'corr_panel_historical_race',
+      idFactory, importId: imported.body.data.import.id, expectedVersion: 1,
+      idempotencyKey: 'workbook-panel-historical-continue-race',
+    })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+    expect(await env.DB.prepare(`SELECT version FROM finance_entries WHERE id=?`).bind(
+      entryId,
+    ).first('version')).toBe(1)
+    expect(await env.DB.prepare(`SELECT status,cursor,version
+      FROM workbook_materialization_jobs WHERE import_id=?`).bind(
+      imported.body.data.import.id,
+    ).first()).toEqual({ status: 'ready', cursor: 0, version: 1 })
+  })
+
+  it('rolls back a Panel slice when an activity dependency wins the D1 race', async () => {
+    const entryId = 'fin_panel_dependency_race'
+    const bytes = new TextEncoder().encode('fictional-panel-dependency-race')
+    const callbacks = createWorkbookPanelMetadataCallbacks({
+      keyring, config, centreId: 'centre_1',
+    })
+    const metadata = {
+      format: 'Panel-v2', scope: { id: 'centre_1', type: 'centre' },
+      rows: [{
+        id: entryId, type: 'finance_entry', baseVersion: 1,
+        fieldDigests: { amountGrosze: await callbacks.digestField({
+          rowType: 'finance_entry', rowId: entryId,
+          field: 'amountGrosze', value: 34_000,
+        }) },
+      }], voidIds: [],
+    }
+    const readPanel = async () => ({
+      edits: [{ id: entryId, sheet: 'Panel — Wizyty', values: { amountGrosze: 35_000 } }],
+      kind: 'panel-v2', metadata, voidIds: [],
+    })
+    const loadPanelState = (input) => loadWorkbookPanelState({
+      db: env.DB, keyring, ...input,
+    })
+    const preview = await previewWorkbook({
+      bytes, filename: 'fictional-panel.xlsx', actor, keyring, config,
+      centreId: 'centre_1', nowMs: NOW_MS, parse: parser, readPanel, loadPanelState,
+      nonceFactory: () => new Uint8Array(16).fill(13),
+    })
+    const imported = await createWorkbookImport({
+      ...command(bytes, preview.data.previewToken, 'workbook-panel-dependency-race'),
+      readPanel, loadPanelState,
+    })
+    const artifact = await env.DB.prepare(
+      'SELECT object_key FROM workbook_artifacts WHERE id=?',
+    ).bind(imported.body.data.import.artifactId).first()
+    createdObjects.push(artifact.object_key)
+    let raced = false
+    const racedDb = {
+      prepare(sql) { return env.DB.prepare(sql) },
+      async batch(statements) {
+        if (!raced) {
+          raced = true
+          await env.DB.prepare(`INSERT INTO activity_charges
+            (id,participant_id,program_id,group_id,membership_id,period_precision,
+             occurred_on,accounting_month,lesson_count,responsible_specialist_id,
+             finance_entry_id,status,version,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+            'ach_panel_dependency_race', 'acp_panel_dependency_race', 'apg_english',
+            null, null, 'day', '2025-09-02', '2025-09', 1,
+            'sp_staging_workbook_anna_janowska', entryId, 'active', 1, NOW, NOW,
+          ).run()
+        }
+        return env.DB.batch(statements)
+      },
+    }
+    await expect(continueWorkbookImport({
+      db: racedDb, actor, keyring, config, centreId: 'centre_1',
+      nowMs: NOW_MS + 2_000, correlationId: 'corr_panel_dependency_race',
+      idFactory, importId: imported.body.data.import.id, expectedVersion: 1,
+      idempotencyKey: 'workbook-panel-dependency-continue-race',
+    })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+    expect(await env.DB.prepare(`SELECT amount_grosze,version FROM finance_entries
+      WHERE id=?`).bind(entryId).first()).toEqual({ amount_grosze: 34_000, version: 1 })
+    expect(await env.DB.prepare(`SELECT status,cursor,version
+      FROM workbook_materialization_jobs WHERE import_id=?`).bind(
+      imported.body.data.import.id,
+    ).first()).toEqual({ status: 'ready', cursor: 0, version: 1 })
   })
 
   it('invalidates a preview when current Panel base state changes before exact-file commit', async () => {
@@ -747,5 +1305,150 @@ describe('workbook import reservation', () => {
     expect((await env.DB.prepare(`SELECT count(*) AS count FROM finance_entries
       WHERE id LIKE 'fin_panel_budget_%' AND version=2
         AND paid_amount_grosze=amount_grosze`).first()).count).toBe(64)
+  })
+
+  it('treats a manual void as a permanent Panel tombstone at read and apply boundaries', async () => {
+    const createdAt = new Date(NOW_MS + 10_000).toISOString()
+    await env.DB.prepare(`INSERT INTO finance_manual_voids
+      (id,finance_entry_id,expected_entry_version,reason_envelope,
+       voided_by_staff_id,created_at) VALUES (?,?,?,?,?,?)`).bind(
+      'fmv_panel_registry_tombstone', 'fin_panel_registry_edit', 3, '{}',
+      actor.id, createdAt,
+    ).run()
+    const state = await loadWorkbookPanelState({
+      db: env.DB, keyring, centreId: 'centre_1',
+      rows: [{ id: 'fin_panel_registry_edit', type: 'finance_entry' }],
+    })
+    expect(state.rows).toEqual([])
+
+    const importId = 'wbi_panel_manual_void_stale'
+    const sourceKey = await getOrCreateDataKey(env.DB, keyring, {
+      type: 'workbook_source_registry', id: 'centre_1', purpose: 'source_registry',
+    }, { id: 'key_panel_manual_void_stale', createdAt })
+    const planEnvelope = JSON.stringify(await encryptForScope(keyring, sourceKey, {
+      expectedScope: {
+        type: 'workbook_source_registry', id: 'centre_1', purpose: 'source_registry',
+      },
+      recordId: importId,
+      field: 'materialization_plan',
+      plaintext: JSON.stringify({
+        schema: 'workbook_import_plan.v1', workbookKind: 'panel-v2',
+        previewPlanDigest: `v1_${'M'.repeat(43)}`,
+        panel: { updates: [{
+          id: 'fin_panel_registry_edit', type: 'finance_entry', expectedVersion: 3,
+          values: { amountGrosze: 22_000 },
+        }], voids: [] },
+      }),
+    }))
+    const progress = JSON.stringify({
+      accepted: 0, accountingMonthsCorrected: 0, candidateCount: 0,
+      financeBatchId: null, fixedRevenuesInserted: 0, formulaGhostsVoided: 0,
+      inserted: 0, linked: 0, quarantined: 0, quarantinedVoided: 0,
+      specialistAssignmentsCorrected: 0, textAmountVisitsInserted: 0, voided: 0,
+    })
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO workbook_artifacts
+        (id,centre_id,environment,fingerprint,byte_size,parser_version,
+         materializer_version,object_key,content_nonce_b64,workbook_kek_version,
+         metadata_hmac_version,metadata_signature,created_by_staff_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        'wba_panel_manual_void_stale', 'centre_1', 'staging', 'd'.repeat(64), 64,
+        2, 2, 'workbook-objects/wbo_panel_manual_void_stale_000000000000',
+        'A'.repeat(16), 1, 1, 'B'.repeat(43), actor.id, createdAt,
+      ),
+      env.DB.prepare(`INSERT INTO workbook_templates
+        (id,artifact_id,format,source_kind,created_by_staff_id,created_at)
+        VALUES (?,?,?,?,?,?)`).bind(
+        'wbt_panel_manual_void_stale', 'wba_panel_manual_void_stale', 'panel-v2',
+        'panel_round_trip', actor.id, createdAt,
+      ),
+      env.DB.prepare(`INSERT INTO workbook_imports
+        (id,artifact_id,preview_token_digest,status,accepted_records,quarantined_records,
+         correlation_id,created_by_staff_id,version,created_at,updated_at,completed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        importId, 'wba_panel_manual_void_stale', 'V'.repeat(43), 'ready', 0, 0,
+        'corr_panel_manual_void_stale', actor.id, 1, createdAt, createdAt, null,
+      ),
+      env.DB.prepare(`INSERT INTO workbook_import_plans
+        (import_id,workbook_kind,plan_version,plan_envelope,created_at)
+        VALUES (?,?,?,?,?)`).bind(importId, 'panel-v2', 1, planEnvelope, createdAt),
+      env.DB.prepare(`INSERT INTO workbook_materialization_jobs
+        (id,import_id,phase,status,cursor,total_records,processed_records,
+         progress_json,created_by_staff_id,version,created_at,updated_at,completed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        'wbj_panel_manual_void_stale', importId, 'apply_finance', 'ready', 0, 1, 0,
+        progress, actor.id, 1, createdAt, createdAt, null,
+      ),
+    ])
+    await expect(continueWorkbookImport({
+      db: env.DB, actor, keyring, config, centreId: 'centre_1',
+      nowMs: NOW_MS + 11_000, correlationId: 'corr_panel_manual_void_continue',
+      idFactory, importId, expectedVersion: 1,
+      idempotencyKey: 'workbook-panel-manual-void-stale',
+    })).rejects.toThrow(/^VERSION_CONFLICT$/)
+    expect(await env.DB.prepare(`SELECT amount_grosze,version FROM finance_entries
+      WHERE id='fin_panel_registry_edit'`).first()).toEqual({
+      amount_grosze: 20_000, version: 3,
+    })
+
+    const voidImportId = 'wbi_panel_manual_void_stale_void'
+    const voidEnvelope = JSON.stringify(await encryptForScope(keyring, sourceKey, {
+      expectedScope: {
+        type: 'workbook_source_registry', id: 'centre_1', purpose: 'source_registry',
+      },
+      recordId: voidImportId,
+      field: 'materialization_plan',
+      plaintext: JSON.stringify({
+        schema: 'workbook_import_plan.v1', workbookKind: 'panel-v2',
+        previewPlanDigest: `v1_${'N'.repeat(43)}`,
+        panel: { updates: [], voids: [{
+          id: 'fin_panel_registry_edit', type: 'finance_entry', expectedVersion: 3,
+        }] },
+      }),
+    }))
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO workbook_artifacts
+        (id,centre_id,environment,fingerprint,byte_size,parser_version,
+         materializer_version,object_key,content_nonce_b64,workbook_kek_version,
+         metadata_hmac_version,metadata_signature,created_by_staff_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        'wba_panel_manual_void_stale_void', 'centre_1', 'staging', 'e'.repeat(64), 64,
+        2, 2, 'workbook-objects/wbo_panel_manual_void_stale_void_00000000',
+        'A'.repeat(16), 1, 1, 'B'.repeat(43), actor.id, createdAt,
+      ),
+      env.DB.prepare(`INSERT INTO workbook_templates
+        (id,artifact_id,format,source_kind,created_by_staff_id,created_at)
+        VALUES (?,?,?,?,?,?)`).bind(
+        'wbt_panel_manual_void_stale_void', 'wba_panel_manual_void_stale_void',
+        'panel-v2', 'panel_round_trip', actor.id, createdAt,
+      ),
+      env.DB.prepare(`INSERT INTO workbook_imports
+        (id,artifact_id,preview_token_digest,status,accepted_records,quarantined_records,
+         correlation_id,created_by_staff_id,version,created_at,updated_at,completed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        voidImportId, 'wba_panel_manual_void_stale_void', 'W'.repeat(43), 'ready', 0, 0,
+        'corr_panel_manual_void_stale_void', actor.id, 1, createdAt, createdAt, null,
+      ),
+      env.DB.prepare(`INSERT INTO workbook_import_plans
+        (import_id,workbook_kind,plan_version,plan_envelope,created_at)
+        VALUES (?,?,?,?,?)`).bind(voidImportId, 'panel-v2', 1, voidEnvelope, createdAt),
+      env.DB.prepare(`INSERT INTO workbook_import_plan_summaries
+        (import_id,mapping_conflict_count) VALUES (?,0)`).bind(voidImportId),
+      env.DB.prepare(`INSERT INTO workbook_materialization_jobs
+        (id,import_id,phase,status,cursor,total_records,processed_records,
+         progress_json,created_by_staff_id,version,created_at,updated_at,completed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
+        'wbj_panel_manual_void_stale_void', voidImportId, 'apply_finance', 'ready',
+        0, 1, 0, progress, actor.id, 1, createdAt, createdAt, null,
+      ),
+    ])
+    await expect(continueWorkbookImport({
+      db: env.DB, actor, keyring, config, centreId: 'centre_1',
+      nowMs: NOW_MS + 12_000, correlationId: 'corr_panel_manual_void_continue_void',
+      idFactory, importId: voidImportId, expectedVersion: 1,
+      idempotencyKey: 'workbook-panel-manual-void-stale-void',
+    })).rejects.toThrow(/^VERSION_CONFLICT$/)
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM finance_entry_voids
+      WHERE finance_entry_id='fin_panel_registry_edit'`).first('count')).toBe(0)
   })
 })

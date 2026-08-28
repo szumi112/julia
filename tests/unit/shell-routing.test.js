@@ -62,7 +62,7 @@ test('maps every rendered protected route to capabilities instead of role labels
     },
     {
       capabilities: ['appointment.charge.read'],
-      accessible: ['payments', 'settings'],
+      accessible: ['settings'],
     },
     {
       capabilities: ['finance.centre.read'],

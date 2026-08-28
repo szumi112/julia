@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   canAccessProtectedRoute,
   canPerformAction,
+  protectedPaymentsSurface,
 } from '../../src/capability-access.js'
 
 const WORKSPACE_ROUTES = ['dashboard', 'calendar', 'clients', 'client']
@@ -92,6 +93,20 @@ test('workspace-backed routes require every capability consumed by the workspace
   }
 })
 
+test('protected payments selects authority scope from capabilities, never display role', () => {
+  assert.equal(protectedPaymentsSurface(['finance.centre.read'], null), 'centre')
+  assert.equal(protectedPaymentsSurface(['finance.centre.read'], 'sp_fictional'), 'centre')
+  assert.equal(protectedPaymentsSurface(WORKSPACE_CAPABILITIES, 'sp_fictional'), 'own')
+  for (const missing of WORKSPACE_CAPABILITIES) {
+    assert.equal(protectedPaymentsSurface(
+      WORKSPACE_CAPABILITIES.filter((capability) => capability !== missing),
+      'sp_fictional',
+    ), 'unavailable', `own payments rejects authority missing ${missing}`)
+  }
+  assert.equal(protectedPaymentsSurface(WORKSPACE_CAPABILITIES, null), 'unavailable')
+  assert.equal(protectedPaymentsSurface([], 'sp_fictional'), 'unavailable')
+})
+
 test('protected activity routes require the TUS management capability', () => {
   for (const routeName of ['tus', 'tusGroup', 'english']) {
     assert.equal(canAccessProtectedRoute(['tus.manage'], routeName), true)
@@ -100,9 +115,14 @@ test('protected activity routes require the TUS management capability', () => {
   }
 })
 
-test('payments accepts either centre-finance read or appointment-charge read', () => {
+test('payments accepts either centre finance or the complete workspace read authority', () => {
   assert.equal(canAccessProtectedRoute(['finance.centre.read'], 'payments'), true)
-  assert.equal(canAccessProtectedRoute(['appointment.charge.read'], 'payments'), true)
+  assert.equal(canAccessProtectedRoute(WORKSPACE_CAPABILITIES, 'payments'), true)
+  for (const missing of WORKSPACE_CAPABILITIES) {
+    assert.equal(canAccessProtectedRoute(
+      WORKSPACE_CAPABILITIES.filter((capability) => capability !== missing), 'payments',
+    ), false, `payments rejects authority missing ${missing}`)
+  }
   assert.equal(canAccessProtectedRoute(['chat.general'], 'payments'), false)
   assert.equal(canAccessProtectedRoute([], 'payments'), false)
 })

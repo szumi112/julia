@@ -41,6 +41,7 @@ const valueFor = (type) => ({
   staffId: 'stf_one',
   version: 1,
   workbookImportId: 'wbi_one',
+  workbookExportId: 'wbe_one',
 })[type]
 
 const eventFor = (action) => {
@@ -61,6 +62,7 @@ const eventFor = (action) => {
           : schema.entityIdKind === 'financeEntryId' ? 'fin_one'
             : schema.entityIdKind === 'specialistId' ? 'sp_one'
                 : schema.entityIdKind === 'workbookImportId' ? 'wbi_one'
+                  : schema.entityIdKind === 'workbookExportId' ? 'wbe_one'
                 : schema.entityIdKind === 'historicalClientId' ? 'hcl_one'
                   : schema.entityIdKind === 'staffId' ? 'stf_one' : 'pay_one',
     result: 'success',

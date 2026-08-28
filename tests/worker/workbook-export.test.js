@@ -1,7 +1,8 @@
 import { env } from 'cloudflare:workers'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { exportWorkbook } from '../../worker/core/workbooks.js'
+import { exportWorkbook, loadWorkbookPanelState } from '../../worker/core/workbooks.js'
+import { recordWorkbookExport } from '../../worker/core/workbook-registry.js'
 import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
@@ -171,6 +172,9 @@ const sealFinance = async (recordId, field, value) => JSON.stringify(await encry
     expectedScope: FINANCE_SCOPE, recordId, field, plaintext: JSON.stringify(value),
   },
 ))
+const fingerprintFor = async (bytes) => [...new Uint8Array(await crypto.subtle.digest(
+  'SHA-256', bytes,
+))].map((value) => value.toString(16).padStart(2, '0')).join('')
 
 describe('legacy workbook export', () => {
   it('patches linked canonical facts and only signed Panel voids while retaining evidence', async () => {
@@ -314,6 +318,10 @@ describe('legacy workbook export', () => {
     const queryBudget = createD1QueryBudget(snapshotDb, {
       totalLimit: 50, recoveryReserve: 8,
     })
+    await env.DB.prepare(`UPDATE specialists SET status='archived',version=version+1,
+      archived_at=?,updated_at=? WHERE id=?`).bind(
+      '2027-01-15T10:01:00.000Z', '2027-01-15T10:01:00.000Z', ROTATED_SPECIALIST_ID,
+    ).run()
     const exported = await exportWorkbook({
       db: queryBudget.work, bucket: env.ARCHIVE, actor, keyring, config,
       centreId: 'centre_1', nowMs: NOW_MS + 120_000, format: 'legacy',
@@ -350,8 +358,95 @@ describe('legacy workbook export', () => {
       .toMatchObject({ accountingMonth: '2025-10', amountGrosze: 20_000 })
     expect((await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length)
       .toBe(beforeObjects)
-    expect(snapshotBatchSizes).toEqual([4])
-    expect(queryBudget.usage()).toMatchObject({ used: 9, workRemaining: 33 })
+    expect(snapshotBatchSizes).toEqual([5])
+    expect(queryBudget.usage()).toMatchObject({ used: 11, workRemaining: 31 })
+    await env.DB.prepare(`UPDATE specialists SET status='active',version=version+1,
+      archived_at=NULL,updated_at=? WHERE id=?`).bind(
+      '2027-01-15T10:02:00.000Z', ROTATED_SPECIALIST_ID,
+    ).run()
+    const firstHistory = await recordWorkbookExport({
+      db: env.DB, actor, nowMs: NOW_MS + 120_000,
+      correlationId: '11111111-1111-4111-8111-111111111111',
+      idFactory: () => 'export_legacy_recovery_first', format: 'legacy',
+      byteSize: exported.bytes.byteLength, filename: exported.filename,
+      fingerprint: await fingerprintFor(exported.bytes),
+      idempotencyKey: 'workbook-export-recovery-legacy',
+    })
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE action='workbook.export.created'`).first('count')).toBe(1)
+    const nextDay = await exportWorkbook({
+      db: env.DB, bucket: env.ARCHIVE, actor, keyring, config,
+      centreId: 'centre_1', nowMs: NOW_MS + 24 * 60 * 60 * 1000, format: 'legacy',
+    })
+    expect(nextDay.filename).not.toBe(exported.filename)
+    const historyBeforeConflict = await env.DB.prepare(`SELECT count(*) AS count
+      FROM workbook_export_history WHERE id=?`).bind(firstHistory.body.data.id).first('count')
+    await expect(recordWorkbookExport({
+      db: env.DB, actor, nowMs: NOW_MS + 24 * 60 * 60 * 1000,
+      correlationId: '22222222-2222-4222-8222-222222222222',
+      idFactory: () => 'must_not_generate', format: 'legacy',
+      byteSize: nextDay.bytes.byteLength, filename: nextDay.filename,
+      fingerprint: await fingerprintFor(nextDay.bytes),
+      idempotencyKey: 'workbook-export-recovery-legacy',
+    })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM workbook_export_history
+      WHERE format='legacy'`).first('count')).toBe(historyBeforeConflict)
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE action='workbook.export.created'`).first('count')).toBe(1)
+    const secondHistory = await recordWorkbookExport({
+      db: env.DB, actor, nowMs: NOW_MS + 24 * 60 * 60 * 1000,
+      correlationId: '33333333-3333-4333-8333-333333333333',
+      idFactory: () => 'export_legacy_recovery_second', format: 'legacy',
+      byteSize: nextDay.bytes.byteLength, filename: nextDay.filename,
+      fingerprint: await fingerprintFor(nextDay.bytes),
+      idempotencyKey: 'workbook-export-recovery-new-key',
+    })
+    expect(secondHistory.body.data.id).not.toBe(firstHistory.body.data.id)
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM workbook_export_history
+      WHERE id IN (?,?)`).bind(
+      firstHistory.body.data.id, secondHistory.body.data.id,
+    ).first('count')).toBe(2)
+    expect(await env.DB.prepare(`SELECT count(*) AS count FROM audit_events
+      WHERE action='workbook.export.created'`).first('count')).toBe(2)
+    nextDay.bytes.fill(0)
+  })
+
+  it('exports manual voids as source removals or accurately labelled tombstones', async () => {
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO finance_manual_voids
+        (id,finance_entry_id,expected_entry_version,reason_envelope,
+         voided_by_staff_id,created_at) VALUES (?,?,?,?,?,?)`).bind(
+        'fmv_export_linked', 'fin_export_block', 2, '{}', OWNER_ID,
+        '2027-01-15T10:02:00.000Z',
+      ),
+      env.DB.prepare(`INSERT INTO finance_manual_voids
+        (id,finance_entry_id,expected_entry_version,reason_envelope,
+         voided_by_staff_id,created_at) VALUES (?,?,?,?,?,?)`).bind(
+        'fmv_export_unlinked', 'fin_export_unlinked', 2, '{}', OWNER_ID,
+        '2027-01-15T10:02:00.001Z',
+      ),
+    ])
+    const panelState = await loadWorkbookPanelState({
+      db: env.DB, keyring, centreId: 'centre_1', rows: [
+        { id: 'fin_export_block', type: 'finance_entry' },
+        { id: 'fin_export_unlinked', type: 'finance_entry' },
+      ],
+    })
+    expect(panelState.rows).toEqual([])
+
+    const exported = await exportWorkbook({
+      db: env.DB, bucket: env.ARCHIVE, actor, keyring, config,
+      centreId: 'centre_1', nowMs: NOW_MS + 180_000, format: 'legacy',
+    })
+    const files = unzipSync(exported.bytes)
+    const worksheet = strFromU8(files['xl/worksheets/sheet1.xml'])
+    const allText = Object.values(files).map((bytes) => strFromU8(bytes)).join('\n')
+    expect(worksheet).toMatch(/<row r="6"><\/row>/)
+    expect(allText).toContain('fin_export_unlinked')
+    expect(allText).toContain('Unieważniono ręcznie w rejestrze finansowym')
+    expect(allText).not.toContain(
+      'Zmiany rekordu ze źródła: miesiąc 2025-12; płatność przelew',
+    )
   })
 
   it('refuses a snapshot while any workbook materialization can still mutate the ledger', async () => {
@@ -437,6 +532,8 @@ describe('legacy workbook export', () => {
           results: [{ nonterminal: 0, object_key: 'opaque-workbook-object' }],
         }, {
           results: Array.from({ length: 5_001 }, (_, index) => ({ id: `fin_${index}` })),
+        }, {
+          results: [{ revision: 1 }],
         }],
       },
       bucket: unreadBucket, actor, keyring, config, centreId: 'centre_1',
@@ -475,6 +572,10 @@ describe('legacy workbook export', () => {
           results: [{ authority_revision: 7, capability: null, decision: null }],
         }
       },
+      async first() {
+        if (!sql.includes('FROM finance_reporting_state')) throw new Error('UNEXPECTED_QUERY')
+        return { revision: 9 }
+      },
     })
     let artifactReads = 0
     const sourceFreeBucket = {
@@ -492,13 +593,15 @@ describe('legacy workbook export', () => {
     const db = {
       prepare: statementFor,
       async batch(statements) {
-        expect(statements).toHaveLength(2)
+        expect(statements).toHaveLength(3)
         expect(statements[1].sql).toContain('entry.specialist_id=?')
         expect(statements[1].args.at(-1)).toBe(SPECIALIST_ID)
         return [{
           results: [{ nonterminal: 0, object_key: 'must-not-be-read' }],
         }, {
           results: [ownRow],
+        }, {
+          results: [{ revision: 9 }],
         }]
       },
     }
@@ -526,6 +629,51 @@ describe('legacy workbook export', () => {
     expect(panel.edits).toEqual([expect.objectContaining({ id: 'fin_specialist_own' })])
   })
 
+  it('fails a specialist export when ledger ownership changes after its snapshot', async () => {
+    const specialist = Object.freeze({
+      id: 'stf_workbook_export_specialist', role: 'specialist',
+      specialistId: SPECIALIST_ID, version: 4, authorityRevision: 7,
+      capabilities: ROLE_DEFAULT_CAPABILITIES.specialist,
+    })
+    const statementFor = (sql) => ({
+      bind() { return this },
+      async all() {
+        if (!sql.includes('FROM staff_authorities AS authority')) {
+          throw new Error('UNEXPECTED_QUERY')
+        }
+        return { results: [{ authority_revision: 7, capability: null, decision: null }] }
+      },
+      async first() {
+        if (!sql.includes('FROM finance_reporting_state')) throw new Error('UNEXPECTED_QUERY')
+        return { revision: 10 }
+      },
+      sql,
+    })
+    const db = {
+      prepare: statementFor,
+      async batch() {
+        return [{
+          results: [{ nonterminal: 0, object_key: 'must-not-be-read' }],
+        }, {
+          results: [{
+            id: 'fin_specialist_stale_owner', accounting_month: '2027-01',
+            occurred_on: '2027-01-15', amount_grosze: 18_000,
+            paid_amount_grosze: 18_000, payment_method: 'cash',
+            settlement_status: 'paid', invoice_status: 'not_required',
+            specialist_id: SPECIALIST_ID, version: 2,
+          }],
+        }, {
+          results: [{ revision: 9 }],
+        }]
+      },
+    }
+    await expect(exportWorkbook({
+      db, bucket: { get: async () => { throw new Error('R2_READ_TRAP') } },
+      actor: specialist, keyring, config, centreId: 'centre_1',
+      nowMs: NOW_MS, format: 'panel-v2',
+    })).rejects.toThrow(/^WORKBOOK_EXPORT_CONFLICT$/)
+  })
+
   it('fails before opening R2 when the authority revision changed after the snapshot', async () => {
     const statementFor = (sql) => ({
       bind() { return this },
@@ -546,6 +694,8 @@ describe('legacy workbook export', () => {
           results: [{ nonterminal: 0, object_key: 'must-not-be-read' }],
         }, {
           results: [],
+        }, {
+          results: [{ revision: 9 }],
         }]
       },
     }

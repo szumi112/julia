@@ -83,6 +83,21 @@ import {
   postFinanceImportChunk,
   postFinanceImportCommit,
 } from './routes/finance.js'
+import {
+  getFinanceWindow,
+  postFinanceEntryVoid,
+} from './routes/finance-reporting.js'
+import {
+  loadWorkbookRegistry,
+  loadWorkbookRegistryDetail,
+  recordWorkbookExport,
+  recordWorkbookResolutions,
+} from './core/workbook-registry.js'
+import {
+  loadWorkbookOperatorEvidence,
+  loadWorkbookReconciliationEvidence,
+  verifyWorkbookImportArtifact,
+} from './core/workbook-operator-evidence.js'
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
 import { loadDataKey } from './security/envelope.js'
 import { createKeyring } from './security/keyring.js'
@@ -110,6 +125,7 @@ const STAFF_ID = /^\/api\/v1\/staff\/stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}\/deacti
 const SPECIALIST_INVITATION_ID = /^\/api\/v1\/specialists\/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}\/invitations$/
 const ACTION_RESOLUTION_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/resolution$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
+const INVALID_WORKBOOK_FILENAME_TEXT = /[\p{Cc}\p{Cf}]/u
 const CLIENT_PATH_ID = 'cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}'
 const STAFF_PATH_ID = 'stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const APPOINTMENT_PATH_ID = 'apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
@@ -178,14 +194,22 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'appointments.payment', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/payments$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'] }),
   descriptor({ id: 'payments.correct', pathPattern: `^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
   descriptor({ id: 'finance.list', path: '/api/v1/finance', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null }),
+  descriptor({ id: 'finance.window', path: '/api/v1/finance/window', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'finance.entry.void', pathPattern: `^/api/v1/finance/entries/${'fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'}/voids$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.entry.voided'], bodyKeys: ['expectedVersion', 'reason'], freshAuth: true }),
   descriptor({ id: 'finance.import.start', path: '/api/v1/finance/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'] }),
   descriptor({ id: 'finance.import.chunk', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/chunks$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'] }),
   descriptor({ id: 'finance.import.commit', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/commit$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'] }),
   descriptor({ id: 'workbooks.preview', path: '/api/v1/workbooks/preview', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, bodyMode: 'workbook-multipart', idempotency: false, queryMode: 'none' }),
-  descriptor({ id: 'workbooks.import', path: '/api/v1/workbooks/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.created'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.import', path: '/api/v1/workbooks/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.created', 'workbook.resolutions.recorded'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
   descriptor({ id: 'workbooks.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.materialized'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
   descriptor({ id: 'workbooks.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
-  descriptor({ id: 'workbooks.export', path: '/api/v1/workbooks/export', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'], auditActions: [], bodyKeys: null, freshAuth: true, queryMode: 'handler' }),
+  descriptor({ id: 'workbooks.operator.evidence', path: '/api/v1/workbooks/operator-evidence', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.artifact.verification', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/artifact-verification$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.reconciliation.evidence', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/reconciliation$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.registry', path: '/api/v1/workbooks/registry', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'workbooks.registry.detail', path: '/api/v1/workbooks/registry/details', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: ['importId', 'section', 'cursor'], idempotency: false }),
+  descriptor({ id: 'workbooks.resolutions', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.resolutions.recorded'], bodyKeys: ['expectedVersion', 'planDigest', 'resolutions'], freshAuth: true }),
+  descriptor({ id: 'workbooks.export.create', path: '/api/v1/workbooks/exports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'], auditActions: ['workbook.export.created'], bodyKeys: ['format'], freshAuth: true }),
   descriptor({ id: 'historical.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
   descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], freshAuth: true }),
   descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], freshAuth: true }),
@@ -364,7 +388,10 @@ const workbookForm = (value, keys) => {
 
 const workbookFile = async (value) => {
   if (!(value instanceof File) || value.size < 1 || value.size > 5 * 1024 * 1024
-    || typeof value.name !== 'string' || !value.name.toLowerCase().endsWith('.xlsx')
+    || typeof value.name !== 'string' || value.name.length < 6 || value.name.length > 255
+    || value.name !== value.name.trim() || value.name !== value.name.normalize('NFC')
+    || INVALID_WORKBOOK_FILENAME_TEXT.test(value.name)
+    || !value.name.toLowerCase().endsWith('.xlsx')
     || value.name.includes('/') || value.name.includes('\\')) {
     throw new AppError('VALIDATION_FAILED', { field: 'filename' })
   }
@@ -372,6 +399,47 @@ const workbookFile = async (value) => {
     bytes: new Uint8Array(await value.arrayBuffer()),
     filename: value.name,
   })
+}
+
+const workbookResolutions = (value) => {
+  if (typeof value !== 'string' || value.length > 16_384) {
+    throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+  }
+  let parsed
+  try { parsed = JSON.parse(value) } catch {
+    throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+  }
+  if (!Array.isArray(parsed) || parsed.length > 100) {
+    throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+  }
+  const result = parsed.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || Object.getPrototypeOf(item) !== Object.prototype
+      || Reflect.ownKeys(item).length !== 2
+      || typeof item.conflictId !== 'string'
+      || !/^wmc_[A-Za-z0-9_-]{43}$/.test(item.conflictId)
+      || typeof item.specialistId !== 'string'
+      || !/^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(item.specialistId)) {
+      throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+    }
+    return Object.freeze({
+      conflictId: item.conflictId, specialistId: item.specialistId,
+    })
+  })
+  if (new Set(result.map(({ conflictId }) => conflictId)).size !== result.length) {
+    throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+  }
+  return Object.freeze(result)
+}
+
+const task11CoreBoundary = async (operation, field) => {
+  try { return await operation() } catch (error) {
+    const match = /^VALIDATION_FAILED\/(registry|registryDetail|resolutions|cursor)$/.exec(
+      error?.message ?? '',
+    )
+    if (match) throw new AppError('VALIDATION_FAILED', { field })
+    throw error
+  }
 }
 
 const workbookStream = (source) => {
@@ -815,6 +883,28 @@ export function createApp(deps = {}) {
     })
     return readResponse(c, result)
   })
+  app.get('/api/v1/finance/window', async (c) => {
+    if (c.get('routeId') !== 'finance.window') throw new AppError('NOT_FOUND')
+    const result = await (deps.getFinanceWindow ?? getFinanceWindow)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      url: c.req.url,
+      ...(deps.loadFinanceWindow ? { load: deps.loadFinanceWindow } : {}),
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/finance/entries/:entryId/voids', async (c) => {
+    if (c.get('routeId') !== 'finance.entry.void') throw new AppError('NOT_FOUND')
+    const result = await (deps.postFinanceEntryVoid ?? postFinanceEntryVoid)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      entryId: c.req.param('entryId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.voidFinanceEntry ? { service: deps.voidFinanceEntry } : {}),
+    })
+    return c.json(result.body, result.status)
+  })
   app.post('/api/v1/finance/imports', async (c) => {
     if (c.get('routeId') !== 'finance.import.start') throw new AppError('NOT_FOUND')
     const result = await (deps.postFinanceImport ?? postFinanceImport)({
@@ -854,11 +944,12 @@ export function createApp(deps = {}) {
     if (c.get('routeId') !== 'workbooks.preview') throw new AppError('NOT_FOUND')
     const form = workbookForm(c.get('multipartBody'), ['workbook'])
     const file = await workbookFile(form.workbook)
-    const config = runtimeConfig(c, deps)
     try {
+      const config = runtimeConfig(c, deps)
       const stateLoader = deps.loadWorkbookPanelState ?? loadWorkbookPanelState
       const result = await (deps.previewWorkbook ?? previewWorkbook)({
         ...file,
+        db: c.get('coreWorkDb'),
         actor: c.get('actor'),
         keyring: c.get('cryptoContext')?.keyring,
         config,
@@ -877,13 +968,16 @@ export function createApp(deps = {}) {
   })
   app.post('/api/v1/workbooks/imports', async (c) => {
     if (c.get('routeId') !== 'workbooks.import') throw new AppError('NOT_FOUND')
-    const form = workbookForm(c.get('multipartBody'), ['previewToken', 'workbook'])
+    const form = workbookForm(
+      c.get('multipartBody'), ['previewToken', 'resolutions', 'workbook'],
+    )
     if (typeof form.previewToken !== 'string') {
       throw new AppError('VALIDATION_FAILED', { field: 'body' })
     }
     const file = await workbookFile(form.workbook)
-    const config = runtimeConfig(c, deps)
     try {
+      const resolutions = workbookResolutions(form.resolutions)
+      const config = runtimeConfig(c, deps)
       const stateLoader = deps.loadWorkbookPanelState ?? loadWorkbookPanelState
       const result = await (deps.createWorkbookImport ?? createWorkbookImport)({
         db: c.get('coreWorkDb'),
@@ -897,6 +991,7 @@ export function createApp(deps = {}) {
         idFactory: deps.idFactory ?? idFactory,
         ...file,
         previewToken: form.previewToken,
+        resolutions,
         idempotencyKey: c.req.header('Idempotency-Key'),
         loadPanelState: (input) => stateLoader({
           db: c.get('coreWorkDb'),
@@ -944,18 +1039,88 @@ export function createApp(deps = {}) {
     })
     return readResponse(c, result)
   })
-  app.get('/api/v1/workbooks/export', async (c) => {
-    if (c.get('routeId') !== 'workbooks.export') throw new AppError('NOT_FOUND')
+  app.get('/api/v1/workbooks/operator-evidence', async (c) => {
+    if (c.get('routeId') !== 'workbooks.operator.evidence') throw new AppError('NOT_FOUND')
+    const result = await (deps.loadWorkbookOperatorEvidence ?? loadWorkbookOperatorEvidence)({
+      db: c.get('coreWorkDb'), bucket: c.env?.ARCHIVE ?? deps.bucket,
+      actor: c.get('actor'), nowMs: c.get('nowMs'),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/imports/:importId/artifact-verification', async (c) => {
+    if (c.get('routeId') !== 'workbooks.artifact.verification') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.verifyWorkbookImportArtifact ?? verifyWorkbookImportArtifact)({
+      db: c.get('coreWorkDb'), bucket: c.env?.ARCHIVE ?? deps.bucket,
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      config: runtimeConfig(c, deps), nowMs: c.get('nowMs'),
+      importId: c.req.param('importId'),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/imports/:importId/reconciliation', async (c) => {
+    if (c.get('routeId') !== 'workbooks.reconciliation.evidence') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.loadWorkbookReconciliationEvidence
+      ?? loadWorkbookReconciliationEvidence)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'), nowMs: c.get('nowMs'),
+      importId: c.req.param('importId'),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/registry', async (c) => {
+    if (c.get('routeId') !== 'workbooks.registry') throw new AppError('NOT_FOUND')
     const url = new URL(c.req.url)
     const keys = [...url.searchParams.keys()]
-    if (keys.length !== 1 || keys[0] !== 'format') {
-      throw new AppError('VALIDATION_FAILED', { field: 'body' })
+    if (keys.some((key) => !['cursor', 'section'].includes(key))
+      || new Set(keys).size !== keys.length || !url.searchParams.has('section')) {
+      throw new AppError('VALIDATION_FAILED', { field: 'registry' })
     }
-    const format = url.searchParams.get('format')
-    if (!['legacy', 'panel-v2'].includes(format)) {
-      throw new AppError('VALIDATION_FAILED', { field: 'body' })
+    const section = url.searchParams.get('section')
+    const cursor = url.searchParams.get('cursor')
+    const canonical = `?section=${section}${cursor === null ? '' : `&cursor=${cursor}`}`
+    if (url.search !== canonical) {
+      throw new AppError('VALIDATION_FAILED', { field: 'registry' })
     }
-    if (url.search !== `?format=${format}`) {
+    const result = await task11CoreBoundary(() => (
+      deps.loadWorkbookRegistry ?? loadWorkbookRegistry)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'), nowMs: c.get('nowMs'),
+      cursor, section,
+      }), 'registry')
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/workbooks/imports/:importId/resolutions', async (c) => {
+    if (c.get('routeId') !== 'workbooks.resolutions') throw new AppError('NOT_FOUND')
+    const body = c.get('jsonBody')
+    const result = await task11CoreBoundary(() => (
+      deps.recordWorkbookResolutions ?? recordWorkbookResolutions)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      importId: c.req.param('importId'), expectedVersion: body.expectedVersion,
+      planDigest: body.planDigest, resolutions: body.resolutions,
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      }), 'resolutions')
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/workbooks/registry/details', async (c) => {
+    if (c.get('routeId') !== 'workbooks.registry.detail') throw new AppError('NOT_FOUND')
+    const body = c.get('jsonBody')
+    const result = await task11CoreBoundary(() => (
+      deps.loadWorkbookRegistryDetail ?? loadWorkbookRegistryDetail)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, config: runtimeConfig(c, deps),
+      nowMs: c.get('nowMs'), importId: body.importId,
+      section: body.section, cursor: body.cursor,
+      }), 'registryDetail')
+    return c.json(result)
+  })
+  app.post('/api/v1/workbooks/exports', async (c) => {
+    if (c.get('routeId') !== 'workbooks.export.create') throw new AppError('NOT_FOUND')
+    const format = c.get('jsonBody')?.format
+    if (format !== 'legacy' && format !== 'panel-v2') {
       throw new AppError('VALIDATION_FAILED', { field: 'body' })
     }
     const result = await (deps.exportWorkbook ?? exportWorkbook)({
@@ -976,17 +1141,32 @@ export function createApp(deps = {}) {
       || result.bytes.byteLength < 1
       || typeof result.filename !== 'string'
       || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.xlsx$/.test(result.filename)) {
+      if (result?.bytes instanceof Uint8Array) result.bytes.fill(0)
       throw new Error('INTERNAL_ERROR')
+    }
+    let fingerprintBytes
+    try {
+      fingerprintBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', result.bytes))
+      await (deps.recordWorkbookExport ?? recordWorkbookExport)({
+        db: c.get('coreWorkDb'), actor: c.get('actor'), nowMs: c.get('nowMs'),
+        correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+        format, byteSize: result.bytes.byteLength, filename: result.filename,
+        fingerprint: [...fingerprintBytes]
+          .map((value) => value.toString(16).padStart(2, '0')).join(''),
+        idempotencyKey: c.req.header('Idempotency-Key'),
+      })
+    } catch (error) {
+      result.bytes.fill(0)
+      throw error
+    } finally {
+      fingerprintBytes?.fill(0)
     }
     const headers = {
       'Cache-Control': 'private, no-store',
+      'Content-Length': String(result.bytes.byteLength),
       'Content-Disposition': `attachment; filename="${result.filename}"`,
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'X-Content-Type-Options': 'nosniff',
-    }
-    if (c.req.method === 'HEAD') {
-      result.bytes.fill(0)
-      return new Response(null, { status: 200, headers })
     }
     return new Response(workbookStream(result.bytes), { status: 200, headers })
   })

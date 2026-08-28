@@ -41,6 +41,7 @@
     "migrate:core:stage-e": "APP_ENV=development DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-e --local",
     "migrate:core:stage-e:staging": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-e --remote --env staging",
     "migrate:core:stage-e:production": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-e --remote --env production",
+    "migration:status:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/migration-status-staging.mjs",
     "upgrade:core-directory": "APP_ENV=development DATA_MODE=fictional node scripts/upgrade-core-directory.js",
     "upgrade:core-directory:staging": "DATA_MODE=fictional node scripts/upgrade-core-directory.js --remote --env staging",
     "upgrade:core-directory:production": "DATA_MODE=fictional node scripts/upgrade-core-directory.js --remote --env production",
@@ -48,6 +49,8 @@
     "backup:status:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs status",
     "backup:migrations:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs migrations",
     "backup:restore": "APP_ENV=staging DATA_MODE=fictional node scripts/restore-backup.mjs",
+    "rollout:workbook:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/workbook-rollout-staging.mjs",
+    "smoke:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/staging-smoke.mjs",
     "audit:workbook": "node scripts/audit-workbook.mjs"
   },
   "dependencies": {

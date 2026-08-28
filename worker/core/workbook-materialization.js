@@ -18,6 +18,8 @@ import {
   WORKBOOK_SOURCE_SCOPE,
 } from './workbook-source-registry.js'
 import { authorize } from '../identity/policy.js'
+import { resolveCurrentAuthorityActor } from '../identity/staff.js'
+import { digestWorkbookSourceValue } from '../security/workbook-artifacts.js'
 
 export const WORKBOOK_MATERIALIZATION_SLICE_SIZE = 64
 
@@ -82,6 +84,78 @@ const authorityInvariant = (db, actor) => invariant(
   actor.authorityRevision,
 )
 
+const specialistInvariant = (db, specialistIds) => invariant(
+  db,
+  `(SELECT count(*) FROM specialists AS specialist
+    JOIN json_each(?) AS selected ON selected.value=specialist.id
+    WHERE specialist.status='active')=?`,
+  JSON.stringify(specialistIds),
+  specialistIds.length,
+)
+
+const panelDependencyIds = async (db, ids) => {
+  if (!ids.length) return new Set()
+  const rows = (await db.prepare(
+    `SELECT requested.value AS id FROM json_each(?) AS requested
+     WHERE EXISTS (
+       SELECT 1 FROM activity_charges AS charge
+       WHERE charge.finance_entry_id=requested.value AND charge.status='active'
+     ) OR EXISTS (
+       SELECT 1 FROM finance_source_links AS source_link
+       JOIN historical_service_occurrences AS occurrence
+         ON occurrence.source_record_id=source_link.source_record_id
+        AND occurrence.status='recorded'
+       WHERE source_link.finance_entry_id=requested.value
+     ) ORDER BY requested.value`,
+  ).bind(JSON.stringify(ids)).all()).results
+  if (!Array.isArray(rows)) fail('WORKBOOK_IMPORT_CONFLICT')
+  return new Set(rows.map(({ id }) => id))
+}
+
+const panelDependencyInvariant = (db, ids) => invariant(
+  db,
+  `NOT EXISTS (
+    SELECT 1 FROM json_each(?) AS requested
+    WHERE EXISTS (
+      SELECT 1 FROM activity_charges AS charge
+      WHERE charge.finance_entry_id=requested.value AND charge.status='active'
+    ) OR EXISTS (
+      SELECT 1 FROM finance_source_links AS source_link
+      JOIN historical_service_occurrences AS occurrence
+        ON occurrence.source_record_id=source_link.source_record_id
+       AND occurrence.status='recorded'
+      WHERE source_link.finance_entry_id=requested.value
+    )
+  )`,
+  JSON.stringify(ids),
+)
+
+const requireCurrentAuthority = async (db, actor) => {
+  let current
+  try {
+    current = await resolveCurrentAuthorityActor(db, {
+      id: actor.id,
+      role: actor.role,
+      specialist_id: actor.specialistId,
+      version: actor.version,
+    })
+  } catch { fail('NOT_FOUND') }
+  if (current.authorityRevision !== actor.authorityRevision
+    || current.capabilities.length !== actor.capabilities.length
+    || current.capabilities.some((capability, index) => (
+      capability !== actor.capabilities[index]
+    ))) fail('NOT_FOUND')
+}
+
+const requireActiveSpecialists = async (db, specialistIds) => {
+  if (!specialistIds.length) return
+  const active = (await db.prepare(
+    `SELECT id FROM specialists WHERE id IN (${specialistIds.map(() => '?').join(',')})
+     AND status='active' ORDER BY id`,
+  ).bind(...specialistIds).all()).results
+  if (!Array.isArray(active) || active.length !== specialistIds.length) fail('NOT_FOUND')
+}
+
 const parseJson = (value, code = 'WORKBOOK_MATERIALIZATION_INVALID') => {
   try { return JSON.parse(value) } catch { fail(code) }
 }
@@ -125,7 +199,16 @@ const jobDto = (row) => Object.freeze({
 })
 
 const responseFrom = (row, status = 200) => {
-  const data = { import: importDto(row), job: jobDto(row) }
+  const progress = parseProgress(row.progress_json)
+  const data = {
+    import: importDto(row),
+    job: jobDto(row),
+    evidence: Object.freeze({
+      createdRecords: progress.inserted,
+      voidedRecords: progress.voided,
+      converged: row.import_status === 'complete' && row.job_status === 'complete',
+    }),
+  }
   if (row.summary_json !== null) data.reconciliation = Object.freeze(parseJson(row.summary_json))
   return Object.freeze({ status, body: Object.freeze({ data: Object.freeze(data) }) })
 }
@@ -155,7 +238,7 @@ const loadState = async (db, importId, actorId) => {
   return row
 }
 
-const loadPlan = async (db, keyring, row) => {
+const loadPlan = async (db, keyring, row, config, centreId) => {
   const envelope = parseJson(row.plan_envelope, 'CRYPTO_FAILURE')
   const dataKey = await loadDataKey(db, { envelope, expectedScope: SOURCE_SCOPE })
   let plan
@@ -167,12 +250,83 @@ const loadPlan = async (db, keyring, row) => {
       envelope,
     }))
   } catch { fail('CRYPTO_FAILURE') }
+  const conflicts = plan?.conflicts ?? []
+  const appliedResolutions = plan?.appliedResolutions ?? []
   if (!plan || plan.schema !== 'workbook_import_plan.v1'
     || plan.workbookKind !== row.workbook_kind
     || typeof plan.previewPlanDigest !== 'string'
     || !/^v[1-9]\d*_[A-Za-z0-9_-]{43}$/.test(plan.previewPlanDigest)
-    || !plan.panel || !Array.isArray(plan.panel.updates) || !Array.isArray(plan.panel.voids)) fail()
-  return Object.freeze({ dataKey, plan })
+    || !plan.panel || !Array.isArray(plan.panel.updates) || !Array.isArray(plan.panel.voids)
+    || !Array.isArray(conflicts) || conflicts.length > 100
+    || !Array.isArray(appliedResolutions) || appliedResolutions.length > 100) fail()
+  const resolutionMappings = []
+  let resolutionIdentity = null
+  if (conflicts.length) {
+    const latest = await db.prepare(
+      `SELECT id,version,plan_digest,resolutions_envelope
+       FROM workbook_import_resolution_sets WHERE import_id=?
+       ORDER BY version DESC LIMIT 1`,
+    ).bind(row.import_id).first()
+    if (!latest || latest.plan_digest !== plan.previewPlanDigest) fail()
+    resolutionIdentity = Object.freeze({
+      id: latest.id, version: latest.version, planDigest: latest.plan_digest,
+      envelope: latest.resolutions_envelope,
+    })
+    let set
+    try {
+      set = JSON.parse(await decryptForScope(keyring, dataKey, {
+        expectedScope: SOURCE_SCOPE, recordId: latest.id, field: 'resolutions',
+        envelope: parseJson(latest.resolutions_envelope, 'CRYPTO_FAILURE'),
+      }))
+    } catch { fail('CRYPTO_FAILURE') }
+    if (!set || set.schema !== 'workbook_resolution_set.v1'
+      || set.planDigest !== plan.previewPlanDigest || !Array.isArray(set.resolutions)
+      || set.resolutions.length !== conflicts.length) fail()
+    const conflictCatalog = new Map()
+    for (const conflict of conflicts) {
+      if (!conflict || typeof conflict !== 'object' || Array.isArray(conflict)
+        || conflict.kind !== 'specialist_mapping'
+        || typeof conflict.id !== 'string' || typeof conflict.sourceValue !== 'string'
+        || conflictCatalog.has(conflict.id)) fail()
+      conflictCatalog.set(conflict.id, conflict)
+    }
+    const specialistIds = new Set()
+    for (const resolution of set.resolutions) {
+      const conflict = conflictCatalog.get(resolution?.conflictId)
+      if (!conflict || typeof resolution.specialistId !== 'string'
+        || !/^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(resolution.specialistId)
+        || resolutionMappings.some(({ conflictId }) => conflict.id === conflictId)) fail()
+      specialistIds.add(resolution.specialistId)
+      const sourceValueKind = conflict.sourceValue === '' ? 'blank' : 'explicit_name'
+      const provenance = await digestWorkbookSourceValue({
+        keyring, config, centreId,
+        sourceValueKind, sourceValue: conflict.sourceValue,
+      })
+      resolutionMappings.push(Object.freeze({
+        conflictId: conflict.id,
+        sourceValue: conflict.sourceValue,
+        sourceValueKind,
+        digest: provenance.digest,
+        hmacVersion: provenance.hmacVersion,
+        specialistId: resolution.specialistId,
+      }))
+    }
+    resolutionIdentity = Object.freeze({
+      ...resolutionIdentity,
+      specialistIds: Object.freeze([...specialistIds].sort(compareUtf16CodeUnits)),
+    })
+  }
+  const initialMappings = await loadAuthenticatedWorkbookSpecialistMappings({
+    db, keyring, dataKey, importId: row.import_id, config, centreId,
+  })
+  const effectiveMappings = new Map(initialMappings.bySourceValue)
+  for (const mapping of resolutionMappings) effectiveMappings.set(mapping.sourceValue, mapping)
+  const specialistIds = [...new Set([...effectiveMappings.values()]
+    .map(({ specialistId }) => specialistId))].sort(compareUtf16CodeUnits)
+  return Object.freeze({
+    dataKey, plan, resolutionMappings: Object.freeze(resolutionMappings), resolutionIdentity,
+    specialistIds: Object.freeze(specialistIds), initialMappings,
+  })
 }
 
 const replayRow = (db, actorId, idempotencyKey) => db.prepare(
@@ -258,6 +412,10 @@ const persistSlice = async ({
   now,
   complete = false,
 }) => {
+  const activeSpecialistIds = [...new Set([
+    ...state.resolution_specialist_ids,
+    ...(state.mutation_specialist_ids ?? []),
+  ])].sort(compareUtf16CodeUnits)
   const nextJobVersion = state.job_version + 1
   const summary = complete ? summaryFrom(progress) : null
   const statements = [...domainStatements]
@@ -333,7 +491,15 @@ const persistSlice = async ({
     `EXISTS (SELECT 1 FROM workbook_materialization_jobs
       WHERE id=? AND version=? AND phase=? AND cursor=? AND status=?)
      AND EXISTS (SELECT 1 FROM workbook_imports
-      WHERE id=? AND version=? AND status=?)`,
+      WHERE id=? AND version=? AND status=?)
+     AND ((? IS NULL AND NOT EXISTS (
+       SELECT 1 FROM workbook_import_resolution_sets WHERE import_id=?
+     )) OR EXISTS (
+       SELECT 1 FROM workbook_import_resolution_sets resolution
+       WHERE resolution.import_id=? AND resolution.id=? AND resolution.version=?
+         AND NOT EXISTS (SELECT 1 FROM workbook_import_resolution_sets newer
+           WHERE newer.import_id=resolution.import_id AND newer.version>resolution.version)
+     ))`,
     state.job_id,
     nextJobVersion,
     complete ? 'complete' : phase,
@@ -342,10 +508,32 @@ const persistSlice = async ({
     command.importId,
     nextImportVersion,
     nextImportStatus,
+    state.resolution_identity?.id ?? null,
+    command.importId,
+    command.importId,
+    state.resolution_identity?.id ?? null,
+    state.resolution_identity?.version ?? null,
   ))
   statements.push(authorityInvariant(command.db, command.actor))
-  await command.db.batch(statements)
-  return responseFrom(await loadState(command.db, command.importId, command.actor.id))
+  if (activeSpecialistIds.length) {
+    statements.push(specialistInvariant(command.db, activeSpecialistIds))
+  }
+  if (state.mutation_dependency_ids?.length) {
+    statements.push(panelDependencyInvariant(command.db, state.mutation_dependency_ids))
+  }
+  try {
+    await command.db.batch(statements)
+  } catch (error) {
+    if (state.mutation_dependency_ids?.length
+      && (await panelDependencyIds(command.db, state.mutation_dependency_ids)).size) {
+      fail('WORKBOOK_IMPORT_CONFLICT')
+    }
+    throw error
+  }
+  const current = await loadState(command.db, command.importId, command.actor.id)
+  await requireCurrentAuthority(command.db, command.actor)
+  await requireActiveSpecialists(command.db, activeSpecialistIds)
+  return responseFrom(current)
 }
 
 const indexFinanceSlice = async (command, state, progress, requestHash, now) => {
@@ -366,7 +554,9 @@ const indexFinanceSlice = async (command, state, progress, requestHash, now) => 
     total = (await command.db.prepare(
       `SELECT count(*) AS count FROM finance_entries AS entry
        LEFT JOIN finance_entry_voids AS void ON void.finance_entry_id=entry.id
-       WHERE entry.batch_id=? AND void.id IS NULL`,
+       LEFT JOIN finance_manual_voids AS manual_void
+         ON manual_void.finance_entry_id=entry.id
+       WHERE entry.batch_id=? AND void.id IS NULL AND manual_void.id IS NULL`,
     ).bind(progress.financeBatchId).first()).count
     if (total !== 2_234) fail('WORKBOOK_RECONCILIATION_CONFLICT')
     progress.candidateCount = total
@@ -376,7 +566,9 @@ const indexFinanceSlice = async (command, state, progress, requestHash, now) => 
             entry.source_row_envelope
      FROM finance_entries AS entry
      LEFT JOIN finance_entry_voids AS void ON void.finance_entry_id=entry.id
-     WHERE entry.batch_id=? AND void.id IS NULL
+     LEFT JOIN finance_manual_voids AS manual_void
+       ON manual_void.finance_entry_id=entry.id
+     WHERE entry.batch_id=? AND void.id IS NULL AND manual_void.id IS NULL
      ORDER BY entry.id LIMIT ? OFFSET ?`,
   ).bind(
     progress.financeBatchId, WORKBOOK_MATERIALIZATION_SLICE_SIZE, state.cursor,
@@ -428,7 +620,9 @@ const indexFinanceSlice = async (command, state, progress, requestHash, now) => 
   })
 }
 
-const reconcileSourceSlice = async (command, state, progress, sourceKeyRow, requestHash, now) => {
+const reconcileSourceSlice = async (
+  command, state, progress, sourceKeyRow, initialMappings, resolutionMappings, requestHash, now,
+) => {
   const rows = (await command.db.prepare(
     `SELECT source.id AS source_record_id,source.source_key,source.sheet_name,
             source.row_number,source.record_type,source.disposition,
@@ -443,10 +637,15 @@ const reconcileSourceSlice = async (command, state, progress, sourceKeyRow, requ
      LIMIT ? OFFSET ?`,
   ).bind(command.importId, WORKBOOK_MATERIALIZATION_SLICE_SIZE, state.cursor).all()).results
   if (!Array.isArray(rows) || !rows.length) fail('WORKBOOK_RECONCILIATION_CONFLICT')
-  const mappings = await loadAuthenticatedWorkbookSpecialistMappings({
-    db: command.db, keyring: command.keyring, dataKey: sourceKeyRow,
-    importId: command.importId, config: command.config, centreId: command.centreId,
-  })
+  const bySourceValue = new Map(initialMappings.bySourceValue)
+  const byDigest = new Map(initialMappings.byDigest)
+  for (const mapping of resolutionMappings) {
+    const prior = bySourceValue.get(mapping.sourceValue)
+    if (prior) byDigest.delete(`${prior.hmacVersion}:${prior.digest}`)
+    bySourceValue.set(mapping.sourceValue, mapping)
+    byDigest.set(`${mapping.hmacVersion}:${mapping.digest}`, mapping)
+  }
+  const mappings = Object.freeze({ bySourceValue, byDigest })
   const keys = rows.map(({ source_key: key }) => key)
   const candidates = (await command.db.prepare(
     `SELECT id,finance_entry_id,source_key,accounting_month,specialist_id,
@@ -853,7 +1052,9 @@ const applyFinanceStatements = (db, { updates, adjustments, inserts, voids, link
          ON entry.id=json_extract(item.value,'$.financeEntryId')
         AND entry.version=json_extract(item.value,'$.expectedVersion')
        WHERE NOT EXISTS (SELECT 1 FROM finance_entry_voids AS existing
-         WHERE existing.finance_entry_id=entry.id)`, voids))
+         WHERE existing.finance_entry_id=entry.id)
+         AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
+           WHERE manual_void.finance_entry_id=entry.id)`, voids))
     statements.push(invariant(db, 'changes()=?', voids.length))
   }
   if (links.length) {
@@ -868,7 +1069,9 @@ const applyFinanceStatements = (db, { updates, adjustments, inserts, voids, link
          ON entry.id=json_extract(item.value,'$.financeEntryId')
         AND entry.version=json_extract(item.value,'$.expectedVersion')
        WHERE NOT EXISTS (SELECT 1 FROM finance_entry_voids AS existing
-         WHERE existing.finance_entry_id=entry.id)`, links))
+         WHERE existing.finance_entry_id=entry.id)
+         AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
+           WHERE manual_void.finance_entry_id=entry.id)`, links))
     statements.push(invariant(db, 'changes()=?', links.length))
   }
   return statements
@@ -895,13 +1098,17 @@ const applyPanelSlice = async (command, state, progress, plan, requestHash, now)
     totalRecords: 0, progress, requestHash, now, complete: true,
   })
   const ids = page.map(({ id }) => id)
+  if ((await panelDependencyIds(command.db, ids)).size) fail('WORKBOOK_IMPORT_CONFLICT')
   const rows = (await command.db.prepare(
     `SELECT id,kind,record_type,accounting_month,occurred_on,amount_grosze,
             paid_amount_grosze,
             payment_method,settlement_status,invoice_status,specialist_id,version,
             source_row_envelope
      FROM finance_entries WHERE id IN (${ids.map(() => '?').join(',')})
-       AND NOT EXISTS (SELECT 1 FROM finance_entry_voids WHERE finance_entry_id=finance_entries.id)`,
+       AND NOT EXISTS (SELECT 1 FROM finance_entry_voids
+         WHERE finance_entry_id=finance_entries.id)
+       AND NOT EXISTS (SELECT 1 FROM finance_manual_voids
+         WHERE finance_entry_id=finance_entries.id)`,
   ).bind(...ids).all()).results
   if (!Array.isArray(rows) || rows.length !== ids.length) fail('VERSION_CONFLICT')
   const byId = new Map(rows.map((row) => [row.id, row]))
@@ -920,15 +1127,13 @@ const applyPanelSlice = async (command, state, progress, plan, requestHash, now)
   if (proposedSpecialistIds.length) {
     foundSpecialists = (await command.db.prepare(
       `SELECT specialist.id FROM json_each(?) AS requested
-       JOIN specialists AS specialist ON specialist.id=requested.value
+       JOIN specialists AS specialist
+         ON specialist.id=requested.value AND specialist.status='active'
        ORDER BY specialist.id`,
     ).bind(JSON.stringify(proposedSpecialistIds)).all()).results
     if (!Array.isArray(foundSpecialists)) fail('WORKBOOK_IMPORT_CONFLICT')
   }
-  const knownSpecialistIds = [...new Set([
-    ...rows.map(({ specialist_id: id }) => id).filter(Boolean),
-    ...foundSpecialists.map(({ id }) => id),
-  ])]
+  const knownSpecialistIds = foundSpecialists.map(({ id }) => id)
   const validated = new Map()
   for (const action of page) {
     const current = byId.get(action.id)
@@ -948,11 +1153,14 @@ const applyPanelSlice = async (command, state, progress, plan, requestHash, now)
       specialistId: current.specialist_id,
     }
     const prospective = prospectivePanelFinanceValues(currentValues, normalized.values)
+    const validationSpecialistIds = Object.hasOwn(normalized.values, 'specialistId')
+      ? knownSpecialistIds
+      : [...knownSpecialistIds, current.specialist_id].filter(Boolean)
     if (invalidPanelFinanceField({
       kind: current.kind,
       recordType: current.record_type,
       values: prospective,
-      specialistIds: knownSpecialistIds,
+      specialistIds: validationSpecialistIds,
     })) fail('WORKBOOK_IMPORT_CONFLICT')
     validated.set(action.id, Object.freeze({
       prospective,
@@ -1107,7 +1315,11 @@ const applyPanelSlice = async (command, state, progress, plan, requestHash, now)
   const nextCursor = state.cursor + page.length
   return persistSlice({
     command,
-    state,
+    state: Object.freeze({
+      ...state,
+      mutation_specialist_ids: proposedSpecialistIds,
+      mutation_dependency_ids: ids,
+    }),
     domainStatements: statements,
     phase: 'apply_finance',
     cursor: nextCursor,
@@ -1135,18 +1347,30 @@ export async function continueWorkbookMaterialization(input) {
     || typeof command.idFactory !== 'function') fail()
   const now = instant(command.nowMs)
   let state = await loadState(command.db, command.importId, command.actor.id)
-  const authenticated = await loadPlan(command.db, command.keyring, state)
+  const authenticated = await loadPlan(
+    command.db, command.keyring, state, command.config, command.centreId,
+  )
+  state = Object.freeze({
+    ...state,
+    resolution_identity: authenticated.resolutionIdentity,
+    resolution_specialist_ids: authenticated.specialistIds,
+  })
   const requestHash = await sha256Base64(JSON.stringify([
     1, command.importId, command.expectedVersion, state.plan_envelope,
-    authenticated.plan.previewPlanDigest,
+    authenticated.plan.previewPlanDigest, authenticated.resolutionIdentity,
   ]))
   const replay = await replayRow(command.db, command.actor.id, command.idempotencyKey)
   if (replay) {
     if (replay.request_hash !== requestHash) fail('IDEMPOTENCY_CONFLICT')
+    await requireCurrentAuthority(command.db, command.actor)
     return responseFrom(state)
   }
-  if (state.import_status === 'complete') return responseFrom(state)
+  if (state.import_status === 'complete') {
+    await requireCurrentAuthority(command.db, command.actor)
+    return responseFrom(state)
+  }
   if (state.import_version !== command.expectedVersion) fail('VERSION_CONFLICT')
+  await requireActiveSpecialists(command.db, state.resolution_specialist_ids)
   const progress = parseProgress(state.progress_json)
   try {
     if (state.workbook_kind === 'panel-v2') {
@@ -1160,7 +1384,8 @@ export async function continueWorkbookMaterialization(input) {
     }
     if (state.phase === 'reconcile_sources') {
       return await reconcileSourceSlice(
-        command, state, progress, authenticated.dataKey, requestHash, now,
+        command, state, progress, authenticated.dataKey,
+        authenticated.initialMappings, authenticated.resolutionMappings, requestHash, now,
       )
     }
     if (state.phase === 'reconcile_unmatched') {
@@ -1181,10 +1406,12 @@ export async function continueWorkbookMaterialization(input) {
     if (winner) {
       if (winner.request_hash !== requestHash) fail('IDEMPOTENCY_CONFLICT')
       state = await loadState(command.db, command.importId, command.actor.id)
+      await requireCurrentAuthority(command.db, command.actor)
       return responseFrom(state)
     }
     const current = await loadState(command.db, command.importId, command.actor.id)
     if (current.job_version !== state.job_version || current.import_status === 'complete') {
+      await requireCurrentAuthority(command.db, command.actor)
       return responseFrom(current)
     }
     throw error

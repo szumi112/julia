@@ -194,14 +194,22 @@ describe('closed core route descriptors', () => {
       { id: 'appointments.payment', capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'payments.correct', capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'finance.list', capability: 'finance.centre.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'finance.window', capability: 'finance.centre.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'finance.entry.void', capability: 'finance.centre.manage', auditActions: ['finance.entry.voided'], bodyKeys: ['expectedVersion', 'reason'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'finance.import.start', capability: 'finance.import', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'finance.import.chunk', capability: 'finance.import', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'finance.import.commit', capability: 'finance.import', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.preview', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'workbooks.import', capability: 'finance.import', auditActions: ['workbook.import.created'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.import', capability: 'finance.import', auditActions: ['workbook.import.created', 'workbook.resolutions.recorded'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.continue', capability: 'finance.import', auditActions: ['workbook.import.materialized'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.status', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'workbooks.export', capability: null, auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.operator.evidence', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.artifact.verification', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.reconciliation.evidence', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.registry', capability: 'finance.centre.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.registry.detail', capability: 'finance.centre.read', auditActions: [], bodyKeys: ['importId', 'section', 'cursor'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.resolutions', capability: 'finance.import', auditActions: ['workbook.resolutions.recorded'], bodyKeys: ['expectedVersion', 'planDigest', 'resolutions'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.export.create', capability: null, auditActions: ['workbook.export.created'], bodyKeys: ['format'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'historical.projection.status', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'historical.projection.continue', capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'historical.projection.resolve', capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
@@ -219,7 +227,7 @@ describe('closed core route descriptors', () => {
       { id: 'activities.projection.status', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'activities.projection.continue', capability: 'finance.import', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
     ])
-    expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'workbooks.export'))
+    expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'workbooks.export.create'))
       .toMatchObject({
         capability: null,
         capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'],

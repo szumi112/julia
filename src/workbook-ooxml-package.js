@@ -253,7 +253,13 @@ export const openWorkbookPackage = (source) => {
   return files
 }
 
-export const closeWorkbookPackage = (files) => zipSync(files, { level: 6 })
+const CANONICAL_ZIP_MTIME = new Date(Date.UTC(1980, 0, 1))
+
+export const closeWorkbookPackage = (files) => zipSync(Object.fromEntries(
+  Object.entries(files).map(([name, bytes]) => [name, [bytes, {
+    mtime: CANONICAL_ZIP_MTIME,
+  }]]),
+), { level: 6 })
 
 export const relationshipEntries = (xml) => {
   const root = /<Relationships\b[^>]*>([\s\S]*?)<\/Relationships\s*>/.exec(xml)

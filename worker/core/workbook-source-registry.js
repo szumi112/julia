@@ -67,6 +67,7 @@ export async function loadAuthenticatedWorkbookSpecialistMappings({
   if (!Array.isArray(rows) || rows.length > 100) fail()
   const bySourceValue = new Map()
   const byDigest = new Map()
+  const byResolutionId = new Map()
   for (const row of rows) {
     let value
     try {
@@ -96,11 +97,13 @@ export async function loadAuthenticatedWorkbookSpecialistMappings({
       digest: row.source_value_digest,
       hmacVersion: row.source_value_hmac_version,
       specialistId: row.specialist_id,
+      resolutionId: row.id,
     })
     bySourceValue.set(value.sourceValue, mapping)
     byDigest.set(digestKey, mapping)
+    byResolutionId.set(row.id, mapping)
   }
-  return Object.freeze({ bySourceValue, byDigest })
+  return Object.freeze({ bySourceValue, byDigest, byResolutionId })
 }
 
 export async function resolveAuthenticatedWorkbookSpecialist({

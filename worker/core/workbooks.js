@@ -33,6 +33,10 @@ import {
 import { authorize } from '../identity/policy.js'
 import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { resolveCurrentAuthorityActor } from '../identity/staff.js'
+import {
+  loadWorkbookSpecialistLabels,
+  loadWorkbookSpecialistOptions,
+} from './workbook-specialist-options.js'
 
 export const APPROVED_WORKBOOK_FINGERPRINT = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 
@@ -53,7 +57,7 @@ const IDENTITY_SCOPE = Object.freeze({
   type: 'staff_directory', id: 'centre_1', purpose: 'identity',
 })
 const OPTIONAL_PREVIEW_KEYS = Object.freeze([
-  'loadPanelState', 'nonceFactory', 'parse', 'readPanel',
+  'db', 'loadPanelState', 'nonceFactory', 'parse', 'readPanel',
 ])
 const REQUIRED_PREVIEW_KEYS = Object.freeze([
   'bytes', 'filename', 'actor', 'keyring', 'config', 'centreId', 'nowMs',
@@ -131,13 +135,25 @@ export async function loadWorkbookPanelState({
       `SELECT entry.id,entry.kind,entry.record_type,entry.accounting_month,
               entry.occurred_on,entry.amount_grosze,
               entry.paid_amount_grosze,entry.payment_method,entry.settlement_status,
-              entry.invoice_status,entry.specialist_id,entry.version
+              entry.invoice_status,entry.specialist_id,entry.version,
+              CASE WHEN EXISTS (
+                SELECT 1 FROM activity_charges AS charge
+                WHERE charge.finance_entry_id=entry.id AND charge.status='active'
+              ) OR EXISTS (
+                SELECT 1 FROM finance_source_links AS source_link
+                JOIN historical_service_occurrences AS occurrence
+                  ON occurrence.source_record_id=source_link.source_record_id
+                 AND occurrence.status='recorded'
+                WHERE source_link.finance_entry_id=entry.id
+              ) THEN 1 ELSE 0 END AS mutation_blocked
        FROM finance_entries AS entry
        JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
        WHERE entry.id IN (${ids.map(() => '?').join(',')})
          AND batch.status='committed'
          AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
            WHERE void.finance_entry_id=entry.id)
+         AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
+           WHERE manual_void.finance_entry_id=entry.id)
        ORDER BY entry.id`,
     ).bind(...ids).all()).results
     if (!Array.isArray(result)) previewInvalid()
@@ -147,15 +163,14 @@ export async function loadWorkbookPanelState({
   if (specialistIds.length) {
     foundSpecialists = (await db.prepare(
       `SELECT specialist.id FROM json_each(?) AS requested
-       JOIN specialists AS specialist ON specialist.id=requested.value
+       JOIN specialists AS specialist
+         ON specialist.id=requested.value AND specialist.status='active'
        ORDER BY specialist.id`,
     ).bind(JSON.stringify(specialistIds)).all()).results
     if (!Array.isArray(foundSpecialists)) previewInvalid()
   }
-  const knownSpecialistIds = [...new Set([
-    ...loaded.map(({ specialist_id: id }) => id).filter(Boolean),
-    ...foundSpecialists.map(({ id }) => id),
-  ])].sort(compareUtf16CodeUnits)
+  const knownSpecialistIds = foundSpecialists.map(({ id }) => id)
+    .sort(compareUtf16CodeUnits)
   return Object.freeze({
     fieldsByType: Object.freeze({ finance_entry: PANEL_FINANCE_FIELDS }),
     specialistIds: Object.freeze(knownSpecialistIds),
@@ -165,6 +180,7 @@ export async function loadWorkbookPanelState({
       recordType: row.record_type,
       type: 'finance_entry',
       version: row.version,
+      mutationBlocked: row.mutation_blocked === 1,
       values: Object.freeze({
         accountingMonth: row.accounting_month,
         occurredOn: row.occurred_on,
@@ -238,6 +254,8 @@ const activeFinanceRowsExportStatement = (db, centreId, format) => db.prepare(
      WHERE batch.status='committed'
        AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
          WHERE void.finance_entry_id=entry.id)
+       AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
+         WHERE manual_void.finance_entry_id=entry.id)
      ORDER BY entry.id LIMIT 5001`,
 ).bind(centreId, format)
 
@@ -253,6 +271,8 @@ const ownFinanceRowsExportStatement = (db, centreId, format, specialistId) => db
        AND entry.specialist_id=?
        AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
          WHERE void.finance_entry_id=entry.id)
+       AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
+         WHERE manual_void.finance_entry_id=entry.id)
      ORDER BY entry.id LIMIT 5001`,
 ).bind(centreId, format, specialistId)
 
@@ -344,7 +364,7 @@ const specialistNamesForExport = async ({ db, keyring, ids }) => {
   }
   const rows = (await db.prepare(
     `SELECT id,display_name_envelope FROM specialists
-     WHERE id IN (${unique.map(() => '?').join(',')}) AND status='active' ORDER BY id`,
+     WHERE id IN (${unique.map(() => '?').join(',')}) ORDER BY id`,
   ).bind(...unique).all()).results
   if (!Array.isArray(rows) || rows.length !== unique.length) throw new Error('INTERNAL_ERROR')
   const dataKeys = new Map()
@@ -403,6 +423,8 @@ const legacySourceRowsExportStatement = (db, centreId, format) => db.prepare(
      WHERE source.disposition='accepted'
        AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
          WHERE void.finance_entry_id=entry.id)
+       AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
+         WHERE manual_void.finance_entry_id=entry.id)
        AND (entry.accounting_month IS NOT source.accounting_month
          OR entry.occurred_on IS NOT source.occurred_on
          OR entry.amount_grosze IS NOT source.amount_grosze
@@ -426,6 +448,8 @@ const unlinkedFinanceRowsExportStatement = (db, centreId, format) => db.prepare(
      WHERE batch.status='committed'
        AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
          WHERE void.finance_entry_id=entry.id)
+       AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
+         WHERE manual_void.finance_entry_id=entry.id)
        AND NOT EXISTS (SELECT 1 FROM finance_source_links AS link
          WHERE link.finance_entry_id=entry.id)
      ORDER BY entry.id LIMIT 2501`,
@@ -433,17 +457,33 @@ const unlinkedFinanceRowsExportStatement = (db, centreId, format) => db.prepare(
 
 const signedVoidRowsExportStatement = (db, centreId, format) => db.prepare(
   `${latestExportCte}
-   SELECT void.finance_entry_id,source.sheet_index,source.sheet_name,source.row_number,
-            source.block_index,source.record_type
-     FROM finance_entry_voids AS void
-     JOIN latest_export AS latest ON 1=1
-     JOIN workbook_import_plans AS plan
-       ON plan.import_id=void.workbook_import_id AND plan.workbook_kind='panel-v2'
-     LEFT JOIN finance_source_links AS link ON link.finance_entry_id=void.finance_entry_id
-     LEFT JOIN workbook_source_records AS source
-       ON source.id=link.source_record_id AND source.import_id=latest.import_id
-     WHERE void.reason_code='panel_signed_void'
-     ORDER BY void.created_at,void.id LIMIT 5001`,
+   SELECT combined.finance_entry_id,combined.sheet_index,combined.sheet_name,
+          combined.row_number,combined.block_index,combined.record_type,
+          combined.void_kind
+   FROM (
+     SELECT void.finance_entry_id,source.sheet_index,source.sheet_name,source.row_number,
+            source.block_index,source.record_type,void.created_at,void.id,
+            'panel' AS void_kind
+       FROM finance_entry_voids AS void
+       JOIN latest_export AS latest ON 1=1
+       JOIN workbook_import_plans AS plan
+         ON plan.import_id=void.workbook_import_id AND plan.workbook_kind='panel-v2'
+       LEFT JOIN finance_source_links AS link ON link.finance_entry_id=void.finance_entry_id
+       LEFT JOIN workbook_source_records AS source
+         ON source.id=link.source_record_id AND source.import_id=latest.import_id
+       WHERE void.reason_code='panel_signed_void'
+     UNION ALL
+     SELECT manual_void.finance_entry_id,source.sheet_index,source.sheet_name,
+            source.row_number,source.block_index,source.record_type,
+            manual_void.created_at,manual_void.id,'manual' AS void_kind
+       FROM finance_manual_voids AS manual_void
+       JOIN latest_export AS latest ON 1=1
+       LEFT JOIN finance_source_links AS link
+         ON link.finance_entry_id=manual_void.finance_entry_id
+       LEFT JOIN workbook_source_records AS source
+         ON source.id=link.source_record_id AND source.import_id=latest.import_id
+   ) AS combined
+   ORDER BY combined.created_at,combined.id LIMIT 5001`,
 ).bind(centreId, format)
 
 const legacyExportFor = async ({ db, source, keyring, baseRows, unlinkedRows, voidRows }) => {
@@ -550,7 +590,9 @@ const legacyExportFor = async ({ db, source, keyring, baseRows, unlinkedRows, vo
   for (const row of voidRows) {
     if (row.sheet_name === null) additions.push({
       action: 'void', field: 'record', id: row.finance_entry_id,
-      value: 'Unieważniono w podpisanym pliku Panel-v2',
+      value: row.void_kind === 'manual'
+        ? 'Unieważniono ręcznie w rejestrze finansowym'
+        : 'Unieważniono w podpisanym pliku Panel-v2',
     })
     else legacyVoids.push({
       sheet: row.sheet_name,
@@ -583,7 +625,7 @@ const snapshotRows = (result, maximum) => {
 }
 
 const workbookExportSnapshot = async (db, centreId, format, specialistId = null) => {
-  const statements = format === 'legacy'
+  const dataStatements = format === 'legacy'
     ? [
         artifactExportStatement(db, centreId, format),
         legacySourceRowsExportStatement(db, centreId, format),
@@ -596,6 +638,9 @@ const workbookExportSnapshot = async (db, centreId, format, specialistId = null)
           ? activeFinanceRowsExportStatement(db, centreId, format)
           : ownFinanceRowsExportStatement(db, centreId, format, specialistId),
       ]
+  const statements = [...dataStatements, db.prepare(
+    `SELECT revision FROM finance_reporting_state WHERE authority_key='finance'`,
+  )]
   let results
   try { results = await db.batch(statements) } catch { throw new Error('INTERNAL_ERROR') }
   if (!Array.isArray(results) || results.length !== statements.length) {
@@ -605,16 +650,26 @@ const workbookExportSnapshot = async (db, centreId, format, specialistId = null)
   const artifact = artifacts[0]
   if (!artifact || artifact.nonterminal === 1) throw new Error('WORKBOOK_EXPORT_CONFLICT')
   if (artifact.object_key === null) throw new Error('NOT_FOUND')
+  const revisionRows = snapshotRows(results.at(-1), 1)
+  const revision = revisionRows[0]?.revision
+  if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('INTERNAL_ERROR')
   if (format === 'panel-v2') return Object.freeze({
-    artifact,
+    artifact, revision,
     rows: snapshotRows(results[1], MAX_WORKBOOK_EXPORT_ROWS),
   })
   return Object.freeze({
-    artifact,
+    artifact, revision,
     baseRows: snapshotRows(results[1], MAX_WORKBOOK_EXPORT_ROWS),
     unlinkedRows: snapshotRows(results[2], 2_500),
     voidRows: snapshotRows(results[3], MAX_WORKBOOK_EXPORT_ROWS),
   })
+}
+
+const requireExportRevision = async (db, expected) => {
+  const row = await db.prepare(
+    `SELECT revision FROM finance_reporting_state WHERE authority_key='finance'`,
+  ).first()
+  if (!row || row.revision !== expected) throw new Error('WORKBOOK_EXPORT_CONFLICT')
 }
 
 const sameCapabilities = (left, right) => left.length === right.length
@@ -671,6 +726,15 @@ const authoritySnapshotInvariant = (db, actor) => db.prepare(
   actor.authorityRevision,
 )
 
+const specialistSnapshotInvariant = (db, specialistIds) => db.prepare(
+  `INSERT INTO core_directory_invariant_failures (failure_kind)
+   SELECT 'workbook_specialist_authority_changed' WHERE (
+     SELECT count(*) FROM specialists AS specialist
+     JOIN json_each(?) AS selected ON selected.value=specialist.id
+     WHERE specialist.status='active'
+   ) != ?`,
+).bind(JSON.stringify(specialistIds), specialistIds.length)
+
 const validExportBytes = (bytes) => {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1
     || bytes.byteLength > MAX_WORKBOOK_EXPORT_BYTES) {
@@ -702,6 +766,7 @@ export async function exportWorkbook({
         specialistId: access.specialistId,
       }))
       await requireCurrentAuthority(db, access.actor)
+      await requireExportRevision(db, snapshot.revision)
       const day = WARSAW_DAY.format(new Date(nowMs))
       return Object.freeze({
         bytes,
@@ -720,8 +785,9 @@ export async function exportWorkbook({
     centreId,
     descriptor: workbookArtifactDescriptor(artifact),
   })
+  let bytes
   try {
-    const bytes = format === 'legacy'
+    bytes = format === 'legacy'
       ? await legacyExportFor({
           db, source, keyring, baseRows: snapshot.baseRows,
           unlinkedRows: snapshot.unlinkedRows, voidRows: snapshot.voidRows,
@@ -734,11 +800,15 @@ export async function exportWorkbook({
       })
     validExportBytes(bytes)
     await requireCurrentAuthority(db, access.actor)
+    await requireExportRevision(db, snapshot.revision)
     const day = WARSAW_DAY.format(new Date(nowMs))
     return Object.freeze({
       bytes,
       filename: `bear-with-me-${format}-${day}.xlsx`,
     })
+  } catch (error) {
+    bytes?.fill?.(0)
+    throw error
   } finally {
     source.fill(0)
   }
@@ -890,6 +960,10 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
       || Object.keys(signed.fieldDigests).some((field) => !Object.hasOwn(fields, field))) {
       previewInvalid()
     }
+    if (current.mutationBlocked === true) {
+      conflicts.push(panelConflict('PANEL_DEPENDENCY_CONFLICT', signed.id))
+      continue
+    }
     if (edit) {
       const invalidEditField = invalidEditFields.get(signed.id)
       if (invalidEditField) {
@@ -898,6 +972,12 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
       }
       const normalizedEdit = normalizedEdits.get(signed.id)
       if (!normalizedEdit) previewInvalid()
+      if (Object.hasOwn(normalizedEdit.values, 'specialistId')
+        && normalizedEdit.values.specialistId !== null
+        && !loaded.specialistIds.includes(normalizedEdit.values.specialistId)) {
+        conflicts.push(panelConflict('PANEL_VALUE_INVALID', signed.id, 'specialistId'))
+        continue
+      }
       const baseValues = {}
       const currentValues = {}
       const editedValues = {}
@@ -936,11 +1016,14 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
         if (merged.conflicts.length) previewInvalid()
         const mergedValues = merged.updates[0]?.values ?? {}
         const prospective = prospectivePanelFinanceValues(current.values, mergedValues)
+        const validationSpecialistIds = Object.hasOwn(mergedValues, 'specialistId')
+          ? loaded.specialistIds
+          : [...loaded.specialistIds, current.values.specialistId].filter(Boolean)
         const invalidField = invalidPanelFinanceField({
           kind: current.kind,
           recordType: current.recordType,
           values: prospective,
-          specialistIds: loaded.specialistIds,
+          specialistIds: validationSpecialistIds,
         })
         if (invalidField) {
           conflicts.push(panelConflict('PANEL_VALUE_INVALID', signed.id, invalidField))
@@ -1005,7 +1088,7 @@ const panelMergeFor = async ({ panel, callbacks, centreId, loadPanelState }) => 
   })
 }
 
-async function inspectWorkbook(input) {
+async function inspectWorkbook(input, includeSpecialistOptions = false) {
   const command = capturePreview(input)
   const bytes = command.bytes instanceof Uint8Array
     ? new Uint8Array(command.bytes.buffer, command.bytes.byteOffset, command.bytes.byteLength)
@@ -1074,14 +1157,34 @@ async function inspectWorkbook(input) {
     .map((sourceValue) => PROFILE_MAPPINGS[sourceValue] ?? null)
     .filter(Boolean)
     .sort((left, right) => compareUtf16CodeUnits(left.displayName, right.displayName))
-  const mappingConflicts = [...values]
-    .filter((sourceValue) => !Object.hasOwn(PROFILE_MAPPINGS, sourceValue))
-    .sort(compareUtf16CodeUnits)
-    .map((sourceValue) => Object.freeze({
+  const mappingConflicts = []
+  for (const sourceValue of [...values]
+    .filter((value) => !Object.hasOwn(PROFILE_MAPPINGS, value))
+    .sort(compareUtf16CodeUnits)) {
+    const provenance = await digestWorkbookSourceValue({
+      keyring: command.keyring,
+      config: command.config,
+      centreId: command.centreId,
+      sourceValueKind: sourceValue === '' ? 'blank' : 'explicit_name',
+      sourceValue,
+    })
+    mappingConflicts.push(Object.freeze({
+      id: `wmc_${provenance.digest}`,
       code: 'SPECIALIST_MAPPING_REQUIRED',
       sourceValue,
     }))
+  }
   const conflicts = Object.freeze([...mappingConflicts, ...panelMerge.conflicts])
+  const panelSpecialistIds = [...new Set([
+    ...(panelMerge.response?.updates ?? []).flatMap(({ values }) => (
+      typeof values.specialistId === 'string' ? [values.specialistId] : []
+    )),
+    ...panelMerge.conflicts.flatMap(({ field, current, edited }) => (
+      field === 'specialistId'
+        ? [current, edited].filter((value) => typeof value === 'string')
+        : []
+    )),
+  ])].sort(compareUtf16CodeUnits)
   const previewPlan = Object.freeze({
     schema: 'workbook_preview_plan.v1',
     workbookKind: panel.kind,
@@ -1122,6 +1225,14 @@ async function inspectWorkbook(input) {
       conflicts,
       quarantine: parsed.quarantinedRows,
       workbookKind: panel.kind,
+      specialistOptions: includeSpecialistOptions
+        ? await loadWorkbookSpecialistOptions({ db: command.db, keyring: command.keyring })
+        : Object.freeze([]),
+      specialistLabels: includeSpecialistOptions
+        ? await loadWorkbookSpecialistLabels({
+          db: command.db, keyring: command.keyring, ids: panelSpecialistIds,
+        })
+        : Object.freeze([]),
   }
   if (panelMerge.response) responseData.panelChanges = panelMerge.response
   const response = Object.freeze({ data: Object.freeze(responseData) })
@@ -1131,7 +1242,11 @@ async function inspectWorkbook(input) {
 }
 
 export async function previewWorkbook(input) {
-  return (await inspectWorkbook(input)).response
+  const command = capturePreview(input)
+  if (!command.db?.prepare) previewInvalid()
+  const inspected = await inspectWorkbook(command, true)
+  await requireCurrentAuthority(command.db, command.actor)
+  return inspected.response
 }
 
 const createInvalid = () => { throw new Error('WORKBOOK_IMPORT_INVALID') }
@@ -1204,15 +1319,26 @@ export async function getWorkbookImport({ db, actor, nowMs, importId } = {}) {
             job.cursor AS job_cursor,job.total_records AS job_total_records,
             job.processed_records AS job_processed_records,job.version AS job_version,
             job.updated_at AS job_updated_at,job.completed_at AS job_completed_at,
-            job.summary_json
+            job.summary_json,job.progress_json
      FROM workbook_imports AS import
      JOIN workbook_materialization_jobs AS job ON job.import_id=import.id
      WHERE import.id=? AND import.created_by_staff_id=?`,
   ).bind(importId, actor.id).first()
   if (!row) throw new Error('NOT_FOUND')
+  let progress
+  try { progress = JSON.parse(row.progress_json) } catch { throw new Error('INTERNAL_ERROR') }
+  if (!progress || !Number.isSafeInteger(progress.inserted) || progress.inserted < 0
+    || !Number.isSafeInteger(progress.voided) || progress.voided < 0) {
+    throw new Error('INTERNAL_ERROR')
+  }
   const data = {
     import: importDto(row),
     job: materializationJobDto(row),
+    evidence: Object.freeze({
+      createdRecords: progress.inserted,
+      voidedRecords: progress.voided,
+      converged: row.status === 'complete' && row.job_status === 'complete',
+    }),
   }
   if (row.summary_json !== null) {
     let summary
@@ -1223,6 +1349,7 @@ export async function getWorkbookImport({ db, actor, nowMs, importId } = {}) {
     }
     data.reconciliation = Object.freeze({ ...summary })
   }
+  await requireCurrentAuthority(db, actor)
   return Object.freeze({ data: Object.freeze(data) })
 }
 
@@ -1408,7 +1535,7 @@ const replayRow = (db, actorId, idempotencyKey) => db.prepare(
 export async function createWorkbookImport(input) {
   const optional = [
     'artifactNonceFactory', 'loadPanelState', 'nonceFactory', 'parse', 'readPanel',
-    'storeArtifact',
+    'resolutions', 'storeArtifact',
   ]
   const required = [
     'db', 'bucket', 'actor', 'keyring', 'config', 'centreId', 'nowMs',
@@ -1433,6 +1560,40 @@ export async function createWorkbookImport(input) {
     || typeof command.idempotencyKey !== 'string'
     || !IDEMPOTENCY_KEY.test(command.idempotencyKey)) createInvalid()
   const now = instant(command.nowMs)
+  const submittedResolutions = command.resolutions ?? []
+  if (!Array.isArray(submittedResolutions) || submittedResolutions.length > 100) createInvalid()
+  const canonicalResolutions = submittedResolutions.map((resolution) => {
+    if (!resolution || typeof resolution !== 'object' || Array.isArray(resolution)
+      || Object.getPrototypeOf(resolution) !== Object.prototype
+      || Reflect.ownKeys(resolution).length !== 2
+      || !Object.hasOwn(resolution, 'conflictId')
+      || !Object.hasOwn(resolution, 'specialistId')
+      || typeof resolution.conflictId !== 'string'
+      || !/^wmc_[A-Za-z0-9_-]{43}$/.test(resolution.conflictId)
+      || typeof resolution.specialistId !== 'string'
+      || !/^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(resolution.specialistId)) {
+      createInvalid()
+    }
+    return Object.freeze({
+      conflictId: resolution.conflictId, specialistId: resolution.specialistId,
+    })
+  }).sort((left, right) => compareUtf16CodeUnits(left.conflictId, right.conflictId))
+  if (new Set(canonicalResolutions.map(({ conflictId }) => conflictId)).size
+    !== canonicalResolutions.length) createInvalid()
+  if (!(command.bytes instanceof Uint8Array)) createInvalid()
+  const submittedFingerprint = await sha256Base64(command.bytes)
+  const tokenDigest = await sha256Base64(command.previewToken)
+  const requestHash = await sha256Base64(JSON.stringify([
+    'workbooks.import.request.v2', submittedFingerprint, command.filename,
+    tokenDigest, canonicalResolutions,
+  ]))
+  const replay = await replayRow(command.db, command.actor.id, command.idempotencyKey)
+  if (replay) {
+    if (replay.request_hash !== requestHash) throw new Error('IDEMPOTENCY_CONFLICT')
+    const replayed = await loadImportRow(command.db, replay.import_id, command.actor.id)
+    await requireCurrentAuthority(command.db, command.actor)
+    return importResponse(replayed)
+  }
   const inspected = await inspectWorkbook({
     bytes: command.bytes,
     filename: command.filename,
@@ -1446,7 +1607,10 @@ export async function createWorkbookImport(input) {
     ...(command.loadPanelState ? { loadPanelState: command.loadPanelState } : {}),
     ...(command.nonceFactory ? { nonceFactory: command.nonceFactory } : {}),
   })
-  if (inspected.response.data.conflicts.length) throw new Error('WORKBOOK_IMPORT_CONFLICT')
+  const mappingConflicts = inspected.response.data.conflicts
+    .filter(({ code }) => code === 'SPECIALIST_MAPPING_REQUIRED')
+  const blockingConflicts = inspected.response.data.conflicts
+    .filter(({ code }) => code !== 'SPECIALIST_MAPPING_REQUIRED')
   await verifyWorkbookPreviewToken({
     token: command.previewToken,
     keyring: command.keyring,
@@ -1462,23 +1626,34 @@ export async function createWorkbookImport(input) {
     },
     nowMs: command.nowMs,
   })
-  const tokenDigest = await sha256Base64(command.previewToken)
-  const requestHash = await sha256Base64(JSON.stringify([
-    inspected.parsed.fingerprint, command.filename, tokenDigest, inspected.planDigest,
-  ]))
-  const replay = await replayRow(command.db, command.actor.id, command.idempotencyKey)
-  if (replay) {
-    if (replay.request_hash !== requestHash) throw new Error('IDEMPOTENCY_CONFLICT')
-    return importResponse(await loadImportRow(command.db, replay.import_id, command.actor.id))
-  }
-  const specialistIds = inspected.response.data.proposedMappings.map(({ specialistId }) => (
-    specialistId
-  ))
+  const expectedConflictIds = mappingConflicts.map(({ id }) => id)
+    .sort(compareUtf16CodeUnits)
+  if (blockingConflicts.length
+    || canonicalResolutions.length !== expectedConflictIds.length
+    || canonicalResolutions.some(({ conflictId }, index) => (
+      conflictId !== expectedConflictIds[index]
+    ))) throw new Error('WORKBOOK_IMPORT_CONFLICT')
+  const mappingByConflict = new Map(mappingConflicts.map((conflict) => [conflict.id, conflict]))
+  const explicitMappings = canonicalResolutions.map(({ conflictId, specialistId }) => {
+    const conflict = mappingByConflict.get(conflictId)
+    return Object.freeze({
+      displayName: specialistId,
+      resolutionCode: 'explicit_match',
+      sourceValue: conflict.sourceValue,
+      sourceValueKind: 'explicit_name',
+      specialistId,
+    })
+  })
+  const allMappings = [
+    ...inspected.response.data.proposedMappings,
+    ...explicitMappings,
+  ]
+  const specialistIds = [...new Set(allMappings.map(({ specialistId }) => specialistId))]
   if (specialistIds.length) {
     const found = (await command.db.prepare(
       `SELECT id FROM specialists
        WHERE id IN (${specialistIds.map(() => '?').join(',')})
-         AND status IN ('active','pending') ORDER BY id`,
+         AND status='active' ORDER BY id`,
     ).bind(...specialistIds).all()).results
     if (!Array.isArray(found) || found.length !== specialistIds.length
       || new Set(found.map(({ id }) => id)).size !== specialistIds.length) {
@@ -1490,6 +1665,11 @@ export async function createWorkbookImport(input) {
   const templateId = generated(command.idFactory, 'wbt', /^wbt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/)
   const jobId = generated(command.idFactory, 'wbj', /^wbj_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/)
   const auditId = generated(command.idFactory, 'aud', /^aud_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/)
+  const resolutionSetId = canonicalResolutions.length
+    ? generated(command.idFactory, 'wrs', /^wrs_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/)
+    : null
+  const resolutionAuditId = resolutionSetId === null ? null
+    : generated(command.idFactory, 'aud', /^aud_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/)
   const dataKey = await getOrCreateDataKey(command.db, command.keyring, SOURCE_SCOPE, {
     id: generated(command.idFactory, 'key', /^key_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/),
     createdAt: now,
@@ -1509,7 +1689,7 @@ export async function createWorkbookImport(input) {
     : { records: [], quarantine: [] }
   const resolutions = isLegacyImport
     ? await resolutionRowsFor({
-      mappings: inspected.response.data.proposedMappings,
+      mappings: allMappings,
       importId,
       actorId: command.actor.id,
       keyring: command.keyring,
@@ -1529,8 +1709,23 @@ export async function createWorkbookImport(input) {
       workbookKind: inspected.panel.kind,
       previewPlanDigest: inspected.planDigest,
       panel: inspected.panelPlan,
+      conflicts: mappingConflicts.map(({ id, code, sourceValue }) => Object.freeze({
+        id, code, kind: 'specialist_mapping', sourceValue,
+      })),
+      appliedResolutions: canonicalResolutions,
     }),
     'materialization_plan',
+  )
+  const resolutionSetEnvelope = resolutionSetId === null ? null : await sealSource(
+    command.keyring,
+    dataKey,
+    resolutionSetId,
+    Object.freeze({
+      schema: 'workbook_resolution_set.v1',
+      planDigest: inspected.planDigest,
+      resolutions: canonicalResolutions,
+    }),
+    'resolutions',
   )
   const objectKey = `workbook-objects/wbo_${command.idFactory()}_${command.idFactory()}`
   const store = command.storeArtifact ?? storeWorkbookArtifact
@@ -1606,8 +1801,32 @@ export async function createWorkbookImport(input) {
       VALUES (?,?,?,?,?)`).bind(
       importId, inspected.panel.kind, 1, materializationPlanEnvelope, now,
     ),
+    command.db.prepare(`INSERT INTO workbook_import_plan_summaries
+      (import_id,mapping_conflict_count) VALUES (?,?)`).bind(
+      importId, mappingConflicts.length,
+    ),
     ...sourceInsertStatements(command.db, records),
   ]
+  if (resolutionSetId !== null) statements.push(command.db.prepare(
+    `INSERT INTO workbook_import_resolution_sets
+     (id,import_id,artifact_id,preview_token_digest,plan_digest,resolution_count,
+      resolutions_envelope,created_by_staff_id,version,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+  ).bind(
+    resolutionSetId, importId, artifactId, tokenDigest, inspected.planDigest,
+    canonicalResolutions.length, resolutionSetEnvelope, command.actor.id, 1, now,
+  ), auditEventStatement(command.db, {
+    id: resolutionAuditId,
+    occurredAt: now,
+    actorStaffId: command.actor.id,
+    action: 'workbook.resolutions.recorded',
+    entityType: 'workbook_import',
+    entityId: importId,
+    result: 'success',
+    correlationId: command.correlationId,
+    metadata: { resolutionCount: canonicalResolutions.length, resolutionVersion: 1 },
+    reasonEnvelope: null,
+  }))
   if (quarantine.length) statements.push(valuesStatement(command.db,
     `INSERT INTO workbook_quarantine_records
      (id,source_record_id,primary_reason,reason_codes_json,created_at)
@@ -1660,18 +1879,44 @@ export async function createWorkbookImport(input) {
       },
       reasonEnvelope: null,
     }),
+    specialistSnapshotInvariant(command.db, specialistIds),
     authoritySnapshotInvariant(command.db, command.actor),
   )
   try {
     await command.db.batch(statements)
   } catch (error) {
-    try { await command.bucket.delete(descriptor.objectKey) } catch { /* Best-effort orphan cleanup. */ }
     const winner = await replayRow(command.db, command.actor.id, command.idempotencyKey)
     if (winner) {
-      if (winner.request_hash !== requestHash) throw new Error('IDEMPOTENCY_CONFLICT')
-      return importResponse(await loadImportRow(command.db, winner.import_id, command.actor.id))
+      if (winner.request_hash !== requestHash) {
+        try { await command.bucket.delete(descriptor.objectKey) } catch { /* Best-effort orphan cleanup. */ }
+        throw new Error('IDEMPOTENCY_CONFLICT')
+      }
+      const replayed = await loadImportRow(command.db, winner.import_id, command.actor.id)
+      const artifact = await command.db.prepare(
+        `SELECT environment,centre_id,object_key,fingerprint,byte_size,
+                parser_version,materializer_version,content_nonce_b64,
+                workbook_kek_version,metadata_hmac_version,metadata_signature
+         FROM workbook_artifacts WHERE id=?`,
+      ).bind(replayed.artifact_id).first()
+      if (!artifact || artifact.fingerprint !== descriptor.fingerprint
+        || artifact.byte_size !== descriptor.byteSize) throw new Error('INTERNAL_ERROR')
+      const committedBytes = await readWorkbookArtifact({
+        bucket: command.bucket,
+        keyring: command.keyring,
+        config: command.config,
+        centreId: command.centreId,
+        descriptor: workbookArtifactDescriptor(artifact),
+      })
+      committedBytes.fill(0)
+      if (artifact.object_key !== descriptor.objectKey) {
+        try { await command.bucket.delete(descriptor.objectKey) } catch { /* Best-effort orphan cleanup. */ }
+      }
+      await requireCurrentAuthority(command.db, command.actor)
+      return importResponse(replayed)
     }
+    try { await command.bucket.delete(descriptor.objectKey) } catch { /* Best-effort orphan cleanup. */ }
     throw error
   }
+  await requireCurrentAuthority(command.db, command.actor)
   return importResponse(row, 201)
 }

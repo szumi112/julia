@@ -4257,9 +4257,14 @@ test('workbook API sends exact multipart lifecycles and accepts a bounded XLSX d
     conflicts: [],
     quarantine: [{
       sourceKey: 'workbook:v1:12:10:0', sheet: 'Stałe koszty', rowNumber: 10,
-      recordType: 'expense', accountingMonth: null, reasonCode: 'ORPHAN_AMOUNT',
+      recordType: 'expense', accountingMonth: null, occurredOn: null,
+      periodPrecision: 'unknown', periodMonth: null, reasonCode: 'ORPHAN_AMOUNT',
       reasonCodes: ['ORPHAN_AMOUNT'], raw: { B: 300.5 },
     }],
+    specialistOptions: [{
+      id: 'sp_staging_workbook_julia_wolanin', label: 'Julia Wolanin',
+    }],
+    specialistLabels: [],
     workbookKind: 'legacy',
   }
   const imported = workbookImportDto()
@@ -4275,12 +4280,19 @@ test('workbook API sends exact multipart lifecycles and accepts a bounded XLSX d
     jsonResponse(sessionBody()),
     jsonResponse({ data: preview }),
     jsonResponse({ data: { import: imported } }, 201),
-    jsonResponse({ data: { import: progressing, job: workbookJobDto() } }),
-    jsonResponse({ data: { import: progressing, job: workbookJobDto() } }),
+    jsonResponse({ data: {
+      import: progressing, job: workbookJobDto(),
+      evidence: { createdRecords: 64, voidedRecords: 0, converged: false },
+    } }),
+    jsonResponse({ data: {
+      import: progressing, job: workbookJobDto(),
+      evidence: { createdRecords: 64, voidedRecords: 0, converged: false },
+    } }),
     new Response(exportBytes, {
       headers: {
         'cache-control': 'private, no-store',
         'content-disposition': 'attachment; filename="bear-with-me-legacy-2026-08-27.xlsx"',
+        'content-length': String(exportBytes.byteLength),
         'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'x-content-type-options': 'nosniff',
       },
@@ -4292,17 +4304,29 @@ test('workbook API sends exact multipart lifecycles and accepts a bounded XLSX d
   })
   await client.getSession()
 
-  assert.deepEqual(await client.previewWorkbook(file), preview)
-  assert.deepEqual(await client.createWorkbookImport(file, previewToken, {
+  assert.deepEqual(await client.previewWorkbook(file), {
+    ...preview,
+    mappingConflicts: [],
+    hasBlockingConflicts: false,
+    quarantine: [{
+      sheet: 'Stałe koszty', rowNumber: 10, recordType: 'expense',
+      reasonCode: 'ORPHAN_AMOUNT', reasonCodes: ['ORPHAN_AMOUNT'],
+    }],
+  })
+  assert.deepEqual(await client.createWorkbookImport(file, previewToken, [], {
     idempotencyKey: 'workbook-import-key-0001',
   }), imported)
   assert.deepEqual(await client.continueWorkbookImport('wbi_api_one', 1, {
     idempotencyKey: 'workbook-continue-key-0001',
-  }), { import: progressing, job: workbookJobDto() })
+  }), {
+    import: progressing, job: workbookJobDto(),
+    evidence: { createdRecords: 64, voidedRecords: 0, converged: false },
+  })
   assert.deepEqual(await client.getWorkbookImport('wbi_api_one'), {
     import: progressing, job: workbookJobDto(),
+    evidence: { createdRecords: 64, voidedRecords: 0, converged: false },
   })
-  assert.deepEqual(await client.exportWorkbook('legacy'), {
+  assert.deepEqual(await client.exportWorkbook({ format: 'legacy' }), {
     bytes: exportBytes,
     filename: 'bear-with-me-legacy-2026-08-27.xlsx',
   })
@@ -4313,7 +4337,7 @@ test('workbook API sends exact multipart lifecycles and accepts a bounded XLSX d
     '/api/v1/workbooks/imports',
     '/api/v1/workbooks/imports/wbi_api_one/continue',
     '/api/v1/workbooks/imports/wbi_api_one',
-    '/api/v1/workbooks/export?format=legacy',
+    '/api/v1/workbooks/exports',
   ])
   for (const call of calls.slice(1, 4)) {
     assert.equal(call.init.method, 'POST')
@@ -4331,11 +4355,14 @@ test('workbook API sends exact multipart lifecycles and accepts a bounded XLSX d
     new Uint8Array(await calls[1].init.body.get('workbook').arrayBuffer()), fileBytes,
   )
   assert.equal(calls[2].init.body.get('previewToken'), previewToken)
+  assert.equal(calls[2].init.body.get('resolutions'), '[]')
   assert.deepEqual(
     new Uint8Array(await calls[2].init.body.get('workbook').arrayBuffer()), fileBytes,
   )
   assert.equal(calls[3].init.body.get('expectedVersion'), '1')
   assert.equal(calls[4].init.method, 'GET')
+  assert.equal(calls[5].init.method, 'POST')
+  assert.equal(calls[5].init.body, '{"format":"legacy"}')
   assert.equal(header(calls[5], 'Accept'),
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 })
@@ -4355,6 +4382,11 @@ test('workbook status accepts every legal import state with terminal invariants'
         status: complete ? 'complete' : status === 'failed' ? 'failed' : 'running',
         completedAt,
       }),
+      evidence: {
+        createdRecords: complete ? 2_232 : 0,
+        voidedRecords: 0,
+        converged: complete,
+      },
     } })
   })
   const { calls, fetchImpl } = queuedFetch(...responses)
@@ -4381,14 +4413,18 @@ test('workbook export cancels an undeclared stream as soon as the client byte ca
     headers: {
       'cache-control': 'private, no-store',
       'content-disposition': 'attachment; filename="bear-with-me-panel-v2-2026-08-27.xlsx"',
+      'content-length': String(10 * 1024 * 1024),
       'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'x-content-type-options': 'nosniff',
     },
   })
-  const { fetchImpl } = queuedFetch(response)
-  const client = createApiClient({ fetchImpl })
+  const { fetchImpl } = queuedFetch(jsonResponse(sessionBody()), response)
+  const client = createApiClient({
+    fetchImpl, idempotencyKeyFactory: () => 'workbook-export-key-0001',
+  })
+  await client.getSession()
 
-  await assert.rejects(client.exportWorkbook('panel-v2'), {
+  await assert.rejects(client.exportWorkbook({ format: 'panel-v2' }), {
     code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE',
   })
   assert.equal(cancelled, true)
@@ -4406,6 +4442,7 @@ test('workbook export cancels and rejects a stream completed after authority rev
     headers: new Headers({
       'cache-control': 'private, no-store',
       'content-disposition': 'attachment; filename="bear-with-me-panel-v2-2026-08-27.xlsx"',
+      'content-length': '4',
       'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'x-content-type-options': 'nosniff',
     }),
@@ -4427,10 +4464,12 @@ test('workbook export cancels and rejects a stream completed after authority rev
     response,
     jsonResponse(refreshed),
   )
-  const client = createApiClient({ fetchImpl })
+  const client = createApiClient({
+    fetchImpl, idempotencyKeyFactory: () => 'workbook-export-key-0001',
+  })
   await client.getSession()
 
-  const stale = client.exportWorkbook('panel-v2')
+  const stale = client.exportWorkbook({ format: 'panel-v2' })
   await client.getSession()
   releaseChunk({ done: false, value: new Uint8Array([80, 75, 3, 4]) })
 

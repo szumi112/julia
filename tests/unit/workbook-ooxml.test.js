@@ -4,8 +4,26 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { parseWorkbookFile } from '../../src/workbook-import.js'
+import { closeWorkbookPackage } from '../../src/workbook-ooxml-package.js'
 
 const workbookOoxml = () => import('../../src/workbook-ooxml.js')
+
+test('OOXML packages use deterministic ZIP metadata', () => {
+  const files = {
+    '[Content_Types].xml': strToU8('<Types/>'),
+    'xl/workbook.xml': strToU8('<workbook/>'),
+  }
+  const originalNow = Date.now
+  try {
+    Date.now = () => Date.UTC(2026, 0, 1)
+    const first = closeWorkbookPackage(files)
+    Date.now = () => Date.UTC(2027, 0, 1)
+    const second = closeWorkbookPackage(files)
+    assert.deepEqual(second, first)
+  } finally {
+    Date.now = originalNow
+  }
+})
 
 test('three-way merge keeps a concurrent current date when the workbook date is unchanged', async () => {
   const { mergePanelEdits } = await workbookOoxml()

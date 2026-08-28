@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useShell } from './shell-ctx.js'
 import { useIsPhone } from './responsive.js'
 import { Button } from './ui.jsx'
-import { routeHref } from './routing.js'
+import { routeFromHash, routeHref } from './routing.js'
 
 export function EntityLink({ route, params, href, label, onClick, children, ...rest }) {
   const { appMode, canAccess, navigate } = useShell()
@@ -53,6 +53,7 @@ export function useRouteParamsSync(routeName, params) {
   const key = JSON.stringify(params)
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
+      if (routeFromHash(window.location.hash)?.name !== routeName) return
       const hash = routeHref(routeName, JSON.parse(key))
       if (window.location.hash !== hash) {
         window.history.replaceState(window.history.state, '', hash)
