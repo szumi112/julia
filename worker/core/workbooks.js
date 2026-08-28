@@ -1720,11 +1720,6 @@ export async function createWorkbookImport(input) {
     await requireCurrentAuthority(command.db, command.actor)
     return importResponse(replayed)
   }
-  const existingArtifact = await command.db.prepare(
-    `SELECT id FROM workbook_artifacts
-     WHERE centre_id=? AND fingerprint=? LIMIT 1`,
-  ).bind(command.centreId, inspected.parsed.fingerprint).first()
-  if (existingArtifact) throw new Error('WORKBOOK_IMPORT_CONFLICT')
   const expectedConflictIds = mappingConflicts.map(({ id }) => id)
     .sort(compareUtf16CodeUnits)
   if (blockingConflicts.length
@@ -1732,6 +1727,11 @@ export async function createWorkbookImport(input) {
     || canonicalResolutions.some(({ conflictId }, index) => (
       conflictId !== expectedConflictIds[index]
     ))) throw new Error('WORKBOOK_IMPORT_CONFLICT')
+  const existingArtifact = await command.db.prepare(
+    `SELECT id FROM workbook_artifacts
+     WHERE centre_id=? AND fingerprint=? LIMIT 1`,
+  ).bind(command.centreId, inspected.parsed.fingerprint).first()
+  if (existingArtifact) throw new Error('WORKBOOK_IMPORT_CONFLICT')
   const mappingByConflict = new Map(mappingConflicts.map((conflict) => [conflict.id, conflict]))
   const explicitMappings = canonicalResolutions.map(({ conflictId, specialistId }) => {
     const conflict = mappingByConflict.get(conflictId)
