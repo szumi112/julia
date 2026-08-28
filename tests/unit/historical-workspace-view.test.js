@@ -73,6 +73,42 @@ test('calendar model keeps exact-day, month-only and unknown occurrences exclusi
   )
 })
 
+test('calendar model keeps adjacent-month exact days while counting only the selected month', () => {
+  const crossingOccurrences = Object.freeze([
+    ...occurrences,
+    occurrence({
+      id: 'hoc_adjacent_day',
+      period: Object.freeze({ precision: 'day', day: '2026-08-01', month: '2026-08' }),
+    }),
+    occurrence({
+      id: 'hoc_adjacent_month',
+      period: Object.freeze({ precision: 'month', day: null, month: '2026-08' }),
+    }),
+  ])
+  const model = historicalCalendarModel({
+    occurrences: crossingOccurrences,
+    historicalClients,
+    specialists,
+    ym: '2026-07',
+    showHistorical: true,
+  })
+
+  assert.deepEqual(model.exactByDay['2026-08-01'].map(({ id }) => id), ['hoc_adjacent_day'])
+  assert.deepEqual(model.monthOnlyRows.map(({ id }) => id), ['hoc_month'])
+  assert.equal(model.historicalCount, 2)
+  assert.equal(model.visibleCount, 2)
+
+  const hiddenModel = historicalCalendarModel({
+    occurrences: crossingOccurrences,
+    historicalClients,
+    specialists,
+    ym: '2026-07',
+    showHistorical: false,
+  })
+
+  assert.equal(hiddenModel.suppressedCount, 4)
+})
+
 test('calendar rows expose exact Polish precision labels without appointment-only fields', () => {
   const model = historicalCalendarModel({
     occurrences, historicalClients, specialists, ym: '2026-07', showHistorical: true,
@@ -253,7 +289,27 @@ test('calendar historical state gives valid URL month and review precedence over
     persisted: { ym: '2026-05', selected: '2026-05-04', review: 'unknown' },
     today: '2026-08-28',
   }), {
-    ym: '2026-07', selected: '2026-05-04', review: 'unknown',
+    ym: '2026-07', selected: '2026-07-01', review: 'unknown',
+  })
+})
+
+test('calendar historical state rejects an impossible civil URL day', () => {
+  assert.deepEqual(resolveCalendarHistoricalViewState({
+    params: { date: '2026-02-31' },
+    persisted: { ym: '2026-05', selected: '2026-05-04', review: null },
+    today: '2026-08-28',
+  }), {
+    ym: '2026-05', selected: '2026-05-04', review: null,
+  })
+})
+
+test('calendar historical state derives a selected day inside a direct URL month', () => {
+  assert.deepEqual(resolveCalendarHistoricalViewState({
+    params: { ym: '2026-07' },
+    persisted: { ym: '2026-05', selected: '2026-05-04', review: null },
+    today: '2026-08-28',
+  }), {
+    ym: '2026-07', selected: '2026-07-01', review: null,
   })
 })
 

@@ -78,10 +78,8 @@ export function historicalCalendarModel({
     if (occurrence.status !== 'recorded') continue
     const row = rowFor(occurrence, clientsById, specialistsById)
     if (occurrence.period.precision === 'unknown') unknownRows.push(row)
-    else if (occurrence.period.month === ym) {
-      if (occurrence.period.precision === 'day') exactRows.push(row)
-      else monthRows.push(row)
-    }
+    else if (occurrence.period.precision === 'day') exactRows.push(row)
+    else if (occurrence.period.month === ym) monthRows.push(row)
   }
 
   exactRows.sort((left, right) => left.day.localeCompare(right.day) || compareSubjectRows(left, right))
@@ -97,7 +95,7 @@ export function historicalCalendarModel({
     for (const day of Object.keys(exactByDay)) Object.freeze(exactByDay[day])
   }
 
-  const historicalCount = exactRows.length + monthRows.length
+  const historicalCount = exactRows.filter(({ month }) => month === ym).length + monthRows.length
   const unknownCount = unknownRows.length
   return Object.freeze({
     exactByDay: Object.freeze(exactByDay),
@@ -106,7 +104,7 @@ export function historicalCalendarModel({
     historicalCount,
     visibleCount: showHistorical ? historicalCount : 0,
     unknownCount,
-    suppressedCount: showHistorical ? 0 : historicalCount + unknownCount,
+    suppressedCount: showHistorical ? 0 : exactRows.length + monthRows.length + unknownCount,
   })
 }
 
@@ -204,16 +202,36 @@ export function sortProfessionalDirectory(specialists) {
   )))
 }
 
-const validMonth = (value) => /^\d{4}-(0[1-9]|1[0-2])$/.test(value ?? '')
-const validDay = (value) => /^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/.test(value ?? '')
+const MONTH = /^(\d{4})-(0[1-9]|1[0-2])$/
+const DAY = /^(\d{4})-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/
+const validMonth = (value) => {
+  const match = MONTH.exec(value ?? '')
+  return match !== null && match[1] !== '0000'
+}
+const validDay = (value) => {
+  const match = DAY.exec(value ?? '')
+  if (match === null || match[1] === '0000') return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const days = month === 2
+    ? year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28
+    : [4, 6, 9, 11].includes(month) ? 30 : 31
+  return day >= 1 && day <= days
+}
 
 export function resolveCalendarHistoricalViewState({ params, persisted, today }) {
   const paramDate = validDay(params?.date) ? params.date : null
-  const selected = paramDate
-    ?? (validDay(persisted?.selected) ? persisted.selected : today)
+  const paramMonth = validMonth(params?.ym) ? params.ym : null
+  const persistedSelected = validDay(persisted?.selected) ? persisted.selected : null
   const ym = paramDate?.slice(0, 7)
-    ?? (validMonth(params?.ym) ? params.ym : null)
-    ?? (validMonth(persisted?.ym) ? persisted.ym : selected.slice(0, 7))
+    ?? paramMonth
+    ?? (validMonth(persisted?.ym) ? persisted.ym : null)
+    ?? persistedSelected?.slice(0, 7)
+    ?? today.slice(0, 7)
+  const selected = paramDate
+    ?? (paramMonth ? `${paramMonth}-01` : null)
+    ?? (persistedSelected?.slice(0, 7) === ym ? persistedSelected : `${ym}-01`)
   const review = params?.review === 'unknown'
     ? 'unknown'
     : persisted?.review === 'unknown' ? 'unknown' : null
