@@ -751,7 +751,8 @@ describe('operational backup create runner', () => {
       sourceDatabaseId: EXPORT_DATABASE_ID,
     })
     expect(calls[0].options.ssecKey).toBeInstanceOf(ArrayBuffer)
-    expect(calls[1].options).toBeUndefined()
+    expect(calls[0].options.onlyIf).toEqual({ etagDoesNotMatch: '*' })
+    expect(calls[1].options).toEqual({ onlyIf: { etagDoesNotMatch: '*' } })
     expect(storedSql).toEqual(sqlBytes)
     const manifest = parseCanonicalManifest(storedManifest)
     expect(manifest).toMatchObject({
@@ -884,6 +885,163 @@ describe('operational backup create runner', () => {
     }])
   })
 
+  it('reclaim cleans deterministic artifacts before export and conditionally recreates both objects', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_reclaim_cleanup',
+      backupId: 'bkp_backup_operational_reclaim_cleanup',
+      localDay: '2099-12-30',
+    })
+    await processNextBackupCreate(processInput({
+      context,
+      schedulerRun,
+      idFactory: () => 'attempt_backup_operational_reclaim_cleanup_1',
+      leaseOwnerFactory: () => 'owner_backup_operational_reclaim_cleanup_1',
+    }))
+    const events = []
+    const writes = []
+    const archive = {
+      async delete(key) { events.push(`delete:${key}`) },
+      async put(key, value, options) {
+        events.push(`put:${key}`)
+        writes.push({ key, options })
+        if (key.endsWith('.sql')) await value.pipeTo(new WritableStream({ write() {} }))
+        return { etag: key.endsWith('.sql') ? 'etag-reclaim-public' : 'manifest-reclaim-public', size: key.endsWith('.sql') ? 1 : value.byteLength }
+      },
+    }
+    const result = await runNextBackupCreate({
+      db: env.DB,
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS + LEASE_MS + 1,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: () => 'attempt_backup_operational_reclaim_cleanup_2',
+      leaseOwnerFactory: () => 'owner_backup_operational_reclaim_cleanup_2',
+      nonceFactory: () => new Uint8Array(12).fill(6),
+      rawKeyFactory: () => new Uint8Array(32).fill(8),
+      pollExport: async () => {
+        events.push('export')
+        return {
+          atBookmark: 'bookmark-operational-reclaim-cleanup',
+          downloadUrl: 'https://download.example.test/reclaim-cleanup',
+        }
+      },
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]))
+            controller.close()
+          },
+        }),
+      }),
+    })
+    expect(result).toEqual({ claimed: true, result: 'succeeded', backupId: seeded.backupId })
+    expect(events.slice(0, 5)).toEqual([
+      `delete:backups/v2/2099/12/${seeded.backupId}.manifest.json`,
+      `delete:backups/v2/2099/12/${seeded.backupId}.sql`,
+      `delete:backups/v1/2099/12/${seeded.backupId}.manifest.json`,
+      `delete:backups/v1/2099/12/${seeded.backupId}.sql`,
+      'export',
+    ])
+    expect(writes.map(({ options }) => options.onlyIf)).toEqual([
+      { etagDoesNotMatch: '*' },
+      { etagDoesNotMatch: '*' },
+    ])
+  })
+
+  it('a suspended prior claimant cannot overwrite or be overwritten after reclaim cleanup', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_reclaim_stale_put',
+      backupId: 'bkp_backup_operational_reclaim_stale_put',
+      localDay: '2099-12-29',
+    })
+    await processNextBackupCreate(processInput({
+      context,
+      schedulerRun,
+      idFactory: () => 'attempt_backup_operational_reclaim_stale_put_1',
+      leaseOwnerFactory: () => 'owner_backup_operational_reclaim_stale_put_1',
+    }))
+    const sqlKey = `backups/v2/2099/12/${seeded.backupId}.sql`
+    const manifestKey = `backups/v2/2099/12/${seeded.backupId}.manifest.json`
+    const objects = new Map([
+      [sqlKey, 'pre-reclaim-sql-public'],
+      [manifestKey, 'pre-reclaim-manifest-public'],
+    ])
+    const archive = {
+      async delete(key) { objects.delete(key) },
+      async put(key, value, options) {
+        if (options?.onlyIf?.etagDoesNotMatch === '*' && objects.has(key)) return null
+        if (key.endsWith('.sql')) await value.pipeTo(new WritableStream({ write() {} }))
+        objects.set(key, 'new-claimant-public')
+        return { etag: 'new-claimant-etag-public', size: key.endsWith('.sql') ? 1 : value.byteLength }
+      },
+    }
+    const result = await runNextBackupCreate({
+      db: env.DB,
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS + LEASE_MS + 1,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: () => 'attempt_backup_operational_reclaim_stale_put_2',
+      leaseOwnerFactory: () => 'owner_backup_operational_reclaim_stale_put_2',
+      nonceFactory: () => new Uint8Array(12).fill(7),
+      rawKeyFactory: () => new Uint8Array(32).fill(9),
+      pollExport: async () => {
+        expect(objects.has(sqlKey)).toBe(false)
+        expect(objects.has(manifestKey)).toBe(false)
+        objects.set(sqlKey, 'suspended-old-claimant-public')
+        return {
+          atBookmark: 'bookmark-operational-reclaim-stale-put',
+          downloadUrl: 'https://download.example.test/reclaim-stale-put',
+        }
+      },
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]))
+            controller.close()
+          },
+        }),
+      }),
+    })
+    expect(result).toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_STATE_INVALID',
+    })
+    expect(objects.get(sqlKey)).toBe('suspended-old-claimant-public')
+    expect(objects.has(manifestKey)).toBe(false)
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'failed',
+      version: 3,
+      last_error_code: 'BACKUP_STATE_INVALID',
+    })
+  })
+
   it('does not finalize a claim after the scheduler owner lease is lost', async () => {
     const context = await cryptoContext()
     const schedulerRun = await seedScheduler({
@@ -961,6 +1119,7 @@ describe('operational backup create runner', () => {
     let nowMs = attemptEightNow
     let putCount = 0
     const archive = {
+      async delete() {},
       async put(key, value) {
         putCount += 1
         if (key.endsWith('.sql')) await value.pipeTo(new WritableStream({ write() {} }))

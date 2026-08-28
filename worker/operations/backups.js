@@ -56,6 +56,7 @@ const LOCAL_MONTH = /^\d{4}-\d{2}$/
 const SOURCE_ACCOUNT_ID = /^[0-9a-f]{32}$/
 const SOURCE_DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MIGRATION_NAME = /^\d{4}_[a-z0-9_-]+\.sql$/
+const MIGRATION_NAME_MAX_BYTES = 255
 
 const invalid = () => { throw new Error('BACKUP_STATE_INVALID') }
 const ownRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -788,9 +789,16 @@ async function readAppliedMigrations(db) {
   let previousId = 0
   for (const row of rows) {
     const migration = dataSnapshot(row, ['id', 'name'])
-    if (!positiveInteger(migration.id) || migration.id <= previousId
-      || typeof migration.name !== 'string' || !MIGRATION_NAME.test(migration.name)
-      || names.has(migration.name)) invalid()
+    let encodedName
+    try {
+      if (!positiveInteger(migration.id) || migration.id <= previousId
+        || typeof migration.name !== 'string' || !MIGRATION_NAME.test(migration.name)
+        || names.has(migration.name)) invalid()
+      encodedName = new TextEncoder().encode(migration.name)
+      if (encodedName.byteLength > MIGRATION_NAME_MAX_BYTES) invalid()
+    } finally {
+      encodedName?.fill(0)
+    }
     previousId = migration.id
     names.add(migration.name)
     migrations.push(migration)
@@ -860,6 +868,23 @@ async function renewClaim(input, claim) {
   } catch (error) {
     if (isD1OutboxOperationGuardFailure(error)) throw new Error('BACKUP_LEASE_LOST')
     throw error
+  }
+}
+
+async function cleanupReclaimedArtifacts(input, candidate, claim) {
+  if (candidate.oldAttempt === null) return
+  if (typeof input.archive.delete !== 'function') invalid()
+  const keyPairs = [2, 1].map((version) => backupObjectKeys({
+    backupId: candidate.backup.id,
+    localMonth: candidate.backup.local_month,
+    version,
+  }))
+  await renewClaim(input, claim)
+  for (const keys of keyPairs) {
+    await input.archive.delete(keys.manifestKey)
+    await renewClaim(input, claim)
+    await input.archive.delete(keys.objectKey)
+    await renewClaim(input, claim)
   }
 }
 
@@ -1125,6 +1150,11 @@ export async function runNextBackupCreate(input) {
   const claim = await claimCandidate(captured, candidate)
   let rawSsecKey
   try {
+    await cleanupReclaimedArtifacts(
+      { ...runner, scheduler: captured.scheduler },
+      candidate,
+      claim,
+    )
     const migrationsBefore = await readAppliedMigrations(runner.db)
     const restoreSentinel = restoreSentinelFor(candidate.backup)
     await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
@@ -1163,6 +1193,7 @@ export async function runNextBackupCreate(input) {
     const stored = await runner.archive.put(keys.objectKey, downloaded.body, {
       ssecKey: rawSsecKey.buffer,
       customMetadata: metadata,
+      onlyIf: { etagDoesNotMatch: '*' },
     })
     if (!stored || typeof stored.etag !== 'string' || stored.etag.length === 0
       || !Number.isSafeInteger(stored.size) || stored.size < 0) invalid()
@@ -1188,7 +1219,9 @@ export async function runNextBackupCreate(input) {
     })
     if (JSON.stringify(expectedObjectMetadata(manifestResult.manifest)) !== JSON.stringify(metadata)) invalid()
     await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
-    const storedManifest = await runner.archive.put(keys.manifestKey, manifestResult.bytes)
+    const storedManifest = await runner.archive.put(keys.manifestKey, manifestResult.bytes, {
+      onlyIf: { etagDoesNotMatch: '*' },
+    })
     if (!storedManifest || typeof storedManifest.etag !== 'string'
       || storedManifest.etag.length === 0
       || storedManifest.size !== manifestResult.bytes.byteLength) invalid()

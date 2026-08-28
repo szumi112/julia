@@ -14,6 +14,7 @@ const DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 const ACCOUNT_ID = /^[0-9a-f]{32}$/
 const DATABASE_NAME = /^[a-z0-9][a-z0-9-]{0,127}$/
 const MIGRATION_NAME = /^\d{4}_[a-z0-9_-]+\.sql$/
+const MIGRATION_NAME_MAX_BYTES = 255
 const MANIFEST_KEY = /^backups\/(v1|v2)\/\d{4}\/(?:0[1-9]|1[0-2])\/(bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123})\.manifest\.json$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const RESTORE_BINDING = 'RESTORE_TARGET'
@@ -62,10 +63,17 @@ function migrationRows(value) {
   const names = new Set()
   let previous = 0
   for (const row of value) {
-    if (!exactObject(row, ['id', 'name'])
-      || !Number.isSafeInteger(row.id) || row.id <= previous
-      || typeof row.name !== 'string' || !MIGRATION_NAME.test(row.name)
-      || names.has(row.name)) failed()
+    let encodedName
+    try {
+      if (!exactObject(row, ['id', 'name'])
+        || !Number.isSafeInteger(row.id) || row.id <= previous
+        || typeof row.name !== 'string' || !MIGRATION_NAME.test(row.name)
+        || names.has(row.name)) failed()
+      encodedName = new TextEncoder().encode(row.name)
+      if (encodedName.byteLength > MIGRATION_NAME_MAX_BYTES) failed()
+    } finally {
+      encodedName?.fill(0)
+    }
     previous = row.id
     names.add(row.name)
     rows.push({ id: row.id, name: row.name })

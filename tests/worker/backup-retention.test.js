@@ -72,7 +72,7 @@ describe('encrypted backup retention', () => {
     expect(await env.DB.prepare(
       'SELECT status,version,updated_at FROM backup_runs WHERE id=?'
     ).bind(seeded.id).first()).toEqual({
-      status: 'pruned', version: 4, updated_at: expiresAt,
+      status: 'pruned', version: 5, updated_at: expiresAt,
     })
     expect(await env.DB.prepare(
       `SELECT actor_staff_id,action,entity_type,entity_id,result,metadata_json
@@ -83,7 +83,7 @@ describe('encrypted backup retention', () => {
       entity_type: 'backup_run',
       entity_id: seeded.id,
       result: 'success',
-      metadata_json: '{"backupVersion":4}',
+      metadata_json: '{"backupVersion":5}',
     })
 
     await expect(pruneExpiredBackups(input(Date.parse(expiresAt) + 1))).resolves.toEqual({
@@ -122,7 +122,69 @@ describe('encrypted backup retention', () => {
     ])
     expect(await env.DB.prepare(
       'SELECT status,version FROM backup_runs WHERE id=?'
-    ).bind(backupId).first()).toEqual({ status: 'pruned', version: 4 })
+    ).bind(backupId).first()).toEqual({ status: 'pruned', version: 5 })
+  })
+
+  it('claims the selected backup version before deletion so restore verification cannot race pruning', async () => {
+    const seeded = await seedStored({ id: 'bkp_retention_restore_race' })
+    let restoreChanges = null
+    const archive = {
+      delete: vi.fn(async () => {
+        if (restoreChanges !== null) return
+        const response = await env.DB.prepare(
+          `UPDATE backup_runs
+           SET status='restore_verified',version=4,restore_verified_at=?,updated_at=?
+           WHERE id=? AND status='stored' AND version=3`
+        ).bind(expiresAt, expiresAt, seeded.id).run()
+        restoreChanges = response.meta.changes
+      }),
+    }
+    await expect(pruneExpiredBackups({
+      db: env.DB,
+      archive,
+      nowMs: Date.parse(expiresAt),
+      limit: 20,
+      idFactory: () => 'audit_backup_pruned_restore_race',
+      correlationIdFactory: () => 'correlation_backup_pruned_restore_race',
+    })).resolves.toEqual({ selected: 1, pruned: 1 })
+    expect(restoreChanges).toBe(0)
+    expect(await env.DB.prepare(
+      'SELECT status,version,restore_verified_at FROM backup_runs WHERE id=?'
+    ).bind(seeded.id).first()).toEqual({
+      status: 'pruned',
+      version: 5,
+      restore_verified_at: null,
+    })
+  })
+
+  it('reclaims an interrupted prune claim and converges after manifest deletion can resume', async () => {
+    const seeded = await seedStored({ id: 'bkp_retention_interrupted_prune' })
+    const firstArchive = {
+      delete: vi.fn(async () => { throw new Error('delete interruption marker') }),
+    }
+    const base = {
+      db: env.DB,
+      nowMs: Date.parse(expiresAt),
+      limit: 20,
+      idFactory: () => 'audit_backup_pruned_interrupted',
+      correlationIdFactory: () => 'correlation_backup_pruned_interrupted',
+    }
+    await expect(pruneExpiredBackups({ ...base, archive: firstArchive }))
+      .rejects.toThrow('delete interruption marker')
+    expect(await env.DB.prepare(
+      'SELECT status,version FROM backup_runs WHERE id=?'
+    ).bind(seeded.id).first()).toEqual({ status: 'stored', version: 4 })
+
+    const retryArchive = { delete: vi.fn(async () => {}) }
+    await expect(pruneExpiredBackups({ ...base, archive: retryArchive }))
+      .resolves.toEqual({ selected: 1, pruned: 1 })
+    expect(retryArchive.delete.mock.calls).toEqual([
+      [seeded.manifestKey],
+      [seeded.objectKey],
+    ])
+    expect(await env.DB.prepare(
+      'SELECT status,version FROM backup_runs WHERE id=?'
+    ).bind(seeded.id).first()).toEqual({ status: 'pruned', version: 6 })
   })
 
   it('prunes a legacy completed pair manifest-first without crossing backup prefixes', async () => {

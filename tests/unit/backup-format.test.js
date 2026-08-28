@@ -636,6 +636,7 @@ test('v2 schema rejects malformed source, migration order and bounds, and non-in
     (m) => { m.appliedMigrations[1].id = 1 },
     (m) => { m.appliedMigrations[1].name = m.appliedMigrations[0].name },
     (m) => { m.appliedMigrations[0].name = '1_bad.sql' },
+    (m) => { m.appliedMigrations[0].name = `0001_${'a'.repeat(247)}.sql` },
     (m) => { m.appliedMigrations[0].extra = true },
     (m) => { m.appliedMigrations = Array.from({ length: 257 }, (_, index) => ({ id: index + 1, name: `${String(index + 1).padStart(4, '0')}_migration.sql` })) },
     (m) => { m.restoreSentinel.kind = 'system_state' },
@@ -656,6 +657,21 @@ test('v2 schema rejects malformed source, migration order and bounds, and non-in
   }
   invalid(() => backupObjectKeys({ backupId: fixtureV2.manifest.backupId, localMonth: '2026-08', version: 3 }))
   invalid(() => backupObjectKeys({ backupId: fixtureV2.manifest.backupId, localMonth: '2026-08', version: 1, extra: true }))
+})
+
+test('v2 manifest creation refuses generated canonical output above 64 KiB', async () => {
+  const facts = structuredClone(fixtureV2.facts)
+  const ring = await keyring()
+  facts.appliedMigrations = Array.from({ length: 256 }, (_, index) => ({
+    id: index + 1,
+    name: `${String(index + 1).padStart(4, '0')}_${'a'.repeat(230)}_${String(index + 1).padStart(3, '0')}.sql`,
+  }))
+  await cryptoFailed(() => createBackupManifest({
+    facts,
+    rawSsecKey: derive(fixtureV2.publicDerivationSeeds.rawSsecKey),
+    keyring: ring,
+    nonceFactory: () => raw(fixtureV2.publicEncoding.nonce),
+  }))
 })
 
 test('v2 authenticated evidence cannot be changed without the historical KEK', async () => {

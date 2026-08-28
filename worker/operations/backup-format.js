@@ -2,6 +2,7 @@ const INVALID = 'BACKUP_MANIFEST_INVALID'
 const CRYPTO_FAILED = 'BACKUP_CRYPTO_FAILED'
 const POLLUTING_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
 const MANIFEST_MAX_BYTES = 64 * 1024
+const MIGRATION_NAME_MAX_BYTES = 255
 const V1_ROOT_KEYS = [
   'format', 'backupId', 'createdAt', 'localDay', 'localMonth', 'retentionClass',
   'objectKey', 'objectEtag', 'objectSize', 'atBookmark', 'wrappedSsecKey',
@@ -213,9 +214,16 @@ function migrationsValue(value) {
   let previousId = 0
   for (const row of rows) {
     const migration = exactObject(row, MIGRATION_KEYS)
-    if (!Number.isSafeInteger(migration.id) || migration.id <= previousId
-      || typeof migration.name !== 'string' || !MIGRATION_NAME.test(migration.name)
-      || names.has(migration.name)) invalid()
+    let encodedName
+    try {
+      if (!Number.isSafeInteger(migration.id) || migration.id <= previousId
+        || typeof migration.name !== 'string' || !MIGRATION_NAME.test(migration.name)
+        || names.has(migration.name)) invalid()
+      encodedName = new TextEncoder().encode(migration.name)
+      if (encodedName.byteLength > MIGRATION_NAME_MAX_BYTES) invalid()
+    } finally {
+      encodedName?.fill(0)
+    }
     previousId = migration.id
     names.add(migration.name)
     captured.push(migration)
@@ -419,6 +427,10 @@ export async function createBackupManifest(input) {
     }
     const complete = manifestValue(manifest)
     const bytes = new TextEncoder().encode(canonicalJson(complete))
+    if (bytes.byteLength > MANIFEST_MAX_BYTES) {
+      bytes.fill(0)
+      invalid()
+    }
     return {
       manifest: complete,
       bytes,

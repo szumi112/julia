@@ -46,6 +46,7 @@ async function pruneOne(input, row) {
       || typeof row.manifest_key !== 'string' || row.manifest_key.length === 0
       || !validInstant(row.expires_at) || row.expires_at > input.now))
     || (!completed && row.created_at > input.incompleteBefore)) invalid()
+  const artifactKeys = []
   if (completed) {
     let matched = null
     for (const version of [1, 2]) {
@@ -60,8 +61,7 @@ async function pruneOne(input, row) {
       }
     }
     if (matched === null) invalid()
-    await input.archive.delete(matched.manifestKey)
-    await input.archive.delete(matched.objectKey)
+    artifactKeys.push(matched.manifestKey, matched.objectKey)
   } else {
     for (const version of [2, 1]) {
       let keys
@@ -70,11 +70,33 @@ async function pruneOne(input, row) {
       } catch {
         invalid()
       }
-      await input.archive.delete(keys.manifestKey)
-      await input.archive.delete(keys.objectKey)
+      artifactKeys.push(keys.manifestKey, keys.objectKey)
     }
   }
-  const nextVersion = row.version + 1
+  const claimedVersion = row.version + 1
+  const claimed = await input.db.prepare(
+    `UPDATE backup_runs
+     SET version=?,updated_at=?
+     WHERE id=? AND status=? AND version=?
+       AND ((status IN ('stored','restore_verified') AND expires_at<=?)
+         OR (status='failed' AND created_at<=?))
+     RETURNING status,version,updated_at`
+  ).bind(
+    claimedVersion,
+    input.now,
+    row.id,
+    row.status,
+    row.version,
+    input.now,
+    input.incompleteBefore,
+  ).first()
+  if (!claimed || typeof claimed !== 'object'
+    || Reflect.ownKeys(claimed).length !== 3
+    || claimed.status !== row.status
+    || claimed.version !== claimedVersion
+    || claimed.updated_at !== input.now) invalid()
+  for (const key of artifactKeys) await input.archive.delete(key)
+  const nextVersion = claimedVersion + 1
   const auditId = input.idFactory()
   const correlationId = input.correlationIdFactory()
   if (!validId(auditId) || !validId(correlationId)) invalid()
@@ -90,7 +112,7 @@ async function pruneOne(input, row) {
       input.now,
       row.id,
       row.status,
-      row.version,
+      claimedVersion,
       input.now,
       input.incompleteBefore,
     ),

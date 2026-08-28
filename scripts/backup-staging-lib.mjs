@@ -23,6 +23,7 @@ const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const ACCOUNT_ID = /^[0-9a-f]{32}$/
 const DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MIGRATION_NAME = /^\d{4}_[a-z0-9_-]+\.sql$/
+const MIGRATION_NAME_MAX_BYTES = 255
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const LEASE_MS = 12 * 60 * 1000
 const LEASE_KEY = 'backup.demand.lease.v1'
@@ -111,8 +112,15 @@ function migrationRows(value) {
   const names = new Set()
   let previous = 0
   for (const row of value) {
-    if (!exactObject(row, ['id', 'name']) || !positiveInteger(row.id) || row.id <= previous
-      || typeof row.name !== 'string' || !MIGRATION_NAME.test(row.name) || names.has(row.name)) failed()
+    let encodedName
+    try {
+      if (!exactObject(row, ['id', 'name']) || !positiveInteger(row.id) || row.id <= previous
+        || typeof row.name !== 'string' || !MIGRATION_NAME.test(row.name) || names.has(row.name)) failed()
+      encodedName = new TextEncoder().encode(row.name)
+      if (encodedName.byteLength > MIGRATION_NAME_MAX_BYTES) failed()
+    } finally {
+      encodedName?.fill(0)
+    }
     previous = row.id
     names.add(row.name)
     migrations.push({ id: row.id, name: row.name })
@@ -278,6 +286,9 @@ export async function createStagingBackup(rawInput) {
   let rawSsecKey
   let completed = false
   let rowCreated = false
+  let pendingStatus = 'queued'
+  let pendingVersion = 1
+  let retentionClass = null
   let preserveCleanupLease = false
   try {
     const acquisition = await input.store.acquireLease({
@@ -335,7 +346,7 @@ export async function createStagingBackup(rawInput) {
       lease = null
       refused('LIVE_BACKUP_EXISTS')
     }
-    const retentionClass = dayFacts.liveMonthlyCount === 0 && dayFacts.storedMonthlyCount === 0
+    retentionClass = dayFacts.liveMonthlyCount === 0 && dayFacts.storedMonthlyCount === 0
       ? 'monthly'
       : 'daily'
     try {
@@ -381,6 +392,8 @@ export async function createStagingBackup(rawInput) {
       || exporting.id !== backupId || exporting.localDay !== localDay || exporting.localMonth !== localMonth
       || exporting.retentionClass !== retentionClass || exporting.status !== 'exporting'
       || exporting.version !== 2 || exporting.createdAt !== createdAt) failed()
+    pendingStatus = 'exporting'
+    pendingVersion = 2
     const before = await migrationEvidence(await input.store.readMigrations())
     lease = await renew(input, lease, 'creating')
     const exported = await input.pollExport({ source: input.source, signal: input.signal })
@@ -525,8 +538,43 @@ export async function createStagingBackup(rawInput) {
         preserveCleanupLease = true
         try { lease = await reread(input, lease) } catch {}
       }
-      try { await input.store.markFailed({ backupId, errorCode: cleanupCode, failedAt: instant(input.now()), lease }) } catch {}
-      if (cleanupProven) {
+      const failedAt = instant(input.now())
+      const expectedFailedVersion = pendingVersion + 1
+      let failedRowProven = false
+      let failedRow = null
+      try {
+        failedRow = await input.store.markFailed({
+          backupId,
+          errorCode: cleanupCode,
+          expectedStatus: pendingStatus,
+          expectedVersion: pendingVersion,
+          failedAt,
+          lease,
+        })
+      } catch {}
+      failedRowProven = exactObject(failedRow, ['status', 'version'])
+        && failedRow.status === 'failed'
+        && failedRow.version === expectedFailedVersion
+      if (!failedRowProven) {
+        let observed = null
+        try { observed = await input.store.readBackup({ backupId }) } catch {}
+        failedRowProven = exactObject(observed, BACKUP_DTO_KEYS)
+          && observed.id === backupId
+          && observed.status === 'failed'
+          && observed.version === expectedFailedVersion
+          && observed.localDay === localDay
+          && observed.localMonth === localMonth
+          && observed.retentionClass === retentionClass
+          && observed.objectKey === null
+          && observed.manifestKey === null
+          && observed.objectEtag === null
+          && observed.objectSize === null
+          && observed.completedAt === null
+          && observed.lastErrorCode === cleanupCode
+          && observed.createdAt === createdAt
+      }
+      if (!failedRowProven) preserveCleanupLease = true
+      if (cleanupProven && failedRowProven) {
         try { await input.store.releaseLease({ lease, now: instant(input.now()) }) } catch {}
         lease = null
       }
@@ -867,9 +915,11 @@ export function createDemandBackupStore(input) {
     const rows = await query(`SELECT id,local_day,local_month,retention_class,status,version,object_key,manifest_key,object_etag,object_size,completed_at,last_error_code,created_at FROM backup_runs WHERE id=${safeSqlText(backupId)}`)
     return rows.length === 0 ? null : backupDto(parseReturning(rows, ['id', 'local_day', 'local_month', 'retention_class', 'status', 'version', 'object_key', 'manifest_key', 'object_etag', 'object_size', 'completed_at', 'last_error_code', 'created_at']))
   }
-  const markFailed = async ({ backupId, errorCode, failedAt, lease }) => {
+  const markFailed = async ({ backupId, errorCode, expectedStatus, expectedVersion, failedAt, lease }) => {
+    if (!((expectedStatus === 'queued' && expectedVersion === 1)
+      || (expectedStatus === 'exporting' && expectedVersion === 2))) failed()
     const fence = await ownedFence(lease, failedAt)
-    const rows = await query(`UPDATE backup_runs SET status='failed',version=version+1,last_error_code=${safeSqlText(errorCode)},updated_at=${safeSqlText(failedAt)} WHERE id=${safeSqlText(backupId)} AND status IN ('queued','exporting') AND ${fence} RETURNING status,version`)
+    const rows = await query(`UPDATE backup_runs SET status='failed',version=version+1,last_error_code=${safeSqlText(errorCode)},updated_at=${safeSqlText(failedAt)} WHERE id=${safeSqlText(backupId)} AND status=${safeSqlText(expectedStatus)} AND version=${expectedVersion} AND ${fence} RETURNING status,version`)
     return parseReturning(rows, ['status', 'version'])
   }
   const markStaleFailed = async ({ staleBackupId, failedAt, lease, errorCode }) => {
@@ -888,9 +938,9 @@ export function createDemandBackupStore(input) {
     return { phase: released.phase }
   }
   const markRestoreVerified = async ({ backupId, manifestKey, objectEtag, objectKey, objectSize, verifiedAt }) => {
-    const rows = await query(`UPDATE backup_runs SET status='restore_verified',version=version+1,restore_verified_at=${safeSqlText(verifiedAt)},updated_at=${safeSqlText(verifiedAt)} WHERE id=${safeSqlText(backupId)} AND status='stored' AND manifest_key=${safeSqlText(manifestKey)} AND object_key=${safeSqlText(objectKey)} AND object_etag=${safeSqlText(objectEtag)} AND object_size=${objectSize} RETURNING status,version`)
+    const rows = await query(`UPDATE backup_runs SET status='restore_verified',version=4,restore_verified_at=${safeSqlText(verifiedAt)},updated_at=${safeSqlText(verifiedAt)} WHERE id=${safeSqlText(backupId)} AND status='stored' AND version=3 AND manifest_key=${safeSqlText(manifestKey)} AND object_key=${safeSqlText(objectKey)} AND object_etag=${safeSqlText(objectEtag)} AND object_size=${objectSize} RETURNING status,version`)
     const row = parseReturning(rows, ['status', 'version'])
-    return { updated: row.status === 'restore_verified' && row.version >= 4 }
+    return { updated: row.status === 'restore_verified' && row.version === 4 }
   }
   return Object.freeze({
     acquireLease, readDayFacts, insertQueued, markExporting, readMigrations,
@@ -1011,12 +1061,13 @@ export function createS3BackupArchive(input) {
       return { etag, size: total }
     } catch (error) {
       if (activeMultipart) {
+        const multipart = activeMultipart
         try {
           await send(new AbortMultipartUploadCommand({
-            Bucket: input.bucket, Key: activeMultipart.key, UploadId: activeMultipart.uploadId,
-          }), signal)
+            Bucket: input.bucket, Key: multipart.key, UploadId: multipart.uploadId,
+          }), AbortSignal.timeout(PROVIDER_REQUEST_MS))
+          if (activeMultipart === multipart) activeMultipart = null
         } catch {}
-        activeMultipart = null
       }
       throw error
     } finally {

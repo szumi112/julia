@@ -55,6 +55,7 @@ test('migration evidence accepts only a bounded, strictly ordered exact set', as
     [],
     [{ id: 2, name: '0002_ok.sql' }, { id: 1, name: '0001_bad.sql' }],
     [{ id: 1, name: '0001_same.sql' }, { id: 2, name: '0001_same.sql' }],
+    [{ id: 1, name: `0001_${'a'.repeat(247)}.sql` }],
     Array.from({ length: 257 }, (_, index) => ({ id: index + 1, name: `${String(index + 1).padStart(4, '0')}_migration.sql` })),
   ]) await assert.rejects(migrationEvidence(invalid), /^Error: BACKUP_STAGING_FAILED$/)
 })
@@ -86,7 +87,7 @@ function successfulSetup(overrides = {}) {
     async rereadLease() { events.push('reread'); return { backupId, owner, version: leaseVersion } },
     async markStored() { events.push('stored'); return { status: 'stored', version: 3 } },
     async readBackup() { events.push('read-backup'); return null },
-    async markFailed({ errorCode }) { events.push(`failed:${errorCode}`); return { status: 'failed' } },
+    async markFailed({ errorCode, expectedVersion }) { events.push(`failed:${errorCode}`); return { status: 'failed', version: expectedVersion + 1 } },
     async markStaleFailed({ errorCode }) { events.push(`stale-failed:${errorCode}`); return { status: 'failed' } },
     async releaseLease() { events.push('release'); return { phase: 'idle' } },
   }
@@ -357,6 +358,66 @@ test('failed absence proof leaves cleanup lease fenced for an executable takeove
   await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
   assert.equal(setup.events.includes('release'), false)
   assert.equal(setup.events.includes('failed:BACKUP_ORPHAN_CLEANUP_FAILED'), true)
+})
+
+test('an uncertain failed-row CAS keeps the lease when an exact reread is still exporting', async () => {
+  const setup = successfulSetup()
+  setup.input.archive.putSql = async () => { throw new Error('write marker') }
+  setup.input.store.markFailed = async () => {
+    setup.events.push('failed-timeout')
+    throw new Error('provider timeout marker')
+  }
+  setup.input.store.readBackup = async () => {
+    setup.events.push('read-backup')
+    return {
+      id: setup.backupId,
+      status: 'exporting',
+      version: 2,
+      localDay: '2026-08-27',
+      localMonth: '2026-08',
+      retentionClass: 'daily',
+      objectKey: null,
+      manifestKey: null,
+      objectEtag: null,
+      objectSize: null,
+      completedAt: null,
+      lastErrorCode: null,
+      createdAt: '2026-08-27T12:34:56.789Z',
+    }
+  }
+  await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
+  assert.equal(setup.events.includes('failed-timeout'), true)
+  assert.equal(setup.events.includes('read-backup'), true)
+  assert.equal(setup.events.includes('release'), false)
+})
+
+test('an uncertain failed-row CAS releases only after an exact failed-row reread', async () => {
+  const setup = successfulSetup()
+  setup.input.archive.putSql = async () => { throw new Error('write marker') }
+  setup.input.store.markFailed = async () => {
+    setup.events.push('failed-timeout')
+    throw new Error('provider timeout marker')
+  }
+  setup.input.store.readBackup = async () => {
+    setup.events.push('read-backup')
+    return {
+      id: setup.backupId,
+      status: 'failed',
+      version: 3,
+      localDay: '2026-08-27',
+      localMonth: '2026-08',
+      retentionClass: 'daily',
+      objectKey: null,
+      manifestKey: null,
+      objectEtag: null,
+      objectSize: null,
+      completedAt: null,
+      lastErrorCode: 'BACKUP_CREATE_FAILED',
+      createdAt: '2026-08-27T12:34:56.789Z',
+    }
+  }
+  await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
+  assert.equal(setup.events.at(-1), 'release')
 })
 
 test('a concurrent one-live/day insert loser refuses before export or R2 writes', async () => {
@@ -639,6 +700,48 @@ test('takeover CAS recovers an expired pre-insert lease with no backup row or ar
   assert.equal(statements.length, 3)
 })
 
+test('source lifecycle terminal CASes bind exact pending and stored versions', async () => {
+  const statements = []
+  const store = createDemandBackupStore({
+    async query(sql) {
+      statements.push(sql)
+      if (sql.startsWith('SELECT key,value_json')) {
+        return [{
+          key: 'backup.demand.lease.v1',
+          value_json: '{"backupId":"bkp_exact_cas_public","leaseExpiresAt":"2026-08-27T12:24:00.000Z","leaseOwner":"exact_owner_public","phase":"creating"}',
+          version: 7,
+          updated_at: '2026-08-27T12:00:00.000Z',
+        }]
+      }
+      if (sql.includes("SET status='failed'")) return [{ status: 'failed', version: 3 }]
+      if (sql.includes("SET status='restore_verified'")) return [{ status: 'restore_verified', version: 4 }]
+      throw new Error('unexpected statement')
+    },
+  })
+  assert.deepEqual(await store.markFailed({
+    backupId: 'bkp_exact_cas_public',
+    errorCode: 'BACKUP_CREATE_FAILED',
+    expectedStatus: 'exporting',
+    expectedVersion: 2,
+    failedAt: '2026-08-27T12:12:00.000Z',
+    lease: { backupId: 'bkp_exact_cas_public', owner: 'exact_owner_public', version: 7 },
+  }), { status: 'failed', version: 3 })
+  assert.deepEqual(await store.markRestoreVerified({
+    backupId: 'bkp_exact_cas_public',
+    manifestKey: 'backups/v2/2026/08/bkp_exact_cas_public.manifest.json',
+    objectEtag: 'etag-exact-public',
+    objectKey: 'backups/v2/2026/08/bkp_exact_cas_public.sql',
+    objectSize: 42,
+    verifiedAt: '2026-08-27T12:13:00.000Z',
+  }), { updated: true })
+  const failedSql = statements.find((sql) => sql.includes("SET status='failed'"))
+  const restoredSql = statements.find((sql) => sql.includes("SET status='restore_verified'"))
+  assert.match(failedSql, /status='exporting' AND version=2/)
+  assert.doesNotMatch(failedSql, /status IN/)
+  assert.match(restoredSql, /version=4/)
+  assert.match(restoredSql, /status='stored' AND version=3/)
+})
+
 function streamFrom(chunks) {
   return new ReadableStream({
     start(controller) {
@@ -771,4 +874,42 @@ test('S3 upload above 8 MiB emits exact parts, fences completion, and aborts a f
     checkpoint: async () => {},
   }), /upload failure marker/)
   assert.deepEqual(failedCalls, ['CreateMultipartUploadCommand', 'UploadPartCommand', 'AbortMultipartUploadCommand'])
+})
+
+test('a failed multipart abort stays retryable and never reuses the cancelled upload signal', async () => {
+  const controller = new AbortController()
+  const abortSignals = []
+  let abortCalls = 0
+  const key = 'backups/v2/2026/08/bkp_s3_public_20260827.sql'
+  const archive = createS3BackupArchive({
+    bucket: 'backup-staging-public',
+    client: {
+      async send(command, options) {
+        const name = command.constructor.name
+        if (name === 'CreateMultipartUploadCommand') return { UploadId: 'retryable-upload-public' }
+        if (name === 'UploadPartCommand') {
+          controller.abort()
+          throw new Error('upload interruption marker')
+        }
+        if (name === 'AbortMultipartUploadCommand') {
+          abortCalls += 1
+          abortSignals.push(options.abortSignal)
+          if (abortCalls === 1) throw new Error('first abort failure marker')
+          return {}
+        }
+        throw new Error('unexpected command')
+      },
+    },
+  })
+  await assert.rejects(archive.putSql({
+    key,
+    body: streamFrom([new Uint8Array(8 * 1024 * 1024), new Uint8Array([1])]),
+    ssecKey: new Uint8Array(32).fill(4),
+    customMetadata: s3Metadata,
+    signal: controller.signal,
+    checkpoint: async () => {},
+  }), /upload interruption marker/)
+  await archive.abortMultipart({ key, signal: new AbortController().signal })
+  assert.equal(abortCalls, 2)
+  assert.equal(abortSignals.every((signal) => signal instanceof AbortSignal && signal.aborted === false), true)
 })
