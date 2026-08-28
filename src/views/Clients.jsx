@@ -14,6 +14,7 @@ import {
   rollingWorkspaceRange,
   specialistIdentityFor,
 } from '../workspace-view.js'
+import { canPerformAction } from '../capability-access.js'
 
 // the client's next scheduled visit — sessions stay sorted by date+time
 const nextSessionOf = (sessions, clientId) => {
@@ -66,7 +67,7 @@ export function Clients({ params = {} }) {
   const [statusFilter, setStatusFilter] = useState(initialState.current.status)
   const [clientForm, setClientForm] = useState(null)
   const { locked: clientMutationLocked } = useClientMutationLock()
-  const canManageClients = !isApp || capabilities.includes('client.manage')
+  const canManageClients = !isApp || canPerformAction(capabilities, 'client.create')
   const clientActionsLocked = isApp && clientMutationLocked
   const openClient = (opts = {}) => {
     if (isApp) {
@@ -359,7 +360,8 @@ export function ClientDetail({ params }) {
     ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
     : []
   const canReadClinicalNotes = !isApp && role.scope === 'own' && client.psychId === role.psychId
-  const canEditClient = !clientMutationLocked && !client.readOnly && (!isApp || capabilities.includes('client.manage'))
+  const canEditClient = !clientMutationLocked && !client.readOnly
+    && (!isApp || canPerformAction(capabilities, 'client.edit'))
     && (role.scope !== 'own' || client.psychId === role.psychId)
   const canManageCare = !isApp && !client.readOnly
     && (role.scope !== 'own' || client.psychId === role.psychId)

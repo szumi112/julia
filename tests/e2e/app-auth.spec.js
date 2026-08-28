@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const ACTORS = {
   owner: { name: 'Alicja Testowa', role: 'Właściciel' },
@@ -25,6 +26,7 @@ const sessionEnvelope = ({
     specialistId: null,
     version: 1,
   },
+  authorityRevision = 1,
   capabilities = ['appointment.manage'],
 } = {}) => {
   const csrfExpiresAt = '2030-01-01T00:00:00.000Z'
@@ -32,6 +34,7 @@ const sessionEnvelope = ({
   return json(200, {
     data: {
       actor,
+      authorityRevision,
       capabilities,
       csrfExpiresAt,
       csrfToken: `v1.${csrfExpiresUnix}.${'A'.repeat(22)}.${'B'.repeat(43)}`,
@@ -113,6 +116,21 @@ const detachedFocusStaff = {
   version: 1,
   specialistId: null,
   invitation: null,
+}
+
+const roleChangeStaff = {
+  id: 'stf_role_target',
+  displayName: 'Roksana Rolowa',
+  email: 'role-target@example.test',
+  role: 'coordinator',
+  status: 'active',
+  version: 3,
+  specialistId: null,
+  invitation: null,
+}
+const roleChangeResult = (overrides = {}) => {
+  const { invitation: _invitation, ...person } = roleChangeStaff
+  return { ...person, role: 'owner', version: 4, ...overrides }
 }
 
 test('@owner delays the fictional shell behind the loading boundary', async ({ page }) => {
@@ -277,6 +295,7 @@ test('@owner refreshes in place and replaces subscribed session authority', asyn
           specialistId: 'sp_refreshed_specialist',
           version: 1,
         },
+        authorityRevision: 2,
         capabilities: [
           'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
           'client.manage', 'client.operational.read', 'clinical.read', 'payment.manage',
@@ -299,7 +318,7 @@ test('@owner refreshes in place and replaces subscribed session authority', asyn
 
   releaseRefresh()
   await expect(page.getByText('Renata Odświeżona', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Specjalista', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('Specjalistka', { exact: true }).first()).toBeVisible()
   await expect(page.locator('.shell')).toHaveAttribute('aria-busy', 'false')
   const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
   await expect(navigation.getByRole('link', { name: 'Finanse', exact: true })).toBeVisible()
@@ -360,10 +379,12 @@ test('@owner constrains a max-length authenticated identity at shell breakpoints
         specialistId: null,
         version: 1,
       },
+      authorityRevision: 1,
       capabilities: [
         'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct',
         'chat.general', 'client.manage', 'client.operational.read', 'clinical.read',
         'finance.centre.manage', 'finance.centre.read', 'operations.health.read', 'payment.manage',
+        'permissions.manage',
         'security.audit.read', 'specialist.directory.read', 'staff.manage', 'tus.manage',
       ],
       csrfExpiresAt,
@@ -527,6 +548,171 @@ test('@owner staff invitation is a native modal that owns the shell shortcuts', 
 
   const drawer = page.getByRole('dialog', { name: 'Zaproś osobę' })
   await expectStaffModalOwnsShell(page, drawer)
+})
+
+test('@owner changes a staff role with optimistic data and refreshes session authority', async ({ page }) => {
+  let changed = false
+  let sessionRequests = 0
+  const roleRequests = []
+  await page.route('**/api/v1/session', (route) => {
+    sessionRequests += 1
+    return route.fulfill(sessionEnvelope({
+      authorityRevision: sessionRequests > 1 ? 2 : 1,
+      capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+    }))
+  })
+  await page.route('**/api/v1/staff', (route) => route.fulfill(json(200, {
+    data: {
+      staff: [{
+        ...roleChangeStaff,
+        role: changed ? 'owner' : roleChangeStaff.role,
+        version: changed ? roleChangeStaff.version + 1 : roleChangeStaff.version,
+      }],
+    },
+  })))
+  await page.route('**/api/v1/staff/*/role', async (route) => {
+    roleRequests.push({
+      body: route.request().postData(),
+      key: route.request().headers()['idempotency-key'],
+      url: route.request().url(),
+    })
+    changed = true
+    await route.fulfill(json(200, {
+      data: {
+        staff: {
+          ...roleChangeResult(),
+        },
+      },
+    }))
+  })
+  await openSettings(page)
+  const row = page.locator('.staff-access-row').filter({ hasText: roleChangeStaff.displayName })
+
+  await row.getByRole('button', { name: `Zmień rolę — ${roleChangeStaff.displayName}` }).click()
+  const drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
+  await drawer.getByLabel('Rola').selectOption('owner')
+  await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
+
+  await expect(drawer).toHaveCount(0)
+  await expect(row).toContainText('Właściciel')
+  await expect.poll(() => sessionRequests).toBeGreaterThanOrEqual(2)
+  expect(roleRequests).toHaveLength(2)
+  expect(roleRequests[1]).toEqual(roleRequests[0])
+  expect(new URL(roleRequests[0].url).pathname).toBe('/api/v1/staff/stf_role_target/role')
+  expect(new URL(roleRequests[0].url).search).toBe('')
+  expect(JSON.parse(roleRequests[0].body)).toEqual({ expectedVersion: 3, role: 'owner' })
+  expect(roleRequests[0].key).toMatch(/^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/)
+})
+
+test('@owner role editor guards its draft and restores focus safely', async ({ page }) => {
+  await page.route('**/api/v1/staff', (route) => route.fulfill(json(200, {
+    data: { staff: [roleChangeStaff] },
+  })))
+  await openSettings(page)
+  const opener = page.getByRole('button', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
+  await opener.click()
+  const drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
+
+  await expect(drawer.getByLabel('Rola')).toHaveValue('coordinator')
+  await drawer.getByLabel('Rola').selectOption('specialist')
+  await drawer.getByRole('button', { name: 'Zamknij' }).click()
+  await expect(drawer.getByText('Masz niezapisane zmiany.', { exact: true })).toBeVisible()
+  await drawer.getByRole('button', { name: 'Wróć' }).click()
+  await expect(drawer.getByLabel('Rola')).toHaveValue('specialist')
+  await drawer.getByRole('button', { name: 'Zamknij' }).click()
+  await drawer.getByRole('button', { name: 'Odrzuć' }).click()
+
+  await expect(drawer).toHaveCount(0)
+  await expect(opener).toBeFocused()
+})
+
+test('@owner retries role authority uncertainty with the exact original action', async ({ page }) => {
+  let sessionRequests = 0
+  const attempts = []
+  await page.route('**/api/v1/session', async (route) => {
+    sessionRequests += 1
+    if (sessionRequests === 2) {
+      await route.abort('connectionfailed')
+      return
+    }
+    await route.fulfill(sessionEnvelope({
+      authorityRevision: sessionRequests > 2 ? 2 : 1,
+      capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+    }))
+  })
+  await page.route('**/api/v1/staff', (route) => route.fulfill(json(200, {
+    data: { staff: [roleChangeStaff] },
+  })))
+  await page.route('**/api/v1/staff/*/role', (route) => {
+    attempts.push({
+      body: route.request().postData(),
+      key: route.request().headers()['idempotency-key'],
+    })
+    return route.fulfill(json(200, {
+      data: { staff: roleChangeResult() },
+    }))
+  })
+  await openSettings(page)
+  await page.getByRole('button', { name: `Zmień rolę — ${roleChangeStaff.displayName}` }).click()
+  const drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
+  await drawer.getByLabel('Rola').selectOption('owner')
+
+  await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
+  await expect(drawer.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
+  await drawer.getByRole('button', { name: 'Spróbuj ponownie' }).click()
+
+  await expect(drawer).toHaveCount(0)
+  expect(attempts).toHaveLength(3)
+  expect(attempts[1]).toEqual(attempts[0])
+  expect(attempts[2]).toEqual(attempts[0])
+})
+
+test('@owner handles role conflict, last-owner, and forbidden responses without raw codes', async ({ page }) => {
+  let responseCode = 'VERSION_CONFLICT'
+  let listRequests = 0
+  await page.route('**/api/v1/staff', (route) => {
+    listRequests += 1
+    return route.fulfill(json(200, { data: { staff: [roleChangeStaff] } }))
+  })
+  await page.route('**/api/v1/staff/*/role', (route) => {
+    const status = responseCode === 'FORBIDDEN' ? 403 : 409
+    return route.fulfill(errorEnvelope(status, responseCode))
+  })
+  await openSettings(page)
+  const openRole = () => page.getByRole('button', {
+    name: `Zmień rolę — ${roleChangeStaff.displayName}`,
+  }).click()
+
+  await openRole()
+  let drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
+  await drawer.getByLabel('Rola').selectOption('owner')
+  const beforeConflict = listRequests
+  await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
+  await expect(drawer).toHaveCount(0)
+  await expect.poll(() => listRequests).toBeGreaterThan(beforeConflict)
+  await expect(page.getByText('Lista personelu została odświeżona.', { exact: true })).toBeVisible()
+
+  responseCode = 'LAST_ACTIVE_OWNER'
+  await openRole()
+  drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
+  await drawer.getByLabel('Rola').selectOption('owner')
+  await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
+  await expect(drawer.getByText(
+    'Nie można zmienić roli ostatniego aktywnego właściciela.',
+    { exact: true },
+  )).toBeVisible()
+  await expect(drawer).not.toContainText('LAST_ACTIVE_OWNER')
+  await drawer.getByRole('button', { name: 'Anuluj' }).click()
+  await drawer.getByRole('button', { name: 'Odrzuć' }).click()
+
+  responseCode = 'FORBIDDEN'
+  await openRole()
+  drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
+  await drawer.getByLabel('Rola').selectOption('owner')
+  await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
+  await expect(drawer).toHaveCount(0)
+  await expect(page.locator('.staff-access-row')).toHaveCount(0)
+  await expect(page.getByText('Nie udało się pobrać listy personelu.', { exact: true })).toBeVisible()
 })
 
 test('@owner rejects an invalid staff email inline without a request', async ({ page }) => {
@@ -931,8 +1117,9 @@ test('@owner confirms and retries deactivation of a dedicated invited row', asyn
   await expect(confirm.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
   await confirm.getByRole('button', { name: 'Spróbuj ponownie' }).click()
   await expect(confirm).toHaveCount(0)
-  expect(attempts).toHaveLength(2)
+  expect(attempts).toHaveLength(3)
   expect(attempts[1]).toEqual(attempts[0])
+  expect(attempts[2]).toEqual(attempts[0])
   await expect(row).toContainText('Wyłączone')
   await expect(row).not.toContainText('Konfiguracja dostępu w toku')
 })

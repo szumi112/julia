@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { ACTORS, NOW_MS } from './fixtures.js'
+import { ACTORS, NOW_MS, authorityActor } from './fixtures.js'
 import { CAPABILITIES, authorize, capabilitiesForActor } from '../../worker/identity/policy.js'
+import { captureAuthorityActor } from '../../worker/identity/authority-actor.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const activeAssignment = { kind: 'client', clientId: 'cl_1', assignment: { kind: 'client_assignment', clientId: 'cl_1', specialistId: 'sp_spec', status: 'active' } }
 const centre = { kind: 'centre', centreId: 'centre_1' }
@@ -8,6 +10,63 @@ const directory = { kind: 'specialist_directory', centreId: 'centre_1' }
 const archivedHistory = { kind: 'client_history', clientId: 'cl_1', appointmentId: 'apt_1', specialistId: 'sp_spec' }
 
 describe('authorization matrix', () => {
+  it('captures and freezes the exact effective authority snapshot without restoring defaults', () => {
+    const source = {
+      id: 'stf_captured_coord',
+      role: 'coordinator',
+      specialistId: null,
+      version: 7,
+      authorityRevision: 9,
+      capabilities: ROLE_DEFAULT_CAPABILITIES.coordinator.filter((capability) => (
+        capability !== 'client.manage'
+      )),
+    }
+
+    const captured = captureAuthorityActor(source)
+
+    expect(captured).toEqual(source)
+    expect(captured).not.toBe(source)
+    expect(captured.capabilities).not.toBe(source.capabilities)
+    expect(Object.isFrozen(captured)).toBe(true)
+    expect(Object.isFrozen(captured.capabilities)).toBe(true)
+    expect(captured.capabilities).not.toContain('client.manage')
+  })
+
+  it('contains stripped, extra, malformed, accessor, and hostile authority snapshots', () => {
+    const valid = {
+      id: 'stf_contained_owner',
+      role: 'owner',
+      specialistId: null,
+      version: 1,
+      authorityRevision: 1,
+      capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+    }
+    let reads = 0
+    const accessor = { ...valid }
+    Object.defineProperty(accessor, 'capabilities', {
+      enumerable: true,
+      get() { reads += 1; return ROLE_DEFAULT_CAPABILITIES.owner },
+    })
+    const hostile = new Proxy({}, {
+      ownKeys() { throw new Error('private-authority-detail') },
+    })
+
+    for (const malformed of [
+      { ...valid, authorityRevision: undefined },
+      { ...valid, capabilities: undefined },
+      { ...valid, extra: true },
+      { ...valid, version: 0 },
+      { ...valid, authorityRevision: 0 },
+      { ...valid, capabilities: ['unknown.capability'] },
+      { ...valid, capabilities: ['permissions.manage', 'permissions.manage'] },
+      { ...valid, capabilities: ['staff.manage', 'permissions.manage'] },
+      { ...valid, role: 'specialist', specialistId: null, capabilities: [] },
+      accessor,
+      hostile,
+    ]) expect(captureAuthorityActor(malformed)).toBeNull()
+    expect(reads).toBe(0)
+  })
+
   it('exposes frozen role-level UI hints but keeps record checks authoritative', () => {
     expect(Object.isFrozen(CAPABILITIES)).toBe(true)
     expect(capabilitiesForActor(ACTORS.owner)).toContain('staff.manage')
@@ -17,22 +76,70 @@ describe('authorization matrix', () => {
   })
 
   it('returns the exact frozen UI capability sets for each valid role', () => {
-    expect(capabilitiesForActor(ACTORS.owner)).toEqual(CAPABILITIES)
-    expect(capabilitiesForActor(ACTORS.coordinator)).toEqual([
-      'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general', 'client.manage',
-      'client.operational.read', 'finance.centre.read', 'operations.health.read', 'payment.manage',
-      'specialist.directory.read', 'tus.manage',
-    ])
-    expect(capabilitiesForActor(ACTORS.specialist)).toEqual([
-      'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general', 'client.manage',
-      'client.operational.read', 'clinical.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
-    ])
-    expect(capabilitiesForActor({ id: 'stf_unknown', role: 'unknown', specialistId: null })).toEqual([])
+    expect(capabilitiesForActor(ACTORS.owner)).toEqual(ROLE_DEFAULT_CAPABILITIES.owner)
+    expect(capabilitiesForActor(ACTORS.coordinator))
+      .toEqual(ROLE_DEFAULT_CAPABILITIES.coordinator)
+    expect(capabilitiesForActor(ACTORS.specialist))
+      .toEqual(ROLE_DEFAULT_CAPABILITIES.specialist)
+    expect(capabilitiesForActor({
+      id: 'stf_unknown', role: 'unknown', specialistId: null, version: 1,
+      authorityRevision: 1, capabilities: [],
+    })).toEqual([])
     expect(capabilitiesForActor({
       id: `stf_${'a'.repeat(124)}`,
       role: 'specialist',
       specialistId: `sp_${'a'.repeat(125)}`,
+      version: 1,
+      authorityRevision: 1,
+      capabilities: ROLE_DEFAULT_CAPABILITIES.specialist,
     })).toEqual(capabilitiesForActor(ACTORS.specialist))
+    expect(CAPABILITIES).toHaveLength(23)
+  })
+
+  it('requires one complete authority snapshot and honors effective removals before facts', () => {
+    const denied = authorityActor({
+      id: 'stf_denied_client', role: 'coordinator',
+      capabilities: ROLE_DEFAULT_CAPABILITIES.coordinator.filter((capability) => (
+        capability !== 'client.manage'
+      )),
+    })
+    expect(authorize(denied, 'client.manage', activeAssignment, { nowMs: NOW_MS })).toBe(false)
+    expect(authorize(denied, 'client.operational.read', activeAssignment, { nowMs: NOW_MS }))
+      .toBe(true)
+    for (const incomplete of [
+      { id: 'stf_incomplete', role: 'owner', specialistId: null, version: 1 },
+      {
+        id: 'stf_incomplete', role: 'owner', specialistId: null, version: 1,
+        authorityRevision: 1,
+      },
+      {
+        id: 'stf_incomplete', role: 'owner', specialistId: null, version: 1,
+        authorityRevision: 0, capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+      },
+    ]) {
+      expect(capabilitiesForActor(incomplete)).toEqual([])
+      expect(authorize(incomplete, 'client.manage', activeAssignment, { nowMs: NOW_MS }))
+        .toBe(false)
+    }
+  })
+
+  it('permits coordinator import only from an effective grant and never widens resource scope', () => {
+    expect(authorize(ACTORS.coordinator, 'finance.import', centre, { nowMs: NOW_MS }))
+      .toBe(false)
+    const granted = authorityActor({
+      id: 'stf_import_coord', role: 'coordinator',
+      capabilities: [...ROLE_DEFAULT_CAPABILITIES.coordinator, 'finance.import'].sort(),
+    })
+    expect(authorize(granted, 'finance.import', centre, { nowMs: NOW_MS })).toBe(true)
+    expect(authorize(granted, 'finance.import', { ...centre, centreId: 'centre_2' }, {
+      nowMs: NOW_MS,
+    })).toBe(false)
+    const hostileSpecialist = {
+      ...ACTORS.specialist,
+      capabilities: [...ACTORS.specialist.capabilities, 'finance.import'].sort(),
+    }
+    expect(authorize(hostileSpecialist, 'finance.import', centre, { nowMs: NOW_MS }))
+      .toBe(false)
   })
 
   it.each([
@@ -132,15 +239,15 @@ describe('authorization matrix', () => {
       [ACTORS.specialist, 'tus.manage', { kind: 'tus_group', groupId: 'tus', leaderSpecialistIds: [] }],
       [ACTORS.specialist, 'tus.manage', { kind: 'tus_group', groupId: 'tus', leaderSpecialistIds: [' '] }],
       [ACTORS.specialist, 'appointment.manage', { kind: 'appointment', appointmentId: ' ', specialistId: 'sp_spec' }],
-      [{ id: 'stf_spec', role: 'specialist', specialistId: ' ' }, 'appointment.manage', { kind: 'appointment', appointmentId: 'apt', specialistId: 'sp_spec' }],
-      [{ id: ' ', role: 'owner', specialistId: null }, 'staff.manage', centre],
+      [{ ...ACTORS.specialist, specialistId: ' ' }, 'appointment.manage', { kind: 'appointment', appointmentId: 'apt', specialistId: 'sp_spec' }],
+      [{ ...ACTORS.owner, id: ' ' }, 'staff.manage', centre],
     ]
     for (const [actor, capability, resource] of malformed) expect(authorize(actor, capability, resource, { nowMs: NOW_MS })).toBe(false)
   })
 
   it('treats malformed specialists as entirely unauthenticated policy inputs', () => {
     for (const specialistId of [null, '', ' ']) {
-      const actor = { id: 'stf_bad_spec', role: 'specialist', specialistId }
+      const actor = { ...ACTORS.specialist, id: 'stf_bad_spec', specialistId }
       expect(capabilitiesForActor(actor)).toEqual([])
       expect(authorize(actor, 'chat.general', centre, { nowMs: NOW_MS })).toBe(false)
       expect(authorize(actor, 'chat.direct', { kind: 'conversation', conversationId: 'con_1', participantStaffIds: ['stf_bad_spec'] }, { nowMs: NOW_MS })).toBe(false)
@@ -148,9 +255,9 @@ describe('authorization matrix', () => {
     for (const actor of [ACTORS.owner, ACTORS.coordinator]) expect(authorize(actor, 'tus.manage', { kind: 'tus_group', groupId: 'tus_1', leaderSpecialistIds: [] }, { nowMs: NOW_MS })).toBe(false)
     expect(authorize(ACTORS.owner, 'staff.manage', centre, { nowMs: -1 })).toBe(false)
     for (const actor of [
-      { id: `stf_${'a'.repeat(125)}`, role: 'owner', specialistId: null },
-      { id: 'sp_actor', role: 'owner', specialistId: null },
-      { id: 'stf_owner', role: 'owner', specialistId: 'stf_profile' },
+      { ...ACTORS.owner, id: `stf_${'a'.repeat(125)}`, specialistId: null },
+      { ...ACTORS.owner, id: 'sp_actor', specialistId: null },
+      { ...ACTORS.owner, specialistId: 'stf_profile' },
     ]) {
       expect(capabilitiesForActor(actor)).toEqual([])
       expect(authorize(actor, 'staff.manage', centre, { nowMs: NOW_MS })).toBe(false)

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 import { CORE_ROUTE_DESCRIPTORS, createApp } from '../../worker/app.js'
 import {
   areSiblingD1QueryBudgetViews,
@@ -24,6 +25,8 @@ const deps = (overrides = {}) => ({
     role: 'owner',
     specialistId: null,
     version: 1,
+    authorityRevision: 1,
+    capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
   })),
   cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
   ...overrides,
@@ -174,7 +177,11 @@ describe('closed core route descriptors', () => {
     expect(CORE_ROUTE_DESCRIPTORS.map(({ id, capability, auditActions, bodyKeys, sharedBudget }) => ({
       id, capability, auditActions, bodyKeys, sharedBudget,
     }))).toEqual([
-      { id: 'workspace', capability: 'client.operational.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workspace', capability: null, auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'permissions.targets', capability: 'permissions.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'permissions.read', capability: 'permissions.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'permissions.replace', capability: 'permissions.manage', auditActions: ['staff.capabilities.updated'], bodyKeys: ['expectedAuthorityRevision', 'allow', 'deny'], sharedBudget: { totalLimit: 80, recoveryReserve: 12 } },
+      { id: 'staff.role.update', capability: 'staff.manage', auditActions: ['staff.role.updated'], bodyKeys: ['expectedVersion', 'role'], sharedBudget: { totalLimit: 96, recoveryReserve: 16 } },
       { id: 'specialists.create', capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'professionalTitle', 'standardRateGrosze'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'specialists.edit', capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'specialists.account.link', capability: 'staff.manage', auditActions: ['specialist.account.linked'], bodyKeys: ['staffId', 'expectedSpecialistVersion', 'expectedStaffVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
@@ -187,17 +194,17 @@ describe('closed core route descriptors', () => {
       { id: 'appointments.payment', capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'payments.correct', capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'finance.list', capability: 'finance.centre.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'finance.import.start', capability: 'finance.centre.manage', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'finance.import.chunk', capability: 'finance.centre.manage', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'finance.import.commit', capability: 'finance.centre.manage', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'workbooks.preview', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'workbooks.import', capability: 'finance.centre.manage', auditActions: ['workbook.import.created'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'workbooks.continue', capability: 'finance.centre.manage', auditActions: ['workbook.import.materialized'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'workbooks.status', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'workbooks.export', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'historical.projection.status', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'historical.projection.continue', capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'historical.projection.resolve', capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'finance.import.start', capability: 'finance.import', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'finance.import.chunk', capability: 'finance.import', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'finance.import.commit', capability: 'finance.import', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.preview', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.import', capability: 'finance.import', auditActions: ['workbook.import.created'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.continue', capability: 'finance.import', auditActions: ['workbook.import.materialized'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.status', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.export', capability: null, auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'historical.projection.status', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'historical.projection.continue', capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'historical.projection.resolve', capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'historical.clients.activate', capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'activities.workspace', capability: 'tus.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'activities.groups.create', capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
@@ -209,9 +216,24 @@ describe('closed core route descriptors', () => {
       { id: 'activities.classes.create', capability: 'tus.manage', auditActions: ['activity.class.created'], bodyKeys: ['groupId', 'date', 'time', 'durationMinutes', 'topic', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'activities.classes.edit', capability: 'tus.manage', auditActions: ['activity.class.updated'], bodyKeys: ['expectedVersion', 'date', 'time', 'durationMinutes', 'topic', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'activities.attendance.set', capability: 'tus.manage', auditActions: ['activity.attendance.set'], bodyKeys: ['participantId', 'status', 'expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'activities.projection.status', capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'activities.projection.continue', capability: 'finance.centre.manage', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.projection.status', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.projection.continue', capability: 'finance.import', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
     ])
+    expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'workbooks.export'))
+      .toMatchObject({
+        capability: null,
+        capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'],
+      })
+    expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'workspace'))
+      .toMatchObject({
+        capability: null,
+        capabilityAnyOf: null,
+        capabilityAllOf: [
+          'appointment.charge.read',
+          'client.operational.read',
+          'specialist.directory.read',
+        ],
+      })
     expect(Object.isFrozen(CORE_ROUTE_DESCRIPTORS)).toBe(true)
     expect(CORE_ROUTE_DESCRIPTORS.every((route) => Object.isFrozen(route)
       && !Object.hasOwn(route, 'handler') && !Object.hasOwn(route, 'service'))).toBe(true)
@@ -227,6 +249,51 @@ describe('closed core route descriptors', () => {
     expect(() => {
       CORE_ROUTE_DESCRIPTORS[0].sharedBudget.totalLimit = 1
     }).toThrow(TypeError)
+  })
+
+  it('dispatches staff role replacement with the exact body and dedicated shared budget', async () => {
+    let views
+    const postRoleChange = vi.fn(async (input) => {
+      views = { work: input.db, recovery: input.recoveryDb }
+      expect(input).toMatchObject({
+        staffId: 'stf_member',
+        idempotencyKey: 'core-command-key-0001',
+        body: { expectedVersion: 3, role: 'coordinator' },
+      })
+      expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
+      expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
+        used: 0,
+        remaining: 96,
+        workRemaining: 80,
+        totalLimit: 96,
+        recoveryReserve: 16,
+      })
+      await input.db.prepare('SELECT role_update_domain').first()
+      return { data: { staff: { id: input.staffId, role: input.body.role } } }
+    })
+    const input = deps({
+      db: coreBudgetDb(),
+      postRoleChange,
+      verifyCsrfToken: vi.fn(async () => true),
+      readJsonBodyOnce: vi.fn(async (request) => request.json()),
+    })
+    const response = await createApp(input).request('/api/v1/staff/stf_member/role', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ expectedVersion: 3, role: 'coordinator' }),
+    })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      data: { staff: { id: 'stf_member', role: 'coordinator' } },
+    })
+    expect(postRoleChange).toHaveBeenCalledOnce()
+    expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
+      used: 1,
+      remaining: 95,
+      workRemaining: 79,
+      totalLimit: 96,
+      recoveryReserve: 16,
+    })
   })
 
   it.each(futureCommands)('validates the closed shell once and keeps future route %s nonfunctional', async (path, body) => {
@@ -518,7 +585,10 @@ describe('closed core route descriptors', () => {
         expect(usageForD1QueryBudgetViews(work, options.recoveryDb)).toEqual({
           used: 3, remaining: 47, workRemaining: 39, totalLimit: 50, recoveryReserve: 8,
         })
-        return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
+        return {
+          id: 'stf_core', role: 'owner', specialistId: null, version: 1,
+          authorityRevision: 1, capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+        }
       }),
       getWorkspace: vi.fn(async ({ db }) => {
         expect(db).toBe(actorWork)
@@ -538,7 +608,10 @@ describe('closed core route descriptors', () => {
       db: coreBudgetDb(),
       resolveActor: vi.fn(async (work, _principal, _context, { recoveryDb }) => {
         views = { work, recoveryDb }
-        return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
+        return {
+          id: 'stf_core', role: 'owner', specialistId: null, version: 1,
+          authorityRevision: 1, capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+        }
       }),
       getWorkspace: vi.fn(async () => ({ data: { window: { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true }, specialists: [], clients: [], appointments: [] } })),
     })
@@ -562,7 +635,10 @@ describe('closed core route descriptors', () => {
         for (let index = 0; index < 8; index += 1) await recoveryDb.prepare(`SELECT recovery_${index}`).first()
         expect(() => recoveryDb.prepare('SELECT recovery_over').first()).toThrow(D1_QUERY_BUDGET_EXCEEDED)
         finalUsage = usageForD1QueryBudgetViews(work, recoveryDb)
-        return { id: 'stf_core', role: 'owner', specialistId: null, version: 1 }
+        return {
+          id: 'stf_core', role: 'owner', specialistId: null, version: 1,
+          authorityRevision: 1, capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+        }
       }),
       getWorkspace: vi.fn(async () => ({ data: { window: { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true }, specialists: [], clients: [], appointments: [] } })),
     })
@@ -571,6 +647,32 @@ describe('closed core route descriptors', () => {
     expect(finalUsage).toEqual({
       used: 50, remaining: 0, workRemaining: 0, totalLimit: 50, recoveryReserve: 8,
     })
+  })
+
+  it.each([
+    'appointment.charge.read',
+    'client.operational.read',
+    'specialist.directory.read',
+  ])('rejects workspace authority missing %s before dispatch', async (missing) => {
+    const getWorkspace = vi.fn(async () => ({ data: {} }))
+    const capabilities = ROLE_DEFAULT_CAPABILITIES.owner.filter((capability) => (
+      capability !== missing
+    ))
+    const input = deps({
+      db: coreBudgetDb(),
+      getWorkspace,
+      resolveActor: vi.fn(async () => ({
+        id: 'stf_core', role: 'owner', specialistId: null, version: 1,
+        authorityRevision: 2, capabilities,
+      })),
+    })
+
+    const response = await createApp(input)
+      .request('/api/v1/workspace?from=2026-08-01&to=2026-08-31')
+
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ error: { code: 'FORBIDDEN' } })
+    expect(getWorkspace).not.toHaveBeenCalled()
   })
 
   it('rejects malformed, nested, and hostile core databases before Access', async () => {
@@ -639,6 +741,8 @@ describe('operations HTTP shell', () => {
     role: 'owner',
     specialistId: null,
     version: 1,
+    authorityRevision: 1,
+    capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
   })
 
   const readPaths = [

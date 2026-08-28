@@ -20,6 +20,7 @@ import {
 import { auditEventStatement } from '../audit/events.js'
 import { AppError } from '../http/errors.js'
 import { authorize } from '../identity/policy.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { partsInWarsaw } from '../operations/clock.js'
 import { encodeBase64Url } from '../security/encoding.js'
 import { getOrCreateDataKey } from '../security/envelope.js'
@@ -40,8 +41,6 @@ import {
   sealActivityPayload,
 } from './activity-crypto.js'
 
-const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
-const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const CAPS = Object.freeze({
   programs: 2,
   groups: 100,
@@ -82,19 +81,9 @@ const exact = (value, keys) => {
 }
 
 const actorFact = (value) => {
-  let hasVersion
-  try { hasVersion = Object.getOwnPropertyDescriptor(value, 'version') !== undefined } catch {
-    internal()
-  }
-  const actor = exact(value, hasVersion
-    ? ['id', 'role', 'specialistId', 'version'] : ['id', 'role', 'specialistId'])
-  if (typeof actor.id !== 'string' || !STAFF_ID.test(actor.id)
-    || !['owner', 'coordinator', 'specialist'].includes(actor.role)
-    || (actor.role === 'specialist'
-      ? typeof actor.specialistId !== 'string' || !SPECIALIST_ID.test(actor.specialistId)
-      : actor.specialistId !== null && (typeof actor.specialistId !== 'string'
-        || !SPECIALIST_ID.test(actor.specialistId)))) internal()
-  return Object.freeze(actor)
+  const actor = captureAuthorityActor(value)
+  if (!actor) internal()
+  return actor
 }
 
 export function parseActivityWorkspaceQuery(value) {

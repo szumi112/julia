@@ -33,15 +33,14 @@ import {
   applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2027-03-02T08:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
 const IMPORT_ID = 'wbi_historical_materializer'
 const CONFLICT_IMPORT_ID = 'wbi_historical_conflict'
 const CORRELATION = 'historical_projection_original'
-const actor = Object.freeze({
-  id: 'stf_historical_materializer', role: 'owner', specialistId: null, version: 1,
-})
+const actor = authorityActor({ id: 'stf_historical_materializer', role: 'owner' })
 const config = Object.freeze({
   appEnv: 'staging', dataMode: 'fictional', activeDataKekVersion: 1,
   activeLookupKeyVersion: 1, activeWorkbookKekVersion: 1,
@@ -397,7 +396,7 @@ describe('historical projection materializer', () => {
     })
     const projectionUsage = usageForD1QueryBudgetViews(budget.work, budget.recovery)
     expect(projectionUsage).toEqual({
-      used: 27, remaining: 23, workRemaining: 15,
+      used: 28, remaining: 22, workRemaining: 14,
       totalLimit: 50, recoveryReserve: 8,
     })
     await expect(continueHistoricalProjection(command(1, 'historical-project-0001')))
@@ -849,16 +848,16 @@ describe('historical projection materializer', () => {
     expect(ownerWorkspace.data.historicalClients.find(({ status }) => status === 'activated'))
       .toMatchObject({ activeClientId: expect.stringMatching(/^cl_/) })
 
-    const specialistWorkspace = await read({
-      id: actor.id, role: 'specialist', specialistId: 'sp_historical_materializer', version: 1,
-    })
+    const specialistWorkspace = await read(authorityActor({
+      id: actor.id, role: 'specialist', specialistId: 'sp_historical_materializer',
+    }))
     expect(specialistWorkspace.data.historicalOccurrences).toHaveLength(5)
     expect(specialistWorkspace.data.historicalClients.find(({ status }) => status === 'activated'))
       .toMatchObject({ activeClientId: null })
 
-    const otherWorkspace = await read({
-      id: actor.id, role: 'specialist', specialistId: 'sp_historical_other', version: 1,
-    })
+    const otherWorkspace = await read(authorityActor({
+      id: actor.id, role: 'specialist', specialistId: 'sp_historical_other',
+    }))
     expect(otherWorkspace.data.historicalClients).toEqual([])
     expect(otherWorkspace.data.historicalOccurrences).toEqual([])
     expect(otherWorkspace.data.latestPopulatedMonth).toBeNull()

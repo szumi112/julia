@@ -1,6 +1,12 @@
 import { parseWorkspaceQuery, readWorkspace } from '../core/workspace.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 
 const invalid = () => { throw new Error('INTERNAL_ERROR') }
+const WORKSPACE_CAPABILITIES = Object.freeze([
+  'appointment.charge.read',
+  'client.operational.read',
+  'specialist.directory.read',
+])
 
 const captureExact = (value, keys) => {
   try {
@@ -30,9 +36,13 @@ export async function getWorkspace(input) {
   if (typeof captured.url !== 'string') invalid()
   const read = captured.read ?? readWorkspace
   if (typeof read !== 'function') invalid()
+  const actor = captureAuthorityActor(captured.actor)
+  if (!actor || !WORKSPACE_CAPABILITIES.every((capability) => actor.capabilities.includes(capability))) {
+    invalid()
+  }
   return read({
     db: captured.db,
-    actor: captured.actor,
+    actor,
     cryptoContext: captured.cryptoContext,
     window: parseWorkspaceQuery(captured.url),
   })

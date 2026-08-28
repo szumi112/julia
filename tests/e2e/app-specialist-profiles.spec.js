@@ -30,13 +30,44 @@ test('@owner creates, edits, and invites one stable specialist profile', async (
   await expect(profile).toContainText('Brak dostępu do panelu')
   await expect(profile).toContainText('Psychoterapeutka')
   await expect(profile).not.toContainText('Właściciel')
+  let sessionRefreshes = 0
+  const invitationAttempts = []
+  await page.route('**/api/v1/session', async (route) => {
+    sessionRefreshes += 1
+    if (sessionRefreshes === 1) {
+      await route.abort('connectionfailed')
+      return
+    }
+    await route.continue()
+  })
+  await page.route('**/api/v1/specialists/*/invitations', async (route) => {
+    invitationAttempts.push({
+      body: route.request().postData(),
+      key: route.request().headers()['idempotency-key'],
+      url: route.request().url(),
+    })
+    await route.continue()
+  })
   await profile.getByRole('button', { name: 'Aktywuj dostęp' }).click()
   const accessDialog = page.getByRole('dialog', {
     name: 'Aktywuj dostęp — Anna Janowska-Kowalska',
   })
   await accessDialog.getByLabel('Adres e-mail').fill('anna-j@gmail.com')
   await accessDialog.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
+  await expect(accessDialog.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
+  await expect(accessDialog).toContainText(
+    'Nie wiadomo, czy zaproszenie zostało utworzone. Spróbuj ponownie bez zmiany adresu e-mail.',
+  )
+  await accessDialog.getByRole('button', { name: 'Spróbuj ponownie' }).click()
 
   await expect(profile).toContainText('Zaproszenie oczekuje')
   await expect(profile.getByRole('button', { name: 'Aktywuj dostęp' })).toHaveCount(0)
+  expect(invitationAttempts).toHaveLength(2)
+  expect(invitationAttempts[1]).toEqual(invitationAttempts[0])
+  expect(JSON.parse(invitationAttempts[0].body)).toEqual({
+    email: 'anna-j@gmail.com',
+    expectedVersion: 2,
+  })
+  expect(invitationAttempts[0].key).toMatch(/^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/)
+  expect(new URL(invitationAttempts[0].url).search).toBe('')
 })

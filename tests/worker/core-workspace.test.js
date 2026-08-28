@@ -14,6 +14,7 @@ import {
 import { createKeyring } from '../../worker/security/keyring.js'
 import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { buildClientDataKey, encryptClientIdentity } from '../../worker/core/crypto.js'
+import { authorityActor } from './fixtures.js'
 
 await completeCoreDirectoryStageA()
 await applyCoreDirectoryStageB()
@@ -232,7 +233,7 @@ describe('workspace read model', () => {
     ))
     const result = await readWorkspace({
       db,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: 'sp_owner', version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner', specialistId: 'sp_owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window,
       decryptSpecialist,
@@ -283,7 +284,7 @@ describe('workspace read model', () => {
     const { db, calls } = scriptedDb()
     await readWorkspace({
       db,
-      actor: { id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec', version: 1 },
+      actor: authorityActor({ id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window,
       decryptSpecialist: async () => 'Never',
@@ -314,7 +315,7 @@ describe('workspace read model', () => {
     const { db } = scriptedDb({ specialists: [row] })
     await expect(readWorkspace({
       db,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery(
         'https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31',
@@ -356,7 +357,7 @@ describe('workspace read model', () => {
     })
     const result = await readWorkspace({
       db,
-      actor: { id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec', version: 1 },
+      actor: authorityActor({ id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window,
       decryptSpecialist: async () => 'Fikcyjna',
@@ -429,7 +430,7 @@ describe('workspace read model', () => {
     })
     const result = await readWorkspace({
       db,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window,
       decryptSpecialist: async () => 'Archiwalna Fikcyjna',
@@ -457,7 +458,7 @@ describe('workspace read model', () => {
     const { db, calls } = scriptedDb(rows)
     await expect(readWorkspace({
       db,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async () => 'Fikcyjna',
@@ -487,7 +488,7 @@ describe('workspace read model', () => {
     const { db, calls } = scriptedDb({ specialists, clients, appointments, payments })
     const result = await readWorkspace({
       db,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async ({ staffId }) => `Fikcyjna ${staffId}`,
@@ -503,7 +504,7 @@ describe('workspace read model', () => {
 
   it('rejects dangling and duplicate appointment facts from a malformed result surface', async () => {
     const common = {
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async () => 'Fikcyjna',
@@ -523,7 +524,7 @@ describe('workspace read model', () => {
 
   it('rejects impossible cancellation, archive, and current-assignment timestamps', async () => {
     const common = {
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async () => 'Fikcyjna',
@@ -578,7 +579,7 @@ describe('workspace read model', () => {
     ]) {
       await expect(readWorkspace({
         db: scriptedDb({ ...common, payments }).db,
-        actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+        actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
         cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
         window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
         decryptSpecialist: async () => 'Fikcyjna',
@@ -606,7 +607,7 @@ describe('workspace read model', () => {
     for (const payments of cases) {
       await expect(readWorkspace({
         db: scriptedDb({ appointments: [appointment], clients: [client], payments }).db,
-        actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+        actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
         cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
         window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
         decryptSpecialist: async () => 'Fikcyjna',
@@ -621,7 +622,7 @@ describe('workspace read model', () => {
     const appointment = appointmentRow('apt_other_scope', 'cl_other_scope', 'sp_other')
     await expect(readWorkspace({
       db: scriptedDb({ appointments: [appointment] }).db,
-      actor: { id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec', version: 1 },
+      actor: authorityActor({ id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist, decryptClient,
@@ -636,7 +637,7 @@ describe('workspace read model', () => {
     })
     await expect(readWorkspace({
       db: scriptedDb({ specialists: [hostile] }).db,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
       decryptSpecialist, decryptClient,
@@ -665,7 +666,7 @@ describe('workspace read model', () => {
       await expect(readWorkspace({
         ...common,
         db: scriptedDb({ clients: [malformed] }).db,
-        actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+        actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       })).rejects.toThrow(/^CRYPTO_FAILURE$/)
     }
 
@@ -678,7 +679,7 @@ describe('workspace read model', () => {
     await expect(readWorkspace({
       ...common,
       db: scriptedDb({ appointments: [appointment], clients: [history] }).db,
-      actor: { id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec', version: 1 },
+      actor: authorityActor({ id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec' }),
     })).rejects.toThrow(/^CRYPTO_FAILURE$/)
     expect(decryptClient).not.toHaveBeenCalled()
   })
@@ -692,7 +693,7 @@ describe('workspace read model', () => {
     }
     const result = await readWorkspace({
       db: scriptedDb({ appointments: [appointment], clients: [history] }).db,
-      actor: { id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec', version: 1 },
+      actor: authorityActor({ id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async () => 'Fikcyjna',
@@ -714,7 +715,7 @@ describe('workspace read model', () => {
     })
     const read = (payments) => readWorkspace({
       db: scriptedDb({ appointments: [appointment], clients: [client], payments }).db,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
       decryptSpecialist: async () => 'Fikcyjna',
@@ -745,7 +746,7 @@ describe('workspace read model', () => {
 
   it('rejects duplicate specialists, reused charges, and appointments outside the captured window', async () => {
     const common = {
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
       decryptSpecialist: async () => 'Fikcyjna',
@@ -776,7 +777,7 @@ describe('workspace read model', () => {
 
   it('adapts the exact GET URL and work-budget view to the read model', async () => {
     const db = scriptedDb().db
-    const actor = { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_owner', role: 'owner' })
     const cryptoContext = { keyring: {}, dataKey: {}, scope: {} }
     const read = vi.fn(async ({ window }) => ({ data: {
       window: { from: window.from, to: window.to, timeZone: 'Europe/Warsaw', complete: true },
@@ -792,9 +793,80 @@ describe('workspace read model', () => {
       from: '2026-08-01', to: '2026-08-02', timeZone: 'Europe/Warsaw', complete: true,
     })
     expect(read).toHaveBeenCalledWith({
-      db, actor, cryptoContext,
+      db,
+      actor: expect.objectContaining({
+        id: actor.id,
+        authorityRevision: actor.authorityRevision,
+        capabilities: actor.capabilities,
+      }),
+      cryptoContext,
       window: expect.objectContaining({ from: '2026-08-01', to: '2026-08-02' }),
     })
+  })
+
+  it.each([
+    'appointment.charge.read',
+    'client.operational.read',
+    'specialist.directory.read',
+  ])('rejects a strict GET actor missing %s before dispatching a workspace reader', async (missing) => {
+    const actor = authorityActor({
+      id: 'stf_owner',
+      role: 'owner',
+      capabilities: authorityActor({ id: 'stf_owner', role: 'owner' }).capabilities
+        .filter((capability) => capability !== missing),
+    })
+    const read = vi.fn(async () => ({ data: { leaked: true } }))
+
+    await expect(getWorkspace({
+      db: scriptedDb().db,
+      actor,
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+      url: 'https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02',
+      read,
+    })).rejects.toThrow(/^INTERNAL_ERROR$/)
+
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    'appointment.charge.read',
+    'client.operational.read',
+    'specialist.directory.read',
+  ])('rejects a strict core actor missing %s before querying or decrypting historical data', async (missing) => {
+    const actor = authorityActor({
+      id: 'stf_owner',
+      role: 'owner',
+      capabilities: authorityActor({ id: 'stf_owner', role: 'owner' }).capabilities
+        .filter((capability) => capability !== missing),
+    })
+    const historicalClient = historicalClientRow('hcl_workspace_boundary')
+    const { db, calls } = scriptedDb({
+      specialists: [specialistRow('sp_workspace_boundary', 'stf_workspace_boundary')],
+      historicalClients: [historicalClient],
+      historicalOccurrences: [historicalOccurrenceRow({
+        id: 'hso_workspace_boundary',
+        sourceRecordId: 'legacy_workspace_boundary',
+        specialistId: 'sp_workspace_boundary',
+        historicalClientId: historicalClient.id,
+        precision: 'day',
+        day: '2026-08-01',
+      })],
+    })
+    const decryptHistoricalIdentity = vi.fn(async () => ({ name: 'Wyciek' }))
+    const decryptHistoricalField = vi.fn(async () => 'Wyciek')
+
+    await expect(readWorkspace({
+      db,
+      actor,
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+      window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
+      decryptHistoricalIdentity,
+      decryptHistoricalField,
+    })).rejects.toThrow(/^INTERNAL_ERROR$/)
+
+    expect(calls).toHaveLength(0)
+    expect(decryptHistoricalIdentity).not.toHaveBeenCalled()
+    expect(decryptHistoricalField).not.toHaveBeenCalled()
   })
 
   it('wires only GET/HEAD through the authentic work view and leaves recovery unused', async () => {
@@ -819,7 +891,7 @@ describe('workspace read model', () => {
       resolveActor: async (work, _principal, _crypto, { recoveryDb }) => {
         expect(areSiblingD1QueryBudgetViews(work, recoveryDb)).toBe(true)
         actorViews = { work, recovery: recoveryDb }
-        return { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 }
+        return authorityActor({ id: 'stf_owner', role: 'owner' })
       },
       getWorkspace: service,
     })
@@ -855,7 +927,7 @@ describe('workspace read model', () => {
         await work.prepare('SELECT 1').first()
         await work.prepare('SELECT 2').first()
         await work.prepare('SELECT 3').first()
-        return { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 }
+        return authorityActor({ id: 'stf_owner', role: 'owner' })
       },
     }).request('/api/v1/workspace?from=2026-08-01&to=2026-08-02')
     expect(response.status).toBe(200)
@@ -965,20 +1037,22 @@ describe('workspace read model', () => {
     }
     const ordinaryDecrypt = vi.fn()
     await expect(read(
-      { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      authorityActor({ id: 'stf_owner', role: 'owner' }),
       '2026-08-01', '2026-08-31', ordinaryDecrypt,
     ).operation).rejects.toThrow(/^CRYPTO_FAILURE$/)
     expect(ordinaryDecrypt).not.toHaveBeenCalled()
 
     const historyDecrypt = vi.fn()
     await expect(read(
-      { id: 'stf_key_history', role: 'specialist', specialistId: 'sp_key_history', version: 1 },
+      authorityActor({
+        id: 'stf_key_history', role: 'specialist', specialistId: 'sp_key_history',
+      }),
       '2026-09-01', '2026-09-30', historyDecrypt,
     ).operation).rejects.toThrow(/^CRYPTO_FAILURE$/)
     expect(historyDecrypt).not.toHaveBeenCalled()
 
     await expect(read(
-      { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      authorityActor({ id: 'stf_owner', role: 'owner' }),
       '2026-10-01', '2026-10-31', vi.fn(),
     ).operation).rejects.toThrow(/^INTERNAL_ERROR$/)
     await env.DB.batch([
@@ -1009,7 +1083,7 @@ describe('workspace read model', () => {
     const scripted = scriptedDb()
     await readWorkspace({
       db: scripted.db,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'),
       decryptSpecialist: async () => 'Fikcyjna',
@@ -1118,7 +1192,7 @@ describe('workspace read model', () => {
     const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
     const result = await readWorkspace({
       db: budget.work,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring, dataKey: staffKey, scope: staffScope },
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
     })

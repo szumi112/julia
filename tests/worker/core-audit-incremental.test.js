@@ -1,15 +1,19 @@
 import { env } from 'cloudflare:workers'
+import { applyD1Migrations } from 'cloudflare:test'
 import { expect, it } from 'vitest'
 import { normalizeBootstrapAuditEvent } from '../../scripts/bootstrap-core.js'
 import { createApiClient } from '../../src/api.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 import { auditEventStatement } from '../../worker/audit/events.js'
 import { listSecurityAudit } from '../../worker/routes/operations.js'
 import { getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { selectCoreMigrationStage } from '../../scripts/core-migration-stages.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2042-08-04T10:00:00.000Z')
 const SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
-const ACTOR = Object.freeze({ id: 'stf_core_incremental', role: 'owner', specialistId: null, version: 1 })
+const ACTOR = authorityActor({ id: 'stf_core_incremental', role: 'owner' })
 const FACTS = Object.freeze([
   ['client.created', 'client', 'cl_incremental', { clientVersion: 1, assignmentId: 'asg_incremental', assignmentVersion: 1 }],
   ['client.updated', 'client', 'cl_incremental', { clientVersion: 2 }],
@@ -31,12 +35,8 @@ const session = {
       id: ACTOR.id, displayName: 'Fikcyjna Właścicielka', professionalTitle: null,
       role: 'owner', specialistId: null, version: 1,
     },
-    capabilities: [
-      'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct',
-      'chat.general', 'client.manage', 'client.operational.read', 'clinical.read',
-      'finance.centre.manage', 'finance.centre.read', 'operations.health.read', 'payment.manage',
-      'security.audit.read', 'specialist.directory.read', 'staff.manage', 'tus.manage',
-    ],
+    authorityRevision: ACTOR.authorityRevision,
+    capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
     csrfToken: `v1.2290764000.${'A'.repeat(22)}.${'B'.repeat(43)}`,
     csrfExpiresAt: '2042-08-04T11:20:00.000Z',
     environment: 'staging',
@@ -45,6 +45,11 @@ const session = {
 }
 
 it('keeps the same fictional incremental core rows append-only across all four registries', async () => {
+  const capabilityMigration = selectCoreMigrationStage(
+    env.TEST_STAGE_E_MIGRATIONS,
+    'stage-e',
+  ).find(({ name }) => name === '0020_capability_overrides.sql')
+  await applyD1Migrations(env.DB, [capabilityMigration])
   const now = new Date(NOW_MS).toISOString()
   await env.DB.prepare(
     `INSERT INTO staff_users

@@ -14,10 +14,9 @@ import {
   postActivityParticipantEdit,
   postActivityProjectionContinue,
 } from '../../worker/routes/activities.js'
+import { authorityActor } from './fixtures.js'
 
-const actor = Object.freeze({
-  id: 'stf_activity_route_owner', role: 'owner', specialistId: null, version: 1,
-})
+const actor = authorityActor({ id: 'stf_activity_route_owner', role: 'owner' })
 
 const common = (overrides = {}) => ({
   db: {}, recoveryDb: {}, actor, keyring: {},

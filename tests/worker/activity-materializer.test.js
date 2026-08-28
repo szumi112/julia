@@ -29,12 +29,14 @@ import {
   applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const NOW_MS = Date.parse('2027-03-03T08:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
 const IMPORT_ID = 'wbi_activity_materializer'
 const actor = Object.freeze({
   id: 'stf_activity_materializer', role: 'owner', specialistId: null, version: 1,
+  authorityRevision: 1, capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
 })
 const config = Object.freeze({
   appEnv: 'staging', dataMode: 'fictional', activeDataKekVersion: 1,
@@ -393,7 +395,7 @@ describe('activity materializer', () => {
     })
     const firstUsage = usageForD1QueryBudgetViews(budget.work, budget.recovery)
     expect(firstUsage).toEqual({
-      used: 34, remaining: 16, workRemaining: 8,
+      used: 35, remaining: 15, workRemaining: 7,
       totalLimit: 50, recoveryReserve: 8,
     })
     const replayBudget = createD1QueryBudget(env.DB, {

@@ -41,8 +41,8 @@ import {
 } from './activity-records.js'
 
 const AUTHORITY_KEYS = Object.freeze([
-  'repositoryMode', 'dataMode', 'actorId', 'actorVersion', 'role', 'specialistId',
-  'capabilities', 'demoRoleId', 'demoAuthGeneration',
+  'repositoryMode', 'dataMode', 'actorId', 'actorVersion', 'authorityRevision',
+  'role', 'specialistId', 'capabilities', 'demoRoleId', 'demoAuthGeneration',
 ])
 const REPOSITORY_METHODS = Object.freeze([
   'loadWindow', 'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient',
@@ -74,7 +74,7 @@ const ACTIVITY_LOAD_MAX_ATTEMPTS = 3
 const INFRASTRUCTURE_CODES = new Set([
   'ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'CSRF_INVALID', 'CSRF_EXPIRED',
   'FORBIDDEN', 'INTERNAL_ERROR', 'INVALID_RESPONSE', 'NETWORK_ERROR', 'ORIGIN_INVALID',
-  'SESSION_REQUIRED',
+  'SESSION_AUTHORITY_STALE', 'SESSION_REQUIRED',
 ])
 
 const fail = (message) => {
@@ -136,6 +136,9 @@ export const createWorkspaceAuthorityKey = (input) => {
     || typeof value.dataMode !== 'string' || value.dataMode.length === 0
     || typeof value.actorId !== 'string' || value.actorId.length === 0
     || !Number.isSafeInteger(value.actorVersion) || value.actorVersion < 1
+    || (value.repositoryMode === 'api'
+      ? !Number.isSafeInteger(value.authorityRevision) || value.authorityRevision < 1
+      : value.authorityRevision !== null)
     || typeof value.role !== 'string' || value.role.length === 0
     || (value.specialistId !== null
       && (typeof value.specialistId !== 'string' || value.specialistId.length === 0))
@@ -155,6 +158,7 @@ export const createWorkspaceAuthorityKey = (input) => {
     value.dataMode,
     value.actorId,
     value.actorVersion,
+    value.authorityRevision,
     value.role,
     value.specialistId,
     captureCapabilities(value.capabilities),
@@ -166,15 +170,16 @@ export const createWorkspaceAuthorityKey = (input) => {
 const activityScopeForAuthorityKey = (authorityKey) => {
   try {
     const parsed = JSON.parse(authorityKey)
-    if (!Array.isArray(parsed) || parsed.length !== 9) return 'unknown'
+    if (!Array.isArray(parsed) || parsed.length !== 10) return 'unknown'
     const rebuilt = createWorkspaceAuthorityKey({
       repositoryMode: parsed[0], dataMode: parsed[1], actorId: parsed[2],
-      actorVersion: parsed[3], role: parsed[4], specialistId: parsed[5],
-      capabilities: parsed[6], demoRoleId: parsed[7], demoAuthGeneration: parsed[8],
+      actorVersion: parsed[3], authorityRevision: parsed[4], role: parsed[5],
+      specialistId: parsed[6], capabilities: parsed[7], demoRoleId: parsed[8],
+      demoAuthGeneration: parsed[9],
     })
     if (rebuilt !== authorityKey || parsed[0] !== 'api') return 'unknown'
-    if (parsed[4] === 'specialist') return 'specialist'
-    if (parsed[4] === 'owner' || parsed[4] === 'coordinator') return 'centre'
+    if (parsed[5] === 'specialist') return 'specialist'
+    if (parsed[5] === 'owner' || parsed[5] === 'coordinator') return 'centre'
   } catch {}
   return 'unknown'
 }

@@ -2,9 +2,9 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { apiClient, ApiError, createApiClient } from '../../src/api.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 import { isWellFormedUnicode, validateClientInput } from '../../src/core-records.js'
 import { validateCreateClientBody } from '../../worker/core/clients.js'
-import { capabilitiesForActor } from '../../worker/identity/policy.js'
 
 const ACTIVITY_NOW = '2026-08-01T10:00:00.000Z'
 const ACTIVITY_LATER = '2026-08-02T10:00:00.000Z'
@@ -71,11 +71,7 @@ const activityProjectionJob = (overrides = {}) => ({
 const CORRELATION_ID = '77777777-7777-4777-8777-777777777777'
 const TOKEN_A = 'v1.1999999999.AAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'
 const TOKEN_B = 'v1.1999999998.CCCCCCCCCCCCCCCCCCCCCC.DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD'
-const coordinatorCapabilities = [
-  'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-  'client.manage', 'client.operational.read', 'finance.centre.read',
-  'operations.health.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
-]
+const coordinatorCapabilities = [...ROLE_DEFAULT_CAPABILITIES.coordinator]
 
 const sessionBody = (overrides = {}) => ({
   data: {
@@ -87,24 +83,8 @@ const sessionBody = (overrides = {}) => ({
       specialistId: null,
       version: 3,
     },
-    capabilities: [
-      'appointment.charge.read',
-      'appointment.manage',
-      'centre.manage',
-      'chat.direct',
-      'chat.general',
-      'client.manage',
-      'client.operational.read',
-      'clinical.read',
-      'finance.centre.manage',
-      'finance.centre.read',
-      'operations.health.read',
-      'payment.manage',
-      'security.audit.read',
-      'specialist.directory.read',
-      'staff.manage',
-      'tus.manage',
-    ],
+    authorityRevision: 1,
+    capabilities: [...ROLE_DEFAULT_CAPABILITIES.owner],
     csrfToken: TOKEN_A,
     csrfExpiresAt: '2033-05-18T03:33:19.000Z',
     environment: 'staging',
@@ -1162,7 +1142,7 @@ test('sanitizes workspace server, network, response, and validator failures', as
   }
 })
 
-test('performs independent uncached workspace GETs without changing session or mutation state', async () => {
+test('performs independent uncached workspace GETs and refreshes after a lifecycle mutation', async () => {
   const invitationResult = {
     data: { staff: staff({ status: 'pending' }), invitation },
   }
@@ -1172,6 +1152,7 @@ test('performs independent uncached workspace GETs without changing session or m
     parsedResponse({ data: null }),
     parsedResponse(emptyWorkspaceBody()),
     jsonResponse(invitationResult, 201),
+    jsonResponse(sessionBody()),
   )
   let generated = 0
   const client = createApiClient({
@@ -1187,7 +1168,7 @@ test('performs independent uncached workspace GETs without changing session or m
     displayName: 'Anna', email: 'anna@example.test', role: 'specialist',
   }, { idempotencyKey: 'workspace-state-key-0001' })
 
-  assert.equal(calls.length, 5)
+  assert.equal(calls.length, 6)
   assert.deepEqual(calls.slice(1, 4).map((call) => call.url), [
     '/api/v1/workspace?from=2026-08-01&to=2026-08-31',
     '/api/v1/workspace?from=2026-08-01&to=2026-08-31',
@@ -1196,6 +1177,7 @@ test('performs independent uncached workspace GETs without changing session or m
   assert.equal(generated, 0)
   assert.equal(header(calls[4], 'X-CSRF-Token'), TOKEN_A)
   assert.equal(header(calls[4], 'Idempotency-Key'), 'workspace-state-key-0001')
+  assert.equal(calls[5].url, '/api/v1/session')
   assert.equal(calls.slice(1, 4).some((call) => header(call, 'X-CSRF-Token') !== null), false)
   assert.equal(calls.slice(1, 4).some((call) => header(call, 'Idempotency-Key') !== null), false)
   assert.equal(calls.slice(1, 4).some((call) => Object.hasOwn(call.init, 'body')), false)
@@ -1239,6 +1221,7 @@ test('creates, edits, and targets an invitation at one stable specialist profile
     jsonResponse(created, 201),
     jsonResponse(edited),
     jsonResponse(invited, 201),
+    jsonResponse(sessionBody()),
   )
   const client = createApiClient({ fetchImpl: queued.fetchImpl })
   await client.getSession()
@@ -1274,6 +1257,9 @@ test('creates, edits, and targets an invitation at one stable specialist profile
       key: 'specialist-invite-api-0001', method: 'POST',
       url: '/api/v1/specialists/sp_anna_profile/invitations',
     },
+    {
+      body: undefined, key: null, method: 'GET', url: '/api/v1/session',
+    },
   ])
 })
 
@@ -1291,6 +1277,7 @@ test('links one existing account to a specialist profile with exact optimistic v
   const queued = queuedFetch(
     jsonResponse(sessionBody()),
     jsonResponse({ data: { link } }, 201),
+    jsonResponse(sessionBody()),
   )
   const client = createApiClient({ fetchImpl: queued.fetchImpl })
   await client.getSession()
@@ -1313,6 +1300,11 @@ test('links one existing account to a specialist profile with exact optimistic v
     key: 'specialist-link-api-0001',
     method: 'POST',
     url: '/api/v1/specialists/sp_julia_profile/account-links',
+  }, {
+    body: undefined,
+    key: null,
+    method: 'GET',
+    url: '/api/v1/session',
   }])
 
   for (const input of [
@@ -1325,7 +1317,71 @@ test('links one existing account to a specialist profile with exact optimistic v
       'sp_julia_profile', input, { idempotencyKey: 'specialist-link-api-0002' },
     ), { code: 'CLIENT_INPUT_INVALID' })
   }
-  assert.equal(queued.calls.length, 2)
+  assert.equal(queued.calls.length, 3)
+})
+
+test('refreshes and safely replays a self-link before the public command settles', async () => {
+  const link = {
+    id: 'spl_owner_profile',
+    specialistId: 'sp_owner_profile',
+    staffId: 'stf_owner_1',
+    lifecycle: 'activated',
+    specialistVersion: 4,
+    staffVersion: 4,
+    createdAt: '2026-08-27T12:00:00.000Z',
+  }
+  const refreshed = sessionBody({
+    actor: {
+      id: 'stf_owner_1',
+      displayName: 'Julia Właścicielka',
+      professionalTitle: 'Psycholożka',
+      role: 'owner',
+      specialistId: 'sp_owner_profile',
+      version: 4,
+    },
+    authorityRevision: 2,
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse({ data: { link } }, 201),
+    jsonResponse(refreshed),
+    jsonResponse({ data: { link } }, 201),
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  const observed = []
+  client.subscribeSession((session) => observed.push(session))
+  await client.getSession()
+
+  assert.deepEqual(await client.linkSpecialistAccount('sp_owner_profile', {
+    staffId: 'stf_owner_1',
+    expectedSpecialistVersion: 3,
+    expectedStaffVersion: 3,
+  }, { idempotencyKey: 'specialist-self-link-key-0001' }), link)
+
+  assert.deepEqual(queued.calls.map(({ url }) => url), [
+    '/api/v1/session',
+    '/api/v1/specialists/sp_owner_profile/account-links',
+    '/api/v1/session',
+    '/api/v1/specialists/sp_owner_profile/account-links',
+    '/api/v1/session',
+  ])
+  assert.deepEqual(queued.calls.filter(({ init }) => init.method === 'POST').map((call) => ({
+    body: call.init.body,
+    key: header(call, 'Idempotency-Key'),
+  })), [
+    {
+      body: '{"staffId":"stf_owner_1","expectedSpecialistVersion":3,"expectedStaffVersion":3}',
+      key: 'specialist-self-link-key-0001',
+    },
+    {
+      body: '{"staffId":"stf_owner_1","expectedSpecialistVersion":3,"expectedStaffVersion":3}',
+      key: 'specialist-self-link-key-0001',
+    },
+  ])
+  assert.deepEqual(observed.at(-1).actor, refreshed.data.actor)
 })
 
 test('gets and validates the session over the exact same-origin request', async () => {
@@ -1415,6 +1471,166 @@ test('single-flights concurrent session failures and cleans up after rejection',
   assert.deepEqual(observed, [publicSession()])
 })
 
+test('starts a lifecycle refresh after a held pre-success session request', async () => {
+  const changed = {
+    data: {
+      staff: staff({ role: 'owner', version: 4, specialistId: null }),
+    },
+  }
+  let releaseHeld
+  const heldResponse = new Promise((resolve) => { releaseHeld = resolve })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()),
+    () => heldResponse,
+    jsonResponse(changed),
+    jsonResponse(sessionBody()),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+
+  const held = client.getSession()
+  const action = client.changeStaffRole(
+    'stf_specialist_1',
+    3,
+    'owner',
+    { idempotencyKey: 'role-held-refresh-key-0001' },
+  )
+  try {
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(queued.calls.map(({ url }) => url), [
+      '/api/v1/session',
+      '/api/v1/session',
+      '/api/v1/staff/stf_specialist_1/role',
+      '/api/v1/session',
+    ])
+    assert.deepEqual(await action, changed.data)
+  } finally {
+    releaseHeld(jsonResponse(sessionBody()))
+    await Promise.allSettled([held, action])
+  }
+})
+
+test('refreshes FORBIDDEN authority after a held pre-denial session request', async () => {
+  const refreshed = sessionBody({
+    authorityRevision: 2,
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  let releaseHeld
+  const heldResponse = new Promise((resolve) => { releaseHeld = resolve })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()),
+    () => heldResponse,
+    errorResponse('FORBIDDEN', 403),
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  const observed = []
+  client.subscribeSession((session) => observed.push(session))
+  await client.getSession()
+
+  const held = client.getSession()
+  try {
+    await assert.rejects(client.getOperationsHealth(), { code: 'FORBIDDEN' })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(queued.calls.map(({ url }) => url), [
+      '/api/v1/session',
+      '/api/v1/session',
+      '/api/v1/operations/health',
+      '/api/v1/session',
+    ])
+    assert.deepEqual(observed.map(({ authorityRevision }) => authorityRevision), [1, 2])
+  } finally {
+    releaseHeld(jsonResponse(sessionBody()))
+    await held.catch(() => {})
+  }
+  assert.deepEqual(observed.map(({ authorityRevision }) => authorityRevision), [1, 2])
+})
+
+test('superseded session denials settle from the newer causal authority', async (t) => {
+  const cases = [
+    {
+      name: 'before the newer session publishes',
+      code: 'ACCESS_DENIED',
+      status: 403,
+      releaseOrder: 'stale-first',
+    },
+    {
+      name: 'after the newer session publishes',
+      code: 'ACCESS_ASSERTION_INVALID',
+      status: 401,
+      releaseOrder: 'fresh-first',
+    },
+  ]
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const refreshed = sessionBody({
+        authorityRevision: 2,
+        csrfToken: TOKEN_B,
+        csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+      })
+      let releaseStale
+      let releaseFresh
+      const staleResponse = new Promise((resolve) => { releaseStale = resolve })
+      const freshResponse = new Promise((resolve) => { releaseFresh = resolve })
+      const queued = queuedFetch(
+        jsonResponse(sessionBody()),
+        () => staleResponse,
+        errorResponse('FORBIDDEN', 403),
+        () => freshResponse,
+      )
+      const client = createApiClient({ fetchImpl: queued.fetchImpl })
+      const observed = []
+      let publishRevisionTwo
+      const revisionTwoPublished = new Promise((resolve) => { publishRevisionTwo = resolve })
+      client.subscribeSession((session) => {
+        observed.push(session)
+        if (session?.authorityRevision === 2) publishRevisionTwo()
+      })
+
+      await client.getSession()
+      const stale = client.getSession()
+      let staleOutcome = 'pending'
+      void stale.then(
+        () => { staleOutcome = 'fulfilled' },
+        () => { staleOutcome = 'rejected' },
+      )
+
+      try {
+        await assert.rejects(client.getOperationsHealth(), { code: 'FORBIDDEN' })
+        assert.deepEqual(queued.calls.map(({ url }) => url), [
+          '/api/v1/session',
+          '/api/v1/session',
+          '/api/v1/operations/health',
+          '/api/v1/session',
+        ])
+
+        if (scenario.releaseOrder === 'stale-first') {
+          releaseStale(errorResponse(scenario.code, scenario.status))
+          await new Promise((resolve) => setImmediate(resolve))
+          assert.equal(staleOutcome, 'pending')
+          assert.deepEqual(observed.map((session) => session?.authorityRevision ?? null), [1])
+          releaseFresh(jsonResponse(refreshed))
+          await revisionTwoPublished
+        } else {
+          releaseFresh(jsonResponse(refreshed))
+          await revisionTwoPublished
+          assert.deepEqual(observed.map((session) => session?.authorityRevision ?? null), [1, 2])
+          releaseStale(errorResponse(scenario.code, scenario.status))
+        }
+
+        assert.deepEqual(await stale, publicSession(refreshed))
+        assert.deepEqual(observed.map((session) => session?.authorityRevision ?? null), [1, 2])
+      } finally {
+        releaseStale(errorResponse(scenario.code, scenario.status))
+        releaseFresh(jsonResponse(refreshed))
+        await Promise.allSettled([stale])
+      }
+    })
+  }
+})
+
 test('invalidates an in-flight session read when authentication is cleared', async () => {
   const firstBody = sessionBody()
   const secondBody = sessionBody({
@@ -1444,6 +1660,7 @@ test('invalidates an in-flight session read when authentication is cleared', asy
     () => firstResponse,
     () => secondResponse,
     jsonResponse(invitationResult, 201),
+    jsonResponse(secondBody),
   )
   const client = createApiClient({
     fetchImpl,
@@ -1501,6 +1718,7 @@ test('contains a stale authentication denial after a newer session succeeds', as
     () => staleResponse,
     jsonResponse(authoritativeBody),
     jsonResponse(invitationResult, 201),
+    jsonResponse(authoritativeBody),
   )
   const client = createApiClient({
     fetchImpl,
@@ -1529,6 +1747,73 @@ test('contains a stale authentication denial after a newer session succeeds', as
   assert.equal(header(calls[2], 'X-CSRF-Token'), TOKEN_B)
 })
 
+test('rejects a non-session response completed under an older authority revision', async () => {
+  let releaseHealth
+  const healthResponse = new Promise((resolve) => { releaseHealth = resolve })
+  const refreshed = sessionBody({
+    authorityRevision: 2,
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const { fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    () => healthResponse,
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  const stale = client.getOperationsHealth()
+  await client.getSession()
+  releaseHealth(jsonResponse(healthBody()))
+
+  await assert.rejects(stale, {
+    code: 'SESSION_AUTHORITY_STALE',
+    message: 'SESSION_AUTHORITY_STALE',
+    status: 0,
+  })
+})
+
+test('keeps a non-session response current when a refresh preserves authority', async () => {
+  let releaseHealth
+  const healthResponse = new Promise((resolve) => { releaseHealth = resolve })
+  const refreshed = sessionBody({
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const { fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    () => healthResponse,
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  const current = client.getOperationsHealth()
+  await client.getSession()
+  releaseHealth(jsonResponse(healthBody()))
+
+  assert.deepEqual(await current, healthBody().data)
+})
+
+test('logout rejects an in-flight protected response with the fixed stale error', async () => {
+  let releaseHealth
+  const healthResponse = new Promise((resolve) => { releaseHealth = resolve })
+  const { fetchImpl } = queuedFetch(jsonResponse(sessionBody()), () => healthResponse)
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  const stale = client.getOperationsHealth()
+  client.clearSession()
+  releaseHealth(jsonResponse(healthBody()))
+
+  await assert.rejects(stale, {
+    code: 'SESSION_AUTHORITY_STALE',
+    message: 'SESSION_AUTHORITY_STALE',
+    status: 0,
+  })
+})
+
 test('lists validated staff without mutation headers', async () => {
   const body = { data: { staff: [{ ...staff(), invitation: null }] } }
   const { calls, fetchImpl } = queuedFetch(jsonResponse(body))
@@ -1554,7 +1839,9 @@ test('invites staff with generated and explicit idempotency keys and exact JSON'
   const { calls, fetchImpl } = queuedFetch(
     jsonResponse(sessionBody()),
     jsonResponse(success, 201),
+    jsonResponse(sessionBody()),
     jsonResponse(success, 201),
+    jsonResponse(sessionBody()),
   )
   const client = createApiClient({
     fetchImpl,
@@ -1567,7 +1854,7 @@ test('invites staff with generated and explicit idempotency keys and exact JSON'
     idempotencyKey: 'explicit-key-0002',
   }), success.data)
 
-  for (const call of calls.slice(1)) {
+  for (const call of calls.filter(({ init }) => init.method === 'POST')) {
     assert.equal(call.url, '/api/v1/staff/invitations')
     assert.equal(call.init.method, 'POST')
     assert.equal(call.init.credentials, 'same-origin')
@@ -1577,7 +1864,8 @@ test('invites staff with generated and explicit idempotency keys and exact JSON'
     assert.equal(call.init.body, JSON.stringify(inviteBody))
   }
   assert.equal(header(calls[1], 'Idempotency-Key'), 'generated-key-0001')
-  assert.equal(header(calls[2], 'Idempotency-Key'), 'explicit-key-0002')
+  assert.equal(header(calls[3], 'Idempotency-Key'), 'explicit-key-0002')
+  assert.deepEqual(calls.filter(({ url }) => url === '/api/v1/session').length, 3)
 })
 
 test('deactivates only an opaque staff ID with exact version JSON', async () => {
@@ -1585,6 +1873,7 @@ test('deactivates only an opaque staff ID with exact version JSON', async () => 
   const { calls, fetchImpl } = queuedFetch(
     jsonResponse(sessionBody()),
     jsonResponse(success),
+    jsonResponse(sessionBody()),
   )
   const client = createApiClient({
     fetchImpl,
@@ -1609,7 +1898,374 @@ test('deactivates only an opaque staff ID with exact version JSON', async () => 
       message: 'CLIENT_INPUT_INVALID',
     })
   }
-  assert.equal(calls.length, 2)
+  assert.equal(calls.length, 3)
+})
+
+test('changes a staff role with an exact optimistic request and refreshes authority', async () => {
+  assert.equal(typeof apiClient.changeStaffRole, 'function')
+  const changed = {
+    data: {
+      staff: staff({
+        role: 'owner',
+        version: 4,
+        specialistId: null,
+      }),
+    },
+  }
+  const refreshed = sessionBody({
+    authorityRevision: 2,
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse(changed),
+    jsonResponse(refreshed),
+    jsonResponse(changed),
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  assert.deepEqual(await client.changeStaffRole(
+    'stf_specialist_1',
+    3,
+    'owner',
+    { idempotencyKey: 'role-change-key-0001' },
+  ), changed.data)
+
+  assert.deepEqual(calls.map(({ url }) => url), [
+    '/api/v1/session',
+    '/api/v1/staff/stf_specialist_1/role',
+    '/api/v1/session',
+    '/api/v1/staff/stf_specialist_1/role',
+    '/api/v1/session',
+  ])
+  assert.equal(calls[1].init.method, 'POST')
+  assert.equal(calls[1].init.credentials, 'same-origin')
+  assert.equal(calls[1].init.body, '{"expectedVersion":3,"role":"owner"}')
+  assert.equal(header(calls[1], 'Content-Type'), 'application/json')
+  assert.equal(header(calls[1], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(calls[1], 'Idempotency-Key'), 'role-change-key-0001')
+  assert.equal(header(calls[3], 'Idempotency-Key'), 'role-change-key-0001')
+  assert.equal(calls[3].init.body, calls[1].init.body)
+})
+
+test('replays a lifecycle result under newer authority before publishing it', async () => {
+  const changed = {
+    data: {
+      staff: staff({ role: 'owner', version: 4, specialistId: null }),
+    },
+  }
+  const refreshed = sessionBody({
+    authorityRevision: 2,
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse(changed),
+    jsonResponse(refreshed),
+    jsonResponse(changed),
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+
+  assert.deepEqual(await client.changeStaffRole(
+    'stf_specialist_1',
+    3,
+    'owner',
+    { idempotencyKey: 'role-canonical-replay-key-0001' },
+  ), changed.data)
+  assert.deepEqual(queued.calls.map(({ url }) => url), [
+    '/api/v1/session',
+    '/api/v1/staff/stf_specialist_1/role',
+    '/api/v1/session',
+    '/api/v1/staff/stf_specialist_1/role',
+    '/api/v1/session',
+  ])
+  const posts = queued.calls.filter(({ init }) => init.method === 'POST')
+  assert.equal(posts.length, 2)
+  assert.equal(posts[1].init.body, posts[0].init.body)
+  assert.equal(header(posts[0], 'Idempotency-Key'), 'role-canonical-replay-key-0001')
+  assert.equal(header(posts[1], 'Idempotency-Key'), 'role-canonical-replay-key-0001')
+  assert.equal(header(posts[1], 'X-CSRF-Token'), TOKEN_B)
+})
+
+test('rejects invalid role-change inputs and incoherent response projections', async (t) => {
+  const inputQueue = queuedFetch(jsonResponse(sessionBody()))
+  const inputClient = createApiClient({ fetchImpl: inputQueue.fetchImpl })
+  await inputClient.getSession()
+  for (const [staffId, expectedVersion, role, options] of [
+    ['../owner', 1, 'owner', { idempotencyKey: 'role-invalid-key-0001' }],
+    ['stf_specialist_1', 0, 'owner', { idempotencyKey: 'role-invalid-key-0002' }],
+    ['stf_specialist_1', 1.5, 'owner', { idempotencyKey: 'role-invalid-key-0003' }],
+    ['stf_specialist_1', 1, 'therapist', { idempotencyKey: 'role-invalid-key-0004' }],
+    ['stf_specialist_1', 1, 'owner', { idempotencyKey: 'bad key' }],
+    ['stf_specialist_1', 1, 'owner', {
+      idempotencyKey: 'role-invalid-key-0005',
+      extra: true,
+    }],
+  ]) {
+    await assert.rejects(
+      inputClient.changeStaffRole(staffId, expectedVersion, role, options),
+      { code: 'CLIENT_INPUT_INVALID' },
+    )
+  }
+  assert.equal(inputQueue.calls.length, 1)
+
+  const valid = staff({
+    role: 'owner',
+    version: 4,
+    specialistId: null,
+  })
+  for (const [name, projected] of [
+    ['unexpected response field', { ...valid, unexpected: true }],
+    ['wrong target ID', { ...valid, id: 'stf_someone_else' }],
+    ['wrong resulting role', { ...valid, role: 'coordinator' }],
+    ['wrong resulting version', { ...valid, version: 3 }],
+  ]) {
+    await t.test(name, async () => {
+      const queued = queuedFetch(
+        jsonResponse(sessionBody()),
+        jsonResponse({ data: { staff: projected } }),
+      )
+      const client = createApiClient({ fetchImpl: queued.fetchImpl })
+      await client.getSession()
+
+      await assert.rejects(client.changeStaffRole(
+        'stf_specialist_1',
+        3,
+        'owner',
+        { idempotencyKey: 'role-response-key-0001' },
+      ), { code: 'INVALID_RESPONSE', status: 200 })
+      assert.equal(queued.calls.length, 2)
+    })
+  }
+})
+
+test('retains the role action key when authority refresh is uncertain after success', async () => {
+  const changed = {
+    data: {
+      staff: staff({
+        role: 'owner',
+        version: 4,
+        specialistId: null,
+      }),
+    },
+  }
+  const refreshed = sessionBody({
+    authorityRevision: 2,
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse(changed),
+    new Error('refresh transport failed'),
+    jsonResponse(changed),
+    jsonResponse(refreshed),
+    jsonResponse(changed),
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+  const invoke = () => client.changeStaffRole(
+    'stf_specialist_1',
+    3,
+    'owner',
+    { idempotencyKey: 'role-refresh-key-0001' },
+  )
+
+  await assert.rejects(invoke(), {
+    code: 'NETWORK_ERROR',
+    idempotencyKey: 'role-refresh-key-0001',
+  })
+  assert.deepEqual(await invoke(), changed.data)
+  assert.deepEqual(calls.map(({ url }) => url), [
+    '/api/v1/session',
+    '/api/v1/staff/stf_specialist_1/role',
+    '/api/v1/session',
+    '/api/v1/staff/stf_specialist_1/role',
+    '/api/v1/session',
+    '/api/v1/staff/stf_specialist_1/role',
+    '/api/v1/session',
+  ])
+  assert.equal(header(calls[1], 'Idempotency-Key'), 'role-refresh-key-0001')
+  assert.equal(header(calls[3], 'Idempotency-Key'), 'role-refresh-key-0001')
+  assert.equal(header(calls[5], 'Idempotency-Key'), 'role-refresh-key-0001')
+  assert.equal(calls[3].init.body, calls[1].init.body)
+  assert.equal(calls[5].init.body, calls[1].init.body)
+})
+
+test('refreshes authority after every staff lifecycle mutation', async (t) => {
+  const inviteResult = { data: { staff: staff({ status: 'pending' }), invitation } }
+  const deactivateResult = { data: { staff: staff({ status: 'disabled', version: 2 }) } }
+  for (const fixture of [
+    {
+      name: 'staff invitation',
+      status: 201,
+      result: inviteResult,
+      invoke: (client) => client.inviteStaff({
+        displayName: 'Anna Specjalistka',
+        email: 'anna@example.test',
+        role: 'specialist',
+      }, { idempotencyKey: 'staff-lifecycle-key-0001' }),
+    },
+    {
+      name: 'specialist invitation',
+      status: 201,
+      result: inviteResult,
+      invoke: (client) => client.inviteSpecialistProfile('sp_specialist_1', {
+        email: 'anna@example.test',
+        expectedVersion: 1,
+      }, { idempotencyKey: 'staff-lifecycle-key-0002' }),
+    },
+    {
+      name: 'staff deactivation',
+      status: 200,
+      result: deactivateResult,
+      invoke: (client) => client.deactivateStaff(
+        'stf_specialist_1',
+        1,
+        { idempotencyKey: 'staff-lifecycle-key-0003' },
+      ),
+    },
+  ]) {
+    await t.test(fixture.name, async () => {
+      const refreshed = sessionBody({
+        csrfToken: TOKEN_B,
+        csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+      })
+      const queued = queuedFetch(
+        jsonResponse(sessionBody()),
+        jsonResponse(fixture.result, fixture.status),
+        jsonResponse(refreshed),
+      )
+      const client = createApiClient({ fetchImpl: queued.fetchImpl })
+      await client.getSession()
+
+      assert.deepEqual(await fixture.invoke(client), fixture.result.data)
+      assert.equal(queued.calls.at(-1).url, '/api/v1/session')
+      assert.equal(queued.calls.length, 3)
+    })
+  }
+})
+
+test('lists, reads, and replaces capability overrides with an immediate authority refresh', async () => {
+  assert.equal(typeof apiClient.listCapabilityTargets, 'function')
+  assert.equal(typeof apiClient.getCapabilityOverrides, 'function')
+  assert.equal(typeof apiClient.replaceCapabilityOverrides, 'function')
+  const authority = {
+    staffId: 'stf_coordinator_1',
+    displayName: 'Karolina Koordynatorka',
+    role: 'coordinator',
+    status: 'active',
+    authorityRevision: 2,
+    allow: ['finance.import'],
+    deny: ['client.manage'],
+    effectiveCapabilities: [
+      'appointment.charge.read',
+      'appointment.manage',
+      'chat.direct',
+      'chat.general',
+      'client.operational.read',
+      'finance.centre.read',
+      'finance.import',
+      'operations.health.read',
+      'payment.manage',
+      'specialist.directory.read',
+      'tus.manage',
+      'workbook.centre.export',
+    ],
+  }
+  const targets = [{
+    staffId: authority.staffId,
+    displayName: authority.displayName,
+    role: authority.role,
+    status: authority.status,
+    authorityRevision: 1,
+  }]
+  const refreshed = sessionBody({
+    authorityRevision: 2,
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse({ data: { targets } }),
+    jsonResponse({ data: { authority } }),
+    jsonResponse({ data: { authority } }),
+    jsonResponse(refreshed),
+    jsonResponse({ data: { authority } }),
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  assert.deepEqual(await client.listCapabilityTargets(), { targets })
+  assert.deepEqual(await client.getCapabilityOverrides(authority.staffId), { authority })
+  assert.deepEqual(await client.replaceCapabilityOverrides(authority.staffId, {
+    expectedAuthorityRevision: 1,
+    allow: ['finance.import', 'client.manage', 'finance.import'],
+    deny: ['client.manage', 'client.manage'],
+  }, { idempotencyKey: 'capability-replace-key-0001' }), { authority })
+
+  assert.deepEqual(calls.map(({ url }) => url), [
+    '/api/v1/session',
+    '/api/v1/staff/capability-targets',
+    `/api/v1/staff/${authority.staffId}/capability-overrides`,
+    `/api/v1/staff/${authority.staffId}/capability-overrides/edits`,
+    '/api/v1/session',
+    `/api/v1/staff/${authority.staffId}/capability-overrides/edits`,
+    '/api/v1/session',
+  ])
+  assert.equal(calls[3].init.method, 'POST')
+  assert.equal(header(calls[3], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(calls[3], 'Idempotency-Key'), 'capability-replace-key-0001')
+  assert.equal(header(calls[5], 'Idempotency-Key'), 'capability-replace-key-0001')
+  assert.equal(calls[5].init.body, calls[3].init.body)
+  assert.deepEqual(JSON.parse(calls[3].init.body), {
+    expectedAuthorityRevision: 1,
+    allow: ['finance.import'],
+    deny: ['client.manage'],
+  })
+})
+
+test('capability override API rejects incoherent authority projections and hostile input', async () => {
+  const malformed = {
+    staffId: 'stf_coordinator_1',
+    displayName: 'Karolina Koordynatorka',
+    role: 'coordinator',
+    status: 'active',
+    authorityRevision: 2,
+    allow: [],
+    deny: [],
+    effectiveCapabilities: [...ROLE_DEFAULT_CAPABILITIES.owner],
+  }
+  const queued = queuedFetch(jsonResponse({ data: { authority: malformed } }))
+  await assert.rejects(
+    createApiClient({ fetchImpl: queued.fetchImpl }).getCapabilityOverrides('stf_coordinator_1'),
+    { code: 'INVALID_RESPONSE', status: 200 },
+  )
+
+  let fetched = 0
+  const client = createApiClient({ fetchImpl: async () => { fetched += 1 } })
+  for (const input of [
+    null,
+    { expectedAuthorityRevision: 1, allow: ['unknown.capability'], deny: [] },
+    { expectedAuthorityRevision: 0, allow: [], deny: [] },
+    { expectedAuthorityRevision: 1, allow: [], deny: [], extra: true },
+  ]) {
+    await assert.rejects(
+      client.replaceCapabilityOverrides('stf_coordinator_1', input, {
+        idempotencyKey: 'capability-invalid-key-0001',
+      }),
+      { code: 'CLIENT_INPUT_INVALID' },
+    )
+  }
+  assert.equal(fetched, 0)
 })
 
 test('refreshes once on CSRF_EXPIRED and reuses the exact action key', async () => {
@@ -1623,6 +2279,7 @@ test('refreshes once on CSRF_EXPIRED and reuses the exact action key', async () 
     errorResponse('CSRF_EXPIRED', 403),
     jsonResponse(refreshed),
     jsonResponse(success, 201),
+    jsonResponse(refreshed),
   )
   const client = createApiClient({
     fetchImpl,
@@ -1642,6 +2299,7 @@ test('refreshes once on CSRF_EXPIRED and reuses the exact action key', async () 
     '/api/v1/staff/invitations',
     '/api/v1/session',
     '/api/v1/staff/invitations',
+    '/api/v1/session',
   ])
   assert.equal(header(calls[1], 'Idempotency-Key'), 'csrf-retry-key-0001')
   assert.equal(header(calls[3], 'Idempotency-Key'), 'csrf-retry-key-0001')
@@ -1650,7 +2308,53 @@ test('refreshes once on CSRF_EXPIRED and reuses the exact action key', async () 
   assert.deepEqual(observed, [
     publicSession(sessionBody()),
     publicSession(refreshed),
+    publicSession(refreshed),
   ])
+})
+
+test('starts the CSRF refresh after a held pre-expiry session request', async () => {
+  const refreshed = sessionBody({
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const success = { data: { staff: staff({ status: 'pending' }), invitation } }
+  let releaseHeld
+  const heldResponse = new Promise((resolve) => { releaseHeld = resolve })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()),
+    () => heldResponse,
+    errorResponse('CSRF_EXPIRED', 403),
+    jsonResponse(refreshed),
+    jsonResponse(success, 201),
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+
+  const held = client.getSession()
+  const action = client.inviteStaff({
+    displayName: 'Anna Specjalistka',
+    email: 'anna@example.test',
+    role: 'specialist',
+  }, { idempotencyKey: 'csrf-held-refresh-key-0001' })
+  try {
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(queued.calls.slice(0, 4).map(({ url }) => url), [
+      '/api/v1/session',
+      '/api/v1/session',
+      '/api/v1/staff/invitations',
+      '/api/v1/session',
+    ])
+    assert.deepEqual(await action, success.data)
+    const posts = queued.calls.filter(({ init }) => init.method === 'POST')
+    assert.equal(header(posts[0], 'X-CSRF-Token'), TOKEN_A)
+    assert.equal(header(posts[1], 'X-CSRF-Token'), TOKEN_B)
+    assert.equal(header(posts[0], 'Idempotency-Key'), 'csrf-held-refresh-key-0001')
+    assert.equal(header(posts[1], 'Idempotency-Key'), 'csrf-held-refresh-key-0001')
+  } finally {
+    releaseHeld(jsonResponse(sessionBody()))
+    await Promise.allSettled([held, action])
+  }
 })
 
 test('does not retry a second CSRF failure or non-CSRF server failures', async (t) => {
@@ -1687,6 +2391,7 @@ test('does not retry a second CSRF failure or non-CSRF server failures', async (
       const { calls, fetchImpl } = queuedFetch(
         jsonResponse(sessionBody()),
         errorResponse(code, status),
+        ...(code === 'FORBIDDEN' ? [jsonResponse(sessionBody())] : []),
       )
       const client = createApiClient({
         fetchImpl,
@@ -1698,7 +2403,9 @@ test('does not retry a second CSRF failure or non-CSRF server failures', async (
         email: 'anna@example.test',
         role: 'owner',
       }), { code })
-      assert.equal(calls.length, 2)
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(calls.length, code === 'FORBIDDEN' ? 3 : 2)
+      assert.equal(calls.filter((call) => call.init.method === 'POST').length, 1)
     })
   }
 })
@@ -1712,11 +2419,14 @@ test('clears authentication state on explicit clear and authentication denial', 
     errorResponse('ACCESS_DENIED', 403),
     jsonResponse(sessionBody()),
     errorResponse('FORBIDDEN', 403),
+    jsonResponse(sessionBody()),
     jsonResponse(success, 201),
+    jsonResponse(sessionBody()),
     errorResponse('VERSION_CONFLICT', 409, {
       details: { currentVersion: 4 },
     }),
     jsonResponse(success, 201),
+    jsonResponse(sessionBody()),
   )
   const client = createApiClient({
     fetchImpl,
@@ -1745,12 +2455,13 @@ test('clears authentication state on explicit clear and authentication denial', 
     email: 'anna@example.test',
     role: 'owner',
   }), { code: 'FORBIDDEN' })
+  await new Promise((resolve) => setImmediate(resolve))
   assert.deepEqual(await client.inviteStaff({
     displayName: 'Anna',
     email: 'anna@example.test',
     role: 'owner',
   }), success.data)
-  assert.equal(header(calls[6], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(calls[7], 'X-CSRF-Token'), TOKEN_A)
 
   await assert.rejects(client.inviteStaff({
     displayName: 'Anna',
@@ -1765,16 +2476,19 @@ test('clears authentication state on explicit clear and authentication denial', 
     email: 'anna@example.test',
     role: 'owner',
   }), success.data)
-  assert.equal(header(calls[8], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(calls[10], 'X-CSRF-Token'), TOKEN_A)
 
   client.clearSession()
   await assert.rejects(client.inviteStaff({}), { code: 'SESSION_REQUIRED' })
-  assert.equal(calls.length, 9)
+  assert.equal(calls.length, 12)
   assert.deepEqual(observed, [
     publicSession(),
     null,
     publicSession(),
     null,
+    publicSession(),
+    publicSession(),
+    publicSession(),
     publicSession(),
     null,
   ])
@@ -1822,6 +2536,7 @@ test('rejects malformed session envelopes without replacing a valid CSRF token',
     jsonResponse(sessionBody()),
     malformed,
     jsonResponse(success, 201),
+    jsonResponse(sessionBody()),
   )
   const client = createApiClient({
     fetchImpl,
@@ -1845,7 +2560,7 @@ test('rejects malformed session envelopes without replacing a valid CSRF token',
     role: 'owner',
   })
   assert.equal(header(calls[2], 'X-CSRF-Token'), TOKEN_A)
-  assert.deepEqual(observed, [publicSession()])
+  assert.deepEqual(observed, [publicSession(), publicSession()])
 })
 
 test('classifies an out-of-range CSRF expiry as a fixed invalid response', async () => {
@@ -1862,11 +2577,12 @@ test('classifies an out-of-range CSRF expiry as a fixed invalid response', async
   })
 })
 
-test('requires and freezes the exact positive authority revision actor shape', async () => {
+test('requires and freezes the exact presentation actor and positive authority revision', async () => {
   const accepted = sessionBody()
   const { fetchImpl } = queuedFetch(jsonResponse(accepted))
   const session = await createApiClient({ fetchImpl }).getSession()
   assert.equal(session.actor.version, 3)
+  assert.equal(session.authorityRevision, 1)
   assert.equal(Object.isFrozen(session.actor), true)
   assert.deepEqual(Reflect.ownKeys(session.actor).sort(), [
     'displayName', 'id', 'professionalTitle', 'role', 'specialistId', 'version',
@@ -1882,7 +2598,7 @@ test('requires and freezes the exact positive authority revision actor shape', a
   }
   const boundary = queuedFetch(jsonResponse(sessionBody({
     actor: boundaryActor,
-    capabilities: [...capabilitiesForActor(boundaryActor)],
+    capabilities: [...ROLE_DEFAULT_CAPABILITIES.specialist],
   })))
   assert.deepEqual((await createApiClient({ fetchImpl: boundary.fetchImpl }).getSession()).actor, boundaryActor)
 
@@ -1910,16 +2626,120 @@ test('requires and freezes the exact positive authority revision actor shape', a
       code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE', status: 200,
     })
   }
+
+  for (const authorityRevision of [undefined, null, 0, -1, 1.5, '1']) {
+    const body = structuredClone(sessionBody())
+    if (authorityRevision === undefined) delete body.data.authorityRevision
+    else body.data.authorityRevision = authorityRevision
+    const queued = queuedFetch(jsonResponse(body))
+    await assert.rejects(createApiClient({ fetchImpl: queued.fetchImpl }).getSession(), {
+      code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE', status: 200,
+    })
+  }
 })
 
-test('keeps browser session role registries byte-for-byte equal to Worker policy', async () => {
+test('rejects descriptor-hostile session envelopes, actors, and capability arrays', async (t) => {
+  const cases = [
+    ['envelope accessor', () => {
+      let reads = 0
+      const source = sessionBody()
+      const body = Object.defineProperty({}, 'data', {
+        enumerable: true,
+        get() { reads += 1; return source.data },
+      })
+      return { body, reads: () => reads }
+    }],
+    ['session accessor', () => {
+      let reads = 0
+      const source = sessionBody()
+      const data = { ...source.data }
+      Object.defineProperty(data, 'actor', {
+        enumerable: true,
+        get() { reads += 1; return source.data.actor },
+      })
+      return { body: { data }, reads: () => reads }
+    }],
+    ['actor accessor', () => {
+      let reads = 0
+      const body = sessionBody()
+      const value = body.data.actor.version
+      Object.defineProperty(body.data.actor, 'version', {
+        enumerable: true,
+        get() { reads += 1; return value },
+      })
+      return { body, reads: () => reads }
+    }],
+    ['capability accessor', () => {
+      let reads = 0
+      const body = sessionBody()
+      const value = body.data.capabilities[0]
+      Object.defineProperty(body.data.capabilities, '0', {
+        enumerable: true,
+        get() { reads += 1; return value },
+      })
+      return { body, reads: () => reads }
+    }],
+    ['non-enumerable capability', () => {
+      const body = sessionBody()
+      Object.defineProperty(body.data.capabilities, '0', {
+        enumerable: false,
+        value: body.data.capabilities[0],
+      })
+      return { body, reads: () => 0 }
+    }],
+    ['inherited sparse capabilities', () => {
+      const body = sessionBody()
+      const values = body.data.capabilities
+      const inherited = Object.create(Array.prototype)
+      values.forEach((value, index) => {
+        Object.defineProperty(inherited, String(index), {
+          enumerable: true,
+          value,
+        })
+      })
+      const capabilities = new Array(values.length)
+      Object.setPrototypeOf(capabilities, inherited)
+      body.data.capabilities = capabilities
+      return { body, reads: () => 0 }
+    }],
+    ['symbol capability field', () => {
+      const body = sessionBody()
+      body.data.capabilities[Symbol('extra')] = 'private'
+      return { body, reads: () => 0 }
+    }],
+    ['unusual session prototype', () => {
+      const body = sessionBody()
+      body.data = Object.assign(Object.create(null), body.data)
+      return { body, reads: () => 0 }
+    }],
+    ['symbol actor field', () => {
+      const body = sessionBody()
+      body.data.actor[Symbol('extra')] = 'private'
+      return { body, reads: () => 0 }
+    }],
+  ]
+
+  for (const [name, fixture] of cases) {
+    await t.test(name, async () => {
+      const { body, reads } = fixture()
+      const queued = queuedFetch(parsedResponse(body))
+      await assert.rejects(createApiClient({ fetchImpl: queued.fetchImpl }).getSession(), {
+        code: 'INVALID_RESPONSE',
+        status: 200,
+      })
+      assert.equal(reads(), 0)
+    })
+  }
+})
+
+test('accepts canonical effective capabilities within each role ceiling', async () => {
   const actors = [
     { id: 'stf_owner_1', displayName: 'Ola', professionalTitle: 'Psycholożka', role: 'owner', specialistId: 'sp_owner', version: 2 },
     { id: 'stf_coord_1', displayName: 'Ela', professionalTitle: null, role: 'coordinator', specialistId: null, version: 3 },
     { id: 'stf_spec_1', displayName: 'Anna', professionalTitle: 'Specjalistka', role: 'specialist', specialistId: 'sp_spec', version: 4 },
   ]
   for (const actor of actors) {
-    const capabilities = [...capabilitiesForActor(actor)]
+    const capabilities = [...ROLE_DEFAULT_CAPABILITIES[actor.role]]
     const body = sessionBody({ actor, capabilities })
     const queued = queuedFetch(jsonResponse(body))
     const session = await createApiClient({ fetchImpl: queued.fetchImpl }).getSession()
@@ -1932,6 +2752,29 @@ test('keeps browser session role registries byte-for-byte equal to Worker policy
       code: 'INVALID_RESPONSE', message: 'INVALID_RESPONSE', status: 200,
     })
   }
+
+  const restrictedOwner = ROLE_DEFAULT_CAPABILITIES.owner.filter((capability) => (
+    !['finance.import', 'security.audit.read'].includes(capability)
+  ))
+  const restricted = queuedFetch(jsonResponse(sessionBody({ capabilities: restrictedOwner })))
+  assert.deepEqual(
+    (await createApiClient({ fetchImpl: restricted.fetchImpl }).getSession()).capabilities,
+    restrictedOwner,
+  )
+
+  const coordinatorWithImport = sessionBody({
+    actor: actors[1],
+    capabilities: [
+      ...ROLE_DEFAULT_CAPABILITIES.coordinator.slice(0, 7),
+      'finance.import',
+      ...ROLE_DEFAULT_CAPABILITIES.coordinator.slice(7),
+    ],
+  })
+  const elevated = queuedFetch(jsonResponse(coordinatorWithImport))
+  assert.equal(
+    (await createApiClient({ fetchImpl: elevated.fetchImpl }).getSession()).capabilities.includes('finance.import'),
+    true,
+  )
 })
 
 test('sanitizes throwing response and envelope getters as fixed API errors', async (t) => {
@@ -2870,7 +3713,11 @@ test('operational resolution never retries network, malformed, VERSION_CONFLICT,
   ]
   for (const [name, outcome, code, retainsKey] of outcomes) {
     await t.test(name, async () => {
-      const { calls, fetchImpl } = queuedFetch(jsonResponse(sessionBody()), outcome)
+      const { calls, fetchImpl } = queuedFetch(
+        jsonResponse(sessionBody()),
+        outcome,
+        ...(code === 'FORBIDDEN' ? [jsonResponse(sessionBody())] : []),
+      )
       const client = createApiClient({ fetchImpl })
       await client.getSession()
       await assert.rejects(client.resolveOperationalAction('act_ok', 1, { idempotencyKey: 'resolve-key-0001' }), (error) => {
@@ -2882,16 +3729,23 @@ test('operational resolution never retries network, malformed, VERSION_CONFLICT,
         assert.doesNotMatch(JSON.stringify(error), /private@example\.test|ciphertext-private|provider email/)
         return true
       })
-      assert.equal(calls.length, 2)
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(calls.length, code === 'FORBIDDEN' ? 3 : 2)
       assert.equal(calls.filter((call) => call.init.method === 'POST').length, 1)
     })
   }
 })
 
-test('operations health authentication denials clear session but FORBIDDEN preserves it', async () => {
-  const { fetchImpl } = queuedFetch(
+test('operations health FORBIDDEN refreshes authority while Access denial clears it', async () => {
+  const refreshed = sessionBody({
+    authorityRevision: 2,
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const { calls, fetchImpl } = queuedFetch(
     jsonResponse(sessionBody()),
     errorResponse('FORBIDDEN', 403),
+    jsonResponse(refreshed),
     errorResponse('ACCESS_DENIED', 403),
   )
   const client = createApiClient({ fetchImpl })
@@ -2899,9 +3753,11 @@ test('operations health authentication denials clear session but FORBIDDEN prese
   client.subscribeSession((session) => observed.push(session))
   await client.getSession()
   await assert.rejects(client.getOperationsHealth(), { code: 'FORBIDDEN' })
-  assert.equal(observed.length, 1)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(calls[2].url, '/api/v1/session')
+  assert.deepEqual(observed, [publicSession(), publicSession(refreshed)])
   await assert.rejects(client.getOperationsHealth(), { code: 'ACCESS_DENIED' })
-  assert.deepEqual(observed, [publicSession(), null])
+  assert.deepEqual(observed, [publicSession(), publicSession(refreshed), null])
 })
 
 test('operations health and operational actions and security audit contain raw response secrets', async (t) => {
@@ -3539,6 +4395,53 @@ test('workbook export cancels an undeclared stream as soon as the client byte ca
   assert.equal(pulls, 2)
 })
 
+test('workbook export cancels and rejects a stream completed after authority revocation', async () => {
+  let releaseChunk
+  const firstChunk = new Promise((resolve) => { releaseChunk = resolve })
+  let cancelled = false
+  let reads = 0
+  const response = {
+    ok: true,
+    status: 200,
+    headers: new Headers({
+      'cache-control': 'private, no-store',
+      'content-disposition': 'attachment; filename="bear-with-me-panel-v2-2026-08-27.xlsx"',
+      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'x-content-type-options': 'nosniff',
+    }),
+    body: { getReader: () => ({
+      async read() {
+        reads += 1
+        return reads === 1 ? firstChunk : { done: true, value: undefined }
+      },
+      async cancel() { cancelled = true },
+    }) },
+  }
+  const refreshed = sessionBody({
+    authorityRevision: 2,
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const { fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    response,
+    jsonResponse(refreshed),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  const stale = client.exportWorkbook('panel-v2')
+  await client.getSession()
+  releaseChunk({ done: false, value: new Uint8Array([80, 75, 3, 4]) })
+
+  await assert.rejects(stale, {
+    code: 'SESSION_AUTHORITY_STALE',
+    message: 'SESSION_AUTHORITY_STALE',
+    status: 0,
+  })
+  assert.equal(cancelled, true)
+})
+
 test('historical activation sends the exact protected command and authenticates the linked result', async () => {
   assert.equal(typeof apiClient.activateHistoricalClient, 'function')
   const response = historicalActivationEnvelope()
@@ -3976,7 +4879,7 @@ test('client create refreshes CSRF exactly once while preserving key, path, and 
 test('client mutations never automatically retry a second CSRF or non-CSRF outcome', async () => {
   const outcomes = [
     [errorResponse('CSRF_EXPIRED', 403), jsonResponse(sessionBody()), errorResponse('CSRF_EXPIRED', 403), 4, 'CSRF_EXPIRED'],
-    [errorResponse('FORBIDDEN', 403), null, null, 2, 'FORBIDDEN'],
+    [errorResponse('FORBIDDEN', 403), jsonResponse(sessionBody()), null, 3, 'FORBIDDEN'],
     [errorResponse('INTERNAL_ERROR', 500), null, null, 2, 'INTERNAL_ERROR'],
     [jsonResponse({ data: { client: { private: 'ciphertext' } } }, 201), null, null, 2, 'INVALID_RESPONSE'],
   ]

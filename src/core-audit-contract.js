@@ -48,6 +48,8 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'specialist.account.linked': schema('specialist', 'specialistId', { specialistVersion: 'version', staffVersion: 'version' }),
   'specialist.profile.created': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
   'specialist.profile.updated': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
+  'staff.capabilities.updated': schema('staff_user', 'staffId', { actorAuthorityRevision: 'version', allowCount: 'count', denyCount: 'count', targetAuthorityRevision: 'version' }),
+  'staff.role.updated': schema('staff_user', 'staffId', { actorAuthorityRevision: 'version', desiredGeneration: 'version', invitationVersion: 'nullableVersion', specialistVersion: 'nullableVersion', staffVersion: 'version', targetAuthorityRevision: 'version' }),
   'workbook.import.created': schema('workbook_import', 'workbookImportId', { acceptedCount: 'count', importVersion: 'version', quarantinedCount: 'count' }),
   'workbook.import.materialized': schema('workbook_import', 'workbookImportId', { accountingMonthsCorrected: 'count', importVersion: 'version', insertedCount: 'count', linkedCount: 'count', voidedCount: 'count' }),
   'historical_client.activated': schema('historical_client', 'historicalClientId', { activeClientId: 'clientId', activeClientVersion: 'version', assignmentId: 'assignmentId', assignmentVersion: 'version', historicalClientVersion: 'version' }),
@@ -79,6 +81,9 @@ const captureExactDataObject = (value, keys) => {
 
 const acceptsType = (type, value) => {
   if (type === 'version') return Number.isSafeInteger(value) && value > 0
+  if (type === 'nullableVersion') {
+    return value === null || (Number.isSafeInteger(value) && value > 0)
+  }
   if (type === 'count') return Number.isSafeInteger(value) && value >= 0
   if (type === 'assignmentId') return typeof value === 'string' && ASSIGNMENT_ID.test(value)
   if (type === 'clientId') return typeof value === 'string' && CLIENT_ID.test(value)
@@ -106,6 +111,7 @@ const acceptsEntityId = (kind, value) => typeof value === 'string' && ({
   financeEntryId: FINANCE_ENTRY_ID,
   paymentId: PAYMENT_ID,
   specialistId: SPECIALIST_ID,
+  staffId: STAFF_ID,
   workbookImportId: WORKBOOK_IMPORT_ID,
   historicalClientId: HISTORICAL_CLIENT_ID,
   activityGroupId: ACTIVITY_GROUP_ID,

@@ -1,4 +1,11 @@
 import { APP_MODE } from './app-mode.js'
+import {
+  CAPABILITIES,
+  acceptEffectiveCapabilities,
+  effectiveCapabilitiesFor,
+  isCapability,
+  normalizeCapabilityOverrides,
+} from './capabilities.js'
 import { isWellFormedUnicode, validateAppointmentInput } from './core-records.js'
 import { SERVICE_BY_ID } from './services.js'
 import {
@@ -138,6 +145,7 @@ const CLIENT_CODES = new Set([
   'CLIENT_INPUT_INVALID',
   'INVALID_RESPONSE',
   'NETWORK_ERROR',
+  'SESSION_AUTHORITY_STALE',
   'SESSION_REQUIRED',
 ])
 const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'REAUTH_REQUIRED'])
@@ -164,38 +172,6 @@ const ACTIVITY_FIELDS = new Set([
   'programs', 'groups', 'groupLeaders', 'participants', 'memberships', 'classes',
   'attendance', 'charges', 'payments',
 ])
-const CAPABILITIES = Object.freeze([
-  'appointment.charge.read',
-  'appointment.manage',
-  'centre.manage',
-  'chat.direct',
-  'chat.general',
-  'client.manage',
-  'client.operational.read',
-  'clinical.read',
-  'finance.centre.manage',
-  'finance.centre.read',
-  'operations.health.read',
-  'payment.manage',
-  'security.audit.read',
-  'specialist.directory.read',
-  'staff.manage',
-  'tus.manage',
-])
-const CAPABILITY_VOCABULARY = new Set(CAPABILITIES)
-const ROLE_CAPABILITIES = Object.freeze({
-  owner: CAPABILITIES,
-  coordinator: Object.freeze([
-    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-    'client.manage', 'client.operational.read', 'finance.centre.read',
-    'operations.health.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
-  ]),
-  specialist: Object.freeze([
-    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-    'client.manage', 'client.operational.read', 'clinical.read', 'payment.manage',
-    'specialist.directory.read', 'tus.manage',
-  ]),
-})
 const ROLES = new Set(['owner', 'coordinator', 'specialist'])
 const STAFF_STATUSES = new Set(['active', 'disabled', 'pending'])
 const INVITATION_STATUSES = new Set(['pending', 'provisioning'])
@@ -1206,7 +1182,7 @@ export class ApiError extends Error {
 const clientError = (code, options) => new ApiError(code, options)
 
 const acceptedActor = (value) => {
-  const actor = captureExactObject(value, [
+  const actor = captureDataObject(value, [
     'id', 'displayName', 'professionalTitle', 'role', 'specialistId', 'version',
   ])
   if (!actor || !STAFF_ID.test(actor.id) || !validText(actor.displayName, 120)
@@ -1230,19 +1206,17 @@ const acceptedActor = (value) => {
 
 const acceptedSession = (payload) => {
   try {
-    const envelope = captureExactObject(payload, ['data'])
-    const value = captureExactObject(envelope?.data, [
-      'actor', 'capabilities', 'csrfToken', 'csrfExpiresAt', 'environment', 'dataMode',
+    const envelope = captureDataObject(payload, ['data'])
+    const value = captureDataObject(envelope?.data, [
+      'actor', 'authorityRevision', 'capabilities', 'csrfToken', 'csrfExpiresAt',
+      'environment', 'dataMode',
     ])
     const actor = acceptedActor(value?.actor)
-    const capabilities = captureArray(value?.capabilities, CAPABILITIES.length)
-    const expectedCapabilities = actor ? ROLE_CAPABILITIES[actor.role] : null
-    if (!actor || !capabilities || capabilities.length !== expectedCapabilities.length
-      || capabilities.some((capability) => (
-        typeof capability !== 'string' || !CAPABILITY_VOCABULARY.has(capability)
-      ))
-      || new Set(capabilities).size !== capabilities.length
-      || capabilities.some((capability, index) => capability !== expectedCapabilities[index])
+    const capabilities = captureDenseArray(value?.capabilities, CAPABILITIES.length)
+    const acceptedCapabilities = actor
+      ? acceptEffectiveCapabilities(actor.role, capabilities)
+      : null
+    if (!actor || !positive(value.authorityRevision) || !acceptedCapabilities
       || !ENVIRONMENTS.has(value.environment) || value.dataMode !== 'fictional'
       || !validIso(value.csrfExpiresAt)) return null
     const match = typeof value.csrfToken === 'string' ? CSRF_TOKEN.exec(value.csrfToken) : null
@@ -1251,12 +1225,118 @@ const acceptedSession = (payload) => {
       || Date.parse(value.csrfExpiresAt) / 1000 !== expiresUnix) return null
     const session = Object.freeze({
       actor,
-      capabilities: Object.freeze(capabilities),
+      authorityRevision: value.authorityRevision,
+      capabilities: acceptedCapabilities,
       csrfExpiresAt: value.csrfExpiresAt,
       environment: value.environment,
       dataMode: value.dataMode,
     })
     return Object.freeze({ csrfToken: value.csrfToken, session })
+  } catch {
+    return null
+  }
+}
+
+const sameOrderedValues = (left, right) => left.length === right.length
+  && left.every((value, index) => value === right[index])
+
+const acceptedCapabilityTarget = (raw) => {
+  const value = captureDataObject(raw, [
+    'staffId', 'displayName', 'role', 'status', 'authorityRevision',
+  ])
+  if (!value || !STAFF_ID.test(value.staffId ?? '') || !validText(value.displayName, 120)
+    || !ROLES.has(value.role) || !STAFF_STATUSES.has(value.status)
+    || !positive(value.authorityRevision)) return null
+  return Object.freeze({
+    staffId: value.staffId,
+    displayName: value.displayName,
+    role: value.role,
+    status: value.status,
+    authorityRevision: value.authorityRevision,
+  })
+}
+
+const acceptedCapabilityTargets = (payload) => {
+  try {
+    const envelope = captureDataObject(payload, ['data'])
+    const data = captureDataObject(envelope?.data, ['targets'])
+    const rows = captureDenseArray(data?.targets, 1_000)
+    if (!rows) return null
+    const targets = rows.map(acceptedCapabilityTarget)
+    if (targets.some((target) => !target)
+      || new Set(targets.map((target) => target.staffId)).size !== targets.length
+      || targets.some((target, index) => index > 0 && (
+        workspaceCollator.compare(targets[index - 1].displayName, target.displayName) > 0
+        || (workspaceCollator.compare(
+          targets[index - 1].displayName, target.displayName,
+        ) === 0 && targets[index - 1].staffId >= target.staffId)
+      ))) return null
+    return Object.freeze({ targets: Object.freeze(targets) })
+  } catch {
+    return null
+  }
+}
+
+const acceptedCapabilityAuthorityValue = (raw) => {
+  try {
+    const value = captureDataObject(raw, [
+      'staffId', 'displayName', 'role', 'status', 'authorityRevision',
+      'allow', 'deny', 'effectiveCapabilities',
+    ])
+    const allow = captureDenseArray(value?.allow, CAPABILITIES.length)
+    const deny = captureDenseArray(value?.deny, CAPABILITIES.length)
+    const effective = captureDenseArray(value?.effectiveCapabilities, CAPABILITIES.length)
+    if (!value || !STAFF_ID.test(value.staffId ?? '') || !validText(value.displayName, 120)
+      || !ROLES.has(value.role) || !STAFF_STATUSES.has(value.status)
+      || !positive(value.authorityRevision) || !allow || !deny || !effective) return null
+    const normalized = normalizeCapabilityOverrides({ role: value.role, allow, deny })
+    const calculated = effectiveCapabilitiesFor({
+      role: value.role,
+      allow: normalized.allow,
+      deny: normalized.deny,
+    })
+    const acceptedEffective = acceptEffectiveCapabilities(value.role, effective)
+    if (!acceptedEffective
+      || !sameOrderedValues(allow, normalized.allow)
+      || !sameOrderedValues(deny, normalized.deny)
+      || !sameOrderedValues(acceptedEffective, calculated)) return null
+    return Object.freeze({
+      staffId: value.staffId,
+      displayName: value.displayName,
+      role: value.role,
+      status: value.status,
+      authorityRevision: value.authorityRevision,
+      allow: normalized.allow,
+      deny: normalized.deny,
+      effectiveCapabilities: acceptedEffective,
+    })
+  } catch {
+    return null
+  }
+}
+
+const acceptedCapabilityAuthority = (payload) => {
+  const envelope = captureDataObject(payload, ['data'])
+  const data = captureDataObject(envelope?.data, ['authority'])
+  const authority = acceptedCapabilityAuthorityValue(data?.authority)
+  return authority ? Object.freeze({ authority }) : null
+}
+
+const captureCapabilityOverrideInput = (raw) => {
+  try {
+    const value = captureDataObject(raw, ['expectedAuthorityRevision', 'allow', 'deny'])
+    const allow = captureDenseArray(value?.allow, CAPABILITIES.length * 4)
+    const deny = captureDenseArray(value?.deny, CAPABILITIES.length * 4)
+    if (!value || !positive(value.expectedAuthorityRevision) || !allow || !deny
+      || allow.some((capability) => !isCapability(capability))
+      || deny.some((capability) => !isCapability(capability))) return null
+    const denied = new Set(deny)
+    const allowed = new Set(allow.filter((capability) => !denied.has(capability)))
+    return Object.freeze({
+      expectedAuthorityRevision: value.expectedAuthorityRevision,
+      allow: Object.freeze(CAPABILITIES.filter((capability) => allowed.has(capability))),
+      deny: Object.freeze(CAPABILITIES.filter((capability) => denied.has(capability))),
+    })
   } catch {
     return null
   }
@@ -1324,6 +1404,39 @@ const acceptedDeactivationResult = (payload) => {
   const value = plainObject(payload) && plainObject(payload.data) ? payload.data : null
   const staff = acceptedStaff(value?.staff, false)
   return staff ? Object.freeze({ staff }) : null
+}
+
+const acceptedRoleChangeResult = (
+  payload,
+  status,
+  staffId,
+  expectedVersion,
+  role,
+) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['staff'])
+  const value = data && captureDataObject(data.staff, [
+    'id', 'displayName', 'email', 'role', 'status', 'version', 'specialistId',
+  ])
+  if (status !== 200 || !value || value.id !== staffId
+    || !validText(value.displayName, 120) || !validText(value.email, 320)
+    || value.role !== role || !STAFF_STATUSES.has(value.status)
+    || value.version !== expectedVersion + 1
+    || !(value.specialistId === null || SPECIALIST_ID.test(value.specialistId))
+    || (value.role === 'specialist' && !SPECIALIST_ID.test(value.specialistId ?? ''))) {
+    return null
+  }
+  return Object.freeze({
+    staff: Object.freeze({
+      id: value.id,
+      displayName: value.displayName,
+      email: value.email,
+      role: value.role,
+      status: value.status,
+      version: value.version,
+      specialistId: value.specialistId,
+    }),
+  })
 }
 
 const acceptedHealth = (payload) => {
@@ -1960,7 +2073,12 @@ const acceptedActivityProjection = (payload, status, importId, expectedVersion =
 const idempotencyOptions = (options) => {
   try {
     if (!plainObject(options)) return null
-    return { idempotencyKey: options.idempotencyKey }
+    const keys = Reflect.ownKeys(options)
+    if (keys.length === 0) return { idempotencyKey: undefined }
+    if (keys.length !== 1 || keys[0] !== 'idempotencyKey') return null
+    const descriptor = Object.getOwnPropertyDescriptor(options, 'idempotencyKey')
+    if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) return null
+    return { idempotencyKey: descriptor.value }
   } catch {
     return null
   }
@@ -2007,7 +2125,11 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
 
   let csrfToken = null
   let sessionRequest = null
+  let newestSessionRequest = null
+  let sessionRequestSequence = 0
   let sessionGeneration = 0
+  let requestAuthorityGeneration = 0
+  let installedAuthority = null
   const listeners = new Set()
   const baseHeaders = () => ({
     Accept: 'application/json',
@@ -2027,23 +2149,43 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   }
   const clearSession = () => {
     sessionGeneration += 1
+    requestAuthorityGeneration += 1
+    installedAuthority = null
     sessionRequest = null
+    newestSessionRequest = null
     csrfToken = null
     notifySession(null)
+  }
+  const authorityFingerprintFor = (session) => JSON.stringify([
+    session.actor.id,
+    session.actor.version,
+    session.actor.role,
+    session.actor.specialistId,
+    session.authorityRevision,
+    session.capabilities,
+  ])
+  const assertCurrentRequestAuthority = (generation, idempotencyKey) => {
+    if (generation !== null && generation !== requestAuthorityGeneration) {
+      throw clientError('SESSION_AUTHORITY_STALE', { idempotencyKey })
+    }
   }
   const requestJson = async (path, init, {
     validate,
     idempotencyKey,
     onAuthDenial = clearSession,
+    authorityBound = true,
   } = {}) => {
+    const authorityGeneration = authorityBound ? requestAuthorityGeneration : null
     let response
     try {
       response = await fetchImpl(path, init)
     } catch {
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
       throw clientError('NETWORK_ERROR', {
         idempotencyKey,
       })
     }
+    assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
     let status
     let ok
     let parseJson
@@ -2061,8 +2203,10 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     try {
       payload = await parseJson.call(response)
     } catch {
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
       throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     }
+    assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
     if (!ok) {
       let error
       try {
@@ -2070,21 +2214,26 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       } catch {
         throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
       }
-      if (AUTH_DENIAL_CODES.has(error.code)) onAuthDenial()
+      if (error.code === 'FORBIDDEN') {
+        const eventSequence = sessionRequestSequence
+        void refreshSessionAfter(eventSequence).catch(() => {})
+      } else if (AUTH_DENIAL_CODES.has(error.code)) onAuthDenial()
       throw error
     }
     let result
     try {
       result = validate(payload, status)
     } catch {
+      assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
       throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     }
+    assertCurrentRequestAuthority(authorityGeneration, idempotencyKey)
     if (!result) throw clientError('INVALID_RESPONSE', { status, idempotencyKey })
     return result
   }
-  const getSession = () => {
-    if (sessionRequest) return sessionRequest
+  const startSessionRequest = () => {
     const generation = sessionGeneration
+    const sequence = ++sessionRequestSequence
     const request = requestJson(`${API_ROOT}/session`, {
       method: 'GET',
       credentials: 'same-origin',
@@ -2092,22 +2241,45 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     }, {
       validate: acceptedSession,
       onAuthDenial: () => {
-        if (sessionGeneration === generation) clearSession()
+        if (sessionGeneration === generation
+          && sessionRequest?.sequence === sequence
+          && newestSessionRequest?.sequence === sequence) clearSession()
       },
+      authorityBound: false,
     }).then((accepted) => {
-      if (sessionGeneration === generation) {
+      if (sessionGeneration === generation && sequence === sessionRequestSequence) {
+        const nextAuthority = authorityFingerprintFor(accepted.session)
+        if (nextAuthority !== installedAuthority) {
+          installedAuthority = nextAuthority
+          requestAuthorityGeneration += 1
+        }
         csrfToken = accepted.csrfToken
         notifySession(accepted.session)
       }
       return accepted.session
+    }).catch((error) => {
+      const newerRequest = newestSessionRequest
+      if (sessionGeneration === generation
+        && error instanceof ApiError
+        && AUTH_DENIAL_CODES.has(error.code)
+        && newerRequest?.sequence > sequence) return newerRequest.promise
+      throw error
     })
-    sessionRequest = request
+    const activeRequest = Object.freeze({ promise: request, sequence })
+    sessionRequest = activeRequest
+    newestSessionRequest = activeRequest
     const clearRequest = () => {
-      if (sessionRequest === request) sessionRequest = null
+      if (sessionRequest === activeRequest) sessionRequest = null
     }
     void request.then(clearRequest, clearRequest)
     return request
   }
+  const getSession = () => sessionRequest?.promise ?? startSessionRequest()
+  const refreshSessionAfter = (eventSequence) => (
+    sessionRequest?.sequence > eventSequence
+      ? sessionRequest.promise
+      : startSessionRequest()
+  )
   const listStaff = () => requestJson(`${API_ROOT}/staff`, {
     method: 'GET',
     credentials: 'same-origin',
@@ -2115,6 +2287,25 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   }, {
     validate: acceptedStaffList,
   })
+  const listCapabilityTargets = () => requestJson(`${API_ROOT}/staff/capability-targets`, {
+    method: 'GET',
+    credentials: 'same-origin',
+    headers: baseHeaders(),
+  }, {
+    validate: acceptedCapabilityTargets,
+  })
+  const getCapabilityOverrides = (staffId) => {
+    if (typeof staffId !== 'string' || !STAFF_ID.test(staffId)) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    return requestJson(`${API_ROOT}/staff/${staffId}/capability-overrides`, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: baseHeaders(),
+    }, {
+      validate: acceptedCapabilityAuthority,
+    })
+  }
   const loadWorkspaceWindow = (options) => {
     const accepted = acceptedWorkspaceOptions(options)
     if (!accepted) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
@@ -2209,33 +2400,80 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     if (!acceptedKey(value)) throw clientError('CLIENT_INPUT_INVALID')
     return value
   }
-  const mutation = async (path, body, validate, suppliedKey) => {
+  const mutationOutcome = async (path, body, validate, suppliedKey) => {
     const idempotencyKey = suppliedKey === undefined
       ? createIdempotencyKey()
       : suppliedKey
     if (!acceptedKey(idempotencyKey)) throw clientError('CLIENT_INPUT_INVALID')
     if (!csrfToken) throw clientError('SESSION_REQUIRED')
-    const send = () => requestJson(path, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {
-        ...baseHeaders(),
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': csrfToken,
-        'Idempotency-Key': idempotencyKey,
-      },
-      body,
-    }, {
-      validate,
-      idempotencyKey,
-    })
+    const send = async () => {
+      const authorityGeneration = requestAuthorityGeneration
+      const result = await requestJson(path, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          ...baseHeaders(),
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+          'Idempotency-Key': idempotencyKey,
+        },
+        body,
+      }, {
+        validate,
+        idempotencyKey,
+      })
+      return Object.freeze({ authorityGeneration, result })
+    }
     try {
       return await send()
     } catch (error) {
       if (!(error instanceof ApiError) || error.code !== 'CSRF_EXPIRED') throw error
     }
-    await getSession()
+    const eventSequence = sessionRequestSequence
+    await refreshSessionAfter(eventSequence)
     return send()
+  }
+  const mutation = async (...args) => (await mutationOutcome(...args)).result
+  const lifecycleMutation = async (path, body, validate, suppliedKey) => {
+    const idempotencyKey = suppliedKey === undefined
+      ? createIdempotencyKey()
+      : suppliedKey
+    if (!acceptedKey(idempotencyKey)) throw clientError('CLIENT_INPUT_INVALID')
+    let outcome = await mutationOutcome(path, body, validate, idempotencyKey)
+    for (let replayed = false; ; replayed = true) {
+      const eventSequence = sessionRequestSequence
+      try {
+        await refreshSessionAfter(eventSequence)
+      } catch (error) {
+        if (error instanceof ApiError) {
+          throw clientError(error.code, {
+            status: error.status,
+            details: error.details,
+            correlationId: error.correlationId,
+            idempotencyKey,
+          })
+        }
+        throw clientError('INVALID_RESPONSE', { idempotencyKey })
+      }
+      if (outcome.authorityGeneration === requestAuthorityGeneration) return outcome.result
+      if (replayed) throw clientError('SESSION_AUTHORITY_STALE', { idempotencyKey })
+      outcome = await mutationOutcome(path, body, validate, idempotencyKey)
+    }
+  }
+  const replaceCapabilityOverrides = async (staffId, input, options) => {
+    const requested = captureCapabilityOverrideInput(input)
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof staffId !== 'string' || !STAFF_ID.test(staffId)
+      || !requested || !acceptedOptions) {
+      throw clientError('CLIENT_INPUT_INVALID')
+    }
+    if (!csrfToken) throw clientError('SESSION_REQUIRED')
+    return lifecycleMutation(
+      `${API_ROOT}/staff/${staffId}/capability-overrides/edits`,
+      JSON.stringify(requested),
+      acceptedCapabilityAuthority,
+      acceptedOptions.idempotencyKey,
+    )
   }
   const multipartMutation = async (path, formFactory, validate, suppliedKey = null) => {
     if (suppliedKey !== null && !acceptedKey(suppliedKey)) {
@@ -2264,6 +2502,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     return send()
   }
   const requestWorkbookExport = async (format) => {
+    const authorityGeneration = requestAuthorityGeneration
     let response
     try {
       response = await fetchImpl(`${API_ROOT}/workbooks/export?format=${format}`, {
@@ -2275,8 +2514,10 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
         },
       })
     } catch {
+      assertCurrentRequestAuthority(authorityGeneration)
       throw clientError('NETWORK_ERROR')
     }
+    assertCurrentRequestAuthority(authorityGeneration)
     const status = responseStatus(response)
     let ok
     try { ok = response?.ok } catch { throw clientError('INVALID_RESPONSE') }
@@ -2284,10 +2525,14 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     if (!ok) {
       let payload
       try { payload = await response.json() } catch {
+        assertCurrentRequestAuthority(authorityGeneration)
         throw clientError('INVALID_RESPONSE', { status })
       }
+      assertCurrentRequestAuthority(authorityGeneration)
       const error = serverError(payload, status)
-      if (AUTH_DENIAL_CODES.has(error.code)) clearSession()
+      if (error.code === 'FORBIDDEN') {
+        void getSession().catch(() => {})
+      } else if (AUTH_DENIAL_CODES.has(error.code)) clearSession()
       throw error
     }
     let filename
@@ -2312,6 +2557,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
         throw new Error('invalid')
       }
     } catch {
+      assertCurrentRequestAuthority(authorityGeneration)
       throw clientError('INVALID_RESPONSE', { status })
     }
     let reader
@@ -2324,6 +2570,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     try {
       while (true) {
         const next = await reader.read()
+        assertCurrentRequestAuthority(authorityGeneration)
         if (!next || typeof next.done !== 'boolean') throw new Error('invalid')
         if (next.done) break
         if (!(next.value instanceof Uint8Array) || next.value.byteLength < 1) {
@@ -2339,6 +2586,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       }
     } catch {
       try { await reader.cancel() } catch { /* The response is already unusable. */ }
+      assertCurrentRequestAuthority(authorityGeneration)
       throw clientError('INVALID_RESPONSE', { status })
     }
     if (total < 1 || (declaredLength !== null && declaredLength !== total)) {
@@ -2350,6 +2598,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       bytes.set(chunk, offset)
       offset += chunk.byteLength
     }
+    assertCurrentRequestAuthority(authorityGeneration)
     return Object.freeze({ bytes, filename })
   }
   const createClient = (input, options) => {
@@ -2544,7 +2793,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     }
     if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
-    return mutation(
+    return lifecycleMutation(
       `${API_ROOT}/specialists/${specialistId}/account-links`,
       JSON.stringify(requested),
       (payload, status) => acceptedSpecialistAccountLink(
@@ -2877,7 +3126,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     } catch {
       return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     }
-    return mutation(
+    return lifecycleMutation(
       `${API_ROOT}/staff/invitations`,
       body,
       acceptedInvitationResult,
@@ -2896,7 +3145,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     }
     if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
-    return mutation(
+    return lifecycleMutation(
       `${API_ROOT}/specialists/${specialistId}/invitations`,
       JSON.stringify(requested),
       acceptedInvitationResult,
@@ -2915,10 +3164,35 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       || !Number.isSafeInteger(version) || version < 1) {
       return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     }
-    return mutation(
+    return lifecycleMutation(
       `${API_ROOT}/staff/${staffId}/deactivation`,
       JSON.stringify({ version }),
       acceptedDeactivationResult,
+      idempotencyKey,
+    )
+  }
+  const changeStaffRole = (staffId, expectedVersion, role, options = {}) => {
+    const acceptedOptions = idempotencyOptions(options)
+    if (!acceptedOptions || typeof staffId !== 'string' || !STAFF_ID.test(staffId)
+      || !positive(expectedVersion) || expectedVersion >= Number.MAX_SAFE_INTEGER
+      || typeof role !== 'string' || !ROLES.has(role)) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    const { idempotencyKey } = acceptedOptions
+    if (idempotencyKey !== undefined && !acceptedKey(idempotencyKey)) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return lifecycleMutation(
+      `${API_ROOT}/staff/${staffId}/role`,
+      JSON.stringify({ expectedVersion, role }),
+      (payload, status) => acceptedRoleChangeResult(
+        payload,
+        status,
+        staffId,
+        expectedVersion,
+        role,
+      ),
       idempotencyKey,
     )
   }
@@ -2952,6 +3226,9 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
   return Object.freeze({
     getSession,
     listStaff,
+    listCapabilityTargets,
+    getCapabilityOverrides,
+    replaceCapabilityOverrides,
     loadWorkspaceWindow,
     loadActivityWorkspace,
     getOperationsHealth,
@@ -2992,6 +3269,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     inviteStaff,
     inviteSpecialistProfile,
     deactivateStaff,
+    changeStaffRole,
     resolveOperationalAction,
     createIdempotencyKey,
     clearSession,

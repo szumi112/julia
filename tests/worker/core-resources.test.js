@@ -9,10 +9,15 @@ import {
   loadClientHistoryResourceFact,
   loadClientResourceFact,
 } from '../../worker/core/resources.js'
+import { authorityActor } from './fixtures.js'
 
-const owner = Object.freeze({ id: 'stf_owner', role: 'owner', specialistId: 'sp_owner' })
-const coordinator = Object.freeze({ id: 'stf_coord', role: 'coordinator', specialistId: null })
-const specialist = Object.freeze({ id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec' })
+const owner = authorityActor({
+  id: 'stf_owner', role: 'owner', specialistId: 'sp_owner',
+})
+const coordinator = authorityActor({ id: 'stf_coord', role: 'coordinator' })
+const specialist = authorityActor({
+  id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec',
+})
 const CURRENT_DAY = '2027-03-01'
 const CURRENT_MS = Date.parse('2027-03-01T08:00:00.000Z')
 
@@ -269,6 +274,7 @@ describe('core authorization resource facts', () => {
 
   it('rejects cross-typed and oversized actor identifiers before SQL', async () => {
     for (const actor of [
+      { id: 'stf_stripped', role: 'owner', specialistId: null },
       { id: `stf_${'a'.repeat(125)}`, role: 'owner', specialistId: null },
       { id: 'sp_actor', role: 'owner', specialistId: null },
       { id: 'stf_owner', role: 'owner', specialistId: 'stf_profile' },
@@ -279,9 +285,9 @@ describe('core authorization resource facts', () => {
     }
 
     const boundaryDb = fakeDb({ appointment_id: 'apt_one', specialist_id: 'sp_other' })
-    await expect(loadAppointmentResourceFact(boundaryDb, {
+    await expect(loadAppointmentResourceFact(boundaryDb, authorityActor({
       id: `stf_${'a'.repeat(124)}`, role: 'owner', specialistId: `sp_${'a'.repeat(125)}`,
-    }, 'apt_one')).resolves.toEqual({
+    }), 'apt_one')).resolves.toEqual({
       kind: 'appointment', appointmentId: 'apt_one', specialistId: 'sp_other',
     })
     expect(boundaryDb.calls).toHaveLength(1)

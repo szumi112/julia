@@ -25,6 +25,7 @@ const sessionEnvelope = ({
     specialistId: null,
     version: 1,
   },
+  authorityRevision = 1,
   capabilities = ['appointment.manage'],
 } = {}) => {
   const csrfExpiresAt = '2030-01-01T00:00:00.000Z'
@@ -32,6 +33,7 @@ const sessionEnvelope = ({
   return json(200, {
     data: {
       actor,
+      authorityRevision,
       capabilities,
       csrfExpiresAt,
       csrfToken: `v1.${csrfExpiresUnix}.${'A'.repeat(22)}.${'B'.repeat(43)}`,

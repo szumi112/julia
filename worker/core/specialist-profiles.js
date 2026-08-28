@@ -7,6 +7,7 @@ import {
 } from '../db/unit-of-work.js'
 import { isD1IdentityCollision } from '../db/errors.js'
 import { authorize } from '../identity/policy.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { encodeBase64Url } from '../security/encoding.js'
 import { encryptForScope } from '../security/envelope.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
@@ -17,7 +18,6 @@ const INPUT_KEYS = Object.freeze([
   'db', 'recoveryDb', 'actor', 'keyring', 'nowMs', 'correlationId', 'idFactory',
   'body', 'idempotencyKey',
 ])
-const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const VERSION_ID = /^ver_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const AUDIT_ID = /^aud_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -88,26 +88,9 @@ const generated = (factory, prefix, grammar, used) => {
 }
 
 const actorFact = (value) => {
-  let captured
-  try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error('FORBIDDEN')
-    }
-    const descriptors = Object.getOwnPropertyDescriptors(value)
-    captured = Object.fromEntries(['id', 'role', 'specialistId'].map((key) => {
-      const descriptor = descriptors[key]
-      if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error('FORBIDDEN')
-      return [key, descriptor.value]
-    }))
-  } catch {
-    throw new Error('FORBIDDEN')
-  }
-  if (!STAFF_ID.test(captured.id ?? '')
-    || !['owner', 'coordinator', 'specialist'].includes(captured.role)
-    || (captured.specialistId !== null && !SPECIALIST_ID.test(captured.specialistId ?? ''))) {
-    throw new Error('FORBIDDEN')
-  }
-  return captured
+  const actor = captureAuthorityActor(value)
+  if (!actor) throw new Error('FORBIDDEN')
+  return actor
 }
 
 const profileDto = (profile) => Object.freeze({

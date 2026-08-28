@@ -25,20 +25,18 @@ import {
   applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2027-03-05T08:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
 const CORRELATION_ID = '1a9faee7-33ef-4e35-a7dc-d8e0d31a4fb9'
-const owner = Object.freeze({
-  id: 'stf_activity_commands_owner', role: 'owner', specialistId: null, version: 1,
-})
-const coordinator = Object.freeze({
+const owner = authorityActor({ id: 'stf_activity_commands_owner', role: 'owner' })
+const coordinator = authorityActor({
   id: 'stf_activity_commands_coordinator', role: 'coordinator',
-  specialistId: null, version: 1,
 })
-const therapist = Object.freeze({
+const therapist = authorityActor({
   id: 'stf_activity_commands_specialist', role: 'specialist',
-  specialistId: 'sp_activity_commands_alpha', version: 1,
+  specialistId: 'sp_activity_commands_alpha',
 })
 const key = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
 let keyring

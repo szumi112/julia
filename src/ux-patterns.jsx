@@ -5,7 +5,9 @@ import { Button } from './ui.jsx'
 import { routeHref } from './routing.js'
 
 export function EntityLink({ route, params, href, label, onClick, children, ...rest }) {
-  const { navigate } = useShell()
+  const { appMode, canAccess, navigate } = useShell()
+
+  if (appMode === 'app' && route && canAccess(route) !== true) return null
 
   return (
     <a

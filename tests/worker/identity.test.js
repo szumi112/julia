@@ -1,13 +1,58 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import { blindEmailIndex, decryptForScope, encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
-import { reindexEmailLookupsBatch, resolveActor, verifyNoOldEmailLookups } from '../../worker/identity/staff.js'
+import {
+  reindexEmailLookupsBatch,
+  resolveActiveActorReadOnly,
+  resolveActor,
+  resolveCurrentAuthorityActor,
+  verifyNoOldEmailLookups,
+} from '../../worker/identity/staff.js'
+import {
+  applyCoreDirectoryStageB,
+  applyFinanceStageC,
+  applySpecialistProfilesStageD,
+  applyWorkbookRegistryStageE,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 import { NOW_MS, TEST_IDENTITIES } from './fixtures.js'
 
 const scope = { type: 'staff_directory', id: 'centre_1', purpose: 'identity' }
 const instant = new Date(NOW_MS).toISOString()
+const expectedActor = ({
+  id,
+  role = 'owner',
+  specialistId = null,
+  version,
+  authorityRevision = 1,
+  capabilities = ROLE_DEFAULT_CAPABILITIES[role],
+}) => ({ id, role, specialistId, version, authorityRevision, capabilities })
+const COORDINATOR_OVERRIDE_CAPABILITIES = Object.freeze([
+  'appointment.charge.read',
+  'appointment.manage',
+  'chat.direct',
+  'chat.general',
+  'client.operational.read',
+  'finance.centre.read',
+  'finance.import',
+  'operations.health.read',
+  'payment.manage',
+  'specialist.directory.read',
+  'tus.manage',
+  'workbook.centre.export',
+])
+
+beforeAll(async () => {
+  await completeCoreDirectoryStageA()
+  await applyCoreDirectoryStageB()
+  await applyFinanceStageC()
+  await applySpecialistProfilesStageD()
+  await applyWorkbookRegistryStageE()
+})
+
 const cryptoContext = async () => {
   const keyring = await createKeyring(env, { activeDataKekVersion: 1, activeLookupKeyVersion: 1, activeBackupKekVersion: 1 })
   return { keyring, dataKey: await getOrCreateDataKey(env.DB, keyring, scope, { id: 'key_identity', createdAt: instant }), scope }
@@ -80,6 +125,19 @@ async function occupyAuditId(id) {
   ).bind(id, instant).run()
 }
 
+const dbWithAuthorityRows = (rows) => ({
+  prepare(sql) {
+    if (!sql.includes('staff_authorities')) return env.DB.prepare(sql)
+    return {
+      bind() {
+        return {
+          async all() { return { results: rows } },
+        }
+      },
+    }
+  },
+})
+
 describe('D1-authoritative staff resolution', () => {
   it('never creates an actor from a valid Access identity alone', async () => {
     const context = await cryptoContext()
@@ -98,7 +156,7 @@ describe('D1-authoritative staff resolution', () => {
 
     await expect(resolveActor(prepareOnly, principal, context, {
       nowMs: NOW_MS, correlationId: 'corr_prepare_only', idFactory: ids('prepare_only'),
-    })).resolves.toEqual({ id: 'stf_prepare_only', role: 'owner', specialistId: null, version: 2 })
+    })).resolves.toEqual(expectedActor({ id: 'stf_prepare_only', version: 2 }))
   })
 
   it('rejects arbitrary, foreign, proxied, accessor, and inherited recovery views before D1', async () => {
@@ -144,7 +202,7 @@ describe('D1-authoritative staff resolution', () => {
     const context = await cryptoContext()
     await seedPending(context)
     await expect(resolveActor(env.DB, { kind: 'human', subject: TEST_IDENTITIES.owner.sub, normalizedEmail: TEST_IDENTITIES.owner.email }, context, { nowMs: NOW_MS, correlationId: 'corr_activation', idFactory: (() => { let n = 0; return () => `evt_activation_${++n}` })() }))
-      .resolves.toEqual({ id: 'stf_pending', role: 'owner', specialistId: null, version: 2 })
+      .resolves.toEqual(expectedActor({ id: 'stf_pending', version: 2 }))
     expect(await env.DB.prepare("SELECT status, access_subject, version FROM staff_users WHERE id = 'stf_pending'").first()).toEqual({ status: 'active', access_subject: TEST_IDENTITIES.owner.sub, version: 2 })
     expect(await env.DB.prepare("SELECT status, version FROM staff_invitations WHERE id = 'inv_pending'").first()).toEqual({ status: 'activated', version: 2 })
     const snapshot = await env.DB.prepare("SELECT snapshot_envelope FROM record_versions WHERE entity_id='stf_pending'").first()
@@ -152,6 +210,179 @@ describe('D1-authoritative staff resolution', () => {
     expect(full).toMatchObject({ id: 'stf_pending', status: 'active', access_subject: TEST_IDENTITIES.owner.sub, version: 2, activated_at: instant, updated_at: instant })
     expect(JSON.stringify(snapshot)).not.toContain(TEST_IDENTITIES.owner.email)
     expect(JSON.stringify(snapshot)).not.toContain(TEST_IDENTITIES.owner.sub)
+  })
+
+  it('loads an exact frozen default authority snapshot on active and read-only resolution', async () => {
+    const context = await cryptoContext()
+    const principal = {
+      kind: 'human',
+      subject: 'access-authority-default',
+      normalizedEmail: 'authority-default@example.test',
+    }
+    await seedPending(context, {
+      staffId: 'stf_authority_default',
+      invitationId: 'inv_authority_default',
+      email: principal.normalizedEmail,
+    })
+    await resolveActor(env.DB, principal, context, {
+      nowMs: NOW_MS,
+      correlationId: 'corr_authority_default_activate',
+      idFactory: ids('authority_default_activate'),
+    })
+    const readOnlyBudget = createD1QueryBudget(env.DB, {
+      totalLimit: 50,
+      recoveryReserve: 8,
+    })
+
+    for (const actor of [
+      await resolveActor(env.DB, principal, context, {
+        nowMs: NOW_MS,
+        correlationId: 'corr_authority_default_active',
+        idFactory: ids('authority_default_active'),
+      }),
+      await resolveActiveActorReadOnly(readOnlyBudget.work, principal, context),
+    ]) {
+      expect(actor).toEqual(expectedActor({ id: 'stf_authority_default', version: 2 }))
+      expect(Object.isFrozen(actor)).toBe(true)
+      expect(Object.isFrozen(actor.capabilities)).toBe(true)
+      expect(Object.keys(actor)).toEqual([
+        'id', 'role', 'specialistId', 'version', 'authorityRevision', 'capabilities',
+      ])
+    }
+    expect(readOnlyBudget.usage().used).toBe(2)
+  })
+
+  it('loads allow and deny overrides while ignoring cleared rows on active and read-only resolution', async () => {
+    const context = await cryptoContext()
+    const principal = {
+      kind: 'human',
+      subject: 'access-authority-overrides',
+      normalizedEmail: 'authority-overrides@example.test',
+    }
+    await seedPending(context, {
+      staffId: 'stf_authority_overrides',
+      invitationId: 'inv_authority_overrides',
+      email: principal.normalizedEmail,
+      staffRole: 'coordinator',
+    })
+    await resolveActor(env.DB, principal, context, {
+      nowMs: NOW_MS,
+      correlationId: 'corr_authority_overrides_activate',
+      idFactory: ids('authority_overrides_activate'),
+    })
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO staff_capability_overrides
+         (staff_id,capability,decision,version,changed_by_staff_id,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      ).bind('stf_authority_overrides', 'finance.import', 'allow', 1, 'stf_authority_overrides', instant, instant),
+      env.DB.prepare(
+        `INSERT INTO staff_capability_overrides
+         (staff_id,capability,decision,version,changed_by_staff_id,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      ).bind('stf_authority_overrides', 'client.manage', 'deny', 1, 'stf_authority_overrides', instant, instant),
+      env.DB.prepare(
+        `INSERT INTO staff_capability_overrides
+         (staff_id,capability,decision,version,changed_by_staff_id,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      ).bind('stf_authority_overrides', 'chat.general', 'cleared', 1, 'stf_authority_overrides', instant, instant),
+      env.DB.prepare(
+        `UPDATE staff_authorities SET revision=2,updated_at=?
+         WHERE staff_id='stf_authority_overrides' AND revision=1`,
+      ).bind(instant),
+    ])
+    const expected = expectedActor({
+      id: 'stf_authority_overrides',
+      role: 'coordinator',
+      version: 2,
+      authorityRevision: 2,
+      capabilities: COORDINATOR_OVERRIDE_CAPABILITIES,
+    })
+
+    await expect(resolveActor(env.DB, principal, context, {
+      nowMs: NOW_MS,
+      correlationId: 'corr_authority_overrides_active',
+      idFactory: ids('authority_overrides_active'),
+    })).resolves.toEqual(expected)
+    await expect(resolveActiveActorReadOnly(env.DB, principal, context)).resolves.toEqual(expected)
+  })
+
+  it('fails the contained authority loader closed when its authenticated staff snapshot is stale', async () => {
+    const context = await cryptoContext()
+    const principal = {
+      kind: 'human',
+      subject: 'access-authority-stale-staff',
+      normalizedEmail: 'authority-stale-staff@example.test',
+    }
+    await seedPending(context, {
+      staffId: 'stf_authority_stale_staff',
+      invitationId: 'inv_authority_stale_staff',
+      email: principal.normalizedEmail,
+    })
+    await resolveActor(env.DB, principal, context, {
+      nowMs: NOW_MS,
+      correlationId: 'corr_authority_stale_staff_activate',
+      idFactory: ids('authority_stale_staff_activate'),
+    })
+    const stale = await env.DB.prepare(
+      `SELECT id,role,specialist_id,version
+       FROM staff_users WHERE id='stf_authority_stale_staff'`,
+    ).first()
+    await env.DB.prepare(
+      `UPDATE staff_users SET version=version+1
+       WHERE id='stf_authority_stale_staff' AND version=2`,
+    ).run()
+
+    await expect(resolveCurrentAuthorityActor(env.DB, stale))
+      .rejects.toThrow(/^IDENTITY_FAILURE$/)
+  })
+
+  it.each([
+    ['missing authority', 'missing', []],
+    ['non-positive revision', 'revision', [
+      { authority_revision: 0, capability: null, decision: null },
+    ]],
+    ['unknown capability', 'unknown', [
+      { authority_revision: 1, capability: 'unknown.capability', decision: 'allow' },
+    ]],
+    ['capability outside the role ceiling', 'ceiling', [
+      { authority_revision: 1, capability: 'workbook.own.export', decision: 'allow' },
+    ]],
+    ['denied constitutional owner permission', 'constitutional', [
+      { authority_revision: 1, capability: 'permissions.manage', decision: 'deny' },
+    ]],
+    ['malformed stored decision', 'decision', [
+      { authority_revision: 1, capability: 'chat.general', decision: 'invalid' },
+    ]],
+    ['malformed empty override', 'empty', [
+      { authority_revision: 1, capability: null, decision: 'deny' },
+    ]],
+  ])('fails closed on %s for active and read-only resolution', async (_label, suffix, rows) => {
+    const context = await cryptoContext()
+    const principal = {
+      kind: 'human',
+      subject: `access-authority-${suffix}`,
+      normalizedEmail: `authority-${suffix}@example.test`,
+    }
+    await seedPending(context, {
+      staffId: `stf_authority_${suffix}`,
+      invitationId: `inv_authority_${suffix}`,
+      email: principal.normalizedEmail,
+    })
+    await resolveActor(env.DB, principal, context, {
+      nowMs: NOW_MS,
+      correlationId: `corr_authority_${suffix}_activate`,
+      idFactory: ids(`authority_${suffix}_activate`),
+    })
+    const db = dbWithAuthorityRows(rows)
+
+    await expect(resolveActor(db, principal, context, {
+      nowMs: NOW_MS,
+      correlationId: `corr_authority_${suffix}_active`,
+      idFactory: ids(`authority_${suffix}_active`),
+    })).rejects.toThrow(/^IDENTITY_FAILURE$/)
+    await expect(resolveActiveActorReadOnly(db, principal, context))
+      .rejects.toThrow(/^IDENTITY_FAILURE$/)
   })
 
   it('denies exact expiry and rolls all mutations back when invitation compare-and-set loses', async () => {
@@ -183,7 +414,10 @@ describe('D1-authoritative staff resolution', () => {
     const input = { kind: 'human', subject: 'access-race', normalizedEmail: 'race@example.test' }
     const options = (correlationId) => ({ nowMs: NOW_MS, correlationId, idFactory: ids(correlationId) })
     const same = await Promise.all([resolveActor(env.DB, input, context, options('corr_race_one')), resolveActor(env.DB, input, context, options('corr_race_two'))])
-    expect(same).toEqual([{ id: 'stf_race', role: 'owner', specialistId: null, version: 2 }, { id: 'stf_race', role: 'owner', specialistId: null, version: 2 }])
+    expect(same).toEqual([
+      expectedActor({ id: 'stf_race', version: 2 }),
+      expectedActor({ id: 'stf_race', version: 2 }),
+    ])
     expect((await env.DB.prepare("SELECT count(*) AS count FROM audit_events WHERE action='identity.activation' AND entity_id='stf_race'").first()).count).toBe(1)
     await expect(resolveActor(env.DB, { ...input, subject: 'access-race-other' }, context, options('corr_race_other'))).rejects.toThrow(/^ACCESS_DENIED$/)
   })
@@ -207,7 +441,7 @@ describe('D1-authoritative staff resolution', () => {
     await firstGate.entered
     const second = resolveActor(secondDb, { kind: 'human', subject: 'access-subject-two', normalizedEmail: 'subject-race@example.test' }, context, options('subject_two'))
     await secondCommitted.promise
-    await expect(second).resolves.toEqual({ id: 'stf_subject_race', role: 'owner', specialistId: null, version: 2 })
+    await expect(second).resolves.toEqual(expectedActor({ id: 'stf_subject_race', version: 2 }))
     firstGate.release()
     const staleCollision = await firstGate.failed
     expect(staleCollision).toBeInstanceOf(Error)
@@ -226,14 +460,14 @@ describe('D1-authoritative staff resolution', () => {
     const loser = resolveActor(budget.work, principal, context, {
       nowMs: NOW_MS, correlationId: 'corr_frozen_loser', idFactory: ids('frozen_loser'), recoveryDb: budget.recovery,
     })
-    const loserExpectation = expect(loser).resolves.toEqual({ id: 'stf_frozen_race', role: 'owner', specialistId: null, version: 2 })
+    const loserExpectation = expect(loser).resolves.toEqual(expectedActor({ id: 'stf_frozen_race', version: 2 }))
     await loserGate.entered
     const winner = await resolveActor(env.DB, principal, context, { nowMs: NOW_MS, correlationId: 'corr_frozen_winner', idFactory: ids('frozen_winner') })
     loserGate.release()
     await loserExpectation
-    expect(winner).toEqual({ id: 'stf_frozen_race', role: 'owner', specialistId: null, version: 2 })
+    expect(winner).toEqual(expectedActor({ id: 'stf_frozen_race', version: 2 }))
     expect(budget.usage()).toEqual({
-      used: 20, remaining: 30, workRemaining: 22, totalLimit: 50, recoveryReserve: 8,
+      used: 21, remaining: 29, workRemaining: 21, totalLimit: 50, recoveryReserve: 8,
     })
   })
 
@@ -358,21 +592,21 @@ describe('D1-authoritative staff resolution', () => {
     await resolveActor(activeBudget.work, { kind: 'human', subject: 'access-budget-active', normalizedEmail: 'budget-active@example.test' }, context, {
       nowMs: NOW_MS, correlationId: 'corr_budget_active', idFactory: ids('budget_active'), recoveryDb: activeBudget.recovery,
     })
-    expect(activeBudget.usage().used).toBe(2)
+    expect(activeBudget.usage().used).toBe(3)
 
     await seedPending(context, { staffId: 'stf_budget_pending', invitationId: 'inv_budget_pending', email: 'budget-pending@example.test' })
     const pendingBudget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
     await resolveActor(pendingBudget.work, { kind: 'human', subject: 'access-budget-pending', normalizedEmail: 'budget-pending@example.test' }, context, {
       nowMs: NOW_MS, correlationId: 'corr_budget_pending', idFactory: ids('budget_pending'), recoveryDb: pendingBudget.recovery,
     })
-    expect(pendingBudget.usage().used).toBe(12)
+    expect(pendingBudget.usage().used).toBe(13)
 
     const v2 = await cryptoContextV2()
     const reindexBudget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
     await resolveActor(reindexBudget.work, { kind: 'human', subject: 'access-budget-active', normalizedEmail: 'budget-active@example.test' }, v2, {
       nowMs: NOW_MS, correlationId: 'corr_budget_reindex', idFactory: ids('budget_reindex'), recoveryDb: reindexBudget.recovery,
     })
-    expect(reindexBudget.usage().used).toBe(7)
+    expect(reindexBudget.usage().used).toBe(8)
   })
 
   it('activates retained V1 rows under active V2 and updates both lookups with encrypted-only audit history', async () => {
@@ -395,7 +629,7 @@ describe('D1-authoritative staff resolution', () => {
     await seedPending(v1, { staffId: 'stf_lazy', invitationId: 'inv_lazy', email: 'lazy@example.test', lookupVersion: 1 })
     await resolveActor(env.DB, { kind: 'human', subject: 'access-lazy', normalizedEmail: 'lazy@example.test' }, v1, { nowMs: NOW_MS, correlationId: 'corr_lazy_activate', idFactory: ids('lazy_activate') })
     await expect(resolveActor(env.DB, { kind: 'human', subject: 'access-lazy', normalizedEmail: 'lazy@example.test' }, v2, { nowMs: NOW_MS, correlationId: 'corr_lazy_reindex', idFactory: ids('lazy_reindex') }))
-      .resolves.toEqual({ id: 'stf_lazy', role: 'owner', specialistId: null, version: 3 })
+      .resolves.toEqual(expectedActor({ id: 'stf_lazy', version: 3 }))
     expect(await env.DB.prepare("SELECT email_lookup,access_subject,version FROM staff_users WHERE id='stf_lazy'").first())
       .toEqual({ email_lookup: await blindEmailIndex('lazy@example.test', v2.keyring), access_subject: 'access-lazy', version: 3 })
   })
@@ -415,7 +649,7 @@ describe('D1-authoritative staff resolution', () => {
     }, v2, {
       nowMs: NOW_MS, correlationId: 'corr_login_reindex_loser', idFactory: ids('login_reindex_loser'),
     })
-    const loginExpectation = expect(login).resolves.toEqual({ id: 'stf_login_batch_race', role: 'owner', specialistId: null, version: 3 })
+    const loginExpectation = expect(login).resolves.toEqual(expectedActor({ id: 'stf_login_batch_race', version: 3 }))
     await loginGate.entered
     const winner = await reindexEmailLookupsBatch(env.DB, v2, {
       table: 'staff_users', afterId: 'stf_login_batch_rac', limit: 1, nowMs: NOW_MS,

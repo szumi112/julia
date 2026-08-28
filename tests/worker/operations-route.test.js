@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   getOperationalHealth,
   listOpenOperationalActions,
@@ -13,6 +13,14 @@ import {
 } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { decodeBase64Url, encodeBase64Url } from '../../worker/security/encoding.js'
+import { authorityActor } from './fixtures.js'
+import {
+  applyCoreDirectoryStageB,
+  applyFinanceStageC,
+  applySpecialistProfilesStageD,
+  applyWorkbookRegistryStageE,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 
 const NOW_MS = Date.parse('2042-07-31T10:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
@@ -23,6 +31,14 @@ const SCOPE = Object.freeze({
   purpose: 'identity',
 })
 let fixtureSerial = 0
+
+beforeAll(async () => {
+  await completeCoreDirectoryStageA()
+  await applyCoreDirectoryStageB()
+  await applyFinanceStageC()
+  await applySpecialistProfilesStageD()
+  await applyWorkbookRegistryStageE()
+})
 
 const ids = (prefix = 'generated') => {
   let count = 0
@@ -141,7 +157,7 @@ async function seedActiveActor({
     NOW,
     NOW,
   ).run()
-  return { id, role, specialistId, version }
+  return authorityActor({ id, role, specialistId, version })
 }
 
 const commonInput = (actor, context, changes = {}) => ({
@@ -236,6 +252,7 @@ async function seedHealthSnapshot(snapshot = validSnapshot(), {
 }
 
 function facade(real, hooks = {}) {
+  let replacedStaffRead = false
   const statement = (inner, sql, bindings = []) => ({
     __inner: inner,
     __sql: sql,
@@ -245,7 +262,16 @@ function facade(real, hooks = {}) {
     first: (column) => inner.first(column),
     async all() {
       const replacement = await hooks.all?.(sql, bindings)
-      return replacement === undefined ? inner.all() : replacement
+      if (replacement !== undefined) {
+        if (sql.includes('FROM staff_users')) replacedStaffRead = true
+        return replacement
+      }
+      if (replacedStaffRead && sql.includes('FROM staff_authorities AS authority')) {
+        return {
+          results: [{ authority_revision: 1, capability: null, decision: null }],
+        }
+      }
+      return inner.all()
     },
   })
   return {
@@ -607,7 +633,7 @@ describe('operations route services', () => {
     ['resolution', resolveOperationalAction, ['actionId', 'idempotencyKey', 'body']],
     ['audit', listSecurityAudit, ['query']],
   ])('rejects malformed exact service inputs for %s before D1', async (_label, service, extraKeys) => {
-    const actor = { id: 'stf_input', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_input', role: 'owner' })
     const context = await cryptoContext()
     const extras = extraKeys.includes('query')
       ? { query: new URLSearchParams() }
@@ -620,6 +646,15 @@ describe('operations route services', () => {
       { ...valid, extra: true },
       Object.assign(Object.create({ inherited: true }), valid),
       { ...valid, db: { prepare() {} } },
+      {
+        ...valid,
+        actor: {
+          id: actor.id,
+          role: actor.role,
+          specialistId: actor.specialistId,
+          version: actor.version,
+        },
+      },
       { ...valid, actor: { ...actor, status: 'active' } },
       { ...valid, nowMs: -1 },
       { ...valid, correlationId: 'opaque-but-not-uuid' },
@@ -645,7 +680,7 @@ describe('operations route services', () => {
 
   it('accepts 65 loaded canonical lookup keys in all four service contexts', async () => {
     const context = await cryptoContextWithLookupCount(65)
-    const actor = { id: 'stf_lookup_65', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_lookup_65', role: 'owner' })
     const services = [
       ['health', getOperationalHealth, {}, 'FROM system_state'],
       ['actions', listOpenOperationalActions, {}, 'FROM operational_actions'],
@@ -707,7 +742,7 @@ describe('operations route services', () => {
       ['sign', 'verify'],
     ))
 
-    const actor = { id: 'stf_real_crypto_key', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_real_crypto_key', role: 'owner' })
     for (const [label, target, key] of candidates) {
       const marker = new Error(`private-crypto-marker:${label}`)
       const prepare = vi.fn(() => { throw marker })
@@ -744,12 +779,10 @@ describe('operations route services', () => {
       dataKek: target === 'data' ? exportable : validDataKek,
       lookupKey: target === 'lookup' ? exportable : validLookupKey,
     })
-    const actor = {
+    const actor = authorityActor({
       id: `stf_extractable_${target}`,
       role: 'owner',
-      specialistId: null,
-      version: 1,
-    }
+    })
 
     const error = await caught(getOperationalHealth(commonInput(actor, invalidContext, {
       db: { prepare, batch: vi.fn() },
@@ -761,7 +794,7 @@ describe('operations route services', () => {
 
   it('normalizes root, nested, descriptor, and hostile keyring traps to OPERATIONS_INVALID', async () => {
     const context = await cryptoContext()
-    const actor = { id: 'stf_proxy_input', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_proxy_input', role: 'owner' })
     const valid = commonInput(actor, context)
     const revoked = Proxy.revocable(valid, {})
     revoked.revoke()
@@ -870,7 +903,6 @@ describe('operations route services', () => {
         dataKey: dataKey.object,
         scope: scope.object,
       }, `${label}:context`)
-      const capturedActor = singleReadObject(actor, `${label}:actor`)
       const db = facade(env.DB, {
         all: (sql) => {
           if (label === 'actions' && sql.includes('FROM operational_actions')) return { results: [] }
@@ -879,7 +911,7 @@ describe('operations route services', () => {
           return undefined
         },
       })
-      const root = singleReadObject(commonInput(capturedActor.object, context.object, {
+      const root = singleReadObject(commonInput(actor, context.object, {
         db,
         ...extras,
       }), `${label}:root`)
@@ -889,7 +921,7 @@ describe('operations route services', () => {
         await expect(service(root.object)).resolves.toEqual(terminal)
       }
       expect(versionReads).toBe(1)
-      for (const reads of [root.reads, context.reads, dataKey.reads, scope.reads, keyring.reads, capturedActor.reads]) {
+      for (const reads of [root.reads, context.reads, dataKey.reads, scope.reads, keyring.reads]) {
         expect([...reads.values()].every((count) => count === 1)).toBe(true)
       }
     }
@@ -897,7 +929,7 @@ describe('operations route services', () => {
 
   it('captures each D1 all-result wrapper and Proxy results array once without mutation', async () => {
     const context = await cryptoContext()
-    const actor = { id: 'stf_all_capture', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_all_capture', role: 'owner' })
     const snapshot = validSnapshot()
     const healthRow = {
       key: 'health.snapshot',
@@ -962,7 +994,7 @@ describe('operations route services', () => {
     ['audit', listSecurityAudit, { query: new URLSearchParams() }],
   ])('normalizes a throwing D1 all-result getter in the %s reader', async (target, service, extras) => {
     const context = await cryptoContext()
-    const actor = { id: `stf_all_throw_${target}`, role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: `stf_all_throw_${target}`, role: 'owner' })
     const hostile = throwingAllResult(`private-all-marker:${target}`)
     const db = facade(env.DB, {
       all(sql) {
@@ -984,7 +1016,7 @@ describe('operations route services', () => {
 
   it('normalizes a throwing Proxy results entry without leaking or mutating it', async () => {
     const context = await cryptoContext()
-    const actor = { id: 'stf_all_proxy_throw', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_all_proxy_throw', role: 'owner' })
     const marker = new Error('private-all-proxy-entry')
     let mutations = 0
     const results = new Proxy([storedActorRow(actor)], {
@@ -1008,7 +1040,7 @@ describe('operations route services', () => {
 
   it('captures the attempted-audit collision result once before recovery classification', async () => {
     const context = await cryptoContext()
-    const actor = { id: 'stf_attempted_audit_capture', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_attempted_audit_capture', role: 'owner' })
     const row = await actionRow(context, {
       ...ACTION_FACTS[2],
       id: 'act_attempted_audit_capture',
@@ -1051,7 +1083,9 @@ describe('operations route services', () => {
     ['invalid specialist id', { specialist_id: 'bad specialist id' }],
   ])('fails closed on a malformed revalidated actor row: %s', async (_label, changes) => {
     const context = await cryptoContext()
-    const actor = { id: `stf_malformed_actor_${++fixtureSerial}`, role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({
+      id: `stf_malformed_actor_${++fixtureSerial}`, role: 'owner',
+    })
     const row = { ...storedActorRow(actor), ...changes }
     const db = facade(env.DB, {
       all: (sql) => sql.includes('FROM staff_users') ? { results: [row] } : undefined,
@@ -1059,6 +1093,71 @@ describe('operations route services', () => {
 
     await expect(getOperationalHealth(commonInput(actor, context, { db })))
       .rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+  })
+
+  it.each([
+    ['missing authority', []],
+    ['unknown capability', [{
+      authority_revision: 1,
+      capability: 'future.capability',
+      decision: 'allow',
+    }]],
+    ['extra authority field', [{
+      authority_revision: 1,
+      capability: null,
+      decision: null,
+      extra: 'private-authority-field',
+    }]],
+  ])('fails closed before the health read on malformed current authority: %s', async (_label, rows) => {
+    const context = await cryptoContext()
+    const actor = authorityActor({
+      id: `stf_malformed_authority_${++fixtureSerial}`,
+      role: 'owner',
+    })
+    let healthReads = 0
+    const db = facade(env.DB, {
+      all(sql) {
+        if (sql.includes('FROM staff_users')) return { results: [storedActorRow(actor)] }
+        if (sql.includes('FROM staff_authorities AS authority')) return { results: rows }
+        if (sql.includes('FROM system_state')) healthReads += 1
+        return undefined
+      },
+    })
+
+    await expect(getOperationalHealth(commonInput(actor, context, { db })))
+      .rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+    expect(healthReads).toBe(0)
+  })
+
+  it('re-reads the effective authority revision and persists a denial after revocation', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({
+      id: 'stf_authority_revision_revoked',
+      role: 'coordinator',
+    })
+    let healthReads = 0
+    const db = facade(env.DB, {
+      all(sql) {
+        if (sql.includes('FROM staff_authorities AS authority')) {
+          return {
+            results: [{
+              authority_revision: actor.authorityRevision + 1,
+              capability: 'operations.health.read',
+              decision: 'deny',
+            }],
+          }
+        }
+        if (sql.includes('FROM system_state')) healthReads += 1
+        return undefined
+      },
+    })
+
+    await expect(getOperationalHealth(commonInput(actor, context, {
+      db,
+      idFactory: ids('aud_authority_revision_revoked'),
+    }))).rejects.toThrow(/^FORBIDDEN$/)
+    expect(healthReads).toBe(0)
+    expect(await denialRows(actor.id)).toHaveLength(1)
   })
 
   it('propagates denial persistence failure instead of returning a bare forbidden response', async () => {
@@ -1120,7 +1219,10 @@ describe('operations route services', () => {
     ['changed version', { version: 2 }],
   ])('denies a previously authorized actor after active-row revalidation: %s', async (_label, stored) => {
     const context = await cryptoContext()
-    const inputActor = { id: `stf_revalidate_${_label.replaceAll(' ', '_')}`, role: 'owner', specialistId: null, version: 1 }
+    const inputActor = authorityActor({
+      id: `stf_revalidate_${_label.replaceAll(' ', '_')}`,
+      role: 'owner',
+    })
     const seeded = await seedActiveActor({
       id: inputActor.id,
       role: stored.role ?? inputActor.role,
@@ -2332,7 +2434,7 @@ describe('operations route services', () => {
 
   it('continues without a gap from a v1 cursor with 65 loaded keys and active v65, then rejects v1 retirement', async () => {
     const context = await cryptoContextWithLookupCount(65)
-    const actor = { id: 'stf_audit_cursor_v65', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_audit_cursor_v65', role: 'owner' })
     const sameInstant = new Date(NOW_MS - 1_000).toISOString()
     const position = canonicalJson({ id: 'audit_v65_z', occurredAt: sameInstant })
     const historicalCursor = await signedCursor(context, position, 1)

@@ -5,8 +5,9 @@ import { motionOK, setReduceMotion, useReveal } from '../anim.js'
 import { useIsPhone, useMediaQuery } from '../responsive.js'
 import { Button, Field, Avatar, IconBtn } from '../ui.jsx'
 import { EntityLink, useRouteParamsSync } from '../ux-patterns.jsx'
+import { canPerformAction } from '../capability-access.js'
 import { OperationsPanel } from './Operations.jsx'
-import { StaffAccess } from './StaffAccess.jsx'
+import { PermissionsAccess, StaffAccess } from './StaffAccess.jsx'
 
 const SECTIONS = [
   { id: 'account', label: 'Konto' },
@@ -16,6 +17,7 @@ const SECTIONS = [
 ]
 const PERSONAL_SECTIONS = SECTIONS.filter((section) => section.id === 'calendar')
 const STAFF_SECTION = Object.freeze({ id: 'staff', label: 'Dostęp personelu' })
+const PERMISSIONS_SECTION = Object.freeze({ id: 'permissions', label: 'Uprawnienia personelu' })
 const OPERATIONS_SECTION = Object.freeze({ id: 'operations', label: 'Stan i bezpieczeństwo' })
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -82,8 +84,9 @@ export function Settings({ params = {} }) {
   const sectionRefs = useRef({})
   const isApp = appMode === 'app'
   const isOwner = role.id === 'owner'
-  const canManageStaff = isApp && capabilities.includes('staff.manage')
-  const canReadOperations = isApp && capabilities.includes('operations.health.read')
+  const canManageStaff = isApp && canPerformAction(capabilities, 'staff.invite')
+  const canManagePermissions = isApp && canPerformAction(capabilities, 'permissions.read')
+  const canReadOperations = isApp && canPerformAction(capabilities, 'operations.health.read')
   const availableSections = useMemo(() => {
     const sections = isApp
       ? SECTIONS.filter((section) => section.id === 'account')
@@ -91,9 +94,10 @@ export function Settings({ params = {} }) {
     return [
       ...sections,
       ...(canManageStaff ? [STAFF_SECTION] : []),
+      ...(canManagePermissions ? [PERMISSIONS_SECTION] : []),
       ...(canReadOperations ? [OPERATIONS_SECTION] : []),
     ]
-  }, [canManageStaff, canReadOperations, isApp, isOwner])
+  }, [canManagePermissions, canManageStaff, canReadOperations, isApp, isOwner])
   const defaultSection = isApp || isOwner ? 'account' : 'calendar'
   const psychologists = useMemo(
     () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
@@ -609,6 +613,11 @@ export function Settings({ params = {} }) {
 
           {canManageStaff && (
             <StaffAccess sectionRef={(element) => { sectionRefs.current.staff = element }} />
+          )}
+          {canManagePermissions && (
+            <PermissionsAccess
+              sectionRef={(element) => { sectionRefs.current.permissions = element }}
+            />
           )}
           {canReadOperations && (
             <OperationsPanel sectionRef={(element) => { sectionRefs.current.operations = element }} />

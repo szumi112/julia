@@ -10,11 +10,13 @@ import {
   getOrCreateDataKey,
 } from '../../worker/security/envelope.js'
 import {
+  createWorkbookPanelMetadataCallbacks,
   digestWorkbookSourceValue,
   storeWorkbookArtifact,
 } from '../../worker/security/workbook-artifacts.js'
 import { readPanelWorkbook } from '../../src/workbook-ooxml.js'
 import { parseWorkbookFile } from '../../src/workbook-import.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
@@ -28,7 +30,14 @@ const NOW = new Date(NOW_MS).toISOString()
 const OWNER_ID = 'stf_workbook_export_owner'
 const SPECIALIST_ID = 'sp_workbook_export_julia'
 const ROTATED_SPECIALIST_ID = 'sp_workbook_export_anna_rotated'
-const actor = Object.freeze({ id: OWNER_ID, role: 'owner', specialistId: null, version: 1 })
+const actor = Object.freeze({
+  id: OWNER_ID,
+  role: 'owner',
+  specialistId: null,
+  version: 1,
+  authorityRevision: 1,
+  capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+})
 const config = Object.freeze({
   appEnv: 'staging', dataMode: 'fictional', activeDataKekVersion: 1,
   activeLookupKeyVersion: 1, activeWorkbookKekVersion: 1, activeWorkbookHmacVersion: 1,
@@ -342,7 +351,7 @@ describe('legacy workbook export', () => {
     expect((await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length)
       .toBe(beforeObjects)
     expect(snapshotBatchSizes).toEqual([4])
-    expect(queryBudget.usage()).toMatchObject({ used: 7, workRemaining: 35 })
+    expect(queryBudget.usage()).toMatchObject({ used: 9, workRemaining: 33 })
   })
 
   it('refuses a snapshot while any workbook materialization can still mutate the ledger', async () => {
@@ -433,6 +442,129 @@ describe('legacy workbook export', () => {
       bucket: unreadBucket, actor, keyring, config, centreId: 'centre_1',
       nowMs: NOW_MS + 300_000, format: 'panel-v2',
     })).rejects.toThrow(/^WORKBOOK_EXPORT_LIMIT$/)
+    expect(artifactReads).toBe(0)
+  })
+
+  it('builds a specialist Panel-v2 export from an own-only D1 projection without opening R2', async () => {
+    const specialist = Object.freeze({
+      id: 'stf_workbook_export_specialist',
+      role: 'specialist',
+      specialistId: SPECIALIST_ID,
+      version: 4,
+      authorityRevision: 7,
+      capabilities: ROLE_DEFAULT_CAPABILITIES.specialist,
+    })
+    const statementFor = (sql) => ({
+      args: [],
+      sql,
+      bind(...args) {
+        this.args = args
+        return this
+      },
+      async all() {
+        if (!sql.includes('FROM staff_authorities AS authority')) {
+          throw new Error('UNEXPECTED_QUERY')
+        }
+        expect(this.args).toEqual([
+          specialist.id,
+          specialist.role,
+          specialist.specialistId,
+          specialist.version,
+        ])
+        return {
+          results: [{ authority_revision: 7, capability: null, decision: null }],
+        }
+      },
+    })
+    let artifactReads = 0
+    const sourceFreeBucket = {
+      async get() {
+        artifactReads += 1
+        throw new Error('R2_READ_TRAP')
+      },
+    }
+    const ownRow = {
+      id: 'fin_specialist_own', accounting_month: '2027-01', occurred_on: '2027-01-15',
+      amount_grosze: 18_000, paid_amount_grosze: 18_000, payment_method: 'cash',
+      settlement_status: 'paid', invoice_status: 'not_required',
+      specialist_id: SPECIALIST_ID, version: 2,
+    }
+    const db = {
+      prepare: statementFor,
+      async batch(statements) {
+        expect(statements).toHaveLength(2)
+        expect(statements[1].sql).toContain('entry.specialist_id=?')
+        expect(statements[1].args.at(-1)).toBe(SPECIALIST_ID)
+        return [{
+          results: [{ nonterminal: 0, object_key: 'must-not-be-read' }],
+        }, {
+          results: [ownRow],
+        }]
+      },
+    }
+
+    const exported = await exportWorkbook({
+      db,
+      bucket: sourceFreeBucket,
+      actor: specialist,
+      keyring,
+      config,
+      centreId: 'centre_1',
+      nowMs: NOW_MS,
+      format: 'panel-v2',
+    })
+
+    expect(artifactReads).toBe(0)
+    expect(exported.filename).toBe('bear-with-me-panel-v2-2027-01-15.xlsx')
+    const panel = await readPanelWorkbook(exported.bytes, {
+      verify: createWorkbookPanelMetadataCallbacks({
+        keyring, config, centreId: 'centre_1',
+      }).verify,
+    })
+    expect(panel.metadata.scope).toEqual({ id: SPECIALIST_ID, type: 'specialist' })
+    expect(panel.metadata.rows.map(({ id }) => id)).toEqual(['fin_specialist_own'])
+    expect(panel.edits).toEqual([expect.objectContaining({ id: 'fin_specialist_own' })])
+  })
+
+  it('fails before opening R2 when the authority revision changed after the snapshot', async () => {
+    const statementFor = (sql) => ({
+      bind() { return this },
+      async all() {
+        if (!sql.includes('FROM staff_authorities AS authority')) {
+          throw new Error('UNEXPECTED_QUERY')
+        }
+        return {
+          results: [{ authority_revision: 2, capability: null, decision: null }],
+        }
+      },
+    })
+    let artifactReads = 0
+    const db = {
+      prepare: statementFor,
+      async batch() {
+        return [{
+          results: [{ nonterminal: 0, object_key: 'must-not-be-read' }],
+        }, {
+          results: [],
+        }]
+      },
+    }
+
+    await expect(exportWorkbook({
+      db,
+      bucket: {
+        async get() {
+          artifactReads += 1
+          throw new Error('R2_READ_TRAP')
+        },
+      },
+      actor,
+      keyring,
+      config,
+      centreId: 'centre_1',
+      nowMs: NOW_MS,
+      format: 'panel-v2',
+    })).rejects.toThrow(/^NOT_FOUND$/)
     expect(artifactReads).toBe(0)
   })
 })

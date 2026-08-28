@@ -21,6 +21,7 @@ import {
   applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2026-08-27T14:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
@@ -159,7 +160,7 @@ const seedProfile = async ({
 const command = ({ actor, staff, profile, key = next('link-key'), db = env.DB } = {}) => ({
   db,
   recoveryDb: env.DB,
-  actor: Object.freeze({
+  actor: authorityActor({
     id: actor.id,
     role: actor.role,
     specialistId: actor.specialist_id,

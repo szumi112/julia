@@ -3,6 +3,7 @@ import { FINANCE_SCOPE } from '../../worker/core/finance.js'
 import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { authorityActor } from './fixtures.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
@@ -15,8 +16,8 @@ export const APPROVED = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d
 export const NOW_MS = Date.parse('2027-03-01T09:00:00.000Z')
 export const NOW = new Date(NOW_MS).toISOString()
 export const RACE_NOW = new Date(NOW_MS + 1_000).toISOString()
-export const actor = Object.freeze({
-  id: 'stf_workbook_race_owner', role: 'owner', specialistId: null, version: 1,
+export const actor = authorityActor({
+  id: 'stf_workbook_race_owner', role: 'owner',
 })
 export const config = Object.freeze({
   appEnv: 'staging', dataMode: 'fictional',

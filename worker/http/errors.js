@@ -59,6 +59,7 @@ const VALIDATION_FIELDS = new Set([
   'entries', 'accountingMonth', 'kind',
   'professionalTitle', 'standardRateGrosze', 'staffId',
   'expectedSpecialistVersion', 'expectedStaffVersion',
+  'allow', 'deny', 'expectedAuthorityRevision',
   'historicalClientId', 'importId', 'expectedJobVersion', 'conflictId',
   'classification', 'existingSubjectId',
   'programId', 'label', 'details', 'leaderSpecialistIds', 'participantId',

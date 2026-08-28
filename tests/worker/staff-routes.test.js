@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../worker/app.js'
 import {
   blindEmailIndex,
@@ -8,7 +8,9 @@ import {
   getOrCreateDataKey,
 } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { NOW_MS } from './fixtures.js'
+import { resolveCurrentAuthorityActor } from '../../worker/identity/staff.js'
+import { NOW_MS, authorityActor } from './fixtures.js'
+import { applyCapabilityOverridesMigration } from './apply-migrations.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const ORIGIN = 'https://bearwithme-panel.app'
@@ -32,6 +34,10 @@ const CORS_HEADERS = [
   'access-control-expose-headers',
 ]
 let fixtureSerial = 0
+
+beforeAll(async () => {
+  await applyCapabilityOverridesMigration()
+})
 
 const ids = (prefix) => {
   let count = 0
@@ -97,12 +103,13 @@ async function actorFixture(role = 'owner', suffix = role) {
   const id = `stf_${safeSuffix}_${fixtureSerial}`
   const email = `${safeSuffix}-${fixtureSerial}@example.test`
   const displayName = role === 'owner' ? 'Owner Testowy' : `${role} Testowy`
-  const actor = await seedActiveStaff(cryptoContext, {
+  const row = await seedActiveStaff(cryptoContext, {
     id,
     role,
     email,
     displayName,
   })
+  const actor = authorityActor(row)
   return { actor, cryptoContext, displayName, email }
 }
 
@@ -119,7 +126,16 @@ function appDeps({ actor, cryptoContext }, overrides = {}) {
       subject: `subject_${actor.id}`,
       normalizedEmail: `${actor.id}@example.test`,
     })),
-    resolveActor: vi.fn(async () => actor),
+    resolveActor: vi.fn(async (db) => {
+      try {
+        const row = await db.prepare(
+          'SELECT id,role,specialist_id,version FROM staff_users WHERE id=?',
+        ).bind(actor.id).first()
+        return row ? resolveCurrentAuthorityActor(db, row) : actor
+      } catch {
+        return actor
+      }
+    }),
     safeLog: vi.fn(),
     verifyCsrfToken: vi.fn(async () => true),
     ...overrides,
@@ -579,6 +595,101 @@ describe('staff owner HTTP operations', () => {
       "SELECT count(*) AS count FROM audit_events WHERE action='staff.deactivated' AND actor_staff_id=?",
       fixture.actor.id,
     )).toBe(1)
+  })
+
+  it('changes a staff role through the protected optimistic route', async () => {
+    const fixture = await actorFixture('owner', 'role_http_owner')
+    const target = await seedActiveStaff(fixture.cryptoContext, {
+      id: 'stf_role_http_target',
+      role: 'coordinator',
+      email: 'role-http-target@example.test',
+      displayName: 'Fikcyjna Koordynatorka',
+    })
+    const deps = appDeps(fixture, { idFactory: ids('role_http') })
+    const request = mutation(
+      `/api/v1/staff/${target.id}/role`,
+      JSON.stringify({ expectedVersion: target.version, role: 'owner' }),
+      'role-http-key',
+    )
+
+    const response = await requestOnce(
+      createApp(deps),
+      deps,
+      request.path,
+      request.init,
+      200,
+      ['role-http-target@example.test', 'Fikcyjna Koordynatorka', 'role-http-key'],
+    )
+    expect(await response.json()).toEqual({
+      data: {
+        staff: {
+          id: target.id,
+          displayName: 'Fikcyjna Koordynatorka',
+          email: 'role-http-target@example.test',
+          role: 'owner',
+          status: 'active',
+          version: 2,
+          specialistId: null,
+        },
+      },
+    })
+    expect((await env.DB.prepare(
+      `SELECT staff_id,revision FROM staff_authorities
+       WHERE staff_id IN (?,?) ORDER BY staff_id`,
+    ).bind(fixture.actor.id, target.id).all()).results).toEqual([
+      { staff_id: fixture.actor.id, revision: 2 },
+      { staff_id: target.id, revision: 2 },
+    ].sort((left, right) => left.staff_id.localeCompare(right.staff_id)))
+    const audit = await env.DB.prepare(
+      `SELECT metadata_json FROM audit_events
+       WHERE action='staff.role.updated' AND entity_id=?`,
+    ).bind(target.id).first()
+    expect(JSON.parse(audit.metadata_json)).toEqual({
+      actorAuthorityRevision: 2,
+      desiredGeneration: expect.any(Number),
+      invitationVersion: null,
+      specialistVersion: null,
+      staffVersion: 2,
+      targetAuthorityRevision: 2,
+    })
+  })
+
+  it('rolls back the complete role batch when the last-owner trigger wins', async () => {
+    const fixture = await actorFixture('owner', 'role_last_owner')
+    await retainOnlyActiveOwner(fixture.actor.id)
+    const before = await Promise.all([
+      env.DB.prepare('SELECT role,status,version FROM staff_users WHERE id=?')
+        .bind(fixture.actor.id).first(),
+      env.DB.prepare('SELECT revision FROM staff_authorities WHERE staff_id=?')
+        .bind(fixture.actor.id).first(),
+      count("SELECT count(*) AS count FROM audit_events WHERE action='staff.role.updated'"),
+      count("SELECT count(*) AS count FROM idempotency_records WHERE operation='staff.role.update'"),
+    ])
+    const deps = appDeps(fixture, { idFactory: ids('role_last_owner') })
+    const request = mutation(
+      `/api/v1/staff/${fixture.actor.id}/role`,
+      JSON.stringify({ expectedVersion: fixture.actor.version, role: 'coordinator' }),
+      'role-last-owner-key',
+    )
+
+    const response = await requestOnce(
+      createApp(deps),
+      deps,
+      request.path,
+      request.init,
+      409,
+    )
+    expect(await response.json()).toEqual({
+      error: { code: 'LAST_ACTIVE_OWNER', correlationId: CORRELATION_ID },
+    })
+    expect(await Promise.all([
+      env.DB.prepare('SELECT role,status,version FROM staff_users WHERE id=?')
+        .bind(fixture.actor.id).first(),
+      env.DB.prepare('SELECT revision FROM staff_authorities WHERE staff_id=?')
+        .bind(fixture.actor.id).first(),
+      count("SELECT count(*) AS count FROM audit_events WHERE action='staff.role.updated'"),
+      count("SELECT count(*) AS count FROM idempotency_records WHERE operation='staff.role.update'"),
+    ])).toEqual(before)
   })
 })
 

@@ -19,6 +19,7 @@ import {
   resolveAuthenticatedWorkbookSpecialist,
   WORKBOOK_SOURCE_SCOPE,
 } from './workbook-source-registry.js'
+import { authorize } from '../identity/policy.js'
 
 export const HISTORICAL_PROJECTION_SLICE_SIZE = 2
 
@@ -31,6 +32,7 @@ const DATA_KEY_COLUMNS = Object.freeze([
   'id', 'scope_type', 'scope_id', 'purpose', 'dek_version', 'wrapped_key_b64',
   'wrap_nonce_b64', 'kek_version', 'created_at', 'retired_at',
 ])
+const CENTRE_RESOURCE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 
 const fail = (code = 'HISTORICAL_PROJECTION_INVALID') => { throw new Error(code) }
 const nowAt = (nowMs) => {
@@ -228,10 +230,28 @@ const replayStatement = (db, { actorId, operation, key, hash, importId, now }) =
    VALUES (?,?,?,?,?,NULL,NULL,?)`,
 ).bind(actorId, operation, key, hash, importId, now)
 
+const authorityInvariant = (db, actor) => db.prepare(
+  `INSERT INTO core_directory_invariant_failures (failure_kind)
+   SELECT 'historical_projection_authority_changed' WHERE NOT EXISTS (
+     SELECT 1 FROM staff_users AS staff
+     JOIN staff_authorities AS authority ON authority.staff_id=staff.id
+     WHERE staff.id=? AND staff.role=? AND staff.specialist_id IS ?
+       AND staff.version=? AND staff.status='active' AND authority.revision=?
+   )`,
+).bind(
+  actor.id,
+  actor.role,
+  actor.specialistId,
+  actor.version,
+  actor.authorityRevision,
+)
+
 const validateCommand = (input, { allowZero = false } = {}) => {
   const command = input && typeof input === 'object' && !Array.isArray(input)
     ? Object.freeze({ ...input }) : null
-  if (command?.actor?.role !== 'owner') fail('NOT_FOUND')
+  if (!authorize(command?.actor, 'finance.import', CENTRE_RESOURCE, {
+    nowMs: command?.nowMs,
+  })) fail('NOT_FOUND')
   if (!command || !command.db?.prepare || !command.db?.batch || !command.keyring
     || typeof command.actor.id !== 'string'
     || command.config?.appEnv !== 'staging' || command.config?.dataMode !== 'fictional'
@@ -261,6 +281,7 @@ const createJob = async (command, state, requestHash, now) => {
         actorId: command.actor.id, operation: 'historical.continue',
         key: command.idempotencyKey, hash: requestHash, importId: command.importId, now,
       }),
+      authorityInvariant(command.db, command.actor),
     ])
   } catch (error) {
     const replay = await replayRow(
@@ -732,6 +753,7 @@ export async function continueHistoricalProjection(input) {
     actorId: command.actor.id, operation: 'historical.continue',
     key: command.idempotencyKey, hash: requestHash, importId: command.importId, now,
   }))
+  statements.push(authorityInvariant(command.db, command.actor))
   try {
     await command.db.batch(statements)
   } catch (error) {
@@ -750,7 +772,7 @@ export async function continueHistoricalProjection(input) {
 }
 
 export async function getHistoricalProjection({ db, actor, importId, keyring } = {}) {
-  if (!db?.prepare || actor?.role !== 'owner' || typeof actor.id !== 'string'
+  if (!db?.prepare || !authorize(actor, 'finance.import', CENTRE_RESOURCE, { nowMs: 0 })
     || typeof importId !== 'string' || !IMPORT_ID.test(importId)) fail('NOT_FOUND')
   const state = await loadState(db, actor.id, importId)
   const projection = jobDto(state)
@@ -830,6 +852,7 @@ export async function resolveHistoricalConflict(input) {
         actorId: command.actor.id, operation: 'historical.resolve',
         key: command.idempotencyKey, hash: requestHash, importId: command.importId, now,
       }),
+      authorityInvariant(command.db, command.actor),
     ])
   } catch (error) {
     const winner = await replayRow(

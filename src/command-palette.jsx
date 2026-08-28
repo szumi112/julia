@@ -16,6 +16,7 @@ const VIEW_ITEMS = [
   { view: 'tus', label: 'Zajęcia TUS', icon: 'group' },
   { view: 'team', label: 'Zespół', icon: 'team' },
   { view: 'payments', label: 'Finanse', icon: 'payments' },
+  { view: 'ledger', label: 'Rejestr', icon: 'reports' },
   { view: 'reports', label: 'Raporty', icon: 'reports' },
   { view: 'settings', label: 'Ustawienia', icon: 'settings' },
 ]
@@ -36,21 +37,23 @@ export function CommandPalette({ onClose }) {
   const results = useMemo(() => {
     const psychOf = (id) => state.psychologists.find((p) => p.id === id)
     const out = []
-    clientsForRole(state, role)
-      .filter((c) => !q || norm(c.name + ' ' + c.email).includes(q))
-      .slice(0, q ? 6 : 4)
-      .forEach((c) =>
-        out.push({
-          key: `c-${c.id}`,
-          group: 'Klienci',
-          title: c.name,
-          sub: psychOf(c.psychId)?.name || c.email,
-          avatar: { name: c.name, color: psychOf(c.psychId)?.color },
-          run: () => navigate('client', { id: c.id }),
-        })
-      )
+    if (canAccess('client')) {
+      clientsForRole(state, role)
+        .filter((c) => !q || norm(c.name + ' ' + c.email).includes(q))
+        .slice(0, q ? 6 : 4)
+        .forEach((c) =>
+          out.push({
+            key: `c-${c.id}`,
+            group: 'Klienci',
+            title: c.name,
+            sub: psychOf(c.psychId)?.name || c.email,
+            avatar: { name: c.name, color: psychOf(c.psychId)?.color },
+            run: () => navigate('client', { id: c.id }),
+          })
+        )
+    }
     state.psychologists
-      .filter((p) => canAccess('psych', role) && (!q || norm(p.name + ' ' + p.spec).includes(q)))
+      .filter((p) => canAccess('psych') && (!q || norm(p.name + ' ' + p.spec).includes(q)))
       .slice(0, q ? 5 : 3)
       .forEach((p) =>
         out.push({
@@ -63,7 +66,7 @@ export function CommandPalette({ onClose }) {
         })
       )
     if (q) {
-      VIEW_ITEMS.filter((v) => canAccess(v.view, role) && norm(v.label).includes(q)).forEach((v) =>
+      VIEW_ITEMS.filter((v) => canAccess(v.view) && norm(v.label).includes(q)).forEach((v) =>
         out.push({
           key: `v-${v.view}`,
           group: 'Przejdź do',

@@ -1,12 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../worker/app.js'
 import { AppError } from '../../worker/http/errors.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2027-03-04T08:00:00.000Z')
 const ORIGIN = 'https://bearwithme-panel.app'
-const actor = Object.freeze({
-  id: 'stf_activity_http_owner', role: 'owner', specialistId: null, version: 1,
-})
+const actor = authorityActor({ id: 'stf_activity_http_owner', role: 'owner' })
 const principal = Object.freeze({
   kind: 'human', subject: 'access-activity-http-owner',
   normalizedEmail: 'activity-http-owner@example.test',

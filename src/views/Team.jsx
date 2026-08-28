@@ -15,6 +15,7 @@ import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
 import { rollingWorkspaceRange } from '../workspace-view.js'
 import { useAuth } from '../auth.jsx'
 import { SpecialistAccessForm, SpecialistProfileForm } from './SpecialistProfileForms.jsx'
+import { canPerformAction } from '../capability-access.js'
 
 const TEAM_FILTERS = [
   { value: 'all', label: 'Cały zespół' },
@@ -31,7 +32,8 @@ const ACCESS_TONES = Object.freeze({ enabled: 'sage', invited: 'amber', unclaime
 
 function AppTeamDirectory({ onRefresh, psychologists }) {
   const { refresh: refreshSession, session } = useAuth()
-  const owner = session.actor.role === 'owner'
+  const { capabilities } = useShell()
+  const canManageStaff = canPerformAction(capabilities, 'specialist.edit')
   const [surface, setSurface] = useState(null)
   const refreshEditedProfile = async (profileId) => {
     await onRefresh()
@@ -43,11 +45,11 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
         <div>
           <div className="eyebrow">Katalog specjalistek</div>
           <h1 className="display view-head__title">Zespół <em>centrum</em></h1>
-          <p className="view-head__sub">{owner
+          <p className="view-head__sub">{canManageStaff
             ? 'Twórz i edytuj profile oraz aktywuj dostęp do panelu.'
             : 'Lista aktywnych specjalistek jest dostępna tylko do odczytu.'}</p>
         </div>
-        {owner ? <div className="view-head__actions">
+        {canManageStaff ? <div className="view-head__actions">
           <Button icon="plus" onClick={() => setSurface({ kind: 'create' })}>Dodaj specjalistkę</Button>
         </div> : null}
       </div>
@@ -64,7 +66,7 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
                 </Pill>
               </div>
             </div>
-            {owner ? (
+            {canManageStaff ? (
               <div className="team-card__footer">
                 <Button size="sm" variant="ghost" onClick={() => setSurface({
                   kind: 'edit', profile: psychologist,

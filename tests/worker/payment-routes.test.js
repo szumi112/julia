@@ -26,6 +26,7 @@ import {
   applyCoreDirectoryStageB,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
 const BODY = Object.freeze({
   expectedVersion: 1,
@@ -44,7 +45,7 @@ const CORRECTION_BODY = Object.freeze({
 })
 const BASE = Object.freeze({
   db: {}, recoveryDb: {},
-  actor: { id: 'stf_payment_owner', role: 'owner', specialistId: null },
+  actor: authorityActor({ id: 'stf_payment_owner', role: 'owner' }),
   keyring: {}, nowMs: Date.parse('2027-01-15T09:00:00.000Z'),
   correlationId: '00000000-0000-4000-8000-000000000022',
   idFactory: () => 'fixture', appointmentId: 'apt_payment_fixture',
@@ -569,7 +570,9 @@ describe('appointment payment capture', () => {
     const target = appointment.paymentEntries[0]
     for (const overrides of [
       { paymentId: 'pay_absent' },
-      { actor: { id: 'stf_payment_target', role: 'specialist', specialistId: 'sp_other' } },
+      { actor: authorityActor({
+        id: 'stf_payment_target', role: 'specialist', specialistId: 'sp_other',
+      }) },
     ]) {
       const idFactory = vi.fn()
       await expect(correctAppointmentPayment(await correctionInput(
@@ -624,8 +627,9 @@ describe('appointment payment capture', () => {
     const appointment = recorded.body.data.appointment
     const target = appointment.paymentEntries[0]
     const input = await correctionInput(appointment, target.id, {
-      actor: { id: 'stf_payment_target', role: 'specialist',
-        specialistId: 'sp_payment_target' },
+      actor: authorityActor({
+        id: 'stf_payment_target', role: 'specialist', specialistId: 'sp_payment_target',
+      }),
       body: { expectedVersion: appointment.version,
         reason: 'Poufna fikcyjna przyczyna', replacement: null },
     })
@@ -657,7 +661,7 @@ describe('appointment payment capture', () => {
     const target = appointment.paymentEntries[0]
     const result = await correctAppointmentPayment(await correctionInput(
       appointment, target.id, {
-        actor: { id: 'stf_payment_coordinator', role: 'coordinator', specialistId: null },
+        actor: authorityActor({ id: 'stf_payment_coordinator', role: 'coordinator' }),
         body: { expectedVersion: appointment.version,
           reason: 'Korekta koordynatora', replacement: null },
       },
@@ -1417,7 +1421,9 @@ describe('appointment payment capture', () => {
     const appointment = await seedAppointment()
     for (const overrides of [
       { appointmentId: 'apt_absent' },
-      { actor: { id: 'stf_payment_target', role: 'specialist', specialistId: 'sp_other' } },
+      { actor: authorityActor({
+        id: 'stf_payment_target', role: 'specialist', specialistId: 'sp_other',
+      }) },
       { body: { ...BODY, expectedVersion: 2 } },
       { body: { ...BODY, amountGrosze: 19_501 } },
     ]) {
@@ -1437,8 +1443,10 @@ describe('appointment payment capture', () => {
   it('allows owner, coordinator, and the exact specialist under payment.manage', async () => {
     const actors = [
       OWNER,
-      { id: OWNER.id, role: 'coordinator', specialistId: null },
-      { id: 'stf_payment_target', role: 'specialist', specialistId: 'sp_payment_target' },
+      authorityActor({ id: OWNER.id, role: 'coordinator' }),
+      authorityActor({
+        id: 'stf_payment_target', role: 'specialist', specialistId: 'sp_payment_target',
+      }),
     ]
     for (const actor of actors) {
       const appointment = await seedAppointment()

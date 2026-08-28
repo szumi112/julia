@@ -6,6 +6,10 @@ import {
   createWorkbookPanelMetadataCallbacks,
   verifyWorkbookPreviewToken,
 } from '../../worker/security/workbook-artifacts.js'
+import {
+  ROLE_DEFAULT_CAPABILITIES,
+  effectiveCapabilitiesFor,
+} from '../../src/capabilities.js'
 
 const APPROVED = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 const config = Object.freeze({
@@ -16,6 +20,7 @@ const config = Object.freeze({
 })
 const owner = Object.freeze({
   id: 'stf_workbook_preview_owner', role: 'owner', specialistId: null, version: 1,
+  authorityRevision: 1, capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
 })
 const panelFinanceValues = (patch = {}) => ({
   accountingMonth: '2025-09',
@@ -80,6 +85,42 @@ const parsed = (fingerprint = APPROVED) => Object.freeze({
 })
 
 describe('no-write workbook preview', () => {
+  it('accepts an explicitly granted coordinator and rejects import without finance.import', async () => {
+    const parse = vi.fn(async () => parsed())
+    const common = {
+      bytes: new Uint8Array([1]),
+      filename: 'fictional.xlsx',
+      keyring: await ring(),
+      config,
+      centreId: 'centre_1',
+      nowMs: 1_800_000_000_000,
+      parse,
+      readPanel: async () => ({ edits: [], kind: 'legacy', metadata: null, voidIds: [] }),
+    }
+    const coordinator = (capabilities) => Object.freeze({
+      id: 'stf_workbook_preview_coordinator',
+      role: 'coordinator',
+      specialistId: null,
+      version: 2,
+      authorityRevision: 3,
+      capabilities,
+    })
+
+    await expect(previewWorkbook({
+      ...common,
+      actor: coordinator(effectiveCapabilitiesFor({
+        role: 'coordinator', allow: ['finance.import'], deny: [],
+      })),
+    })).resolves.toMatchObject({ data: { workbookKind: 'legacy' } })
+    expect(parse).toHaveBeenCalledOnce()
+
+    await expect(previewWorkbook({
+      ...common,
+      actor: coordinator(ROLE_DEFAULT_CAPABILITIES.coordinator),
+    })).rejects.toThrow(/^WORKBOOK_PREVIEW_INVALID$/)
+    expect(parse).toHaveBeenCalledOnce()
+  })
+
   it('returns the signed exact-file contract, proposed source mappings, conflicts and every quarantine row', async () => {
     const bytes = new Uint8Array([1, 2, 3, 4])
     const parse = vi.fn(async (buffer, options) => {

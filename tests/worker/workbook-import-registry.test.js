@@ -23,6 +23,7 @@ import {
   createScopedPanelWorkbook,
   readPanelWorkbook,
 } from '../../src/workbook-ooxml.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
@@ -35,6 +36,7 @@ const NOW_MS = Date.parse('2027-01-15T10:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
 const actor = Object.freeze({
   id: 'stf_workbook_import_owner', role: 'owner', specialistId: null, version: 1,
+  authorityRevision: 1, capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
 })
 const panelFinanceValues = (patch = {}) => ({
   accountingMonth: '2025-09', occurredOn: '2025-09-02',
@@ -534,7 +536,7 @@ describe('workbook import reservation', () => {
       db: exportBudget.work, bucket: env.ARCHIVE, actor, keyring, config,
       centreId: 'centre_1', nowMs: NOW_MS + 4_000, format: 'panel-v2',
     })
-    expect(exportBudget.usage()).toMatchObject({ used: 2, workRemaining: 40 })
+    expect(exportBudget.usage()).toMatchObject({ used: 4, workRemaining: 38 })
     expect(exported.filename).toBe('bear-with-me-panel-v2-2027-01-15.xlsx')
     const exportedPanel = await readPanelWorkbook(exported.bytes, { verify: callbacks.verify })
     expect(exportedPanel.kind).toBe('panel-v2')

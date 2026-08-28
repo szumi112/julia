@@ -21,6 +21,7 @@ import { useShell } from '../shell-ctx.js'
 import { useApp } from '../store.jsx'
 import { Button, Chip, EmptyState, IconBtn, Pager, Pill, usePagination } from '../ui.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
+import { canPerformAction } from '../capability-access.js'
 
 const METHOD_LABELS = Object.freeze({
   blik: 'BLIK', card: 'Karta', cash: 'Gotówka', monthly: 'Miesięcznie',
@@ -124,7 +125,7 @@ export function Finance() {
   const [parseStatus, setParseStatus] = useState('idle')
   const [importStatus, setImportStatus] = useState({ importing: false, progress: 0, error: '' })
   const fileRef = useRef(null)
-  const canImport = capabilities.includes('finance.centre.manage')
+  const canImport = canPerformAction(capabilities, 'finance.import.create')
 
   useRouteParamsSync('ledger', { ym: month ?? 'unknown' })
 

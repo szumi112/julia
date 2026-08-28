@@ -3,7 +3,6 @@ import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../worker/app.js'
 import {
   authorize,
-  CAPABILITIES,
   capabilitiesForActor,
 } from '../../worker/identity/policy.js'
 import { getSession } from '../../worker/routes/session.js'
@@ -16,6 +15,7 @@ import {
 } from '../../worker/security/envelope.js'
 import { verifyCsrfToken } from '../../worker/security/csrf.js'
 import { NOW_MS } from './fixtures.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
@@ -98,6 +98,19 @@ async function fixture(suffix = 'owner', {
   return { keyring, dataKey, scope, actorId, subject, role, specialistId }
 }
 
+const authorityActor = (context, overrides = {}) => {
+  const role = overrides.role ?? context.role
+  return Object.freeze({
+    id: overrides.id ?? context.actorId,
+    role,
+    specialistId: overrides.specialistId ?? context.specialistId,
+    version: overrides.version ?? 3,
+    authorityRevision: overrides.authorityRevision ?? 1,
+    capabilities: Object.freeze([...(overrides.capabilities
+      ?? ROLE_DEFAULT_CAPABILITIES[role])]),
+  })
+}
+
 describe('/api/v1/session route', () => {
   beforeAll(async () => {
     await completeCoreDirectoryStageA()
@@ -118,7 +131,9 @@ describe('/api/v1/session route', () => {
       db,
       config,
       principal: { kind: 'human', subject: 'access-session-version' },
-      actor: { id: 'stf_session_version', role: 'owner', specialistId: null, version },
+      actor: authorityActor({
+        actorId: 'stf_session_version', role: 'owner', specialistId: null,
+      }, { version }),
       cryptoContext: {},
       nowMs: NOW_MS,
     })).rejects.toThrow(/^ACCESS_DENIED$/)
@@ -128,7 +143,9 @@ describe('/api/v1/session route', () => {
       db: env.DB,
       config,
       principal: { kind: 'human', subject: 'access-session-version' },
-      actor: { id: 'stf_session_version', role: 'owner', specialistId: null, version },
+      actor: authorityActor({
+        actorId: 'stf_session_version', role: 'owner', specialistId: null,
+      }, { version }),
       cryptoContext: {},
       nowMs: NOW_MS,
     })).rejects.toThrow(/^ACCESS_DENIED$/)
@@ -140,7 +157,7 @@ describe('/api/v1/session route', () => {
       db: env.DB,
       config,
       principal: { kind: 'human', subject: cryptoContext.subject },
-      actor: { id: cryptoContext.actorId, role: 'owner', specialistId: null, version: 3 },
+      actor: authorityActor(cryptoContext),
       cryptoContext,
       nowMs: NOW_MS + 999,
     })
@@ -153,6 +170,7 @@ describe('/api/v1/session route', () => {
       version: 3,
     })
     expect(result.data.capabilities).toEqual([...result.data.capabilities].sort())
+    expect(result.data.authorityRevision).toBe(1)
     expect(Object.isFrozen(result.data.actor)).toBe(true)
     expect(Object.isFrozen(result.data.capabilities)).toBe(true)
     expect(result.data.environment).toBe('staging')
@@ -180,9 +198,7 @@ describe('/api/v1/session route', () => {
       role: 'owner', specialistId: 'sp_session_linked_owner',
       professionalTitle: 'Psycholożka',
     })
-    const actor = {
-      id: context.actorId, role: 'owner', specialistId: context.specialistId, version: 3,
-    }
+    const actor = authorityActor(context)
     const result = await getSession({
       db: env.DB, config,
       principal: { kind: 'human', subject: context.subject },
@@ -193,7 +209,7 @@ describe('/api/v1/session route', () => {
       professionalTitle: 'Psycholożka', role: 'owner',
       specialistId: context.specialistId, version: 3,
     })
-    expect(result.data.capabilities).toEqual([...CAPABILITIES].sort())
+    expect(result.data.capabilities).toEqual(ROLE_DEFAULT_CAPABILITIES.owner)
     expect(authorize(actor, 'finance.centre.read', {
       kind: 'centre', centreId: 'centre_1',
     }, { nowMs: NOW_MS })).toBe(true)
@@ -204,10 +220,7 @@ describe('/api/v1/session route', () => {
     await expect(getSession({
       db: env.DB, config,
       principal: { kind: 'human', subject: legacy.subject },
-      actor: {
-        id: legacy.actorId, role: 'specialist',
-        specialistId: legacy.specialistId, version: 3,
-      },
+      actor: authorityActor(legacy),
       cryptoContext: legacy, nowMs: NOW_MS,
     })).resolves.toMatchObject({
       data: { actor: { professionalTitle: 'Specjalistka' } },
@@ -219,10 +232,7 @@ describe('/api/v1/session route', () => {
     await expect(getSession({
       db: env.DB, config,
       principal: { kind: 'human', subject: tampered.subject },
-      actor: {
-        id: tampered.actorId, role: 'specialist',
-        specialistId: tampered.specialistId, version: 3,
-      },
+      actor: authorityActor(tampered),
       cryptoContext: tampered, nowMs: NOW_MS,
     })).rejects.toThrow(/^CRYPTO_FAILURE$/)
   })
@@ -232,10 +242,7 @@ describe('/api/v1/session route', () => {
     await expect(getSession({
       db: env.DB, config,
       principal: { kind: 'human', subject: context.subject },
-      actor: {
-        id: context.actorId, role: 'specialist',
-        specialistId: context.specialistId, version: 3,
-      },
+      actor: authorityActor(context),
       cryptoContext: context, nowMs: NOW_MS,
       decryptForScope: async (_keyring, _dataKey, input) => (
         input.field === 'professional_title' ? '\uD800' : 'Fikcyjna Specjalistka'
@@ -250,7 +257,7 @@ describe('/api/v1/session route', () => {
       db: env.DB,
       config,
       principal: { kind: 'human', subject: cryptoContext.subject },
-      actor: { id: cryptoContext.actorId, role: 'owner', specialistId: 'sp_owner', version: 2 },
+      actor: authorityActor(cryptoContext, { specialistId: 'sp_owner', version: 2 }),
       cryptoContext,
       nowMs: NOW_MS,
       decryptForScope: decrypt,
@@ -258,26 +265,28 @@ describe('/api/v1/session route', () => {
     expect(decrypt).not.toHaveBeenCalled()
   })
 
+  it('denies a stale authority revision before decrypting or publishing capabilities', async () => {
+    const context = await fixture('stale_authority')
+    const decrypt = vi.fn()
+    await expect(getSession({
+      db: env.DB,
+      config,
+      principal: { kind: 'human', subject: context.subject },
+      actor: authorityActor(context, { authorityRevision: 2 }),
+      cryptoContext: context,
+      nowMs: NOW_MS,
+      decryptForScope: decrypt,
+    })).rejects.toThrow(/^ACCESS_DENIED$/)
+    expect(decrypt).not.toHaveBeenCalled()
+  })
+
   it.each([
-    ['owner', CAPABILITIES],
-    ['coordinator', [
-      'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-      'client.manage', 'client.operational.read', 'finance.centre.read', 'operations.health.read',
-      'payment.manage', 'specialist.directory.read', 'tus.manage',
-    ]],
-    ['specialist', [
-      'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-      'client.manage', 'client.operational.read', 'clinical.read', 'payment.manage',
-      'specialist.directory.read', 'tus.manage',
-    ]],
+    ['owner', ROLE_DEFAULT_CAPABILITIES.owner],
+    ['coordinator', ROLE_DEFAULT_CAPABILITIES.coordinator],
+    ['specialist', ROLE_DEFAULT_CAPABILITIES.specialist],
   ])('returns the exact sorted %s capability hints', async (role, expected) => {
     const context = await fixture(`role_${role}`, { role })
-    const actor = {
-      id: context.actorId,
-      role,
-      specialistId: context.specialistId,
-      version: 3,
-    }
+    const actor = authorityActor(context)
     const result = await getSession({
       db: env.DB,
       config,
@@ -322,12 +331,7 @@ describe('/api/v1/session route', () => {
         db: env.DB,
         config,
         principal: { kind: 'human', subject },
-        actor: {
-          id: context.actorId,
-          role: 'coordinator',
-          specialistId: null,
-          version,
-        },
+        actor: authorityActor(context, { version }),
         cryptoContext: context,
         nowMs: NOW_MS,
         decryptForScope: decrypt,
@@ -340,9 +344,7 @@ describe('/api/v1/session route', () => {
     const context = await fixture('exact_crypto')
     const load = vi.fn(async () => context.dataKey)
     const decrypt = vi.fn(async () => 'Exact Name')
-    const actor = {
-      id: context.actorId, role: 'owner', specialistId: null, version: 3,
-    }
+    const actor = authorityActor(context)
     const result = await getSession({
       db: env.DB,
       config,
@@ -375,7 +377,7 @@ describe('/api/v1/session route', () => {
       db: env.DB,
       config,
       principal: { kind: 'human', subject: wrongScope.subject },
-      actor: { id: wrongScope.actorId, role: 'owner', specialistId: null, version: 3 },
+      actor: authorityActor(wrongScope),
       cryptoContext: { ...wrongScope, scope: { ...scope, id: 'centre_wrong' } },
       nowMs: NOW_MS,
     })).rejects.toThrow(/^CRYPTO_FAILURE$/)
@@ -385,7 +387,7 @@ describe('/api/v1/session route', () => {
       db: env.DB,
       config,
       principal: { kind: 'human', subject: tampered.subject },
-      actor: { id: tampered.actorId, role: 'owner', specialistId: null, version: 3 },
+      actor: authorityActor(tampered),
       cryptoContext: tampered,
       nowMs: NOW_MS,
     })).rejects.toThrow(/^CRYPTO_FAILURE$/)
@@ -424,12 +426,7 @@ describe('/api/v1/session route', () => {
         subject: context.subject,
         normalizedEmail: 'csrf-boundary@example.test',
       })),
-      resolveActor: vi.fn(async () => ({
-        id: context.actorId,
-        role: 'owner',
-        specialistId: null,
-        version: 3,
-      })),
+      resolveActor: vi.fn(async () => authorityActor(context)),
     }
     const response = await createApp(deps).request('/api/v1/session')
     const result = await response.json()

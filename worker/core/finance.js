@@ -14,6 +14,7 @@ import {
   isD1FinanceSourceDuplicate,
 } from '../db/errors.js'
 import { authorize } from '../identity/policy.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 import {
   blindEmailIndex,
   blindEmailCandidates,
@@ -34,8 +35,6 @@ const ENTRY_ID = /^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CHUNK_ID = /^fic_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const AUDIT_ID = /^aud_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const DATA_KEY_ID = /^key_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
-const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
-const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/
 const SOURCE_KEY = /^workbook:v1:(\d{1,4}):(\d{1,6}):(\d{1,4})$/
@@ -68,27 +67,9 @@ const exact = (value, keys, field = 'body') => {
 }
 
 const actorFact = (value) => {
-  try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) fail('NOT_FOUND')
-    const descriptors = Object.getOwnPropertyDescriptors(value)
-    const actor = {}
-    for (const key of ['id', 'role', 'specialistId']) {
-      const descriptor = descriptors[key]
-      if (!descriptor || !Object.hasOwn(descriptor, 'value')) fail('NOT_FOUND')
-      actor[key] = descriptor.value
-    }
-    if (typeof actor.id !== 'string' || !STAFF_ID.test(actor.id)
-      || !['owner', 'coordinator', 'specialist'].includes(actor.role)
-      || (actor.specialistId !== null
-        && (typeof actor.specialistId !== 'string' || !SPECIALIST_ID.test(actor.specialistId)))
-      || (actor.role === 'specialist' && actor.specialistId === null)
-      || (!authorize(actor, 'finance.centre.read', CENTRE, { nowMs: 0 })
-        && !authorize(actor, 'finance.centre.manage', CENTRE, { nowMs: 0 }))) fail('NOT_FOUND')
-    return Object.freeze(actor)
-  } catch (error) {
-    if (error instanceof Error && error.message === 'NOT_FOUND') throw error
-    fail('NOT_FOUND')
-  }
+  const actor = captureAuthorityActor(value)
+  if (!actor) fail('NOT_FOUND')
+  return actor
 }
 
 const requireRead = (actor, nowMs) => {
@@ -97,6 +78,10 @@ const requireRead = (actor, nowMs) => {
 
 const requireManage = (actor, nowMs) => {
   if (!authorize(actor, 'finance.centre.manage', CENTRE, { nowMs })) fail('NOT_FOUND')
+}
+
+const requireImport = (actor, nowMs) => {
+  if (!authorize(actor, 'finance.import', CENTRE, { nowMs })) fail('NOT_FOUND')
 }
 
 const canonicalInstant = (nowMs) => {
@@ -176,13 +161,13 @@ const batchDto = (row, filename = undefined) => Object.freeze({
   committedAt: row.committed_at,
 })
 
-const loadBatch = async (db, batchId) => {
+const loadBatch = async (db, batchId, actorId) => {
   if (typeof batchId !== 'string' || !BATCH_ID.test(batchId)) validation('batchId')
   const row = await db.prepare(
     `SELECT id,fingerprint,filename_envelope,format_version,total_rows,accepted_rows,
-            status,version,created_at,updated_at,committed_at
-     FROM finance_import_batches WHERE id=?`
-  ).bind(batchId).first()
+            status,created_by_staff_id,version,created_at,updated_at,committed_at
+     FROM finance_import_batches WHERE id=? AND created_by_staff_id=?`
+  ).bind(batchId, actorId).first()
   if (!row) fail('NOT_FOUND')
   return row
 }
@@ -197,20 +182,33 @@ const audit = (db, { id, now, actorId, action, entityId, correlationId, metadata
 
 const batchGuard = (db, {
   batchId, status, acceptedRows, version, auditId, action, actorId, correlationId, metadata,
+  authorityActor,
 }) => db.prepare(
   `INSERT INTO core_directory_invariant_failures (failure_kind)
    SELECT 'finance_batch_postcondition'
    WHERE NOT (
      EXISTS (SELECT 1 FROM finance_import_batches
-       WHERE id=? AND status=? AND accepted_rows=? AND version=?)
+       WHERE id=? AND status=? AND accepted_rows=? AND version=?
+         AND created_by_staff_id=?)
      AND EXISTS (SELECT 1 FROM audit_events
        WHERE id=? AND action=? AND entity_type='finance_import' AND entity_id=?
          AND actor_staff_id=? AND correlation_id=? AND result='success'
-         AND metadata_json=?))`
+         AND metadata_json=?)
+     AND EXISTS (
+       SELECT 1 FROM staff_users AS staff
+       JOIN staff_authorities AS authority ON authority.staff_id=staff.id
+       WHERE staff.id=? AND staff.role=? AND staff.specialist_id IS ?
+         AND staff.version=? AND staff.status='active' AND authority.revision=?
+     ))`
 ).bind(
-  batchId, status, acceptedRows, version,
+  batchId, status, acceptedRows, version, actorId,
   auditId, action, batchId, actorId, correlationId,
   JSON.stringify(Object.fromEntries(Object.entries(metadata).sort(([a], [b]) => a.localeCompare(b)))),
+  authorityActor.id,
+  authorityActor.role,
+  authorityActor.specialistId,
+  authorityActor.version,
+  authorityActor.authorityRevision,
 )
 
 const responseForBatch = (status, batch) => Object.freeze({
@@ -254,7 +252,7 @@ export async function startFinanceImport(input) {
   ], 'input')
   validDependency(command.db, command.keyring, command.correlationId, command.idFactory)
   const actor = actorFact(command.actor)
-  requireManage(actor, command.nowMs)
+  requireImport(actor, command.nowMs)
   if (!IDEMPOTENCY_KEY.test(command.idempotencyKey ?? '')) validation('body')
   const body = validateFinanceImport(command.body)
   const now = canonicalInstant(command.nowMs)
@@ -304,7 +302,7 @@ export async function startFinanceImport(input) {
   unit.guard(batchGuard(command.db, {
     batchId, status: 'importing', acceptedRows: 0, version: 1,
     auditId, action: 'finance.import.started', actorId: actor.id,
-    correlationId: command.correlationId, metadata,
+    correlationId: command.correlationId, metadata, authorityActor: actor,
   }))
   try {
     await unit.commit()
@@ -358,7 +356,7 @@ export async function appendFinanceImportChunk(input) {
   ], 'input')
   validDependency(command.db, command.keyring, command.correlationId, command.idFactory)
   const actor = actorFact(command.actor)
-  requireManage(actor, command.nowMs)
+  requireImport(actor, command.nowMs)
   if (!IDEMPOTENCY_KEY.test(command.idempotencyKey ?? '')) validation('body')
   if (typeof command.batchId !== 'string' || !BATCH_ID.test(command.batchId)) {
     validation('batchId')
@@ -375,15 +373,16 @@ export async function appendFinanceImportChunk(input) {
             batch.updated_at,batch.committed_at
      FROM finance_import_chunks AS chunk
      JOIN finance_import_batches AS batch ON batch.id=chunk.batch_id
-     WHERE chunk.batch_id=? AND chunk.idempotency_key=?`
-  ).bind(command.batchId, command.idempotencyKey).first()
+     WHERE chunk.batch_id=? AND chunk.idempotency_key=?
+       AND batch.created_by_staff_id=?`
+  ).bind(command.batchId, command.idempotencyKey, actor.id).first()
   const replay = await loadReplay()
   if (replay) {
     if (replay.sequence !== body.sequence || replay.row_count !== body.entries.length
       || replay.payload_hash !== payloadHash) fail('IDEMPOTENCY_CONFLICT')
     return responseForBatch(200, batchDto(replay))
   }
-  const current = await loadBatch(command.db, command.batchId)
+  const current = await loadBatch(command.db, command.batchId, actor.id)
   if (current.status !== 'importing') fail('FINANCE_IMPORT_CLOSED')
   if (current.accepted_rows + body.entries.length > current.total_rows) {
     fail('FINANCE_IMPORT_OVERFLOW')
@@ -473,7 +472,7 @@ export async function appendFinanceImportChunk(input) {
   unit.guard(batchGuard(command.db, {
     batchId: command.batchId, status: 'importing', acceptedRows, version: nextVersion,
     auditId, action: 'finance.import.chunk.accepted', actorId: actor.id,
-    correlationId: command.correlationId, metadata,
+    correlationId: command.correlationId, metadata, authorityActor: actor,
   }))
   try {
     await unit.commit()
@@ -499,7 +498,7 @@ export async function commitFinanceImport(input) {
   ], 'input')
   validDependency(command.db, command.keyring, command.correlationId, command.idFactory)
   const actor = actorFact(command.actor)
-  requireManage(actor, command.nowMs)
+  requireImport(actor, command.nowMs)
   if (!IDEMPOTENCY_KEY.test(command.idempotencyKey ?? '')) validation('body')
   const body = exact(command.body, ['expectedVersion'])
   if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 1) {
@@ -510,7 +509,7 @@ export async function commitFinanceImport(input) {
     JSON.stringify({ batchId: command.batchId, expectedVersion: body.expectedVersion }))
   const replay = await inspectIdempotency(command.db, context, idem)
   if (replay) return replay
-  const current = await loadBatch(command.db, command.batchId)
+  const current = await loadBatch(command.db, command.batchId, actor.id)
   if (current.version !== body.expectedVersion) fail('VERSION_CONFLICT')
   if (current.status === 'committed') return responseForBatch(200, batchDto(current))
   if (current.status !== 'importing') fail('FINANCE_IMPORT_CLOSED')
@@ -542,7 +541,7 @@ export async function commitFinanceImport(input) {
     batchId: command.batchId, status: 'committed',
     acceptedRows: current.total_rows, version,
     auditId, action: 'finance.import.committed', actorId: actor.id,
-    correlationId: command.correlationId, metadata,
+    correlationId: command.correlationId, metadata, authorityActor: actor,
   }))
   try {
     await unit.commit()

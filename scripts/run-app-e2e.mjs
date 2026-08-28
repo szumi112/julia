@@ -31,7 +31,7 @@ import {
   sep,
 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { CAPABILITIES } from '../worker/identity/policy.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../src/capabilities.js'
 import {
   buildLocalHarnessWranglerConfig,
   LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
@@ -421,6 +421,7 @@ export async function assertReadySession(response, {
   if (!exactKeys(body, ['data'])
     || !exactKeys(data, [
       'actor',
+      'authorityRevision',
       'capabilities',
       'csrfToken',
       'csrfExpiresAt',
@@ -437,11 +438,15 @@ export async function assertReadySession(response, {
     || actor.specialistId !== null
     || !Number.isSafeInteger(actor.version)
     || actor.version < 1
+    || !Number.isSafeInteger(data.authorityRevision)
+    || data.authorityRevision < 1
     || data.environment !== 'development'
     || data.dataMode !== 'fictional'
     || !Array.isArray(data.capabilities)
-    || data.capabilities.length !== CAPABILITIES.length
-    || data.capabilities.some((capability, index) => capability !== CAPABILITIES[index])
+    || data.capabilities.length !== ROLE_DEFAULT_CAPABILITIES.owner.length
+    || data.capabilities.some((capability, index) => (
+      capability !== ROLE_DEFAULT_CAPABILITIES.owner[index]
+    ))
     || !validCsrfProof(data.csrfToken, data.csrfExpiresAt, nowMs)
     || !ID.test(actor.id)) fail('APP_E2E_READINESS_INVALID')
   return Object.freeze({

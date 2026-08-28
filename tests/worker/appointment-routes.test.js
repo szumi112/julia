@@ -28,10 +28,11 @@ import {
   applyCoreDirectoryStageB,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2027-01-15T09:00:00.000Z')
 const CORRELATION_ID = '00000000-0000-4000-8000-000000000019'
-const OWNER = Object.freeze({ id: 'stf_appointment_owner', role: 'owner', specialistId: null })
+const OWNER = authorityActor({ id: 'stf_appointment_owner', role: 'owner' })
 const BODY = Object.freeze({
   clientId: 'cl_replaced', specialistId: 'sp_appointment_target', serviceId: 'zajecia',
   date: '2027-01-16', time: '10:00', durationMinutes: 50,
@@ -200,7 +201,9 @@ describe('persistent appointment creation', () => {
   it('enforces effective assignment and role scope before IDs', async () => {
     const client = await seedClient()
     for (const [actor, specialistId] of [
-      [{ id: 'stf_other_specialist', role: 'specialist', specialistId: 'sp_other' }, 'sp_appointment_target'],
+      [authorityActor({
+        id: 'stf_other_specialist', role: 'specialist', specialistId: 'sp_other',
+      }), 'sp_appointment_target'],
       [OWNER, 'sp_absent'],
     ]) {
       const idFactory = vi.fn()
@@ -215,8 +218,11 @@ describe('persistent appointment creation', () => {
   it('allows every active role within its exact appointment scope independent of target staff role', async () => {
     for (const [index, actor] of [
       OWNER,
-      { id: 'stf_appointment_owner', role: 'coordinator', specialistId: null },
-      { id: 'stf_appointment_target', role: 'specialist', specialistId: 'sp_appointment_target' },
+      authorityActor({ id: 'stf_appointment_owner', role: 'coordinator' }),
+      authorityActor({
+        id: 'stf_appointment_target', role: 'specialist',
+        specialistId: 'sp_appointment_target',
+      }),
     ].entries()) {
       const client = await seedClient()
       const result = await create(client, { actor,
@@ -1208,9 +1214,9 @@ describe('persistent appointment editing', () => {
         status: 'active', specialistId: 'sp_appointment_second' },
       idempotencyKey: `appointment-edit-assignment-${sequence}-key`,
     })
-    const historical = await edit(current, { actor: {
+    const historical = await edit(current, { actor: authorityActor({
       id: 'stf_appointment_target', role: 'specialist', specialistId: 'sp_appointment_target',
-    }, body: {
+    }), body: {
       ...EDIT_BODY, expectedVersion: 1, date: '2027-01-15', time: '10:50',
       status: 'completed', location: 'Gabinet historyczny',
     } })
@@ -1823,9 +1829,9 @@ describe('persistent appointment cancellation', () => {
   it('authorizes all active roles against the current appointment specialist only', async () => {
     for (const [index, actor] of [
       OWNER,
-      { id: OWNER.id, role: 'coordinator', specialistId: null },
-      { id: 'stf_appointment_target', role: 'specialist',
-        specialistId: 'sp_appointment_target' },
+      authorityActor({ id: OWNER.id, role: 'coordinator' }),
+      authorityActor({ id: 'stf_appointment_target', role: 'specialist',
+        specialistId: 'sp_appointment_target' }),
     ].entries()) {
       const client = await seedClient()
       const appointment = (await create(client, { body: {
@@ -1838,10 +1844,10 @@ describe('persistent appointment cancellation', () => {
       ...BODY, clientId: client.id, date: '2027-09-10',
     } })).body.data.appointment
     const ids = vi.fn()
-    await expect(cancel(appointment, { actor: {
+    await expect(cancel(appointment, { actor: authorityActor({
       id: 'stf_appointment_second', role: 'specialist',
       specialistId: 'sp_appointment_second',
-    }, idFactory: ids })).rejects.toThrow('NOT_FOUND')
+    }), idFactory: ids })).rejects.toThrow('NOT_FOUND')
     expect(ids).not.toHaveBeenCalled()
   })
 

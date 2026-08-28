@@ -1,5 +1,6 @@
 import { parseWorkbookFile } from '../../src/workbook-import.js'
 import {
+  createScopedPanelWorkbook,
   mergePanelEdits,
   patchPanelWorkbook,
   readPanelWorkbook,
@@ -29,6 +30,9 @@ import {
   normalizePanelFinanceEdits,
   prospectivePanelFinanceValues,
 } from './workbook-panel-finance.js'
+import { authorize } from '../identity/policy.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
+import { resolveCurrentAuthorityActor } from '../identity/staff.js'
 
 export const APPROVED_WORKBOOK_FINGERPRINT = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 
@@ -44,6 +48,7 @@ const SOURCE_KEY = /^workbook:v1:(\d{1,4}):(\d{1,7}):(\d{1,5})$/
 const SOURCE_SCOPE = Object.freeze({
   type: 'workbook_source_registry', id: 'centre_1', purpose: 'source_registry',
 })
+const CENTRE_RESOURCE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 const IDENTITY_SCOPE = Object.freeze({
   type: 'staff_directory', id: 'centre_1', purpose: 'identity',
 })
@@ -236,6 +241,21 @@ const activeFinanceRowsExportStatement = (db, centreId, format) => db.prepare(
      ORDER BY entry.id LIMIT 5001`,
 ).bind(centreId, format)
 
+const ownFinanceRowsExportStatement = (db, centreId, format, specialistId) => db.prepare(
+  `${latestExportCte}
+   SELECT entry.id,entry.accounting_month,entry.occurred_on,entry.amount_grosze,
+            entry.paid_amount_grosze,entry.payment_method,entry.settlement_status,
+            entry.invoice_status,entry.specialist_id,entry.version
+     FROM finance_entries AS entry
+     JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
+     JOIN latest_export ON 1=1
+     WHERE batch.status='committed'
+       AND entry.specialist_id=?
+       AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
+         WHERE void.finance_entry_id=entry.id)
+     ORDER BY entry.id LIMIT 5001`,
+).bind(centreId, format, specialistId)
+
 const panelValues = (row) => Object.freeze({
   accountingMonth: row.accounting_month,
   occurredOn: row.occurred_on,
@@ -247,7 +267,7 @@ const panelValues = (row) => Object.freeze({
   specialistId: row.specialist_id,
 })
 
-const panelExportFor = async ({ source, rows, callbacks, centreId }) => {
+const panelExportDocument = async ({ rows, callbacks, scope }) => {
   const sheetRows = rows.map((row) => Object.freeze({ id: row.id, values: panelValues(row) }))
   const metadataRows = []
   for (let offset = 0; offset < rows.length; offset += 64) {
@@ -268,17 +288,43 @@ const panelExportFor = async ({ source, rows, callbacks, centreId }) => {
       })
     })))
   }
+  return Object.freeze({
+    metadata: Object.freeze({
+      format: 'Panel-v2',
+      scope,
+      rows: Object.freeze(metadataRows),
+      voidIds: Object.freeze([]),
+    }),
+    sheets: Object.freeze([Object.freeze({
+      name: 'Panel — Wizyty', columns: PANEL_FINANCE_COLUMNS, rows: sheetRows,
+    })]),
+  })
+}
+
+const panelExportFor = async ({ source, rows, callbacks, centreId }) => {
+  const document = await panelExportDocument({
+    rows,
+    callbacks,
+    scope: Object.freeze({ id: centreId, type: 'centre' }),
+  })
   return patchPanelWorkbook(source, {
     includePermissions: false,
-    metadata: {
-      format: 'Panel-v2',
-      scope: { id: centreId, type: 'centre' },
-      rows: metadataRows,
-      voidIds: [],
-    },
-    sheets: [{
-      name: 'Panel — Wizyty', columns: PANEL_FINANCE_COLUMNS, rows: sheetRows,
-    }],
+    metadata: document.metadata,
+    sheets: document.sheets,
+  }, { sign: callbacks.sign })
+}
+
+const specialistPanelExportFor = async ({ rows, callbacks, specialistId }) => {
+  const document = await panelExportDocument({
+    rows,
+    callbacks,
+    scope: Object.freeze({ id: specialistId, type: 'specialist' }),
+  })
+  return createScopedPanelWorkbook({
+    allowedRowIds: rows.map(({ id }) => id),
+    allowedSheets: [{ name: 'Panel — Wizyty', columns: PANEL_FINANCE_COLUMNS }],
+    metadata: document.metadata,
+    sheets: document.sheets,
   }, { sign: callbacks.sign })
 }
 
@@ -536,7 +582,7 @@ const snapshotRows = (result, maximum) => {
   return rows
 }
 
-const workbookExportSnapshot = async (db, centreId, format) => {
+const workbookExportSnapshot = async (db, centreId, format, specialistId = null) => {
   const statements = format === 'legacy'
     ? [
         artifactExportStatement(db, centreId, format),
@@ -546,7 +592,9 @@ const workbookExportSnapshot = async (db, centreId, format) => {
       ]
     : [
         artifactExportStatement(db, centreId, format),
-        activeFinanceRowsExportStatement(db, centreId, format),
+        specialistId === null
+          ? activeFinanceRowsExportStatement(db, centreId, format)
+          : ownFinanceRowsExportStatement(db, centreId, format, specialistId),
       ]
   let results
   try { results = await db.batch(statements) } catch { throw new Error('INTERNAL_ERROR') }
@@ -569,16 +617,102 @@ const workbookExportSnapshot = async (db, centreId, format) => {
   })
 }
 
+const sameCapabilities = (left, right) => left.length === right.length
+  && left.every((capability, index) => capability === right[index])
+
+const exportAccessFor = (value, nowMs, format) => {
+  const actor = captureAuthorityActor(value)
+  if (!actor) throw new Error('NOT_FOUND')
+  if (['owner', 'coordinator'].includes(actor.role)
+    && authorize(actor, 'workbook.centre.export', CENTRE_RESOURCE, { nowMs })) {
+    return Object.freeze({ actor, specialistId: null })
+  }
+  if (format === 'panel-v2' && actor.role === 'specialist'
+    && authorize(actor, 'workbook.own.export', {
+      kind: 'workbook_own', specialistId: actor.specialistId,
+    }, { nowMs })) {
+    return Object.freeze({ actor, specialistId: actor.specialistId })
+  }
+  throw new Error('NOT_FOUND')
+}
+
+const requireCurrentAuthority = async (db, expected) => {
+  let current
+  try {
+    current = await resolveCurrentAuthorityActor(db, {
+      id: expected.id,
+      role: expected.role,
+      specialist_id: expected.specialistId,
+      version: expected.version,
+    })
+  } catch {
+    throw new Error('NOT_FOUND')
+  }
+  if (current.authorityRevision !== expected.authorityRevision
+    || !sameCapabilities(current.capabilities, expected.capabilities)) {
+    throw new Error('NOT_FOUND')
+  }
+  return current
+}
+
+const authoritySnapshotInvariant = (db, actor) => db.prepare(
+  `INSERT INTO core_directory_invariant_failures (failure_kind)
+   SELECT 'workbook_authority_changed' WHERE NOT EXISTS (
+     SELECT 1 FROM staff_users AS staff
+     JOIN staff_authorities AS authority ON authority.staff_id=staff.id
+     WHERE staff.id=? AND staff.role=? AND staff.specialist_id IS ?
+       AND staff.version=? AND staff.status='active' AND authority.revision=?
+   )`,
+).bind(
+  actor.id,
+  actor.role,
+  actor.specialistId,
+  actor.version,
+  actor.authorityRevision,
+)
+
+const validExportBytes = (bytes) => {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1
+    || bytes.byteLength > MAX_WORKBOOK_EXPORT_BYTES) {
+    bytes?.fill?.(0)
+    throw new Error('WORKBOOK_EXPORT_LIMIT')
+  }
+  return bytes
+}
+
 export async function exportWorkbook({
   db, bucket, actor, keyring, config, centreId, nowMs, format,
 } = {}) {
   if (!db?.prepare || !db?.batch || typeof bucket?.get !== 'function'
-    || actor?.role !== 'owner' || typeof actor.id !== 'string'
     || !keyring || config?.appEnv !== 'staging' || config?.dataMode !== 'fictional'
     || centreId !== 'centre_1' || !Number.isSafeInteger(nowMs) || nowMs < 0
     || !['legacy', 'panel-v2'].includes(format)) throw new Error('NOT_FOUND')
-  const snapshot = await workbookExportSnapshot(db, centreId, format)
+  const access = exportAccessFor(actor, nowMs, format)
+  const snapshot = await workbookExportSnapshot(db, centreId, format, access.specialistId)
   const { artifact } = snapshot
+  const callbacks = createWorkbookPanelMetadataCallbacks({ keyring, config, centreId })
+  await requireCurrentAuthority(db, access.actor)
+
+  if (access.specialistId !== null) {
+    let bytes
+    try {
+      bytes = validExportBytes(await specialistPanelExportFor({
+        rows: snapshot.rows,
+        callbacks,
+        specialistId: access.specialistId,
+      }))
+      await requireCurrentAuthority(db, access.actor)
+      const day = WARSAW_DAY.format(new Date(nowMs))
+      return Object.freeze({
+        bytes,
+        filename: `bear-with-me-${format}-${day}.xlsx`,
+      })
+    } catch (error) {
+      bytes?.fill?.(0)
+      throw error
+    }
+  }
+
   const source = await readWorkbookArtifact({
     bucket,
     keyring,
@@ -595,14 +729,11 @@ export async function exportWorkbook({
       : await panelExportFor({
         source,
         rows: snapshot.rows,
-        callbacks: createWorkbookPanelMetadataCallbacks({ keyring, config, centreId }),
+        callbacks,
         centreId,
       })
-    if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1
-      || bytes.byteLength > MAX_WORKBOOK_EXPORT_BYTES) {
-      bytes?.fill?.(0)
-      throw new Error('WORKBOOK_EXPORT_LIMIT')
-    }
+    validExportBytes(bytes)
+    await requireCurrentAuthority(db, access.actor)
     const day = WARSAW_DAY.format(new Date(nowMs))
     return Object.freeze({
       bytes,
@@ -882,7 +1013,9 @@ async function inspectWorkbook(input) {
   if (!bytes || bytes.byteLength < 1 || bytes.byteLength > MAX_WORKBOOK_BYTES
     || typeof command.filename !== 'string' || !command.filename.toLowerCase().endsWith('.xlsx')
     || command.filename.includes('/') || command.filename.includes('\\')
-    || command.actor?.role !== 'owner' || typeof command.actor.id !== 'string'
+    || !authorize(command.actor, 'finance.import', CENTRE_RESOURCE, {
+      nowMs: command.nowMs,
+    })
     || command.config?.appEnv !== 'staging' || command.config?.dataMode !== 'fictional'
     || typeof command.centreId !== 'string' || !CENTRE_ID.test(command.centreId)
     || !Number.isSafeInteger(command.nowMs) || command.nowMs < 0
@@ -1060,7 +1193,7 @@ const loadImportRow = async (db, importId, actorId = null) => {
 }
 
 export async function getWorkbookImport({ db, actor, nowMs, importId } = {}) {
-  if (actor?.role !== 'owner' || typeof actor.id !== 'string'
+  if (!authorize(actor, 'finance.import', CENTRE_RESOURCE, { nowMs })
     || !db?.prepare || typeof importId !== 'string' || !IMPORT_ID.test(importId)
     || !Number.isSafeInteger(nowMs) || nowMs < 0) throw new Error('NOT_FOUND')
   const row = await db.prepare(
@@ -1290,7 +1423,9 @@ export async function createWorkbookImport(input) {
     ))) createInvalid()
   const command = Object.freeze({ ...input })
   if (!command.db?.prepare || !command.db?.batch || typeof command.bucket?.put !== 'function'
-    || command.actor?.role !== 'owner' || typeof command.actor.id !== 'string'
+    || !authorize(command.actor, 'finance.import', CENTRE_RESOURCE, {
+      nowMs: command.nowMs,
+    })
     || command.config?.appEnv !== 'staging' || command.config?.dataMode !== 'fictional'
     || command.centreId !== SOURCE_SCOPE.id || typeof command.idFactory !== 'function'
     || typeof command.correlationId !== 'string' || !CORRELATION_ID.test(command.correlationId)
@@ -1399,6 +1534,7 @@ export async function createWorkbookImport(input) {
   )
   const objectKey = `workbook-objects/wbo_${command.idFactory()}_${command.idFactory()}`
   const store = command.storeArtifact ?? storeWorkbookArtifact
+  await requireCurrentAuthority(command.db, command.actor)
   const descriptor = await store({
     bucket: command.bucket,
     keyring: command.keyring,
@@ -1524,6 +1660,7 @@ export async function createWorkbookImport(input) {
       },
       reasonEnvelope: null,
     }),
+    authoritySnapshotInvariant(command.db, command.actor),
   )
   try {
     await command.db.batch(statements)

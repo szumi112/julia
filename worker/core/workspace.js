@@ -1,6 +1,7 @@
 import { AppError } from '../http/errors.js'
 import { isD1MissingColumn } from '../db/errors.js'
 import { authorize } from '../identity/policy.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { decryptForScope } from '../security/envelope.js'
 import { decodeBase64Url } from '../security/encoding.js'
 import { decryptClientIdentity } from './crypto.js'
@@ -42,6 +43,11 @@ const CAPS = Object.freeze({
   specialists: 50, clients: 1_000, appointments: 500, paymentEntries: 1_000,
   historicalClients: 1_000, historicalOccurrences: 1_000,
 })
+const WORKSPACE_CAPABILITIES = Object.freeze([
+  'appointment.charge.read',
+  'client.operational.read',
+  'specialist.directory.read',
+])
 const STAFF_KEYS = Object.freeze([
   'id', 'staff_user_id', 'standard_rate_grosze', 'status', 'version', 'staff_id',
   'staff_specialist_id', 'staff_status', 'staff_version', 'display_name_envelope',
@@ -470,14 +476,9 @@ const limit = (rows, field) => {
 }
 
 const validActor = (actor) => {
-  const value = captureExact(actor, ['id', 'role', 'specialistId', 'version'])
-  if (typeof value.id !== 'string' || !/^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value.id)
-    || !['owner', 'coordinator', 'specialist'].includes(value.role)
-    || !positive(value.version)
-    || (value.role === 'specialist'
-      ? !isSpecialistId(value.specialistId)
-      : value.specialistId !== null && !isSpecialistId(value.specialistId))) invalid()
-  return Object.freeze(value)
+  const value = captureAuthorityActor(actor)
+  if (!value) invalid()
+  return value
 }
 
 const dataKeyFromClient = (row) => Object.freeze(Object.fromEntries(DATA_KEY_KEYS.map((key) => {
@@ -880,6 +881,7 @@ export async function readWorkspace(input) {
   }
   const captured = captureExact(input, expected)
   const actor = validActor(captured.actor)
+  if (!WORKSPACE_CAPABILITIES.every((capability) => actor.capabilities.includes(capability))) invalid()
   const window = captureExact(captured.window, ['from', 'to', 'lower', 'upper'])
   if (!DATE.test(window.from) || !DATE.test(window.to)
     || !isCanonicalUtc(window.lower) || !isCanonicalUtc(window.upper)

@@ -17,6 +17,7 @@ import {
 } from './workbook-source-registry.js'
 import { getOrCreateDataKey } from '../security/envelope.js'
 import { encodeBase64Url } from '../security/encoding.js'
+import { authorize } from '../identity/policy.js'
 
 export const ACTIVITY_PROJECTION_SLICE_SIZE = 1
 
@@ -58,6 +59,22 @@ const exact = (value, keys) => {
     fail()
   }
 }
+
+const authorityInvariant = (db, actor) => db.prepare(
+  `INSERT INTO core_directory_invariant_failures (failure_kind)
+   SELECT 'activity_projection_authority_changed' WHERE NOT EXISTS (
+     SELECT 1 FROM staff_users AS staff
+     JOIN staff_authorities AS authority ON authority.staff_id=staff.id
+     WHERE staff.id=? AND staff.role=? AND staff.specialist_id IS ?
+       AND staff.version=? AND staff.status='active' AND authority.revision=?
+   )`,
+).bind(
+  actor.id,
+  actor.role,
+  actor.specialistId,
+  actor.version,
+  actor.authorityRevision,
+)
 
 const civilMonth = (value) => {
   const match = typeof value === 'string' ? MONTH.exec(value) : null
@@ -157,6 +174,7 @@ const VERSION_ID = /^ver_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const JOB_ID = /^apj_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const AUDIT_ID = /^aud_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
+const CENTRE_RESOURCE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 
 const made = (factory, prefix, pattern) => {
   let id
@@ -182,7 +200,9 @@ const commandInput = (input) => {
     || !command.recoveryDb?.batch || !command.keyring
     || command.centreId !== 'centre_1'
     || typeof command.importId !== 'string' || !IMPORT_ID.test(command.importId)
-    || !command.actor || command.actor.role !== 'owner'
+    || !authorize(command.actor, 'finance.import', CENTRE_RESOURCE, {
+      nowMs: command.nowMs,
+    })
     || typeof command.actor.id !== 'string' || !STAFF_ID.test(command.actor.id)
     || command.config?.appEnv !== 'staging' || command.config?.dataMode !== 'fictional'
     || typeof command.idFactory !== 'function'
@@ -717,7 +737,10 @@ export async function materializeActivitySlice(input) {
   const prepared = await prepareActivitySlice(commandInput(input))
   if (!prepared.statements.length) return sliceResult(prepared)
   try {
-    await prepared.command.db.batch(prepared.statements)
+    await prepared.command.db.batch([
+      ...prepared.statements,
+      authorityInvariant(prepared.command.db, prepared.command.actor),
+    ])
     return sliceResult(prepared)
   } catch (error) {
     if (await authenticatePreparedReplay(prepared)) {
@@ -861,7 +884,10 @@ const continuationCommand = (input) => {
     'expectedVersion', 'idempotencyKey', 'idFactory', 'nowMs',
   ])
   if (!command.db?.prepare || !command.db?.batch || !command.recoveryDb?.prepare
-    || !command.recoveryDb?.batch || command.actor?.role !== 'owner'
+    || !command.recoveryDb?.batch
+    || !authorize(command.actor, 'finance.import', CENTRE_RESOURCE, {
+      nowMs: command.nowMs,
+    })
     || typeof command.actor.id !== 'string' || !STAFF_ID.test(command.actor.id)
     || !command.keyring || command.config?.appEnv !== 'staging'
     || command.config?.dataMode !== 'fictional' || command.centreId !== 'centre_1'
@@ -1030,6 +1056,7 @@ const createProjectionJob = async (command, state, requestHash) => {
       projectionGuardStatement(command, {
         projection, auditId, requestHash, sourceRecordId: null,
       }),
+      authorityInvariant(command.db, command.actor),
     ])
   } catch (error) {
     return recoverProjectionWrite(command, requestHash, 0, error)
@@ -1112,6 +1139,7 @@ export async function continueActivityProjection(input) {
     projectionGuardStatement(command, {
       projection, auditId, requestHash, sourceRecordId,
     }),
+    authorityInvariant(command.db, command.actor),
   ]
   try {
     await command.db.batch(statements)
@@ -1129,7 +1157,8 @@ export async function continueActivityProjection(input) {
 
 export async function getActivityProjection(input) {
   const value = exact(input, ['db', 'actor', 'importId'])
-  if (!value.db?.prepare || value.actor?.role !== 'owner'
+  if (!value.db?.prepare
+    || !authorize(value.actor, 'finance.import', CENTRE_RESOURCE, { nowMs: 0 })
     || typeof value.actor.id !== 'string' || !STAFF_ID.test(value.actor.id)
     || typeof value.importId !== 'string' || !IMPORT_ID.test(value.importId)) {
     fail('NOT_FOUND')

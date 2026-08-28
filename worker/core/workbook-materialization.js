@@ -17,6 +17,7 @@ import {
   resolveAuthenticatedWorkbookSpecialist,
   WORKBOOK_SOURCE_SCOPE,
 } from './workbook-source-registry.js'
+import { authorize } from '../identity/policy.js'
 
 export const WORKBOOK_MATERIALIZATION_SLICE_SIZE = 64
 
@@ -25,6 +26,7 @@ const SOURCE_SCOPE = WORKBOOK_SOURCE_SCOPE
 const FINANCE_SCOPE = Object.freeze({
   type: 'centre_finance', id: 'centre_1', purpose: 'ledger',
 })
+const CENTRE_RESOURCE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 const IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CORRELATION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -64,6 +66,21 @@ const invariant = (db, predicate, ...bindings) => db.prepare(
   `INSERT INTO core_directory_invariant_failures (failure_kind)
    SELECT 'workbook_materialization_postcondition' WHERE NOT (${predicate})`,
 ).bind(...bindings)
+
+const authorityInvariant = (db, actor) => invariant(
+  db,
+  `EXISTS (
+    SELECT 1 FROM staff_users AS staff
+    JOIN staff_authorities AS authority ON authority.staff_id=staff.id
+    WHERE staff.id=? AND staff.role=? AND staff.specialist_id IS ?
+      AND staff.version=? AND staff.status='active' AND authority.revision=?
+  )`,
+  actor.id,
+  actor.role,
+  actor.specialistId,
+  actor.version,
+  actor.authorityRevision,
+)
 
 const parseJson = (value, code = 'WORKBOOK_MATERIALIZATION_INVALID') => {
   try { return JSON.parse(value) } catch { fail(code) }
@@ -326,6 +343,7 @@ const persistSlice = async ({
     nextImportVersion,
     nextImportStatus,
   ))
+  statements.push(authorityInvariant(command.db, command.actor))
   await command.db.batch(statements)
   return responseFrom(await loadState(command.db, command.importId, command.actor.id))
 }
@@ -1105,7 +1123,9 @@ export async function continueWorkbookMaterialization(input) {
   const command = input && typeof input === 'object' && !Array.isArray(input)
     ? Object.freeze({ ...input }) : null
   if (!command || !command.db?.prepare || !command.db?.batch
-    || command.actor?.role !== 'owner' || typeof command.actor.id !== 'string'
+    || !authorize(command.actor, 'finance.import', CENTRE_RESOURCE, {
+      nowMs: command.nowMs,
+    })
     || command.config?.appEnv !== 'staging' || command.config?.dataMode !== 'fictional'
     || command.centreId !== 'centre_1' || typeof command.importId !== 'string'
     || !IMPORT_ID.test(command.importId) || !Number.isSafeInteger(command.expectedVersion)

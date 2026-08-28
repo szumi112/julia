@@ -9,9 +9,11 @@ import {
   getHistoricalProjection,
   resolveHistoricalConflict,
 } from '../core/historical-materializer.js'
+import { authorize } from '../identity/policy.js'
 
 const IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const CENTRE_RESOURCE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 
 const validation = (field) => { throw new AppError('VALIDATION_FAILED', { field }) }
 const exactBody = (value, keys) => {
@@ -38,7 +40,9 @@ const importIdFrom = (value) => {
 }
 
 const projectionActor = (actor) => {
-  if (actor?.role !== 'owner') throw new AppError('NOT_FOUND')
+  if (!authorize(actor, 'finance.import', CENTRE_RESOURCE, { nowMs: 0 })) {
+    throw new AppError('NOT_FOUND')
+  }
   return actor
 }
 

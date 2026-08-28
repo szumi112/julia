@@ -5,12 +5,13 @@ import { createKeyring } from '../../worker/security/keyring.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
+  applySpecialistProfilesStageD,
+  applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
-const OWNER = Object.freeze({
-  id: 'stf_finance_bootstrap_owner', role: 'owner', specialistId: null,
-})
+const OWNER = authorityActor({ id: 'stf_finance_bootstrap_owner', role: 'owner' })
 const NOW_MS = 1_800_000_100_000
 const CORRELATION_ID = '00000000-0000-4000-8000-000000000041'
 
@@ -30,6 +31,8 @@ describe('finance key bootstrap concurrency', () => {
     await completeCoreDirectoryStageA(env.DB)
     await applyCoreDirectoryStageB(env.DB)
     await applyFinanceStageC(env.DB)
+    await applySpecialistProfilesStageD(env.DB)
+    await applyWorkbookRegistryStageE(env.DB)
     await env.DB.prepare(
       `INSERT INTO staff_users
        (id,email_lookup,email_envelope,display_name_envelope,role,status,

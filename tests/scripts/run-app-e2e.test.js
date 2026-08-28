@@ -17,7 +17,7 @@ const {
   runBoundedAppChild,
   runAppE2E,
 } = appE2ERunner
-import { CAPABILITIES } from '../../worker/identity/policy.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const CSP = "default-src 'none'"
 const READY_URL = 'http://127.0.0.1:5174/api/v1/session'
@@ -259,7 +259,8 @@ const readyResponse = (overrides = {}) => {
       specialistId: null,
       version: 1,
     },
-    capabilities: [...CAPABILITIES],
+    authorityRevision: 1,
+    capabilities: [...ROLE_DEFAULT_CAPABILITIES.owner],
     csrfToken: CSRF_TOKEN,
     csrfExpiresAt: new Date(CSRF_EXPIRES * 1000).toISOString(),
     environment: 'development',
@@ -301,6 +302,8 @@ test('readiness accepts only the exact loopback session, security headers, and s
     readyResponse({ headers: { 'content-type': 'application/jsonp' } }),
     readyResponse({ body: { environment: 'staging' } }),
     readyResponse({ body: { dataMode: 'real' } }),
+    readyResponse({ body: { authorityRevision: 0 } }),
+    readyResponse({ body: { authorityRevision: 1.5 } }),
     readyResponse({ body: { capabilities: ['staff.manage'] } }),
     readyResponse({ body: { actor: { id: 'stf_other', displayName: 'Other', professionalTitle: null, role: 'owner', specialistId: null, version: 1 } } }),
     readyResponse({ body: { actor: { id: 'stf_local_owner', displayName: 'Alicja Testowa', professionalTitle: null, role: 'owner', specialistId: null } } }),
@@ -326,7 +329,8 @@ test('readiness accepts only the exact loopback session, security headers, and s
             specialistId: null,
             version: 1,
           },
-          capabilities: [...CAPABILITIES],
+          authorityRevision: 1,
+          capabilities: [...ROLE_DEFAULT_CAPABILITIES.owner],
           csrfToken: CSRF_TOKEN,
           csrfExpiresAt: new Date(CSRF_EXPIRES * 1000).toISOString(),
           environment: 'development',

@@ -21,6 +21,7 @@ import { paymentEntryFor, paymentSnapshotOf, scopedBillingSummary } from '../wor
 import {
   assertCorrectionReason, parsePaymentAmountGrosze, validatePaymentDateInput, warsawDateFromUtc,
 } from '../core-records.js'
+import { canPerformAction } from '../capability-access.js'
 import {
   clientIdentityFor,
   monthWorkspaceRange,
@@ -627,7 +628,7 @@ export function Payments() {
   const workspaceRange = useMemo(() => monthWorkspaceRange(ym), [ym])
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const canManagePayments = isApp
-    && capabilities.includes('payment.manage')
+    && canPerformAction(capabilities, 'payment.record')
     && workspaceState === 'ready'
     && workspace.status === 'ready'
 

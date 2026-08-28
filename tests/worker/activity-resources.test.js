@@ -22,15 +22,14 @@ import {
   applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2026-08-15T10:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
-const owner = Object.freeze({
-  id: 'stf_activity_read_owner', role: 'owner', specialistId: null, version: 1,
-})
-const specialist = Object.freeze({
+const owner = authorityActor({ id: 'stf_activity_read_owner', role: 'owner' })
+const specialist = authorityActor({
   id: 'stf_activity_read_own', role: 'specialist',
-  specialistId: 'sp_activity_read_own', version: 1,
+  specialistId: 'sp_activity_read_own',
 })
 const key = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
 let keyring

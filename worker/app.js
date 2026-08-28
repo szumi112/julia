@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { isCapability } from '../src/capabilities.js'
 import { isCoreAuditAction } from '../src/core-audit-contract.js'
 import { auditEventStatement } from './audit/events.js'
 import { loadConfig } from './config.js'
@@ -34,8 +35,14 @@ import {
   getStaff,
   postDeactivation,
   postInvitation,
+  postRoleChange,
   postSpecialistInvitation,
 } from './routes/staff.js'
+import {
+  getCapabilityOverride,
+  getCapabilityTargets,
+  postCapabilityOverride,
+} from './routes/capability-overrides.js'
 import { getWorkspace } from './routes/workspace.js'
 import {
   getHistoricalProjectionStatus,
@@ -104,6 +111,7 @@ const SPECIALIST_INVITATION_ID = /^\/api\/v1\/specialists\/sp_[A-Za-z0-9][A-Za-z
 const ACTION_RESOLUTION_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/resolution$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CLIENT_PATH_ID = 'cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}'
+const STAFF_PATH_ID = 'stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const APPOINTMENT_PATH_ID = 'apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const PAYMENT_PATH_ID = 'pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const FINANCE_BATCH_PATH_ID = 'fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
@@ -116,10 +124,25 @@ const ACTIVITY_CLASS_PATH_ID = 'acl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const CORE_COMMAND_ALLOW = 'POST, OPTIONS'
 const CORE_READ_ALLOW = 'GET, HEAD, OPTIONS'
 const CORE_BUDGET = Object.freeze({ totalLimit: 50, recoveryReserve: 8 })
+const CAPABILITY_MUTATION_BUDGET = Object.freeze({
+  totalLimit: 80,
+  recoveryReserve: 12,
+})
+const STAFF_ROLE_MUTATION_BUDGET = Object.freeze({
+  totalLimit: 96,
+  recoveryReserve: 16,
+})
 const coreRouteMatchers = new WeakMap()
 const descriptor = (value) => {
   const route = Object.freeze({
     ...value,
+    capability: value.capability ?? null,
+    capabilityAnyOf: value.capabilityAnyOf
+      ? Object.freeze([...value.capabilityAnyOf])
+      : null,
+    capabilityAllOf: value.capabilityAllOf
+      ? Object.freeze([...value.capabilityAllOf])
+      : null,
     methods: Object.freeze([...value.methods]),
     auditActions: Object.freeze([...value.auditActions]),
     bodyKeys: value.bodyKeys ? Object.freeze([...value.bodyKeys]) : null,
@@ -127,7 +150,7 @@ const descriptor = (value) => {
     freshAuth: value.freshAuth === true,
     idempotency: value.idempotency !== false,
     queryMode: value.queryMode ?? (value.bodyKeys === null ? 'any' : 'none'),
-    sharedBudget: CORE_BUDGET,
+    sharedBudget: value.sharedBudget ?? CORE_BUDGET,
     core: true,
     expected: 'human',
   })
@@ -138,7 +161,11 @@ const descriptor = (value) => {
   return route
 }
 const CORE_ROUTES = Object.freeze([
-  descriptor({ id: 'workspace', path: '/api/v1/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'client.operational.read', auditActions: [], bodyKeys: null }),
+  descriptor({ id: 'workspace', path: '/api/v1/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capabilityAllOf: ['appointment.charge.read', 'client.operational.read', 'specialist.directory.read'], auditActions: [], bodyKeys: null }),
+  descriptor({ id: 'permissions.targets', path: '/api/v1/staff/capability-targets', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'permissions.manage', auditActions: [], bodyKeys: null, queryMode: 'none', idempotency: false }),
+  descriptor({ id: 'permissions.read', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/capability-overrides$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'permissions.manage', auditActions: [], bodyKeys: null, queryMode: 'none', idempotency: false }),
+  descriptor({ id: 'permissions.replace', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/capability-overrides/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'permissions.manage', auditActions: ['staff.capabilities.updated'], bodyKeys: ['expectedAuthorityRevision', 'allow', 'deny'], queryMode: 'none', sharedBudget: CAPABILITY_MUTATION_BUDGET }),
+  descriptor({ id: 'staff.role.update', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/role$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['staff.role.updated'], bodyKeys: ['expectedVersion', 'role'], queryMode: 'none', sharedBudget: STAFF_ROLE_MUTATION_BUDGET }),
   descriptor({ id: 'specialists.create', path: '/api/v1/specialists', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'professionalTitle', 'standardRateGrosze'] }),
   descriptor({ id: 'specialists.edit', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze'] }),
   descriptor({ id: 'specialists.account.link', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/account-links$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.account.linked'], bodyKeys: ['staffId', 'expectedSpecialistVersion', 'expectedStaffVersion'] }),
@@ -151,17 +178,17 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'appointments.payment', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/payments$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'] }),
   descriptor({ id: 'payments.correct', pathPattern: `^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
   descriptor({ id: 'finance.list', path: '/api/v1/finance', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null }),
-  descriptor({ id: 'finance.import.start', path: '/api/v1/finance/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'] }),
-  descriptor({ id: 'finance.import.chunk', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/chunks$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'] }),
-  descriptor({ id: 'finance.import.commit', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/commit$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'] }),
-  descriptor({ id: 'workbooks.preview', path: '/api/v1/workbooks/preview', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, bodyMode: 'workbook-multipart', idempotency: false, queryMode: 'none' }),
-  descriptor({ id: 'workbooks.import', path: '/api/v1/workbooks/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['workbook.import.created'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
-  descriptor({ id: 'workbooks.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['workbook.import.materialized'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
-  descriptor({ id: 'workbooks.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, queryMode: 'none' }),
-  descriptor({ id: 'workbooks.export', path: '/api/v1/workbooks/export', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, freshAuth: true, queryMode: 'handler' }),
-  descriptor({ id: 'historical.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, queryMode: 'none' }),
-  descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedVersion'], freshAuth: true }),
-  descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], freshAuth: true }),
+  descriptor({ id: 'finance.import.start', path: '/api/v1/finance/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'] }),
+  descriptor({ id: 'finance.import.chunk', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/chunks$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'] }),
+  descriptor({ id: 'finance.import.commit', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/commit$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'workbooks.preview', path: '/api/v1/workbooks/preview', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, bodyMode: 'workbook-multipart', idempotency: false, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.import', path: '/api/v1/workbooks/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.created'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.materialized'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.export', path: '/api/v1/workbooks/export', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'], auditActions: [], bodyKeys: null, freshAuth: true, queryMode: 'handler' }),
+  descriptor({ id: 'historical.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], freshAuth: true }),
+  descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], freshAuth: true }),
   descriptor({ id: 'historical.clients.activate', pathPattern: `^/api/v1/historical-clients/${HISTORICAL_CLIENT_PATH_ID}/activation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'] }),
   descriptor({ id: 'activities.workspace', path: '/api/v1/activities/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'tus.manage', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'activities.groups.create', path: '/api/v1/activities/groups', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'] }),
@@ -173,11 +200,26 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'activities.classes.create', path: '/api/v1/activities/classes', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.class.created'], bodyKeys: ['groupId', 'date', 'time', 'durationMinutes', 'topic', 'status'] }),
   descriptor({ id: 'activities.classes.edit', pathPattern: `^/api/v1/activities/classes/${ACTIVITY_CLASS_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.class.updated'], bodyKeys: ['expectedVersion', 'date', 'time', 'durationMinutes', 'topic', 'status'] }),
   descriptor({ id: 'activities.attendance.set', pathPattern: `^/api/v1/activities/classes/${ACTIVITY_CLASS_PATH_ID}/attendance$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.attendance.set'], bodyKeys: ['participantId', 'status', 'expectedVersion'] }),
-  descriptor({ id: 'activities.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, queryMode: 'none' }),
-  descriptor({ id: 'activities.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], freshAuth: true }),
+  descriptor({ id: 'activities.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'activities.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], freshAuth: true }),
 ])
 export const CORE_ROUTE_DESCRIPTORS = CORE_ROUTES
-if (CORE_ROUTES.some((route) => route.auditActions.some((action) => !isCoreAuditAction(action)))) {
+if (CORE_ROUTES.some((route) => {
+  const singular = isCapability(route.capability)
+    && route.capabilityAnyOf === null && route.capabilityAllOf === null
+  const anyOf = route.capability === null && route.capabilityAllOf === null
+    && Array.isArray(route.capabilityAnyOf)
+    && route.capabilityAnyOf.length > 0
+    && new Set(route.capabilityAnyOf).size === route.capabilityAnyOf.length
+    && route.capabilityAnyOf.every(isCapability)
+  const allOf = route.capability === null && route.capabilityAnyOf === null
+    && Array.isArray(route.capabilityAllOf)
+    && route.capabilityAllOf.length > 1
+    && new Set(route.capabilityAllOf).size === route.capabilityAllOf.length
+    && route.capabilityAllOf.every(isCapability)
+  return (!singular && !anyOf && !allOf)
+    || route.auditActions.some((action) => !isCoreAuditAction(action))
+})) {
   throw new Error('CORE_ROUTE_REGISTRY_INVALID')
 }
 const OPERATION_SERVICES = Object.freeze({
@@ -419,7 +461,7 @@ export function createApp(deps = {}) {
 
     if (route.core) {
       const rawDb = c.env?.DB ?? deps.db
-      const budget = createD1QueryBudget(rawDb, CORE_BUDGET)
+      const budget = createD1QueryBudget(rawDb, route.sharedBudget)
       c.set('coreD1Budget', budget)
       c.set('coreWorkDb', budget.work)
       c.set('coreRecoveryDb', budget.recovery)
@@ -483,6 +525,10 @@ export function createApp(deps = {}) {
       )
       c.set('actor', actor)
       c.set('cryptoContext', cryptoContext)
+      if (Array.isArray(route.capabilityAllOf)
+        && !route.capabilityAllOf.every((capability) => (
+          actor?.capabilities?.includes(capability) === true
+        ))) throw new AppError('FORBIDDEN')
     }
 
     if (isMutationMethod(method)) {
@@ -546,6 +592,63 @@ export function createApp(deps = {}) {
       url: c.req.url,
     })
     return readResponse(c, result)
+  })
+  app.get('/api/v1/staff/capability-targets', async (c) => {
+    if (c.get('routeId') !== 'permissions.targets') throw new AppError('NOT_FOUND')
+    const result = await getCapabilityTargets({
+      db: c.get('coreWorkDb'),
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      ...(deps.listCapabilityTargets ? { list: deps.listCapabilityTargets } : {}),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/staff/:staffId/capability-overrides', async (c) => {
+    if (c.get('routeId') !== 'permissions.read') throw new AppError('NOT_FOUND')
+    const result = await getCapabilityOverride({
+      db: c.get('coreWorkDb'),
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      staffId: c.req.param('staffId'),
+      nowMs: c.get('nowMs'),
+      ...(deps.getCapabilityOverrides ? { read: deps.getCapabilityOverrides } : {}),
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/staff/:staffId/capability-overrides/edits', async (c) => {
+    if (c.get('routeId') !== 'permissions.replace') throw new AppError('NOT_FOUND')
+    const result = await postCapabilityOverride({
+      db: c.get('coreWorkDb'),
+      recoveryDb: c.get('coreRecoveryDb'),
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      staffId: c.req.param('staffId'),
+      input: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      correlationId: c.get('correlationId'),
+      nowMs: c.get('nowMs'),
+      idFactory: deps.idFactory ?? idFactory,
+      ...(deps.replaceCapabilityOverrides
+        ? { replace: deps.replaceCapabilityOverrides } : {}),
+    })
+    return c.json(result)
+  })
+  app.post('/api/v1/staff/:staffId/role', async (c) => {
+    if (c.get('routeId') !== 'staff.role.update') throw new AppError('NOT_FOUND')
+    const result = await (deps.postRoleChange ?? postRoleChange)({
+      db: c.get('coreWorkDb'),
+      recoveryDb: c.get('coreRecoveryDb'),
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      staffId: c.req.param('staffId'),
+      body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      correlationId: c.get('correlationId'),
+      nowMs: c.get('nowMs'),
+      idFactory: deps.idFactory ?? idFactory,
+    })
+    return c.json(result)
   })
   app.post('/api/v1/clients', async (c) => {
     if (c.get('routeId') !== 'clients.create') throw new AppError('NOT_FOUND')

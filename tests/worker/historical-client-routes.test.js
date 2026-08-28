@@ -5,12 +5,11 @@ import {
   usageForD1QueryBudgetViews,
 } from '../../worker/db/query-budget.js'
 import { AppError } from '../../worker/http/errors.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2027-03-04T08:00:00.000Z')
 const ORIGIN = 'https://bearwithme-panel.app'
-const actor = Object.freeze({
-  id: 'stf_historical_route_owner', role: 'owner', specialistId: null, version: 1,
-})
+const actor = authorityActor({ id: 'stf_historical_route_owner', role: 'owner' })
 const principal = Object.freeze({
   kind: 'human', subject: 'access-historical-route-owner',
   normalizedEmail: 'historical-route-owner@example.test',

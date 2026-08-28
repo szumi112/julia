@@ -2,9 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Icon, BearMark } from './icons.jsx'
 import { Avatar, Button, EmptyState, IconBtn, PopItem, Popover } from './ui.jsx'
 import { useApp, useToasts } from './store.jsx'
-import { ShellCtx } from './shell-ctx.js'
+import {
+  canAccessShellRoute,
+  resolveShellRoute,
+  ShellCtx,
+} from './shell-ctx.js'
 import { DEMO_ROLES } from './data.js'
 import { shellRoleFor } from './auth-role.js'
+import { canPerformAction } from './capability-access.js'
 import { useIsCompact, useIsPhone } from './responsive.js'
 import { TodayCockpit } from './cockpit.jsx'
 import { motionOK, brandBurst } from './anim.js'
@@ -43,22 +48,7 @@ const NAV = [
   { id: 'reports', label: 'Raporty', icon: 'reports' },
 ]
 
-const DEMO_ROLE_NAV = {
-  owner: ['dashboard', 'calendar', 'clients', 'tus', 'team', 'payments', 'reports', 'settings'],
-  coordinator: ['dashboard', 'calendar', 'clients', 'tus', 'payments', 'settings'],
-  therapist: ['dashboard', 'calendar', 'clients', 'tus', 'settings'],
-}
-const APP_ROLE_NAV = {
-  owner: ['dashboard', 'calendar', 'clients', 'team', 'payments', 'ledger', 'reports', 'settings'],
-  coordinator: ['dashboard', 'calendar', 'clients', 'payments', 'ledger', 'reports', 'settings'],
-  therapist: ['dashboard', 'calendar', 'clients', 'payments', 'settings'],
-}
 const EMPTY_CAPABILITIES = Object.freeze([])
-const canAccessInMode = (routeName, role, appMode) => {
-  if (appMode === 'app' && ['tus', 'tusGroup', 'psych'].includes(routeName)) return false
-  const matrix = appMode === 'app' ? APP_ROLE_NAV : DEMO_ROLE_NAV
-  return Boolean(matrix[role.id]?.includes(ACTIVE_OF[routeName] || routeName))
-}
 
 const routeTitle = (routeName) => {
   const navItem = NAV.find((item) => item.id === routeName)
@@ -383,7 +373,7 @@ function MobileNavDrawer({
 const PHONE_TAB_IDS = new Set(['dashboard', 'calendar', 'tus'])
 const PHONE_TABS = NAV.filter((item) => PHONE_TAB_IDS.has(item.id))
 
-function MobileTabbar({ route, navigate, onAdd, onMenu }) {
+function MobileTabbar({ route, navigate, canAccessRoute, onAdd, onMenu }) {
   const barRef = useRef(null)
   const [pill, setPill] = useState(null)
   const activeId = ACTIVE_OF[route.name] || route.name
@@ -431,7 +421,7 @@ function MobileTabbar({ route, navigate, onAdd, onMenu }) {
     <nav className="tabbar" ref={barRef} aria-label="Nawigacja dolna">
       {pill && <span className="tabbar__pill" style={{ transform: `translateX(${pill.left}px)` }} />}
       <div className="tabbar__side">
-        {PHONE_TABS.slice(0, 2).map(tab)}
+        {PHONE_TABS.slice(0, 2).filter((item) => canAccessRoute(item.id)).map(tab)}
       </div>
       {onAdd && (
         <button className="tabbar__fab" onClick={onAdd} aria-label="Nowa sesja">
@@ -439,7 +429,7 @@ function MobileTabbar({ route, navigate, onAdd, onMenu }) {
         </button>
       )}
       <div className="tabbar__side">
-        {PHONE_TABS.slice(2).map(tab)}
+        {PHONE_TABS.slice(2).filter((item) => canAccessRoute(item.id)).map(tab)}
         <button
           type="button"
           data-id="menu"
@@ -665,18 +655,27 @@ export function Shell({
   const actor = isApp ? session.actor : null
   const capabilities = isApp ? session.capabilities : EMPTY_CAPABILITIES
   const dataMode = isApp ? session.dataMode : 'fictional'
+  const routeAuthority = useMemo(() => ({
+    appMode,
+    capabilities,
+    roleId: role.id,
+  }), [appMode, capabilities, role.id])
   const canAccessRoute = useCallback(
-    (routeName, targetRole = role) => canAccessInMode(routeName, targetRole, appMode),
-    [appMode, role]
+    (routeName, targetRole = role) => canAccessShellRoute({
+      appMode,
+      capabilities,
+      roleId: targetRole.id,
+    }, routeName),
+    [appMode, capabilities, role]
   )
-  const [route, setRoute] = useState(() => {
+  const [storedRoute, setRoute] = useState(() => {
     const requested = routeFromHash(window.location.hash)
-    if (!requested || !VIEWS[requested.name]
-      || !canAccessInMode(requested.name, role, appMode)) {
-      return { name: 'dashboard' }
-    }
-    return requested
+    return resolveShellRoute(routeAuthority, requested) || { name: 'settings' }
   })
+  const route = useMemo(
+    () => resolveShellRoute(routeAuthority, storedRoute) || { name: 'settings' },
+    [routeAuthority, storedRoute]
+  )
   const [drawer, setDrawer] = useState(null)
   const [overlay, setOverlay] = useState(null)
   const [roleMenuOpen, setRoleMenuOpen] = useState(false)
@@ -688,6 +687,7 @@ export function Shell({
   const viewRegistryRef = useRef({})
   const routeRef = useRef(route)
   const roleRef = useRef(role)
+  const routeAuthorityRef = useRef(routeAuthority)
   // distinguishes hash-driven route commits (replace) from in-app navigation
   // (push) so browser back/forward walks views, not filter tweaks
   const fromHashRef = useRef(false)
@@ -705,6 +705,28 @@ export function Shell({
   const routeParamsKey = JSON.stringify(route.params || {})
   routeRef.current = route
   roleRef.current = role
+  routeAuthorityRef.current = routeAuthority
+
+  // A refreshed authority can invalidate the stored route before the shell
+  // state commit. Derive the safe route during render so the old view never
+  // paints, then synchronously discard stale shell state and replace the hash.
+  useLayoutEffect(() => {
+    if (route === storedRoute) return
+    const nextHash = routeHref(route.name)
+    viewRegistryRef.current = {}
+    leaveGuardsRef.current.clear()
+    setPendingLeave(null)
+    setRoleMenuOpen(false)
+    setDrawer(null)
+    setOverlay(null)
+    clearToasts()
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(window.history.state, '', nextHash)
+    }
+    committedHashRef.current = nextHash
+    routeRef.current = route
+    setRoute(route)
+  }, [clearToasts, route, storedRoute])
 
   useEffect(() => {
     const viaHash = fromHashRef.current
@@ -720,7 +742,9 @@ export function Shell({
       ? routeHref(route.name, route.params)
       : currentHash
     const viewChanged = previousName !== route.name
-    if (!viaHash && previousName && viewChanged) {
+    const previousAccessible = previousName
+      && canAccessShellRoute(routeAuthorityRef.current, previousName)
+    if (!viaHash && previousAccessible && viewChanged) {
       window.history.pushState(window.history.state, '', nextHash)
     } else if (nextHash !== currentHash) {
       window.history.replaceState(window.history.state, '', nextHash)
@@ -736,14 +760,19 @@ export function Shell({
       const currentRole = roleRef.current
       const currentRoute = routeRef.current
       const requested = routeFromHash(window.location.hash)
-      const accessible = requested
-        && VIEWS[requested.name]
-        && canAccessInMode(requested.name, currentRole, appMode)
-      const nextRoute = accessible ? requested : { name: 'dashboard' }
+      const nextRoute = resolveShellRoute(routeAuthorityRef.current, requested)
+        || { name: 'settings' }
       if (
         currentRoute.name === nextRoute.name
         && JSON.stringify(currentRoute.params || {}) === JSON.stringify(nextRoute.params || {})
-      ) return
+      ) {
+        const nextHash = routeHref(nextRoute.name, nextRoute.params)
+        if (window.location.hash !== nextHash) {
+          window.history.replaceState(window.history.state, '', nextHash)
+        }
+        committedHashRef.current = nextHash
+        return
+      }
       const commit = () => {
         viewRegistryRef.current = patchRegistryRoute(
           viewRegistryRef.current,
@@ -765,7 +794,7 @@ export function Shell({
     }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
-  }, [appMode])
+  }, [])
 
   useMonthSettled()
 
@@ -849,7 +878,7 @@ export function Shell({
   const navigate = useCallback((name, params) => {
     const currentRole = roleRef.current
     const currentRoute = routeRef.current
-    if (!canAccessInMode(name, currentRole, appMode)) return
+    if (!canAccessShellRoute(routeAuthorityRef.current, name)) return
     if (currentRoute.name === name && JSON.stringify(currentRoute.params) === JSON.stringify(params)) return
     if (leaveBlocked()) {
       setPendingLeave(() => () => requestLeave(() => navigate(name, params)))
@@ -866,7 +895,7 @@ export function Shell({
     const nextRoute = { name, params }
     routeRef.current = nextRoute
     setRoute(nextRoute)
-  }, [appMode, requestLeave])
+  }, [requestLeave])
 
   const setDemoRole = useCallback((roleId) => {
     if (isApp) return
@@ -884,7 +913,11 @@ export function Shell({
     const parentRoute = ACTIVE_OF[currentRoute.name]
     const candidate = parentRoute || currentRoute.name
     const nextRoute = {
-      name: canAccessInMode(candidate, nextRole, 'demo') ? candidate : 'dashboard',
+      name: canAccessShellRoute({
+        appMode: 'demo',
+        capabilities: EMPTY_CAPABILITIES,
+        roleId: nextRole.id,
+      }, candidate) ? candidate : 'dashboard',
     }
     if (leaveBlocked()) {
       setPendingLeave(() => () => requestLeave(() => setDemoRole(roleId)))
@@ -912,7 +945,8 @@ export function Shell({
     setRoleMenuOpen(open)
   }, [])
   const openSessionForm = useCallback((opts = {}) => {
-    if (isApp && !capabilities.includes('appointment.manage')) return
+    if (isApp && !canPerformAction(capabilities, opts.session
+      ? 'appointment.edit' : 'appointment.create')) return
     setDrawer({ kind: 'session', opts })
     openOverlay('drawer')
   }, [capabilities, isApp, openOverlay])
@@ -1055,6 +1089,7 @@ export function Shell({
           <MobileTabbar
             route={route}
             navigate={navigate}
+            canAccessRoute={canAccessRoute}
             onAdd={isApp ? undefined : openNewSession}
             onMenu={openNavigation}
           />

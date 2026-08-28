@@ -45,6 +45,7 @@ const errorText = (error) => error instanceof ApiError && error.code === 'FORBID
   : error instanceof ApiError && error.code === 'STAFF_INVITATION_CONFLICT'
     ? 'Ten profil ma już przypisane zaproszenie lub konto.'
     : 'Nie udało się zapisać zmian. Spróbuj ponownie.'
+const SPECIALIST_INVITATION_UNCERTAIN = 'Nie wiadomo, czy zaproszenie zostało utworzone. Spróbuj ponownie bez zmiany adresu e-mail.'
 
 export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
   const initialName = profile?.name ?? ''
@@ -129,7 +130,15 @@ export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
 export function SpecialistAccessForm({ profile, onClose, onSaved }) {
   const [email, setEmail] = useState('')
   const [saving, setSaving] = useState(false)
+  const [uncertain, setUncertain] = useState(false)
   const [error, setError] = useState(null)
+  const actionRef = useRef(null)
+  const changeEmail = (value) => {
+    setEmail(value)
+    setError(null)
+    setUncertain(false)
+    actionRef.current = null
+  }
   const submit = async (event) => {
     event.preventDefault()
     const canonical = email.trim().toLowerCase().normalize('NFC')
@@ -137,16 +146,42 @@ export function SpecialistAccessForm({ profile, onClose, onSaved }) {
       setError('Podaj poprawny adres e-mail.')
       return
     }
+    let action = actionRef.current
+    if (!action) {
+      try {
+        action = Object.freeze({
+          idempotencyKey: apiClient.createIdempotencyKey(),
+          payload: Object.freeze({
+            email: canonical,
+            expectedVersion: profile.version,
+          }),
+        })
+      } catch (caught) {
+        setError(errorText(caught))
+        return
+      }
+      actionRef.current = action
+    }
     setSaving(true)
+    setUncertain(false)
     setError(null)
     try {
-      await apiClient.inviteSpecialistProfile(profile.id, {
-        email: canonical,
-        expectedVersion: profile.version,
-      }, { idempotencyKey: apiClient.createIdempotencyKey() })
+      await apiClient.inviteSpecialistProfile(
+        profile.id,
+        action.payload,
+        { idempotencyKey: action.idempotencyKey },
+      )
       await onSaved()
       onClose()
     } catch (caught) {
+      if (caught instanceof ApiError
+        && caught.idempotencyKey === action.idempotencyKey) {
+        setError(SPECIALIST_INVITATION_UNCERTAIN)
+        setUncertain(true)
+        setSaving(false)
+        return
+      }
+      actionRef.current = null
       setError(errorText(caught))
       setSaving(false)
     }
@@ -164,12 +199,13 @@ export function SpecialistAccessForm({ profile, onClose, onSaved }) {
           </div>
           <form className="drawer__body" onSubmit={submit}>
             <Field label="Adres e-mail">
-              <input className="input" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" autoFocus />
+              <input className="input" type="email" value={email} onChange={(event) => changeEmail(event.target.value)} autoComplete="email" autoFocus />
             </Field>
             {error ? <p className="form-error" role="alert">{error}</p> : null}
             <div className="drawer__actions">
               <Button variant="ghost" onClick={requestClose} disabled={saving}>Anuluj</Button>
-              <Button type="submit" disabled={saving}>{saving ? 'Wysyłanie…' : 'Wyślij zaproszenie'}</Button>
+              <Button type="submit" disabled={saving}>{saving
+                ? 'Wysyłanie…' : uncertain ? 'Spróbuj ponownie' : 'Wyślij zaproszenie'}</Button>
             </div>
           </form>
         </>

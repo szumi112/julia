@@ -2029,6 +2029,22 @@ test.describe('Task 4 administrative redesign', () => {
     await expect(main.getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(0)
   })
 
+  test('public demo keeps staff role management hidden and API-free', async ({ page }) => {
+    const apiRequests = []
+    page.on('request', (request) => {
+      if (new URL(request.url()).pathname.startsWith('/api/v1/')) apiRequests.push(request.url())
+    })
+    await login(page)
+    await page.getByRole('navigation', { name: 'Nawigacja główna' })
+      .getByRole('link', { name: 'Ustawienia' })
+      .click()
+
+    await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Zmień rolę/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Zaproś osobę' })).toHaveCount(0)
+    expect(apiRequests).toEqual([])
+  })
+
   test('Ustawienia limits the therapist to personal calendar and integration preferences', async ({ page }) => {
     await login(page)
     const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })

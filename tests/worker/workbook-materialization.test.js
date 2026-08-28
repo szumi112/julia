@@ -22,16 +22,15 @@ import {
   applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
 const APPROVED = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 const NOW_MS = Date.parse('2027-02-10T08:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
 const FINANCE_BATCH = 'fib_workbook_materialization_current'
-const actor = Object.freeze({
-  id: 'stf_workbook_materialization_owner', role: 'owner', specialistId: null, version: 1,
-})
-const otherOwner = Object.freeze({
-  id: 'stf_workbook_materialization_other', role: 'owner', specialistId: null, version: 1,
+const actor = authorityActor({ id: 'stf_workbook_materialization_owner', role: 'owner' })
+const otherOwner = authorityActor({
+  id: 'stf_workbook_materialization_other', role: 'owner',
 })
 const config = Object.freeze({
   appEnv: 'staging', dataMode: 'fictional',

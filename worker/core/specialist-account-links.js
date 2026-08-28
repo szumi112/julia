@@ -10,6 +10,7 @@ import {
   isD1IdentityCollision,
 } from '../db/errors.js'
 import { authorize } from '../identity/policy.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
 import { encodeBase64Url } from '../security/encoding.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
@@ -23,7 +24,6 @@ const INPUT_KEYS = Object.freeze([
   'db', 'recoveryDb', 'actor', 'keyring', 'nowMs', 'correlationId', 'idFactory',
   'specialistId', 'body', 'idempotencyKey',
 ])
-const ACTOR_KEYS = Object.freeze(['id', 'role', 'specialistId', 'version'])
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const LINK_ID = /^spl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -89,17 +89,8 @@ export function validateSpecialistAccountLinkBody(value) {
 }
 
 const captureActor = (value, nowMs) => {
-  let actor
-  try {
-    actor = captureExact(value, ACTOR_KEYS, 'actor')
-  } catch {
-    forbidden()
-  }
-  if (!STAFF_ID.test(actor.id ?? '')
-    || !['owner', 'coordinator', 'specialist'].includes(actor.role)
-    || (actor.specialistId !== null && !SPECIALIST_ID.test(actor.specialistId ?? ''))
-    || !validVersion(actor.version)
-    || !authorize(actor, 'staff.manage', CENTRE, { nowMs })) forbidden()
+  const actor = captureAuthorityActor(value)
+  if (!actor || !authorize(actor, 'staff.manage', CENTRE, { nowMs })) forbidden()
   return actor
 }
 

@@ -1,8 +1,8 @@
-import { capabilitiesForActor } from '../identity/policy.js'
 import { isD1MissingColumn } from '../db/errors.js'
 import { issueCsrfToken } from '../security/csrf.js'
 import { decryptForScope as decryptField, loadDataKey } from '../security/envelope.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
+import { acceptEffectiveCapabilities } from '../../src/capabilities.js'
 
 const denied = () => { throw new Error('ACCESS_DENIED') }
 const titleFailure = () => { throw new Error('CRYPTO_FAILURE') }
@@ -18,10 +18,12 @@ const validProfessionalTitle = (value) => {
 
 const sessionRowSql = (withTitle) => `
   SELECT staff.display_name_envelope,staff.role,staff.specialist_id,
+         authority.revision AS authority_revision,
          specialist.id AS profile_id,specialist.staff_user_id AS profile_staff_user_id,
          specialist.status AS profile_status
          ${withTitle ? ',specialist.professional_title_envelope' : ''}
   FROM staff_users AS staff
+  JOIN staff_authorities AS authority ON authority.staff_id=staff.id
   LEFT JOIN specialists AS specialist
     ON specialist.id=staff.specialist_id AND specialist.staff_user_id=staff.id
   WHERE staff.id=? AND staff.status='active' AND staff.access_subject=? AND staff.version=?`
@@ -37,8 +39,11 @@ export async function getSession({
   issueToken = issueCsrfToken,
   loadDataKey: loadKey = loadDataKey,
 } = {}) {
+  const capabilities = acceptEffectiveCapabilities(actor?.role, actor?.capabilities)
   if (!db?.prepare || principal?.kind !== 'human' || typeof principal.subject !== 'string'
     || !actor?.id || !Number.isSafeInteger(actor.version) || actor.version < 1
+    || !Number.isSafeInteger(actor.authorityRevision) || actor.authorityRevision < 1
+    || !capabilities
     || !Number.isSafeInteger(nowMs)) denied()
   let row
   let withTitle = true
@@ -51,7 +56,8 @@ export async function getSession({
     row = await db.prepare(sessionRowSql(false))
       .bind(actor.id, principal.subject, actor.version).first()
   }
-  if (!row || row.role !== actor.role || row.specialist_id !== actor.specialistId) denied()
+  if (!row || row.role !== actor.role || row.specialist_id !== actor.specialistId
+    || row.authority_revision !== actor.authorityRevision) denied()
   const linked = row.specialist_id !== null
   if (linked !== (row.profile_id !== null)
     || (linked && (row.profile_id !== row.specialist_id
@@ -106,10 +112,10 @@ export async function getSession({
     specialistId: actor.specialistId,
     version: actor.version,
   })
-  const capabilities = Object.freeze([...capabilitiesForActor(actor)].sort())
   return {
     data: {
       actor: sessionActor,
+      authorityRevision: actor.authorityRevision,
       capabilities,
       csrfToken,
       csrfExpiresAt: new Date(expiresUnix * 1000).toISOString(),

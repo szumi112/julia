@@ -10,7 +10,10 @@ import {
   inviteSpecialistProfile,
   inviteStaff,
 } from '../../worker/identity/invitations.js'
-import { resolveActor } from '../../worker/identity/staff.js'
+import {
+  resolveActor,
+  resolveCurrentAuthorityActor,
+} from '../../worker/identity/staff.js'
 import { readWorkspace } from '../../worker/core/workspace.js'
 import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import {
@@ -26,14 +29,13 @@ import {
   applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2026-08-27T12:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
 const SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const CORRELATION_ID = '77777777-7777-4777-8777-777777777777'
-const actor = Object.freeze({
-  id: 'stf_profile_owner', role: 'owner', specialistId: null, version: 1,
-})
+let actor = authorityActor({ id: 'stf_profile_owner', role: 'owner' })
 let cryptoContext
 let targetedInvitation
 
@@ -52,6 +54,13 @@ const specialistSnapshotAt = async (specialistId, version) => {
     expectedScope: SCOPE, recordId: specialistId, field: 'record_version',
     envelope: JSON.parse(record.snapshot_envelope),
   }))
+}
+
+const refreshActor = async () => {
+  const row = await env.DB.prepare(
+    'SELECT id,role,specialist_id,version FROM staff_users WHERE id=?',
+  ).bind(actor.id).first()
+  actor = await resolveCurrentAuthorityActor(env.DB, row)
 }
 
 describe('specialist profile creation', () => {
@@ -200,7 +209,7 @@ describe('specialist profile creation', () => {
     const before = (await env.DB.prepare('SELECT count(*) AS count FROM specialists').first()).count
     await expect(createSpecialistProfile({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_profile_coordinator', role: 'coordinator', specialistId: null },
+      actor: authorityActor({ id: 'stf_profile_coordinator', role: 'coordinator' }),
       keyring: cryptoContext.keyring, nowMs: NOW_MS, correlationId: CORRELATION_ID,
       idFactory: () => 'must_not_run',
       body: {
@@ -260,6 +269,52 @@ describe('specialist profile creation', () => {
       specialist_id: 'sp_profile_one', staff_user_id: result.data.staff.id,
       lifecycle: 'reserved', changed_by_staff_id: actor.id,
     })
+  })
+
+  it('replays an exact specialist invitation after the profile becomes linked', async () => {
+    const beforeAudits = (await env.DB.prepare(
+      "SELECT count(*) AS count FROM audit_events WHERE action='staff.invited'",
+    ).first()).count
+    const replay = await inviteSpecialistProfile({
+      db: env.DB, cryptoContext, actor, specialistId: 'sp_profile_one',
+      input: { email: 'anna.profile@example.test', expectedVersion: 1 },
+      idempotencyKey: 'profile-invite-one', correlationId: CORRELATION_ID,
+      nowMs: NOW_MS + 1_000, dataMode: 'fictional',
+      idFactory: () => { throw new Error('id factory must not run on replay') },
+    })
+
+    expect(replay).toEqual({ data: targetedInvitation })
+    expect((await env.DB.prepare(
+      'SELECT staff_user_id,status,version FROM specialists WHERE id=?',
+    ).bind('sp_profile_one').first())).toEqual({
+      staff_user_id: targetedInvitation.staff.id, status: 'pending', version: 2,
+    })
+    expect((await env.DB.prepare(
+      "SELECT count(*) AS count FROM audit_events WHERE action='staff.invited'",
+    ).first()).count).toBe(beforeAudits)
+  })
+
+  it('keeps changed specialist invitation replay tuples conflict-safe', async () => {
+    const base = {
+      db: env.DB, cryptoContext, actor, specialistId: 'sp_profile_one',
+      correlationId: CORRELATION_ID, nowMs: NOW_MS + 1_000, dataMode: 'fictional',
+      idFactory: () => { throw new Error('id factory must not run on replay conflict') },
+    }
+    await expect(inviteSpecialistProfile({
+      ...base,
+      input: { email: 'inna.profile@example.test', expectedVersion: 1 },
+      idempotencyKey: 'profile-invite-one',
+    })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+    await expect(inviteSpecialistProfile({
+      ...base,
+      input: { email: 'anna.profile@example.test', expectedVersion: 2 },
+      idempotencyKey: 'profile-invite-one',
+    })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+    await expect(inviteSpecialistProfile({
+      ...base,
+      input: { email: 'anna.profile@example.test', expectedVersion: 1 },
+      idempotencyKey: 'profile-invite-new-key',
+    })).rejects.toThrow('STAFF_INVITATION_CONFLICT')
   })
 
   it('edits basic profile data without replacing its stable account link', async () => {
@@ -356,6 +411,7 @@ describe('specialist profile creation', () => {
       nowMs: NOW_MS + 4_000,
       idFactory: (() => { let value = 0; return () => `release_${++value}` })(),
     })
+    await refreshActor()
     expect(await env.DB.prepare(
       'SELECT staff_user_id,status,version FROM specialists WHERE id=?',
     ).bind('sp_profile_one').first()).toEqual({
@@ -408,6 +464,7 @@ describe('specialist profile creation', () => {
       correlationId: CORRELATION_ID, nowMs: NOW_MS + 5_500,
       idFactory: (() => { let value = 0; return () => `pending_release_disable_${++value}` })(),
     })
+    await refreshActor()
 
     expect((await env.DB.prepare(
       `SELECT lifecycle FROM specialist_account_links

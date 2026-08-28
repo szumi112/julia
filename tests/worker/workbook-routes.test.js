@@ -3,12 +3,11 @@ import { createApp } from '../../worker/app.js'
 import { blindEmailIndex } from '../../worker/security/envelope.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = Date.parse('2027-01-15T10:00:00.000Z')
 const ORIGIN = 'https://bearwithme-panel.app'
-const actor = Object.freeze({
-  id: 'stf_workbook_route_owner', role: 'owner', specialistId: null, version: 1,
-})
+const actor = authorityActor({ id: 'stf_workbook_route_owner', role: 'owner' })
 const principal = Object.freeze({
   kind: 'human',
   subject: 'access-workbook-route-owner',
@@ -128,7 +127,13 @@ describe('protected workbook HTTP routes', () => {
             specialist_id: null,
             version: actor.version,
           })),
-          all: vi.fn(async () => ({ results: [] })),
+          all: vi.fn(async () => query.includes('FROM staff_authorities AS authority')
+            ? { results: [{
+              authority_revision: actor.authorityRevision,
+              capability: null,
+              decision: null,
+            }] }
+            : { results: [] }),
           raw: vi.fn(async () => []),
           run: vi.fn(async () => { throw new Error('WRITE_TRAP') }),
         }
@@ -160,10 +165,14 @@ describe('protected workbook HTTP routes', () => {
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ data: { previewToken: 'read-only-preview' } })
-    expect(sql).toHaveLength(1)
+    expect(sql).toHaveLength(2)
     expect(sql[0]).toContain('FROM staff_users')
     expect(sql[0]).toContain("status='active'")
-    expect(bindings).toEqual([[emailLookup, principal.subject]])
+    expect(sql[1]).toContain('FROM staff_authorities AS authority')
+    expect(bindings).toEqual([
+      [emailLookup, principal.subject],
+      [actor.id, actor.role, actor.specialistId, actor.version],
+    ])
     expect(db.batch).not.toHaveBeenCalled()
     expect(bucket.get).not.toHaveBeenCalled()
     expect(bucket.put).not.toHaveBeenCalled()

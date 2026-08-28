@@ -1,10 +1,13 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import {
   deactivateStaff,
   inviteStaff,
 } from '../../worker/identity/invitations.js'
-import { resolveActor } from '../../worker/identity/staff.js'
+import {
+  resolveActor,
+  resolveCurrentAuthorityActor,
+} from '../../worker/identity/staff.js'
 import { listActiveSpecialists } from '../../worker/identity/specialists.js'
 import {
   blindEmailIndex,
@@ -13,7 +16,8 @@ import {
   getOrCreateDataKey,
 } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { NOW_MS } from './fixtures.js'
+import { NOW_MS, authorityActor } from './fixtures.js'
+import { applyCapabilityOverridesMigration } from './apply-migrations.js'
 
 const NOW = new Date(NOW_MS).toISOString()
 const SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
@@ -23,6 +27,10 @@ const DEACTIVATION_CORRELATION = '33333333-3333-4333-8333-333333333333'
 const REINVITE_CORRELATION = '44444444-4444-4444-8444-444444444444'
 const RETAINED_ACTIVATION_CORRELATION = '55555555-5555-4555-8555-555555555555'
 let serial = 0
+
+beforeAll(async () => {
+  await applyCapabilityOverridesMigration()
+})
 
 const ids = (prefix) => {
   let count = 0
@@ -49,12 +57,12 @@ async function context() {
     id: `key_specialist_lifecycle_${serial}`,
     createdAt: NOW,
   })
-  const owner = {
+  const owner = authorityActor({
     id: `stf_specialist_owner_${serial}`,
     role: 'owner',
     specialistId: null,
     version: 1,
-  }
+  })
   const email = `specialist-owner-${serial}@example.test`
   await env.DB.prepare(
     `INSERT INTO staff_users
@@ -75,29 +83,44 @@ async function context() {
   return { keyring, dataKey, scope: SCOPE, owner }
 }
 
-const invite = (cryptoContext, input, options = {}) => inviteStaff({
-  db: options.db ?? env.DB,
-  cryptoContext,
-  actor: cryptoContext.owner,
-  input,
-  idempotencyKey: options.idempotencyKey ?? `specialist-invite-${serial}`,
-  correlationId: options.correlationId ?? INVITE_CORRELATION,
-  nowMs: options.nowMs ?? NOW_MS,
-  dataMode: 'fictional',
-  idFactory: options.idFactory ?? ids(`specialist_invite_${serial}`),
-})
+async function refreshOwner(cryptoContext) {
+  const row = await env.DB.prepare(
+    'SELECT id,role,specialist_id,version FROM staff_users WHERE id=?',
+  ).bind(cryptoContext.owner.id).first()
+  cryptoContext.owner = await resolveCurrentAuthorityActor(env.DB, row)
+}
 
-const deactivate = (cryptoContext, staffId, version, options = {}) => deactivateStaff({
-  db: options.db ?? env.DB,
-  cryptoContext,
-  actor: cryptoContext.owner,
-  staffId,
-  version,
-  idempotencyKey: options.idempotencyKey ?? `specialist-deactivate-${serial}`,
-  correlationId: options.correlationId ?? DEACTIVATION_CORRELATION,
-  nowMs: options.nowMs ?? NOW_MS,
-  idFactory: options.idFactory ?? ids(`specialist_deactivate_${serial}`),
-})
+const invite = async (cryptoContext, input, options = {}) => {
+  const result = await inviteStaff({
+    db: options.db ?? env.DB,
+    cryptoContext,
+    actor: cryptoContext.owner,
+    input,
+    idempotencyKey: options.idempotencyKey ?? `specialist-invite-${serial}`,
+    correlationId: options.correlationId ?? INVITE_CORRELATION,
+    nowMs: options.nowMs ?? NOW_MS,
+    dataMode: 'fictional',
+    idFactory: options.idFactory ?? ids(`specialist_invite_${serial}`),
+  })
+  await refreshOwner(cryptoContext)
+  return result
+}
+
+const deactivate = async (cryptoContext, staffId, version, options = {}) => {
+  const result = await deactivateStaff({
+    db: options.db ?? env.DB,
+    cryptoContext,
+    actor: cryptoContext.owner,
+    staffId,
+    version,
+    idempotencyKey: options.idempotencyKey ?? `specialist-deactivate-${serial}`,
+    correlationId: options.correlationId ?? DEACTIVATION_CORRELATION,
+    nowMs: options.nowMs ?? NOW_MS,
+    idFactory: options.idFactory ?? ids(`specialist_deactivate_${serial}`),
+  })
+  if (cryptoContext.owner.id !== staffId) await refreshOwner(cryptoContext)
+  return result
+}
 
 const activate = (cryptoContext, email, options = {}) => resolveActor(
   options.db ?? env.DB,

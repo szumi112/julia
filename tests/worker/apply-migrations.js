@@ -62,3 +62,14 @@ export const applyWorkbookRegistryStageE = () => {
     selectCoreMigrationStage(env.TEST_STAGE_E_MIGRATIONS, 'stage-e'),
   )
 }
+
+export const applyCapabilityOverridesMigration = () => {
+  if (env.CORE_DIRECTORY_STAGE !== 'stage-a-complete-before-fixtures') {
+    throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')
+  }
+  const migration = env.TEST_STAGE_E_MIGRATIONS.find(({ name }) => (
+    name === '0020_capability_overrides.sql'
+  ))
+  if (!migration) throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')
+  return applyD1Migrations(env.DB, [migration])
+}

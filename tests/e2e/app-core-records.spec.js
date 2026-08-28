@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const json = (status, body) => ({ status, contentType: 'application/json', body: JSON.stringify(body) })
 const error = (status, code) => json(status, { error: { code } })
@@ -65,32 +66,16 @@ const workspace = (from, to, { specialists, clients, appointments = [] }) => jso
   },
 })
 
-const session = (actor, capabilities) => {
+const session = (actor, capabilities, authorityRevision = actor.version) => {
   const expiresAt = '2030-01-01T00:00:00.000Z'
   return json(200, { data: {
-    actor, capabilities, csrfExpiresAt: expiresAt,
+    actor, authorityRevision, capabilities, csrfExpiresAt: expiresAt,
     csrfToken: `v1.${Date.parse(expiresAt) / 1000}.${'A'.repeat(22)}.${'B'.repeat(43)}`,
     dataMode: 'fictional', environment: 'development',
   } })
 }
 
-const roleCapabilities = {
-  owner: [
-    'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct', 'chat.general',
-    'client.manage', 'client.operational.read', 'clinical.read', 'finance.centre.manage', 'finance.centre.read',
-    'operations.health.read', 'payment.manage', 'security.audit.read', 'specialist.directory.read',
-    'staff.manage', 'tus.manage',
-  ],
-  coordinator: [
-    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-    'client.manage', 'client.operational.read', 'finance.centre.read',
-    'operations.health.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
-  ],
-  specialist: [
-    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general', 'client.manage',
-    'client.operational.read', 'clinical.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
-  ],
-}
+const roleCapabilities = ROLE_DEFAULT_CAPABILITIES
 
 const noDurableBrowserState = (page) => page.evaluate(async () => ({
   caches: await caches.keys(),

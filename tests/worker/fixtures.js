@@ -1,14 +1,27 @@
 import { exportJWK, generateKeyPair, SignJWT } from 'jose'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 export const NOW_MS = 1_800_000_000_000
 export const ISSUER = 'https://team.cloudflareaccess.com'
 export const AUDIENCE = 'bwm-worker-test'
 export const KID = 'fixture-rsa-v1'
 
+export const authorityActor = ({
+  id,
+  role,
+  specialistId = role === 'specialist' ? `sp_${id.slice(4)}` : null,
+  version = 1,
+  authorityRevision = 1,
+  capabilities = ROLE_DEFAULT_CAPABILITIES[role],
+}) => Object.freeze({
+  id, role, specialistId, version, authorityRevision,
+  capabilities: Object.freeze([...capabilities]),
+})
+
 export const ACTORS = Object.freeze({
-  coordinator: Object.freeze({ id: 'stf_coord', role: 'coordinator', specialistId: null }),
-  owner: Object.freeze({ id: 'stf_owner', role: 'owner', specialistId: 'sp_owner' }),
-  specialist: Object.freeze({ id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec' }),
+  coordinator: authorityActor({ id: 'stf_coord', role: 'coordinator' }),
+  owner: authorityActor({ id: 'stf_owner', role: 'owner', specialistId: 'sp_owner' }),
+  specialist: authorityActor({ id: 'stf_spec', role: 'specialist', specialistId: 'sp_spec' }),
 })
 
 export const TEST_IDENTITIES = Object.freeze({

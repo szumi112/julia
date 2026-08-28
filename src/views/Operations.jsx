@@ -3,6 +3,7 @@ import { ApiError, apiClient } from '../api.js'
 import { useShell } from '../shell-ctx.js'
 import { useApp } from '../store.jsx'
 import { Button, IconBtn, Pill } from '../ui.jsx'
+import { canPerformAction } from '../capability-access.js'
 
 const timeFormat = new Intl.DateTimeFormat('pl-PL', {
   dateStyle: 'medium',
@@ -293,7 +294,8 @@ function ResolutionConfirm({ action, fallbackRef, opener, onClose, onReconcile }
 export function OperationsPanel({ sectionRef }) {
   const { toast } = useApp()
   const { appMode, capabilities } = useShell()
-  const canReadAudit = appMode === 'app' && capabilities.includes('security.audit.read')
+  const canReadAudit = appMode === 'app'
+    && canPerformAction(capabilities, 'security.audit.read')
   const tabs = useMemo(() => [
     { id: 'health', label: 'Stan systemu' },
     { id: 'actions', label: 'Działania' },

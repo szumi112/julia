@@ -21,6 +21,7 @@ import {
   weekWorkspaceRange,
 } from '../workspace-view.js'
 import { ApiError } from '../api.js'
+import { canPerformAction } from '../capability-access.js'
 
 const DOW = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Nd']
 const STRIP_DOW = ['Pn', 'Wt', 'Śr', 'Cz', 'Pt', 'So', 'Nd']
@@ -551,7 +552,7 @@ export function CalendarView({ params = {} }) {
   )
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const canManageAppointments = !isApp || (
-    capabilities.includes('appointment.manage')
+    canPerformAction(capabilities, 'appointment.edit')
     && workspaceState === 'ready'
     && !appointmentMutationLocked
   )

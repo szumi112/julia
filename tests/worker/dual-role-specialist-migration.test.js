@@ -15,6 +15,11 @@ const currentLinkTriggers = Object.freeze([
   'specialists_current_staff_valid_insert',
   'specialists_current_staff_valid_update',
 ])
+const PRE_DUAL_ROLE_MIGRATION_NAMES = Object.freeze([
+  '0016_workbook_source_records.sql',
+  '0017_historical_workspace.sql',
+  '0018_activity_workspace.sql',
+])
 const run = (sql, ...bindings) => env.DB.prepare(sql).bind(...bindings).run()
 const all = async (sql, ...bindings) => (
   await env.DB.prepare(sql).bind(...bindings).all()
@@ -73,9 +78,13 @@ describe('dual-role specialist migration', () => {
     await applyFinanceStageC()
     await applySpecialistProfilesStageD()
     const stageE = selectCoreMigrationStage(env.TEST_STAGE_E_MIGRATIONS, 'stage-e')
-    await applyD1Migrations(env.DB, stageE.slice(0, -1))
+    await applyD1Migrations(env.DB, PRE_DUAL_ROLE_MIGRATION_NAMES.map((name) => (
+      stageE.find((migration) => migration.name === name)
+    )))
     triggersBefore = await specialistTriggerInventory()
-    await applyD1Migrations(env.DB, stageE.slice(-1))
+    await applyD1Migrations(env.DB, [stageE.find(({ name }) => (
+      name === '0019_dual_role_specialists.sql'
+    ))])
     triggersAfter = await specialistTriggerInventory()
   })
 

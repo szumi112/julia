@@ -2,6 +2,7 @@ import { authorize } from '../identity/policy.js'
 import { auditEventStatement, encryptAuditReason } from '../audit/events.js'
 import { createUnitOfWork } from '../db/unit-of-work.js'
 import {
+  changeStaffRole,
   deactivateStaff,
   inviteSpecialistProfile,
   inviteStaff,
@@ -59,4 +60,16 @@ export async function postDeactivation(input) {
   if (!key) throw new Error('VALIDATION_FAILED')
   const body = deactivationBody(input.body)
   return deactivateStaff({ ...input, staffId: input.staffId, version: body.version, idempotencyKey: key })
+}
+export async function postRoleChange(input) {
+  if (!allowed(input.actor, input.nowMs)) return deny(input)
+  const key = input.idempotencyKey
+  if (!key) throw new Error('VALIDATION_FAILED')
+  return changeStaffRole({
+    ...input,
+    recoveryDb: input.recoveryDb ?? input.db,
+    staffId: input.staffId,
+    input: input.body,
+    idempotencyKey: key,
+  })
 }

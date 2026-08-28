@@ -9,6 +9,7 @@ import { useDrawerFX } from '../anim.js'
 import { toISODate, plural, fmtMoney } from '../format.js'
 import { ApiError } from '../api.js'
 import { validateClientInput } from '../core-records.js'
+import { canPerformAction } from '../capability-access.js'
 
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -107,7 +108,8 @@ export function ClientDrawer({ opts, onClose }) {
   }
 
   const submitApp = async () => {
-    if (saveStatus === 'saving' || clientMutationLocked || !capabilities.includes('client.manage')
+    if (saveStatus === 'saving' || clientMutationLocked
+      || !canPerformAction(capabilities, editing ? 'client.edit' : 'client.create')
       || editing?.readOnly || editing?.status === 'archived') return
     const payload = appPayload()
     const nextErrors = appErrors(payload)
@@ -207,7 +209,8 @@ export function ClientDrawer({ opts, onClose }) {
   }
 
   const archive = async () => {
-    if (!isApp || saveStatus === 'saving' || clientMutationLocked || !capabilities.includes('client.manage')
+    if (!isApp || saveStatus === 'saving' || clientMutationLocked
+      || !canPerformAction(capabilities, 'client.archive')
       || !editing || editing.readOnly || editing.status === 'archived') return
     setSaveStatus('saving')
     setSaveError(null)

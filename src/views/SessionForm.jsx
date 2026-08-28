@@ -10,6 +10,7 @@ import { clientsForRole } from '../workspace.js'
 import { SERVICES, SERVICE_BY_ID, STANDARD_SERVICE, amountFor, durationFor } from '../services.js'
 import { ApiError } from '../api.js'
 import { validateAppointmentInput } from '../core-records.js'
+import { canPerformAction } from '../capability-access.js'
 
 export function SessionDrawer({ opts, onClose }) {
   const { state, dispatch, toast, workspace } = useApp()
@@ -211,7 +212,8 @@ export function SessionDrawer({ opts, onClose }) {
 
   const submitApp = async () => {
     if (saveStatus === 'saving' || appointmentMutationLocked
-      || !capabilities.includes('appointment.manage')) return
+      || !canPerformAction(capabilities, editing
+        ? 'appointment.edit' : 'appointment.create')) return
     const nextErrors = appErrors()
     setErrors(nextErrors)
     if (Object.values(nextErrors).some(Boolean)) {

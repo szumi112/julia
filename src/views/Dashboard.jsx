@@ -167,7 +167,9 @@ export function BoardDrawer({ onClose }) {
 
 export function Dashboard() {
   const { state } = useApp()
-  const { appMode, openSessionForm, openClientForm, openTeamBoard, navigate, role } = useShell()
+  const {
+    appMode, canAccess, openSessionForm, openClientForm, openTeamBoard, navigate, role,
+  } = useShell()
   const isApp = appMode === 'app'
   const ref = useReveal()
 
@@ -197,8 +199,7 @@ export function Dashboard() {
       : 'Kalendarz jest dziś pusty — czas na oddech.'
 
   // The masthead is just the cover date; the nearest session follows as the lede.
-  // Therapists have no Payments route, so their arrears stay a plain figure.
-  const canOpenPayments = role.scope !== 'own'
+  const canOpenPayments = isApp ? canAccess('payments') : role.scope !== 'own'
   const showBoard = !isApp && ['owner', 'coordinator'].includes(role.id)
 
   return (

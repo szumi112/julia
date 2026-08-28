@@ -9,6 +9,7 @@ import { isD1CoreDirectoryInvariantFailure, isD1IdentityCollision } from '../db/
 import { auditEventStatement } from '../audit/events.js'
 import { createOwnershipCapabilityBoundary } from './crypto.js'
 import { createRecordVersionBuilder } from './versions.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { encryptForScope } from '../security/envelope.js'
 import {
   APPOINTMENT_VERSION_CAP,
@@ -202,28 +203,9 @@ const captureCorrectionCommand = (input) => {
 }
 
 const actorFact = (value) => {
-  try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-      throw new Error('FORBIDDEN')
-    }
-    const descriptors = Object.getOwnPropertyDescriptors(value)
-    const actor = {}
-    for (const key of ['id', 'role', 'specialistId']) {
-      const descriptor = descriptors[key]
-      if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error('FORBIDDEN')
-      actor[key] = descriptor.value
-    }
-    if (typeof actor.id !== 'string' || !STAFF_ID.test(actor.id)
-      || !['owner', 'coordinator', 'specialist'].includes(actor.role)
-      || (actor.specialistId !== null && typeof actor.specialistId !== 'string')
-      || (actor.role === 'specialist' && actor.specialistId === null)) {
-      throw new Error('FORBIDDEN')
-    }
-    return Object.freeze(actor)
-  } catch (error) {
-    if (error instanceof Error && error.message === 'FORBIDDEN') throw error
-    throw new Error('FORBIDDEN')
-  }
+  const actor = captureAuthorityActor(value)
+  if (!actor) throw new Error('FORBIDDEN')
+  return actor
 }
 
 const generated = (factory, prefix, predicate, used) => {

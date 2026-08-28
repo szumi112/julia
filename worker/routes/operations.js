@@ -11,6 +11,8 @@ import {
 import { isD1IdentityCollision } from '../db/errors.js'
 import { createUnitOfWork } from '../db/unit-of-work.js'
 import { authorize } from '../identity/policy.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
+import { resolveCurrentAuthorityActor } from '../identity/staff.js'
 import { isCorrelationId } from '../logging/safe-log.js'
 import { decodeBase64Url, encodeBase64Url } from '../security/encoding.js'
 import { decryptForScope } from '../security/envelope.js'
@@ -24,7 +26,6 @@ const CENTRE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
-const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const CLIENT_ID = /^cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const ASSIGNMENT_ID = /^asg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -36,7 +37,6 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CURSOR_MAC_PREFIX = 'bwm.security-audit.cursor.v1'
 const MAX_CURSOR_POSITION_BYTES = 177
 const MAX_CURSOR_POSITION_TEXT = 236
-const ROLES = new Set(['owner', 'coordinator', 'specialist'])
 const DENIAL_CAPABILITIES = new Set([
   'operations.health.read',
   'security.audit.read',
@@ -246,12 +246,9 @@ function captureDb(value) {
 }
 
 function captureActor(value, failure = invalid) {
-  const actor = exactSnapshot(value, ['id', 'role', 'specialistId', 'version'], failure)
-  if (!validId(actor.id) || !ROLES.has(actor.role) || !positive(actor.version)
-    || (actor.role === 'specialist'
-      ? !validId(actor.specialistId)
-      : actor.specialistId !== null && !validId(actor.specialistId))) failure()
-  return Object.freeze(actor)
+  const actor = captureAuthorityActor(value)
+  if (!actor) failure()
+  return actor
 }
 
 function captureCryptoContext(value) {
@@ -345,15 +342,8 @@ function actionIdFrom(factory) {
 
 function actorFromRow(row) {
   const captured = exactSnapshot(row, ACTOR_ROW_KEYS, invalidState)
-  const actor = {
-    id: captured.id,
-    role: captured.role,
-    specialistId: captured.specialist_id,
-    version: captured.version,
-  }
-  captureActor(actor, invalidState)
   if (!['pending', 'active', 'disabled'].includes(captured.status)) invalidState()
-  return Object.freeze({ ...captured, actor: Object.freeze(actor) })
+  return Object.freeze(captured)
 }
 
 async function readCurrentActor(input) {
@@ -362,13 +352,23 @@ async function readCurrentActor(input) {
      FROM staff_users WHERE id=?`
   ).bind(input.actor.id).all()
   const rows = captureAllRows(result, 1)
-  return rows.length === 1 ? actorFromRow(rows[0]) : null
+  if (rows.length !== 1) return null
+  const row = actorFromRow(rows[0])
+  if (row.status !== 'active') return Object.freeze({ ...row, actor: null })
+  let actor
+  try { actor = await resolveCurrentAuthorityActor(input.db, row) } catch { invalidState() }
+  return Object.freeze({ ...row, actor })
 }
 
 const sameActor = (row, actor) => row.id === actor.id
   && row.role === actor.role
   && row.specialist_id === actor.specialistId
   && row.version === actor.version
+  && row.actor.authorityRevision === actor.authorityRevision
+  && row.actor.capabilities.length === actor.capabilities.length
+  && row.actor.capabilities.every((capability, index) => (
+    capability === actor.capabilities[index]
+  ))
 
 async function persistDenial(input, capability) {
   const auditId = actionIdFrom(input.idFactory)

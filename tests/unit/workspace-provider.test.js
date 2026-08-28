@@ -152,7 +152,8 @@ const makeController = (repositoryFactory, overrides = {}) => createWorkspacePro
 
 const protectedAuthorityKey = (role) => createWorkspaceAuthorityKey({
   repositoryMode: 'api', dataMode: 'fictional', actorId: `stf_${role}`,
-  actorVersion: 1, role, specialistId: role === 'specialist' ? 'sp_anna' : null,
+  actorVersion: 1, authorityRevision: 1, role,
+  specialistId: role === 'specialist' ? 'sp_anna' : null,
   capabilities: [], demoRoleId: null, demoAuthGeneration: null,
 })
 
@@ -1334,6 +1335,22 @@ test('infrastructure failure preserves caller input and disables later mutations
   controller.resetAuthority('authority-recovered')
   assert.equal(controller.getSnapshot().workspace.status, 'ready')
   assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [])
+})
+
+test('a stale API authority completion fails the current workspace closed', async () => {
+  const staleAuthority = Object.assign(new Error('SESSION_AUTHORITY_STALE'), {
+    code: 'SESSION_AUTHORITY_STALE',
+    status: 0,
+  })
+  const controller = makeController(() => repositoryWith({
+    loadWindow: async () => { throw staleAuthority },
+  }))
+
+  await assert.rejects(
+    controller.getSnapshot().workspace.loadWindow(range('2026-08-01')),
+    staleAuthority,
+  )
+  assert.equal(controller.getSnapshot().workspace.status, 'read-only-error')
 })
 
 test('invalid load response fails closed without erasing prior canonical coverage', async () => {

@@ -1,8 +1,7 @@
 import { isAppointmentId, isClientId, isSpecialistId } from '../../src/core-records.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { partsInWarsaw } from '../operations/clock.js'
 
-const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
-const ROLES = new Set(['owner', 'coordinator', 'specialist'])
 const ACTIVITY_GROUP_ID = /^agr_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ACTIVITY_PARTICIPANT_ID = /^acp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CIVIL_DAY = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/
@@ -34,14 +33,6 @@ const captureFields = (value, keys, { exact = false } = {}) => {
   } catch {
     return null
   }
-}
-
-const captureActor = (value) => {
-  const actor = captureFields(value, ['id', 'role', 'specialistId'])
-  if (!actor || !STAFF_ID.test(actor.id) || !ROLES.has(actor.role)
-    || (actor.specialistId !== null && !isSpecialistId(actor.specialistId))
-    || (actor.role === 'specialist' && !isSpecialistId(actor.specialistId))) return null
-  return Object.freeze(actor)
 }
 
 const exactRow = (value, keys) => {
@@ -94,7 +85,7 @@ const validCivilDay = (value) => {
 export async function loadActivityGroupResourceFact(
   db, value, groupId, nowMs, effectiveDay,
 ) {
-  const actor = captureActor(value)
+  const actor = captureAuthorityActor(value)
   if (!actor || !ACTIVITY_GROUP_ID.test(groupId)
     || !Number.isSafeInteger(nowMs) || nowMs < 0) notFound()
   const currentDay = effectiveDay === undefined ? partsInWarsaw(nowMs).day : effectiveDay
@@ -144,7 +135,7 @@ export async function loadActivityGroupResourceFact(
 export async function loadActivityParticipantResourceFact(
   db, value, participantId, nowMs,
 ) {
-  const actor = captureActor(value)
+  const actor = captureAuthorityActor(value)
   if (!actor || !ACTIVITY_PARTICIPANT_ID.test(participantId)
     || !Number.isSafeInteger(nowMs) || nowMs < 0) notFound()
   const currentDay = partsInWarsaw(nowMs).day
@@ -220,7 +211,7 @@ export async function loadActivityParticipantResourceFact(
 }
 
 export async function loadClientResourceFact(db, value, clientId) {
-  const actor = captureActor(value)
+  const actor = captureAuthorityActor(value)
   if (!actor || !isClientId(clientId)) notFound()
   const specialistScope = actor.role === 'specialist'
   const sql = specialistScope
@@ -264,7 +255,7 @@ export async function loadClientResourceFact(db, value, clientId) {
 }
 
 export async function loadClientHistoryResourceFact(db, value, input) {
-  const actor = captureActor(value)
+  const actor = captureAuthorityActor(value)
   const ids = captureFields(input, ['clientId', 'appointmentId'], { exact: true })
   if (!actor || !ids || !isClientId(ids.clientId) || !isAppointmentId(ids.appointmentId)) {
     notFound()
@@ -298,7 +289,7 @@ export async function loadClientHistoryResourceFact(db, value, input) {
 }
 
 export async function loadAppointmentResourceFact(db, value, appointmentId) {
-  const actor = captureActor(value)
+  const actor = captureAuthorityActor(value)
   if (!actor || !isAppointmentId(appointmentId)) notFound()
   const specialistScope = actor.role === 'specialist'
   const sql = specialistScope
