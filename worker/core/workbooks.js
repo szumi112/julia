@@ -1676,17 +1676,6 @@ export async function createWorkbookImport(input) {
   if (!(command.bytes instanceof Uint8Array)) createInvalid()
   const submittedFingerprint = await sha256Base64(command.bytes)
   const tokenDigest = await sha256Base64(command.previewToken)
-  const requestHash = await sha256Base64(JSON.stringify([
-    'workbooks.import.request.v2', submittedFingerprint, command.filename,
-    tokenDigest, canonicalResolutions,
-  ]))
-  const replay = await replayRow(command.db, command.actor.id, command.idempotencyKey)
-  if (replay) {
-    if (replay.request_hash !== requestHash) throw new Error('IDEMPOTENCY_CONFLICT')
-    const replayed = await loadImportRow(command.db, replay.import_id, command.actor.id)
-    await requireCurrentAuthority(command.db, command.actor)
-    return importResponse(replayed)
-  }
   const inspected = await inspectWorkbook({
     bytes: command.bytes,
     filename: command.filename,
@@ -1719,6 +1708,23 @@ export async function createWorkbookImport(input) {
     },
     nowMs: command.nowMs,
   })
+  const requestHash = await sha256Base64(JSON.stringify([
+    'workbooks.import.request.v3', submittedFingerprint, command.filename,
+    inspected.parsed.parserVersion, inspected.parsed.materializerVersion,
+    inspected.planDigest, canonicalResolutions,
+  ]))
+  const replay = await replayRow(command.db, command.actor.id, command.idempotencyKey)
+  if (replay) {
+    if (replay.request_hash !== requestHash) throw new Error('IDEMPOTENCY_CONFLICT')
+    const replayed = await loadImportRow(command.db, replay.import_id, command.actor.id)
+    await requireCurrentAuthority(command.db, command.actor)
+    return importResponse(replayed)
+  }
+  const existingArtifact = await command.db.prepare(
+    `SELECT id FROM workbook_artifacts
+     WHERE centre_id=? AND fingerprint=? LIMIT 1`,
+  ).bind(command.centreId, inspected.parsed.fingerprint).first()
+  if (existingArtifact) throw new Error('WORKBOOK_IMPORT_CONFLICT')
   const expectedConflictIds = mappingConflicts.map(({ id }) => id)
     .sort(compareUtf16CodeUnits)
   if (blockingConflicts.length

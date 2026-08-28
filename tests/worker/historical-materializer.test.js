@@ -1,8 +1,9 @@
 import { env } from 'cloudflare:workers'
-import { beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   continueHistoricalProjection,
   getHistoricalProjection,
+  getHistoricalProjectionReviewCatalog,
   resolveHistoricalConflict,
 } from '../../worker/core/historical-materializer.js'
 import { activateHistoricalClient } from '../../worker/core/historical-clients.js'
@@ -119,7 +120,7 @@ beforeAll(async () => {
      metadata_signature,created_by_staff_id,created_at)
     VALUES ('wba_historical_materializer','centre_1','staging',?,4096,2,2,
       'workbook-objects/wbo_historical_materializer','AAAAAAAAAAAAAAAA',1,1,?,?,?)`).bind(
-    'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a',
+    'b4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99b',
     'A'.repeat(43), actor.id, NOW,
   ).run()
   await env.DB.prepare(`INSERT INTO workbook_artifacts
@@ -128,7 +129,7 @@ beforeAll(async () => {
      metadata_signature,created_by_staff_id,created_at)
     VALUES ('wba_historical_conflict','centre_1','staging',?,4096,2,2,
       'workbook-objects/wbo_historical_conflict','BBBBBBBBBBBBBBBB',1,1,?,?,?)`).bind(
-    'e4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99b',
+    'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a',
     'E'.repeat(43), actor.id, NOW,
   ).run()
   await env.DB.prepare(`INSERT INTO workbook_imports
@@ -258,7 +259,7 @@ beforeAll(async () => {
   await env.DB.prepare(`INSERT INTO workbook_imports
     (id,artifact_id,preview_token_digest,status,accepted_records,quarantined_records,
      correlation_id,created_by_staff_id,version,created_at,updated_at,completed_at)
-    VALUES (?,'wba_historical_conflict',?,'complete',1,0,?,?,2,?,?,?)`).bind(
+    VALUES (?,'wba_historical_conflict',?,'complete',2,0,?,?,2,?,?,?)`).bind(
     CONFLICT_IMPORT_ID, 'D'.repeat(43), 'historical_conflict_original', actor.id,
     NOW, NOW, NOW,
   ).run()
@@ -274,7 +275,7 @@ beforeAll(async () => {
   await env.DB.prepare(`INSERT INTO workbook_materialization_jobs
     (id,import_id,phase,status,cursor,total_records,processed_records,progress_json,
      summary_json,created_by_staff_id,version,created_at,updated_at,completed_at)
-    VALUES ('wbj_historical_conflict',?,'complete','complete',1,1,1,'{}','{}',
+    VALUES ('wbj_historical_conflict',?,'complete','complete',2,2,2,'{}','{}',
       ?,2,?,?,?)`).bind(CONFLICT_IMPORT_ID, actor.id, NOW, NOW, NOW).run()
   const conflictNormalized = Object.freeze({
     ...normalized,
@@ -304,6 +305,36 @@ beforeAll(async () => {
     await sealSource(sourceKey, 'wbs_historical_conflict', 'source_payload', conflictPayload),
     NOW,
   ).run()
+  const secondConflictNormalized = Object.freeze({
+    ...conflictNormalized,
+    sourceKey: 'workbook:v1:0:5:0', rowNumber: 5,
+    counterparty: 'Pacjent',
+  })
+  const secondConflictPayload = Object.freeze({
+    schema: 'workbook_source_payload.v1', normalized: secondConflictNormalized,
+    raw: Object.freeze({ Cena: 180 }),
+  })
+  const secondConflictDigest = await digestWorkbookSourcePayload({
+    keyring, config, centreId: 'centre_1', sourceKey: secondConflictNormalized.sourceKey,
+    payload: secondConflictPayload,
+  })
+  await env.DB.prepare(`INSERT INTO workbook_source_records
+    (id,import_id,source_key,sheet_index,sheet_name,row_number,block_index,record_type,
+     disposition,accounting_month,occurred_on,period_precision,period_month,amount_grosze,
+     payment_method,settlement_status,invoice_status,initial_paid_amount_grosze,
+     record_digest,record_digest_hmac_version,specialist_source_digest,
+     specialist_source_hmac_version,warning_codes_json,source_payload_version,
+     source_payload_envelope,created_at)
+    VALUES ('wbs_historical_conflict_two',?,?,0,'Styczeń 2025',5,0,'income','accepted',
+      '2025-01',NULL,'unknown',NULL,18000,'cash','paid','not_required',18000,
+      ?,1,?,1,'[]',1,?,?)`).bind(
+    CONFLICT_IMPORT_ID, secondConflictNormalized.sourceKey, secondConflictDigest.digest,
+    specialistDigest.digest,
+    await sealSource(
+      sourceKey, 'wbs_historical_conflict_two', 'source_payload', secondConflictPayload,
+    ),
+    NOW,
+  ).run()
   await env.DB.prepare(`INSERT INTO workbook_resolutions
     (id,import_id,source_record_id,kind,resolution_code,specialist_id,
      source_value_kind,source_value_digest,source_value_hmac_version,
@@ -315,10 +346,15 @@ beforeAll(async () => {
       schema: 'workbook_specialist_source.v1', sourceValue: '',
     }), actor.id, NOW,
   ).run()
+  await env.DB.prepare(`INSERT INTO workbook_import_resolution_sets
+    (id,import_id,artifact_id,preview_token_digest,plan_digest,resolution_count,
+     resolutions_envelope,created_by_staff_id,version,created_at)
+    VALUES ('wrs_historical_conflict',?,'wba_historical_conflict',?,?,1,'{}',?,1,?)`)
+    .bind(CONFLICT_IMPORT_ID, 'D'.repeat(43), `v1_${'A'.repeat(43)}`, actor.id, NOW).run()
   await env.DB.prepare(`INSERT INTO finance_import_batches
     (id,fingerprint,filename_envelope,format_version,total_rows,accepted_rows,status,
      created_by_staff_id,version,created_at,updated_at,committed_at)
-    VALUES ('fib_historical_conflict',?,'{}',1,1,1,'committed',?,1,?,?,?)`).bind(
+    VALUES ('fib_historical_conflict',?,'{}',1,2,2,'committed',?,1,?,?,?)`).bind(
     'd'.repeat(64), actor.id, NOW, NOW, NOW,
   ).run()
   await env.DB.prepare(`INSERT INTO finance_entries
@@ -335,6 +371,38 @@ beforeAll(async () => {
     (id,source_record_id,finance_entry_id,relationship,created_by_staff_id,created_at)
     VALUES ('fsl_historical_conflict','wbs_historical_conflict',
       'fin_historical_conflict','materialized',?,?)`).bind(actor.id, NOW).run()
+  await env.DB.prepare(`INSERT INTO finance_entries
+    (id,batch_id,source_key,kind,record_type,accounting_month,occurred_on,
+     amount_grosze,paid_amount_grosze,payment_method,settlement_status,invoice_status,
+     specialist_id,appointment_id,counterparty_lookup,details_envelope,
+     source_row_envelope,version,created_by_staff_id,created_at,updated_at)
+    VALUES ('fin_historical_conflict_two','fib_historical_conflict',
+      'source-historical-conflict-two','income','income','2025-01',NULL,18000,18000,
+      'cash','paid','not_required','sp_historical_materializer',NULL,NULL,'{}','{}',1,?,?,?)`)
+    .bind(actor.id, NOW, NOW).run()
+  await env.DB.prepare(`INSERT INTO finance_source_links
+    (id,source_record_id,finance_entry_id,relationship,created_by_staff_id,created_at)
+    VALUES ('fsl_historical_conflict_two','wbs_historical_conflict_two',
+      'fin_historical_conflict_two','materialized',?,?)`).bind(actor.id, NOW).run()
+
+  const nearIdentity = await buildHistoricalIdentity(env.DB, keyring, {
+    kind: 'person', id: 'hcl_historical_review_near',
+    dataKeyId: 'key_historical_review_near', name: 'Pacjentt', createdAt: NOW,
+  })
+  await env.DB.batch([
+    nearIdentity.keyStatement,
+    env.DB.prepare(`INSERT INTO historical_clients
+      (id,identity_envelope,status,active_client_id,version,created_at,updated_at)
+      VALUES ('hcl_historical_review_near',?,'historical',NULL,1,?,?)`).bind(
+      nearIdentity.identityEnvelope, NOW, NOW,
+    ),
+    ...nearIdentity.lookups.map((lookup) => env.DB.prepare(`INSERT INTO
+      historical_client_lookup_aliases
+      (historical_client_id,domain,hmac_version,lookup_digest,created_at)
+      VALUES ('hcl_historical_review_near',?,?,?,?)`).bind(
+      lookup.domain, lookup.version, lookup.digest, NOW,
+    )),
+  ])
 })
 
 describe('historical projection materializer', () => {
@@ -704,6 +772,90 @@ describe('historical projection materializer', () => {
     })).rejects.toThrow(/CRYPTO_FAILURE/)
   })
 
+  it('exposes a creator-bound paged review catalog keyed by opaque source ID', async () => {
+    const catalog = await getHistoricalProjectionReviewCatalog({
+      db: env.DB, actor, keyring, config, centreId: 'centre_1',
+      importId: CONFLICT_IMPORT_ID, afterSourceRecordId: null,
+    })
+    expect(catalog.data.binding).toEqual({
+      environment: 'staging', centreId: 'centre_1',
+      fingerprint: 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a',
+      artifactId: 'wba_historical_conflict', importId: CONFLICT_IMPORT_ID,
+      creatorId: actor.id, planDigest: `v1_${'A'.repeat(43)}`,
+    })
+    expect(catalog.data).toMatchObject({
+      afterSourceRecordId: null, nextAfterSourceRecordId: null,
+      items: [
+        {
+          sourceRecordId: 'wbs_historical_conflict', kind: 'classification',
+          conflictId: null, resolution: null,
+          context: {
+            counterparty: 'Pacjent', serviceLabel: 'Zajęcia psychologiczne',
+            proposedClassification: 'review', proposedServiceId: 'zajecia',
+            nearSubjectIds: ['hcl_historical_review_near'],
+          },
+        },
+        {
+          sourceRecordId: 'wbs_historical_conflict_two', kind: 'classification',
+          conflictId: null, resolution: null,
+          context: {
+            counterparty: 'Pacjent', serviceLabel: 'Zajęcia psychologiczne',
+            proposedClassification: 'review', proposedServiceId: 'zajecia',
+            nearSubjectIds: ['hcl_historical_review_near'],
+          },
+        },
+      ],
+    })
+    const serialized = JSON.stringify(catalog)
+    for (const forbidden of ['sheet_name', 'row_number', 'source_key', 'workbook:v1:0:4:0']) {
+      expect(serialized).not.toContain(forbidden)
+    }
+    await expect(getHistoricalProjectionReviewCatalog({
+      db: env.DB,
+      actor: authorityActor({ id: 'stf_other_catalog', role: 'owner' }),
+      keyring, config, centreId: 'centre_1', importId: CONFLICT_IMPORT_ID,
+      afterSourceRecordId: null,
+    })).rejects.toThrow(/^NOT_FOUND$/)
+  })
+
+  it('rechecks current authority after decrypting every transient operator context', async () => {
+    const revokedRecoveryDb = {
+      prepare: vi.fn(() => ({
+        bind: vi.fn(() => ({ first: vi.fn(async () => null) })),
+      })),
+    }
+    await expect(getHistoricalProjectionReviewCatalog({
+      db: env.DB, recoveryDb: revokedRecoveryDb, actor, keyring, config,
+      centreId: 'centre_1', importId: CONFLICT_IMPORT_ID,
+      afterSourceRecordId: null,
+    })).rejects.toThrow(/^NOT_FOUND$/)
+    await expect(getHistoricalProjection({
+      db: env.DB, recoveryDb: revokedRecoveryDb, actor, keyring,
+      importId: CONFLICT_IMPORT_ID,
+    })).rejects.toThrow(/^NOT_FOUND$/)
+    expect(revokedRecoveryDb.prepare).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects a review catalog binding for any non-approved workbook fingerprint', async () => {
+    let queries = 0
+    const db = {
+      prepare() {
+        queries += 1
+        return { bind() { return { async first() { return {
+          environment: 'staging', centre_id: 'centre_1', fingerprint: '0'.repeat(64),
+          artifact_id: 'wba_wrong_fingerprint', import_id: 'wbi_wrong_fingerprint',
+          creator_id: actor.id, plan_envelope: '{}',
+          plan_digest: `v1_${'A'.repeat(43)}`, job_id: null,
+        } } } } }
+      },
+    }
+    await expect(getHistoricalProjectionReviewCatalog({
+      db, actor, keyring, config, centreId: 'centre_1',
+      importId: 'wbi_wrong_fingerprint', afterSourceRecordId: null,
+    })).rejects.toThrow(/^NOT_FOUND$/)
+    expect(queries).toBe(1)
+  })
+
   it('returns only authenticated unresolved conflict context from its creator-bound status', async () => {
     const command = (expectedVersion, idempotencyKey) => ({
       db: env.DB, actor, keyring, config, centreId: 'centre_1',
@@ -718,6 +870,21 @@ describe('historical projection materializer', () => {
       status: 'conflicts', processedRecords: 1, projectedRecords: 0,
       conflictCount: 1, version: 2,
     })
+    expect(await continueHistoricalProjection(
+      command(1, 'historical-conflict-project-0001'),
+    )).toEqual(blocked)
+    const pausedBeforeFreshContinue = await env.DB.prepare(`SELECT status,
+      after_source_record_id,processed_records,projected_records,conflict_count,version
+      FROM historical_projection_jobs WHERE import_id=?`).bind(CONFLICT_IMPORT_ID).first()
+    await expect(continueHistoricalProjection(
+      command(2, 'historical-conflict-fresh-continue-0001'),
+    )).rejects.toThrow(/^VERSION_CONFLICT$/)
+    expect(await env.DB.prepare(`SELECT status,after_source_record_id,processed_records,
+      projected_records,conflict_count,version FROM historical_projection_jobs
+      WHERE import_id=?`).bind(CONFLICT_IMPORT_ID).first()).toEqual(pausedBeforeFreshContinue)
+    expect((await env.DB.prepare(`SELECT source_record_id FROM historical_projection_conflicts
+      WHERE job_id=? ORDER BY source_record_id`).bind(blocked.body.data.projection.id).all())
+      .results).toEqual([{ source_record_id: 'wbs_historical_conflict' }])
     const status = await getHistoricalProjection({
       db: env.DB, actor, keyring, config, centreId: 'centre_1',
       importId: CONFLICT_IMPORT_ID,
@@ -735,11 +902,30 @@ describe('historical projection materializer', () => {
       },
     }])
     const conflictId = status.data.conflicts[0].id
+    const initialCatalog = await getHistoricalProjectionReviewCatalog({
+      db: env.DB, actor, keyring, config, centreId: 'centre_1',
+      importId: CONFLICT_IMPORT_ID, afterSourceRecordId: null,
+    })
+    expect(initialCatalog.data.items.map(({ sourceRecordId, conflictId: id }) => ({
+      sourceRecordId, conflictId: id,
+    }))).toEqual([
+      { sourceRecordId: 'wbs_historical_conflict', conflictId },
+      { sourceRecordId: 'wbs_historical_conflict_two', conflictId: null },
+    ])
+    const liveCatalog = await getHistoricalProjectionReviewCatalog({
+      db: env.DB, actor, keyring, config, centreId: 'centre_1',
+      importId: CONFLICT_IMPORT_ID, afterSourceRecordId: null,
+    })
+    const liveItem = liveCatalog.data.items[0]
+    expect(liveItem.context.nearSubjectIds).toEqual(['hcl_historical_review_near'])
     const resolution = {
       ...command(2, 'historical-conflict-resolve-0001'),
       body: {
         expectedJobVersion: 2, conflictId, classification: 'person',
-        existingSubjectId: null, serviceId: null,
+        existingSubjectId: null, serviceId: 'zajecia',
+        reviewContextDigest: liveItem.reviewContextDigest,
+        directoryCount: liveCatalog.data.directoryCount,
+        directoryDigest: liveCatalog.data.directoryDigest,
       },
     }
     const [resolved, concurrentResolution] = await Promise.all([
@@ -747,10 +933,23 @@ describe('historical projection materializer', () => {
     ])
     expect(concurrentResolution).toEqual(resolved)
     expect(resolved).toMatchObject({ status: 201, body: { data: { projection: {
-      status: 'running', version: 3,
+      status: 'running', projectedRecords: 1, version: 3,
     } } } })
+    expect(await env.DB.prepare(`SELECT service_id FROM historical_service_occurrences
+      WHERE source_record_id='wbs_historical_conflict'`).first()).toEqual({
+      service_id: 'zajecia',
+    })
     const replayed = await resolveHistoricalConflict(resolution)
     expect(replayed).toEqual({ status: 200, body: resolved.body })
+    const afterFirstResolution = await getHistoricalProjectionReviewCatalog({
+      db: env.DB, actor, keyring, config, centreId: 'centre_1',
+      importId: CONFLICT_IMPORT_ID, afterSourceRecordId: null,
+    })
+    expect(afterFirstResolution.data.items[0]).toMatchObject({
+      sourceRecordId: 'wbs_historical_conflict', conflictId,
+      resolution: { classification: 'person', existingSubjectId: null, serviceId: 'zajecia' },
+      context: { nearSubjectIds: [] },
+    })
     await expect(resolveHistoricalConflict({
       ...resolution,
       idempotencyKey: 'historical-conflict-resolve-0002',
@@ -758,15 +957,55 @@ describe('historical projection materializer', () => {
     expect((await getHistoricalProjection({
       db: env.DB, actor, keyring, importId: CONFLICT_IMPORT_ID,
     })).data.conflicts).toEqual([])
-    const materialized = await continueHistoricalProjection(
+    const secondBlocked = await continueHistoricalProjection(
       command(3, 'historical-conflict-after-resolution-0001'),
     )
-    expect(materialized.body.data.projection).toMatchObject({
-      status: 'running', projectedRecords: 1, version: 4,
+    expect(secondBlocked.body.data.projection).toMatchObject({
+      status: 'conflicts', processedRecords: 2, projectedRecords: 1,
+      conflictCount: 2, version: 4,
     })
-    await continueHistoricalProjection(command(4, 'historical-conflict-complete-0001'))
+    const secondStatus = await getHistoricalProjection({
+      db: env.DB, actor, keyring, config, centreId: 'centre_1',
+      importId: CONFLICT_IMPORT_ID,
+    })
+    expect(secondStatus.data.conflicts).toHaveLength(1)
+    expect(secondStatus.data.conflicts[0]).toMatchObject({
+      sourceRecordId: 'wbs_historical_conflict_two', kind: 'classification',
+    })
+    const secondCatalog = await getHistoricalProjectionReviewCatalog({
+      db: env.DB, actor, keyring, config, centreId: 'centre_1',
+      importId: CONFLICT_IMPORT_ID, afterSourceRecordId: null,
+    })
+    const secondItem = secondCatalog.data.items[1]
+    expect(secondItem.conflictId).toBe(secondStatus.data.conflicts[0].id)
+    const secondResolved = await resolveHistoricalConflict({
+      ...command(4, 'historical-conflict-resolve-second-0001'),
+      body: {
+        expectedJobVersion: 4,
+        conflictId: secondItem.conflictId,
+        classification: 'person', existingSubjectId: null, serviceId: 'zajecia',
+        reviewContextDigest: secondItem.reviewContextDigest,
+        directoryCount: secondCatalog.data.directoryCount,
+        directoryDigest: secondCatalog.data.directoryDigest,
+      },
+    })
+    expect(secondResolved.body.data.projection).toMatchObject({
+      status: 'running', projectedRecords: 2, version: 5,
+    })
+    const completed = await continueHistoricalProjection(
+      command(5, 'historical-conflict-complete-0001'),
+    )
+    expect(completed.body.data.projection).toMatchObject({
+      status: 'complete', processedRecords: 2, projectedRecords: 2,
+      conflictCount: 2, version: 6,
+    })
     expect(await env.DB.prepare(`SELECT service_id FROM historical_service_occurrences
-      WHERE source_record_id='wbs_historical_conflict'`).first()).toEqual({ service_id: null })
+      WHERE source_record_id='wbs_historical_conflict'`).first()).toEqual({
+      service_id: 'zajecia',
+    })
+    expect((await getHistoricalProjection({
+      db: env.DB, actor, keyring, importId: CONFLICT_IMPORT_ID,
+    })).data.conflicts).toEqual([])
   })
 
   it('activates once with immutable provenance, exact replay, versions, and audit', async () => {
@@ -843,6 +1082,7 @@ describe('historical projection materializer', () => {
       'wbs_historical_rotation_overlap',
       'wbs_historical_rotation_retired',
       'wbs_historical_conflict',
+      'wbs_historical_conflict_two',
     ])
     expect(ownerWorkspace.data.latestPopulatedMonth).toBe('2025-01')
     expect(ownerWorkspace.data.historicalClients.find(({ status }) => status === 'activated'))
@@ -851,7 +1091,7 @@ describe('historical projection materializer', () => {
     const specialistWorkspace = await read(authorityActor({
       id: actor.id, role: 'specialist', specialistId: 'sp_historical_materializer',
     }))
-    expect(specialistWorkspace.data.historicalOccurrences).toHaveLength(5)
+    expect(specialistWorkspace.data.historicalOccurrences).toHaveLength(6)
     expect(specialistWorkspace.data.historicalClients.find(({ status }) => status === 'activated'))
       .toMatchObject({ activeClientId: null })
 

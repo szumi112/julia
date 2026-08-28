@@ -440,7 +440,7 @@ describe('workbook import reservation', () => {
       resolutions,
     })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
     expect(await importWriteEvidence()).toEqual(afterImported)
-    expect(parses).toBe(4)
+    expect(parses).toBe(7)
     expect(await env.DB.prepare(`SELECT specialist_id FROM workbook_resolutions
       WHERE import_id=? AND kind='specialist_mapping'`).bind(
       imported.body.data.import.id,
@@ -540,32 +540,43 @@ describe('workbook import reservation', () => {
     })).rejects.toThrow(/^NOT_FOUND$/)
 
     const beforeExpiredReplay = await importWriteEvidence()
-    const replay = await createWorkbookImport({
+    await expect(createWorkbookImport({
       ...command(bytes, preview.data.previewToken, 'workbook-import-one'),
       nowMs: NOW_MS + 10 * 60_000,
+    })).rejects.toThrow(/^WORKBOOK_PREVIEW_TOKEN_INVALID$/)
+    const changedToken = await previewWorkbook({
+      bytes, filename: 'fictional-panel.xlsx', actor, keyring, config,
+      centreId: 'centre_1', nowMs: NOW_MS + 10 * 60_000, parse: parser, readPanel: panel,
+      nonceFactory: () => new Uint8Array(16).fill(12),
+    })
+    const replay = await createWorkbookImport({
+      ...command(bytes, changedToken.data.previewToken, 'workbook-import-one'),
+      nowMs: NOW_MS + 10 * 60_000 + 1,
     })
     expect(replay.status).toBe(200)
     expect(replay.body).toEqual(first.body)
     expect(await importWriteEvidence()).toEqual(beforeExpiredReplay)
 
-    const changedToken = await previewWorkbook({
-      bytes, filename: 'fictional-panel.xlsx', actor, keyring, config,
-      centreId: 'centre_1', nowMs: NOW_MS + 1, parse: parser, readPanel: panel,
-      nonceFactory: () => new Uint8Array(16).fill(12),
-    })
+    let duplicateStoreCalled = false
     await expect(createWorkbookImport({
-      ...command(bytes, changedToken.data.previewToken, 'workbook-import-one'),
-      nowMs: NOW_MS + 2,
-    })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+      ...command(bytes, changedToken.data.previewToken, 'workbook-import-new-key'),
+      nowMs: NOW_MS + 10 * 60_000 + 1,
+      async storeArtifact() {
+        duplicateStoreCalled = true
+        throw new Error('must not store a duplicate artifact')
+      },
+    })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+    expect(duplicateStoreCalled).toBe(false)
     expect(await importWriteEvidence()).toEqual(beforeExpiredReplay)
+
     await expect(createWorkbookImport({
       ...command(
         new TextEncoder().encode('fictional-workbook-registry-one-altered'),
-        preview.data.previewToken,
+        changedToken.data.previewToken,
         'workbook-import-one',
       ),
-      nowMs: NOW_MS + 2,
-    })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
+      nowMs: NOW_MS + 10 * 60_000 + 2,
+    })).rejects.toThrow(/^WORKBOOK_PREVIEW_TOKEN_INVALID$/)
     expect(await importWriteEvidence()).toEqual(beforeExpiredReplay)
     const status = await getWorkbookImport({
       db: env.DB, actor, nowMs: NOW_MS + 2_000, importId: first.body.data.import.id,
@@ -799,13 +810,13 @@ describe('workbook import reservation', () => {
       readPanel,
       loadPanelState,
     })
-    liveInspectionAllowed = false
     const recovered = await createWorkbookImport({
       ...command(bytes, preview.data.previewToken, 'workbook-import-panel-edit'),
       readPanel,
       loadPanelState,
     })
     expect(recovered.body).toEqual(imported.body)
+    liveInspectionAllowed = false
     const artifact = await env.DB.prepare(
       'SELECT object_key FROM workbook_artifacts WHERE id=?',
     ).bind(imported.body.data.import.artifactId).first()
@@ -887,6 +898,19 @@ describe('workbook import reservation', () => {
     expect(replayed.body).toEqual(continued.body)
     expect((await env.DB.prepare(`SELECT count(*) AS count FROM finance_adjustments
       WHERE finance_entry_id='fin_panel_registry_edit'`).first()).count).toBe(1)
+    await expect(continueWorkbookImport({
+      db: env.DB,
+      actor,
+      keyring,
+      config,
+      centreId: 'centre_1',
+      nowMs: NOW_MS + 3_500,
+      correlationId: 'corr_workbook_panel_edit_continue',
+      idFactory,
+      importId: imported.body.data.import.id,
+      expectedVersion: 1,
+      idempotencyKey: 'workbook-panel-edit-continue-unrecorded',
+    })).rejects.toThrow(/^VERSION_CONFLICT$/)
     const objectCount = (await env.ARCHIVE.list({ prefix: 'workbook-objects/' })).objects.length
     const exportBudget = createD1QueryBudget(env.DB, {
       totalLimit: 50, recoveryReserve: 8,

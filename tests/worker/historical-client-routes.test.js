@@ -56,6 +56,12 @@ const mutation = (body, idempotencyKey) => ({
 describe('historical workspace HTTP routes', () => {
   it('forwards exact status, continuation, resolution, and activation contracts', async () => {
     let routeUsage
+    const getHistoricalProjectionReviewCatalog = vi.fn(async ({ importId }) => ({
+      data: {
+        binding: { importId }, afterSourceRecordId: null,
+        nextAfterSourceRecordId: null, items: [],
+      },
+    }))
     const getHistoricalProjectionStatus = vi.fn(async ({ importId }) => ({
       data: { projection: { id: 'hpj_route_one', importId, version: 1 }, conflicts: [] },
     }))
@@ -85,6 +91,7 @@ describe('historical workspace HTTP routes', () => {
       } } },
     }))
     const app = createApp(depsFor({
+      getHistoricalProjectionReviewCatalog,
       getHistoricalProjectionStatus,
       postHistoricalProjectionContinue,
       postHistoricalProjectionResolution,
@@ -93,6 +100,9 @@ describe('historical workspace HTTP routes', () => {
 
     expect((await app.request(
       '/api/v1/workbooks/imports/wbi_route_one/historical-projection',
+    )).status).toBe(200)
+    expect((await app.request(
+      '/api/v1/workbooks/imports/wbi_route_one/historical-projection/review-catalog',
     )).status).toBe(200)
     expect((await app.request(
       '/api/v1/workbooks/imports/wbi_route_one/historical-projection/continue',
@@ -106,7 +116,9 @@ describe('historical workspace HTTP routes', () => {
       '/api/v1/workbooks/imports/wbi_route_one/historical-projection/resolutions',
       mutation({
         expectedJobVersion: 2, conflictId: 'hcf_route_one', classification: 'person',
-        existingSubjectId: null, serviceId: null,
+        existingSubjectId: null, serviceId: 'zajecia',
+        reviewContextDigest: 'a'.repeat(64), directoryCount: 0,
+        directoryDigest: 'b'.repeat(64),
       }, 'historical-route-resolution-0001'),
     )).status).toBe(201)
     expect((await app.request(
@@ -118,6 +130,11 @@ describe('historical workspace HTTP routes', () => {
     expect(getHistoricalProjectionStatus).toHaveBeenCalledWith(expect.objectContaining({
       actor, importId: 'wbi_route_one',
     }))
+    expect(getHistoricalProjectionReviewCatalog).toHaveBeenCalledWith(expect.objectContaining({
+      actor, importId: 'wbi_route_one', afterSourceRecordId: null,
+      recoveryDb: expect.anything(),
+      config: expect.objectContaining({ appEnv: 'staging', dataMode: 'fictional' }),
+    }))
     expect(postHistoricalProjectionContinue).toHaveBeenCalledWith(expect.objectContaining({
       actor, expectedVersion: 1, importId: 'wbi_route_one',
       idempotencyKey: 'historical-route-continue-0001',
@@ -125,7 +142,9 @@ describe('historical workspace HTTP routes', () => {
     expect(postHistoricalProjectionResolution).toHaveBeenCalledWith(expect.objectContaining({
       actor, body: {
         expectedJobVersion: 2, conflictId: 'hcf_route_one', classification: 'person',
-        existingSubjectId: null, serviceId: null,
+        existingSubjectId: null, serviceId: 'zajecia',
+        reviewContextDigest: 'a'.repeat(64), directoryCount: 0,
+        directoryDigest: 'b'.repeat(64),
       },
     }))
     expect(postHistoricalClientActivation).toHaveBeenCalledWith(expect.objectContaining({
@@ -134,16 +153,41 @@ describe('historical workspace HTTP routes', () => {
     }))
   })
 
+  it('returns a fixed conflict response when a fresh continuation targets a paused job', async () => {
+    const core = vi.fn(async () => { throw new Error('VERSION_CONFLICT') })
+    const app = createApp(depsFor({
+      postHistoricalProjectionContinue: core,
+    }))
+    const response = await app.request(
+      '/api/v1/workbooks/imports/wbi_route_one/historical-projection/continue',
+      mutation({ expectedVersion: 2 }, 'historical-route-paused-continue-0001'),
+    )
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ error: { code: 'VERSION_CONFLICT' } })
+    expect(core).toHaveBeenCalledOnce()
+    expect(core).toHaveBeenCalledWith(expect.objectContaining({
+      importId: 'wbi_route_one', expectedVersion: 2,
+      idempotencyKey: 'historical-route-paused-continue-0001',
+    }))
+  })
+
   it('maps malformed historical commands to fixed 400 validation errors before core', async () => {
+    const getHistoricalProjectionReviewCatalog = vi.fn()
     const postHistoricalProjectionContinue = vi.fn()
     const postHistoricalProjectionResolution = vi.fn()
     const postHistoricalClientActivation = vi.fn()
     const app = createApp(depsFor({
+      getHistoricalProjectionReviewCatalog,
       postHistoricalProjectionContinue,
       postHistoricalProjectionResolution,
       postHistoricalClientActivation,
     }))
     const requests = [
+      [
+        '/api/v1/workbooks/imports/wbi_route_one/historical-projection/review-catalog?afterSourceRecordId=bad',
+        undefined,
+        null,
+      ],
       [
         '/api/v1/workbooks/imports/wbi_route_one/historical-projection/continue',
         mutation({ expectedVersion: '1' }, 'historical-route-invalid-continue-0001'),
@@ -167,10 +211,11 @@ describe('historical workspace HTTP routes', () => {
     for (const [path, init, field] of requests) {
       const response = await app.request(path, init)
       expect(response.status).toBe(400)
-      expect(await response.json()).toMatchObject({
-        error: { code: 'VALIDATION_FAILED', details: { field } },
-      })
+      const payload = await response.json()
+      expect(payload).toMatchObject({ error: { code: 'VALIDATION_FAILED' } })
+      if (field !== null) expect(payload).toMatchObject({ error: { details: { field } } })
     }
+    expect(getHistoricalProjectionReviewCatalog).not.toHaveBeenCalled()
     expect(postHistoricalProjectionContinue).not.toHaveBeenCalled()
     expect(postHistoricalProjectionResolution).not.toHaveBeenCalled()
     expect(postHistoricalClientActivation).not.toHaveBeenCalled()
@@ -188,11 +233,15 @@ describe('historical workspace HTTP routes', () => {
     const specialistApp = createApp(depsFor({
       resolveActor: vi.fn(async () => specialist),
       getHistoricalProjectionStatus: projection,
+      getHistoricalProjectionReviewCatalog: projection,
       postHistoricalProjectionContinue: projection,
       postHistoricalProjectionResolution: projection,
       postHistoricalClientActivation: activation,
     }))
     const attempts = [
+      specialistApp.request(
+        '/api/v1/workbooks/imports/wbi_route_one/historical-projection/review-catalog',
+      ),
       specialistApp.request(
         '/api/v1/workbooks/imports/wbi_route_one/historical-projection',
       ),
@@ -205,6 +254,8 @@ describe('historical workspace HTTP routes', () => {
         mutation({
           expectedJobVersion: 2, conflictId: 'hcf_route_one', classification: 'exclude',
           existingSubjectId: null, serviceId: null,
+          reviewContextDigest: 'a'.repeat(64), directoryCount: 0,
+          directoryDigest: 'b'.repeat(64),
         }, 'historical-route-hidden-resolution-0001'),
       ),
       specialistApp.request(

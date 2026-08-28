@@ -1337,6 +1337,8 @@ export async function continueWorkbookMaterialization(input) {
     await requireCurrentAuthority(command.db, command.actor)
     return responseFrom(state)
   }
+  if (state.import_status === 'complete'
+    && state.import_version !== command.expectedVersion) fail('VERSION_CONFLICT')
   if (state.import_status === 'complete') {
     await requireCurrentAuthority(command.db, command.actor)
     return responseFrom(state)

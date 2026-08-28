@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 
 import {
@@ -7,6 +8,47 @@ import {
 } from '../../scripts/workbook-rollout-staging-lib.mjs'
 
 const PLAN_DIGEST = `v1_${'A'.repeat(43)}`
+const FINGERPRINT = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
+const sha256 = (value) => createHash('sha256').update(value).digest('hex')
+const projectionContext = (index) => Object.freeze({
+  counterparty: 'Synthetic rollout subject',
+  serviceLabel: index < 86 ? 'Synthetic classification' : 'Synthetic service',
+  proposedClassification: index < 86 ? 'review' : 'person',
+  proposedServiceId: null, nearSubjectIds: Object.freeze([]),
+})
+const projectionProfiles = Object.freeze(Array.from({ length: 5 }, (_, index) => (
+  Object.freeze({
+    sourceRecordId: `wbs_rollout_profile_${String(index + 1).padStart(4, '0')}`,
+    context: Object.freeze({
+      counterparty: `Conflict free ${sha256(`profile-${index}`).slice(0, 24)}`,
+      serviceLabel: 'Zajęcia psychologiczne', proposedClassification: 'person',
+      proposedServiceId: 'zajecia', nearSubjectIds: Object.freeze([]),
+    }),
+  })
+)))
+const PROFILE_DIGEST = sha256(JSON.stringify(projectionProfiles))
+const projectionDecisions = Object.freeze(Array.from({ length: 1_992 }, (_, index) => (
+  Object.freeze({
+    sourceRecordId: `wbs_rollout_${String(index + 1).padStart(4, '0')}`,
+    kind: index < 86 ? 'classification' : 'service', classification: 'person',
+    existingSubjectId: null, serviceId: 'zajecia',
+    reviewContextDigest: sha256(JSON.stringify({
+      context: projectionContext(index), subjectSensitive: false,
+      profileDigest: PROFILE_DIGEST,
+    })),
+  })
+)))
+const projectionArtifact = Object.freeze({
+  schema: 'historical_projection_resolutions.v1', environment: 'staging',
+  centreId: 'centre_1', fingerprint: FINGERPRINT,
+  artifactId: 'wba_rollout_one', importId: 'wbi_rollout_one',
+  creatorId: 'stf_rollout_owner', planDigest: PLAN_DIGEST,
+  decisionCount: 1_992, decisionDigest: sha256(JSON.stringify(projectionDecisions)),
+  decisions: projectionDecisions,
+})
+const loadedResolutions = Object.freeze({
+  artifact: projectionArtifact, fileSha256: sha256(JSON.stringify(projectionArtifact)),
+})
 const previewMetadata = Object.freeze({
   parserVersion: 2,
   materializerVersion: 2,
@@ -61,9 +103,40 @@ const serverReconciliation = Object.freeze({
   replayVoidedRecords: 0,
 })
 
+const recoveryFacts = Object.freeze({
+  kind: 'workbook_roundtrip_v1',
+  artifact: Object.freeze({
+    id: 'wba_rollout_one', fingerprint: FINGERPRINT, byteSize: 4096,
+    parserVersion: 2, materializerVersion: 2,
+  }),
+  import: Object.freeze({
+    id: 'wbi_rollout_one', status: 'complete', version: 3,
+    acceptedRecords: 2_232, quarantinedRecords: 3,
+  }),
+  finance: Object.freeze({
+    jobId: 'wbj_rollout_one', status: 'complete', phase: 'complete', version: 3,
+    cursor: 2_232, totalRecords: 2_232, processedRecords: 2_232, reportingRevision: 1,
+  }),
+  historical: Object.freeze({
+    jobId: 'hpj_rollout_one', status: 'complete', version: 3_985,
+    totalRecords: 2_000, processedRecords: 2_000, projectedRecords: 1_997,
+    conflictCount: 1_992, resolutionCount: 1_992, occurrenceCount: 1_997,
+    explicitExclusionCount: 0, automaticDeferredCount: 3, unresolvedCount: 0,
+  }),
+  activity: Object.freeze({
+    jobId: 'apj_rollout_one', status: 'complete', version: 2,
+    totalRecords: 190, processedRecords: 190, projectedRecords: 190,
+    participantLinkCount: 190, chargeLinkCount: 190, groupLinkCount: 25,
+    membershipObservationLinkCount: 25, physicalLinkCount: 430,
+  }),
+  reconciliation: Object.freeze({ ...serverReconciliation, crossProjectionOverlapCount: 0 }),
+})
+
 const terminal = Object.freeze({
   importId: 'wbi_rollout_one',
   artifactId: 'wba_rollout_one',
+  jobId: 'wbj_rollout_one',
+  jobVersion: 3,
   status: 'complete',
   version: 3,
   createdRecords: 2235,
@@ -125,6 +198,7 @@ const fixture = (overrides = {}) => {
       assert.equal(input.idempotencyKey, 'rollout-commit-fixed-key')
       return {
         importId: terminal.importId, artifactId: terminal.artifactId,
+        jobId: null, jobVersion: null,
         status: 'materializing', version: 1, createdRecords: 0,
         voidedRecords: 0, converged: false,
       }
@@ -134,20 +208,22 @@ const fixture = (overrides = {}) => {
       assert.equal(importId, terminal.importId)
       return {
         importId, artifactId: terminal.artifactId, status: 'materializing',
+        jobId: terminal.jobId, jobVersion: 1,
         version: 2, createdRecords: 0, voidedRecords: 0, converged: false,
       }
     },
     async continue(input) {
       calls.push('continue')
       continuationCalls += 1
-      const ordinal = continuationCalls <= 2 ? continuationCalls : continuationCalls - 2
+      const ordinal = continuationCalls <= 2 ? continuationCalls : 2
       assert.deepEqual(input, {
         importId: terminal.importId,
         expectedVersion: 2,
-        idempotencyKey: `rollout-continue-fixed-key-2-${ordinal}`,
+        idempotencyKey: `rollout-continue-fixed-key-${terminal.jobId}-${ordinal}-${ordinal}`,
       })
       return ordinal === 1 ? {
         importId: terminal.importId, artifactId: terminal.artifactId,
+        jobId: terminal.jobId, jobVersion: 2,
         status: 'materializing', version: 2, createdRecords: 1200,
         voidedRecords: 2, converged: false,
       } : terminal
@@ -169,7 +245,88 @@ const fixture = (overrides = {}) => {
     async reconciliation(importId) {
       calls.push('reconciliation')
       assert.equal(importId, terminal.importId)
-      return serverReconciliation
+      return recoveryFacts
+    },
+    async historicalReviewCatalog({ afterSourceRecordId, consumeReviewPage }) {
+      const offset = afterSourceRecordId === null ? 0
+        : projectionDecisions.findIndex(({ sourceRecordId }) => (
+          sourceRecordId === afterSourceRecordId
+        )) + 1
+      const page = projectionDecisions.slice(offset, offset + 100)
+      const privatePage = {
+        binding: {
+          environment: 'staging', centreId: 'centre_1', fingerprint: FINGERPRINT,
+          artifactId: terminal.artifactId, importId: terminal.importId,
+          creatorId: 'stf_rollout_owner', planDigest: PLAN_DIGEST,
+        },
+        afterSourceRecordId,
+        nextAfterSourceRecordId: offset + page.length < projectionDecisions.length
+          ? page.at(-1).sourceRecordId : null,
+        directoryCount: 0, directoryDigest: 'd'.repeat(64),
+        items: page.map((decision, index) => ({
+          sourceRecordId: decision.sourceRecordId, kind: decision.kind,
+          conflictId: `hcf_rollout_${String(offset + index + 1).padStart(4, '0')}`,
+          resolution: {
+            classification: decision.classification,
+            existingSubjectId: decision.existingSubjectId, serviceId: decision.serviceId,
+          },
+          reviewContextDigest: sha256(JSON.stringify(projectionContext(offset + index))),
+          context: projectionContext(offset + index),
+        })),
+        profiles: afterSourceRecordId === null ? projectionProfiles.map((profile) => ({
+          ...profile, reviewContextDigest: sha256(JSON.stringify(profile.context)),
+        })) : [],
+      }
+      await consumeReviewPage(privatePage)
+      return {
+        ...privatePage,
+        items: privatePage.items.map(({ context: _context, ...item }) => item),
+        profiles: privatePage.profiles.map(({ context: _context, ...profile }) => profile),
+      }
+    },
+    async historicalProjection(_importId, { consumeConflictReview }) {
+      const value = {
+        projection: {
+          id: 'hpj_rollout_one', importId: terminal.importId, status: 'complete',
+          afterSourceRecordId: 'wbs_rollout_terminal', totalRecords: 2_000,
+          processedRecords: 2_000, projectedRecords: 1_997, conflictCount: 1_992,
+          version: 3_985, updatedAt: '2026-08-28T10:00:00.000Z',
+          completedAt: '2026-08-28T10:00:00.000Z',
+        },
+        conflicts: [],
+      }
+      await consumeConflictReview(value)
+      return value
+    },
+    async continueHistoricalProjection(input) {
+      assert.equal(input.expectedVersion, 3_984)
+      return {
+        id: 'hpj_rollout_one', importId: terminal.importId, status: 'complete',
+        afterSourceRecordId: 'wbs_rollout_terminal', totalRecords: 2_000,
+        processedRecords: 2_000, projectedRecords: 1_997, conflictCount: 1_992,
+        version: 3_985, updatedAt: '2026-08-28T10:00:00.000Z',
+        completedAt: '2026-08-28T10:00:00.000Z',
+      }
+    },
+    async resolveHistoricalProjection() { throw new Error('terminal') },
+    async activityProjection() {
+      return {
+        id: 'apj_rollout_one', importId: terminal.importId, status: 'complete',
+        afterSourceRecordId: 'wbs_activity_terminal', totalRecords: 190,
+        processedRecords: 190, projectedRecords: 190, version: 2,
+        updatedAt: '2026-08-28T10:00:00.000Z',
+        completedAt: '2026-08-28T10:00:00.000Z',
+      }
+    },
+    async continueActivityProjection(input) {
+      assert.equal(input.expectedVersion, 1)
+      return {
+        id: 'apj_rollout_one', importId: terminal.importId, status: 'complete',
+        afterSourceRecordId: 'wbs_activity_terminal', totalRecords: 190,
+        processedRecords: 190, projectedRecords: 190, version: 2,
+        updatedAt: '2026-08-28T10:00:00.000Z',
+        completedAt: '2026-08-28T10:00:00.000Z',
+      }
     },
     ...overrides,
   }
@@ -186,9 +343,10 @@ test('rollout proves no-write preview, terminal continuation, artifact readback 
       conflictId: 'wmc_mapping_one', specialistId: 'sp_fictional_julia',
     })]),
     commitIdempotencyKey: 'rollout-commit-fixed-key',
-    continueIdempotencyKey: (version, ordinal) => (
-      `rollout-continue-fixed-key-${version}-${ordinal}`
+    continueIdempotencyKey: (jobId, jobVersion, _version, ordinal) => (
+      `rollout-continue-fixed-key-${jobId}-${jobVersion}-${ordinal}`
     ),
+    loadedResolutions,
     expectedReconciliation: reconciliation,
     maximumContinuations: 10,
   })
@@ -209,7 +367,7 @@ test('rollout proves no-write preview, terminal continuation, artifact readback 
   assert.equal(evidenceReads(), 4)
   assert.deepEqual(calls, [
     'evidence', 'preview', 'evidence', 'commit', 'status', 'continue', 'continue',
-    'artifact', 'reconciliation', 'evidence', 'commit', 'continue', 'continue',
+    'artifact', 'reconciliation', 'evidence', 'commit', 'continue',
     'evidence', 'reconciliation',
   ])
   assert.doesNotMatch(JSON.stringify(result), /must-never-escape|mapping|specialist|source/i)
@@ -259,6 +417,7 @@ test('rollout stops before commit when preview wrote or resolutions do not exact
       continueIdempotencyKey: (version, ordinal) => (
         `rollout-continue-fixed-key-${version}-${ordinal}`
       ),
+      loadedResolutions,
       expectedReconciliation: reconciliation,
       maximumContinuations: 10,
     }), /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/)
@@ -291,6 +450,7 @@ test('rollout rejects non-authoritative preview versions, kind and digest before
       resolutions: [{ conflictId: 'wmc_mapping_one', specialistId: 'sp_fictional_julia' }],
       commitIdempotencyKey: 'rollout-commit-fixed-key',
       continueIdempotencyKey: (version, ordinal) => `continue-${version}-${ordinal}`,
+      loadedResolutions,
       expectedReconciliation: reconciliation,
     }), /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/)
     assert.equal(commits, 0)
@@ -304,6 +464,7 @@ test('rollout stops before a second continuation when a response switches import
       continuationCalls += 1
       return {
         importId: 'wbi_foreign_one', artifactId: 'wba_foreign_one',
+        jobId: terminal.jobId, jobVersion: 2,
         status: 'materializing', version: 2, createdRecords: 1,
         voidedRecords: 0, converged: false,
       }
@@ -316,6 +477,7 @@ test('rollout stops before a second continuation when a response switches import
     resolutions: [{ conflictId: 'wmc_mapping_one', specialistId: 'sp_fictional_julia' }],
     commitIdempotencyKey: 'rollout-commit-fixed-key',
     continueIdempotencyKey: (version, ordinal) => `continue-${version}-${ordinal}`,
+    loadedResolutions,
     expectedReconciliation: reconciliation,
   }), /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/)
   assert.equal(continuationCalls, 1)
@@ -341,6 +503,7 @@ test('rollout rejects replay when created or voided write counters change', asyn
     continueIdempotencyKey: (version, ordinal) => (
       `rollout-continue-fixed-key-${version}-${ordinal}`
     ),
+    loadedResolutions,
     expectedReconciliation: reconciliation,
     maximumContinuations: 10,
   }), /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/)
@@ -361,6 +524,7 @@ test('rollout rejects nonzero informational replay decision counts', async () =>
     })]),
     commitIdempotencyKey: 'rollout-commit-fixed-key',
     continueIdempotencyKey: (version, ordinal) => `continue-${version}-${ordinal}`,
+    loadedResolutions,
     expectedReconciliation: reconciliation,
   }), /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/)
 })

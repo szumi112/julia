@@ -1,4 +1,5 @@
 import { authorize } from '../identity/policy.js'
+import { readBackupRecoverySnapshot } from '../operations/backup-recovery.js'
 import { readWorkbookArtifact } from '../security/workbook-artifacts.js'
 
 const CENTRE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
@@ -148,65 +149,20 @@ export async function loadWorkbookReconciliationEvidence(input) {
     || !IMPORT_ID.test(input.importId ?? '')
     || !Number.isSafeInteger(input.nowMs) || input.nowMs < 0) fail('INTERNAL_ERROR')
   await authorizeOperator(input.db, input.actor, input.nowMs)
-  const row = await input.db.prepare(
-    `SELECT
-      (SELECT count(*) FROM workbook_source_records source
-       WHERE source.import_id=import.id AND source.disposition='accepted') AS activeAcceptedSourceRecords,
-      (SELECT count(*) FROM workbook_source_records source
-       WHERE source.import_id=import.id AND source.disposition='quarantined') AS quarantinedSourceRecords,
-      (SELECT count(*) FROM workbook_quarantine_records quarantine
-       JOIN workbook_source_records source ON source.id=quarantine.source_record_id
-       WHERE source.import_id=import.id
-         AND quarantine.primary_reason IN ('SERVICE_DATE_MISSING','SERVICE_DATE_INVALID')) AS monthlyDateQuarantines,
-      (SELECT count(*) FROM workbook_quarantine_records quarantine
-       JOIN workbook_source_records source ON source.id=quarantine.source_record_id
-       WHERE source.import_id=import.id AND quarantine.primary_reason='ORPHAN_AMOUNT') AS fixedOrphanAmountQuarantines,
-      (SELECT count(*) FROM workbook_source_records source,json_each(source.warning_codes_json) warning
-       WHERE source.import_id=import.id AND warning.value='AMOUNT_STORED_AS_TEXT') AS amountStoredAsTextWarnings,
-      (SELECT count(*) FROM workbook_finance_decisions decision
-       WHERE decision.import_id=import.id AND decision.accounting_month_changed=1) AS correctedCombinedSheetMonths,
-      (SELECT count(*) FROM workbook_source_records source
-       WHERE source.import_id=import.id AND source.record_type='tus') AS tusRecords,
-      (SELECT count(*) FROM workbook_source_records source
-       WHERE source.import_id=import.id AND source.record_type='english') AS englishRecords,
-      (SELECT count(*) FROM workbook_finance_decisions decision
-       WHERE decision.import_id=import.id AND decision.reason_code='formula_cache') AS formulaGhostsExcluded,
-      max(0,(SELECT count(*) FROM workbook_finance_candidates candidate
-        WHERE candidate.import_id=import.id)-(SELECT count(DISTINCT decision.finance_entry_id)
-        FROM workbook_finance_decisions decision WHERE decision.import_id=import.id
-          AND decision.finance_entry_id IS NOT NULL)) AS unexplainedDroppedCandidates,
-      (SELECT count(*)-count(DISTINCT decision.source_record_id)
-       FROM workbook_finance_decisions decision
-       WHERE decision.import_id=import.id AND decision.action='insert') AS replayCreatedRecords,
-      (SELECT count(*)-count(DISTINCT decision.finance_entry_id)
-       FROM workbook_finance_decisions decision
-       WHERE decision.import_id=import.id AND decision.action='void') AS replayVoidedRecords,
-      NOT EXISTS (SELECT link.finance_entry_id FROM finance_source_links link
-        JOIN workbook_source_records source ON source.id=link.source_record_id
-        WHERE source.import_id=import.id GROUP BY link.finance_entry_id HAVING count(*)>1) AS ledgerLinksUnique,
-      NOT EXISTS (SELECT source.id FROM workbook_source_records source
-        LEFT JOIN historical_service_occurrences occurrence ON occurrence.source_record_id=source.id
-        LEFT JOIN activity_source_links activity ON activity.source_record_id=source.id
-        WHERE source.import_id=import.id GROUP BY source.id
-        HAVING count(occurrence.id)>1 OR count(activity.id)>1) AS projectionLinksUnique,
-      ((SELECT count(*) FROM workbook_source_records source WHERE source.import_id=import.id)
-        = import.accepted_records+import.quarantined_records) AS parentTotalsReconcile
-     FROM workbook_imports import WHERE import.id=? AND import.created_by_staff_id=?`,
+  const imported = await input.db.prepare(
+    `SELECT id FROM workbook_imports WHERE id=? AND created_by_staff_id=?`,
   ).bind(input.importId, input.actor.id).first()
-  if (!row) fail('NOT_FOUND')
-  const countKeys = [
-    'activeAcceptedSourceRecords', 'quarantinedSourceRecords',
-    'monthlyDateQuarantines', 'fixedOrphanAmountQuarantines',
-    'amountStoredAsTextWarnings', 'correctedCombinedSheetMonths', 'tusRecords',
-    'englishRecords', 'formulaGhostsExcluded', 'unexplainedDroppedCandidates',
-    'replayCreatedRecords', 'replayVoidedRecords',
-  ]
-  const booleanKeys = ['ledgerLinksUnique', 'projectionLinksUnique', 'parentTotalsReconcile']
-  if (countKeys.some((key) => !safe(row[key]))
-    || booleanKeys.some((key) => ![0, 1].includes(row[key]))) fail('INTERNAL_ERROR')
+  if (!imported || imported.id !== input.importId) fail('NOT_FOUND')
+  let snapshot
+  try { snapshot = await readBackupRecoverySnapshot(input.db) } catch {
+    await authorizeOperator(input.db, input.actor, input.nowMs)
+    fail('INTERNAL_ERROR')
+  }
+  const facts = snapshot?.recoveryFacts
+  if (!facts || facts.kind !== 'workbook_roundtrip_v1'
+    || facts.import?.id !== input.importId || facts.artifact?.fingerprint !== APPROVED) {
+    fail('NOT_FOUND')
+  }
   await authorizeOperator(input.db, input.actor, input.nowMs)
-  return Object.freeze({ data: Object.freeze({
-    ...Object.fromEntries(countKeys.map((key) => [key, row[key]])),
-    ...Object.fromEntries(booleanKeys.map((key) => [key, row[key] === 1])),
-  }) })
+  return Object.freeze({ data: facts })
 }

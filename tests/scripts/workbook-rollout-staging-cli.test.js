@@ -1,5 +1,19 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  open,
+  realpath,
+  rename,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, relative } from 'node:path'
 import test from 'node:test'
 
 import {
@@ -11,6 +25,38 @@ import { runStagingWorkbookRollout } from '../../scripts/workbook-rollout-stagin
 
 const ORIGIN = 'https://staging.bearwithme-panel.app'
 const PLAN_DIGEST = `v1_${'A'.repeat(43)}`
+const digest = (value) => createHash('sha256').update(value).digest('hex')
+const rolloutCliUrl = new URL('../../scripts/workbook-rollout-staging.mjs', import.meta.url)
+
+const privateInputRoot = async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'bwm-rollout-input-')))
+  await chmod(root, 0o700)
+  const directory = join(root, 'operator')
+  await mkdir(directory, { mode: 0o700 })
+  return { root, directory }
+}
+
+const writePrivateInput = async (path, bytes) => {
+  await writeFile(path, bytes, { mode: 0o600 })
+  await chmod(path, 0o600)
+}
+
+async function interceptNextHandleRead(action) {
+  const sample = await open(import.meta.filename, 'r')
+  const prototype = Object.getPrototypeOf(sample)
+  const original = prototype.readFile
+  await sample.close()
+  let intercepted = false
+  prototype.readFile = async function (...args) {
+    const bytes = await original.apply(this, args)
+    if (!intercepted) {
+      intercepted = true
+      await action(bytes)
+    }
+    return bytes
+  }
+  return () => { prototype.readFile = original }
+}
 const response = (payload, status = 200, path = '/api/v1/workbooks/operator-evidence') => ({
   ok: () => status >= 200 && status < 300,
   status: () => status,
@@ -29,7 +75,7 @@ const imported = (status = 'materializing', version = 1) => ({
   updatedAt: '2026-08-28T10:00:00.000Z', completedAt: null,
 })
 const job = {
-  id: 'wmj_http_one', phase: 'apply_finance', status: 'running', cursor: 64,
+  id: 'wbj_http_one', phase: 'apply_finance', status: 'running', cursor: 64,
   totalRecords: 2235, processedRecords: 64, version: 2,
   updatedAt: '2026-08-28T10:00:00.000Z', completedAt: null,
 }
@@ -56,7 +102,7 @@ test('HTTP adapter discovers exact import state through the narrow fingerprint e
 
   assert.deepEqual(
     await api.discoverImport({ fingerprint, creatorId: 'stf_http_one' }),
-    discoveredImport(),
+    { ...discoveredImport(), jobId: null, jobVersion: null },
   )
   assert.deepEqual(paths, [
     `/api/v1/workbooks/imports/discovery?fingerprint=${fingerprint}`,
@@ -199,6 +245,290 @@ test('HTTP adapter uses only guarded creator-bound rollout endpoints and normali
   assert.equal(calls[0].options.multipart.workbook.name, 'approved-workbook.xlsx')
   assert.equal(calls[1].options.multipart.resolutions,
     '[{"conflictId":"wmc_http_one","specialistId":"sp_http_one"}]')
+})
+
+test('HTTP adapter drives creator-bound historical and activity projections without returning review context', async () => {
+  const calls = []
+  const historical = {
+    id: 'hpj_http_one', importId: 'wbi_http_one', status: 'conflicts',
+    afterSourceRecordId: 'wbs_http_one', totalRecords: 2000, processedRecords: 1,
+    projectedRecords: 0, conflictCount: 1, version: 2,
+    updatedAt: '2026-08-28T10:00:00.000Z', completedAt: null,
+  }
+  const activity = {
+    id: 'apj_http_one', importId: 'wbi_http_one', status: 'running',
+    afterSourceRecordId: 'wbs_activity_one', totalRecords: 190, processedRecords: 1,
+    projectedRecords: 1, version: 2,
+    updatedAt: '2026-08-28T10:00:00.000Z', completedAt: null,
+  }
+  const privateReviewContext = {
+    counterparty: 'must-never-leave-adapter', serviceLabel: 'private-service',
+    proposedClassification: 'review', proposedServiceId: 'zajecia',
+    nearSubjectIds: [],
+  }
+  const requestContext = {
+    async get(path, options) {
+      calls.push({ method: 'GET', path, options })
+      if (path.includes('/review-catalog')) return response({ data: {
+        binding: {
+          environment: 'staging', centreId: 'centre_1',
+          fingerprint: 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a',
+          artifactId: 'wba_http_one', importId: 'wbi_http_one', creatorId: 'stf_http_one',
+          planDigest: PLAN_DIGEST,
+        },
+        afterSourceRecordId: null, nextAfterSourceRecordId: null,
+        directoryCount: 0, directoryDigest: 'd'.repeat(64),
+        items: [{
+          sourceRecordId: 'wbs_http_one', kind: 'classification',
+          conflictId: 'hcf_http_one', resolution: null,
+          reviewContextDigest: digest(JSON.stringify(privateReviewContext)),
+          context: privateReviewContext,
+        }],
+        profiles: [],
+      } }, 200, path)
+      if (path.endsWith('/historical-projection')) return response({ data: {
+        projection: historical,
+        conflicts: [{
+          id: 'hcf_http_one', sourceRecordId: 'wbs_http_one', kind: 'classification',
+          context: {
+            counterparty: 'must-never-leave-adapter', serviceLabel: 'private-service',
+            proposedClassification: 'review', proposedServiceId: 'zajecia',
+            nearSubjectIds: [],
+          },
+        }],
+      } }, 200, path)
+      return response({ data: { job: activity } }, 200, path)
+    },
+    async post(path, options) {
+      calls.push({ method: 'POST', path, options })
+      return path.includes('/historical-projection')
+        ? response({ data: { projection: { ...historical, status: 'running', version: 3 } } },
+          path.endsWith('/resolutions') ? 201 : 200, path)
+        : response({ data: { job: { ...activity, version: 3 } } }, 200, path)
+    },
+  }
+  const api = createStagingWorkbookApi({
+    requestContext, origin: ORIGIN, csrfToken: 'private-csrf',
+    expectedActorId: 'stf_http_one', expectedAuthorityRevision: 7,
+  })
+  let transientReviewPage = null
+  const catalog = await api.historicalReviewCatalog({
+    importId: 'wbi_http_one', afterSourceRecordId: null,
+    consumeReviewPage(value) { transientReviewPage = value },
+  })
+  const status = await api.historicalProjection('wbi_http_one')
+  await api.continueHistoricalProjection({
+    importId: 'wbi_http_one', expectedVersion: 2,
+    idempotencyKey: 'historical-continue-http-one',
+  })
+  await api.resolveHistoricalProjection({
+    importId: 'wbi_http_one', expectedJobVersion: 2, conflictId: 'hcf_http_one',
+    classification: 'person', existingSubjectId: null, serviceId: 'zajecia',
+    reviewContextDigest: digest(JSON.stringify(privateReviewContext)),
+    directoryCount: 0, directoryDigest: 'd'.repeat(64),
+    idempotencyKey: 'historical-resolve-http-one',
+  })
+  await api.activityProjection('wbi_http_one')
+  await api.continueActivityProjection({
+    importId: 'wbi_http_one', expectedVersion: 2,
+    idempotencyKey: 'activity-continue-http-one',
+  })
+
+  assert.deepEqual(catalog.items, [{
+    sourceRecordId: 'wbs_http_one', kind: 'classification',
+    conflictId: 'hcf_http_one', resolution: null,
+    reviewContextDigest: digest(JSON.stringify(privateReviewContext)),
+  }])
+  assert.deepEqual(status.conflicts, [{
+    conflictId: 'hcf_http_one', sourceRecordId: 'wbs_http_one', kind: 'classification',
+  }])
+  assert.equal(JSON.stringify({ catalog, status }).includes('must-never-leave-adapter'), false)
+  assert.equal(JSON.stringify(transientReviewPage).includes('must-never-leave-adapter'), true)
+  assert.deepEqual(calls.map(({ method, path }) => `${method} ${path}`), [
+    'GET /api/v1/workbooks/imports/wbi_http_one/historical-projection/review-catalog',
+    'GET /api/v1/workbooks/imports/wbi_http_one/historical-projection',
+    'POST /api/v1/workbooks/imports/wbi_http_one/historical-projection/continue',
+    'POST /api/v1/workbooks/imports/wbi_http_one/historical-projection/resolutions',
+    'GET /api/v1/workbooks/imports/wbi_http_one/activity-projection',
+    'POST /api/v1/workbooks/imports/wbi_http_one/activity-projection/continue',
+  ])
+  for (const call of calls.filter(({ method }) => method === 'POST')) {
+    assert.equal(call.options.headers['X-CSRF-Token'], 'private-csrf')
+    assert.equal(call.options.headers['Idempotency-Key'].length > 7, true)
+    assert.equal(call.options.maxRedirects, 0)
+  }
+})
+
+test('HTTP review adapter pins the approved fingerprint and fixes hostile remote subject values', async () => {
+  const hostileContext = {
+    counterparty: 'Synthetic subject', serviceLabel: 'Synthetic service',
+    proposedClassification: 'review', proposedServiceId: null, nearSubjectIds: [],
+  }
+  const base = {
+    binding: {
+      environment: 'staging', centreId: 'centre_1',
+      fingerprint: 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a',
+      artifactId: 'wba_http_hostile', importId: 'wbi_http_hostile',
+      creatorId: 'stf_http_one', planDigest: PLAN_DIGEST,
+    },
+    afterSourceRecordId: null, nextAfterSourceRecordId: null,
+    directoryCount: 0, directoryDigest: 'd'.repeat(64),
+    items: [{
+      sourceRecordId: 'wbs_http_hostile', kind: 'classification', conflictId: null,
+      resolution: null,
+      reviewContextDigest: digest(JSON.stringify(hostileContext)),
+      context: hostileContext,
+    }],
+    profiles: [],
+  }
+  for (const mutate of [
+    (value) => { value.binding.fingerprint = '0'.repeat(64) },
+    (value) => { value.items[0].context.nearSubjectIds = [7] },
+    (value) => { value.items[0].resolution = {
+      classification: 'person', existingSubjectId: 7, serviceId: 'zajecia',
+    } },
+  ]) {
+    const payload = structuredClone(base)
+    mutate(payload)
+    const api = createStagingWorkbookApi({
+      origin: ORIGIN, csrfToken: 'private-csrf', expectedActorId: 'stf_http_one',
+      expectedAuthorityRevision: 7,
+      requestContext: {
+        async get(path) { return response({ data: payload }, 200, path) },
+        async post() { throw new Error('unused') },
+      },
+    })
+    await assert.rejects(api.historicalReviewCatalog({
+      importId: 'wbi_http_hostile', afterSourceRecordId: null,
+    }), /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/)
+  }
+})
+
+test('rollout CLI module exposes its private input reader without executing rollout', async () => {
+  const originalArgv = process.argv
+  const originalExitCode = process.exitCode
+  const originalWrite = process.stderr.write
+  let stderr = ''
+  process.argv = [process.execPath, 'node-test-runner']
+  process.stderr.write = (chunk) => {
+    stderr += String(chunk)
+    return true
+  }
+  try {
+    const module = await import(`${rolloutCliUrl.href}?private-reader-contract=1`)
+    assert.equal(typeof module.readPrivateRolloutInput, 'function')
+    assert.equal(stderr, '')
+    assert.equal(process.exitCode, originalExitCode)
+  } finally {
+    process.argv = originalArgv
+    process.exitCode = originalExitCode
+    process.stderr.write = originalWrite
+  }
+})
+
+test('rollout CLI requires private operator copies of workbook, session, and mapping inputs', async () => {
+  const { root, directory } = await privateInputRoot()
+  const publicDirectory = join(root, 'shared')
+  await mkdir(publicDirectory, { mode: 0o755 })
+  await chmod(publicDirectory, 0o755)
+  const inputs = [
+    ['approved-workbook.xlsx', Buffer.from('fictional-workbook'), 5 * 1024 * 1024],
+    ['owner-session.json', Buffer.from('{"cookies":[],"origins":[]}'), 1024 * 1024],
+    ['specialist-mappings.json', Buffer.from('[]'), 256 * 1024],
+  ]
+  const { readPrivateRolloutInput } = await import(
+    `${rolloutCliUrl.href}?private-reader-contract=1`
+  )
+  for (const [name, expected, maximumBytes] of inputs) {
+    const sharedPath = join(publicDirectory, name)
+    await writePrivateInput(sharedPath, expected)
+    await assert.rejects(readPrivateRolloutInput(sharedPath, maximumBytes),
+      /^Error: WORKBOOK_ROLLOUT_STAGING_REFUSED$/)
+
+    const privatePath = join(directory, name)
+    await copyFile(sharedPath, privatePath)
+    await chmod(privatePath, 0o600)
+    const loaded = await readPrivateRolloutInput(privatePath, maximumBytes)
+    try { assert.deepEqual(loaded.bytes, expected) } finally { loaded.bytes.fill(0) }
+    await chmod(privatePath, 0o640)
+    await assert.rejects(readPrivateRolloutInput(privatePath, maximumBytes),
+      /^Error: WORKBOOK_ROLLOUT_STAGING_REFUSED$/)
+  }
+})
+
+test('rollout CLI private input reader refuses an existing relative path and symlink parent', async () => {
+  const original = await privateInputRoot()
+  const path = join(original.directory, 'owner-session.json')
+  await writePrivateInput(path, Buffer.from('{"cookies":[],"origins":[]}'))
+  const { readPrivateRolloutInput } = await import(
+    `${rolloutCliUrl.href}?private-reader-contract=1`
+  )
+  await assert.rejects(readPrivateRolloutInput(relative(process.cwd(), path), 1024 * 1024),
+    /^Error: WORKBOOK_ROLLOUT_STAGING_REFUSED$/)
+
+  const linked = await privateInputRoot()
+  const linkedDirectory = join(linked.root, 'linked-operator')
+  await symlink(original.directory, linkedDirectory)
+  await assert.rejects(readPrivateRolloutInput(
+    join(linkedDirectory, 'owner-session.json'), 1024 * 1024,
+  ), /^Error: WORKBOOK_ROLLOUT_STAGING_REFUSED$/)
+})
+
+test('rollout CLI private input reader refuses a file path swap after descriptor read', async () => {
+  const { directory } = await privateInputRoot()
+  const path = join(directory, 'owner-session.json')
+  const replacement = join(directory, 'replacement.json')
+  await writePrivateInput(path, Buffer.from('{"cookies":[],"origins":[]}'))
+  await writePrivateInput(replacement, Buffer.from('{"cookies":[1],"origins":[]}'))
+  const { readPrivateRolloutInput } = await import(
+    `${rolloutCliUrl.href}?private-reader-contract=1`
+  )
+  let interceptedBytes
+  const restore = await interceptNextHandleRead(async (bytes) => {
+    interceptedBytes = bytes
+    await rename(replacement, path)
+  })
+  try {
+    await assert.rejects(readPrivateRolloutInput(path, 1024 * 1024),
+      /^Error: WORKBOOK_ROLLOUT_STAGING_REFUSED$/)
+    assert.equal(interceptedBytes.every((byte) => byte === 0), true)
+  } finally { restore() }
+})
+
+test('rollout CLI private input reader refuses a parent revision after descriptor read', async () => {
+  const { directory } = await privateInputRoot()
+  const path = join(directory, 'owner-session.json')
+  await writePrivateInput(path, Buffer.from('{"cookies":[],"origins":[]}'))
+  const { readPrivateRolloutInput } = await import(
+    `${rolloutCliUrl.href}?private-reader-contract=1`
+  )
+  const restore = await interceptNextHandleRead(async () => {
+    await writePrivateInput(join(directory, 'unexpected.json'), Buffer.from('{}'))
+  })
+  try {
+    await assert.rejects(readPrivateRolloutInput(path, 1024 * 1024),
+      /^Error: WORKBOOK_ROLLOUT_STAGING_REFUSED$/)
+  } finally { restore() }
+})
+
+test('rollout CLI private input flags fail closed when no-follow or directory flags are absent', async () => {
+  const { validatePrivateRolloutFileFlags } = await import(
+    `${rolloutCliUrl.href}?private-reader-contract=1`
+  )
+  assert.equal(typeof validatePrivateRolloutFileFlags, 'function')
+  for (const fsConstants of [
+    { O_DIRECTORY: 1, O_NOFOLLOW: undefined, O_RDONLY: 0 },
+    { O_DIRECTORY: undefined, O_NOFOLLOW: 1, O_RDONLY: 0 },
+    { O_DIRECTORY: 1, O_NOFOLLOW: 0, O_RDONLY: 0 },
+    { O_DIRECTORY: 0, O_NOFOLLOW: 1, O_RDONLY: 0 },
+    { O_DIRECTORY: 1, O_NOFOLLOW: -1, O_RDONLY: 0 },
+    { O_DIRECTORY: -1, O_NOFOLLOW: 1, O_RDONLY: 0 },
+    { O_DIRECTORY: 1, O_NOFOLLOW: 1.5, O_RDONLY: 0 },
+    { O_DIRECTORY: 1.5, O_NOFOLLOW: 1, O_RDONLY: 0 },
+  ]) {
+    assert.throws(() => validatePrivateRolloutFileFlags(fsConstants),
+      /^Error: WORKBOOK_ROLLOUT_STAGING_REFUSED$/)
+  }
 })
 
 test('rollout CLI refuses arguments and missing private inputs without remote calls', () => {
@@ -534,7 +864,7 @@ test('HTTP adapter composes with the rollout using bound actor and preview metad
       } }, 200, path)
       if (path.endsWith('/continue')) return response({ data: {
         import: complete, job: { ...job, status: 'complete', processedRecords: 2235,
-          completedAt: '2026-08-28T10:05:00.000Z' },
+          version: 3, completedAt: '2026-08-28T10:05:00.000Z' },
         evidence: { createdRecords: 2232, voidedRecords: 0, converged: true },
       } }, 200, path)
       return response({ data: { import: imported('materializing', 1) } }, 201, path)
@@ -548,9 +878,10 @@ test('HTTP adapter composes with the rollout using bound actor and preview metad
     api, workbook: { buffer: Buffer.from('fictional') },
     approvedFingerprint: 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a',
     resolutions: [], commitIdempotencyKey: 'commit-key',
-    continueIdempotencyKey: (_version, ordinal) => `continue-${ordinal}`,
+    continueIdempotencyKey: (_jobId, _jobVersion, _version, ordinal) => `continue-${ordinal}`,
+    loadedResolutions: null,
     expectedReconciliation,
   })
-  assert.equal(result.status, 'ok')
+  assert.equal(result.status, 'historical_review_required')
   assert.equal(result.importId, 'wbi_http_one')
 })

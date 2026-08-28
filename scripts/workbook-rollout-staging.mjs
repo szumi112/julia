@@ -1,6 +1,6 @@
 import { constants } from 'node:fs'
-import { open, readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { lstat, open, readFile, realpath } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { request } from '@playwright/test'
@@ -12,6 +12,7 @@ import {
   readStagingSession,
 } from './workbook-rollout-staging-http.mjs'
 import { createWorkbookRolloutJournal } from './workbook-rollout-journal.mjs'
+import { readHistoricalProjectionResolutions } from './workbook-historical-resolutions.mjs'
 import { assertApprovedRolloutActorAndResolutions } from './workbook-rollout-staging-lib.mjs'
 import { runResumableStagingWorkbookRollout } from './workbook-rollout-resume.mjs'
 
@@ -33,6 +34,10 @@ const EXPECTED_RECONCILIATION = Object.freeze({
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const refused = () => { throw new Error('WORKBOOK_ROLLOUT_STAGING_REFUSED') }
 const failed = () => { throw new Error('WORKBOOK_ROLLOUT_STAGING_FAILED') }
+const REVISION_KEYS = Object.freeze([
+  'dev', 'ino', 'mode', 'nlink', 'uid', 'gid', 'size', 'mtimeNs', 'ctimeNs',
+])
+const sameRevision = (left, right) => REVISION_KEYS.every((key) => left[key] === right[key])
 
 function environmentPath(name) {
   const value = process.env[name]
@@ -41,21 +46,77 @@ function environmentPath(name) {
   return value
 }
 
-async function privateFile(path, maximumBytes) {
-  let handle
+function optionalEnvironmentPath(name) {
+  const value = process.env[name]
+  if (value === undefined) return null
+  if (typeof value !== 'string' || value.length < 1 || value !== value.trim()
+    || value.includes('\0')) refused()
+  return value
+}
+
+export function validatePrivateRolloutFileFlags(fsConstants = constants) {
+  if (!fsConstants || !Number.isInteger(fsConstants.O_RDONLY)
+    || fsConstants.O_RDONLY < 0
+    || !Number.isInteger(fsConstants.O_NOFOLLOW) || fsConstants.O_NOFOLLOW <= 0
+    || !Number.isInteger(fsConstants.O_DIRECTORY) || fsConstants.O_DIRECTORY <= 0) refused()
+  return Object.freeze({
+    directory: fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+    file: fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+  })
+}
+
+export async function readPrivateRolloutInput(path, maximumBytes) {
+  let directoryHandle
+  let fileHandle
+  let bytes
+  let returned = false
   try {
-    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
-    const stats = await handle.stat()
-    if (!stats.isFile() || (stats.mode & 0o777) !== 0o600
-      || stats.size < 1 || stats.size > maximumBytes) refused()
-    const bytes = await handle.readFile()
-    if (bytes.length !== stats.size) refused()
+    const flags = validatePrivateRolloutFileFlags()
+    if (typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path
+      || path.includes('\0') || basename(path).length < 1 || basename(path).length > 160
+      || !Number.isSafeInteger(maximumBytes) || maximumBytes < 1) refused()
+    const parent = dirname(path)
+    const directoryBefore = await lstat(parent, { bigint: true })
+    if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink()
+      || (directoryBefore.mode & 0o777n) !== 0o700n
+      || await realpath(parent) !== parent) refused()
+    directoryHandle = await open(parent, flags.directory)
+    const directoryOpened = await directoryHandle.stat({ bigint: true })
+    if (!directoryOpened.isDirectory() || !sameRevision(directoryOpened, directoryBefore)) refused()
+
+    const fileBefore = await lstat(path, { bigint: true })
+    if (!fileBefore.isFile() || fileBefore.isSymbolicLink()
+      || (fileBefore.mode & 0o777n) !== 0o600n
+      || fileBefore.size < 1n || fileBefore.size > BigInt(maximumBytes)) refused()
+    fileHandle = await open(path, flags.file)
+    const fileOpened = await fileHandle.stat({ bigint: true })
+    if (!fileOpened.isFile() || !sameRevision(fileOpened, fileBefore)) refused()
+
+    bytes = await fileHandle.readFile()
+    if (BigInt(bytes.length) !== fileOpened.size) refused()
+
+    const fileDescriptorFinal = await fileHandle.stat({ bigint: true })
+    const filePathFinal = await lstat(path, { bigint: true })
+    const directoryDescriptorFinal = await directoryHandle.stat({ bigint: true })
+    const directoryPathFinal = await lstat(parent, { bigint: true })
+    if (!fileDescriptorFinal.isFile() || !filePathFinal.isFile()
+      || filePathFinal.isSymbolicLink()
+      || !sameRevision(fileDescriptorFinal, fileOpened)
+      || !sameRevision(filePathFinal, fileOpened)
+      || !directoryDescriptorFinal.isDirectory() || !directoryPathFinal.isDirectory()
+      || directoryPathFinal.isSymbolicLink()
+      || !sameRevision(directoryDescriptorFinal, directoryOpened)
+      || !sameRevision(directoryPathFinal, directoryOpened)
+      || await realpath(parent) !== parent) refused()
+    returned = true
     return Object.freeze({ bytes })
   } catch (error) {
     if (error?.message === 'WORKBOOK_ROLLOUT_STAGING_REFUSED') throw error
     refused()
   } finally {
-    await handle?.close()
+    if (!returned) bytes?.fill(0)
+    try { await fileHandle?.close() } catch { /* Refusal status is already fixed. */ }
+    try { await directoryHandle?.close() } catch { /* Refusal status is already fixed. */ }
   }
 }
 
@@ -78,12 +139,15 @@ async function main() {
   let context
   let storageState
   let resolutions
+  let loadedResolutions
   try {
-    workbook = await privateFile(environmentPath('BWM_WORKBOOK_PATH'), 5 * 1024 * 1024)
-    session = await privateFile(
+    workbook = await readPrivateRolloutInput(
+      environmentPath('BWM_WORKBOOK_PATH'), 5 * 1024 * 1024,
+    )
+    session = await readPrivateRolloutInput(
       environmentPath('BWM_STAGING_OWNER_SESSION_FILE'), 1024 * 1024,
     )
-    resolutionFile = await privateFile(
+    resolutionFile = await readPrivateRolloutInput(
       environmentPath('BWM_WORKBOOK_RESOLUTIONS_FILE'), 256 * 1024,
     )
     if (await sha256(workbook.bytes) !== AUTHORITATIVE_WORKBOOK_FINGERPRINT) refused()
@@ -96,6 +160,11 @@ async function main() {
     const journal = await createWorkbookRolloutJournal(
       environmentPath('BWM_WORKBOOK_ROLLOUT_JOURNAL'),
     )
+    const historicalResolutionPath = optionalEnvironmentPath(
+      'BWM_HISTORICAL_PROJECTION_RESOLUTIONS_FILE',
+    )
+    loadedResolutions = historicalResolutionPath === null
+      ? null : await readHistoricalProjectionResolutions(historicalResolutionPath)
     context = await request.newContext({
       baseURL: origin,
       storageState,
@@ -127,6 +196,7 @@ async function main() {
         approvedFingerprint: AUTHORITATIVE_WORKBOOK_FINGERPRINT,
         creatorId: sessionData.actor.id,
         resolutions,
+        loadedResolutions,
         expectedReconciliation: EXPECTED_RECONCILIATION,
       }))
     process.stdout.write(`${JSON.stringify(result)}\n`)
@@ -141,11 +211,13 @@ async function main() {
   }
 }
 
-try {
-  await main()
-} catch (error) {
-  const status = error?.message === 'WORKBOOK_ROLLOUT_STAGING_REFUSED'
-    || error?.message === 'BACKUP_STAGING_REFUSED' ? 'refused' : 'failed'
-  process.stderr.write(`${JSON.stringify({ status })}\n`)
-  process.exitCode = 1
+if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
+  try {
+    await main()
+  } catch (error) {
+    const status = error?.message === 'WORKBOOK_ROLLOUT_STAGING_REFUSED'
+      || error?.message === 'BACKUP_STAGING_REFUSED' ? 'refused' : 'failed'
+    process.stderr.write(`${JSON.stringify({ status })}\n`)
+    process.exitCode = 1
+  }
 }

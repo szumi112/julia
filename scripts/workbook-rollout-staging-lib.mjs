@@ -1,9 +1,14 @@
 import { isDeepStrictEqual } from 'node:util'
 
+import { validateBackupRecoveryFacts } from '../worker/operations/backup-recovery.js'
 import {
   WORKBOOK_MATERIALIZER_VERSION,
   WORKBOOK_PARSER_VERSION,
 } from '../src/workbook-import.js'
+import {
+  replayWorkbookProjectionTerminalOperations,
+  runWorkbookProjectionRollout,
+} from './workbook-projection-rollout.mjs'
 
 const EVIDENCE_KEYS = Object.freeze([
   'artifactCount',
@@ -58,8 +63,8 @@ const RECONCILIATION_BOOLEAN_KEYS = Object.freeze([
   'projectionLinksUnique',
 ])
 const STATE_KEYS = Object.freeze([
-  'artifactId', 'converged', 'createdRecords', 'importId', 'status', 'version',
-  'voidedRecords',
+  'artifactId', 'converged', 'createdRecords', 'importId', 'jobId', 'jobVersion',
+  'status', 'version', 'voidedRecords',
 ])
 const IMPORT_STATUSES = new Set(['ready', 'materializing', 'complete', 'failed'])
 const RESULT_KEYS = Object.freeze([
@@ -131,6 +136,9 @@ function importStateDto(value) {
     || !identifier(value.artifactId, 'wba') || !IMPORT_STATUSES.has(value.status)
     || !Number.isSafeInteger(value.version) || value.version < 1
     || !count(value.createdRecords) || !count(value.voidedRecords)
+    || !((value.jobId === null && value.jobVersion === null)
+      || (identifier(value.jobId, 'wbj') && Number.isSafeInteger(value.jobVersion)
+        && value.jobVersion >= 1))
     || typeof value.converged !== 'boolean') failed()
   return Object.freeze(Object.fromEntries(STATE_KEYS.map((key) => [key, value[key]])))
 }
@@ -144,6 +152,9 @@ function artifactDto(value, importState) {
 
 function reconciliationDto(value, expected = false) {
   const keys = [...RECONCILIATION_BOOLEAN_KEYS, ...RECONCILIATION_INTEGER_KEYS]
+  if (!expected) {
+    try { return validateBackupRecoveryFacts(value) } catch { failed() }
+  }
   const informational = ['replayCreatedRecords', 'replayVoidedRecords']
   const hasInformational = informational.every((key) => Object.hasOwn(value ?? {}, key))
   const acceptedKeys = expected ? keys : [...keys, ...informational]
@@ -182,10 +193,14 @@ async function finishImport({ api, initial, continueIdempotencyKey, maximumConti
   const artifactId = initial.artifactId
   let continuations = 0
   const operations = []
+  if (!identifier(state.jobId, 'wbj') || !Number.isSafeInteger(state.jobVersion)
+    || state.jobVersion < 1) failed()
   while (state.status !== 'complete') {
     if (state.status === 'failed' || continuations >= maximumContinuations) failed()
     const ordinal = continuations + 1
-    const idempotencyKey = continueIdempotencyKey(state.version, ordinal)
+    const idempotencyKey = continueIdempotencyKey(
+      state.jobId, state.jobVersion, state.version, ordinal,
+    )
     if (!secretText(idempotencyKey)) failed()
     const operation = Object.freeze({
       importId: state.importId,
@@ -193,8 +208,11 @@ async function finishImport({ api, initial, continueIdempotencyKey, maximumConti
       idempotencyKey,
     })
     operations.push(operation)
+    const previous = state
     state = importStateDto(await api.continue(operation))
-    if (state.importId !== importId || state.artifactId !== artifactId) failed()
+    if (state.importId !== importId || state.artifactId !== artifactId
+      || state.jobId !== previous.jobId
+      || state.jobVersion !== previous.jobVersion + 1) failed()
     continuations += 1
   }
   if (!state.converged) failed()
@@ -219,8 +237,13 @@ export async function verifyStagingWorkbookTerminal({
       || observed.importId !== result.importId
       || observed.artifactId !== result.artifactId) failed()
     artifactDto(await api.artifactVerification(result.importId), observed)
-    const reconciled = reconciliationDto(await api.reconciliation(result.importId))
+    const facts = reconciliationDto(await api.reconciliation(result.importId))
+    const reconciled = Object.freeze(Object.fromEntries(
+      [...RECONCILIATION_BOOLEAN_KEYS, ...RECONCILIATION_INTEGER_KEYS]
+        .map((key) => [key, facts.reconciliation[key]]),
+    ))
     if (!isDeepStrictEqual(reconciled, expected)
+      || facts.import.id !== result.importId || facts.artifact.id !== result.artifactId
       || reconciled.activeAcceptedSourceRecords !== result.acceptedCount
       || reconciled.quarantinedSourceRecords !== result.quarantinedCount) failed()
     return result
@@ -279,18 +302,23 @@ export async function runStagingWorkbookRollout({
   commitIdempotencyKey,
   continueIdempotencyKey,
   recordedContinuations = null,
+  loadedResolutions,
+  projectionCheckpoint = async () => {},
   expectedReconciliation,
   maximumContinuations = 256,
 }) {
   try {
     const methods = [
       'artifactVerification', 'commit', 'continue', 'operatorEvidence', 'preview',
-      'reconciliation', 'status',
+      'reconciliation', 'status', 'historicalReviewCatalog', 'historicalProjection',
+      'continueHistoricalProjection', 'resolveHistoricalProjection',
+      'activityProjection', 'continueActivityProjection',
     ]
     if (!plain(api) || !methods.every((name) => typeof api[name] === 'function')
       || workbook === null || typeof workbook !== 'object'
       || !fingerprint(approvedFingerprint) || !secretText(commitIdempotencyKey)
       || typeof continueIdempotencyKey !== 'function'
+      || typeof projectionCheckpoint !== 'function'
       || !(recordedContinuations === null || typeof recordedContinuations === 'function')
       || !Number.isSafeInteger(maximumContinuations) || maximumContinuations < 1
       || maximumContinuations > 256) failed()
@@ -317,8 +345,29 @@ export async function runStagingWorkbookRollout({
       api, initial: observed, continueIdempotencyKey, maximumContinuations,
     })
     artifactDto(await api.artifactVerification(completed.state.importId), completed.state)
-    const reconciled = reconciliationDto(await api.reconciliation(completed.state.importId))
-    if (!isDeepStrictEqual(reconciled, expected)) failed()
+    if (loadedResolutions === null) return Object.freeze({
+      status: 'historical_review_required',
+      artifactId: completed.state.artifactId,
+      importId: completed.state.importId,
+    })
+    if (loadedResolutions === undefined) failed()
+    const projectionResult = await runWorkbookProjectionRollout({
+      api, importId: completed.state.importId, loadedResolutions,
+      checkpoint: projectionCheckpoint,
+    })
+    if (projectionResult.status !== 'ok') return Object.freeze({
+      ...projectionResult,
+      artifactId: completed.state.artifactId,
+      importId: completed.state.importId,
+    })
+    const recoveryFacts = reconciliationDto(await api.reconciliation(completed.state.importId))
+    const reconciled = Object.freeze(Object.fromEntries(
+      [...RECONCILIATION_BOOLEAN_KEYS, ...RECONCILIATION_INTEGER_KEYS]
+        .map((key) => [key, recoveryFacts.reconciliation[key]]),
+    ))
+    if (!isDeepStrictEqual(reconciled, expected)
+      || recoveryFacts.import.id !== completed.state.importId
+      || recoveryFacts.artifact.id !== completed.state.artifactId) failed()
 
     const beforeReplay = evidenceDto(await api.operatorEvidence())
     const replayCommitted = importStateDto(await api.commit(commitInput))
@@ -327,16 +376,21 @@ export async function runStagingWorkbookRollout({
     let replayState = replayCommitted
     const replayOperations = recordedContinuations === null
       ? completed.operations : recordedContinuations()
-    if (!Array.isArray(replayOperations) || replayOperations.length > 256) failed()
-    for (const operation of replayOperations) {
-      if (!keysAre(operation, ['importId', 'expectedVersion', 'idempotencyKey'])
-        || !identifier(operation.importId, 'wbi')
-        || !Number.isSafeInteger(operation.expectedVersion) || operation.expectedVersion < 1
-        || !secretText(operation.idempotencyKey)) failed()
-      replayState = importStateDto(await api.continue(operation))
-      if (replayState.importId !== completed.state.importId
-        || replayState.artifactId !== completed.state.artifactId) failed()
-    }
+    if (!Array.isArray(replayOperations) || replayOperations.length < 1
+      || replayOperations.length > 256) failed()
+    const terminalOperation = replayOperations.at(-1)
+    if (!keysAre(terminalOperation, ['importId', 'expectedVersion', 'idempotencyKey'])
+      || !identifier(terminalOperation.importId, 'wbi')
+      || !Number.isSafeInteger(terminalOperation.expectedVersion)
+      || terminalOperation.expectedVersion < 1
+      || !secretText(terminalOperation.idempotencyKey)) failed()
+    replayState = importStateDto(await api.continue(terminalOperation))
+    if (replayState.importId !== completed.state.importId
+      || replayState.artifactId !== completed.state.artifactId) failed()
+    await replayWorkbookProjectionTerminalOperations({
+      api, importId: completed.state.importId, loadedResolutions,
+      result: projectionResult,
+    })
     if (replayState.status !== 'complete' || !replayState.converged
       || replayState.importId !== completed.state.importId
       || replayState.artifactId !== completed.state.artifactId) failed()
@@ -345,9 +399,13 @@ export async function runStagingWorkbookRollout({
     const replayVoidedRecords = afterReplay.voidedRecordCount - beforeReplay.voidedRecordCount
     if (replayCreatedRecords !== 0 || replayVoidedRecords !== 0
       || !isDeepStrictEqual(beforeReplay, afterReplay)) failed()
-    const replayReconciliation = reconciliationDto(
+    const replayFacts = reconciliationDto(
       await api.reconciliation(completed.state.importId),
     )
+    const replayReconciliation = Object.freeze(Object.fromEntries(
+      [...RECONCILIATION_BOOLEAN_KEYS, ...RECONCILIATION_INTEGER_KEYS]
+        .map((key) => [key, replayFacts.reconciliation[key]]),
+    ))
     if (!isDeepStrictEqual(replayReconciliation, expected)) failed()
 
     return Object.freeze({

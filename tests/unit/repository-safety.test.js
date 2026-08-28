@@ -379,7 +379,7 @@ test('backend binding names cannot appear in browser files but may appear in Wor
   assert.throws(() => inspectDeployArtifact({ root: rejectedRoot, secretValues: {} }), /backend binding/i)
 })
 
-test('backup provider account and database bindings stay out of browser artifacts', (t) => {
+test('staging backup and provider bindings stay out of browser artifacts', (t) => {
   for (const binding of ['BWM_BACKUP_KEK_V2', 'CF_ACCOUNT_ID', 'CF_D1_DATABASE_ID']) {
     const allowedRoot = deployFixture(t, { worker: `const value = env.${binding}` })
     assert.doesNotThrow(() => inspectDeployArtifact({ root: allowedRoot, secretValues: {} }))

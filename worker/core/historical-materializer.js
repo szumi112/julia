@@ -23,6 +23,7 @@ import { authorize } from '../identity/policy.js'
 
 export const HISTORICAL_PROJECTION_SLICE_SIZE = 2
 
+const APPROVED_WORKBOOK_FINGERPRINT = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 const IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const SERVICE_BY_LABEL = new Map(SERVICES.map(({ id, label }) => [
@@ -35,6 +36,15 @@ const DATA_KEY_COLUMNS = Object.freeze([
 const CENTRE_RESOURCE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 
 const fail = (code = 'HISTORICAL_PROJECTION_INVALID') => { throw new Error(code) }
+const assertCurrentActor = async (db, actor) => {
+  const current = await db.prepare(
+    `SELECT staff.id,authority.revision FROM staff_users AS staff
+     JOIN staff_authorities AS authority ON authority.staff_id=staff.id
+     WHERE staff.id=? AND staff.role=? AND staff.specialist_id IS ?
+       AND staff.version=? AND staff.status='active'`,
+  ).bind(actor.id, actor.role, actor.specialistId, actor.version).first()
+  if (!current || current.revision !== actor.authorityRevision) fail('NOT_FOUND')
+}
 const nowAt = (nowMs) => {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0) fail()
   try { return new Date(nowMs).toISOString() } catch { fail() }
@@ -48,6 +58,14 @@ const made = (factory, prefix, pattern) => {
 const sha256 = async (value) => encodeBase64Url(await crypto.subtle.digest(
   'SHA-256', new TextEncoder().encode(value),
 ))
+const sha256Hex = async (value) => {
+  const bytes = new Uint8Array(await crypto.subtle.digest(
+    'SHA-256', new TextEncoder().encode(value),
+  ))
+  try { return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('') } finally {
+    bytes.fill(0)
+  }
+}
 const normalizedLabel = (value) => {
   try { return canonicalHistoricalName(value) } catch { return null }
 }
@@ -107,7 +125,7 @@ const response = (row, status = 200) => Object.freeze({
 
 const safeConflictText = (value, maximum) => {
   if (typeof value !== 'string' || value !== value.normalize('NFC') || value !== value.trim()
-    || !value.isWellFormed() || /[\p{Cc}\p{Cf}]/u.test(value)) return false
+    || !value.isWellFormed() || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)) return false
   const bytes = new TextEncoder().encode(value)
   const valid = bytes.byteLength >= 1 && bytes.byteLength <= maximum
   bytes.fill(0)
@@ -497,6 +515,50 @@ const nearRecords = (records, name) => [...records.values()].filter(
   (record) => historicalNamesRequireReview(record.name, name),
 ).sort((left, right) => compareUtf16CodeUnits(left.id, right.id))
 
+const reviewSubjectCandidates = async ({ identities, keyring, decision, name }) => {
+  const kinds = decision.classification === 'review'
+    ? ['counterparty', 'person'] : [decision.classification]
+  const candidates = new Map()
+  for (const kind of kinds) {
+    if (!['person', 'counterparty'].includes(kind)) continue
+    const exact = await exactRecord(identities, keyring, kind, name)
+    if (exact) continue
+    for (const record of nearRecords(identities.records[kind], name)) {
+      candidates.set(record.id, record)
+    }
+  }
+  return Object.freeze([...candidates.keys()].sort(compareUtf16CodeUnits))
+}
+
+const historicalDirectorySnapshot = async (identities) => {
+  const records = []
+  for (const kind of ['counterparty', 'person']) {
+    for (const record of identities.records[kind].values()) {
+      records.push({ kind, id: record.id, canonical: record.canonical })
+    }
+  }
+  records.sort((left, right) => compareUtf16CodeUnits(
+    `${left.kind}:${left.id}`, `${right.kind}:${right.id}`,
+  ))
+  return Object.freeze({
+    count: records.length,
+    digest: await sha256Hex(JSON.stringify(records)),
+  })
+}
+
+const liveReviewContext = async ({ identities, keyring, decision, payload }) => {
+  const context = Object.freeze({
+    counterparty: payload.normalized.counterparty,
+    serviceLabel: payload.normalized.sourceLabel,
+    proposedClassification: decision.classification,
+    proposedServiceId: decision.serviceId,
+    nearSubjectIds: await reviewSubjectCandidates({
+      identities, keyring, decision, name: payload.normalized.counterparty,
+    }),
+  })
+  return Object.freeze({ context, digest: await sha256Hex(JSON.stringify(context)) })
+}
+
 const preparedIdentity = async ({ command, identities, kind, name, correlationId, now }) => {
   const existing = await exactRecord(identities, command.keyring, kind, name)
   if (existing) return Object.freeze({ ...existing, isNew: false, statements: [] })
@@ -695,6 +757,7 @@ export async function continueHistoricalProjection(input) {
   if (state.job_id === null) return createJob(command, state, requestHash, now)
   if (state.job_version !== command.expectedVersion) fail('VERSION_CONFLICT')
   if (state.job_status === 'complete') return response(state)
+  if (state.job_status === 'conflicts') fail('VERSION_CONFLICT')
   const sourceKey = await loadWorkbookSourceDataKey(command.db, state.plan_envelope)
   const specialistMappings = await loadAuthenticatedWorkbookSpecialistMappings({
     db: command.db, keyring: command.keyring, dataKey: sourceKey,
@@ -724,6 +787,7 @@ export async function continueHistoricalProjection(input) {
       processed += 1
       after = row.source_record_id
     }
+    if (result.conflict > 0) break
   }
   const unresolved = await command.db.prepare(
     `SELECT count(*) AS count FROM historical_projection_conflicts AS conflict
@@ -741,7 +805,7 @@ export async function continueHistoricalProjection(input) {
     status=?,after_source_record_id=?,processed_records=processed_records+?,
     projected_records=projected_records+?,conflict_count=conflict_count+?,
     version=?,updated_at=?,completed_at=?
-    WHERE id=? AND version=? AND status IN ('ready','running','conflicts')`).bind(
+    WHERE id=? AND version=? AND status IN ('ready','running')`).bind(
     nextStatus, after, processed, projected, conflicts, nextVersion, now,
     complete ? now : null, state.job_id, state.job_version,
   ))
@@ -771,13 +835,196 @@ export async function continueHistoricalProjection(input) {
   return response(await loadState(command.db, command.actor.id, command.importId))
 }
 
-export async function getHistoricalProjection({ db, actor, importId, keyring } = {}) {
+export async function getHistoricalProjection({
+  db, recoveryDb, actor, importId, keyring,
+} = {}) {
   if (!db?.prepare || !authorize(actor, 'finance.import', CENTRE_RESOURCE, { nowMs: 0 })
     || typeof importId !== 'string' || !IMPORT_ID.test(importId)) fail('NOT_FOUND')
   const state = await loadState(db, actor.id, importId)
   const projection = jobDto(state)
   const conflicts = await unresolvedConflictDtos({ db, keyring, state })
+  await assertCurrentActor(recoveryDb ?? db, actor)
   return Object.freeze({ data: Object.freeze({ projection, conflicts }) })
+}
+
+const reviewBinding = async ({ db, actor, importId, config, centreId }) => {
+  const row = await db.prepare(
+    `SELECT artifact.environment,artifact.centre_id,artifact.fingerprint,
+            artifact.id AS artifact_id,import.id AS import_id,
+            import.created_by_staff_id AS creator_id,plan.plan_envelope,
+            resolution_set.plan_digest,job.id AS job_id
+     FROM workbook_imports AS import
+     JOIN workbook_artifacts AS artifact ON artifact.id=import.artifact_id
+     JOIN workbook_import_plans AS plan ON plan.import_id=import.id
+       AND plan.workbook_kind='legacy'
+     JOIN workbook_import_resolution_sets AS resolution_set
+       ON resolution_set.id=(SELECT candidate.id
+         FROM workbook_import_resolution_sets AS candidate
+         WHERE candidate.import_id=import.id ORDER BY candidate.version DESC LIMIT 1)
+     LEFT JOIN historical_projection_jobs AS job ON job.import_id=import.id
+     WHERE import.id=? AND import.created_by_staff_id=? AND import.status='complete'`,
+  ).bind(importId, actor.id).first()
+  if (!row || row.environment !== config.appEnv || row.centre_id !== centreId
+    || row.fingerprint !== APPROVED_WORKBOOK_FINGERPRINT
+    || !/^wba_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(row.artifact_id ?? '')
+    || row.import_id !== importId || row.creator_id !== actor.id
+    || typeof row.plan_envelope !== 'string'
+    || !/^v1_[A-Za-z0-9_-]{43}$/.test(row.plan_digest ?? '')
+    || !(row.job_id === null
+      || /^hpj_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(row.job_id))) fail('NOT_FOUND')
+  return row
+}
+
+const REVIEW_SOURCE_SELECT = `SELECT source.id AS source_record_id,source.source_key,
+            source.sheet_name,source.row_number,source.record_type,source.period_precision,
+            source.period_month,source.occurred_on,source.record_digest,
+            source.record_digest_hmac_version,source.specialist_source_digest,
+            source.specialist_source_hmac_version,source.source_payload_envelope,
+            entry.specialist_id,conflict.id AS conflict_id,
+            conflict.kind AS conflict_kind,conflict.context_envelope,
+            resolution.classification AS resolution_classification,
+            resolution.existing_historical_client_id,
+            resolution.existing_counterparty_id,resolution.service_id AS resolution_service_id
+     FROM workbook_source_records AS source
+     JOIN finance_source_links AS link ON link.source_record_id=source.id
+     JOIN finance_entries AS entry ON entry.id=link.finance_entry_id
+     LEFT JOIN finance_entry_voids AS void ON void.finance_entry_id=entry.id
+     LEFT JOIN historical_projection_conflicts AS conflict
+       ON conflict.job_id IS ? AND conflict.source_record_id=source.id
+     LEFT JOIN historical_conflict_resolutions AS resolution
+       ON resolution.conflict_id=conflict.id`
+
+const reviewSourceRows = async ({ db, importId, jobId, afterSourceRecordId }) => {
+  const rows = (await db.prepare(
+    `${REVIEW_SOURCE_SELECT}
+     WHERE source.import_id=? AND source.disposition='accepted'
+       AND source.record_type='income' AND entry.kind='income'
+       AND entry.specialist_id IS NOT NULL AND void.id IS NULL AND source.id>?
+     ORDER BY source.id LIMIT 101`,
+  ).bind(jobId, importId, afterSourceRecordId ?? '').all()).results
+  if (!Array.isArray(rows) || rows.length > 101) fail()
+  return rows
+}
+
+const reviewSourceRow = async ({ db, importId, jobId, sourceRecordId }) => {
+  const row = await db.prepare(`${REVIEW_SOURCE_SELECT}
+     WHERE source.import_id=? AND source.id=? AND source.disposition='accepted'
+       AND source.record_type='income' AND entry.kind='income'
+       AND entry.specialist_id IS NOT NULL AND void.id IS NULL`)
+    .bind(jobId, importId, sourceRecordId).first()
+  if (!row || row.source_record_id !== sourceRecordId) fail('NOT_FOUND')
+  return row
+}
+
+const reviewResolution = (row) => {
+  if (row.resolution_classification === null) return null
+  const existingSubjectId = row.resolution_classification === 'person'
+    ? row.existing_historical_client_id
+    : row.resolution_classification === 'counterparty'
+      ? row.existing_counterparty_id : null
+  const value = {
+    classification: row.resolution_classification,
+    existingSubjectId,
+    serviceId: row.resolution_service_id,
+  }
+  if (!['person', 'counterparty', 'exclude'].includes(value.classification)
+    || !(value.existingSubjectId === null
+      || /^hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value.existingSubjectId)
+      || /^hcp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value.existingSubjectId))
+    || !(value.serviceId === null || SERVICES.some(({ id }) => id === value.serviceId))) fail()
+  return Object.freeze(value)
+}
+
+export async function getHistoricalProjectionReviewCatalog(input = {}) {
+  const {
+    db, recoveryDb, actor, keyring, config, centreId, importId, afterSourceRecordId,
+  } = input
+  if (!db?.prepare || !authorize(actor, 'finance.import', CENTRE_RESOURCE, { nowMs: 0 })
+    || !keyring || config?.appEnv !== 'staging' || config?.dataMode !== 'fictional'
+    || centreId !== 'centre_1' || typeof importId !== 'string' || !IMPORT_ID.test(importId)
+    || !(afterSourceRecordId === null || (typeof afterSourceRecordId === 'string'
+      && /^wbs_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(afterSourceRecordId)))) {
+    fail('NOT_FOUND')
+  }
+  const binding = await reviewBinding({ db, actor, importId, config, centreId })
+  const sourceKey = await loadWorkbookSourceDataKey(db, binding.plan_envelope)
+  const mappings = await loadAuthenticatedWorkbookSpecialistMappings({
+    db, keyring, dataKey: sourceKey, importId, config, centreId,
+  })
+  const identities = await loadIdentities(
+    db, keyring, '1970-01-01T00:00:00.000Z',
+  )
+  const directory = await historicalDirectorySnapshot(identities)
+  const rows = await reviewSourceRows({
+    db, importId, jobId: binding.job_id, afterSourceRecordId,
+  })
+  const scanned = rows.slice(0, 100)
+  const items = []
+  const profiles = []
+  for (const row of scanned) {
+    const payload = await openAuthenticatedWorkbookSource({
+      keyring, dataKey: sourceKey, row, config, centreId,
+    })
+    if (await resolveAuthenticatedWorkbookSpecialist({
+      keyring, config, centreId, mappings, row, payload,
+    }) !== row.specialist_id) fail('CRYPTO_FAILURE')
+    const decision = historicalProjectionDecision({
+      ...payload.normalized, specialistId: row.specialist_id,
+      financeLinked: true, voided: false,
+    })
+    if (!decision.eligible) continue
+    if (!(row.conflict_id === null
+      || /^hcf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(row.conflict_id))) fail()
+    const live = await liveReviewContext({
+      identities, keyring, decision, payload,
+    })
+    if (decision.conflictKind === null) {
+      if (!(row.conflict_kind === null || row.conflict_kind === 'near_match')) fail()
+      profiles.push(Object.freeze({
+        sourceRecordId: row.source_record_id,
+        reviewContextDigest: live.digest,
+        context: live.context,
+      }))
+      continue
+    }
+    if (!(row.conflict_kind === null || row.conflict_kind === decision.conflictKind)) fail()
+    if (row.conflict_id !== null) {
+      const stored = (await conflictContextDto({
+        keyring, sourceKey, row: { ...row, id: row.conflict_id },
+      })).context
+      for (const key of [
+        'counterparty', 'serviceLabel', 'proposedClassification', 'proposedServiceId',
+      ]) if (stored[key] !== live.context[key]) fail('CRYPTO_FAILURE')
+    }
+    items.push(Object.freeze({
+      sourceRecordId: row.source_record_id,
+      kind: decision.conflictKind,
+      conflictId: row.conflict_id,
+      resolution: reviewResolution(row),
+      reviewContextDigest: live.digest,
+      context: live.context,
+    }))
+  }
+  const result = Object.freeze({ data: Object.freeze({
+    binding: Object.freeze({
+      environment: binding.environment,
+      centreId: binding.centre_id,
+      fingerprint: binding.fingerprint,
+      artifactId: binding.artifact_id,
+      importId: binding.import_id,
+      creatorId: binding.creator_id,
+      planDigest: binding.plan_digest,
+    }),
+    afterSourceRecordId,
+    nextAfterSourceRecordId: rows.length === 101
+      ? scanned.at(-1).source_record_id : null,
+    directoryCount: directory.count,
+    directoryDigest: directory.digest,
+    items: Object.freeze(items),
+    profiles: Object.freeze(profiles),
+  }) })
+  await assertCurrentActor(recoveryDb ?? db, actor)
+  return result
 }
 
 export async function resolveHistoricalConflict(input) {
@@ -787,8 +1034,9 @@ export async function resolveHistoricalConflict(input) {
   const body = input.body
   const now = nowAt(command.nowMs)
   if (!body || typeof body !== 'object' || Array.isArray(body)
-    || Object.keys(body).length !== 5
-    || !['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId']
+    || Object.keys(body).length !== 8
+    || !['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId',
+      'reviewContextDigest', 'directoryCount', 'directoryDigest']
       .every((key) => Object.hasOwn(body, key))
     || !/^hcf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(body.conflictId)
     || !['person', 'counterparty', 'exclude'].includes(body.classification)
@@ -796,12 +1044,16 @@ export async function resolveHistoricalConflict(input) {
       || /^hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(body.existingSubjectId)
       || /^hcp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(body.existingSubjectId))
     || !(body.serviceId === null || SERVICES.some(({ id }) => id === body.serviceId))
+    || !/^[a-f0-9]{64}$/.test(body.reviewContextDigest ?? '')
+    || !Number.isSafeInteger(body.directoryCount) || body.directoryCount < 0
+    || !/^[a-f0-9]{64}$/.test(body.directoryDigest ?? '')
     || (body.classification === 'person' && body.existingSubjectId !== null
       && !body.existingSubjectId.startsWith('hcl_'))
     || (body.classification === 'counterparty' && body.existingSubjectId !== null
       && !body.existingSubjectId.startsWith('hcp_'))
     || (body.classification === 'exclude'
-      && (body.existingSubjectId !== null || body.serviceId !== null))) fail()
+      && (body.existingSubjectId !== null || body.serviceId !== null))
+    || (body.classification !== 'exclude' && body.serviceId === null)) fail()
   const requestHash = await sha256(JSON.stringify([1, command.importId, body]))
   const replay = await replayRow(
     command.db, command.actor.id, 'historical.resolve', command.idempotencyKey,
@@ -814,12 +1066,49 @@ export async function resolveHistoricalConflict(input) {
   if (state.job_id === null || state.job_status === 'complete'
     || state.job_version !== body.expectedJobVersion) fail('VERSION_CONFLICT')
   const conflict = await command.db.prepare(
-    `SELECT conflict.id FROM historical_projection_conflicts AS conflict
+    `SELECT conflict.id,conflict.source_record_id,conflict.kind
+     FROM historical_projection_conflicts AS conflict
      WHERE conflict.id=? AND conflict.job_id=? AND NOT EXISTS (
        SELECT 1 FROM historical_conflict_resolutions AS resolution
        WHERE resolution.conflict_id=conflict.id)`,
   ).bind(body.conflictId, state.job_id).first()
   if (!conflict) fail('NOT_FOUND')
+  const sourceKey = await loadWorkbookSourceDataKey(command.db, state.plan_envelope)
+  const mappings = await loadAuthenticatedWorkbookSpecialistMappings({
+    db: command.db, keyring: command.keyring, dataKey: sourceKey,
+    importId: command.importId, config: command.config, centreId: command.centreId,
+  })
+  const row = await reviewSourceRow({
+    db: command.db, importId: command.importId, jobId: state.job_id,
+    sourceRecordId: conflict.source_record_id,
+  })
+  if (row.conflict_id !== conflict.id || row.conflict_kind !== conflict.kind) fail()
+  const payload = await openAuthenticatedWorkbookSource({
+    keyring: command.keyring, dataKey: sourceKey, row,
+    config: command.config, centreId: command.centreId,
+  })
+  if (await resolveAuthenticatedWorkbookSpecialist({
+    keyring: command.keyring, config: command.config, centreId: command.centreId,
+    mappings, row, payload,
+  }) !== row.specialist_id) fail('CRYPTO_FAILURE')
+  const decision = historicalProjectionDecision({
+    ...payload.normalized, specialistId: row.specialist_id,
+    financeLinked: true, voided: false,
+  })
+  if (!decision.eligible || decision.conflictKind !== conflict.kind
+    || !['classification', 'service'].includes(conflict.kind)) fail('NOT_FOUND')
+  if (conflict.kind === 'service' && body.classification !== decision.classification) {
+    fail('NOT_FOUND')
+  }
+  const identities = await loadIdentities(command.db, command.keyring, now)
+  const directory = await historicalDirectorySnapshot(identities)
+  const live = await liveReviewContext({
+    identities, keyring: command.keyring, decision, payload,
+  })
+  if (live.digest !== body.reviewContextDigest || directory.count !== body.directoryCount
+    || directory.digest !== body.directoryDigest) fail('VERSION_CONFLICT')
+  if (body.existingSubjectId !== null
+    && !live.context.nearSubjectIds.includes(body.existingSubjectId)) fail('NOT_FOUND')
   if (body.existingSubjectId !== null) {
     const table = body.classification === 'person'
       ? 'historical_clients' : 'historical_counterparties'
@@ -831,8 +1120,35 @@ export async function resolveHistoricalConflict(input) {
   const resolutionId = made(
     command.idFactory, 'hcr', /^hcr_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/,
   )
+  const materialized = await materializeRow({
+    command,
+    state: Object.freeze({ ...state, sourceKey }),
+    row: Object.freeze({
+      ...row,
+      conflict_id: body.conflictId,
+      conflict_kind: conflict.kind,
+      resolution_classification: body.classification,
+      existing_historical_client_id: body.classification === 'person'
+        ? body.existingSubjectId : null,
+      existing_counterparty_id: body.classification === 'counterparty'
+        ? body.existingSubjectId : null,
+      resolution_service_id: body.serviceId,
+      is_new: 0,
+    }),
+    payload,
+    identities,
+    specialistMappings: mappings,
+    now,
+  })
+  if (materialized.conflict !== 0 || ![0, 1].includes(materialized.projected)) fail()
   try {
     await command.db.batch([
+      command.db.prepare(`INSERT INTO core_directory_invariant_failures (failure_kind)
+        SELECT 'historical_directory_cas' WHERE
+          (SELECT count(*) FROM historical_clients)
+          +(SELECT count(*) FROM historical_counterparties) != ?`).bind(
+        body.directoryCount,
+      ),
       command.db.prepare(`INSERT INTO historical_conflict_resolutions
         (id,conflict_id,classification,existing_historical_client_id,
          existing_counterparty_id,service_id,resolved_by_staff_id,created_at)
@@ -842,9 +1158,11 @@ export async function resolveHistoricalConflict(input) {
         body.classification === 'counterparty' ? body.existingSubjectId : null,
         body.serviceId, command.actor.id, now,
       ),
+      ...materialized.statements,
       command.db.prepare(`UPDATE historical_projection_jobs SET status='running',
-        version=?,updated_at=? WHERE id=? AND version=? AND status='conflicts'`).bind(
-        nextVersion, now, state.job_id, state.job_version,
+        projected_records=projected_records+?,version=?,updated_at=?
+        WHERE id=? AND version=? AND status='conflicts'`).bind(
+        materialized.projected, nextVersion, now, state.job_id, state.job_version,
       ),
       command.db.prepare(`INSERT INTO core_directory_invariant_failures (failure_kind)
         SELECT 'historical_resolution_cas' WHERE changes()!=1`),

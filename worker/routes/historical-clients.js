@@ -7,6 +7,7 @@ import { activateHistoricalClient } from '../core/historical-clients.js'
 import {
   continueHistoricalProjection,
   getHistoricalProjection,
+  getHistoricalProjectionReviewCatalog as loadHistoricalProjectionReviewCatalog,
   resolveHistoricalConflict,
 } from '../core/historical-materializer.js'
 import { authorize } from '../identity/policy.js'
@@ -61,6 +62,23 @@ export const getHistoricalProjectionStatus = (input = {}) => {
   })
 }
 
+export const getHistoricalProjectionReviewCatalog = (input = {}) => {
+  const actor = projectionActor(input.actor)
+  const service = input.service ?? loadHistoricalProjectionReviewCatalog
+  if (typeof service !== 'function') throw new Error('INTERNAL_ERROR')
+  if (!(input.afterSourceRecordId === null
+    || (typeof input.afterSourceRecordId === 'string'
+      && /^wbs_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(input.afterSourceRecordId)))) {
+    validation('afterSourceRecordId')
+  }
+  return service({
+    db: input.db, recoveryDb: input.recoveryDb, actor,
+    keyring: input.keyring, config: input.config,
+    centreId: input.centreId, importId: importIdFrom(input.importId),
+    afterSourceRecordId: input.afterSourceRecordId,
+  })
+}
+
 export const postHistoricalProjectionContinue = (input = {}) => {
   const actor = projectionActor(input.actor)
   const service = input.service ?? continueHistoricalProjection
@@ -83,7 +101,25 @@ export const postHistoricalProjectionResolution = (input = {}) => {
   const service = input.service ?? resolveHistoricalConflict
   if (typeof service !== 'function') throw new Error('INTERNAL_ERROR')
   let body
-  try { body = captureHistoricalResolution(input.body) } catch { validation('body') }
+  try {
+    const captured = exactBody(input.body, [
+      'expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId',
+      'serviceId', 'reviewContextDigest', 'directoryCount', 'directoryDigest',
+    ])
+    const decision = captureHistoricalResolution(Object.fromEntries(
+      ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId']
+        .map((key) => [key, captured[key]]),
+    ))
+    if (!/^[a-f0-9]{64}$/.test(captured.reviewContextDigest)
+      || !Number.isSafeInteger(captured.directoryCount) || captured.directoryCount < 0
+      || !/^[a-f0-9]{64}$/.test(captured.directoryDigest)) validation('body')
+    body = Object.freeze({
+      ...decision,
+      reviewContextDigest: captured.reviewContextDigest,
+      directoryCount: captured.directoryCount,
+      directoryDigest: captured.directoryDigest,
+    })
+  } catch { validation('body') }
   return service({
     db: input.db, recoveryDb: input.recoveryDb, actor,
     keyring: input.keyring, config: input.config, centreId: input.centreId,

@@ -45,6 +45,7 @@ import {
 } from './routes/capability-overrides.js'
 import { getWorkspace } from './routes/workspace.js'
 import {
+  getHistoricalProjectionReviewCatalog,
   getHistoricalProjectionStatus,
   postHistoricalClientActivation,
   postHistoricalProjectionContinue,
@@ -214,8 +215,9 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'workbooks.resolutions', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.resolutions.recorded'], bodyKeys: ['expectedVersion', 'planDigest', 'resolutions'], freshAuth: true }),
   descriptor({ id: 'workbooks.export.create', path: '/api/v1/workbooks/exports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'], auditActions: ['workbook.export.created'], bodyKeys: ['format'], freshAuth: true }),
   descriptor({ id: 'historical.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'historical.projection.review', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/review-catalog$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], freshAuth: true }),
-  descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId'], freshAuth: true }),
+  descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId', 'reviewContextDigest', 'directoryCount', 'directoryDigest'], freshAuth: true }),
   descriptor({ id: 'historical.clients.activate', pathPattern: `^/api/v1/historical-clients/${HISTORICAL_CLIENT_PATH_ID}/activation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'] }),
   descriptor({ id: 'activities.workspace', path: '/api/v1/activities/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'tus.manage', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'activities.groups.create', path: '/api/v1/activities/groups', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'] }),
@@ -1205,6 +1207,26 @@ export function createApp(deps = {}) {
       db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
       keyring: c.get('cryptoContext')?.keyring, importId: c.req.param('importId'),
       service: deps.getHistoricalProjectionStatus,
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/imports/:importId/historical-projection/review-catalog', async (c) => {
+    if (c.get('routeId') !== 'historical.projection.review') throw new AppError('NOT_FOUND')
+    const url = new URL(c.req.url)
+    const keys = [...url.searchParams.keys()]
+    const afterSourceRecordId = url.searchParams.get('afterSourceRecordId')
+    if (keys.length > 1 || (keys.length === 1 && (keys[0] !== 'afterSourceRecordId'
+      || typeof afterSourceRecordId !== 'string'
+      || !/^wbs_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(afterSourceRecordId)
+      || url.search !== `?afterSourceRecordId=${afterSourceRecordId}`))) {
+      throw new AppError('VALIDATION_FAILED', { field: 'afterSourceRecordId' })
+    }
+    const result = await getHistoricalProjectionReviewCatalog({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, config: runtimeConfig(c, deps),
+      centreId: 'centre_1', importId: c.req.param('importId'),
+      afterSourceRecordId: keys.length === 0 ? null : afterSourceRecordId,
+      service: deps.getHistoricalProjectionReviewCatalog,
     })
     return readResponse(c, result)
   })
