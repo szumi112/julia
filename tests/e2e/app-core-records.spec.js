@@ -66,6 +66,60 @@ const workspace = (from, to, { specialists, clients, appointments = [] }) => jso
   },
 })
 
+const financeWindow = (selectedMonth, visit = null) => {
+  const months = ['2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08']
+  const paymentTotals = (visit?.paymentEntries ?? [])
+    .filter(({ correctedAt }) => correctedAt === null)
+    .reduce((totals, { method, amountGrosze }) => {
+      totals.set(method, (totals.get(method) ?? 0) + amountGrosze)
+      return totals
+    }, new Map())
+  paymentTotals.set('outstanding', visit === null ? 0 : visit.payment.outstandingGrosze)
+  const paymentSplit = Object.fromEntries([...paymentTotals.entries()]
+    .sort(([left], [right]) => left.localeCompare(right)))
+  const row = visit === null ? null : {
+    id: 'fin_iga', sourceKind: 'panel', appointmentId: visit.id,
+    accountingMonth: selectedMonth, occurredOn: visit.startsAt.slice(0, 10),
+    kind: 'income', recordType: 'income',
+    revenueGrosze: visit.charge.expectedAmountGrosze,
+    receivableGrosze: visit.charge.expectedAmountGrosze,
+    collectedGrosze: visit.payment.collectedGrosze, expenseGrosze: 0,
+    specialistId: visit.specialistId, serviceId: visit.serviceId, program: null,
+    paymentMethod: 'unknown', invoiceStatus: 'not_required',
+    version: Math.max(visit.version, visit.charge.version),
+  }
+  const revenueGrosze = row?.revenueGrosze ?? 0
+  const collectedGrosze = row?.collectedGrosze ?? 0
+  const kpis = {
+    revenueGrosze, collectedGrosze, outstandingGrosze: revenueGrosze - collectedGrosze,
+    expensesGrosze: 0, incomeGrosze: revenueGrosze,
+  }
+  const empty = {
+    revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0,
+    expensesGrosze: 0, incomeGrosze: 0,
+  }
+  return {
+    currentMonth: '2026-08', selectedMonth, fromMonth: months[0], toMonth: selectedMonth,
+    months, latestPopulatedMonth: row ? selectedMonth : null, kpis,
+    trend: months.map((month) => ({ month, ...(month === selectedMonth ? kpis : empty) })),
+    splits: {
+      specialist: row ? { sp_anna: revenueGrosze } : {},
+      service: row ? { zajecia: revenueGrosze } : {},
+      payment: row ? paymentSplit : {},
+      invoice: row ? { not_required: { count: 1, revenueGrosze } } : {},
+      program: {
+        english: { count: 0, revenueGrosze: 0 },
+        tus: { count: 0, revenueGrosze: 0 },
+      },
+    },
+    specialistLabels: row ? [{ id: 'sp_anna', label: 'Anna Nowak' }] : [], rows: row ? [row] : [],
+    coverage: {
+      dateOnlyCount: 0, monthOnlyCount: 0, timedCount: row ? 1 : 0, unknownCount: 0,
+    },
+    unknownPeriodCount: 0, complete: true,
+  }
+}
+
 const session = (actor, capabilities, authorityRevision = actor.version) => {
   const expiresAt = '2030-01-01T00:00:00.000Z'
   return json(200, { data: {
@@ -92,7 +146,7 @@ const expectCommand = (route, { method, path, body }) => {
   expect(request.postDataJSON()).toEqual(body)
 }
 
-test('@owner completes a fictional client, visit, payment, correction, and reload workflow without browser persistence', async ({ page }) => {
+test('@owner reconciles POST payment and correction mutations in the fictional reload workflow', async ({ page }) => {
   await freezeTime(page)
   const writes = []
   const specialists = [specialist('sp_anna', 'Anna Nowak')]
@@ -117,6 +171,10 @@ test('@owner completes a fictional client, visit, payment, correction, and reloa
   let clients = []
   let visit = null
   let appointmentEdits = 0
+  let paymentAccepted = false
+  let correctionAccepted = false
+  let financeReadsAfterPayment = 0
+  let financeReadsAfterCorrection = 0
   page.on('request', (request) => {
     if (new URL(request.url()).pathname.startsWith('/api/v1/')) writes.push(request.method())
   })
@@ -125,6 +183,12 @@ test('@owner completes a fictional client, visit, payment, correction, and reloa
     return route.fulfill(workspace(url.searchParams.get('from'), url.searchParams.get('to'), {
       specialists, clients, appointments: visit ? [visit] : [],
     }))
+  })
+  await page.route('**/api/v1/finance/window?*', (route) => {
+    if (paymentAccepted) financeReadsAfterPayment += 1
+    if (correctionAccepted) financeReadsAfterCorrection += 1
+    const month = new URL(route.request().url()).searchParams.get('month')
+    return route.fulfill(json(200, { data: financeWindow(month, visit) }))
   })
   await page.route('**/api/v1/clients', (route) => {
     expectCommand(route, { method: 'POST', path: '/api/v1/clients', body: {
@@ -159,6 +223,7 @@ test('@owner completes a fictional client, visit, payment, correction, and reloa
       expectedVersion: 2, amountGrosze: 12_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z',
     } })
     visit = paidVisit
+    paymentAccepted = true
     return route.fulfill(json(200, { data: { appointment: paidVisit } }))
   })
   await page.route('**/api/v1/payments/pay_iga/corrections', (route) => {
@@ -168,6 +233,7 @@ test('@owner completes a fictional client, visit, payment, correction, and reloa
       },
     } })
     visit = correctedVisit
+    correctionAccepted = true
     return route.fulfill(json(200, { data: { appointment: correctedVisit } }))
   })
 
@@ -194,12 +260,18 @@ test('@owner completes a fictional client, visit, payment, correction, and reloa
 
   await page.goto('./#/payments?ym=2026-08')
   const ledger = page.getByRole('table', { name: 'Lista rozliczeń' })
+  const financeRow = ledger.locator('tbody tr', { hasText: 'Iga Próbna' })
   await ledger.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
   const payment = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
   await payment.getByLabel('Kwota wpłaty').fill('120')
   await payment.getByLabel('Forma płatności').selectOption('card')
   await payment.getByLabel('Data wpłaty').fill('2026-08-04')
   await payment.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+  await expect(financeRow.locator('td').nth(3)).toHaveText('120 zł')
+  await expect(financeRow.locator('td').nth(4)).toHaveText('60 zł')
+  await expect(page.getByRole('heading', { name: 'Finanse — sierpień 2026' })).toBeVisible()
+  await expect(page.getByText('Finanse są teraz niedostępne', { exact: true })).toHaveCount(0)
+  await expect.poll(() => financeReadsAfterPayment).toBeGreaterThan(0)
   await ledger.getByRole('button', { name: /Skoryguj wpłatę/ }).click()
   const correction = page.getByRole('dialog', { name: 'Skoryguj wpłatę' })
   await correction.getByLabel('Powód korekty').fill('Fikcyjna korekta')
@@ -209,6 +281,11 @@ test('@owner completes a fictional client, visit, payment, correction, and reloa
   await correction.getByLabel('Data zastępcza').fill('2026-08-05')
   await correction.getByRole('button', { name: 'Zapisz korektę' }).click()
   await expect(ledger).toContainText('Skorygowana')
+  await expect(financeRow.locator('td').nth(3)).toHaveText('100 zł')
+  await expect(financeRow.locator('td').nth(4)).toHaveText('80 zł')
+  await expect(page.getByRole('heading', { name: 'Finanse — sierpień 2026' })).toBeVisible()
+  await expect(page.getByText('Finanse są teraz niedostępne', { exact: true })).toHaveCount(0)
+  await expect.poll(() => financeReadsAfterCorrection).toBeGreaterThan(0)
 
   await page.goto('./#/calendar?date=2026-08-04')
   await plan.getByRole('button', { name: 'Status: Odbyta — Iga Próbna, 12:00' }).click()

@@ -169,7 +169,7 @@ test('@owner capability shell exposes protected activity routes and keeps incomp
   await tabbar.getByRole('button', { name: 'Menu' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nawigacja' })
   await expect(drawer.getByRole('navigation', { name: 'Nawigacja główna' })
-    .getByRole('link')).toHaveText(['Angielski', 'Finanse', 'Ustawienia'])
+    .getByRole('link')).toHaveText(['Angielski', 'Ustawienia'])
   await page.keyboard.press('Escape')
 
   await page.keyboard.press('Control+K')
