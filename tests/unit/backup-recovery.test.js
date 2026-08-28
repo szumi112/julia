@@ -289,6 +289,25 @@ test('recovery-fact validation is exact-keyed and enforces all terminal equation
   assert.deepEqual(validateBackupRecoveryFacts(boundary), boundary)
 })
 
+test('recovery facts pin the approved historical projection partition', () => {
+  const shiftedPartition = workbookFacts()
+  shiftedPartition.historical.projectedRecords = 1996
+  shiftedPartition.historical.occurrenceCount = 1996
+  shiftedPartition.historical.explicitExclusionCount = 1
+  assert.throws(
+    () => validateBackupRecoveryFacts(shiftedPartition),
+    /BACKUP_RECOVERY_INVALID/,
+  )
+
+  const shiftedConflicts = workbookFacts()
+  shiftedConflicts.historical.conflictCount = 1991
+  shiftedConflicts.historical.resolutionCount = 1991
+  assert.throws(
+    () => validateBackupRecoveryFacts(shiftedConflicts),
+    /BACKUP_RECOVERY_INVALID/,
+  )
+})
+
 test('recovery boundaries reject hostile descriptors without invoking getters or leaking traps', async () => {
   let invoked = false
   const accessor = workbookFacts()

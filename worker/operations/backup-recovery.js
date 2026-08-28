@@ -221,11 +221,11 @@ function validateWorkbook(value) {
     || !id(historical.jobId, ID_PATTERNS.historical)
     || historical.status !== 'complete' || !positive(historical.version)
     || historical.totalRecords !== 2_000 || historical.processedRecords !== 2_000
-    || !count(historical.projectedRecords)
-    || !count(historical.conflictCount)
-    || historical.resolutionCount !== historical.conflictCount
-    || historical.occurrenceCount !== historical.projectedRecords
-    || !count(historical.explicitExclusionCount)
+    || historical.projectedRecords !== 1_997
+    || historical.conflictCount !== 1_992
+    || historical.resolutionCount !== 1_992
+    || historical.occurrenceCount !== 1_997
+    || historical.explicitExclusionCount !== 0
     || historical.automaticDeferredCount !== 3
     || historical.unresolvedCount !== 0
     || historical.occurrenceCount + historical.explicitExclusionCount
