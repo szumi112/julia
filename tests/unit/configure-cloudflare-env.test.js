@@ -114,7 +114,7 @@ const expectedEnvironmentBlock = (name, section) => {
     ACCESS_TEAM_DOMAIN: section.accessTeamDomain,
     ACTIVE_DATA_KEK_VERSION: '1',
     ACTIVE_LOOKUP_KEY_VERSION: '1',
-    ACTIVE_BACKUP_KEK_VERSION: '1',
+    ACTIVE_BACKUP_KEK_VERSION: name === 'staging' ? '2' : '1',
     ACTIVE_WORKBOOK_KEK_VERSION: '1',
     ACTIVE_WORKBOOK_HMAC_VERSION: '1',
     CF_ACCOUNT_ID: section.accountId,
@@ -135,6 +135,7 @@ const expectedEnvironmentBlock = (name, section) => {
     secrets: {
       required: [
         'BWM_BACKUP_KEK_V1',
+        ...(name === 'staging' ? ['BWM_BACKUP_KEK_V2'] : []),
         'BWM_DATA_KEK_V1',
         'BWM_LOOKUP_HMAC_V1',
         'BWM_WORKBOOK_HMAC_V1',
@@ -268,6 +269,32 @@ test('the writer accepts the live repo wrangler.json shape', () => {
     'CF_ACCESS_GROUP_TOKEN',
     'CF_D1_EXPORT_TOKEN',
     'SCW_SECRET_KEY',
+  ])
+  assert.equal(config.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
+  assert.equal(config.env.staging.vars.ACTIVE_BACKUP_KEK_VERSION, '2')
+  assert.deepEqual(config.env.staging.secrets.required.slice(0, 2), [
+    'BWM_BACKUP_KEK_V1',
+    'BWM_BACKUP_KEK_V2',
+  ])
+  assert.equal(config.env.production.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
+  assert.equal(config.env.production.secrets.required.includes('BWM_BACKUP_KEK_V2'), false)
+})
+
+test('backup KEK V2 is activated and retained only for staging', () => {
+  const { config } = applyProviderResults({ config: baseConfig(), document: validDocument() })
+
+  assert.equal(config.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
+  assert.deepEqual(config.secrets.required.filter((name) => name.startsWith('BWM_BACKUP_KEK_')), [
+    'BWM_BACKUP_KEK_V1',
+  ])
+  assert.equal(config.env.staging.vars.ACTIVE_BACKUP_KEK_VERSION, '2')
+  assert.deepEqual(config.env.staging.secrets.required.filter((name) => name.startsWith('BWM_BACKUP_KEK_')), [
+    'BWM_BACKUP_KEK_V1',
+    'BWM_BACKUP_KEK_V2',
+  ])
+  assert.equal(config.env.production.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
+  assert.deepEqual(config.env.production.secrets.required.filter((name) => name.startsWith('BWM_BACKUP_KEK_')), [
+    'BWM_BACKUP_KEK_V1',
   ])
 })
 

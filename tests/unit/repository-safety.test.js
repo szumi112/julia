@@ -380,13 +380,32 @@ test('backend binding names cannot appear in browser files but may appear in Wor
 })
 
 test('backup provider account and database bindings stay out of browser artifacts', (t) => {
-  for (const binding of ['CF_ACCOUNT_ID', 'CF_D1_DATABASE_ID']) {
+  for (const binding of ['BWM_BACKUP_KEK_V2', 'CF_ACCOUNT_ID', 'CF_D1_DATABASE_ID']) {
     const allowedRoot = deployFixture(t, { worker: `const value = env.${binding}` })
     assert.doesNotThrow(() => inspectDeployArtifact({ root: allowedRoot, secretValues: {} }))
 
     const rejectedRoot = deployFixture(t, { browser: `const value = '${binding}'` })
     assert.throws(() => inspectDeployArtifact({ root: rejectedRoot, secretValues: {} }), /backend binding/i)
   }
+})
+
+test('deploy inspection redacts the staging backup V2 secret without exposing its value', (t) => {
+  const secret = 'staging-backup-v2-secret-must-not-ship'
+  const root = deployFixture(t, { worker: `const accidental = '${secret}'` })
+  let error
+  try {
+    inspectDeployArtifact({
+      root,
+      secretValues: { BWM_BACKUP_KEK_V2: secret },
+    })
+  } catch (caught) {
+    error = caught
+  }
+
+  assert.ok(error)
+  assert.match(error.message, /BWM_BACKUP_KEK_V2/)
+  assert.match(error.message, /dist\/app\/worker\.js/)
+  assert.doesNotMatch(error.message, new RegExp(secret))
 })
 
 test('deploy inspection scans textual assets regardless of extension but ignores binary bytes', (t) => {

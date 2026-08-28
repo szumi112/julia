@@ -38,6 +38,11 @@ const REQUIRED_SECRETS = [
   'CF_D1_EXPORT_TOKEN',
   'SCW_SECRET_KEY',
 ]
+const STAGING_REQUIRED_SECRETS = [
+  'BWM_BACKUP_KEK_V1',
+  'BWM_BACKUP_KEK_V2',
+  ...REQUIRED_SECRETS.slice(1),
+]
 // Canonical base64url encoding of 32 zero bytes: a shape-valid stand-in so the
 // runtime schema can validate emitted vars without any real key material.
 const DUMMY_SECRET_KEY = 'A'.repeat(43)
@@ -198,6 +203,7 @@ const buildEnvironmentBlock = (name, section, inheritedVars) => {
     ACCESS_HEALTH_SERVICE_TOKEN_ID: section.accessHealthServiceTokenId,
     ACCESS_TEAM_DOMAIN: section.accessTeamDomain,
     ...inheritedVars,
+    ACTIVE_BACKUP_KEK_VERSION: name === 'staging' ? '2' : '1',
     CF_ACCOUNT_ID: section.accountId,
     CF_D1_DATABASE_ID: section.d1.id,
     CF_ACCESS_GROUP_ID: section.accessGroupId,
@@ -217,7 +223,7 @@ const buildEnvironmentBlock = (name, section, inheritedVars) => {
     vars,
     // Wrangler does not inherit the top-level secrets manifest per environment,
     // so each env block repeats the required list.
-    secrets: { required: [...REQUIRED_SECRETS] },
+    secrets: { required: [...(name === 'staging' ? STAGING_REQUIRED_SECRETS : REQUIRED_SECRETS)] },
     d1_databases: [{
       binding: 'DB',
       database_name: section.d1.name,

@@ -39,7 +39,13 @@ test('staging backup configuration derives one non-production D1/R2 source ident
     bucket: config.env.staging.r2_buckets[0].bucket_name,
     jurisdiction: 'eu',
   })
-  assert.equal(selected.activeBackupKekVersion, 1)
+  assert.equal(selected.activeBackupKekVersion, 2)
+  assert.deepEqual(config.env.staging.secrets.required.filter((name) => name.startsWith('BWM_BACKUP_KEK_')), [
+    'BWM_BACKUP_KEK_V1',
+    'BWM_BACKUP_KEK_V2',
+  ])
+  assert.equal(config.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
+  assert.equal(config.env.production.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
 
   const cases = [
     { config, environment: { ...environment, APP_ENV: 'production' } },

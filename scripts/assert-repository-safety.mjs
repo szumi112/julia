@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url'
 const RUNTIME_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdn.jsdelivr.net']
 const SECRET_NAMES = [
   'BWM_BACKUP_KEK_V1',
+  'BWM_BACKUP_KEK_V2',
   'BWM_DATA_KEK_V1',
   'BWM_LOOKUP_HMAC_V1',
   'BWM_WORKBOOK_HMAC_V1',
@@ -29,6 +30,7 @@ const BACKEND_BINDINGS = [
   'ARCHIVE',
   'ASSETS',
   'BWM_BACKUP_KEK_V1',
+  'BWM_BACKUP_KEK_V2',
   'BWM_DATA_KEK_V1',
   'BWM_LOOKUP_HMAC_V1',
   'BWM_WORKBOOK_HMAC_V1',
