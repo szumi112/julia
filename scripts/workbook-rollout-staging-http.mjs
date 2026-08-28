@@ -12,7 +12,6 @@ const identifier = (value, prefix) => typeof value === 'string'
   && new RegExp(`^${prefix}_[A-Za-z0-9_-]{1,120}$`).test(value)
 const MAX_JSON_BYTES = 4 * 1024 * 1024
 const CSRF_REFRESH_SKEW_MS = 60_000
-const REGISTRY_PAGE_LIMIT = 20
 
 export class WorkbookRolloutHttpError extends Error {
   constructor(code, status, details = null) {
@@ -147,40 +146,20 @@ function state(data, expectedActorId, create = false) {
   }
 }
 
-function registryImportIdentity(value, expectedActorId, fingerprint) {
+function discoveryState(value) {
   const keys = [
-    'id', 'artifact', 'status', 'version', 'phase', 'progress', 'summary',
-    'resolutionVersion', 'createdByStaffId', 'createdAt', 'updatedAt',
+    'artifactId', 'converged', 'createdRecords', 'importId', 'status', 'version',
+    'voidedRecords',
   ]
-  const artifactKeys = [
-    'id', 'fingerprint', 'byteSize', 'parserVersion', 'materializerVersion', 'createdAt',
-  ]
-  const summaryKeys = [
-    'sourceCount', 'quarantineCount', 'conflictCount', 'duplicateCount', 'resolutionCount',
-  ]
-  if (!exact(value, keys) || !exact(value.artifact, artifactKeys)
-    || !exact(value.summary, summaryKeys)
-    || !identifier(value.id, 'wbi') || !identifier(value.artifact.id, 'wba')
-    || !/^[a-f0-9]{64}$/.test(value.artifact.fingerprint ?? '')
-    || !Number.isSafeInteger(value.artifact.byteSize) || value.artifact.byteSize < 1
-    || value.artifact.byteSize > 5 * 1024 * 1024
-    || value.artifact.parserVersion !== WORKBOOK_PARSER_VERSION
-    || value.artifact.materializerVersion !== WORKBOOK_MATERIALIZER_VERSION
-    || !['uploading', 'ready', 'materializing', 'conflicts', 'complete', 'failed']
-      .includes(value.status)
+  if (!exact(value, keys) || !identifier(value.importId, 'wbi')
+    || !identifier(value.artifactId, 'wba')
+    || !['ready', 'materializing', 'complete', 'failed'].includes(value.status)
     || !Number.isSafeInteger(value.version) || value.version < 1
-    || !(value.phase === null || typeof value.phase === 'string')
-    || !(value.progress === null || (exact(value.progress, ['processed', 'total'])
-      && Number.isSafeInteger(value.progress.processed) && value.progress.processed >= 0
-      && Number.isSafeInteger(value.progress.total) && value.progress.total >= 0
-      && value.progress.processed <= value.progress.total))
-    || summaryKeys.some((key) => !Number.isSafeInteger(value.summary[key])
-      || value.summary[key] < 0)
-    || !Number.isSafeInteger(value.resolutionVersion) || value.resolutionVersion < 0
-    || !identifier(value.createdByStaffId, 'stf')) failed()
-  if (value.artifact.fingerprint !== fingerprint) return null
-  if (value.createdByStaffId !== expectedActorId) failed()
-  return Object.freeze({ importId: value.id, artifactId: value.artifact.id })
+    || !Number.isSafeInteger(value.createdRecords) || value.createdRecords < 0
+    || !Number.isSafeInteger(value.voidedRecords) || value.voidedRecords < 0
+    || typeof value.converged !== 'boolean'
+    || value.converged !== (value.status === 'complete')) failed()
+  return Object.freeze(Object.fromEntries(keys.map((key) => [key, value[key]])))
 }
 
 export function createStagingWorkbookApi({
@@ -271,33 +250,11 @@ export function createStagingWorkbookApi({
     },
     async discoverImport({ fingerprint, creatorId }) {
       if (!/^[a-f0-9]{64}$/.test(fingerprint ?? '') || creatorId !== expectedActorId) failed()
-      const matches = []
-      const seenCursors = new Set()
-      let cursor = null
-      for (let page = 0; page < REGISTRY_PAGE_LIMIT; page += 1) {
-        const path = `/api/v1/workbooks/registry?section=imports${
-          cursor === null ? '' : `&cursor=${cursor}`
-        }`
-        const data = await getJson(path)
-        if (!exact(data, [
-          'cursor', 'nextCursor', 'imports', 'exports', 'entries', 'complete',
-        ]) || data.cursor !== cursor || !Array.isArray(data.imports)
-          || data.imports.length > 20 || !Array.isArray(data.exports)
-          || data.exports.length !== 0 || !Array.isArray(data.entries)
-          || data.entries.length !== 0 || typeof data.complete !== 'boolean'
-          || !(data.nextCursor === null || /^c_[1-9]\d*_r[1-9]\d*$/.test(data.nextCursor))
-          || data.complete !== (data.nextCursor === null)) failed()
-        for (const value of data.imports) {
-          const match = registryImportIdentity(value, expectedActorId, fingerprint)
-          if (match !== null) matches.push(match)
-        }
-        if (matches.length > 1) failed()
-        if (data.complete) return matches[0] ?? null
-        if (seenCursors.has(data.nextCursor)) failed()
-        seenCursors.add(data.nextCursor)
-        cursor = data.nextCursor
-      }
-      failed()
+      const data = await getJson(
+        `/api/v1/workbooks/imports/discovery?fingerprint=${fingerprint}`,
+      )
+      if (!exact(data, ['import'])) failed()
+      return data.import === null ? null : discoveryState(data.import)
     },
     async preview(workbook) {
       const request = await postMutation('/api/v1/workbooks/preview', () => ({

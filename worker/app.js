@@ -104,6 +104,7 @@ import { createKeyring } from './security/keyring.js'
 import {
   createWorkbookImport,
   continueWorkbookImport,
+  discoverWorkbookImport,
   exportWorkbook,
   getWorkbookImport,
   loadWorkbookPanelState,
@@ -203,6 +204,7 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'workbooks.preview', path: '/api/v1/workbooks/preview', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, bodyMode: 'workbook-multipart', idempotency: false, queryMode: 'none' }),
   descriptor({ id: 'workbooks.import', path: '/api/v1/workbooks/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.created', 'workbook.resolutions.recorded'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
   descriptor({ id: 'workbooks.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.materialized'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.discovery', path: '/api/v1/workbooks/imports/discovery', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'workbooks.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
   descriptor({ id: 'workbooks.operator.evidence', path: '/api/v1/workbooks/operator-evidence', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
   descriptor({ id: 'workbooks.artifact.verification', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/artifact-verification$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
@@ -1037,6 +1039,24 @@ export function createApp(deps = {}) {
       idempotencyKey: c.req.header('Idempotency-Key'),
     })
     return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/workbooks/imports/discovery', async (c) => {
+    if (c.get('routeId') !== 'workbooks.discovery') throw new AppError('NOT_FOUND')
+    const url = new URL(c.req.url)
+    const keys = [...url.searchParams.keys()]
+    const fingerprint = url.searchParams.get('fingerprint')
+    if (keys.length !== 1 || keys[0] !== 'fingerprint'
+      || typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)
+      || url.search !== `?fingerprint=${fingerprint}`) {
+      throw new AppError('VALIDATION_FAILED', { field: 'fingerprint' })
+    }
+    const result = await (deps.discoverWorkbookImport ?? discoverWorkbookImport)({
+      db: c.get('coreWorkDb'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      fingerprint,
+    })
+    return readResponse(c, result)
   })
   app.get('/api/v1/workbooks/imports/:importId', async (c) => {
     if (c.get('routeId') !== 'workbooks.status') throw new AppError('NOT_FOUND')

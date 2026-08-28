@@ -95,6 +95,7 @@ describe('protected workbook HTTP routes', () => {
         '/api/v1/workbooks/preview',
         '/api/v1/workbooks/imports',
         '/api/v1/workbooks/imports/wbi_route_one/continue',
+        `/api/v1/workbooks/imports/discovery?fingerprint=${'a'.repeat(64)}`,
         '/api/v1/workbooks/imports/wbi_route_one',
         '/api/v1/workbooks/registry?section=unknown',
         '/api/v1/workbooks/export?format=panel-v2',
@@ -116,6 +117,57 @@ describe('protected workbook HTTP routes', () => {
       expect(db.batch).not.toHaveBeenCalled()
     },
   )
+
+  it('dispatches narrow restart discovery for a finance.import-only actor', async () => {
+    const importOnlyActor = authorityActor({
+      id: 'stf_workbook_route_import_operator',
+      role: 'coordinator',
+      authorityRevision: 4,
+      capabilities: ['finance.import'],
+    })
+    const fingerprint = 'a'.repeat(64)
+    const discovered = Object.freeze({
+      artifactId: 'wba_route_discovery', converged: false, createdRecords: 7,
+      importId: 'wbi_route_discovery', status: 'materializing', version: 2,
+      voidedRecords: 1,
+    })
+    const discoverWorkbookImport = vi.fn(async (input) => {
+      expect(input).toEqual(expect.objectContaining({
+        actor: importOnlyActor, fingerprint, nowMs: NOW_MS,
+      }))
+      return { data: { import: discovered } }
+    })
+    const loadWorkbookRegistry = vi.fn()
+    const app = createApp(depsFor({
+      discoverWorkbookImport,
+      loadWorkbookRegistry,
+      resolveActor: vi.fn(async () => importOnlyActor),
+    }))
+    const path = `/api/v1/workbooks/imports/discovery?fingerprint=${fingerprint}`
+    const response = await app.request(path)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ data: { import: discovered } })
+    expect(response.headers.get('cache-control')).toContain('no-store')
+    const head = await app.request(path, { method: 'HEAD' })
+    expect(head.status).toBe(200)
+    expect(await head.text()).toBe('')
+    expect(discoverWorkbookImport).toHaveBeenCalledTimes(2)
+    expect(loadWorkbookRegistry).not.toHaveBeenCalled()
+
+    for (const invalid of [
+      '/api/v1/workbooks/imports/discovery',
+      `${path}&section=imports`,
+      `${path}&fingerprint=${fingerprint}`,
+      `/api/v1/workbooks/imports/discovery?fingerprint=${'A'.repeat(64)}`,
+    ]) {
+      const refused = await app.request(invalid)
+      expect(refused.status, invalid).toBe(400)
+      expect(await refused.json()).toMatchObject({
+        error: { code: 'VALIDATION_FAILED', details: { field: 'fingerprint' } },
+      })
+    }
+    expect(discoverWorkbookImport).toHaveBeenCalledTimes(2)
+  })
 
   it('forwards the canonical bounded unknown-period registry section without extra input', async () => {
     const loadWorkbookRegistry = vi.fn(async (input) => {

@@ -161,6 +161,7 @@ test('restart after an uncertain commit obtains a fresh no-write preview and dis
     let invocation = 1
     let committed = false
     let previewCalls = 0
+    let statusCalls = 0
     const commitInputs = []
     const api = {
       async operatorEvidence() { return evidence },
@@ -169,7 +170,7 @@ test('restart after an uncertain commit obtains a fresh no-write preview and dis
         assert.equal(fingerprint, FINGERPRINT)
         assert.equal(creatorId, CREATOR_ID)
         return invocation === 2 && committed
-          ? { importId: IMPORT_ID, artifactId: ARTIFACT_ID }
+          ? terminalState
           : null
       },
       async commit(input) {
@@ -181,7 +182,7 @@ test('restart after an uncertain commit obtains a fresh no-write preview and dis
         committed = true
         throw new Error('response lost after commit')
       },
-      async status() { return terminalState },
+      async status() { statusCalls += 1; return terminalState },
       async continue() { throw new Error('must not continue terminal import') },
       async artifactVerification() { return artifactVerification() },
       async reconciliation() { return reconciled() },
@@ -200,6 +201,7 @@ test('restart after an uncertain commit obtains a fresh no-write preview and dis
     assert.deepEqual(result, terminalResult)
     assert.equal(previewCalls, 2)
     assert.equal(commitInputs.length, 2)
+    assert.equal(statusCalls, 2)
     assert.deepEqual(await observed.journal.load(), complete)
     await observed.inspect()
   } finally { await rm(root, { recursive: true, force: true }) }
@@ -322,12 +324,13 @@ test('one process replays exact commit and continuation operations with zero del
 
 test('same-process commit discovery still exact-replays the uncertain in-memory operation', async () => {
   let committed = false
+  let statusCalls = 0
   const commitInputs = []
   const api = {
     async operatorEvidence() { return evidence },
     async preview() { return preview() },
     async discoverImport() {
-      return committed ? { importId: IMPORT_ID, artifactId: ARTIFACT_ID } : null
+      return committed ? terminalState : null
     },
     async commit(input) {
       commitInputs.push(input)
@@ -335,7 +338,7 @@ test('same-process commit discovery still exact-replays the uncertain in-memory 
       if (commitInputs.length <= 2) throw new Error('commit response lost')
       return terminalState
     },
-    async status() { return terminalState },
+    async status() { statusCalls += 1; return terminalState },
     async continue() { throw new Error('terminal import must not continue') },
     async artifactVerification() { return artifactVerification() },
     async reconciliation() { return reconciled() },
@@ -348,6 +351,7 @@ test('same-process commit discovery still exact-replays the uncertain in-memory 
 
   assert.deepEqual(await runResumableStagingWorkbookRollout(runInput(journal, api)), terminalResult)
   assert.equal(commitInputs.length, 3)
+  assert.equal(statusCalls, 1)
   assert.deepEqual(commitInputs[0], commitInputs[1])
   assert.deepEqual(commitInputs[1], commitInputs[2])
   assert.deepEqual(saved, complete)

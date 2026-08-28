@@ -10,6 +10,7 @@ import {
   monthKey,
   METHOD_LABELS,
 } from '../format.js'
+import { ownPaymentCivilDate } from '../own-payments.js'
 import { SERVICE_BY_ID } from '../services.js'
 import { useShell } from '../shell-ctx.js'
 import { Button, EmptyState, IconBtn, Pager, Pill, usePagination } from '../ui.jsx'
@@ -144,7 +145,7 @@ export function OwnPayments() {
                 <tbody>{appointments.length === 0 ? <tr><td colSpan={7}>
                   <EmptyState icon="payments" title="Brak rozliczonych sesji w tym miesiącu" />
                 </td></tr> : pageItems.map((appointment) => <tr key={appointment.id}>
-                  <td>{fmtShortDate(appointment.startsAt.slice(0, 10))}</td>
+                  <td>{fmtShortDate(ownPaymentCivilDate(appointment.startsAt))}</td>
                   <td>{SERVICE_BY_ID[appointment.serviceId].label}</td>
                   <td className="right num-cell">
                     {fmtMoney(appointment.charge.expectedAmountGrosze / 100)}

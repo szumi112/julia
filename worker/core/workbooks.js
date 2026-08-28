@@ -46,6 +46,7 @@ const MAX_WORKBOOK_EXPORT_ROWS = 5_000
 const CENTRE_ID = /^centre_[A-Za-z0-9][A-Za-z0-9_-]{0,120}$/
 const FINGERPRINT = /^[0-9a-f]{64}$/
 const IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const ARTIFACT_ID = /^wba_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CORRELATION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const SOURCE_KEY = /^workbook:v1:(\d{1,4}):(\d{1,7}):(\d{1,5})$/
@@ -1305,6 +1306,88 @@ const loadImportRow = async (db, importId, actorId = null) => {
     throw new Error('NOT_FOUND')
   }
   return row
+}
+
+const DISCOVERY_ROW_KEYS = Object.freeze([
+  'id', 'artifact_id', 'status', 'version', 'job_status', 'progress_json',
+])
+const discoveryRows = (value) => {
+  try {
+    const result = Object.getOwnPropertyDescriptor(value, 'results')
+    if (!result?.enumerable || !Object.hasOwn(result, 'value')) throw new Error()
+    const rows = result.value
+    if (!Array.isArray(rows) || Object.getPrototypeOf(rows) !== Array.prototype
+      || rows.length > 2) throw new Error()
+    const descriptors = Object.getOwnPropertyDescriptors(rows)
+    if (Reflect.ownKeys(descriptors).length !== rows.length + 1) throw new Error()
+    return Array.from({ length: rows.length }, (_, index) => {
+      const item = descriptors[String(index)]
+      if (!item?.enumerable || !Object.hasOwn(item, 'value')) throw new Error()
+      const row = item.value
+      if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new Error()
+      const fields = Object.getOwnPropertyDescriptors(row)
+      const keys = Reflect.ownKeys(fields)
+      if (keys.length !== DISCOVERY_ROW_KEYS.length || keys.some((key) => (
+        typeof key !== 'string' || !DISCOVERY_ROW_KEYS.includes(key)
+      ))) throw new Error()
+      return Object.fromEntries(DISCOVERY_ROW_KEYS.map((key) => {
+        const field = fields[key]
+        if (!field?.enumerable || !Object.hasOwn(field, 'value')) throw new Error()
+        return [key, field.value]
+      }))
+    })
+  } catch {
+    throw new Error('INTERNAL_ERROR')
+  }
+}
+
+const discoveredImportState = (row) => {
+  let progress
+  try { progress = JSON.parse(row.progress_json) } catch { throw new Error('INTERNAL_ERROR') }
+  if (!IMPORT_ID.test(row.id ?? '') || !ARTIFACT_ID.test(row.artifact_id ?? '')
+    || !['ready', 'materializing', 'complete', 'failed'].includes(row.status)
+    || !['ready', 'running', 'complete', 'failed'].includes(row.job_status)
+    || !Number.isSafeInteger(row.version) || row.version < 1
+    || progress === null || typeof progress !== 'object' || Array.isArray(progress)
+    || !Number.isSafeInteger(progress.inserted) || progress.inserted < 0
+    || !Number.isSafeInteger(progress.voided) || progress.voided < 0
+    || ((row.status === 'complete') !== (row.job_status === 'complete'))) {
+    throw new Error('INTERNAL_ERROR')
+  }
+  return Object.freeze({
+    artifactId: row.artifact_id,
+    converged: row.status === 'complete',
+    createdRecords: progress.inserted,
+    importId: row.id,
+    status: row.status,
+    version: row.version,
+    voidedRecords: progress.voided,
+  })
+}
+
+export async function discoverWorkbookImport({ db, actor, nowMs, fingerprint } = {}) {
+  if (!authorize(actor, 'finance.import', CENTRE_RESOURCE, { nowMs })
+    || !db?.prepare || !Number.isSafeInteger(nowMs) || nowMs < 0
+    || typeof fingerprint !== 'string' || !FINGERPRINT.test(fingerprint)) {
+    throw new Error('NOT_FOUND')
+  }
+  const rows = discoveryRows(await db.prepare(
+    `SELECT import.id,import.artifact_id,import.status,import.version,
+            job.status AS job_status,job.progress_json
+     FROM workbook_imports AS import
+     JOIN workbook_artifacts AS artifact ON artifact.id=import.artifact_id
+     JOIN workbook_materialization_jobs AS job ON job.import_id=import.id
+     WHERE import.created_by_staff_id=?
+       AND artifact.created_by_staff_id=import.created_by_staff_id
+       AND job.created_by_staff_id=import.created_by_staff_id
+       AND artifact.centre_id='centre_1'
+       AND artifact.fingerprint=?
+     LIMIT 2`,
+  ).bind(actor.id, fingerprint).all())
+  if (rows.length > 1) throw new Error('INTERNAL_ERROR')
+  const discovered = rows.length === 0 ? null : discoveredImportState(rows[0])
+  await requireCurrentAuthority(db, actor)
+  return Object.freeze({ data: Object.freeze({ import: discovered }) })
 }
 
 export async function getWorkbookImport({ db, actor, nowMs, importId } = {}) {

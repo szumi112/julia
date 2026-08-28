@@ -33,27 +33,13 @@ const job = {
   totalRecords: 2235, processedRecords: 64, version: 2,
   updatedAt: '2026-08-28T10:00:00.000Z', completedAt: null,
 }
-const registryImport = ({
-  id = 'wbi_registry_http', artifactId = 'wba_registry_http',
-  fingerprint = '1'.repeat(64), creatorId = 'stf_http_one',
-} = {}) => ({
-  id,
-  artifact: {
-    id: artifactId, fingerprint, byteSize: 2048,
-    parserVersion: 2, materializerVersion: 2,
-    createdAt: '2026-08-28T10:00:00.000Z',
-  },
-  status: 'ready', version: 1, phase: null, progress: null,
-  summary: {
-    sourceCount: 0, quarantineCount: 0, conflictCount: 0,
-    duplicateCount: 0, resolutionCount: 0,
-  },
-  resolutionVersion: 0, createdByStaffId: creatorId,
-  createdAt: '2026-08-28T10:00:00.000Z',
-  updatedAt: '2026-08-28T10:00:00.000Z',
+const discoveredImport = (patch = {}) => ({
+  artifactId: 'wba_registry_http', converged: false, createdRecords: 64,
+  importId: 'wbi_registry_http', status: 'materializing', version: 2,
+  voidedRecords: 1, ...patch,
 })
 
-test('HTTP adapter discovers one exact creator-bound fingerprint through bounded registry pages', async () => {
+test('HTTP adapter discovers exact import state through the narrow fingerprint endpoint', async () => {
   const fingerprint = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
   const paths = []
   const api = createStagingWorkbookApi({
@@ -63,47 +49,34 @@ test('HTTP adapter discovers one exact creator-bound fingerprint through bounded
       async post() { throw new Error('unused') },
       async get(path) {
         paths.push(path)
-        if (path === '/api/v1/workbooks/registry?section=imports') return response({ data: {
-          cursor: null, nextCursor: 'c_20_r7', imports: [registryImport()],
-          exports: [], entries: [], complete: false,
-        } }, 200, path)
-        return response({ data: {
-          cursor: 'c_20_r7', nextCursor: null,
-          imports: [registryImport({ fingerprint })], exports: [], entries: [], complete: true,
-        } }, 200, path)
+        return response({ data: { import: discoveredImport() } }, 200, path)
       },
     },
   })
 
-  assert.deepEqual(await api.discoverImport({ fingerprint, creatorId: 'stf_http_one' }), {
-    importId: 'wbi_registry_http', artifactId: 'wba_registry_http',
-  })
+  assert.deepEqual(
+    await api.discoverImport({ fingerprint, creatorId: 'stf_http_one' }),
+    discoveredImport(),
+  )
   assert.deepEqual(paths, [
-    '/api/v1/workbooks/registry?section=imports',
-    '/api/v1/workbooks/registry?section=imports&cursor=c_20_r7',
+    `/api/v1/workbooks/imports/discovery?fingerprint=${fingerprint}`,
   ])
 })
 
-test('HTTP adapter fails closed on wrong-creator, ambiguous or unbounded import discovery', async () => {
+test('HTTP adapter accepts explicit not-found and fails closed on malformed discovery state', async () => {
   const fingerprint = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
-  const cases = [
-    [
-      registryImport({ fingerprint, creatorId: 'stf_other_owner' }),
-    ],
-    [
-      registryImport({ fingerprint }),
-      registryImport({ id: 'wbi_registry_other', artifactId: 'wba_registry_other', fingerprint }),
-    ],
+  const payloads = [
+    { import: [discoveredImport(), discoveredImport()] },
+    { import: discoveredImport({ unexpected: true }) },
+    { import: discoveredImport({ createdRecords: -1 }) },
   ]
-  for (const imports of cases) {
+  for (const data of payloads) {
     const api = createStagingWorkbookApi({
       origin: ORIGIN, csrfToken: 'private-csrf', expectedActorId: 'stf_http_one',
       expectedAuthorityRevision: 7,
       requestContext: {
         async post() { throw new Error('unused') },
-        async get(path) { return response({ data: {
-          cursor: null, nextCursor: null, imports, exports: [], entries: [], complete: true,
-        } }, 200, path) },
+        async get(path) { return response({ data }, 200, path) },
       },
     })
     await assert.rejects(
@@ -112,27 +85,25 @@ test('HTTP adapter fails closed on wrong-creator, ambiguous or unbounded import 
     )
   }
 
-  let page = 0
+  let gets = 0
   const api = createStagingWorkbookApi({
     origin: ORIGIN, csrfToken: 'private-csrf', expectedActorId: 'stf_http_one',
     expectedAuthorityRevision: 7,
     requestContext: {
       async post() { throw new Error('unused') },
       async get(path) {
-        const cursor = page === 0 ? null : `c_${page * 20}_r7`
-        page += 1
-        return response({ data: {
-          cursor, nextCursor: `c_${page * 20}_r7`, imports: [],
-          exports: [], entries: [], complete: false,
-        } }, 200, path)
+        gets += 1
+        return response({ data: { import: null } }, 200, path)
       },
     },
   })
+  assert.equal(await api.discoverImport({ fingerprint, creatorId: 'stf_http_one' }), null)
+  assert.equal(gets, 1)
   await assert.rejects(
-    api.discoverImport({ fingerprint, creatorId: 'stf_http_one' }),
+    api.discoverImport({ fingerprint, creatorId: 'stf_other_owner' }),
     /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/,
   )
-  assert.equal(page, 20)
+  assert.equal(gets, 1)
 })
 
 test('HTTP adapter uses only guarded creator-bound rollout endpoints and normalizes count-only DTOs', async () => {

@@ -180,7 +180,10 @@ export async function runResumableStagingWorkbookRollout({
     const confirmedContinuations = []
     const continuationInputs = new Map()
     const confirmImport = async (value) => {
-      const identity = importIdentity(value)
+      const identity = importIdentity({
+        importId: value?.importId,
+        artifactId: value?.artifactId,
+      })
       await persist({ phase: 'import_confirmed', importIdentity: identity })
       return identity
     }
@@ -188,7 +191,7 @@ export async function runResumableStagingWorkbookRollout({
       const value = await api.discoverImport({
         fingerprint: approvedFingerprint, creatorId,
       })
-      return value === null ? null : importIdentity(value)
+      return value === null ? null : importState(value)
     }
     const wrappedApi = Object.freeze({
       operatorEvidence: (...args) => api.operatorEvidence(...args),
@@ -206,9 +209,9 @@ export async function runResumableStagingWorkbookRollout({
         )
         const existing = await discover()
         if (existing !== null) {
-          await confirmImport(existing)
+          const identity = await confirmImport(existing)
           discovered = true
-          return importState(await api.status(existing.importId), existing)
+          return importState(existing, identity)
         }
         let response
         let lastError
@@ -222,9 +225,9 @@ export async function runResumableStagingWorkbookRollout({
         if (lastError) {
           const recovered = await discover()
           if (recovered === null) throw lastError
-          await confirmImport(recovered)
+          const identity = await confirmImport(recovered)
           confirmedCommitInput = input
-          return importState(await api.status(recovered.importId), recovered)
+          return importState(recovered, identity)
         }
         const identity = await confirmImport({
           importId: response.importId, artifactId: response.artifactId,

@@ -203,6 +203,7 @@ describe('closed core route descriptors', () => {
       { id: 'workbooks.preview', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.import', capability: 'finance.import', auditActions: ['workbook.import.created', 'workbook.resolutions.recorded'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.continue', capability: 'finance.import', auditActions: ['workbook.import.materialized'], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'workbooks.discovery', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.status', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.operator.evidence', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workbooks.artifact.verification', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
