@@ -5,6 +5,7 @@ import {
   compareHistoricalOccurrences,
 } from './historical-records.js'
 import { captureLoadedActivitiesState } from './loaded-activities.js'
+import { assertProfessionalTitle } from './core-records.js'
 
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
 const CIVIL_MONTH = /^(\d{4})-(\d{2})$/
@@ -207,6 +208,10 @@ const presentationColor = (id) => {
   return PRESENTATION_COLORS[hash]
 }
 
+const professionalTitle = (value) => {
+  try { return assertProfessionalTitle(value) } catch { fail('workspace specialist') }
+}
+
 const warsawParts = (value, label) => {
   if (typeof value !== 'string' || !INSTANT.test(value)) fail(label)
   const instant = new Date(value)
@@ -223,6 +228,7 @@ const warsawParts = (value, label) => {
 const projectSpecialist = (item) => frozenRecord({
   id: safeText(item.id, 'workspace specialist'),
   name: safeText(item.displayName, 'workspace specialist'),
+  professionalTitle: professionalTitle(item.professionalTitle),
   rate: safeInteger(item.standardRateGrosze, 1, 1_000_000, 'workspace specialist') / 100,
   color: presentationColor(item.id),
   status: ['active', 'archived'].includes(item.status)

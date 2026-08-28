@@ -3,6 +3,8 @@ import { ApiError, apiClient } from '../api.js'
 import { Button, DiscardConfirm, Field, IconBtn, useDiscardGuard } from '../ui.jsx'
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u
+const INVALID_TITLE = /[\p{Cc}\p{Cf}]/u
+const TEXT_ENCODER = new TextEncoder()
 
 function ModalShell({ children, dirty, label, onClose }) {
   const dialogRef = useRef(null)
@@ -46,20 +48,26 @@ const errorText = (error) => error instanceof ApiError && error.code === 'FORBID
 
 export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
   const initialName = profile?.name ?? ''
+  const initialProfessionalTitle = profile?.professionalTitle ?? 'Specjalistka'
   const initialRate = profile ? String(profile.rate).replace('.', ',') : '180'
   const [displayName, setDisplayName] = useState(initialName)
+  const [professionalTitle, setProfessionalTitle] = useState(initialProfessionalTitle)
   const [rate, setRate] = useState(initialRate)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
-  const dirty = displayName !== initialName || rate !== initialRate
+  const dirty = displayName !== initialName
+    || professionalTitle !== initialProfessionalTitle || rate !== initialRate
   const submit = async (event) => {
     event.preventDefault()
     const name = displayName.trim().normalize('NFC')
+    const title = professionalTitle.trim().normalize('NFC')
     const canonicalRate = rate.trim().replace(',', '.')
     const amount = Number(canonicalRate)
-    if (!name || !/^\d{1,5}(?:\.\d{1,2})?$/.test(canonicalRate)
+    if (!name || !title || INVALID_TITLE.test(title)
+      || TEXT_ENCODER.encode(title).byteLength > 120
+      || !/^\d{1,5}(?:\.\d{1,2})?$/.test(canonicalRate)
       || !Number.isFinite(amount) || amount <= 0 || amount > 10000) {
-      setError('Podaj imię i nazwisko oraz poprawną stawkę.')
+      setError('Podaj imię i nazwisko, tytuł zawodowy oraz poprawną stawkę.')
       return
     }
     setSaving(true)
@@ -67,6 +75,7 @@ export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
     try {
       const input = {
         displayName: name,
+        professionalTitle: title,
         standardRateGrosze: Math.round(amount * 100),
       }
       const options = { idempotencyKey: apiClient.createIdempotencyKey() }
@@ -97,6 +106,9 @@ export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
           <form className="drawer__body" onSubmit={submit}>
             <Field label="Imię i nazwisko">
               <input className="input" value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoFocus />
+            </Field>
+            <Field label="Tytuł zawodowy">
+              <input className="input" value={professionalTitle} onChange={(event) => setProfessionalTitle(event.target.value)} />
             </Field>
             <Field label="Stawka za sesję (zł)">
               <input className="input" inputMode="decimal" value={rate} onChange={(event) => setRate(event.target.value)} />

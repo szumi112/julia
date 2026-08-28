@@ -20,7 +20,8 @@ import {
 
 const specialist = (overrides = {}) => Object.freeze({
   id: 'sp_anna', displayName: 'Anna Nowak', standardRateGrosze: 18_000,
-  status: 'active', version: 3, staffVersion: 4, ...overrides,
+  professionalTitle: 'Psycholożka', status: 'active', version: 3,
+  staffVersion: 4, ...overrides,
 })
 
 const client = (overrides = {}) => Object.freeze({
@@ -170,7 +171,7 @@ test('projects canonical records into immutable legacy view records without priv
 
   assert.deepEqual(projected.psychologists, [{
     id: 'sp_anna', name: 'Anna Nowak', rate: 180, color: 'var(--pink-deep)',
-    status: 'active', version: 3, staffVersion: 4,
+    professionalTitle: 'Psycholożka', status: 'active', version: 3, staffVersion: 4,
   }])
   assert.deepEqual(projected.clients, [
     {
@@ -254,7 +255,8 @@ test('keeps archived historical specialist identities out of the active team dir
   assert.deepEqual(projected.psychologists.map(({ id }) => id), ['sp_anna'])
   assert.deepEqual(projected.historicalSpecialists, [{
     id: 'sp_archived_history', name: 'Zofia Archiwalna', rate: 180,
-    color: 'var(--sky-deep)', status: 'archived', version: 5, staffVersion: 7,
+    color: 'var(--sky-deep)', professionalTitle: 'Psycholożka',
+    status: 'archived', version: 5, staffVersion: 7,
   }])
   assert.deepEqual(specialistIdentityFor(
     projected.historicalSpecialists, 'sp_archived_history',

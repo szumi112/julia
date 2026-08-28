@@ -10,6 +10,19 @@ export default defineConfig({
       return {
         wrangler: { configPath: './wrangler.json' },
         miniflare: {
+          d1Databases: {
+            MATERIALIZER_EXACT: 'materializer-exact',
+            MATERIALIZER_NEAR: 'materializer-near',
+            MATERIALIZER_TOKEN: 'materializer-token',
+            MATERIALIZER_AMBIGUOUS: 'materializer-ambiguous',
+            MATERIALIZER_PRESERVE: 'materializer-preserve',
+            MATERIALIZER_INVALID: 'materializer-invalid',
+            MATERIALIZER_CONFLICT: 'materializer-conflict',
+            MATERIALIZER_CREATE: 'materializer-create',
+            MATERIALIZER_UPDATE: 'materializer-update',
+            MATERIALIZER_STAFF_CAP: 'materializer-staff-cap',
+            MATERIALIZER_PROFILE_CAP: 'materializer-profile-cap',
+          },
           bindings: {
             CORE_DIRECTORY_STAGE: 'stage-a-complete-before-fixtures',
             TEST_STAGE_A_MIGRATIONS: selectCoreMigrationStage(migrations, 'stage-a'),

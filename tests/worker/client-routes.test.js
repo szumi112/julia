@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers'
+import { applyD1Migrations } from 'cloudflare:test'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   archiveClient,
@@ -30,7 +31,6 @@ import { createApp } from '../../worker/app.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
-  applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
 
@@ -770,7 +770,9 @@ beforeAll(async () => {
   expect(await completeCoreDirectoryStageA()).toMatchObject({ status: 'complete' })
   await applyCoreDirectoryStageB()
   await applyFinanceStageC()
-  await applyWorkbookRegistryStageE()
+  // This suite deliberately exercises the pre-profile client schema while retaining
+  // the workbook/historical tables introduced before the dual-role migration.
+  await applyD1Migrations(env.DB, env.TEST_STAGE_E_MIGRATIONS.slice(0, -1))
   const instant = new Date(NOW_MS).toISOString()
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO staff_users

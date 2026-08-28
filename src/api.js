@@ -53,6 +53,7 @@ const CSRF_TOKEN = /^v1\.([1-9]\d*)\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const SPECIALIST_LINK_ID = /^spl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CLIENT_ID = /^cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const HISTORICAL_CLIENT_ID = /^hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ASSIGNMENT_ID = /^asg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -124,6 +125,7 @@ const SERVER_STATUS = Object.freeze({
   FINANCE_IMPORT_INCOMPLETE: 409,
   FINANCE_IMPORT_OVERFLOW: 409,
   STAFF_INVITATION_CONFLICT: 409,
+  SPECIALIST_LINK_CONFLICT: 409,
   LAST_ACTIVE_OWNER: 409,
   VERSION_CONFLICT: 409,
   PAYLOAD_TOO_LARGE: 413,
@@ -148,7 +150,8 @@ const VALIDATION_FIELDS = new Set([
   'historicalOccurrences',
   'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
   'entries', 'accountingMonth', 'kind',
-  'standardRateGrosze',
+  'standardRateGrosze', 'professionalTitle', 'staffId',
+  'expectedSpecialistVersion', 'expectedStaffVersion',
   'programId', 'label', 'details', 'leaderSpecialistIds', 'historicalClientId',
   'participantId', 'groupId', 'membershipId', 'classId', 'startsOn', 'endsOn',
   'date', 'time', 'topic', 'importId',
@@ -409,12 +412,14 @@ const workspaceIdentity = (name, age) => validClientIdentityText(name)
 
 const captureWorkspaceSpecialist = (raw) => {
   const legacyKeys = [
-    'id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion',
+    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
+    'version', 'staffVersion',
   ]
   const value = captureDataObject(raw, legacyKeys)
     ?? captureDataObject(raw, [...legacyKeys, 'accessStatus'])
   if (!value || typeof value.id !== 'string' || !SPECIALIST_ID.test(value.id)
     || !validWorkspaceText(value.displayName, 120)
+    || !validWorkspaceText(value.professionalTitle, 120)
     || !workspacePositive(value.standardRateGrosze, 1_000_000)
     || !['active', 'archived'].includes(value.status) || !workspacePositive(value.version)
     || !(value.staffVersion === null || workspacePositive(value.staffVersion))
@@ -424,6 +429,7 @@ const captureWorkspaceSpecialist = (raw) => {
   return Object.freeze(Object.hasOwn(value, 'accessStatus') ? {
     id: value.id,
     displayName: value.displayName,
+    professionalTitle: value.professionalTitle,
     standardRateGrosze: value.standardRateGrosze,
     status: value.status,
     version: value.version,
@@ -432,6 +438,7 @@ const captureWorkspaceSpecialist = (raw) => {
   } : {
     id: value.id,
     displayName: value.displayName,
+    professionalTitle: value.professionalTitle,
     standardRateGrosze: value.standardRateGrosze,
     status: value.status,
     version: value.version,
@@ -531,8 +538,11 @@ const acceptedCreatedClient = (payload, status, requested) => {
 }
 
 const captureSpecialistProfileInput = (raw) => {
-  const value = captureDataObject(raw, ['displayName', 'standardRateGrosze'])
+  const value = captureDataObject(raw, [
+    'displayName', 'professionalTitle', 'standardRateGrosze',
+  ])
   if (!value || !validWorkspaceText(value.displayName, 120)
+    || !validWorkspaceText(value.professionalTitle, 120)
     || !workspacePositive(value.standardRateGrosze, 1_000_000)) return null
   return Object.freeze(value)
 }
@@ -541,11 +551,12 @@ const acceptedSpecialistProfile = (payload, status, requested) => {
   const outer = captureDataObject(payload, ['data'])
   const data = outer && captureDataObject(outer.data, ['specialist'])
   const value = data && captureDataObject(data.specialist, [
-    'id', 'displayName', 'standardRateGrosze', 'status', 'version', 'accessStatus',
-    'createdAt', 'updatedAt',
+    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
+    'version', 'accessStatus', 'createdAt', 'updatedAt',
   ])
   if (status !== 201 || !value || !SPECIALIST_ID.test(value.id ?? '')
     || value.displayName !== requested.displayName
+    || value.professionalTitle !== requested.professionalTitle
     || value.standardRateGrosze !== requested.standardRateGrosze
     || value.status !== 'active' || value.version !== 1
     || value.accessStatus !== 'unclaimed' || !validInstant(value.createdAt)
@@ -559,11 +570,12 @@ const acceptedEditedSpecialistProfile = (
   const outer = captureDataObject(payload, ['data'])
   const data = outer && captureDataObject(outer.data, ['specialist'])
   const value = data && captureDataObject(data.specialist, [
-    'id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion',
-    'accessStatus', 'createdAt', 'updatedAt',
+    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
+    'version', 'staffVersion', 'accessStatus', 'createdAt', 'updatedAt',
   ])
   if (status !== 200 || !value || value.id !== specialistId
     || value.displayName !== requested.displayName
+    || value.professionalTitle !== requested.professionalTitle
     || value.standardRateGrosze !== requested.standardRateGrosze
     || value.status !== 'active' || value.version !== expectedVersion + 1
     || !(value.staffVersion === null || positive(value.staffVersion))
@@ -571,6 +583,36 @@ const acceptedEditedSpecialistProfile = (
     || !validInstant(value.createdAt) || !validInstant(value.updatedAt)
     || value.updatedAt < value.createdAt) return null
   return Object.freeze(value)
+}
+
+const captureSpecialistAccountLinkInput = (raw) => {
+  const value = captureDataObject(raw, [
+    'staffId', 'expectedSpecialistVersion', 'expectedStaffVersion',
+  ])
+  if (!value || !STAFF_ID.test(value.staffId ?? '')
+    || !positive(value.expectedSpecialistVersion)
+    || value.expectedSpecialistVersion >= Number.MAX_SAFE_INTEGER
+    || !positive(value.expectedStaffVersion)
+    || value.expectedStaffVersion >= Number.MAX_SAFE_INTEGER) return null
+  return Object.freeze(value)
+}
+
+const acceptedSpecialistAccountLink = (
+  payload, status, specialistId, requested,
+) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['link'])
+  const value = data && captureDataObject(data.link, [
+    'id', 'specialistId', 'staffId', 'lifecycle', 'specialistVersion',
+    'staffVersion', 'createdAt',
+  ])
+  if (status !== 201 || !value || !SPECIALIST_LINK_ID.test(value.id ?? '')
+    || value.specialistId !== specialistId || value.staffId !== requested.staffId
+    || value.lifecycle !== 'activated'
+    || value.specialistVersion !== requested.expectedSpecialistVersion + 1
+    || value.staffVersion !== requested.expectedStaffVersion + 1
+    || !validInstant(value.createdAt)) return null
+  return Object.freeze({ ...value })
 }
 
 const acceptedEditedClient = (payload, status, clientId, expectedVersion, requested) => {
@@ -1165,17 +1207,21 @@ const clientError = (code, options) => new ApiError(code, options)
 
 const acceptedActor = (value) => {
   const actor = captureExactObject(value, [
-    'id', 'displayName', 'role', 'specialistId', 'version',
+    'id', 'displayName', 'professionalTitle', 'role', 'specialistId', 'version',
   ])
   if (!actor || !STAFF_ID.test(actor.id) || !validText(actor.displayName, 120)
+    || !(actor.professionalTitle === null
+      || validWorkspaceText(actor.professionalTitle, 120))
     || !ROLES.has(actor.role) || !positive(actor.version)
     || (actor.specialistId !== null && !SPECIALIST_ID.test(actor.specialistId))
-    || (actor.role === 'specialist' && !SPECIALIST_ID.test(actor.specialistId))) {
+    || (actor.role === 'specialist' && !SPECIALIST_ID.test(actor.specialistId))
+    || ((actor.professionalTitle === null) !== (actor.specialistId === null))) {
     return null
   }
   return Object.freeze({
     id: actor.id,
     displayName: actor.displayName,
+    professionalTitle: actor.professionalTitle,
     role: actor.role,
     specialistId: actor.specialistId,
     version: actor.version,
@@ -2490,6 +2536,23 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
+  const linkSpecialistAccount = (specialistId, input, options) => {
+    const requested = captureSpecialistAccountLinkInput(input)
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof specialistId !== 'string' || !SPECIALIST_ID.test(specialistId)
+      || !requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/specialists/${specialistId}/account-links`,
+      JSON.stringify(requested),
+      (payload, status) => acceptedSpecialistAccountLink(
+        payload, status, specialistId, requested,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
   const startFinanceImport = (input, options) => {
     const acceptedOptions = captureClientOptions(options)
     let requested
@@ -2908,6 +2971,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     activateHistoricalClient,
     createSpecialistProfile,
     updateSpecialistProfile,
+    linkSpecialistAccount,
     editClient,
     archiveClient,
     startFinanceImport,

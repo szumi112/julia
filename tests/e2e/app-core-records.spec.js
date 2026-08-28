@@ -19,7 +19,8 @@ const freezeTime = async (page, iso = '2026-08-04T08:00:00.000Z') => {
 }
 
 const specialist = (id, displayName, standardRateGrosze = 18_000) => ({
-  id, displayName, standardRateGrosze, status: 'active', version: 1, staffVersion: 1,
+  id, displayName, professionalTitle: 'Specjalistka', standardRateGrosze,
+  status: 'active', version: 1, staffVersion: 1,
 })
 
 const client = ({
@@ -243,8 +244,8 @@ test('@owner @coordinator keeps retained active practitioners in the exact 93-da
     specialist('sp_coordinator_retained', 'Celina Retencja'),
   ]
   const actor = testInfo.project.name === 'coordinator'
-    ? { id: 'stf_coordinator_retained', displayName: 'Celina Testowa', role: 'coordinator', specialistId: 'sp_coordinator_retained', version: 1 }
-    : { id: 'stf_owner_retained', displayName: 'Alicja Testowa', role: 'owner', specialistId: 'sp_owner_retained', version: 1 }
+    ? { id: 'stf_coordinator_retained', displayName: 'Celina Testowa', professionalTitle: 'Specjalistka', role: 'coordinator', specialistId: 'sp_coordinator_retained', version: 1 }
+    : { id: 'stf_owner_retained', displayName: 'Alicja Testowa', professionalTitle: 'Specjalistka', role: 'owner', specialistId: 'sp_owner_retained', version: 1 }
   let sessionReads = 0
   await page.route('**/api/v1/session', (route) => {
     sessionReads += 1
@@ -279,7 +280,7 @@ test('@owner @coordinator keeps retained active practitioners in the exact 93-da
 test('@specialist renders only assigned clients and their own appointments', async ({ page }) => {
   await freezeTime(page)
   await page.route('**/api/v1/session', (route) => route.fulfill(session({
-    id: 'stf_specialist_scope', displayName: 'Zofia Fikcyjna', role: 'specialist',
+    id: 'stf_specialist_scope', displayName: 'Zofia Fikcyjna', professionalTitle: 'Specjalistka', role: 'specialist',
     specialistId: 'sp_anna', version: 1,
   }, roleCapabilities.specialist)))
   const own = client({ id: 'cl_own', name: 'Maja Własna', specialistId: 'sp_anna' })
@@ -440,8 +441,8 @@ test('@owner clears loaded records and an open draft when the authority revision
   await page.route('**/api/v1/session', (route) => {
     sessionCalls += 1
     return route.fulfill(sessionCalls === 1
-      ? session({ id: 'stf_owner_switch', displayName: 'Alicja Testowa', role: 'owner', specialistId: null, version: 1 }, roleCapabilities.owner)
-      : session({ id: 'stf_specialist_switch', displayName: 'Zofia Fikcyjna', role: 'specialist', specialistId: 'sp_anna', version: 2 }, roleCapabilities.specialist))
+      ? session({ id: 'stf_owner_switch', displayName: 'Alicja Testowa', professionalTitle: null, role: 'owner', specialistId: null, version: 1 }, roleCapabilities.owner)
+      : session({ id: 'stf_specialist_switch', displayName: 'Zofia Fikcyjna', professionalTitle: 'Specjalistka', role: 'specialist', specialistId: 'sp_anna', version: 2 }, roleCapabilities.specialist))
   })
   await page.route('**/api/v1/workspace?*', (route) => {
     const url = new URL(route.request().url())

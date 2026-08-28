@@ -245,7 +245,7 @@ function MobileRoleControls({ appMode, role, onRoleChange, onLogout }) {
         <Avatar name={role.name} size={40} />
         <span>
           <b>{role.name}</b>
-          <small>{role.label}</small>
+          <small>{role.professionalTitle ?? role.label}</small>
         </span>
       </div>
       {appMode === 'demo' && (
@@ -512,7 +512,7 @@ function Topbar({
                   <Avatar name={role.name} size={37} />
                   <span>
                     <span className="userchip__name">{role.name}</span>
-                    <span className="userchip__role">{role.label}</span>
+                    <span className="userchip__role">{role.professionalTitle ?? role.label}</span>
                   </span>
                 </div>
               ) : (
@@ -532,7 +532,7 @@ function Topbar({
                       <span>
                         <span className="userchip__mode">Tryb demonstracyjny</span>
                         <span className="userchip__name">{role.name}</span>
-                        <span className="userchip__role">{role.label}</span>
+                        <span className="userchip__role">{role.professionalTitle ?? role.label}</span>
                       </span>
                     </button>
                   }

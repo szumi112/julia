@@ -45,6 +45,7 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'finance.import.started': schema('finance_import', 'financeBatchId', { batchVersion: 'version', rowCount: 'count' }),
   'payment.corrected': schema('payment_entry', 'paymentId', { appointmentVersion: 'version', correctionId: 'correctionId', replacementEntryId: 'nullablePaymentId', reversedEntryId: 'paymentId' }),
   'payment.recorded': schema('appointment', 'appointmentId', { appointmentVersion: 'version', paymentEntryId: 'paymentId' }),
+  'specialist.account.linked': schema('specialist', 'specialistId', { specialistVersion: 'version', staffVersion: 'version' }),
   'specialist.profile.created': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
   'specialist.profile.updated': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
   'workbook.import.created': schema('workbook_import', 'workbookImportId', { acceptedCount: 'count', importVersion: 'version', quarantinedCount: 'count' }),

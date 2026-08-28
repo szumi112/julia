@@ -2,6 +2,7 @@ import {
   captureHistoricalClient,
   captureHistoricalOccurrence,
 } from './historical-records.js'
+import { isWellFormedUnicode } from './core-records.js'
 
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
 const CIVIL_MONTH = /^(\d{4})-(\d{2})$/
@@ -15,6 +16,7 @@ const PAYMENT_ID = /^pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const HISTORICAL_CLIENT_ID = /^hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const HISTORICAL_OCCURRENCE_ID = /^hoc_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+const INVALID_PRESENTATION_TEXT = /[\p{Cc}\p{Cf}]/u
 const STATE_KEYS = Object.freeze([
   'loadedRanges', 'specialistsById', 'clientsById', 'appointmentsById',
   'historicalClientsById', 'historicalOccurrencesById', 'latestPopulatedMonth',
@@ -174,9 +176,14 @@ const captureEntityArray = (raw, label, idPattern, validate) => {
   return result
 }
 
+const validProfessionalTitle = (value) => typeof value === 'string'
+  && value.length > 0 && value === value.trim() && value === value.normalize('NFC')
+  && isWellFormedUnicode(value) && !INVALID_PRESENTATION_TEXT.test(value)
+  && new TextEncoder().encode(value).byteLength <= 120
+
 const validSpecialist = (value) => ['active', 'archived'].includes(
   safeProperty(value, 'status'),
-)
+) && validProfessionalTitle(safeProperty(value, 'professionalTitle'))
 
 const validClient = (value) => {
   const status = safeProperty(value, 'status')

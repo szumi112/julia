@@ -19,7 +19,6 @@ import {
   getOrCreateDataKey,
 } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import { ensureStagingSpecialistProfiles } from '../../worker/operations/staging-specialist-seed.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
@@ -43,6 +42,17 @@ const encrypted = async (recordId, field, plaintext) => JSON.stringify(
     expectedScope: SCOPE, recordId, field, plaintext,
   }),
 )
+
+const specialistSnapshotAt = async (specialistId, version) => {
+  const record = await env.DB.prepare(
+    `SELECT snapshot_envelope FROM record_versions
+     WHERE entity_type='specialist' AND entity_id=? AND version=?`,
+  ).bind(specialistId, version).first()
+  return JSON.parse(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+    expectedScope: SCOPE, recordId: specialistId, field: 'record_version',
+    envelope: JSON.parse(record.snapshot_envelope),
+  }))
+}
 
 describe('specialist profile creation', () => {
   beforeAll(async () => {
@@ -72,15 +82,22 @@ describe('specialist profile creation', () => {
     ).run()
   })
 
-  it('strictly validates the name and standard rate', () => {
+  it('strictly validates the name, professional title and standard rate', () => {
     expect(validateSpecialistProfileBody({
-      displayName: 'Anna Janowska', standardRateGrosze: 18000,
-    })).toEqual({ displayName: 'Anna Janowska', standardRateGrosze: 18000 })
+      displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
+      standardRateGrosze: 18000,
+    })).toEqual({
+      displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
+      standardRateGrosze: 18000,
+    })
     for (const value of [
-      { displayName: '', standardRateGrosze: 18000 },
-      { displayName: ' Anna Janowska', standardRateGrosze: 18000 },
-      { displayName: 'Anna Janowska', standardRateGrosze: 0 },
-      { displayName: 'Anna Janowska', standardRateGrosze: 18000, email: 'x@example.test' },
+      { displayName: '', professionalTitle: 'Specjalistka', standardRateGrosze: 18000 },
+      { displayName: ' Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000 },
+      { displayName: 'Anna Janowska', professionalTitle: '', standardRateGrosze: 18000 },
+      { displayName: 'Anna Janowska', professionalTitle: ' Specjalistka', standardRateGrosze: 18000 },
+      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka\u0000', standardRateGrosze: 18000 },
+      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 0 },
+      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, email: 'x@example.test' },
     ]) expect(() => validateSpecialistProfileBody(value)).toThrow('VALIDATION_FAILED')
   })
 
@@ -94,12 +111,16 @@ describe('specialist profile creation', () => {
     const result = await createSpecialistProfile({
       db: env.DB, recoveryDb: env.DB, actor, keyring: cryptoContext.keyring,
       nowMs: NOW_MS, correlationId: CORRELATION_ID, idFactory: () => generated.shift(),
-      body: { displayName: 'Anna Janowska', standardRateGrosze: 18000 },
+      body: {
+        displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
+        standardRateGrosze: 18000,
+      },
       idempotencyKey: 'profile-create-one',
     })
 
     expect(result).toEqual({ status: 201, body: { data: { specialist: {
-      id: 'sp_profile_one', displayName: 'Anna Janowska', standardRateGrosze: 18000,
+      id: 'sp_profile_one', displayName: 'Anna Janowska',
+      professionalTitle: 'Specjalistka', standardRateGrosze: 18000,
       status: 'active', version: 1, accessStatus: 'unclaimed',
       createdAt: NOW, updatedAt: NOW,
     } } } })
@@ -108,10 +129,23 @@ describe('specialist profile creation', () => {
     ).bind('sp_profile_one').first()
     expect(profile.staff_user_id).toBeNull()
     expect(profile.display_name_envelope).not.toContain('Anna Janowska')
+    expect(profile.professional_title_envelope).not.toContain('Specjalistka')
     expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
       expectedScope: SCOPE, recordId: profile.id, field: 'display_name',
       envelope: JSON.parse(profile.display_name_envelope),
     })).toBe('Anna Janowska')
+    expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE, recordId: profile.id, field: 'professional_title',
+      envelope: JSON.parse(profile.professional_title_envelope),
+    })).toBe('Specjalistka')
+    await expect(decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE, recordId: profile.id, field: 'display_name',
+      envelope: JSON.parse(profile.professional_title_envelope),
+    })).rejects.toThrow()
+    expect(await specialistSnapshotAt(profile.id, 1)).toMatchObject({
+      schema: 'specialist.v3', displayName: 'Anna Janowska',
+      professionalTitle: 'Specjalistka', version: 1,
+    })
     expect({
       staff: (await env.DB.prepare('SELECT count(*) AS count FROM staff_users').first()).count,
       invitations: (await env.DB.prepare('SELECT count(*) AS count FROM staff_invitations').first()).count,
@@ -126,6 +160,42 @@ describe('specialist profile creation', () => {
     })
   })
 
+  it('preserves an accepted display-name format character through v3 lifecycle reads', async () => {
+    const displayName = 'Anna\u200eJanowska'
+    const createdIds = ['profile_format_name', 'profile_format_version', 'profile_format_audit']
+    const created = await createSpecialistProfile({
+      db: env.DB, recoveryDb: env.DB, actor, keyring: cryptoContext.keyring,
+      nowMs: NOW_MS, correlationId: CORRELATION_ID, idFactory: () => createdIds.shift(),
+      body: { displayName, professionalTitle: 'Specjalistka', standardRateGrosze: 18000 },
+      idempotencyKey: 'profile-create-format-name',
+    })
+    expect(created.body.data.specialist.displayName).toBe(displayName)
+
+    const invited = await inviteSpecialistProfile({
+      db: env.DB, cryptoContext, actor, specialistId: created.body.data.specialist.id,
+      input: { email: 'format.name@example.test', expectedVersion: 1 },
+      idempotencyKey: 'profile-invite-format-name', correlationId: CORRELATION_ID,
+      nowMs: NOW_MS + 1, dataMode: 'fictional',
+      idFactory: (() => { let value = 0; return () => `format_name_${++value}` })(),
+    })
+    expect(invited.data.staff.specialistId).toBe(created.body.data.specialist.id)
+
+    const updatedIds = ['profile_format_edit_version', 'profile_format_edit_audit']
+    const updated = await updateSpecialistProfile({
+      db: env.DB, recoveryDb: env.DB, actor, keyring: cryptoContext.keyring,
+      nowMs: NOW_MS + 2, correlationId: CORRELATION_ID,
+      idFactory: () => updatedIds.shift(), specialistId: created.body.data.specialist.id,
+      body: {
+        expectedVersion: 2, displayName,
+        professionalTitle: 'Psycholożka', standardRateGrosze: 19000,
+      },
+      idempotencyKey: 'profile-edit-format-name',
+    })
+    expect(updated.body.data.specialist).toMatchObject({
+      displayName, professionalTitle: 'Psycholożka', version: 3,
+    })
+  })
+
   it('denies coordinator creation without database residue', async () => {
     const before = (await env.DB.prepare('SELECT count(*) AS count FROM specialists').first()).count
     await expect(createSpecialistProfile({
@@ -133,7 +203,10 @@ describe('specialist profile creation', () => {
       actor: { id: 'stf_profile_coordinator', role: 'coordinator', specialistId: null },
       keyring: cryptoContext.keyring, nowMs: NOW_MS, correlationId: CORRELATION_ID,
       idFactory: () => 'must_not_run',
-      body: { displayName: 'Justyna J-J', standardRateGrosze: 18000 },
+      body: {
+        displayName: 'Justyna J-J', professionalTitle: 'Specjalistka',
+        standardRateGrosze: 18000,
+      },
       idempotencyKey: 'profile-denied-one',
     })).rejects.toThrow('FORBIDDEN')
     expect((await env.DB.prepare('SELECT count(*) AS count FROM specialists').first()).count)
@@ -152,7 +225,8 @@ describe('specialist profile creation', () => {
     })
     expect(workspace.data.specialists).toContainEqual({
       id: 'sp_profile_one', displayName: 'Anna Janowska',
-      standardRateGrosze: 18000, status: 'active', version: 1,
+      professionalTitle: 'Specjalistka', standardRateGrosze: 18000,
+      status: 'active', version: 1,
       staffVersion: null, accessStatus: 'unclaimed',
     })
   })
@@ -175,6 +249,10 @@ describe('specialist profile creation', () => {
     expect(profile).toEqual({
       staff_user_id: result.data.staff.id, status: 'pending', version: 2,
     })
+    expect(await specialistSnapshotAt('sp_profile_one', 2)).toMatchObject({
+      schema: 'specialist.v3', displayName: 'Anna Janowska',
+      professionalTitle: 'Specjalistka', status: 'pending', version: 2,
+    })
     expect(await env.DB.prepare(
       `SELECT specialist_id,staff_user_id,lifecycle,changed_by_staff_id
        FROM specialist_account_links WHERE specialist_id=?`,
@@ -196,13 +274,26 @@ describe('specialist profile creation', () => {
       body: {
         expectedVersion: 2,
         displayName: 'Anna Janowska-Kowalska',
+        professionalTitle: 'Psycholożka',
         standardRateGrosze: 19000,
       },
       idempotencyKey: 'profile-edit-one',
     })
     expect(result.body.data.specialist).toMatchObject({
       id: 'sp_profile_one', displayName: 'Anna Janowska-Kowalska',
-      standardRateGrosze: 19000, version: 3, accessStatus: 'invited',
+      professionalTitle: 'Psycholożka', standardRateGrosze: 19000,
+      version: 3, accessStatus: 'invited',
+    })
+    const encryptedProfile = await env.DB.prepare(
+      'SELECT professional_title_envelope FROM specialists WHERE id=?',
+    ).bind('sp_profile_one').first()
+    expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE, recordId: 'sp_profile_one', field: 'professional_title',
+      envelope: JSON.parse(encryptedProfile.professional_title_envelope),
+    })).toBe('Psycholożka')
+    expect(await specialistSnapshotAt('sp_profile_one', 3)).toMatchObject({
+      schema: 'specialist.v3', displayName: 'Anna Janowska-Kowalska',
+      professionalTitle: 'Psycholożka', status: 'pending', version: 3,
     })
     expect(await env.DB.prepare(
       'SELECT staff_user_id FROM specialists WHERE id=?',
@@ -240,6 +331,10 @@ describe('specialist profile creation', () => {
       status: 'active',
       version: 4,
     })
+    expect(await specialistSnapshotAt('sp_profile_one', 4)).toMatchObject({
+      schema: 'specialist.v3', professionalTitle: 'Psycholożka',
+      status: 'active', version: 4,
+    })
     expect((await env.DB.prepare(
       `SELECT lifecycle FROM specialist_account_links
        WHERE specialist_id=? ORDER BY created_at,lifecycle`,
@@ -268,6 +363,10 @@ describe('specialist profile creation', () => {
       status: 'active',
       version: 5,
     })
+    expect(await specialistSnapshotAt('sp_profile_one', 5)).toMatchObject({
+      schema: 'specialist.v3', professionalTitle: 'Psycholożka',
+      staffUserId: null, status: 'active', version: 5,
+    })
     expect((await env.DB.prepare(
       `SELECT lifecycle FROM specialist_account_links
        WHERE specialist_id=? ORDER BY created_at,lifecycle`,
@@ -286,7 +385,10 @@ describe('specialist profile creation', () => {
         const values = ['pending_release', 'pending_release_version', 'pending_release_audit']
         return () => values.shift()
       })(),
-      body: { displayName: 'Profil do zwolnienia', standardRateGrosze: 18000 },
+      body: {
+        displayName: 'Profil do zwolnienia', professionalTitle: 'Specjalistka',
+        standardRateGrosze: 18000,
+      },
       idempotencyKey: 'profile-pending-release-create',
     })
     const specialistId = created.body.data.specialist.id
@@ -331,7 +433,7 @@ describe('specialist profile creation', () => {
       idFactory: (() => { let value = 0; return () => `generic_${++value}` })(),
     })
     const profile = await env.DB.prepare(
-      'SELECT id,display_name_envelope FROM specialists WHERE id=?',
+      'SELECT id,display_name_envelope,professional_title_envelope FROM specialists WHERE id=?',
     ).bind(result.data.staff.specialistId).first()
     expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
       expectedScope: SCOPE,
@@ -339,56 +441,59 @@ describe('specialist profile creation', () => {
       field: 'display_name',
       envelope: JSON.parse(profile.display_name_envelope),
     })).toBe('Maria Testowa')
+    expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE,
+      recordId: profile.id,
+      field: 'professional_title',
+      envelope: JSON.parse(profile.professional_title_envelope),
+    })).toBe('Specjalistka')
+    expect(await specialistSnapshotAt(profile.id, 1)).toMatchObject({
+      schema: 'specialist.v3', displayName: 'Maria Testowa',
+      professionalTitle: 'Specjalistka', version: 1,
+    })
   })
 
-  it('seeds the three resolvable workbook profiles on staging exactly once without creating accounts', async () => {
-    const stagingEnv = {
-      ...env,
-      APP_ENV: 'staging',
-      APP_ORIGIN: 'https://staging.bearwithme-panel.app',
+  it('uses the explicit legacy-null title fallback but never masks title tampering', async () => {
+    await env.DB.prepare(
+      `INSERT INTO specialists
+       (id,staff_user_id,display_name_envelope,professional_title_envelope,
+        standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+       VALUES (?,NULL,?,NULL,18000,'active',1,NULL,?,?)`,
+    ).bind(
+      'sp_profile_legacy_title',
+      await encrypted('sp_profile_legacy_title', 'display_name', 'Legacy Fikcyjna'),
+      NOW,
+      NOW,
+    ).run()
+    const input = {
+      db: createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 }).work,
+      actor,
+      cryptoContext,
+      window: {
+        from: '2026-08-01', to: '2026-08-31',
+        lower: '2026-07-31T22:00:00.000Z', upper: '2026-08-31T22:00:00.000Z',
+      },
     }
-    const staffBefore = (await env.DB.prepare(
-      'SELECT count(*) AS count FROM staff_users',
-    ).first()).count
-    await expect(ensureStagingSpecialistProfiles({
-      env: stagingEnv,
-      scheduledTime: NOW_MS + 3_000,
-    })).resolves.toEqual({ createdOrConfirmed: 3 })
-    const invited = await inviteSpecialistProfile({
-      db: env.DB, cryptoContext, actor,
-      specialistId: 'sp_staging_workbook_anna_janowska',
-      input: { email: 'anna.seed@example.test', expectedVersion: 1 },
-      idempotencyKey: 'profile-seed-invite-one', correlationId: CORRELATION_ID,
-      nowMs: NOW_MS + 3_500, dataMode: 'fictional',
-      idFactory: (() => { let value = 0; return () => `seed_invite_${++value}` })(),
+    await expect(readWorkspace(input)).resolves.toMatchObject({
+      data: { specialists: expect.arrayContaining([expect.objectContaining({
+        id: 'sp_profile_legacy_title', professionalTitle: 'Specjalistka',
+      })]) },
     })
-    await expect(ensureStagingSpecialistProfiles({
-      env: stagingEnv,
-      scheduledTime: NOW_MS + 4_000,
-    })).resolves.toEqual({ createdOrConfirmed: 3 })
-    expect((await env.DB.prepare(
-      `SELECT id,staff_user_id,status FROM specialists
-       WHERE id IN ('sp_staging_workbook_anna_janowska','sp_staging_workbook_julia_wolanin','sp_staging_workbook_justyna_j_j')
-       ORDER BY id`,
-    ).all()).results).toEqual([
-      {
-        id: 'sp_staging_workbook_anna_janowska',
-        staff_user_id: invited.data.staff.id,
-        status: 'pending',
-      },
-      {
-        id: 'sp_staging_workbook_julia_wolanin',
-        staff_user_id: null,
-        status: 'active',
-      },
-      {
-        id: 'sp_staging_workbook_justyna_j_j',
-        staff_user_id: null,
-        status: 'active',
-      },
-    ])
-    expect((await env.DB.prepare(
-      'SELECT count(*) AS count FROM staff_users',
-    ).first()).count).toBe(staffBefore + 1)
+
+    await env.DB.prepare(
+      `INSERT INTO specialists
+       (id,staff_user_id,display_name_envelope,professional_title_envelope,
+        standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+       VALUES (?,NULL,?,'{}',18000,'active',1,NULL,?,?)`,
+    ).bind(
+      'sp_profile_tampered_title',
+      await encrypted('sp_profile_tampered_title', 'display_name', 'Tampered Fikcyjna'),
+      NOW,
+      NOW,
+    ).run()
+    await expect(readWorkspace({
+      ...input,
+      db: createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 }).work,
+    })).rejects.toThrow(/^CRYPTO_FAILURE$/)
   })
 })

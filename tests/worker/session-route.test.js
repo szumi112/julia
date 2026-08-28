@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../worker/app.js'
 import {
   authorize,
@@ -16,6 +16,13 @@ import {
 } from '../../worker/security/envelope.js'
 import { verifyCsrfToken } from '../../worker/security/csrf.js'
 import { NOW_MS } from './fixtures.js'
+import {
+  applyCoreDirectoryStageB,
+  applyFinanceStageC,
+  applySpecialistProfilesStageD,
+  applyWorkbookRegistryStageE,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 
 const now = new Date(NOW_MS).toISOString()
 const correlationId = '11111111-1111-4111-8111-111111111111'
@@ -26,6 +33,9 @@ async function fixture(suffix = 'owner', {
   role = 'owner',
   specialistId = role === 'specialist' ? `sp_${suffix}` : null,
   tamperedDisplay = false,
+  tamperedTitle = false,
+  legacyTitle = false,
+  professionalTitle = 'Specjalistka',
 } = {}) {
   const actorId = `stf_session_${suffix}`
   const subject = `access-session-${suffix}`
@@ -61,10 +71,41 @@ async function fixture(suffix = 'owner', {
     now,
     now,
   ).run()
+  if (specialistId !== null) {
+    const titleEnvelope = legacyTitle ? null : tamperedTitle ? '{}' : JSON.stringify(
+      await encryptForScope(keyring, dataKey, {
+        expectedScope: scope,
+        recordId: specialistId,
+        field: 'professional_title',
+        plaintext: professionalTitle,
+      }),
+    )
+    const profileNameEnvelope = JSON.stringify(await encryptForScope(keyring, dataKey, {
+      expectedScope: scope,
+      recordId: specialistId,
+      field: 'display_name',
+      plaintext: `Julia ${suffix}`,
+    }))
+    await env.DB.prepare(
+      `INSERT INTO specialists
+       (id,staff_user_id,display_name_envelope,professional_title_envelope,
+        standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+       VALUES (?,?,?,?,18000,'active',1,NULL,?,?)`,
+    ).bind(
+      specialistId, actorId, profileNameEnvelope, titleEnvelope, now, now,
+    ).run()
+  }
   return { keyring, dataKey, scope, actorId, subject, role, specialistId }
 }
 
 describe('/api/v1/session route', () => {
+  beforeAll(async () => {
+    await completeCoreDirectoryStageA()
+    await applyCoreDirectoryStageB()
+    await applyFinanceStageC()
+    await applySpecialistProfilesStageD()
+    await applyWorkbookRegistryStageE()
+  })
   it.each([0, -1])('rejects actor version %s before any D1 read', async (version) => {
     let reads = 0
     const db = {
@@ -106,6 +147,7 @@ describe('/api/v1/session route', () => {
     expect(result.data.actor).toEqual({
       id: 'stf_session_owner',
       displayName: 'Julia owner',
+      professionalTitle: null,
       role: 'owner',
       specialistId: null,
       version: 3,
@@ -131,6 +173,74 @@ describe('/api/v1/session route', () => {
     expect(JSON.stringify(result)).not.toContain('email')
     expect(JSON.stringify(result)).not.toContain(cryptoContext.subject)
     expect(JSON.stringify(result)).not.toContain('ciphertext')
+  })
+
+  it('keeps a linked owner centre-scoped while projecting the professional title', async () => {
+    const context = await fixture('linked_owner', {
+      role: 'owner', specialistId: 'sp_session_linked_owner',
+      professionalTitle: 'Psycholożka',
+    })
+    const actor = {
+      id: context.actorId, role: 'owner', specialistId: context.specialistId, version: 3,
+    }
+    const result = await getSession({
+      db: env.DB, config,
+      principal: { kind: 'human', subject: context.subject },
+      actor, cryptoContext: context, nowMs: NOW_MS,
+    })
+    expect(result.data.actor).toEqual({
+      id: context.actorId, displayName: 'Julia linked_owner',
+      professionalTitle: 'Psycholożka', role: 'owner',
+      specialistId: context.specialistId, version: 3,
+    })
+    expect(result.data.capabilities).toEqual([...CAPABILITIES].sort())
+    expect(authorize(actor, 'finance.centre.read', {
+      kind: 'centre', centreId: 'centre_1',
+    }, { nowMs: NOW_MS })).toBe(true)
+  })
+
+  it('uses only the legacy-null title fallback and rejects present tampering', async () => {
+    const legacy = await fixture('legacy_title', { role: 'specialist', legacyTitle: true })
+    await expect(getSession({
+      db: env.DB, config,
+      principal: { kind: 'human', subject: legacy.subject },
+      actor: {
+        id: legacy.actorId, role: 'specialist',
+        specialistId: legacy.specialistId, version: 3,
+      },
+      cryptoContext: legacy, nowMs: NOW_MS,
+    })).resolves.toMatchObject({
+      data: { actor: { professionalTitle: 'Specjalistka' } },
+    })
+
+    const tampered = await fixture('tampered_title', {
+      role: 'specialist', tamperedTitle: true,
+    })
+    await expect(getSession({
+      db: env.DB, config,
+      principal: { kind: 'human', subject: tampered.subject },
+      actor: {
+        id: tampered.actorId, role: 'specialist',
+        specialistId: tampered.specialistId, version: 3,
+      },
+      cryptoContext: tampered, nowMs: NOW_MS,
+    })).rejects.toThrow(/^CRYPTO_FAILURE$/)
+  })
+
+  it('rejects a decrypted professional title containing malformed Unicode', async () => {
+    const context = await fixture('malformed_title', { role: 'specialist' })
+    await expect(getSession({
+      db: env.DB, config,
+      principal: { kind: 'human', subject: context.subject },
+      actor: {
+        id: context.actorId, role: 'specialist',
+        specialistId: context.specialistId, version: 3,
+      },
+      cryptoContext: context, nowMs: NOW_MS,
+      decryptForScope: async (_keyring, _dataKey, input) => (
+        input.field === 'professional_title' ? '\uD800' : 'Fikcyjna Specjalistka'
+      ),
+    })).rejects.toThrow(/^CRYPTO_FAILURE$/)
   })
 
   it('denies stale actor facts before decrypting', async () => {

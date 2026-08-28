@@ -29,7 +29,8 @@ const freezeTime = async (page, iso) => {
 }
 
 const activeSpecialist = {
-  id: 'sp_anna', displayName: 'Anna Nowak', standardRateGrosze: 18_000,
+  id: 'sp_anna', displayName: 'Anna Nowak', professionalTitle: 'Specjalistka',
+  standardRateGrosze: 18_000,
   status: 'active', version: 3, staffVersion: 4,
 }
 

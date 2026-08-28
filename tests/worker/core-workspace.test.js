@@ -64,6 +64,7 @@ const specialistRow = (id, staffId, version = 1) => ({
   id, staff_user_id: staffId, standard_rate_grosze: 18000, status: 'active', version,
   staff_id: staffId, staff_specialist_id: id, staff_status: 'active',
   staff_version: version + 2, display_name_envelope: `staff:${staffId}`,
+  professional_title_envelope: null,
 })
 
 const archivedSpecialistRow = (id, staffId, version = 2) => ({
@@ -241,8 +242,8 @@ describe('workspace read model', () => {
     expect(result).toEqual({ data: {
       window: { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true },
       specialists: [
-        { id: 'sp_ania', displayName: 'Ągata Fikcyjna', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
-        { id: 'sp_zofia', displayName: 'Zofia Fikcyjna', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
+        { id: 'sp_ania', displayName: 'Ągata Fikcyjna', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
+        { id: 'sp_zofia', displayName: 'Zofia Fikcyjna', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
       ],
       clients: [
         { id: 'cl_archived', name: 'Archiwalna Fikcyjna', age: null, status: 'archived', version: 2, archivedAt: instant('01'), createdAt: instant('01'), updatedAt: instant('02'), readOnly: true, assignment: null },
@@ -303,6 +304,25 @@ describe('workspace read model', () => {
     expect(calls[5].bindings).toEqual(calls[4].bindings)
     expect(calls[6].bindings).toEqual(calls[4].bindings)
     expect(calls[7].bindings).toEqual(['sp_spec'])
+  })
+
+  it('rejects a decrypted professional title containing a format character', async () => {
+    const row = {
+      ...specialistRow('sp_unsafe_title', 'stf_unsafe_title'),
+      professional_title_envelope: '{"title":"encrypted"}',
+    }
+    const { db } = scriptedDb({ specialists: [row] })
+    await expect(readWorkspace({
+      db,
+      actor: { id: 'stf_owner', role: 'owner', specialistId: null, version: 1 },
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
+      window: parseWorkspaceQuery(
+        'https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31',
+      ),
+      decryptSpecialist: async ({ field }) => field === 'professional_title'
+        ? 'Specjalistka\u200b' : 'Fikcyjna',
+      decryptClient: async () => ({ name: 'Fikcyjna', age: null }),
+    })).rejects.toThrow(/^CRYPTO_FAILURE$/)
   })
 
   it('returns scoped historical precision without exposing an out-of-scope activated client link', async () => {
@@ -419,7 +439,8 @@ describe('workspace read model', () => {
     })
     expect(result.data.specialists).toEqual([{
       id: 'sp_archived_history', displayName: 'Archiwalna Fikcyjna',
-      standardRateGrosze: 18000, status: 'archived', version: 2, staffVersion: 4,
+      professionalTitle: 'Specjalistka', standardRateGrosze: 18000,
+      status: 'archived', version: 2, staffVersion: 4,
     }])
     expect(result.data.historicalOccurrences[0].specialistId).toBe('sp_archived_history')
     expect(calls[0].sql).toContain("specialist.status='archived'")
@@ -1102,7 +1123,8 @@ describe('workspace read model', () => {
       window: parseWorkspaceQuery('https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'),
     })
     expect(result.data.specialists).toEqual([{
-      id: specialistId, displayName: 'Żaneta Fikcyjna', standardRateGrosze: 19000,
+      id: specialistId, displayName: 'Żaneta Fikcyjna',
+      professionalTitle: 'Specjalistka', standardRateGrosze: 19000,
       status: 'active', version: 2, staffVersion: 4, accessStatus: 'enabled',
     }])
     expect(result.data.clients[0]).toMatchObject({ id: clientId, name: 'Łucja Fikcyjna', age: 11 })

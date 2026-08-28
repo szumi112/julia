@@ -18,7 +18,10 @@ const ACTIVITY_KEYS = [
   'loadWindow', 'loadedMonths', 'setAttendance', 'state', 'status',
 ]
 const range = (from, to = from) => ({ from, to })
-const specialist = () => ({ id: 'sp_anna', displayName: 'Anna', status: 'active', version: 1 })
+const specialist = () => ({
+  id: 'sp_anna', displayName: 'Anna', professionalTitle: 'Specjalistka',
+  status: 'active', version: 1,
+})
 const client = () => ({
   id: 'cl_ola', name: 'Ola', status: 'active', readOnly: false,
   assignment: { id: 'asg_ola', specialistId: 'sp_anna' },

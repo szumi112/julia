@@ -6,6 +6,7 @@ import {
   isD1FinanceSourceDuplicate,
   isD1IdentityCollision,
   isD1LastActiveOwner,
+  isD1MissingColumn,
   isD1RateLimitGuardFailure,
 } from '../../worker/db/errors.js'
 import * as d1Errors from '../../worker/db/errors.js'
@@ -84,6 +85,25 @@ it('classifies only exact D1 guard errors', () => {
   expect(classifyOwnerTransitionError(new Error('unknown'))).toBeNull()
   expect(classifyOwnerTransitionError(new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT'), { guardProven: false })).toBeNull()
   expect(classifyOwnerTransitionError(new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT'), { guardProven: true })).toBe('VERSION_CONFLICT')
+})
+
+it('recognizes only an exact D1 missing-column signal for the requested column', () => {
+  const column = 'specialist.professional_title_envelope'
+  expect(isD1MissingColumn(
+    new Error(`D1_ERROR: no such column: ${column} at offset 321: SQLITE_ERROR`),
+    column,
+  )).toBe(true)
+  expect(isD1MissingColumn(new Error(`no such column: ${column}`), column)).toBe(true)
+  for (const message of [
+    `D1_ERROR: no such column: ${column}: SQLITE_ERROR: retry`,
+    `D1_ERROR: query failed; no such column: ${column} at offset 321: SQLITE_ERROR`,
+    `D1_ERROR: no such column: other.${column} at offset 321: SQLITE_ERROR`,
+    `prefix no such column: ${column}`,
+  ]) {
+    expect(isD1MissingColumn(new Error(message), column)).toBe(false)
+  }
+  expect(isD1MissingColumn(new Error(`no such column: ${column}`), 'unsafe(column)'))
+    .toBe(false)
 })
 
 it('preserves one active owner across two direct concurrent transitions and classifies the loser exactly', async () => {

@@ -82,6 +82,7 @@ const sessionBody = (overrides = {}) => ({
     actor: {
       id: 'stf_owner_1',
       displayName: 'Julia Właścicielka',
+      professionalTitle: null,
       role: 'owner',
       specialistId: null,
       version: 3,
@@ -194,6 +195,7 @@ const fullWorkspaceBody = () => ({
     specialists: [{
       id: 'sp_anna',
       displayName: 'Anna Żuraw',
+      professionalTitle: 'Psycholożka',
       standardRateGrosze: 18000,
       status: 'active',
       version: 2,
@@ -502,6 +504,7 @@ test('accepts only archived specialist profiles referenced by historical occurre
   const source = historicalWorkspaceBody()
   source.data.specialists.push({
     id: 'sp_archived_history', displayName: 'Zofia Archiwalna',
+    professionalTitle: 'Psycholożka',
     standardRateGrosze: 19000, status: 'archived', version: 4, staffVersion: 6,
   })
   source.data.historicalOccurrences[1].specialistId = 'sp_archived_history'
@@ -688,6 +691,10 @@ test('rejects invalid specialist, client, assignment, and appointment scalar con
     (body) => { body.data.specialists[0].id = 'staff_anna' },
     (body) => { body.data.specialists[0].displayName = ' Anna' },
     (body) => { body.data.specialists[0].displayName = 'A\u0000nna' },
+    (body) => { body.data.specialists[0].professionalTitle = '' },
+    (body) => { body.data.specialists[0].professionalTitle = ' Psycholożka' },
+    (body) => { body.data.specialists[0].professionalTitle = 'Psycholożka\u0000' },
+    (body) => { body.data.specialists[0].professionalTitle = 'x'.repeat(121) },
     (body) => { body.data.specialists[0].standardRateGrosze = 1_000_001 },
     (body) => { body.data.specialists[0].status = 'pending' },
     (body) => { body.data.specialists[0].version = 0 },
@@ -1200,6 +1207,7 @@ test('creates, edits, and targets an invitation at one stable specialist profile
   const created = {
     data: { specialist: {
       id: 'sp_anna_profile', displayName: 'Anna Janowska',
+      professionalTitle: 'Specjalistka',
       standardRateGrosze: 18000, status: 'active', version: 1,
       accessStatus: 'unclaimed', createdAt, updatedAt: createdAt,
     } },
@@ -1209,6 +1217,7 @@ test('creates, edits, and targets an invitation at one stable specialist profile
     data: { specialist: {
       ...created.data.specialist,
       displayName: 'Anna Janowska-Kowalska',
+      professionalTitle: 'Psycholożka',
       standardRateGrosze: 19000,
       version: 2,
       staffVersion: null,
@@ -1234,10 +1243,12 @@ test('creates, edits, and targets an invitation at one stable specialist profile
   const client = createApiClient({ fetchImpl: queued.fetchImpl })
   await client.getSession()
   await client.createSpecialistProfile({
-    displayName: 'Anna Janowska', standardRateGrosze: 18000,
+    displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
+    standardRateGrosze: 18000,
   }, { idempotencyKey: 'specialist-create-api-0001' })
   await client.updateSpecialistProfile('sp_anna_profile', 1, {
-    displayName: 'Anna Janowska-Kowalska', standardRateGrosze: 19000,
+    displayName: 'Anna Janowska-Kowalska', professionalTitle: 'Psycholożka',
+    standardRateGrosze: 19000,
   }, { idempotencyKey: 'specialist-edit-api-0001' })
   await client.inviteSpecialistProfile('sp_anna_profile', {
     email: 'anna-j@gmail.com', expectedVersion: 2,
@@ -1250,11 +1261,11 @@ test('creates, edits, and targets an invitation at one stable specialist profile
     url,
   })), [
     {
-      body: '{"displayName":"Anna Janowska","standardRateGrosze":18000}',
+      body: '{"displayName":"Anna Janowska","professionalTitle":"Specjalistka","standardRateGrosze":18000}',
       key: 'specialist-create-api-0001', method: 'POST', url: '/api/v1/specialists',
     },
     {
-      body: '{"expectedVersion":1,"displayName":"Anna Janowska-Kowalska","standardRateGrosze":19000}',
+      body: '{"expectedVersion":1,"displayName":"Anna Janowska-Kowalska","professionalTitle":"Psycholożka","standardRateGrosze":19000}',
       key: 'specialist-edit-api-0001', method: 'POST',
       url: '/api/v1/specialists/sp_anna_profile/edits',
     },
@@ -1264,6 +1275,57 @@ test('creates, edits, and targets an invitation at one stable specialist profile
       url: '/api/v1/specialists/sp_anna_profile/invitations',
     },
   ])
+})
+
+test('links one existing account to a specialist profile with exact optimistic versions', async () => {
+  const createdAt = '2026-08-27T12:00:00.000Z'
+  const link = {
+    id: 'spl_julia_profile',
+    specialistId: 'sp_julia_profile',
+    staffId: 'stf_julia_owner',
+    lifecycle: 'activated',
+    specialistVersion: 4,
+    staffVersion: 8,
+    createdAt,
+  }
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse({ data: { link } }, 201),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+
+  const result = await client.linkSpecialistAccount('sp_julia_profile', {
+    staffId: 'stf_julia_owner',
+    expectedSpecialistVersion: 3,
+    expectedStaffVersion: 7,
+  }, { idempotencyKey: 'specialist-link-api-0001' })
+
+  assert.deepEqual(result, link)
+  assert.equal(Object.isFrozen(result), true)
+  assert.deepEqual(queued.calls.slice(1).map(({ url, init }) => ({
+    body: init.body,
+    key: header({ init }, 'Idempotency-Key'),
+    method: init.method,
+    url,
+  })), [{
+    body: '{"staffId":"stf_julia_owner","expectedSpecialistVersion":3,"expectedStaffVersion":7}',
+    key: 'specialist-link-api-0001',
+    method: 'POST',
+    url: '/api/v1/specialists/sp_julia_profile/account-links',
+  }])
+
+  for (const input of [
+    { staffId: 'bad', expectedSpecialistVersion: 3, expectedStaffVersion: 7 },
+    { staffId: 'stf_julia_owner', expectedSpecialistVersion: 0, expectedStaffVersion: 7 },
+    { staffId: 'stf_julia_owner', expectedSpecialistVersion: 3, expectedStaffVersion: 1.5 },
+    { staffId: 'stf_julia_owner', expectedSpecialistVersion: 3, expectedStaffVersion: 7, extra: true },
+  ]) {
+    await assert.rejects(client.linkSpecialistAccount(
+      'sp_julia_profile', input, { idempotencyKey: 'specialist-link-api-0002' },
+    ), { code: 'CLIENT_INPUT_INVALID' })
+  }
+  assert.equal(queued.calls.length, 2)
 })
 
 test('gets and validates the session over the exact same-origin request', async () => {
@@ -1359,6 +1421,7 @@ test('invalidates an in-flight session read when authentication is cleared', asy
     actor: {
       id: 'stf_coordinator_1',
       displayName: 'Karolina Koordynatorka',
+      professionalTitle: null,
       role: 'coordinator',
       specialistId: null,
       version: 4,
@@ -1417,6 +1480,7 @@ test('contains a stale authentication denial after a newer session succeeds', as
     actor: {
       id: 'stf_coordinator_1',
       displayName: 'Karolina Koordynatorka',
+      professionalTitle: null,
       role: 'coordinator',
       specialistId: null,
       version: 4,
@@ -1804,11 +1868,14 @@ test('requires and freezes the exact positive authority revision actor shape', a
   const session = await createApiClient({ fetchImpl }).getSession()
   assert.equal(session.actor.version, 3)
   assert.equal(Object.isFrozen(session.actor), true)
-  assert.deepEqual(Reflect.ownKeys(session.actor).sort(), ['displayName', 'id', 'role', 'specialistId', 'version'])
+  assert.deepEqual(Reflect.ownKeys(session.actor).sort(), [
+    'displayName', 'id', 'professionalTitle', 'role', 'specialistId', 'version',
+  ])
 
   const boundaryActor = {
     id: `stf_${'a'.repeat(124)}`,
     displayName: 'Anna Graniczna',
+    professionalTitle: 'x'.repeat(120),
     role: 'specialist',
     specialistId: `sp_${'a'.repeat(125)}`,
     version: 1,
@@ -1828,6 +1895,13 @@ test('requires and freezes the exact positive authority revision actor shape', a
     (actor) => { actor.id = `stf_${'a'.repeat(125)}` },
     (actor) => { actor.specialistId = 'stf_profile' },
     (actor) => { actor.specialistId = `sp_${'a'.repeat(126)}` },
+    (actor) => { delete actor.professionalTitle },
+    (actor) => { actor.professionalTitle = '' },
+    (actor) => { actor.professionalTitle = ' Specjalistka' },
+    (actor) => { actor.professionalTitle = 'Specjalistka\u0000' },
+    (actor) => { actor.professionalTitle = 'x'.repeat(121) },
+    (actor) => { actor.professionalTitle = 'Specjalistka' },
+    (actor) => { actor.specialistId = 'sp_owner_profile' },
   ]) {
     const body = structuredClone(sessionBody())
     mutate(body.data.actor)
@@ -1840,9 +1914,9 @@ test('requires and freezes the exact positive authority revision actor shape', a
 
 test('keeps browser session role registries byte-for-byte equal to Worker policy', async () => {
   const actors = [
-    { id: 'stf_owner_1', displayName: 'Ola', role: 'owner', specialistId: 'sp_owner', version: 2 },
-    { id: 'stf_coord_1', displayName: 'Ela', role: 'coordinator', specialistId: null, version: 3 },
-    { id: 'stf_spec_1', displayName: 'Anna', role: 'specialist', specialistId: 'sp_spec', version: 4 },
+    { id: 'stf_owner_1', displayName: 'Ola', professionalTitle: 'Psycholożka', role: 'owner', specialistId: 'sp_owner', version: 2 },
+    { id: 'stf_coord_1', displayName: 'Ela', professionalTitle: null, role: 'coordinator', specialistId: null, version: 3 },
+    { id: 'stf_spec_1', displayName: 'Anna', professionalTitle: 'Specjalistka', role: 'specialist', specialistId: 'sp_spec', version: 4 },
   ]
   for (const actor of actors) {
     const capabilities = [...capabilitiesForActor(actor)]

@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test'
 const ACTORS = {
   owner: { name: 'Alicja Testowa', role: 'Właściciel' },
   coordinator: { name: 'Celina Testowa', role: 'Koordynator' },
-  specialist: { name: 'Zofia Fikcyjna', role: 'Specjalista' },
+  specialist: { name: 'Zofia Fikcyjna', role: 'Specjalistka' },
 }
 
 const json = (status, body) => ({
@@ -20,6 +20,7 @@ const sessionEnvelope = ({
   actor = {
     id: 'stf_capability_owner',
     displayName: 'Alicja Testowa',
+    professionalTitle: null,
     role: 'owner',
     specialistId: null,
     version: 1,
@@ -136,6 +137,38 @@ test('@owner delays the fictional shell behind the loading boundary', async ({ p
   await expectAuthenticated(page, 'owner')
 })
 
+test('@owner presents a linked owner as an ordinary specialist without losing owner navigation', async ({ page }) => {
+  await page.route('**/api/v1/session', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.actor = {
+      ...body.data.actor,
+      displayName: 'Julia Wolanin',
+      professionalTitle: 'Specjalistka',
+      specialistId: 'sp_julia',
+    }
+    await route.fulfill({ response, json: body })
+  })
+
+  await page.goto('.')
+
+  const account = page.locator('.userchip').first()
+  await expect(account).toContainText('Julia Wolanin')
+  await expect(account).toContainText('Specjalistka')
+  await expect(account).not.toContainText('Właściciel')
+  await expect(page.getByRole('navigation', { name: 'Nawigacja główna' })
+    .getByRole('link', { name: 'Zespół' })).toBeVisible()
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('navigation', { name: 'Nawigacja dolna' })
+    .getByRole('button', { name: 'Menu', exact: true }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nawigacja' })
+  const mobileAccount = drawer.locator('.mobile-account__identity')
+  await expect(mobileAccount).toContainText('Julia Wolanin')
+  await expect(mobileAccount).toContainText('Specjalistka')
+  await expect(mobileAccount).not.toContainText('Właściciel')
+})
+
 for (const [status, code] of [
   [401, 'ACCESS_ASSERTION_INVALID'],
   [403, 'ACCESS_DENIED'],
@@ -239,6 +272,7 @@ test('@owner refreshes in place and replaces subscribed session authority', asyn
         actor: {
           id: 'stf_refreshed_specialist',
           displayName: 'Renata Odświeżona',
+          professionalTitle: 'Specjalistka',
           role: 'specialist',
           specialistId: 'sp_refreshed_specialist',
           version: 1,
@@ -321,6 +355,7 @@ test('@owner constrains a max-length authenticated identity at shell breakpoints
       actor: {
         id: 'stf_max_name_owner',
         displayName,
+        professionalTitle: null,
         role: 'owner',
         specialistId: null,
         version: 1,
@@ -630,6 +665,7 @@ test('@owner role change removes the directory without another staff request', a
     actor: {
       id: 'stf_capability_coordinator',
       displayName: 'Celina Testowa',
+      professionalTitle: null,
       role: 'coordinator',
       specialistId: null,
       version: 1,
@@ -1129,7 +1165,7 @@ test('@specialist keeps authenticated identity, gains Finances, and stays fictio
   await bottomNavigation.getByRole('button', { name: 'Menu', exact: true }).click()
   let drawer = page.getByRole('dialog', { name: 'Nawigacja' })
   await expect(drawer.getByText('Zofia Fikcyjna', { exact: true })).toBeVisible()
-  await expect(drawer.getByText('Specjalista', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('Specjalistka', { exact: true })).toBeVisible()
   await expect(drawer.getByRole('group', { name: 'Tryb demonstracyjny' })).toHaveCount(0)
   await expect(drawer.getByRole('button', { name: 'Wyloguj się' })).toBeVisible()
   await expect(drawer.getByRole('link', { name: 'Finanse', exact: true })).toBeVisible()

@@ -197,7 +197,12 @@ test('demo load projects a complete ordered canonical window without excluded fi
   const repository = createDemoWorkspaceRepository({ dispatch: harness.dispatch, getState: harness.getState })
   const result = await repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' })
   assert.deepEqual(result.window, { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true })
-  assert.deepEqual(result.specialists.map(({ id, displayName }) => [id, displayName]), [['sp_demo_p1', 'Anna'], ['sp_demo_p2', 'Żaneta']])
+  assert.deepEqual(result.specialists.map(({ id, displayName, professionalTitle }) => (
+    [id, displayName, professionalTitle]
+  )), [
+    ['sp_demo_p1', 'Anna', 'Specjalistka'],
+    ['sp_demo_p2', 'Żaneta', 'Specjalistka'],
+  ])
   assert.deepEqual(result.clients.map(({ id, name }) => [id, name]), [['cl_demo_c1', 'Ada'], ['cl_demo_c2', 'Zenon']])
   assert.equal(result.appointments.length, 1)
   assert.equal(result.appointments[0].id, 'apt_demo_s1')

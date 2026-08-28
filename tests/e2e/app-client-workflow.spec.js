@@ -28,11 +28,13 @@ const freezeTime = async (page, iso) => {
 
 const specialists = [
   {
-    id: 'sp_anna', displayName: 'Anna Nowak', standardRateGrosze: 18_000,
+    id: 'sp_anna', displayName: 'Anna Nowak', professionalTitle: 'Specjalistka',
+    standardRateGrosze: 18_000,
     status: 'active', version: 3, staffVersion: 4,
   },
   {
-    id: 'sp_basia', displayName: 'Basia Zielińska', standardRateGrosze: 19_000,
+    id: 'sp_basia', displayName: 'Basia Zielińska', professionalTitle: 'Specjalistka',
+    standardRateGrosze: 19_000,
     status: 'active', version: 2, staffVersion: 3,
   },
 ]

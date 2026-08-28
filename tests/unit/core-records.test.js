@@ -75,6 +75,32 @@ test('core records require already trimmed NFC strings and bounded snapshots', (
   assert.throws(() => assertServiceSnapshot({ serviceId: 'zajecia', durationMinutes: 60, expectedAmountGrosze: 18000 }), /VALIDATION_FAILED\/durationMinutes/)
 })
 
+test('specialist DTO requires one canonical professional title', () => {
+  const specialist = {
+    id: 'sp_one',
+    displayName: 'Ada',
+    professionalTitle: 'Specjalistka',
+    standardRateGrosze: 18_000,
+    status: 'active',
+    version: 1,
+    staffVersion: 2,
+  }
+
+  assert.deepEqual(specialistDto(specialist), specialist)
+  assert.throws(
+    () => specialistDto(Object.fromEntries(
+      Object.entries(specialist).filter(([key]) => key !== 'professionalTitle'),
+    )),
+    /VALIDATION_FAILED\/specialist/,
+  )
+  for (const professionalTitle of ['', ' Specjalistka', 'Specjalistka\u0000', 'x'.repeat(121)]) {
+    assert.throws(
+      () => specialistDto({ ...specialist, professionalTitle }),
+      /VALIDATION_FAILED\/professionalTitle/,
+    )
+  }
+})
+
 test('core record status transitions preserve archival and cancellation terminality', () => {
   assert.doesNotThrow(() => assertClientStatusTransition('active', 'paused'))
   assert.throws(() => assertClientStatusTransition('active', 'archived'), /VALIDATION_FAILED\/status/)
@@ -169,7 +195,7 @@ test('canonical DTOs fail closed and separate legacy projections derive frontend
   assert.deepEqual(Object.keys(clientDto(client)).sort(), ['age', 'archivedAt', 'assignment', 'createdAt', 'id', 'name', 'readOnly', 'status', 'updatedAt', 'version'])
   assert.throws(() => appointmentDto({ id: 'apt_one' }), /VALIDATION_FAILED\/appointment/)
   assert.throws(() => clientDto({ ...client, assignment: { id: 'asg_one' } }), /VALIDATION_FAILED\/client/)
-  assert.deepEqual(specialistDto({ id: 'sp_one', displayName: 'Ada', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 2 }).id, 'sp_one')
+  assert.deepEqual(specialistDto({ id: 'sp_one', displayName: 'Ada', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 2 }).id, 'sp_one')
   assert.equal(legacyClientProjection(client).email, '')
   const dto = appointmentDto({ id: 'apt_one', clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', startsAt: '2026-08-04T07:15:00.000Z', endsAt: '2026-08-04T08:05:00.000Z', timeZone: 'Europe/Warsaw', location: null, status: 'completed', source: 'panel', version: 1, cancelledAt: null, createdAt: '2026-08-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z', charge: { id: 'chg_one', serviceId: 'zajecia', expectedAmountGrosze: 18000, currency: 'PLN', version: 1 }, paymentEntries: [{ id: 'pay_one', appointmentId: 'apt_one', amountGrosze: 18000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }], corrections: [] })
   assert.deepEqual(legacyAppointmentProjection(dto), { ...dto, psychId: 'sp_one', date: '2026-08-04', time: '09:15', duration: 50, amount: 180, payment: 'paid', paidAmount: 180, method: 'card', paidDate: '2026-08-04' })

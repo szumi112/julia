@@ -427,9 +427,12 @@ export async function assertReadySession(response, {
       'environment',
       'dataMode',
     ])
-    || !exactKeys(actor, ['id', 'displayName', 'role', 'specialistId', 'version'])
+    || !exactKeys(actor, [
+      'id', 'displayName', 'professionalTitle', 'role', 'specialistId', 'version',
+    ])
     || actor.id !== 'stf_local_owner'
     || actor.displayName !== 'Alicja Testowa'
+    || actor.professionalTitle !== null
     || actor.role !== 'owner'
     || actor.specialistId !== null
     || !Number.isSafeInteger(actor.version)

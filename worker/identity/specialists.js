@@ -1,9 +1,11 @@
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
+import { isWellFormedUnicode } from '../../src/core-records.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const DEFAULT_PROFESSIONAL_TITLE = 'Specjalistka'
 const PROFILE_COLUMNS = Object.freeze([
   'id',
   'staff_user_id',
@@ -85,11 +87,22 @@ function validProfile(profile) {
     && profile.created_at <= profile.updated_at
 }
 
-async function snapshotEnvelope(context, profile, displayName = null) {
+async function snapshotEnvelope(context, profile, presentation = null) {
   const snapshot = specialistSnapshot(profile)
-  const plaintext = displayName === null
+  const plaintext = presentation === null
     ? JSON.stringify(snapshot)
-    : JSON.stringify({ ...snapshot, displayName, schema: 'specialist.v2' })
+    : presentation.professionalTitle === null
+      ? JSON.stringify({
+          ...snapshot,
+          displayName: presentation.displayName,
+          schema: 'specialist.v2',
+        })
+      : JSON.stringify({
+          ...snapshot,
+          displayName: presentation.displayName,
+          professionalTitle: presentation.professionalTitle,
+          schema: 'specialist.v3',
+        })
   return JSON.stringify(await encryptForScope(
     context.keyring,
     context.dataKey,
@@ -107,6 +120,65 @@ async function hasDisplayNameColumn(db) {
     "SELECT name FROM pragma_table_info('specialists') WHERE name='display_name_envelope'",
   ).first()
   return row?.name === 'display_name_envelope'
+}
+
+async function hasProfessionalTitleColumn(db) {
+  const row = await db.prepare(
+    "SELECT name FROM pragma_table_info('specialists') WHERE name='professional_title_envelope'",
+  ).first()
+  return row?.name === 'professional_title_envelope'
+}
+
+const validDisplayName = (value) => {
+  if (typeof value !== 'string' || !isWellFormedUnicode(value) || value !== value.trim()
+    || value !== value.normalize('NFC')) return false
+  const encoded = new TextEncoder().encode(value)
+  const valid = encoded.byteLength >= 1 && encoded.byteLength <= 120
+  encoded.fill(0)
+  return valid
+}
+
+const validProfessionalTitle = (value) => validDisplayName(value)
+  && !/[\p{Cc}\p{Cf}]/u.test(value)
+
+async function profilePresentation(db, context, profile, profileV3, fallbackDisplayName) {
+  if (!profileV3 && !await hasDisplayNameColumn(db)) return null
+  if (!profile) {
+    if (!validDisplayName(fallbackDisplayName)) failure()
+    return Object.freeze({
+      displayName: fallbackDisplayName,
+      professionalTitle: profileV3 ? DEFAULT_PROFESSIONAL_TITLE : null,
+    })
+  }
+  const row = await db.prepare(profileV3
+    ? `SELECT display_name_envelope,professional_title_envelope
+       FROM specialists WHERE id=?`
+    : 'SELECT display_name_envelope FROM specialists WHERE id=?')
+    .bind(profile.id).first()
+  if (!row || typeof row.display_name_envelope !== 'string') failure()
+  try {
+    const displayName = await decryptForScope(context.keyring, context.dataKey, {
+      expectedScope: context.scope,
+      recordId: profile.id,
+      field: 'display_name',
+      envelope: JSON.parse(row.display_name_envelope),
+    })
+    const professionalTitle = profileV3
+      ? row.professional_title_envelope === null
+        ? DEFAULT_PROFESSIONAL_TITLE
+        : await decryptForScope(context.keyring, context.dataKey, {
+            expectedScope: context.scope,
+            recordId: profile.id,
+            field: 'professional_title',
+            envelope: JSON.parse(row.professional_title_envelope),
+          })
+      : null
+    if (!validDisplayName(displayName)
+      || (professionalTitle !== null && !validProfessionalTitle(professionalTitle))) failure()
+    return Object.freeze({ displayName, professionalTitle })
+  } catch {
+    failure()
+  }
 }
 
 export async function specialistSnapshotMatches(context, record, profile) {
@@ -128,13 +200,27 @@ export async function specialistSnapshotMatches(context, record, profile) {
     )
     const parsed = JSON.parse(plaintext)
     if (sameRow(parsed, specialistSnapshot(profile))) return true
-    if (parsed?.schema !== 'specialist.v2'
-      || typeof parsed.displayName !== 'string') return false
-    const { displayName: _displayName, ...withoutDisplayName } = parsed
-    return sameRow(withoutDisplayName, {
-      ...specialistSnapshot(profile),
-      schema: 'specialist.v2',
-    })
+    if (parsed?.schema === 'specialist.v2' && validDisplayName(parsed.displayName)) {
+      const { displayName: _displayName, ...withoutDisplayName } = parsed
+      return sameRow(withoutDisplayName, {
+        ...specialistSnapshot(profile),
+        schema: 'specialist.v2',
+      })
+    }
+    if (parsed?.schema === 'specialist.v3'
+      && validDisplayName(parsed.displayName)
+      && validProfessionalTitle(parsed.professionalTitle)) {
+      const {
+        displayName: _displayName,
+        professionalTitle: _professionalTitle,
+        ...withoutPresentation
+      } = parsed
+      return sameRow(withoutPresentation, {
+        ...specialistSnapshot(profile),
+        schema: 'specialist.v3',
+      })
+    }
+    return false
   } catch {
     return false
   }
@@ -209,6 +295,10 @@ export async function prepareSpecialistTransition({
     nextStaff.id,
   )
   const profileV2 = await hasDisplayNameColumn(db)
+  const profileV3 = await hasProfessionalTitleColumn(db)
+  const presentation = profileV2
+    ? await profilePresentation(db, cryptoContext, current, profileV3, displayName)
+    : null
   const releasedCurrent = profileV2
     && currentStaff?.status === 'disabled'
     && current?.staff_user_id === null
@@ -235,9 +325,6 @@ export async function prepareSpecialistTransition({
       updated_at: now,
     }
     if (profileV2) {
-      if (typeof displayName !== 'string' || displayName !== displayName.trim()
-        || displayName.length < 1
-        || new TextEncoder().encode(displayName).byteLength > 120) failure()
       const displayNameEnvelope = JSON.stringify(await encryptForScope(
         cryptoContext.keyring,
         cryptoContext.dataKey,
@@ -245,23 +332,51 @@ export async function prepareSpecialistTransition({
           expectedScope: cryptoContext.scope,
           recordId: profile.id,
           field: 'display_name',
-          plaintext: displayName,
+          plaintext: presentation.displayName,
         },
       ))
-      domainStatement = db.prepare(
-        `INSERT INTO specialists
-         (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
-          archived_at,created_at,updated_at)
-         VALUES (?,?,?,18000,?,1,?,?,?)`
-      ).bind(
-        profile.id,
-        profile.staff_user_id,
-        displayNameEnvelope,
-        profile.status,
-        profile.archived_at,
-        profile.created_at,
-        profile.updated_at,
-      )
+      if (profileV3) {
+        const professionalTitleEnvelope = JSON.stringify(await encryptForScope(
+          cryptoContext.keyring,
+          cryptoContext.dataKey,
+          {
+            expectedScope: cryptoContext.scope,
+            recordId: profile.id,
+            field: 'professional_title',
+            plaintext: presentation.professionalTitle,
+          },
+        ))
+        domainStatement = db.prepare(
+          `INSERT INTO specialists
+           (id,staff_user_id,display_name_envelope,professional_title_envelope,
+            standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+           VALUES (?,?,?,?,18000,?,1,?,?,?)`,
+        ).bind(
+          profile.id,
+          profile.staff_user_id,
+          displayNameEnvelope,
+          professionalTitleEnvelope,
+          profile.status,
+          profile.archived_at,
+          profile.created_at,
+          profile.updated_at,
+        )
+      } else {
+        domainStatement = db.prepare(
+          `INSERT INTO specialists
+           (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
+            archived_at,created_at,updated_at)
+           VALUES (?,?,?,18000,?,1,?,?,?)`,
+        ).bind(
+          profile.id,
+          profile.staff_user_id,
+          displayNameEnvelope,
+          profile.status,
+          profile.archived_at,
+          profile.created_at,
+          profile.updated_at,
+        )
+      }
     } else {
       domainStatement = db.prepare(
         `INSERT INTO specialists
@@ -319,7 +434,7 @@ export async function prepareSpecialistTransition({
     recordId,
     profile.id,
     profile.version,
-    await snapshotEnvelope(cryptoContext, profile, current ? null : displayName ?? null),
+    await snapshotEnvelope(cryptoContext, profile, presentation),
     changedByStaffId,
     now,
     correlationId,

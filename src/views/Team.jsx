@@ -30,9 +30,13 @@ const ACCESS_LABELS = Object.freeze({
 const ACCESS_TONES = Object.freeze({ enabled: 'sage', invited: 'amber', unclaimed: 'ink' })
 
 function AppTeamDirectory({ onRefresh, psychologists }) {
-  const { session } = useAuth()
+  const { refresh: refreshSession, session } = useAuth()
   const owner = session.actor.role === 'owner'
   const [surface, setSurface] = useState(null)
+  const refreshEditedProfile = async (profileId) => {
+    await onRefresh()
+    if (profileId === session.actor.specialistId) await refreshSession()
+  }
   return (
     <div>
       <div className="view-head">
@@ -54,7 +58,7 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
               <Avatar name={psychologist.name} color={psychologist.color} size={52} />
               <div className="team-card__identity">
                 <h2 className="team-card__name">{psychologist.name}</h2>
-                <span className="team-card__spec">Specjalistka · {fmtMoney(psychologist.rate)} / sesja</span>
+                <span className="team-card__spec">{psychologist.professionalTitle} · {fmtMoney(psychologist.rate)} / sesja</span>
                 <Pill tone={ACCESS_TONES[psychologist.accessStatus ?? 'enabled']}>
                   {ACCESS_LABELS[psychologist.accessStatus ?? 'enabled']}
                 </Pill>
@@ -82,7 +86,7 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
         <SpecialistProfileForm
           profile={surface.profile}
           onClose={() => setSurface(null)}
-          onSaved={onRefresh}
+          onSaved={() => refreshEditedProfile(surface.profile.id)}
         />
       ) : null}
       {surface?.kind === 'access' ? (

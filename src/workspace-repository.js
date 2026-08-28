@@ -630,6 +630,7 @@ export function createDemoWorkspaceRepository(options) {
     if (item.status === 'inactive') fail('specialist')
     return specialistDto({
       id: demoId('sp', item.id), displayName: item.name,
+      professionalTitle: item.professionalTitle ?? 'Specjalistka',
       standardRateGrosze: groszeFromLegacy(item.rate, 'specialist'), status: 'active',
       version: 1, staffVersion: 1,
     })

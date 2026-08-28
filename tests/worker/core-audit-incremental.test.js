@@ -27,7 +27,10 @@ const FACTS = Object.freeze([
 
 const session = {
   data: {
-    actor: { id: ACTOR.id, displayName: 'Fikcyjna Właścicielka', role: 'owner', specialistId: null, version: 1 },
+    actor: {
+      id: ACTOR.id, displayName: 'Fikcyjna Właścicielka', professionalTitle: null,
+      role: 'owner', specialistId: null, version: 1,
+    },
     capabilities: [
       'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct',
       'chat.general', 'client.manage', 'client.operational.read', 'clinical.read',

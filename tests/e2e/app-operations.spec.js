@@ -20,6 +20,7 @@ const sessionEnvelope = ({
   actor = {
     id: 'stf_capability_owner',
     displayName: 'Alicja Testowa',
+    professionalTitle: null,
     role: 'owner',
     specialistId: null,
     version: 1,
@@ -44,6 +45,7 @@ const coordinatorSession = () => sessionEnvelope({
   actor: {
     id: 'stf_capability_coordinator',
     displayName: 'Celina Testowa',
+    professionalTitle: null,
     role: 'coordinator',
     specialistId: null,
     version: 1,
@@ -59,6 +61,7 @@ const specialistSession = () => sessionEnvelope({
   actor: {
     id: 'stf_capability_specialist',
     displayName: 'Zofia Fikcyjna',
+    professionalTitle: 'Specjalistka',
     role: 'specialist',
     specialistId: 'sp_zofia',
     version: 1,

@@ -1,4 +1,5 @@
 import { AppError } from '../http/errors.js'
+import { isD1MissingColumn } from '../db/errors.js'
 import { authorize } from '../identity/policy.js'
 import { decryptForScope } from '../security/envelope.js'
 import { decodeBase64Url } from '../security/encoding.js'
@@ -6,6 +7,7 @@ import { decryptClientIdentity } from './crypto.js'
 import {
   assertClientIdentity,
   assertLocation,
+  assertProfessionalTitle,
   isAppointmentId,
   isAssignmentId,
   isCanonicalUtc,
@@ -44,6 +46,7 @@ const STAFF_KEYS = Object.freeze([
   'id', 'staff_user_id', 'standard_rate_grosze', 'status', 'version', 'staff_id',
   'staff_specialist_id', 'staff_status', 'staff_version', 'display_name_envelope',
 ])
+const STAFF_V3_KEYS = Object.freeze([...STAFF_KEYS, 'professional_title_envelope'])
 const CLIENT_KEYS = Object.freeze([
   'id', 'identity_envelope', 'status', 'version', 'archived_at', 'created_at',
   'updated_at', 'assignment_id', 'assignment_specialist_id', 'assignment_starts_at',
@@ -159,6 +162,9 @@ const nullableInstant = (value) => value === null || isCanonicalUtc(value)
 const canonicalName = (value) => {
   try { return assertClientIdentity({ name: value, age: null }).name } catch { cryptoFailure() }
 }
+const canonicalProfessionalTitle = (value) => {
+  try { return assertProfessionalTitle(value) } catch { cryptoFailure() }
+}
 const parseEnvelope = (value) => {
   if (typeof value !== 'string') cryptoFailure()
   try { return JSON.parse(value) } catch { cryptoFailure() }
@@ -171,12 +177,14 @@ const freeze = (value) => {
   return value
 }
 
-const defaultDecryptSpecialist = async ({ recordId, envelope, cryptoContext }) => {
+const defaultDecryptSpecialist = async ({
+  recordId, envelope, cryptoContext, field = 'display_name',
+}) => {
   const context = captureExact(cryptoContext, ['keyring', 'dataKey', 'scope'], cryptoFailure)
   return decryptForScope(context.keyring, context.dataKey, {
     expectedScope: context.scope,
     recordId,
-    field: 'display_name',
+    field,
     envelope: parseEnvelope(envelope),
   })
 }
@@ -278,6 +286,25 @@ const directoryV2Sql = (specialist) => `
          specialist.status, specialist.version, staff.id AS staff_id,
          staff.specialist_id AS staff_specialist_id, staff.status AS staff_status,
          staff.version AS staff_version, specialist.display_name_envelope
+  FROM specialists AS specialist
+  LEFT JOIN staff_users AS staff
+    ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
+  WHERE (specialist.status IN ('active','pending')
+      AND (specialist.staff_user_id IS NULL OR staff.status IN ('pending','active')))
+    OR (specialist.status='archived' AND EXISTS (
+      SELECT 1 FROM historical_service_occurrences AS occurrence
+      WHERE occurrence.specialist_id=specialist.id
+        AND ${historicalWindowSql(specialist)}
+    ))
+  ORDER BY specialist.id
+  LIMIT ?`
+
+const directoryV3Sql = (specialist) => `
+  SELECT specialist.id, specialist.staff_user_id, specialist.standard_rate_grosze,
+         specialist.status, specialist.version, staff.id AS staff_id,
+         staff.specialist_id AS staff_specialist_id, staff.status AS staff_status,
+         staff.version AS staff_version, specialist.display_name_envelope,
+         specialist.professional_title_envelope
   FROM specialists AS specialist
   LEFT JOIN staff_users AS staff
     ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
@@ -532,7 +559,9 @@ const defaultDecryptHistoricalField = async ({
   envelope: parseEnvelope(envelope),
 })
 
-const specialistDto = async (row, context, decrypt, profileV2) => {
+const specialistDto = async (row, context, decrypt, profileVersion) => {
+  const profileV2 = profileVersion >= 2
+  const profileV3 = profileVersion >= 3
   const archived = row.status === 'archived'
   const accessStatus = row.staff_user_id === null
     ? 'unclaimed'
@@ -540,6 +569,8 @@ const specialistDto = async (row, context, decrypt, profileV2) => {
       : row.staff_status === 'active' ? 'enabled' : null
   if (!isSpecialistId(row.id) || !positive(row.standard_rate_grosze, 1_000_000)
     || !positive(row.version) || typeof row.display_name_envelope !== 'string'
+    || (profileV3 && !(row.professional_title_envelope === null
+      || typeof row.professional_title_envelope === 'string'))
     || (profileV2
       ? (!['active', 'pending', 'archived'].includes(row.status)
         || (!archived && accessStatus === null)
@@ -556,6 +587,7 @@ const specialistDto = async (row, context, decrypt, profileV2) => {
     decryptedName = await decrypt({
       recordId: profileV2 ? row.id : row.staff_id,
       staffId: row.staff_id,
+      field: 'display_name',
       envelope: row.display_name_envelope,
       cryptoContext: context,
     })
@@ -564,21 +596,39 @@ const specialistDto = async (row, context, decrypt, profileV2) => {
     decryptedName = await decrypt({
       recordId: row.staff_id,
       staffId: row.staff_id,
+      field: 'display_name',
       envelope: row.display_name_envelope,
       cryptoContext: context,
     })
   }
   const displayName = canonicalName(decryptedName)
+  let professionalTitle = 'Specjalistka'
+  if (profileV3 && row.professional_title_envelope !== null) {
+    let decryptedTitle
+    try {
+      decryptedTitle = await decrypt({
+        recordId: row.id,
+        staffId: row.staff_id,
+        field: 'professional_title',
+        envelope: row.professional_title_envelope,
+        cryptoContext: context,
+      })
+    } catch { cryptoFailure() }
+    professionalTitle = canonicalProfessionalTitle(decryptedTitle)
+  }
   if (profileV2 && archived) return freeze({
-    id: row.id, displayName, standardRateGrosze: row.standard_rate_grosze,
+    id: row.id, displayName, professionalTitle,
+    standardRateGrosze: row.standard_rate_grosze,
     status: 'archived', version: row.version, staffVersion: row.staff_version,
   })
   return freeze(profileV2 ? {
-    id: row.id, displayName, standardRateGrosze: row.standard_rate_grosze,
+    id: row.id, displayName, professionalTitle,
+    standardRateGrosze: row.standard_rate_grosze,
     status: 'active', version: row.version, staffVersion: row.staff_version,
     accessStatus,
   } : {
-    id: row.id, displayName, standardRateGrosze: row.standard_rate_grosze,
+    id: row.id, displayName, professionalTitle,
+    standardRateGrosze: row.standard_rate_grosze,
     status: 'active', version: row.version, staffVersion: row.staff_version,
   })
 }
@@ -857,19 +907,33 @@ export async function readWorkspace(input) {
     window.from, window.to, window.from.slice(0, 7), window.to.slice(0, 7),
   ]
   let specialistRows
-  let profileV2 = true
+  let profileVersion = 3
   try {
     specialistRows = limit(await query(
-      db, directoryV2Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_KEYS,
+      db, directoryV3Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_V3_KEYS,
     ), 'specialists')
   } catch (error) {
-    if (!/no such column: specialist\.display_name_envelope/.test(error?.message ?? '')) {
-      throw error
-    }
-    profileV2 = false
-    specialistRows = limit(await query(
-      db, DIRECTORY_SQL, [CAPS.specialists + 1], STAFF_KEYS,
-    ), 'specialists')
+    if (isD1MissingColumn(error, 'specialist.display_name_envelope')) {
+      profileVersion = 1
+      specialistRows = limit(await query(
+        db, DIRECTORY_SQL, [CAPS.specialists + 1], STAFF_KEYS,
+      ), 'specialists')
+    } else if (isD1MissingColumn(error, 'specialist.professional_title_envelope')) {
+      try {
+        profileVersion = 2
+        specialistRows = limit(await query(
+          db, directoryV2Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_KEYS,
+        ), 'specialists')
+      } catch (fallbackError) {
+        if (!isD1MissingColumn(fallbackError, 'specialist.display_name_envelope')) {
+          throw fallbackError
+        }
+        profileVersion = 1
+        specialistRows = limit(await query(
+          db, DIRECTORY_SQL, [CAPS.specialists + 1], STAFF_KEYS,
+        ), 'specialists')
+      }
+    } else throw error
   }
   if (new Set(specialistRows.map((row) => row.id)).size !== specialistRows.length
     || new Set(specialistRows.map((row) => row.staff_id).filter(Boolean)).size
@@ -950,7 +1014,7 @@ export async function readWorkspace(input) {
     appointmentByClient.set(row.client_id, values)
   }
   const specialists = await Promise.all(specialistRows.map((row) => (
-    specialistDto(row, cryptoContext, decryptSpecialist, profileV2)
+    specialistDto(row, cryptoContext, decryptSpecialist, profileVersion)
   )))
   const clients = await Promise.all(clientRows.map((row) => (
     clientDto(row, actor, cryptoContext, decryptClient, appointmentByClient)

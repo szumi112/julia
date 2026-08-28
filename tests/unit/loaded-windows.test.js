@@ -13,7 +13,8 @@ import { projectLoadedWorkspace } from '../../src/workspace-view.js'
 
 const range = (from, to = from) => ({ from, to })
 const specialist = (id = 'sp_anna', displayName = 'Anna', status = 'active') => ({
-  id, displayName, status, version: status === 'archived' ? 2 : 1,
+  id, displayName, professionalTitle: 'Specjalistka', status,
+  version: status === 'archived' ? 2 : 1,
 })
 const client = (id = 'cl_ola', status = 'active', specialistId = 'sp_anna') => ({
   id,
@@ -366,11 +367,13 @@ test('retains only archived specialists referenced by historical records across 
 test('downgrades an omitted active specialist to historical-only attribution', () => {
   const previouslyActive = {
     id: 'sp_transitioned', displayName: 'Specjalistka Historyczna',
+    professionalTitle: 'Specjalistka',
     standardRateGrosze: 18000, status: 'active', version: 3, staffVersion: 4,
     accessStatus: 'enabled',
   }
   const currentActive = {
     id: 'sp_current', displayName: 'Specjalistka Aktywna',
+    professionalTitle: 'Specjalistka',
     standardRateGrosze: 19000, status: 'active', version: 1, staffVersion: 2,
     accessStatus: 'enabled',
   }
@@ -584,12 +587,32 @@ test('captures caller data deeply and freezes merge state and result', () => {
     payload({ from: '2026-08-01', specialists, clients, appointments }),
   )
   specialists[0].displayName = 'Changed'
+  specialists[0].professionalTitle = 'Changed'
   appointments[0].charge.expectedAmountGrosze = 1
   assert.equal(result.state.specialistsById.sp_anna.displayName, 'Anna')
+  assert.equal(result.state.specialistsById.sp_anna.professionalTitle, 'Specjalistka')
   assert.equal(result.state.appointmentsById.apt_one.charge.expectedAmountGrosze, 18000)
   assert.ok(Object.isFrozen(result))
   assert.ok(Object.isFrozen(result.state.appointmentsById.apt_one.charge))
   assert.ok(Object.isFrozen(result.state.appointmentsById.apt_one.paymentEntries))
+})
+
+test('requires a canonical professional title on every loaded specialist', () => {
+  const state = createLoadedWorkspaceState()
+  const capture = captureLoadedWorkspaceLoad(state, range('2026-08-01'))
+  const missing = specialist()
+  delete missing.professionalTitle
+
+  for (const value of [
+    missing,
+    { ...specialist(), professionalTitle: '' },
+    { ...specialist(), professionalTitle: ' Specjalistka' },
+    { ...specialist(), professionalTitle: 'Specjalistka\u0000' },
+  ]) {
+    assert.throws(() => mergeLoadedWorkspaceLoad(state, capture, payload({
+      from: '2026-08-01', specialists: [value],
+    })), TypeError)
+  }
 })
 
 test('rejects nested prototype-pollution keys without inheritance or source mutation', () => {
