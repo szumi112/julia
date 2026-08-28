@@ -20,6 +20,7 @@ import {
 import { authorize } from '../identity/policy.js'
 import { resolveCurrentAuthorityActor } from '../identity/staff.js'
 import { digestWorkbookSourceValue } from '../security/workbook-artifacts.js'
+import { parseWorkbookMaterializationProgress } from './workbook-materialization-progress.js'
 
 export const WORKBOOK_MATERIALIZATION_SLICE_SIZE = 64
 
@@ -33,22 +34,6 @@ const IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CORRELATION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const SOURCE_KEY = /^workbook:v1:\d{1,4}:\d{1,7}:\d{1,5}$/
-const PROGRESS_KEYS = Object.freeze([
-  'accepted',
-  'accountingMonthsCorrected',
-  'candidateCount',
-  'financeBatchId',
-  'fixedRevenuesInserted',
-  'formulaGhostsVoided',
-  'inserted',
-  'linked',
-  'quarantined',
-  'quarantinedVoided',
-  'specialistAssignmentsCorrected',
-  'textAmountVisitsInserted',
-  'voided',
-])
-
 const fail = (code = 'WORKBOOK_MATERIALIZATION_INVALID') => { throw new Error(code) }
 const instant = (nowMs) => {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0) fail()
@@ -160,19 +145,6 @@ const parseJson = (value, code = 'WORKBOOK_MATERIALIZATION_INVALID') => {
   try { return JSON.parse(value) } catch { fail(code) }
 }
 
-const parseProgress = (value) => {
-  const progress = parseJson(value)
-  if (!progress || Array.isArray(progress) || typeof progress !== 'object'
-    || Object.keys(progress).sort(compareUtf16CodeUnits).join('\n')
-      !== [...PROGRESS_KEYS].sort(compareUtf16CodeUnits).join('\n')
-    || PROGRESS_KEYS.filter((key) => key !== 'financeBatchId').some((key) => (
-      !Number.isSafeInteger(progress[key]) || progress[key] < 0
-    ))
-    || !(progress.financeBatchId === null
-      || /^fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(progress.financeBatchId))) fail()
-  return { ...progress }
-}
-
 const importDto = (row) => Object.freeze({
   id: row.import_id,
   artifactId: row.artifact_id,
@@ -199,7 +171,7 @@ const jobDto = (row) => Object.freeze({
 })
 
 const responseFrom = (row, status = 200) => {
-  const progress = parseProgress(row.progress_json)
+  const progress = parseWorkbookMaterializationProgress(row.progress_json)
   const data = {
     import: importDto(row),
     job: jobDto(row),
@@ -234,7 +206,7 @@ const loadState = async (db, importId, actorId) => {
      WHERE import.id=? AND import.created_by_staff_id=?`,
   ).bind(importId, actorId).first()
   if (!row || row.job_created_by_staff_id !== row.created_by_staff_id) fail('NOT_FOUND')
-  parseProgress(row.progress_json)
+  parseWorkbookMaterializationProgress(row.progress_json)
   return row
 }
 
@@ -1371,7 +1343,7 @@ export async function continueWorkbookMaterialization(input) {
   }
   if (state.import_version !== command.expectedVersion) fail('VERSION_CONFLICT')
   await requireActiveSpecialists(command.db, state.resolution_specialist_ids)
-  const progress = parseProgress(state.progress_json)
+  const progress = parseWorkbookMaterializationProgress(state.progress_json)
   try {
     if (state.workbook_kind === 'panel-v2') {
       return await applyPanelSlice(

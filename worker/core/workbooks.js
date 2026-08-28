@@ -37,6 +37,7 @@ import {
   loadWorkbookSpecialistLabels,
   loadWorkbookSpecialistOptions,
 } from './workbook-specialist-options.js'
+import { parseWorkbookMaterializationProgress } from './workbook-materialization-progress.js'
 
 export const APPROVED_WORKBOOK_FINGERPRINT = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 
@@ -1311,6 +1312,22 @@ const loadImportRow = async (db, importId, actorId = null) => {
 const DISCOVERY_ROW_KEYS = Object.freeze([
   'id', 'artifact_id', 'status', 'version', 'job_status', 'progress_json',
 ])
+const MATERIALIZATION_JOB_STATUS_BY_IMPORT_STATUS = Object.freeze({
+  complete: 'complete',
+  failed: 'failed',
+  materializing: 'running',
+  ready: 'ready',
+})
+const validMaterializationStatusPair = (importStatus, jobStatus) => (
+  typeof importStatus === 'string'
+  && Object.hasOwn(MATERIALIZATION_JOB_STATUS_BY_IMPORT_STATUS, importStatus)
+  && MATERIALIZATION_JOB_STATUS_BY_IMPORT_STATUS[importStatus] === jobStatus
+)
+const readMaterializationProgress = (value) => {
+  try { return parseWorkbookMaterializationProgress(value) } catch {
+    throw new Error('INTERNAL_ERROR')
+  }
+}
 const discoveryRows = (value) => {
   try {
     const result = Object.getOwnPropertyDescriptor(value, 'results')
@@ -1342,16 +1359,11 @@ const discoveryRows = (value) => {
 }
 
 const discoveredImportState = (row) => {
-  let progress
-  try { progress = JSON.parse(row.progress_json) } catch { throw new Error('INTERNAL_ERROR') }
+  const progress = readMaterializationProgress(row.progress_json)
   if (!IMPORT_ID.test(row.id ?? '') || !ARTIFACT_ID.test(row.artifact_id ?? '')
-    || !['ready', 'materializing', 'complete', 'failed'].includes(row.status)
-    || !['ready', 'running', 'complete', 'failed'].includes(row.job_status)
+    || !validMaterializationStatusPair(row.status, row.job_status)
     || !Number.isSafeInteger(row.version) || row.version < 1
-    || progress === null || typeof progress !== 'object' || Array.isArray(progress)
-    || !Number.isSafeInteger(progress.inserted) || progress.inserted < 0
-    || !Number.isSafeInteger(progress.voided) || progress.voided < 0
-    || ((row.status === 'complete') !== (row.job_status === 'complete'))) {
+  ) {
     throw new Error('INTERNAL_ERROR')
   }
   return Object.freeze({
@@ -1408,12 +1420,10 @@ export async function getWorkbookImport({ db, actor, nowMs, importId } = {}) {
      WHERE import.id=? AND import.created_by_staff_id=?`,
   ).bind(importId, actor.id).first()
   if (!row) throw new Error('NOT_FOUND')
-  let progress
-  try { progress = JSON.parse(row.progress_json) } catch { throw new Error('INTERNAL_ERROR') }
-  if (!progress || !Number.isSafeInteger(progress.inserted) || progress.inserted < 0
-    || !Number.isSafeInteger(progress.voided) || progress.voided < 0) {
+  if (!validMaterializationStatusPair(row.status, row.job_status)) {
     throw new Error('INTERNAL_ERROR')
   }
+  const progress = readMaterializationProgress(row.progress_json)
   const data = {
     import: importDto(row),
     job: materializationJobDto(row),
