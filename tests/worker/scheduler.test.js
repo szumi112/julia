@@ -6,6 +6,7 @@ import { decryptOutboxPayload, enqueueOutboxStatement, processOutboxBatch } from
 import { decryptForScope, encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import recoveryRow from '../fixtures/backup-recovery-workbook-row.json'
 
 const VALID_ENV = Object.freeze({
   APP_ENV: 'development',
@@ -284,6 +285,76 @@ function trackedDb(real, hooks = {}) {
       return hooks.batch ? hooks.batch({ statements, sql, execute }) : execute()
     },
   }
+}
+
+function realBackupArchive(mode) {
+  const objects = new Map()
+  const calls = []
+  return {
+    objects,
+    calls,
+    binding: {
+      async put(key, value) {
+        calls.push(`put:${key}`)
+        if (key.endsWith('.manifest.json') && mode === 'manifest_cleanup_failure') {
+          throw new Error('manifest write marker')
+        }
+        let bytes
+        if (value instanceof ReadableStream) {
+          const reader = value.getReader()
+          const values = []
+          while (true) {
+            const part = await reader.read()
+            if (part.done) break
+            values.push(...part.value)
+          }
+          bytes = Uint8Array.from(values)
+        } else {
+          bytes = new Uint8Array(value)
+        }
+        objects.set(key, bytes)
+        return { etag: `etag-${mode}-${objects.size}`, size: bytes.byteLength }
+      },
+      async delete(key) {
+        calls.push(`delete:${key}`)
+        if (!(mode === 'manifest_cleanup_failure' && key.endsWith('.sql'))) objects.delete(key)
+      },
+      async head(key) {
+        calls.push(`head:${key}`)
+        return objects.has(key) ? { etag: `etag-${mode}`, size: objects.get(key).byteLength } : null
+      },
+      async get() { return null },
+      async list() { return { objects: [], truncated: false } },
+    },
+  }
+}
+
+const backupProviderEnv = (db, archive) => ({
+  ...runtimeEnv(db),
+  APP_ENV: 'staging',
+  APP_ORIGIN: 'https://staging.bearwithme-panel.app',
+  CF_ACCOUNT_ID: '2c7526d6afa1ee03407e35beefc21a0f',
+  CF_D1_DATABASE_ID: 'df9375e3-b5a8-4fe2-83b2-52acf78beb17',
+  CF_D1_EXPORT_TOKEN: 'fictional-scheduler-export-token',
+  ARCHIVE: archive,
+})
+
+function backupProviderFetch() {
+  return vi.fn(async (url) => {
+    if (url === 'https://download.example.test/scheduler-backup.sql') {
+      return new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 })
+    }
+    return new Response(JSON.stringify({
+      errors: [],
+      messages: [],
+      result: {
+        at_bookmark: 'bookmark-scheduler-real-v3',
+        filename: 'scheduler-backup.sql',
+        signed_url: 'https://download.example.test/scheduler-backup.sql',
+      },
+      success: true,
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  })
 }
 
 const backupsForDay = async (localDay) => (await env.DB.prepare(
@@ -1400,6 +1471,92 @@ describe('scheduled operational publication budget', () => {
 })
 
 describe('ordinary outbox integration and privacy', () => {
+  it.each([
+    ['v3 success', 'success', 'stored', null],
+    ['recovery drift', 'recovery_drift', 'failed', 'BACKUP_MIGRATION_SET_CHANGED'],
+    ['manifest and cleanup failure', 'manifest_cleanup_failure', 'failed', 'BACKUP_ORPHAN_CLEANUP_FAILED'],
+  ])('keeps the real non-injected %s path within 47 work statements and a three-statement reserve', async (
+    _label, mode, expectedStatus, expectedError,
+  ) => {
+    const context = await cryptoContext()
+    const budgetMonth = { success: 0, recovery_drift: 1, manifest_cleanup_failure: 2 }[mode]
+    const scheduledTime = Date.UTC(2039, budgetMonth, 2, 2, 15)
+    const archive = realBackupArchive(mode)
+    let statements = 0
+    let recoveryReads = 0
+    const executed = []
+    const terminal = async ({ sql, execute }) => {
+      statements += 1
+      executed.push(sql.replaceAll(/\s+/g, ' ').trim().slice(0, 100))
+      return execute()
+    }
+    const db = trackedDb(env.DB, {
+      run: terminal,
+      first: terminal,
+      raw: terminal,
+      async all({ sql, execute }) {
+        statements += 1
+        executed.push(sql.replaceAll(/\s+/g, ' ').trim().slice(0, 100))
+        if (/WITH migration_snapshot AS/i.test(sql)
+          && /JOIN workbook_imports AS imported/i.test(sql)) {
+          recoveryReads += 1
+          const row = structuredClone(recoveryRow)
+          if (mode === 'recovery_drift' && recoveryReads === 2) row.activity_version += 1
+          return { results: [row], success: true }
+        }
+        return execute()
+      },
+      async batch({ sql, execute }) {
+        statements += sql.length
+        executed.push(...sql.map((value) => value.replaceAll(/\s+/g, ' ').trim().slice(0, 100)))
+        return execute()
+      },
+    })
+    const backupId = `bkp_scheduler_real_${mode}`
+    const deps = schedulerDeps(`real_${mode}`, context, scheduledTime, {
+      cryptoContext: undefined,
+      createKeyring: async () => context.keyring,
+      backupDue: () => dueFor(scheduledTime),
+      backupIdFactory: () => backupId,
+      rawKeyFactory: () => new Uint8Array(32).fill(7),
+      backupNonceFactory: () => new Uint8Array(12).fill(5),
+      fetch: backupProviderFetch(),
+      wait: async () => {},
+    })
+    expect(Object.hasOwn(deps, 'processBackupCreate')).toBe(false)
+
+    const result = await runScheduled({
+      scheduledTime,
+      env: backupProviderEnv(db, archive.binding),
+      deps,
+    })
+    const observedBackup = await env.DB.prepare(
+      'SELECT status,last_error_code FROM backup_runs WHERE id=?'
+    ).bind(backupId).first()
+    const observedJobs = (await jobsForBackup(backupId)).map(({ status, last_error_code: lastErrorCode }) => ({
+      status, lastErrorCode,
+    }))
+    expect(result.status, JSON.stringify({ result, statements, observedBackup, observedJobs, executed }))
+      .toBe('succeeded')
+    expect(result.backupEnqueued).toBe(true)
+
+    expect(statements).toBeLessThanOrEqual(47)
+    expect(50 - statements).toBeGreaterThanOrEqual(3)
+    expect(recoveryReads).toBe(2)
+    expect(observedBackup).toEqual({
+      status: expectedStatus,
+      last_error_code: expectedError,
+    })
+    if (mode === 'success') {
+      expect(archive.calls.filter((call) => call.startsWith('put:')).map((call) => call.slice(4)))
+        .toEqual([
+          `backups/v3/${dueFor(scheduledTime).localMonth.replace('-', '/')}/${backupId}.sql`,
+          `backups/v3/${dueFor(scheduledTime).localMonth.replace('-', '/')}/${backupId}.manifest.json`,
+        ])
+    }
+    if (mode === 'manifest_cleanup_failure') expect(archive.objects.size).toBe(1)
+  })
+
   it('runs one bounded retention pass when no backup create job is claimed', async () => {
     const context = await cryptoContext()
     const scheduledTime = schedule(++serial)
@@ -1422,7 +1579,7 @@ describe('ordinary outbox integration and privacy', () => {
       db: expect.any(Object),
       archive: env.ARCHIVE,
       nowMs: scheduledTime,
-      limit: 20,
+      limit: 5,
     })
   })
 

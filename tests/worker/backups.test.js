@@ -6,6 +6,7 @@ import { enqueueOutboxStatement } from '../../worker/jobs/outbox.js'
 import { openBackupManifest, parseCanonicalManifest } from '../../worker/operations/backup-format.js'
 import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import recoveryRow from '../fixtures/backup-recovery-workbook-row.json'
 
 const {
   downloadD1Export,
@@ -43,6 +44,7 @@ const BACKUP_COLUMNS = Object.freeze([
 let schedulerSerial = 0
 let backupSerial = 0
 let inputSerial = 0
+let finalizationSerial = 0
 
 const nonterminalResult = (bookmark = EXPORT_BOOKMARK) => ({ at_bookmark: bookmark })
 const completeResult = (overrides = {}) => ({
@@ -412,6 +414,93 @@ function trackedDb(real, hooks = {}) {
   }
 }
 
+function workbookRecoveryDb(real, hooks = {}) {
+  return trackedDb(real, {
+    ...hooks,
+    async all(context) {
+      if (/WITH migration_snapshot AS/i.test(context.sql)
+        && /JOIN workbook_imports AS imported/i.test(context.sql)) {
+        const replacement = hooks.recovery?.(context)
+        return replacement ?? { results: [structuredClone(recoveryRow)], success: true }
+      }
+      return hooks.all ? hooks.all(context) : context.execute()
+    },
+  })
+}
+
+async function finalizationScenario(suffix, hooks = {}) {
+  finalizationSerial += 1
+  const context = await cryptoContext()
+  const schedulerRun = await seedScheduler()
+  const seeded = await seedQueued(context, {
+    jobId: `job_backup_finalize_${suffix}`,
+    backupId: `bkp_backup_finalize_${suffix}`,
+    localDay: `2045-01-${String(finalizationSerial).padStart(2, '0')}`,
+  })
+  const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+  const objects = new Map()
+  const mutations = []
+  const archive = {
+    async put(key, value) {
+      let bytes
+      if (value instanceof ReadableStream) {
+        const chunks = []
+        const reader = value.getReader()
+        while (true) {
+          const part = await reader.read()
+          if (part.done) break
+          chunks.push(...part.value)
+        }
+        bytes = Uint8Array.from(chunks)
+      } else {
+        bytes = new Uint8Array(value)
+      }
+      objects.set(key, bytes)
+      mutations.push(`put:${key}`)
+      return { etag: `etag-${suffix}-${objects.size}`, size: bytes.byteLength }
+    },
+    async delete(key) { mutations.push(`delete:${key}`); objects.delete(key) },
+    async head(key) {
+      mutations.push(`head:${key}`)
+      return objects.has(key) ? { etag: `etag-${suffix}`, size: objects.get(key).byteLength } : null
+    },
+  }
+  const input = {
+    db: workbookRecoveryDb(env.DB, hooks),
+    cryptoContext: context,
+    keyring,
+    archive,
+    providerConfig: {
+      accountId: EXPORT_ACCOUNT_ID,
+      databaseId: EXPORT_DATABASE_ID,
+      token: EXPORT_TOKEN,
+    },
+    source: BACKUP_SOURCE,
+    schedulerRun,
+    now: () => CLAIM_MS,
+    wait: async () => {},
+    fetch: async () => { throw new Error('real fetch must stay outside this test') },
+    signal: new AbortController().signal,
+    idFactory: sequence(`attempt_backup_finalize_${suffix}`),
+    leaseOwnerFactory: sequence(`owner_backup_finalize_${suffix}`),
+    nonceFactory: () => new Uint8Array(12).fill(6),
+    rawKeyFactory: () => new Uint8Array(32).fill(8),
+    pollExport: async () => ({
+      atBookmark: `bookmark-finalize-${suffix}`,
+      downloadUrl: 'https://download.example.test/finalization-fixture',
+    }),
+    downloadExport: async () => ({
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3, 4]))
+          controller.close()
+        },
+      }),
+    }),
+  }
+  return { input, mutations, objects, seeded }
+}
+
 async function forceReclaims({ context, schedulerRun, count, startMs = CLAIM_MS }) {
   let nowMs = startMs
   for (let index = 0; index < count; index += 1) {
@@ -668,12 +757,10 @@ describe('operational backup create runner', () => {
     const rawSsecKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1)
     const calls = []
     const evidenceOrder = []
-    const db = trackedDb(env.DB, {
+    const db = workbookRecoveryDb(env.DB, {
+      recovery: () => { evidenceOrder.push('recovery') },
       all: async ({ sql, execute }) => {
         const response = await execute()
-        if (/SELECT id,\s*name\s+FROM d1_migrations\s+ORDER BY id\s+LIMIT 257/i.test(sql)) {
-          evidenceOrder.push('migrations')
-        }
         return response
       },
     })
@@ -740,12 +827,12 @@ describe('operational backup create runner', () => {
 
     expect(result).toEqual({ claimed: true, result: 'succeeded', backupId: seeded.backupId })
     expect(calls.map(({ key }) => key)).toEqual([
-      `backups/v2/2044/07/${seeded.backupId}.sql`,
-      `backups/v2/2044/07/${seeded.backupId}.manifest.json`,
+      `backups/v3/2044/07/${seeded.backupId}.sql`,
+      `backups/v3/2044/07/${seeded.backupId}.manifest.json`,
     ])
     expect(calls[0].options.customMetadata).toEqual({
       backupId: seeded.backupId,
-      format: 'bwm-d1-sql-v2',
+      format: 'bwm-d1-sql-v3',
       retentionClass: 'daily',
       sourceAppEnv: 'staging',
       sourceDatabaseId: EXPORT_DATABASE_ID,
@@ -756,7 +843,7 @@ describe('operational backup create runner', () => {
     expect(storedSql).toEqual(sqlBytes)
     const manifest = parseCanonicalManifest(storedManifest)
     expect(manifest).toMatchObject({
-      format: 'bwm-d1-sql-v2',
+      format: 'bwm-d1-sql-v3',
       backupId: seeded.backupId,
       atBookmark: 'bookmark-operational-1',
       objectEtag: 'etag-operational-1',
@@ -773,7 +860,11 @@ describe('operational backup create runner', () => {
     expect(manifest.appliedMigrations.every(({ id, name }) => (
       Number.isSafeInteger(id) && /^\d{4}_[a-z0-9_-]+\.sql$/.test(name)
     ))).toBe(true)
-    expect(evidenceOrder).toEqual(['migrations', 'export', 'migrations', 'sql', 'manifest'])
+    expect(manifest.recoveryFacts).toMatchObject({ kind: 'workbook_roundtrip_v1' })
+    expect(manifest.plaintextSqlSha256).toBe(
+      '40b30d75e5fc82d2efb638990b7a275540ebd39f1bbacadfec3f136594d64342',
+    )
+    expect(evidenceOrder).toEqual(['recovery', 'export', 'recovery', 'sql', 'manifest'])
     const opened = await openBackupManifest({ bytes: storedManifest, keyring })
     expect(opened.rawSsecKey).toEqual(Uint8Array.from({ length: 32 }, (_, index) => index + 1))
     opened.rawSsecKey.fill(0)
@@ -782,8 +873,8 @@ describe('operational backup create runner', () => {
     expect(await backup(seeded.backupId)).toMatchObject({
       status: 'stored',
       version: 3,
-      object_key: `backups/v2/2044/07/${seeded.backupId}.sql`,
-      manifest_key: `backups/v2/2044/07/${seeded.backupId}.manifest.json`,
+      object_key: `backups/v3/2044/07/${seeded.backupId}.sql`,
+      manifest_key: `backups/v3/2044/07/${seeded.backupId}.manifest.json`,
       object_etag: 'etag-operational-1',
       object_size: sqlBytes.byteLength,
       expires_at: '2044-09-02T00:00:00.000Z',
@@ -805,6 +896,113 @@ describe('operational backup create runner', () => {
     expect(downloadExport).toHaveBeenCalledOnce()
   })
 
+  it('accepts an exact stored finalization when the committed batch response is lost', async () => {
+    let responseLost = false
+    const scenario = await finalizationScenario('committed_response_loss', {
+      async batch({ sql, execute }) {
+        if (sql.length === 4 && sql[0].includes("SET status='stored'")) {
+          const result = await execute()
+          responseLost = true
+          throw new Error('completion response lost marker')
+        }
+        return execute()
+      },
+    })
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'succeeded',
+      backupId: scenario.seeded.backupId,
+    })
+    expect(responseLost).toBe(true)
+    expect(scenario.mutations.some((entry) => entry.startsWith('delete:'))).toBe(false)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({ status: 'stored', version: 3 })
+    expect(await job(scenario.seeded.jobId)).toMatchObject({ status: 'succeeded' })
+  })
+
+  it('cleans exact pending artifacts after a pre-commit completion failure and leaves the claim for expiry', async () => {
+    const scenario = await finalizationScenario('precommit_failure', {
+      async batch({ sql, execute }) {
+        if (sql.length === 4 && sql[0].includes("SET status='stored'")) {
+          throw new Error('completion precommit marker')
+        }
+        return execute()
+      },
+    })
+    await expect(runNextBackupCreate(scenario.input)).rejects.toThrow(/^BACKUP_FINALIZE_UNCERTAIN$/)
+    expect(scenario.objects.size).toBe(0)
+    expect(scenario.mutations.filter((entry) => entry.startsWith('delete:'))).toHaveLength(2)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({
+      status: 'exporting', version: 2, last_error_code: null,
+    })
+    expect(await job(scenario.seeded.jobId)).toMatchObject({
+      status: 'processing', last_error_code: null,
+    })
+    expect(await attempts(scenario.seeded.jobId)).toMatchObject([{
+      result: null, error_code: null, completed_at: null,
+    }])
+  })
+
+  it('preserves both artifacts when completion readback is unavailable', async () => {
+    const scenario = await finalizationScenario('readback_unavailable', {
+      async batch({ sql, execute }) {
+        if (sql.length === 4 && sql[0].includes("SET status='stored'")) {
+          throw new Error('completion precommit marker')
+        }
+        return execute()
+      },
+      async all({ sql, execute }) {
+        if (/FROM backup_runs AS b\s+JOIN outbox_jobs AS j/.test(sql)) {
+          throw new Error('finalization readback unavailable marker')
+        }
+        return execute()
+      },
+    })
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: scenario.seeded.backupId,
+      errorCode: 'BACKUP_FINALIZE_UNCERTAIN',
+    })
+    expect(scenario.objects.size).toBe(2)
+    expect(scenario.mutations.some((entry) => entry.startsWith('delete:'))).toBe(false)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({ status: 'exporting', version: 2 })
+    expect(await job(scenario.seeded.jobId)).toMatchObject({ status: 'processing' })
+  })
+
+  it('preserves both artifacts when completion readback is parsed but not an exact terminal state', async () => {
+    const scenario = await finalizationScenario('readback_inexact', {
+      async batch({ sql, execute }) {
+        if (sql.length === 4 && sql[0].includes("SET status='stored'")) {
+          throw new Error('completion precommit marker')
+        }
+        return execute()
+      },
+      async all({ sql, execute }) {
+        const response = await execute()
+        if (/FROM backup_runs AS b\s+JOIN outbox_jobs AS j/.test(sql)) {
+          return {
+            ...response,
+            results: response.results.map((row) => ({
+              ...row,
+              backup_object_etag: 'partially-observed-public-etag',
+            })),
+          }
+        }
+        return response
+      },
+    })
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: scenario.seeded.backupId,
+      errorCode: 'BACKUP_FINALIZE_UNCERTAIN',
+    })
+    expect(scenario.objects.size).toBe(2)
+    expect(scenario.mutations.some((entry) => entry.startsWith('delete:'))).toBe(false)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({ status: 'exporting', version: 2 })
+    expect(await job(scenario.seeded.jobId)).toMatchObject({ status: 'processing' })
+  })
+
   it('fails the backup and outbox attempt with a fixed code when manifest-last storage fails', async () => {
     const context = await cryptoContext()
     const schedulerRun = await seedScheduler()
@@ -817,7 +1015,10 @@ describe('operational backup create runner', () => {
     const rawSsecKey = new Uint8Array(32).fill(7)
     const providerMarker = 'signed-url@example.test provider-secret-body'
     let puts = 0
+    const cleanup = []
     const archive = {
+      async delete(key) { cleanup.push(`delete:${key}`) },
+      async head(key) { cleanup.push(`head:${key}`); return null },
       async put(_key, value) {
         puts += 1
         if (puts === 1) {
@@ -829,7 +1030,7 @@ describe('operational backup create runner', () => {
     }
 
     await expect(runNextBackupCreate({
-      db: env.DB,
+      db: workbookRecoveryDb(env.DB),
       cryptoContext: context,
       keyring,
       archive,
@@ -868,6 +1069,12 @@ describe('operational backup create runner', () => {
     })
 
     expect(rawSsecKey).toEqual(new Uint8Array(32))
+    expect(cleanup).toEqual([
+      `delete:backups/v3/2044/07/${seeded.backupId}.manifest.json`,
+      `head:backups/v3/2044/07/${seeded.backupId}.manifest.json`,
+      `delete:backups/v3/2044/07/${seeded.backupId}.sql`,
+      `head:backups/v3/2044/07/${seeded.backupId}.sql`,
+    ])
     expect(JSON.stringify(await backup(seeded.backupId))).not.toContain(providerMarker)
     expect(await backup(seeded.backupId)).toMatchObject({
       status: 'failed', version: 3, last_error_code: 'BACKUP_CREATE_FAILED',
@@ -883,6 +1090,129 @@ describe('operational backup create runner', () => {
       error_code: 'BACKUP_CREATE_FAILED',
       provider_reference: null,
     }])
+  })
+
+  it('rejects an offset SSE-C key view before sending any key material to R2', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_offset_ssec_key',
+      backupId: 'bkp_backup_offset_ssec_key',
+      localDay: '2044-08-14',
+    })
+    const backing = new Uint8Array(64).fill(9)
+    const offsetView = new Uint8Array(backing.buffer, 16, 32)
+    const archive = { put: vi.fn() }
+
+    await expect(runNextBackupCreate({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_offset_ssec_key'),
+      leaseOwnerFactory: sequence('owner_backup_offset_ssec_key'),
+      nonceFactory: () => new Uint8Array(12).fill(2),
+      rawKeyFactory: () => offsetView,
+      pollExport: async () => ({
+        atBookmark: 'bookmark-offset-ssec-key',
+        downloadUrl: 'https://download.example.test/offset-ssec-key',
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]))
+            controller.close()
+          },
+        }),
+      }),
+    })).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_STATE_INVALID',
+    })
+
+    expect(archive.put).not.toHaveBeenCalled()
+    expect([...backing.slice(0, 16)]).toEqual(new Array(16).fill(9))
+    expect([...backing.slice(16, 48)]).toEqual(new Array(32).fill(0))
+    expect([...backing.slice(48)]).toEqual(new Array(16).fill(9))
+  })
+
+  it('aborts the digest pipeline when R2 rejects after partially consuming SQL', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_partial_put_failure',
+      backupId: 'bkp_backup_partial_put_failure',
+      localDay: '2044-08-15',
+    })
+    const rawSsecKey = new Uint8Array(32).fill(6)
+    const putFailure = new Error('R2_PARTIAL_PUT_MARKER')
+    let sourceCancelReason = null
+    const archive = {
+      async put(_key, value) {
+        const reader = value.getReader()
+        const first = await reader.read()
+        expect(first).toEqual({ done: false, value: new Uint8Array([1, 2, 3]) })
+        reader.releaseLock()
+        throw putFailure
+      },
+      delete: vi.fn(async () => {}),
+      head: vi.fn(async () => null),
+    }
+
+    await expect(runNextBackupCreate({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_partial_put_failure'),
+      leaseOwnerFactory: sequence('owner_backup_partial_put_failure'),
+      nonceFactory: () => new Uint8Array(12).fill(3),
+      rawKeyFactory: () => rawSsecKey,
+      pollExport: async () => ({
+        atBookmark: 'bookmark-partial-put-failure',
+        downloadUrl: 'https://download.example.test/partial-put-failure',
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])) },
+          cancel(reason) { sourceCancelReason = reason },
+        }),
+      }),
+    })).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_CREATE_FAILED',
+    })
+
+    expect(sourceCancelReason).toBe(putFailure)
+    expect(rawSsecKey).toEqual(new Uint8Array(32))
+    expect(archive.delete).toHaveBeenCalledTimes(2)
+    expect(archive.head).toHaveBeenCalledTimes(2)
   })
 
   it('reclaim cleans deterministic artifacts before export and conditionally recreates both objects', async () => {
@@ -903,6 +1233,7 @@ describe('operational backup create runner', () => {
     const writes = []
     const archive = {
       async delete(key) { events.push(`delete:${key}`) },
+      async head(key) { events.push(`head:${key}`); return null },
       async put(key, value, options) {
         events.push(`put:${key}`)
         writes.push({ key, options })
@@ -911,7 +1242,7 @@ describe('operational backup create runner', () => {
       },
     }
     const result = await runNextBackupCreate({
-      db: env.DB,
+      db: workbookRecoveryDb(env.DB),
       cryptoContext: context,
       keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
       archive,
@@ -947,11 +1278,19 @@ describe('operational backup create runner', () => {
       }),
     })
     expect(result).toEqual({ claimed: true, result: 'succeeded', backupId: seeded.backupId })
-    expect(events.slice(0, 5)).toEqual([
+    expect(events.slice(0, 13)).toEqual([
+      `delete:backups/v3/2099/12/${seeded.backupId}.manifest.json`,
+      `head:backups/v3/2099/12/${seeded.backupId}.manifest.json`,
+      `delete:backups/v3/2099/12/${seeded.backupId}.sql`,
+      `head:backups/v3/2099/12/${seeded.backupId}.sql`,
       `delete:backups/v2/2099/12/${seeded.backupId}.manifest.json`,
+      `head:backups/v2/2099/12/${seeded.backupId}.manifest.json`,
       `delete:backups/v2/2099/12/${seeded.backupId}.sql`,
+      `head:backups/v2/2099/12/${seeded.backupId}.sql`,
       `delete:backups/v1/2099/12/${seeded.backupId}.manifest.json`,
+      `head:backups/v1/2099/12/${seeded.backupId}.manifest.json`,
       `delete:backups/v1/2099/12/${seeded.backupId}.sql`,
+      `head:backups/v1/2099/12/${seeded.backupId}.sql`,
       'export',
     ])
     expect(writes.map(({ options }) => options.onlyIf)).toEqual([
@@ -974,14 +1313,15 @@ describe('operational backup create runner', () => {
       idFactory: () => 'attempt_backup_operational_reclaim_stale_put_1',
       leaseOwnerFactory: () => 'owner_backup_operational_reclaim_stale_put_1',
     }))
-    const sqlKey = `backups/v2/2099/12/${seeded.backupId}.sql`
-    const manifestKey = `backups/v2/2099/12/${seeded.backupId}.manifest.json`
+    const sqlKey = `backups/v3/2099/12/${seeded.backupId}.sql`
+    const manifestKey = `backups/v3/2099/12/${seeded.backupId}.manifest.json`
     const objects = new Map([
       [sqlKey, 'pre-reclaim-sql-public'],
       [manifestKey, 'pre-reclaim-manifest-public'],
     ])
     const archive = {
       async delete(key) { objects.delete(key) },
+      async head(key) { return objects.has(key) ? { key } : null },
       async put(key, value, options) {
         if (options?.onlyIf?.etagDoesNotMatch === '*' && objects.has(key)) return null
         if (key.endsWith('.sql')) await value.pipeTo(new WritableStream({ write() {} }))
@@ -990,7 +1330,7 @@ describe('operational backup create runner', () => {
       },
     }
     const result = await runNextBackupCreate({
-      db: env.DB,
+      db: workbookRecoveryDb(env.DB),
       cryptoContext: context,
       keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
       archive,
@@ -1033,7 +1373,7 @@ describe('operational backup create runner', () => {
       backupId: seeded.backupId,
       errorCode: 'BACKUP_STATE_INVALID',
     })
-    expect(objects.get(sqlKey)).toBe('suspended-old-claimant-public')
+    expect(objects.has(sqlKey)).toBe(false)
     expect(objects.has(manifestKey)).toBe(false)
     expect(await backup(seeded.backupId)).toMatchObject({
       status: 'failed',
@@ -1057,7 +1397,7 @@ describe('operational backup create runner', () => {
     const archive = { put: vi.fn(async () => ({ etag: 'unused', size: 0 })) }
 
     await expect(runNextBackupCreate({
-      db: env.DB,
+      db: workbookRecoveryDb(env.DB),
       cryptoContext: context,
       keyring,
       archive,
@@ -1120,6 +1460,7 @@ describe('operational backup create runner', () => {
     let putCount = 0
     const archive = {
       async delete() {},
+      async head() { return null },
       async put(key, value) {
         putCount += 1
         if (key.endsWith('.sql')) await value.pipeTo(new WritableStream({ write() {} }))
@@ -1132,7 +1473,7 @@ describe('operational backup create runner', () => {
     }
     const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
     const runnerInput = () => ({
-      db: env.DB,
+      db: workbookRecoveryDb(env.DB),
       cryptoContext: context,
       keyring,
       archive,
@@ -1165,7 +1506,12 @@ describe('operational backup create runner', () => {
       }),
     })
 
-    await expect(runNextBackupCreate(runnerInput())).rejects.toThrow('BACKUP_LEASE_LOST')
+    if (expireAfterPut === 1) {
+      await expect(runNextBackupCreate(runnerInput())).rejects.toThrow('BACKUP_LEASE_LOST')
+    } else {
+      await expect(runNextBackupCreate(runnerInput()))
+        .rejects.toThrow('BACKUP_FINALIZE_UNCERTAIN')
+    }
     expect(putCount).toBe(expireAfterPut)
     expect(await job(seeded.jobId)).toMatchObject({
       status: 'processing', attempt_count: 8, last_error_code: 'OUTBOX_LEASE_EXPIRED',
@@ -1224,7 +1570,7 @@ describe('operational backup create runner', () => {
     }
 
     await runNextBackupCreate({
-      db: env.DB,
+      db: workbookRecoveryDb(env.DB),
       cryptoContext: context,
       keyring,
       archive,
@@ -1272,19 +1618,13 @@ describe('operational backup create runner', () => {
       backupId: 'bkp_backup_migration_drift',
       localDay: '2046-03-01',
     })
-    let migrationReads = 0
-    const db = trackedDb(env.DB, {
-      all: async ({ sql, execute }) => {
-        const response = await execute()
-        if (!/SELECT id,\s*name\s+FROM d1_migrations\s+ORDER BY id\s+LIMIT 257/i.test(sql)) {
-          return response
-        }
-        migrationReads += 1
-        if (migrationReads === 1) return response
-        return {
-          ...response,
-          results: [...response.results, { id: 9999, name: '9999_drift.sql' }],
-        }
+    let recoveryReads = 0
+    const db = workbookRecoveryDb(env.DB, {
+      recovery: () => {
+        recoveryReads += 1
+        const row = structuredClone(recoveryRow)
+        if (recoveryReads === 2) row.activity_version += 1
+        return { results: [row], success: true }
       },
     })
     const archive = { put: vi.fn() }
@@ -1321,7 +1661,7 @@ describe('operational backup create runner', () => {
       backupId: seeded.backupId,
       errorCode: 'BACKUP_MIGRATION_SET_CHANGED',
     })
-    expect(migrationReads).toBe(2)
+    expect(recoveryReads).toBe(2)
     expect(downloadExport).not.toHaveBeenCalled()
     expect(archive.put).not.toHaveBeenCalled()
   })

@@ -22,6 +22,7 @@ import { pruneExpiredBackups } from './backup-retention.js'
 const IDENTITY_SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const SCHEDULER_LEASE_MS = 900_000
 const ORDINARY_LIMIT = 1
+const RETENTION_LIMIT = 5
 const RECORDED_ORDINARY_LIMIT = 10
 const BACKUP_MAX_ATTEMPTS = 8
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -903,14 +904,14 @@ export async function runScheduled(input) {
         db: validated.db,
         archive: validated.env.ARCHIVE,
         nowMs: retentionCheckpoint.ms,
-        limit: 20,
+        limit: RETENTION_LIMIT,
         idFactory: deps.idFactory,
         correlationIdFactory: deps.correlationIdFactory,
       })
       if (!exactKeys(retentionResult, ['selected', 'pruned'])
         || !validCount(retentionResult.selected)
         || !validCount(retentionResult.pruned)
-        || retentionResult.selected > 20
+        || retentionResult.selected > RETENTION_LIMIT
         || retentionResult.pruned > retentionResult.selected) invalidState()
     }
 

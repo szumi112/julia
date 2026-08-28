@@ -6,6 +6,12 @@ import {
   openBackupManifest,
 } from '../worker/operations/backup-format.js'
 import { partsInWarsaw } from '../worker/operations/clock.js'
+import {
+  readBackupRecoverySnapshotWithQuery,
+  recoveryFactsMatchMigrations,
+  validateBackupRecoveryFacts,
+} from '../worker/operations/backup-recovery.js'
+import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
@@ -43,8 +49,10 @@ const HOST_BACKUP_FAILURE_CODES = new Set([
 ])
 const BACKUP_DTO_KEYS = Object.freeze([
   'id', 'status', 'version', 'localDay', 'localMonth', 'retentionClass',
-  'objectKey', 'manifestKey', 'objectEtag', 'objectSize', 'completedAt',
-  'lastErrorCode', 'createdAt',
+  'exportBookmark', 'objectKey', 'manifestKey', 'ssecKeyVersion',
+  'wrappedSsecKeyB64', 'wrapNonceB64', 'objectEtag', 'objectSize', 'startedAt',
+  'completedAt', 'expiresAt', 'restoreVerifiedAt', 'lastErrorCode', 'createdAt',
+  'updatedAt',
 ])
 
 const refused = (code = 'BACKUP_STAGING_REFUSED') => { throw new Error(code) }
@@ -149,6 +157,21 @@ export async function migrationEvidence(value) {
   }
 }
 
+async function recoveryEvidence(value) {
+  try {
+    if (!exactObject(value, ['appliedMigrations', 'recoveryFacts'])) failed()
+    const migrations = migrationRows(value.appliedMigrations)
+    const recoveryFacts = validateBackupRecoveryFacts(value.recoveryFacts)
+    recoveryFactsMatchMigrations(recoveryFacts, migrations)
+    return {
+      appliedMigrations: migrations,
+      migrationCount: migrations.length,
+      migrationSetSha256: await digestMigrations(migrations),
+      recoveryFacts,
+    }
+  } catch { failed() }
+}
+
 function sourceValue(value) {
   if (!exactObject(value, ['accountId', 'appEnv', 'dataMode', 'databaseId'])
     || !ACCOUNT_ID.test(value.accountId) || value.appEnv !== 'staging'
@@ -192,14 +215,15 @@ async function cleanupArtifacts(input, lease, keys) {
   lease = await renew(input, lease, 'cleanup')
   await input.archive.deleteObject({ key: keys.manifestKey, signal: cleanupSignal() })
   lease = await reread(input, lease)
+  const manifestAbsent = await input.archive.objectAbsent({ key: keys.manifestKey, signal: cleanupSignal() })
+  lease = await reread(input, lease)
+  if (manifestAbsent !== true) failed('BACKUP_ORPHAN_CLEANUP_FAILED')
   lease = await renew(input, lease, 'cleanup')
   await input.archive.deleteObject({ key: keys.objectKey, signal: cleanupSignal() })
   lease = await reread(input, lease)
-  const manifestAbsent = await input.archive.objectAbsent({ key: keys.manifestKey, signal: cleanupSignal() })
-  lease = await reread(input, lease)
   const sqlAbsent = await input.archive.objectAbsent({ key: keys.objectKey, signal: cleanupSignal() })
   lease = await reread(input, lease)
-  if (manifestAbsent !== true || sqlAbsent !== true) failed('BACKUP_ORPHAN_CLEANUP_FAILED')
+  if (sqlAbsent !== true) failed('BACKUP_ORPHAN_CLEANUP_FAILED')
   return lease
 }
 
@@ -226,6 +250,7 @@ function validateCreateInput(input) {
   sourceValue(input.source)
   const storeMethods = [
     'acquireLease', 'readDayFacts', 'insertQueued', 'markExporting', 'readMigrations',
+    'readRecoverySnapshot',
     'renewLease', 'rereadLease', 'markStored', 'readBackup', 'markFailed',
     'markStaleFailed', 'releaseLease',
   ]
@@ -249,7 +274,11 @@ function exactPendingBackup(value, expected) {
     && value.localMonth === expected.localMonth
     && value.retentionClass === expected.retentionClass
     && value.createdAt === expected.createdAt
-    && ['objectKey', 'manifestKey', 'objectEtag', 'objectSize', 'completedAt', 'lastErrorCode']
+    && value.updatedAt === expected.createdAt
+    && value.startedAt === (expected.status === 'queued' ? null : expected.createdAt)
+    && ['exportBookmark', 'objectKey', 'manifestKey', 'ssecKeyVersion',
+      'wrappedSsecKeyB64', 'wrapNonceB64', 'objectEtag', 'objectSize', 'completedAt',
+      'expiresAt', 'restoreVerifiedAt', 'lastErrorCode']
       .every((key) => value[key] === null)
 }
 
@@ -261,13 +290,21 @@ function exactStoredBackup(value, expected) {
     && value.localDay === expected.localDay
     && value.localMonth === expected.localMonth
     && value.retentionClass === expected.retentionClass
+    && value.exportBookmark === expected.bookmark
     && value.objectKey === expected.objectKey
     && value.manifestKey === expected.manifestKey
+    && value.ssecKeyVersion === expected.databaseFields.ssecKeyVersion
+    && value.wrappedSsecKeyB64 === expected.databaseFields.wrappedSsecKeyB64
+    && value.wrapNonceB64 === expected.databaseFields.wrapNonceB64
     && value.objectEtag === expected.objectEtag
     && value.objectSize === expected.objectSize
+    && value.startedAt === expected.createdAt
     && value.completedAt === expected.completedAt
+    && value.expiresAt === expected.expiresAt
+    && value.restoreVerifiedAt === null
     && value.lastErrorCode === null
     && value.createdAt === expected.createdAt
+    && value.updatedAt === expected.completedAt
 }
 
 export async function createStagingBackup(rawInput) {
@@ -282,7 +319,7 @@ export async function createStagingBackup(rawInput) {
   const localMonth = local.month
   let lease
   let exporting = null
-  let keys = backupObjectKeys({ backupId, localMonth, version: 2 })
+  let keys = backupObjectKeys({ backupId, localMonth, version: 3 })
   let rawSsecKey
   let completed = false
   let rowCreated = false
@@ -290,6 +327,7 @@ export async function createStagingBackup(rawInput) {
   let pendingVersion = 1
   let retentionClass = null
   let preserveCleanupLease = false
+  let finalizationUncertain = false
   try {
     const acquisition = await input.store.acquireLease({
       backupId,
@@ -308,7 +346,7 @@ export async function createStagingBackup(rawInput) {
         || !BACKUP_ID.test(acquisition.stale.backupId)
         || typeof acquisition.stale.localMonth !== 'string') failed()
       try {
-        for (const version of [2, 1]) {
+        for (const version of [3, 2, 1]) {
           const staleKeys = backupObjectKeys({
             backupId: acquisition.stale.backupId,
             localMonth: acquisition.stale.localMonth,
@@ -394,25 +432,26 @@ export async function createStagingBackup(rawInput) {
       || exporting.version !== 2 || exporting.createdAt !== createdAt) failed()
     pendingStatus = 'exporting'
     pendingVersion = 2
-    const before = await migrationEvidence(await input.store.readMigrations())
+    const before = await recoveryEvidence(await input.store.readRecoverySnapshot())
     lease = await renew(input, lease, 'creating')
     const exported = await input.pollExport({ source: input.source, signal: input.signal })
     if (!exactObject(exported, ['atBookmark', 'downloadUrl'])
       || typeof exported.atBookmark !== 'string' || exported.atBookmark.length === 0
       || typeof exported.downloadUrl !== 'string' || exported.downloadUrl.length === 0) failed()
-    const after = await migrationEvidence(await input.store.readMigrations())
+    const after = await recoveryEvidence(await input.store.readRecoverySnapshot())
     lease = await renew(input, lease, 'creating')
-    if (before.migrationSetSha256 !== after.migrationSetSha256
-      || canonicalJson(before.migrations) !== canonicalJson(after.migrations)) {
+    if (canonicalJson(before) !== canonicalJson(after)) {
       failed('BACKUP_MIGRATION_SET_CHANGED')
     }
     const downloaded = await input.downloadExport({ downloadUrl: exported.downloadUrl, signal: input.signal })
     if (!exactObject(downloaded, ['body']) || !(downloaded.body instanceof ReadableStream)) failed()
     rawSsecKey = input.rawKeyFactory()
-    if (!(rawSsecKey instanceof Uint8Array) || rawSsecKey.byteLength !== 32) failed()
+    if (!(rawSsecKey instanceof Uint8Array) || rawSsecKey.byteLength !== 32
+      || rawSsecKey.byteOffset !== 0 || !(rawSsecKey.buffer instanceof ArrayBuffer)
+      || rawSsecKey.buffer.byteLength !== 32) failed()
     const metadata = {
       backupId,
-      format: 'bwm-d1-sql-v2',
+      format: 'bwm-d1-sql-v3',
       retentionClass,
       sourceAppEnv: input.source.appEnv,
       sourceDatabaseId: input.source.databaseId,
@@ -430,22 +469,25 @@ export async function createStagingBackup(rawInput) {
       },
     })
     lease = await reread(input, lease)
-    if (!exactObject(stored, ['etag', 'size']) || typeof stored.etag !== 'string'
-      || stored.etag.length === 0 || !Number.isSafeInteger(stored.size) || stored.size < 0) failed()
+    if (!exactObject(stored, ['etag', 'size', 'plaintextSqlSha256'])
+      || typeof stored.etag !== 'string'
+      || stored.etag.length === 0 || !Number.isSafeInteger(stored.size) || stored.size < 1) failed()
     const manifestResult = await createBackupManifest({
       facts: {
-        format: 'bwm-d1-sql-v2',
+        format: 'bwm-d1-sql-v3',
         backupId,
         createdAt,
         localDay,
         localMonth,
         retentionClass,
         source: input.source,
-        appliedMigrations: before.migrations,
+        appliedMigrations: before.appliedMigrations,
         restoreSentinel: {
           kind: 'backup_run_v1', backupId, createdAt, localDay, localMonth,
           retentionClass, status: 'exporting', version: 2,
         },
+        recoveryFacts: before.recoveryFacts,
+        plaintextSqlSha256: stored.plaintextSqlSha256,
         objectKey: keys.objectKey,
         objectEtag: stored.etag,
         objectSize: stored.size,
@@ -488,7 +530,8 @@ export async function createStagingBackup(rawInput) {
     try {
       finalized = await input.store.markStored(storedFacts)
     } catch {
-      const observed = await input.store.readBackup({ backupId })
+      let observed = null
+      try { observed = await input.store.readBackup({ backupId }) } catch {}
       if (exactStoredBackup(observed, {
         backupId,
         localDay,
@@ -499,10 +542,23 @@ export async function createStagingBackup(rawInput) {
         objectEtag: stored.etag,
         objectSize: stored.size,
         completedAt: storedFacts.completedAt,
+        expiresAt: storedFacts.expiresAt,
+        bookmark: storedFacts.bookmark,
+        databaseFields: storedFacts.databaseFields,
         createdAt,
       })) {
         finalized = { status: 'stored', version: 3 }
+      } else if (exactPendingBackup(observed, {
+        backupId, localDay, localMonth, retentionClass, createdAt,
+        status: 'exporting', version: 2,
+      })) {
+        try { lease = await cleanupArtifacts(input, lease, keys) } catch {}
+        finalizationUncertain = true
+        preserveCleanupLease = true
+        throw new Error('BACKUP_FINALIZE_UNCERTAIN')
       } else {
+        finalizationUncertain = true
+        preserveCleanupLease = true
         throw new Error('BACKUP_FINALIZE_UNCERTAIN')
       }
     }
@@ -527,6 +583,7 @@ export async function createStagingBackup(rawInput) {
     }
   } catch (error) {
     const code = stableFailure(error)
+    if (finalizationUncertain) throw new Error('BACKUP_STAGING_FAILED')
     if (lease && rowCreated && !completed) {
       let cleanupCode = code
       let cleanupProven = false
@@ -565,13 +622,21 @@ export async function createStagingBackup(rawInput) {
           && observed.localDay === localDay
           && observed.localMonth === localMonth
           && observed.retentionClass === retentionClass
+          && observed.exportBookmark === null
           && observed.objectKey === null
           && observed.manifestKey === null
+          && observed.ssecKeyVersion === null
+          && observed.wrappedSsecKeyB64 === null
+          && observed.wrapNonceB64 === null
           && observed.objectEtag === null
           && observed.objectSize === null
-          && observed.completedAt === null
+          && observed.startedAt === (pendingStatus === 'queued' ? null : createdAt)
+          && observed.completedAt === failedAt
+          && observed.expiresAt === null
+          && observed.restoreVerifiedAt === null
           && observed.lastErrorCode === cleanupCode
           && observed.createdAt === createdAt
+          && observed.updatedAt === failedAt
       }
       if (!failedRowProven) preserveCleanupLease = true
       if (cleanupProven && failedRowProven) {
@@ -614,9 +679,17 @@ export async function statusStagingBackup(input) {
       || !LOCAL_DAY.test(row.localDay) || !LOCAL_MONTH.test(row.localMonth)
       || row.localMonth !== row.localDay.slice(0, 7)
       || !['daily', 'monthly'].includes(row.retentionClass)
-      || !validInstant(row.createdAt) || !positiveInteger(row.version)) failed()
+      || !validInstant(row.createdAt) || !validInstant(row.updatedAt)
+      || !positiveInteger(row.version)) failed()
     if (row.status === 'failed') {
-      if (!HOST_BACKUP_FAILURE_CODES.has(row.lastErrorCode)) failed()
+      if (!HOST_BACKUP_FAILURE_CODES.has(row.lastErrorCode)
+        || ![2, 3].includes(row.version)
+        || !(row.startedAt === null || validInstant(row.startedAt))
+        || !validInstant(row.completedAt) || row.completedAt !== row.updatedAt
+        || ['exportBookmark', 'objectKey', 'manifestKey', 'ssecKeyVersion',
+          'wrappedSsecKeyB64', 'wrapNonceB64', 'objectEtag', 'objectSize',
+          'expiresAt', 'restoreVerifiedAt']
+          .some((key) => row[key] !== null)) failed()
       return {
         backupId: row.id,
         cleanupRequired: row.lastErrorCode === 'BACKUP_ORPHAN_CLEANUP_FAILED',
@@ -626,21 +699,49 @@ export async function statusStagingBackup(input) {
     }
     if (!['stored', 'restore_verified'].includes(row.status)
       || row.lastErrorCode !== null || !validInstant(row.completedAt)
+      || !validInstant(row.startedAt) || !validInstant(row.expiresAt)
+      || row.startedAt !== row.createdAt
+      || typeof row.exportBookmark !== 'string' || row.exportBookmark.length === 0
+      || !positiveInteger(row.ssecKeyVersion)
+      || typeof row.wrappedSsecKeyB64 !== 'string' || row.wrappedSsecKeyB64.length === 0
+      || typeof row.wrapNonceB64 !== 'string' || row.wrapNonceB64.length === 0
       || typeof row.objectEtag !== 'string' || row.objectEtag.length === 0
       || !Number.isSafeInteger(row.objectSize) || row.objectSize < 0) failed()
-    const keys = backupObjectKeys({ backupId: row.id, localMonth: row.localMonth, version: 2 })
-    if (row.objectKey !== keys.objectKey || row.manifestKey !== keys.manifestKey) failed()
+    if ((row.status === 'stored' && (row.version !== 3 || row.restoreVerifiedAt !== null
+      || row.updatedAt !== row.completedAt))
+      || (row.status === 'restore_verified' && (row.version !== 4
+        || !validInstant(row.restoreVerifiedAt) || row.updatedAt !== row.restoreVerifiedAt))) failed()
+    let formatVersion = null
+    let keys = null
+    for (const version of [3, 2]) {
+      const candidate = backupObjectKeys({ backupId: row.id, localMonth: row.localMonth, version })
+      if (row.objectKey === candidate.objectKey && row.manifestKey === candidate.manifestKey) {
+        formatVersion = version
+        keys = candidate
+        break
+      }
+    }
+    if (formatVersion === null) failed()
     const bytes = await input.getManifest(keys.manifestKey)
     const opened = await openBackupManifest({ bytes, keyring: input.keyring })
     const manifest = opened.manifest
     try {
-      if (manifest.format !== 'bwm-d1-sql-v2' || manifest.backupId !== row.id
+      if (manifest.format !== `bwm-d1-sql-v${formatVersion}` || manifest.backupId !== row.id
         || manifest.createdAt !== row.createdAt || manifest.localDay !== row.localDay
         || manifest.localMonth !== row.localMonth || manifest.retentionClass !== row.retentionClass
         || manifest.objectKey !== row.objectKey || manifest.objectEtag !== row.objectEtag
         || manifest.objectSize !== row.objectSize
+        || manifest.atBookmark !== row.exportBookmark
+        || manifest.wrappedSsecKey.kekVersion !== row.ssecKeyVersion
+        || manifest.wrappedSsecKey.ciphertext !== row.wrappedSsecKeyB64
+        || manifest.wrappedSsecKey.nonce !== row.wrapNonceB64
         || canonicalJson(manifest.source) !== canonicalJson(input.source)) failed()
-      const evidence = await migrationEvidence(manifest.appliedMigrations)
+      const evidence = formatVersion === 3
+        ? await recoveryEvidence({
+          appliedMigrations: manifest.appliedMigrations,
+          recoveryFacts: manifest.recoveryFacts,
+        })
+        : await migrationEvidence(manifest.appliedMigrations)
       return {
         backupId: row.id,
         completedAt: row.completedAt,
@@ -807,13 +908,21 @@ function backupDto(row) {
     localDay: row.local_day,
     localMonth: row.local_month,
     retentionClass: row.retention_class,
+    exportBookmark: row.export_bookmark,
     objectKey: row.object_key,
     manifestKey: row.manifest_key,
+    ssecKeyVersion: row.ssec_key_version,
+    wrappedSsecKeyB64: row.wrapped_ssec_key_b64,
+    wrapNonceB64: row.wrap_nonce_b64,
     objectEtag: row.object_etag,
     objectSize: row.object_size,
+    startedAt: row.started_at,
     completedAt: row.completed_at,
+    expiresAt: row.expires_at,
+    restoreVerifiedAt: row.restore_verified_at,
     lastErrorCode: row.last_error_code,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
   }
 }
 
@@ -904,6 +1013,7 @@ export function createDemandBackupStore(input) {
     return { id: row.id, localDay: row.local_day, localMonth: row.local_month, retentionClass: row.retention_class, status: row.status, version: row.version, createdAt: row.created_at }
   }
   const readMigrations = async () => query('SELECT id,name FROM d1_migrations ORDER BY id LIMIT 257')
+  const readRecoverySnapshot = async () => readBackupRecoverySnapshotWithQuery(query)
   const markStored = async (facts) => {
     const now = facts.completedAt
     const dbf = facts.databaseFields
@@ -912,19 +1022,26 @@ export function createDemandBackupStore(input) {
     return parseReturning(rows, ['status', 'version'])
   }
   const readBackup = async ({ backupId }) => {
-    const rows = await query(`SELECT id,local_day,local_month,retention_class,status,version,object_key,manifest_key,object_etag,object_size,completed_at,last_error_code,created_at FROM backup_runs WHERE id=${safeSqlText(backupId)}`)
-    return rows.length === 0 ? null : backupDto(parseReturning(rows, ['id', 'local_day', 'local_month', 'retention_class', 'status', 'version', 'object_key', 'manifest_key', 'object_etag', 'object_size', 'completed_at', 'last_error_code', 'created_at']))
+    const columns = [
+      'id', 'local_day', 'local_month', 'retention_class', 'status', 'version',
+      'export_bookmark', 'object_key', 'manifest_key', 'ssec_key_version',
+      'wrapped_ssec_key_b64', 'wrap_nonce_b64', 'object_etag', 'object_size',
+      'started_at', 'completed_at', 'expires_at', 'restore_verified_at',
+      'last_error_code', 'created_at', 'updated_at',
+    ]
+    const rows = await query(`SELECT ${columns.join(',')} FROM backup_runs WHERE id=${safeSqlText(backupId)}`)
+    return rows.length === 0 ? null : backupDto(parseReturning(rows, columns))
   }
   const markFailed = async ({ backupId, errorCode, expectedStatus, expectedVersion, failedAt, lease }) => {
     if (!((expectedStatus === 'queued' && expectedVersion === 1)
       || (expectedStatus === 'exporting' && expectedVersion === 2))) failed()
     const fence = await ownedFence(lease, failedAt)
-    const rows = await query(`UPDATE backup_runs SET status='failed',version=version+1,last_error_code=${safeSqlText(errorCode)},updated_at=${safeSqlText(failedAt)} WHERE id=${safeSqlText(backupId)} AND status=${safeSqlText(expectedStatus)} AND version=${expectedVersion} AND ${fence} RETURNING status,version`)
+    const rows = await query(`UPDATE backup_runs SET status='failed',version=version+1,completed_at=${safeSqlText(failedAt)},last_error_code=${safeSqlText(errorCode)},updated_at=${safeSqlText(failedAt)} WHERE id=${safeSqlText(backupId)} AND status=${safeSqlText(expectedStatus)} AND version=${expectedVersion} AND ${fence} RETURNING status,version`)
     return parseReturning(rows, ['status', 'version'])
   }
   const markStaleFailed = async ({ staleBackupId, failedAt, lease, errorCode }) => {
     const fence = await ownedFence(lease, failedAt)
-    const rows = await query(`UPDATE backup_runs SET status='failed',version=version+1,last_error_code=${safeSqlText(errorCode)},updated_at=${safeSqlText(failedAt)} WHERE id=${safeSqlText(staleBackupId)} AND status IN ('queued','exporting','failed') AND ${fence} RETURNING status,version`)
+    const rows = await query(`UPDATE backup_runs SET status='failed',version=version+1,completed_at=${safeSqlText(failedAt)},last_error_code=${safeSqlText(errorCode)},updated_at=${safeSqlText(failedAt)} WHERE id=${safeSqlText(staleBackupId)} AND status IN ('queued','exporting','failed') AND ${fence} RETURNING status,version`)
     return parseReturning(rows, ['status', 'version'])
   }
   const releaseLease = async ({ lease, now }) => {
@@ -944,18 +1061,31 @@ export function createDemandBackupStore(input) {
   }
   return Object.freeze({
     acquireLease, readDayFacts, insertQueued, markExporting, readMigrations,
+    readRecoverySnapshot,
     renewLease, rereadLease, markStored, readBackup, markFailed, markStaleFailed,
     releaseLease, markRestoreVerified,
   })
 }
 
 function customerEncryption(ssecKey) {
-  if (!(ssecKey instanceof Uint8Array) || ssecKey.byteLength !== 32) failed()
-  return { SSECustomerAlgorithm: 'AES256', SSECustomerKey: Buffer.from(ssecKey).toString('base64') }
+  if (!(ssecKey instanceof Uint8Array) || !(ssecKey.buffer instanceof ArrayBuffer)
+    || ssecKey.byteOffset !== 0 || ssecKey.byteLength !== 32
+    || ssecKey.buffer.byteLength !== 32) failed()
+  return {
+    SSECustomerAlgorithm: 'AES256',
+    SSECustomerKey: Buffer.from(ssecKey.buffer, 0, 32).toString('base64'),
+  }
 }
 
-function normalizedEtag(value) {
-  return typeof value === 'string' ? value.replace(/^"|"$/g, '') : null
+export function normalizedS3Etag(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 258) failed()
+  const startsQuoted = value.startsWith('"')
+  const endsQuoted = value.endsWith('"')
+  if (startsQuoted !== endsQuoted) failed()
+  const normalized = startsQuoted ? value.slice(1, -1) : value
+  if (normalized.length === 0 || normalized.length > 256
+    || /[\u0000-\u0020"\\\u007f]/.test(normalized)) failed()
+  return normalized
 }
 
 function concatQueue(queue, length) {
@@ -990,14 +1120,24 @@ export function createS3BackupArchive(input) {
     const encryption = customerEncryption(ssecKey)
     const metadata = Object.fromEntries(Object.entries(customMetadata).map(([name, value]) => [name.toLowerCase(), value]))
     const reader = body.getReader()
+    const digest = createHash('sha256')
     const queue = []
     let pending = 0
     let total = 0
     let ended = false
+    let digestFinalized = false
+    const finishDigest = () => {
+      if (digestFinalized) failed()
+      digestFinalized = true
+      return digest.digest('hex')
+    }
     const fill = async () => {
       const part = await reader.read()
       if (part.done) { ended = true; return }
       if (!(part.value instanceof Uint8Array) || part.value.byteLength === 0) failed()
+      if (!Number.isSafeInteger(pending + part.value.byteLength)
+        || !Number.isSafeInteger(total + part.value.byteLength)) failed()
+      digest.update(part.value)
       queue.push({ bytes: part.value, offset: 0 })
       pending += part.value.byteLength
       total += part.value.byteLength
@@ -1015,9 +1155,8 @@ export function createS3BackupArchive(input) {
         } finally {
           payload.fill(0)
         }
-        const etag = normalizedEtag(response.ETag)
-        if (!etag) failed()
-        return { etag, size: total }
+        const etag = normalizedS3Etag(response.ETag)
+        return { etag, size: total, plaintextSqlSha256: finishDigest() }
       }
       await checkpoint()
       const created = await send(new CreateMultipartUploadCommand({
@@ -1028,6 +1167,7 @@ export function createS3BackupArchive(input) {
       const parts = []
       let partNumber = 1
       while (!ended || pending > 0) {
+        if (!Number.isSafeInteger(partNumber) || partNumber > 10_000) failed()
         while (!ended && pending < MULTIPART_PART_BYTES) await fill()
         const length = pending >= MULTIPART_PART_BYTES ? MULTIPART_PART_BYTES : pending
         if (length === 0) break
@@ -1043,8 +1183,7 @@ export function createS3BackupArchive(input) {
         } finally {
           payload.fill(0)
         }
-        const etag = normalizedEtag(uploaded.ETag)
-        if (!etag) failed()
+        normalizedS3Etag(uploaded.ETag)
         parts.push({ ETag: uploaded.ETag, PartNumber: partNumber })
         partNumber += 1
         await checkpoint()
@@ -1055,11 +1194,11 @@ export function createS3BackupArchive(input) {
         MultipartUpload: { Parts: parts },
       }), signal)
       activeMultipart = null
-      const etag = normalizedEtag(completed.ETag)
-      if (!etag) failed()
+      const etag = normalizedS3Etag(completed.ETag)
       await checkpoint()
-      return { etag, size: total }
+      return { etag, size: total, plaintextSqlSha256: finishDigest() }
     } catch (error) {
+      try { await reader.cancel(error) } catch {}
       if (activeMultipart) {
         const multipart = activeMultipart
         try {
@@ -1071,6 +1210,9 @@ export function createS3BackupArchive(input) {
       }
       throw error
     } finally {
+      if (!digestFinalized) {
+        try { digest.destroy() } catch {}
+      }
       for (const part of queue) part.bytes.fill(0)
       try { reader.releaseLock() } catch {}
     }
@@ -1080,8 +1222,7 @@ export function createS3BackupArchive(input) {
     const response = await send(new PutObjectCommand({
       Bucket: input.bucket, Key: key, Body: bytes, IfNoneMatch: '*', ContentType: 'application/json',
     }), signal)
-    const etag = normalizedEtag(response.ETag)
-    if (!etag) failed()
+    const etag = normalizedS3Etag(response.ETag)
     return { etag, size: bytes.byteLength }
   }
   const headSql = async ({ key, ssecKey, signal }) => {
@@ -1089,7 +1230,7 @@ export function createS3BackupArchive(input) {
     const metadataKeys = ['backupid', 'format', 'retentionclass', 'sourceappenv', 'sourcedatabaseid']
     if (!exactObject(response.Metadata, metadataKeys)) failed()
     return {
-      etag: normalizedEtag(response.ETag),
+      etag: normalizedS3Etag(response.ETag),
       size: response.ContentLength,
       customMetadata: {
         backupId: response.Metadata.backupid,
@@ -1102,7 +1243,7 @@ export function createS3BackupArchive(input) {
   }
   const headManifest = async ({ key, signal }) => {
     const response = await send(new HeadObjectCommand({ Bucket: input.bucket, Key: key }), signal)
-    return { etag: normalizedEtag(response.ETag), size: response.ContentLength }
+    return { etag: normalizedS3Etag(response.ETag), size: response.ContentLength }
   }
   const deleteObject = async ({ key, signal }) => { await send(new DeleteObjectCommand({ Bucket: input.bucket, Key: key }), signal) }
   const objectAbsent = async ({ key, signal }) => {

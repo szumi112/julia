@@ -1,18 +1,18 @@
 import { execFile } from 'node:child_process'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import { createD1DatabaseFacade, createD1RestClient } from './bootstrap-owner.mjs'
 import { createKeyring } from '../worker/security/keyring.js'
 import {
-  createDemandBackupStore,
-  createPinnedSourceRunner,
   validateStagingBackupConfig,
 } from './backup-staging-lib.mjs'
 import {
   createPinnedWranglerRunner,
+  createRestoreSourceStore,
   restoreBackup,
   validateRestoreRequest,
 } from './restore-backup-lib.mjs'
@@ -84,25 +84,37 @@ const databaseFacts = (config) => {
   }
 }
 
-async function boundedJson(response) {
+export async function readBoundedJson(response) {
   if (!(response instanceof Response) || !response.ok || response.redirected || !(response.body instanceof ReadableStream)) failed()
   const reader = response.body.getReader()
   const chunks = []
   let total = 0
+  let completed = false
   try {
     while (true) {
       const part = await reader.read()
       if (part.done) break
       if (!(part.value instanceof Uint8Array) || part.value.byteLength === 0) failed()
+      if (!Number.isSafeInteger(total + part.value.byteLength)) failed()
       total += part.value.byteLength
       if (total > RESPONSE_MAX_BYTES) failed()
       chunks.push(part.value)
     }
-  } finally { reader.releaseLock() }
-  const bytes = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) } catch { failed() } finally { bytes.fill(0) }
+    const bytes = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+    try {
+      const result = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+      completed = true
+      return result
+    } catch { failed() } finally { bytes.fill(0) }
+  } finally {
+    if (!completed) {
+      try { await reader.cancel() } catch {}
+    }
+    for (const chunk of chunks) chunk.fill(0)
+    try { reader.releaseLock() } catch {}
+  }
 }
 
 function bodyStream(body) {
@@ -111,24 +123,114 @@ function bodyStream(body) {
   failed()
 }
 
-async function boundedBody(body) {
+function pairedEtag(value) {
+  if (typeof value !== 'string' || !/^"[^"\r\n]+"$/.test(value)) failed()
+  const etag = value.slice(1, -1)
+  if (etag.length < 1 || etag.length > 1024 || etag !== etag.trim()
+    || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(etag)) failed()
+  return etag
+}
+
+function quotedEtag(value) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 1024
+    || value.includes('"') || value !== value.trim()
+    || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)) failed()
+  return `"${value}"`
+}
+
+function objectMetadata(value) {
+  if (!ownObject(value)) failed()
+  const format = value.format
+  const keys = format === 'bwm-d1-sql-v1'
+    ? ['backupid', 'format', 'retentionclass']
+    : ['backupid', 'format', 'retentionclass', 'sourceappenv', 'sourcedatabaseid']
+  if (Reflect.ownKeys(value).length !== keys.length
+    || !keys.every((key) => Object.hasOwn(value, key))) failed()
+  return format === 'bwm-d1-sql-v1'
+    ? {
+        backupId: value.backupid,
+        format,
+        retentionClass: value.retentionclass,
+      }
+    : {
+        backupId: value.backupid,
+        format,
+        retentionClass: value.retentionclass,
+        sourceAppEnv: value.sourceappenv,
+        sourceDatabaseId: value.sourcedatabaseid,
+      }
+}
+
+export async function readBoundedManifestBody(body) {
   const reader = bodyStream(body).getReader()
   const chunks = []
   let total = 0
+  let completed = false
   try {
     while (true) {
       const part = await reader.read()
       if (part.done) break
       if (!(part.value instanceof Uint8Array) || part.value.byteLength === 0) failed()
+      if (!Number.isSafeInteger(total + part.value.byteLength)) failed()
       total += part.value.byteLength
       if (total > MANIFEST_MAX_BYTES) failed()
       chunks.push(part.value)
     }
-  } finally { reader.releaseLock() }
-  const result = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength }
-  return result
+    const result = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength }
+    completed = true
+    return result
+  } finally {
+    if (!completed) {
+      try { await reader.cancel() } catch {}
+    }
+    for (const chunk of chunks) chunk.fill(0)
+    try { reader.releaseLock() } catch {}
+  }
+}
+
+export function sseCustomerParameters(ssecKey) {
+  if (!(ssecKey instanceof Uint8Array) || !(ssecKey.buffer instanceof ArrayBuffer)
+    || ssecKey.byteOffset !== 0 || ssecKey.byteLength !== 32
+    || ssecKey.buffer.byteLength !== 32) failed()
+  return {
+    SSECustomerAlgorithm: 'AES256',
+    SSECustomerKey: Buffer.from(ssecKey.buffer, 0, 32).toString('base64'),
+  }
+}
+
+const RESTORE_RESULT_KEYS = Object.freeze([
+  'backupId', 'format', 'migrationCount', 'migrationSetSha256', 'recoveryKind',
+  'target', 'manifestAuthenticated', 'objectReadbackVerified',
+  'migrationsVerified', 'recoveryFactsVerified', 'restoreSentinelVerified',
+  'sourceMarkedVerified', 'targetFreshVerified',
+])
+
+export function restoreCliLine(value) {
+  if (!ownObject(value)
+    || !Reflect.ownKeys(value).every((key, index) => key === RESTORE_RESULT_KEYS[index])
+    || Reflect.ownKeys(value).length !== RESTORE_RESULT_KEYS.length
+    || typeof value.backupId !== 'string' || typeof value.target !== 'string'
+    || !['bwm-d1-sql-v1', 'bwm-d1-sql-v2', 'bwm-d1-sql-v3'].includes(value.format)
+    || !Number.isSafeInteger(value.migrationCount) || value.migrationCount < 1
+    || !/^[0-9a-f]{64}$/.test(value.migrationSetSha256)
+    || !['manifestAuthenticated', 'objectReadbackVerified', 'migrationsVerified',
+      'recoveryFactsVerified', 'restoreSentinelVerified', 'sourceMarkedVerified',
+      'targetFreshVerified'].every((key) => typeof value[key] === 'boolean')) failed()
+  const expected = value.format === 'bwm-d1-sql-v1'
+    ? [null, false, false, false, false]
+    : value.format === 'bwm-d1-sql-v2'
+      ? [null, true, false, true, true]
+      : [value.recoveryKind, true, true, true, true]
+  if ((value.format === 'bwm-d1-sql-v3'
+    && !['core_pre_workbook_v1', 'workbook_roundtrip_v1'].includes(value.recoveryKind))
+    || [value.recoveryKind, value.migrationsVerified, value.recoveryFactsVerified,
+      value.restoreSentinelVerified, value.sourceMarkedVerified]
+      .some((entry, index) => entry !== expected[index])
+    || value.manifestAuthenticated !== true || value.objectReadbackVerified !== true
+    || value.targetFreshVerified !== true) failed()
+  return `${JSON.stringify(value)}\n`
 }
 
 async function main() {
@@ -139,6 +241,7 @@ async function main() {
   const policy = databaseFacts(config)
   validateRestoreRequest({ request, ...policy })
   const apiToken = requiredEnvironment(process.env, 'CLOUDFLARE_API_TOKEN')
+  const d1Token = requiredEnvironment(process.env, 'CF_D1_EXPORT_TOKEN')
   const accessKeyId = requiredEnvironment(process.env, 'R2_ACCESS_KEY_ID')
   const secretAccessKey = requiredEnvironment(process.env, 'R2_SECRET_ACCESS_KEY')
   const keyring = await createKeyring(process.env, { activeBackupKekVersion: selection.activeBackupKekVersion })
@@ -155,11 +258,17 @@ async function main() {
     signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)]),
   })
   const targetRunner = createPinnedWranglerRunner({ tempRoot: tmpdir(), wranglerPath, execute })
-  const sourceRunner = createPinnedSourceRunner({ tempRoot: tmpdir(), wranglerPath, database: selection.database, execute })
-  const sourceStore = createDemandBackupStore({ query: sourceRunner.query })
-  const customerParameters = (ssecKey) => ({
-    SSECustomerAlgorithm: 'AES256',
-    SSECustomerKey: Buffer.from(ssecKey).toString('base64'),
+  const sourceStore = createRestoreSourceStore({
+    db: createD1DatabaseFacade(createD1RestClient({
+      accountId: selection.source.accountId,
+      databaseId: selection.source.databaseId,
+      token: d1Token,
+      fetch,
+      deadlineSignal: (milliseconds) => AbortSignal.any([
+        controller.signal,
+        AbortSignal.timeout(milliseconds),
+      ]),
+    })),
   })
   const providerSignal = () => AbortSignal.any([controller.signal, AbortSignal.timeout(60_000)])
   const provider = {
@@ -168,48 +277,57 @@ async function main() {
         `https://api.cloudflare.com/client/v4/accounts/${selection.source.accountId}/d1/database?name=${encodeURIComponent(targetName)}&per_page=10`,
         { headers: { Authorization: `Bearer ${apiToken}` }, redirect: 'error', signal: providerSignal() },
       )
-      const payload = await boundedJson(response)
+      const payload = await readBoundedJson(response)
       const matches = ownObject(payload) && payload.success === true && Array.isArray(payload.result)
         ? payload.result.filter((row) => ownObject(row) && row.name === targetName)
         : []
       if (matches.length !== 1) refused()
       return { name: matches[0].name, id: matches[0].uuid, jurisdiction: matches[0].jurisdiction }
     },
-    async getManifest(key) {
-      const response = await s3.send(new GetObjectCommand({ Bucket: selection.archive.bucket, Key: key }), { abortSignal: providerSignal() })
-      return boundedBody(response.Body)
+    async headManifest({ key }) {
+      const response = await s3.send(new HeadObjectCommand({
+        Bucket: selection.archive.bucket,
+        Key: key,
+      }), { abortSignal: providerSignal() })
+      return { etag: pairedEtag(response.ETag), size: response.ContentLength }
+    },
+    async getManifest({ key, ifMatch }) {
+      const response = await s3.send(new GetObjectCommand({
+        Bucket: selection.archive.bucket,
+        Key: key,
+        IfMatch: quotedEtag(ifMatch),
+      }), { abortSignal: providerSignal() })
+      return {
+        etag: pairedEtag(response.ETag),
+        size: response.ContentLength,
+        bytes: await readBoundedManifestBody(response.Body),
+      }
     },
     async headObject({ key, ssecKey }) {
       const response = await s3.send(new HeadObjectCommand({
-        Bucket: selection.archive.bucket, Key: key, ...customerParameters(ssecKey),
+        Bucket: selection.archive.bucket, Key: key, ...sseCustomerParameters(ssecKey),
       }), { abortSignal: providerSignal() })
-      const format = response.Metadata?.format
-      const customMetadata = format === 'bwm-d1-sql-v2'
-        ? {
-            backupId: response.Metadata?.backupid,
-            format,
-            retentionClass: response.Metadata?.retentionclass,
-            sourceAppEnv: response.Metadata?.sourceappenv,
-            sourceDatabaseId: response.Metadata?.sourcedatabaseid,
-          }
-        : {
-            backupId: response.Metadata?.backupid,
-            format,
-            retentionClass: response.Metadata?.retentionclass,
-          }
-      return { etag: response.ETag?.replace(/^"|"$/g, ''), size: response.ContentLength, customMetadata }
+      return {
+        etag: pairedEtag(response.ETag),
+        size: response.ContentLength,
+        customMetadata: objectMetadata(response.Metadata),
+      }
     },
-    async getObject({ key, ssecKey }) {
+    async getObject({ key, ssecKey, ifMatch }) {
       const response = await s3.send(new GetObjectCommand({
-        Bucket: selection.archive.bucket, Key: key, ...customerParameters(ssecKey),
+        Bucket: selection.archive.bucket,
+        Key: key,
+        IfMatch: quotedEtag(ifMatch),
+        ...sseCustomerParameters(ssecKey),
       }), { abortSignal: providerSignal() })
-      return bodyStream(response.Body)
+      return {
+        etag: pairedEtag(response.ETag),
+        size: response.ContentLength,
+        body: bodyStream(response.Body),
+      }
     },
-    async markRestoreVerified(facts) {
-      const verifiedAt = new Date().toISOString()
-      return sourceStore.markRestoreVerified({ ...facts, verifiedAt })
-    },
-    async readSourceBackup({ backupId }) { return sourceStore.readBackup({ backupId }) },
+    async markRestoreVerified(facts) { return sourceStore.markRestoreVerified(facts) },
+    async readSourceBackup({ backupId }) { return sourceStore.readSourceBackup({ backupId }) },
   }
   const abort = () => controller.abort()
   process.once('SIGINT', abort)
@@ -223,25 +341,28 @@ async function main() {
       keyring,
       provider,
       runCommand: targetRunner.runCommand,
-      log() {},
+      cleanupTarget: targetRunner.cleanup,
       signal: controller.signal,
     })
-    process.stdout.write(`${JSON.stringify(result)}\n`)
+    process.stdout.write(restoreCliLine(result))
   } finally {
     process.removeListener('SIGINT', abort)
     process.removeListener('SIGTERM', abort)
-    try { await targetRunner.cleanup() } catch {}
-    try { await sourceRunner.cleanup() } catch {}
     try { s3.destroy() } catch {}
   }
 }
 
-try {
-  await main()
-} catch (error) {
-  const status = error?.message === 'RESTORE_REFUSED' || error?.message === 'BACKUP_STAGING_REFUSED'
-    ? 'refused'
-    : 'failed'
-  process.stderr.write(`${JSON.stringify({ status })}\n`)
-  process.exitCode = 1
+const invokedDirectly = typeof process.argv[1] === 'string'
+  && pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+
+if (invokedDirectly) {
+  try {
+    await main()
+  } catch (error) {
+    const status = error?.message === 'RESTORE_REFUSED' || error?.message === 'BACKUP_STAGING_REFUSED'
+      ? 'refused'
+      : 'failed'
+    process.stderr.write(`${JSON.stringify({ status })}\n`)
+    process.exitCode = 1
+  }
 }

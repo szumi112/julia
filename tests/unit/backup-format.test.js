@@ -655,7 +655,6 @@ test('v2 schema rejects malformed source, migration order and bounds, and non-in
     change(manifest)
     invalid(() => parseCanonicalManifest(bytes(canonical(manifest))))
   }
-  invalid(() => backupObjectKeys({ backupId: fixtureV2.manifest.backupId, localMonth: '2026-08', version: 3 }))
   invalid(() => backupObjectKeys({ backupId: fixtureV2.manifest.backupId, localMonth: '2026-08', version: 1, extra: true }))
 })
 

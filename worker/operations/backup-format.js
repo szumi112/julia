@@ -1,3 +1,8 @@
+import {
+  recoveryFactsMatchMigrations,
+  validateBackupRecoveryFacts,
+} from './backup-recovery.js'
+
 const INVALID = 'BACKUP_MANIFEST_INVALID'
 const CRYPTO_FAILED = 'BACKUP_CRYPTO_FAILED'
 const POLLUTING_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
@@ -12,9 +17,16 @@ const V2_ROOT_KEYS = [
   'source', 'appliedMigrations', 'restoreSentinel',
   'objectKey', 'objectEtag', 'objectSize', 'atBookmark', 'wrappedSsecKey',
 ]
+const V3_ROOT_KEYS = [
+  'format', 'backupId', 'createdAt', 'localDay', 'localMonth', 'retentionClass',
+  'source', 'appliedMigrations', 'restoreSentinel', 'recoveryFacts',
+  'plaintextSqlSha256', 'objectKey', 'objectEtag', 'objectSize', 'atBookmark',
+  'wrappedSsecKey',
+]
 const WRAPPED_KEY_KEYS = ['algorithm', 'kekVersion', 'nonce', 'ciphertext']
 const V1_FACT_KEYS = V1_ROOT_KEYS.filter((key) => key !== 'wrappedSsecKey')
 const V2_FACT_KEYS = V2_ROOT_KEYS.filter((key) => key !== 'wrappedSsecKey')
+const V3_FACT_KEYS = V3_ROOT_KEYS.filter((key) => key !== 'wrappedSsecKey')
 const SOURCE_KEYS = ['accountId', 'appEnv', 'dataMode', 'databaseId']
 const MIGRATION_KEYS = ['id', 'name']
 const SENTINEL_KEYS = [
@@ -29,6 +41,7 @@ const MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/
 const DAY = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const BASE64URL = /^[A-Za-z0-9_-]*$/
+const SHA256 = /^[0-9a-f]{64}$/
 const UNSAFE_OPAQUE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
 
 const invalid = () => { throw new Error(INVALID) }
@@ -248,12 +261,20 @@ function factsValue(value) {
   const facts = discriminatedObject(value, {
     'bwm-d1-sql-v1': V1_FACT_KEYS,
     'bwm-d1-sql-v2': V2_FACT_KEYS,
+    'bwm-d1-sql-v3': V3_FACT_KEYS,
   })
   if (facts.format === 'bwm-d1-sql-v1') return commonFactsValue(facts, 1)
-  commonFactsValue(facts, 2)
+  commonFactsValue(facts, facts.format === 'bwm-d1-sql-v2' ? 2 : 3)
   facts.source = sourceValue(facts.source)
   facts.appliedMigrations = migrationsValue(facts.appliedMigrations)
   facts.restoreSentinel = sentinelValue(facts.restoreSentinel, facts)
+  if (facts.format === 'bwm-d1-sql-v3') {
+    if (facts.objectSize < 1) invalid()
+    facts.recoveryFacts = validateBackupRecoveryFacts(facts.recoveryFacts)
+    if (typeof facts.plaintextSqlSha256 !== 'string'
+      || !SHA256.test(facts.plaintextSqlSha256)) invalid()
+    recoveryFactsMatchMigrations(facts.recoveryFacts, facts.appliedMigrations)
+  }
   return facts
 }
 
@@ -261,8 +282,11 @@ function manifestValue(value) {
   const manifest = discriminatedObject(value, {
     'bwm-d1-sql-v1': V1_ROOT_KEYS,
     'bwm-d1-sql-v2': V2_ROOT_KEYS,
+    'bwm-d1-sql-v3': V3_ROOT_KEYS,
   })
-  const factKeys = manifest.format === 'bwm-d1-sql-v1' ? V1_FACT_KEYS : V2_FACT_KEYS
+  const factKeys = manifest.format === 'bwm-d1-sql-v1'
+    ? V1_FACT_KEYS
+    : manifest.format === 'bwm-d1-sql-v2' ? V2_FACT_KEYS : V3_FACT_KEYS
   const facts = factsValue(Object.fromEntries(factKeys.map((key) => [key, manifest[key]])))
   const wrapped = exactObject(manifest.wrappedSsecKey, WRAPPED_KEY_KEYS)
   if (wrapped.algorithm !== 'A256GCM'
@@ -320,7 +344,9 @@ function decodeBase64Url(value, byteLength) {
 }
 
 function aadFor(facts) {
-  const version = facts.format === 'bwm-d1-sql-v1' ? 1 : 2
+  const version = facts.format === 'bwm-d1-sql-v1'
+    ? 1
+    : facts.format === 'bwm-d1-sql-v2' ? 2 : 3
   return new TextEncoder().encode(`bwm:backup-key:v${version}\n${canonicalJson(facts)}`)
 }
 
@@ -346,7 +372,7 @@ export function backupObjectKeys(input) {
     const value = Object.fromEntries(fields.map((field) => [field, descriptors.get(field).value]))
     if (typeof value.backupId !== 'string' || !BACKUP_ID.test(value.backupId) || !validMonth(value.localMonth)) invalid()
     const version = fields.length === 2 ? 1 : value.version
-    if (![1, 2].includes(version)) invalid()
+    if (![1, 2, 3].includes(version)) invalid()
     const [year, month] = value.localMonth.split('-')
     return {
       objectKey: `backups/v${version}/${year}/${month}/${value.backupId}.sql`,
@@ -463,7 +489,9 @@ export async function openBackupManifest(input) {
     ciphertext = decodeBase64Url(manifest.wrappedSsecKey.ciphertext, 48)
     const kek = await ring.getBackupKek(manifest.wrappedSsecKey.kekVersion)
     if (!validBackupKek(kek)) invalid()
-    const factKeys = manifest.format === 'bwm-d1-sql-v1' ? V1_FACT_KEYS : V2_FACT_KEYS
+    const factKeys = manifest.format === 'bwm-d1-sql-v1'
+      ? V1_FACT_KEYS
+      : manifest.format === 'bwm-d1-sql-v2' ? V2_FACT_KEYS : V3_FACT_KEYS
     aad = aadFor(factsValue(Object.fromEntries(factKeys.map((key) => [key, manifest[key]]))))
     plaintext = new Uint8Array(await crypto.subtle.decrypt({
       name: 'AES-GCM', iv: nonce, additionalData: aad, tagLength: 128,

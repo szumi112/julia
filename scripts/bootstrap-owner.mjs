@@ -204,6 +204,7 @@ const responseText = async (response, signal) => {
   if (typeof response?.body?.getReader !== 'function') fail('D1_REST_RESPONSE_INVALID')
   const reader = response.body.getReader()
   const decoder = new TextDecoder('utf-8', { fatal: true })
+  let completed = false
   let total = 0
   let value = ''
   try {
@@ -212,13 +213,11 @@ const responseText = async (response, signal) => {
       if (part.done) break
       if (!(part.value instanceof Uint8Array)) fail('D1_REST_RESPONSE_INVALID')
       total += part.value.byteLength
-      if (total > MAX_RESPONSE_BYTES) {
-        try { await reader.cancel() } catch { /* Fixed public error. */ }
-        fail('D1_REST_RESPONSE_INVALID')
-      }
+      if (!Number.isSafeInteger(total) || total > MAX_RESPONSE_BYTES) fail('D1_REST_RESPONSE_INVALID')
       value += decoder.decode(part.value, { stream: true })
     }
     value += decoder.decode()
+    completed = true
     return value
   } catch (error) {
     if (['D1_REST_AMBIGUOUS', 'D1_REST_RESPONSE_INVALID'].includes(error?.message)) {
@@ -226,6 +225,9 @@ const responseText = async (response, signal) => {
     }
     fail('D1_REST_RESPONSE_INVALID')
   } finally {
+    if (!completed) {
+      try { await reader.cancel() } catch { /* Best effort after a fixed public error. */ }
+    }
     try { reader.releaseLock() } catch { /* The stream is already consumed. */ }
   }
 }

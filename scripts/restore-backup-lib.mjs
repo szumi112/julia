@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
@@ -5,8 +6,8 @@ import {
   canonicalJson,
   expectedObjectMetadata,
   openBackupManifest,
-  parseCanonicalManifest,
 } from '../worker/operations/backup-format.js'
+import { readBackupRecoverySnapshotWithQuery } from '../worker/operations/backup-recovery.js'
 
 const TARGET = /^bearwithme-restore-[a-z0-9][a-z0-9-]{0,62}$/
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -15,10 +16,21 @@ const ACCOUNT_ID = /^[0-9a-f]{32}$/
 const DATABASE_NAME = /^[a-z0-9][a-z0-9-]{0,127}$/
 const MIGRATION_NAME = /^\d{4}_[a-z0-9_-]+\.sql$/
 const MIGRATION_NAME_MAX_BYTES = 255
-const MANIFEST_KEY = /^backups\/(v1|v2)\/\d{4}\/(?:0[1-9]|1[0-2])\/(bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123})\.manifest\.json$/
+const MANIFEST_KEY = /^backups\/(v1|v2|v3)\/\d{4}\/(?:0[1-9]|1[0-2])\/(bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123})\.manifest\.json$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const RESTORE_BINDING = 'RESTORE_TARGET'
 const WRANGLER_OUTPUT_MAX_BYTES = 1024 * 1024
+const MANIFEST_MAX_BYTES = 64 * 1024
+const FRESH_TARGET_SQL = `SELECT count(*) AS application_object_count
+FROM sqlite_schema
+WHERE name NOT GLOB 'sqlite_*'
+  AND name NOT GLOB '_cf_*'`
+const SOURCE_ROW_KEYS = Object.freeze([
+  'id', 'status', 'version', 'localDay', 'localMonth', 'retentionClass',
+  'exportBookmark', 'objectKey', 'manifestKey', 'ssecKeyVersion',
+  'wrappedSsecKeyB64', 'wrapNonceB64', 'objectEtag', 'objectSize', 'completedAt',
+  'restoreVerifiedAt', 'lastErrorCode', 'createdAt', 'updatedAt',
+])
 
 const refused = () => { throw new Error('RESTORE_REFUSED') }
 const failed = () => { throw new Error('RESTORE_FAILED') }
@@ -160,16 +172,7 @@ export function createPinnedWranglerRunner(input) {
     return configPath
   }
 
-  const runCommand = async (command) => {
-    const operation = command?.operation
-    const keys = operation === 'import'
-      ? ['operation', 'target', 'targetId', 'filePath']
-      : operation === 'sentinel'
-        ? ['operation', 'target', 'targetId', 'backupId']
-        : ['operation', 'target', 'targetId']
-    if (!exactObject(command, keys) || !['import', 'migrations', 'sentinel'].includes(operation)
-      || (operation === 'import' && (typeof command.filePath !== 'string' || command.filePath.length === 0))
-      || (operation === 'sentinel' && (typeof command.backupId !== 'string' || !BACKUP_ID.test(command.backupId)))) failed()
+  const executeSql = async (command, operation, sql = null) => {
     const path = await ensureConfig(command)
     const common = [
       input.wranglerPath,
@@ -185,18 +188,53 @@ export function createPinnedWranglerRunner(input) {
     ]
     let args
     if (operation === 'import') args = [...common, '--file', command.filePath]
-    else if (operation === 'migrations') {
-      args = [...common, '--command', 'SELECT id,name FROM d1_migrations ORDER BY id LIMIT 257']
-    } else {
-      args = [...common, '--command', `SELECT id,local_day,local_month,retention_class,status,version,created_at FROM backup_runs WHERE id='${command.backupId}'`]
-    }
+    else args = [...common, '--command', sql]
     let child
     try { child = await input.execute(args) } catch { failed() }
     if (!ownObject(child) || typeof child.stdout !== 'string') failed()
     const entry = parseWranglerOutput(child.stdout, operation)
     if (operation === 'import') return importResult(entry)
-    if (operation === 'migrations') return { migrations: migrationRows(entry.results) }
-    return sentinelResult(entry)
+    return entry.results
+  }
+
+  const runCommand = async (command) => {
+    const operation = command?.operation
+    const keys = operation === 'import'
+      ? ['operation', 'target', 'targetId', 'filePath']
+      : operation === 'sentinel'
+        ? ['operation', 'target', 'targetId', 'backupId']
+        : ['operation', 'target', 'targetId']
+    if (!exactObject(command, keys)
+      || !['freshness', 'import', 'migrations', 'recovery', 'sentinel'].includes(operation)
+      || (operation === 'import'
+        && (typeof command.filePath !== 'string' || command.filePath.length === 0))
+      || (operation === 'sentinel'
+        && (typeof command.backupId !== 'string' || !BACKUP_ID.test(command.backupId)))) failed()
+    if (operation === 'import') return executeSql(command, operation)
+    if (operation === 'freshness') {
+      const rows = await executeSql(command, operation, FRESH_TARGET_SQL)
+      if (!Array.isArray(rows) || rows.length !== 1
+        || !exactObject(rows[0], ['application_object_count'])
+        || rows[0].application_object_count !== 0) failed()
+      return { fresh: true }
+    }
+    if (operation === 'migrations') {
+      const rows = await executeSql(
+        command,
+        operation,
+        'SELECT id,name FROM d1_migrations ORDER BY id LIMIT 257',
+      )
+      return { migrations: migrationRows(rows) }
+    }
+    if (operation === 'sentinel') {
+      const rows = await executeSql(
+        command,
+        operation,
+        `SELECT id,local_day,local_month,retention_class,status,version,created_at FROM backup_runs WHERE id='${command.backupId}'`,
+      )
+      return sentinelResult({ results: rows })
+    }
+    return readBackupRecoverySnapshotWithQuery((sql) => executeSql(command, operation, sql))
   }
 
   const cleanup = async () => {
@@ -246,7 +284,21 @@ function validateTarget(value, request, policy) {
   return value
 }
 
-function validateHead(value, manifest) {
+function validateManifestHead(value) {
+  if (!exactObject(value, ['etag', 'size']) || !validOpaque(value.etag)
+    || !Number.isSafeInteger(value.size) || value.size < 1
+    || value.size > MANIFEST_MAX_BYTES) failed()
+  return value
+}
+
+function validateManifestGet(value, head) {
+  if (!exactObject(value, ['etag', 'size', 'bytes'])
+    || value.etag !== head.etag || value.size !== head.size
+    || !(value.bytes instanceof Uint8Array) || value.bytes.byteLength !== head.size) failed()
+  return value.bytes
+}
+
+function validateObjectHead(value, manifest) {
   const expected = expectedObjectMetadata(manifest)
   if (!exactObject(value, ['etag', 'size', 'customMetadata'])
     || value.etag !== manifest.objectEtag || value.size !== manifest.objectSize
@@ -254,28 +306,148 @@ function validateHead(value, manifest) {
   for (const [key, expectedValue] of Object.entries(expected)) {
     if (value.customMetadata[key] !== expectedValue) failed()
   }
+  return value
 }
 
-function exactVerifiedSourceRow(value, manifest, manifestKey) {
-  const keys = [
-    'id', 'status', 'version', 'localDay', 'localMonth', 'retentionClass',
-    'objectKey', 'manifestKey', 'objectEtag', 'objectSize', 'completedAt',
-    'lastErrorCode', 'createdAt',
-  ]
-  return exactObject(value, keys)
+function validateObjectGet(value, head) {
+  if (!exactObject(value, ['etag', 'size', 'body'])
+    || value.etag !== head.etag || value.size !== head.size
+    || !(value.body instanceof ReadableStream)) failed()
+  return value.body
+}
+
+function exactVerifiedSourceRow(value, manifest, manifestKey, verifiedAt) {
+  return exactObject(value, SOURCE_ROW_KEYS)
     && value.id === manifest.backupId
     && value.status === 'restore_verified'
     && value.version === 4
     && value.localDay === manifest.localDay
     && value.localMonth === manifest.localMonth
     && value.retentionClass === manifest.retentionClass
+    && value.exportBookmark === manifest.atBookmark
     && value.objectKey === manifest.objectKey
     && value.manifestKey === manifestKey
+    && value.ssecKeyVersion === manifest.wrappedSsecKey.kekVersion
+    && value.wrappedSsecKeyB64 === manifest.wrappedSsecKey.ciphertext
+    && value.wrapNonceB64 === manifest.wrappedSsecKey.nonce
     && value.objectEtag === manifest.objectEtag
     && value.objectSize === manifest.objectSize
     && validInstant(value.completedAt)
+    && value.restoreVerifiedAt === verifiedAt
     && value.lastErrorCode === null
     && value.createdAt === manifest.createdAt
+    && value.updatedAt === verifiedAt
+}
+
+const SOURCE_SELECT = `id,status,version,local_day,local_month,retention_class,
+export_bookmark,object_key,manifest_key,ssec_key_version,wrapped_ssec_key_b64,
+wrap_nonce_b64,object_etag,object_size,completed_at,restore_verified_at,
+last_error_code,created_at,updated_at`
+
+function sourceRow(value) {
+  const keys = SOURCE_SELECT.replaceAll('\n', '').split(',')
+  if (!exactObject(value, keys) || !BACKUP_ID.test(value.id)) failed()
+  return {
+    id: value.id,
+    status: value.status,
+    version: value.version,
+    localDay: value.local_day,
+    localMonth: value.local_month,
+    retentionClass: value.retention_class,
+    exportBookmark: value.export_bookmark,
+    objectKey: value.object_key,
+    manifestKey: value.manifest_key,
+    ssecKeyVersion: value.ssec_key_version,
+    wrappedSsecKeyB64: value.wrapped_ssec_key_b64,
+    wrapNonceB64: value.wrap_nonce_b64,
+    objectEtag: value.object_etag,
+    objectSize: value.object_size,
+    completedAt: value.completed_at,
+    restoreVerifiedAt: value.restore_verified_at,
+    lastErrorCode: value.last_error_code,
+    createdAt: value.created_at,
+    updatedAt: value.updated_at,
+  }
+}
+
+function responseRows(value) {
+  if (!exactObject(value, ['meta', 'results', 'success'])
+    || value.success !== true || !ownObject(value.meta)
+    || !Array.isArray(value.results) || value.results.length > 1) failed()
+  return value.results
+}
+
+export function createRestoreSourceStore(input) {
+  if (!exactObject(input, ['db']) || typeof input.db?.prepare !== 'function') refused()
+  const readSourceBackup = async ({ backupId } = {}) => {
+    if (typeof backupId !== 'string' || !BACKUP_ID.test(backupId)) failed()
+    const response = await input.db.prepare(
+      `SELECT ${SOURCE_SELECT} FROM backup_runs WHERE id=? LIMIT 2`,
+    ).bind(backupId).all()
+    const rows = responseRows(response)
+    return rows.length === 0 ? null : sourceRow(rows[0])
+  }
+  const markRestoreVerified = async (facts) => {
+    const keys = [
+      'backupId', 'localDay', 'localMonth', 'retentionClass', 'createdAt',
+      'exportBookmark', 'objectKey', 'manifestKey', 'objectEtag', 'objectSize',
+      'ssecKeyVersion', 'wrappedSsecKeyB64', 'wrapNonceB64', 'verifiedAt',
+    ]
+    if (!exactObject(facts, keys) || !BACKUP_ID.test(facts.backupId)
+      || !validInstant(facts.createdAt) || !validInstant(facts.verifiedAt)
+      || !Number.isSafeInteger(facts.objectSize) || facts.objectSize < 0
+      || !Number.isSafeInteger(facts.ssecKeyVersion) || facts.ssecKeyVersion < 1
+      || !['daily', 'monthly'].includes(facts.retentionClass)
+      || !validOpaque(facts.exportBookmark) || !validOpaque(facts.objectKey)
+      || !validOpaque(facts.manifestKey) || !validOpaque(facts.objectEtag)
+      || !validOpaque(facts.wrappedSsecKeyB64) || !validOpaque(facts.wrapNonceB64)) failed()
+    const response = await input.db.prepare(
+      `UPDATE backup_runs
+       SET status='restore_verified',version=4,restore_verified_at=?,updated_at=?
+       WHERE id=? AND local_day=? AND local_month=? AND retention_class=?
+         AND status='stored' AND version=3 AND created_at=? AND last_error_code IS NULL
+         AND export_bookmark=? AND object_key=? AND manifest_key=? AND object_etag=?
+         AND object_size=? AND ssec_key_version=? AND wrapped_ssec_key_b64=?
+         AND wrap_nonce_b64=? AND restore_verified_at IS NULL
+       RETURNING ${SOURCE_SELECT}`,
+    ).bind(
+      facts.verifiedAt,
+      facts.verifiedAt,
+      facts.backupId,
+      facts.localDay,
+      facts.localMonth,
+      facts.retentionClass,
+      facts.createdAt,
+      facts.exportBookmark,
+      facts.objectKey,
+      facts.manifestKey,
+      facts.objectEtag,
+      facts.objectSize,
+      facts.ssecKeyVersion,
+      facts.wrappedSsecKeyB64,
+      facts.wrapNonceB64,
+    ).all()
+    const rows = responseRows(response)
+    if (rows.length === 0) return { updated: false }
+    const row = sourceRow(rows[0])
+    return { updated: exactVerifiedSourceRow(row, {
+      backupId: facts.backupId,
+      localDay: facts.localDay,
+      localMonth: facts.localMonth,
+      retentionClass: facts.retentionClass,
+      createdAt: facts.createdAt,
+      atBookmark: facts.exportBookmark,
+      objectKey: facts.objectKey,
+      objectEtag: facts.objectEtag,
+      objectSize: facts.objectSize,
+      wrappedSsecKey: {
+        kekVersion: facts.ssecKeyVersion,
+        ciphertext: facts.wrappedSsecKeyB64,
+        nonce: facts.wrapNonceB64,
+      },
+    }, facts.manifestKey, facts.verifiedAt) }
+  }
+  return Object.freeze({ markRestoreVerified, readSourceBackup })
 }
 
 export async function writeRestoreStream(handle, stream, expectedSize) {
@@ -283,6 +455,8 @@ export async function writeRestoreStream(handle, stream, expectedSize) {
     || !Number.isSafeInteger(expectedSize) || expectedSize < 0) failed()
   let total = 0
   const reader = stream.getReader()
+  const hash = createHash('sha256')
+  let completed = false
   try {
     while (true) {
       const part = await reader.read()
@@ -298,20 +472,28 @@ export async function writeRestoreStream(handle, stream, expectedSize) {
         offset += written.bytesWritten
         total += written.bytesWritten
       }
+      hash.update(part.value)
     }
+    if (total !== expectedSize) failed()
+    completed = true
+    return { byteCount: total, plaintextSqlSha256: hash.digest('hex') }
   } finally {
-    reader.releaseLock()
+    if (!completed) {
+      try { await reader.cancel() } catch {}
+      try { hash.destroy() } catch {}
+    }
+    try { reader.releaseLock() } catch {}
   }
-  if (total !== expectedSize) failed()
 }
 
 async function writeStream0600(directory, stream, expectedSize) {
   const filePath = join(directory, 'restore.sql')
   const handle = await open(filePath, 'wx', 0o600)
-  try { await writeRestoreStream(handle, stream, expectedSize) } finally { await handle.close() }
+  let evidence
+  try { evidence = await writeRestoreStream(handle, stream, expectedSize) } finally { await handle.close() }
   const fileStats = await stat(filePath)
   if (!fileStats.isFile() || (fileStats.mode & 0o077) !== 0) failed()
-  return filePath
+  return { filePath, ...evidence }
 }
 
 async function sha256(value) {
@@ -322,20 +504,52 @@ async function sha256(value) {
   } finally { bytes.fill(0) }
 }
 
+async function proveAbsent(path) {
+  try {
+    await lstat(path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return
+    failed()
+  }
+  failed()
+}
+
+function restoreResult({ manifest, migrations, migrationSetSha256, recoveryKind, target,
+  migrationsVerified, recoveryFactsVerified, restoreSentinelVerified,
+  sourceMarkedVerified }) {
+  return {
+    backupId: manifest.backupId,
+    format: manifest.format,
+    migrationCount: migrations.length,
+    migrationSetSha256,
+    recoveryKind,
+    target,
+    manifestAuthenticated: true,
+    objectReadbackVerified: true,
+    migrationsVerified,
+    recoveryFactsVerified,
+    restoreSentinelVerified,
+    sourceMarkedVerified,
+    targetFreshVerified: true,
+  }
+}
+
 export async function restoreBackup(input) {
   const required = [
     'request', 'expectedSource', 'sourceDatabaseNames', 'sourceDatabaseIds',
     'productionDatabaseNames', 'productionDatabaseIds', 'tempRoot', 'keyring',
-    'provider', 'runCommand', 'log',
+    'provider', 'runCommand', 'cleanupTarget',
   ]
   const keys = input && Reflect.ownKeys(input).includes('signal') ? [...required, 'signal'] : required
   if (!exactObject(input, keys) || typeof input.tempRoot !== 'string' || input.tempRoot.length === 0
     || !input.keyring || typeof input.keyring.getBackupKek !== 'function'
     || !input.provider || typeof input.provider.describeDatabase !== 'function'
-    || typeof input.provider.getManifest !== 'function' || typeof input.provider.headObject !== 'function'
+    || typeof input.provider.headManifest !== 'function'
+    || typeof input.provider.getManifest !== 'function'
+    || typeof input.provider.headObject !== 'function'
     || typeof input.provider.getObject !== 'function' || typeof input.provider.markRestoreVerified !== 'function'
     || typeof input.provider.readSourceBackup !== 'function'
-    || typeof input.runCommand !== 'function' || typeof input.log !== 'function'
+    || typeof input.runCommand !== 'function' || typeof input.cleanupTarget !== 'function'
     || (Object.hasOwn(input, 'signal') && !(input.signal instanceof AbortSignal))) refused()
   const policy = {
     sourceDatabaseNames: input.sourceDatabaseNames,
@@ -346,81 +560,162 @@ export async function restoreBackup(input) {
   const request = validateRestoreRequest({ request: input.request, ...policy })
   const expectedSource = expectedSourceValue(input.expectedSource)
   let temporaryDirectory = null
+  let filePath = null
   let rawSsecKey
+  let targetCleaned = false
   const checkpoint = () => { if (input.signal?.aborted === true) failed() }
+  const cleanupBeforeBoundary = async () => {
+    let cleanupFailed = false
+    if (rawSsecKey instanceof Uint8Array) rawSsecKey.fill(0)
+    rawSsecKey = undefined
+    if (temporaryDirectory !== null) {
+      const ownedDirectory = temporaryDirectory
+      const ownedFile = filePath
+      temporaryDirectory = null
+      filePath = null
+      try {
+        await rm(ownedDirectory, { recursive: true, force: true })
+        if (ownedFile !== null) await proveAbsent(ownedFile)
+        await proveAbsent(ownedDirectory)
+      } catch { cleanupFailed = true }
+    }
+    if (!targetCleaned) {
+      try {
+        await input.cleanupTarget()
+        targetCleaned = true
+      } catch { cleanupFailed = true }
+    }
+    if (cleanupFailed) failed()
+  }
   try {
     checkpoint()
     const restoredTarget = validateTarget(await input.provider.describeDatabase(request.target), request, policy)
     checkpoint()
-    const rawManifest = await input.provider.getManifest(request.manifestKey)
+    const freshness = await input.runCommand({
+      operation: 'freshness', target: restoredTarget.name, targetId: restoredTarget.id,
+    })
+    if (!exactObject(freshness, ['fresh']) || freshness.fresh !== true) failed()
     checkpoint()
-    if (!(rawManifest instanceof Uint8Array)) failed()
-    const manifest = parseCanonicalManifest(rawManifest)
-    const version = manifest.format === 'bwm-d1-sql-v1' ? 1 : 2
+    const manifestHead = validateManifestHead(await input.provider.headManifest({
+      key: request.manifestKey,
+    }))
+    checkpoint()
+    const rawManifest = validateManifestGet(await input.provider.getManifest({
+      key: request.manifestKey,
+      ifMatch: manifestHead.etag,
+    }), manifestHead)
+    checkpoint()
+    const opened = await openBackupManifest({ bytes: rawManifest, keyring: input.keyring })
+    const manifest = opened.manifest
+    rawSsecKey = opened.rawSsecKey
+    const version = {
+      'bwm-d1-sql-v1': 1,
+      'bwm-d1-sql-v2': 2,
+      'bwm-d1-sql-v3': 3,
+    }[manifest.format]
+    if (!version) failed()
     if (version === 1 && request.allowLegacyUnverified !== true) refused()
     const expectedKeys = backupObjectKeys({ backupId: manifest.backupId, localMonth: manifest.localMonth, version })
     if (expectedKeys.manifestKey !== request.manifestKey || expectedKeys.objectKey !== manifest.objectKey) failed()
-    if (version === 2 && canonicalJson(manifest.source) !== canonicalJson(expectedSource)) refused()
-    const opened = await openBackupManifest({ bytes: rawManifest, keyring: input.keyring })
-    rawSsecKey = opened.rawSsecKey
-    validateHead(await input.provider.headObject({ key: manifest.objectKey, ssecKey: rawSsecKey }), manifest)
+    if (version >= 2 && canonicalJson(manifest.source) !== canonicalJson(expectedSource)) refused()
+    const objectHead = validateObjectHead(await input.provider.headObject({
+      key: manifest.objectKey,
+      ssecKey: rawSsecKey,
+    }), manifest)
     checkpoint()
-    const body = await input.provider.getObject({ key: manifest.objectKey, ssecKey: rawSsecKey })
+    const body = validateObjectGet(await input.provider.getObject({
+      key: manifest.objectKey,
+      ssecKey: rawSsecKey,
+      ifMatch: objectHead.etag,
+    }), objectHead)
     checkpoint()
     temporaryDirectory = await privateDirectory(input.tempRoot, 'bearwithme-restore-')
-    const filePath = await writeStream0600(temporaryDirectory, body, manifest.objectSize)
+    const written = await writeStream0600(temporaryDirectory, body, manifest.objectSize)
+    filePath = written.filePath
+    if (version === 3 && written.plaintextSqlSha256 !== manifest.plaintextSqlSha256) failed()
     const imported = await input.runCommand({ operation: 'import', target: restoredTarget.name, targetId: restoredTarget.id, filePath })
     checkpoint()
     if (!exactObject(imported, ['imported', 'finalBookmark']) || imported.imported !== true || !validOpaque(imported.finalBookmark)) failed()
-    const migrationResponse = await input.runCommand({ operation: 'migrations', target: restoredTarget.name, targetId: restoredTarget.id })
+    const migrationResponse = await input.runCommand({
+      operation: 'migrations',
+      target: restoredTarget.name,
+      targetId: restoredTarget.id,
+    })
     checkpoint()
     if (!exactObject(migrationResponse, ['migrations'])) failed()
     const migrations = migrationRows(migrationResponse.migrations)
-    if (version === 1) {
-      const result = { backupId: manifest.backupId, migrationCount: migrations.length, status: 'legacy_unverified', target: restoredTarget.name }
-      await input.log({ ...result })
-      return result
+    if (version >= 2
+      && canonicalJson(migrations) !== canonicalJson(manifest.appliedMigrations)) failed()
+    if (version >= 2) {
+      const sentinelResponse = await input.runCommand({
+        operation: 'sentinel', target: restoredTarget.name, targetId: restoredTarget.id,
+        backupId: manifest.backupId,
+      })
+      checkpoint()
+      if (!exactObject(sentinelResponse, ['sentinel'])
+        || canonicalJson(sentinelResponse.sentinel)
+          !== canonicalJson(manifest.restoreSentinel)) failed()
     }
-    if (canonicalJson(migrations) !== canonicalJson(manifest.appliedMigrations)) failed()
-    const sentinelResponse = await input.runCommand({
-      operation: 'sentinel', target: restoredTarget.name, targetId: restoredTarget.id, backupId: manifest.backupId,
+    if (version === 3) {
+      const recoveryResponse = await input.runCommand({
+        operation: 'recovery', target: restoredTarget.name, targetId: restoredTarget.id,
+      })
+      checkpoint()
+      if (!exactObject(recoveryResponse, ['appliedMigrations', 'recoveryFacts'])) failed()
+      const recoveryMigrations = migrationRows(recoveryResponse.appliedMigrations)
+      if (canonicalJson(recoveryMigrations) !== canonicalJson(manifest.appliedMigrations)
+        || canonicalJson(recoveryResponse.recoveryFacts)
+          !== canonicalJson(manifest.recoveryFacts)) failed()
+    }
+    const migrationSetSha256 = await sha256(migrations)
+    const result = restoreResult({
+      manifest,
+      migrations,
+      migrationSetSha256,
+      recoveryKind: version === 3 ? manifest.recoveryFacts.kind : null,
+      target: restoredTarget.name,
+      migrationsVerified: version >= 2,
+      recoveryFactsVerified: version === 3,
+      restoreSentinelVerified: version >= 2,
+      sourceMarkedVerified: version >= 2,
     })
+    await cleanupBeforeBoundary()
     checkpoint()
-    if (!exactObject(sentinelResponse, ['sentinel'])
-      || canonicalJson(sentinelResponse.sentinel) !== canonicalJson(manifest.restoreSentinel)) failed()
+    if (version === 1) return result
+    const verifiedAt = new Date().toISOString()
+    if (!validInstant(verifiedAt)) failed()
     const markFacts = {
       backupId: manifest.backupId,
+      localDay: manifest.localDay,
+      localMonth: manifest.localMonth,
+      retentionClass: manifest.retentionClass,
+      createdAt: manifest.createdAt,
+      exportBookmark: manifest.atBookmark,
       manifestKey: request.manifestKey,
       objectEtag: manifest.objectEtag,
       objectKey: manifest.objectKey,
       objectSize: manifest.objectSize,
+      ssecKeyVersion: manifest.wrappedSsecKey.kekVersion,
+      wrappedSsecKeyB64: manifest.wrappedSsecKey.ciphertext,
+      wrapNonceB64: manifest.wrappedSsecKey.nonce,
+      verifiedAt,
     }
     let marked
     try {
       marked = await input.provider.markRestoreVerified(markFacts)
     } catch {
       const observed = await input.provider.readSourceBackup({ backupId: manifest.backupId })
-      if (!exactVerifiedSourceRow(observed, manifest, request.manifestKey)) failed()
+      if (!exactVerifiedSourceRow(observed, manifest, request.manifestKey, verifiedAt)) failed()
       marked = { updated: true }
     }
-    checkpoint()
     if (!exactObject(marked, ['updated']) || marked.updated !== true) failed()
-    const result = {
-      backupId: manifest.backupId,
-      migrationCount: migrations.length,
-      migrationSetSha256: await sha256(migrations),
-      status: 'restore_verified',
-      target: restoredTarget.name,
-    }
-    await input.log({ ...result })
     return result
   } catch (error) {
     if (error?.message === 'RESTORE_REFUSED') throw error
     throw new Error('RESTORE_FAILED')
   } finally {
-    if (rawSsecKey instanceof Uint8Array) rawSsecKey.fill(0)
-    if (temporaryDirectory !== null) {
-      try { await rm(temporaryDirectory, { recursive: true, force: true }) } catch { throw new Error('RESTORE_FAILED') }
+    if (rawSsecKey instanceof Uint8Array || temporaryDirectory !== null || !targetCleaned) {
+      try { await cleanupBeforeBoundary() } catch { throw new Error('RESTORE_FAILED') }
     }
   }
 }

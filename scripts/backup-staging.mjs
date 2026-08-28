@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { createKeyring } from '../worker/security/keyring.js'
@@ -54,34 +54,47 @@ async function pinnedWranglerPath() {
   return resolved
 }
 
-async function boundedJsonResponse(response) {
-  if (!(response instanceof Response) || !response.ok || response.redirected || !(response.body instanceof ReadableStream)) failed()
+export async function boundedJsonResponse(response) {
+  if (!(response instanceof Response)) failed()
+  if (!response.ok || response.redirected || !(response.body instanceof ReadableStream)) {
+    try { await response.body?.cancel() } catch {}
+    failed()
+  }
   const length = response.headers.get('content-length')
-  if (length !== null && (!/^\d+$/.test(length) || Number(length) > RESPONSE_MAX_BYTES)) failed()
+  if (length !== null && (!/^\d+$/.test(length)
+    || !Number.isSafeInteger(Number(length)) || Number(length) > RESPONSE_MAX_BYTES)) {
+    try { await response.body.cancel() } catch {}
+    failed()
+  }
   const reader = response.body.getReader()
   const chunks = []
+  let bytes
+  let completed = false
   let total = 0
   try {
     while (true) {
       const part = await reader.read()
       if (part.done) break
       if (!(part.value instanceof Uint8Array) || part.value.byteLength === 0) failed()
+      chunks.push(part.value)
+      if (!Number.isSafeInteger(total + part.value.byteLength)) failed()
       total += part.value.byteLength
       if (total > RESPONSE_MAX_BYTES) failed()
-      chunks.push(part.value)
     }
+    bytes = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+    let result
+    try { result = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) } catch { failed() }
+    completed = true
+    return result
   } finally {
-    reader.releaseLock()
-  }
-  const bytes = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-  try {
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
-  } catch {
-    failed()
-  } finally {
-    bytes.fill(0)
+    if (!completed) {
+      try { await reader.cancel() } catch {}
+    }
+    for (const chunk of chunks) chunk.fill(0)
+    bytes?.fill(0)
+    try { reader.releaseLock() } catch {}
   }
 }
 
@@ -106,27 +119,35 @@ function bodyStream(body) {
   failed()
 }
 
-async function boundedBody(body, maximum = MANIFEST_MAX_BYTES) {
+export async function boundedBody(body, maximum = MANIFEST_MAX_BYTES) {
   const stream = bodyStream(body)
+  if (!Number.isSafeInteger(maximum) || maximum < 1) failed()
   const reader = stream.getReader()
   const chunks = []
+  let completed = false
   let total = 0
   try {
     while (true) {
       const part = await reader.read()
       if (part.done) break
       if (!(part.value instanceof Uint8Array) || part.value.byteLength === 0) failed()
+      chunks.push(part.value)
+      if (!Number.isSafeInteger(total + part.value.byteLength)) failed()
       total += part.value.byteLength
       if (total > maximum) failed()
-      chunks.push(part.value)
     }
+    const result = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength }
+    completed = true
+    return result
   } finally {
-    reader.releaseLock()
+    if (!completed) {
+      try { await reader.cancel() } catch {}
+    }
+    for (const chunk of chunks) chunk.fill(0)
+    try { reader.releaseLock() } catch {}
   }
-  const result = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength }
-  return result
 }
 
 const randomId = (prefix) => `${prefix}${crypto.randomUUID().replaceAll('-', '')}`
@@ -227,10 +248,15 @@ async function main() {
   }
 }
 
-try {
-  await main()
-} catch (error) {
-  const status = error?.message === 'BACKUP_STAGING_REFUSED' ? 'refused' : 'failed'
-  process.stderr.write(`${JSON.stringify({ status })}\n`)
-  process.exitCode = 1
+const invokedDirectly = typeof process.argv[1] === 'string'
+  && pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+
+if (invokedDirectly) {
+  try {
+    await main()
+  } catch (error) {
+    const status = error?.message === 'BACKUP_STAGING_REFUSED' ? 'refused' : 'failed'
+    process.stderr.write(`${JSON.stringify({ status })}\n`)
+    process.exitCode = 1
+  }
 }

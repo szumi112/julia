@@ -19,6 +19,7 @@ function captureInput(input) {
       .every((key) => Object.hasOwn(input, key))
     || !input.db?.prepare || !input.db?.batch
     || typeof input.archive?.delete !== 'function'
+    || typeof input.archive?.head !== 'function'
     || !Number.isSafeInteger(input.nowMs) || input.nowMs < 0
     || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > MAX_BATCH
     || typeof input.idFactory !== 'function'
@@ -49,7 +50,7 @@ async function pruneOne(input, row) {
   const artifactKeys = []
   if (completed) {
     let matched = null
-    for (const version of [1, 2]) {
+    for (const version of [1, 2, 3]) {
       let keys
       try {
         keys = backupObjectKeys({ backupId: row.id, localMonth: row.local_month, version })
@@ -63,7 +64,7 @@ async function pruneOne(input, row) {
     if (matched === null) invalid()
     artifactKeys.push(matched.manifestKey, matched.objectKey)
   } else {
-    for (const version of [2, 1]) {
+    for (const version of [3, 2, 1]) {
       let keys
       try {
         keys = backupObjectKeys({ backupId: row.id, localMonth: row.local_month, version })
@@ -95,7 +96,10 @@ async function pruneOne(input, row) {
     || claimed.status !== row.status
     || claimed.version !== claimedVersion
     || claimed.updated_at !== input.now) invalid()
-  for (const key of artifactKeys) await input.archive.delete(key)
+  for (const key of artifactKeys) {
+    await input.archive.delete(key)
+    if (await input.archive.head(key) !== null) invalid()
+  }
   const nextVersion = claimedVersion + 1
   const auditId = input.idFactory()
   const correlationId = input.correlationIdFactory()

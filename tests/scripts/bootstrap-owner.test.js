@@ -347,6 +347,29 @@ test('D1 REST deadline also cancels a response body that stops producing bytes',
   assert.equal(cancelCalled, true)
 })
 
+test('D1 REST client cancels an unfinished response body after invalid UTF-8', async () => {
+  let cancelCalled = false
+  const client = createD1RestClient({
+    accountId: 'a'.repeat(32),
+    databaseId: '22222222-2222-4222-8222-222222222222',
+    token: 'd1-token',
+    fetch: async () => new Response(new ReadableStream({
+      cancel() {
+        cancelCalled = true
+      },
+      start(controller) {
+        controller.enqueue(Uint8Array.of(0xff))
+      },
+    })),
+  })
+
+  await assert.rejects(
+    client.query({ sql: 'SELECT 1', params: [] }),
+    /^Error: D1_REST_RESPONSE_INVALID$/,
+  )
+  assert.equal(cancelCalled, true)
+})
+
 test('D1 REST client reads at most 64 KiB of raw response bytes', async () => {
   const raw = JSON.stringify(okResult())
   const clientFor = (size) => createD1RestClient({

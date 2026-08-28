@@ -6,6 +6,7 @@ import {
   createBackupManifest,
   expectedObjectMetadata,
 } from './backup-format.js'
+import { readBackupRecoverySnapshot } from './backup-recovery.js'
 
 const BACKUP_JOB_LIMIT = 1
 const BACKUP_LEASE_MS = 12 * 60 * 1000
@@ -55,8 +56,6 @@ const LOCAL_DAY = /^\d{4}-\d{2}-\d{2}$/
 const LOCAL_MONTH = /^\d{4}-\d{2}$/
 const SOURCE_ACCOUNT_ID = /^[0-9a-f]{32}$/
 const SOURCE_DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const MIGRATION_NAME = /^\d{4}_[a-z0-9_-]+\.sql$/
-const MIGRATION_NAME_MAX_BYTES = 255
 
 const invalid = () => { throw new Error('BACKUP_STATE_INVALID') }
 const ownRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -704,6 +703,7 @@ async function claimCandidate(input, candidate) {
     backupId: candidate.backup.id,
     attemptId,
     attemptNumber: candidate.nextAttempt,
+    claimedAt: input.claimNow,
     leaseOwner,
     leaseExpiresAt: input.leaseExpiresAt,
     recoveryOnly: candidate.nextAttempt === candidate.job.max_attempts,
@@ -775,35 +775,48 @@ function captureRunnerInput(input) {
   return { ...value, providerConfig, source }
 }
 
-async function readAppliedMigrations(db) {
-  const response = await db.prepare(
-    `SELECT id,name
-     FROM d1_migrations
-     ORDER BY id
-     LIMIT 257`
-  ).all()
-  const rows = fixedArray(dataProperty(response, 'results'))
-  if (rows.length < 1 || rows.length > 256) invalid()
-  const migrations = []
-  const names = new Set()
-  let previousId = 0
-  for (const row of rows) {
-    const migration = dataSnapshot(row, ['id', 'name'])
-    let encodedName
-    try {
-      if (!positiveInteger(migration.id) || migration.id <= previousId
-        || typeof migration.name !== 'string' || !MIGRATION_NAME.test(migration.name)
-        || names.has(migration.name)) invalid()
-      encodedName = new TextEncoder().encode(migration.name)
-      if (encodedName.byteLength > MIGRATION_NAME_MAX_BYTES) invalid()
-    } finally {
-      encodedName?.fill(0)
-    }
-    previousId = migration.id
-    names.add(migration.name)
-    migrations.push(migration)
+async function recoverySnapshot(db) {
+  try { return await readBackupRecoverySnapshot(db) } catch { invalid() }
+}
+
+function sha256Readable(body) {
+  if (!(body instanceof ReadableStream)) invalid()
+  let digestStream
+  let writer
+  try {
+    digestStream = new crypto.DigestStream('SHA-256')
+    writer = digestStream.getWriter()
+  } catch { invalid() }
+  let byteCount = 0
+  const readable = body.pipeThrough(new TransformStream({
+    async transform(chunk, controller) {
+      if (!(chunk instanceof Uint8Array) || chunk.byteLength === 0
+        || !Number.isSafeInteger(byteCount + chunk.byteLength)) invalid()
+      await writer.write(chunk)
+      byteCount += chunk.byteLength
+      controller.enqueue(chunk)
+    },
+    async flush() { await writer.close() },
+  }))
+  return {
+    body: readable,
+    async abort(reason) {
+      try { await readable.cancel(reason) } catch {}
+      try { await writer.abort(reason) } catch {}
+      try { await digestStream.digest } catch {}
+    },
+    async result() {
+      const bytes = new Uint8Array(await digestStream.digest)
+      try {
+        if (bytes.byteLength !== 32) invalid()
+        return {
+          byteCount,
+          plaintextSqlSha256: [...bytes]
+            .map((value) => value.toString(16).padStart(2, '0')).join(''),
+        }
+      } finally { bytes.fill(0) }
+    },
   }
-  return migrations
 }
 
 function restoreSentinelFor(backup) {
@@ -834,47 +847,38 @@ async function renewClaim(input, claim) {
   const now = instantFromMs(nowMs)
   const leaseExpiresAt = instantFromMs(nowMs + BACKUP_LEASE_MS)
   try {
-    const results = await input.db.batch([
-      input.db.prepare(
-        `UPDATE outbox_jobs
-         SET lease_expires_at=?,updated_at=?
-         WHERE id=? AND type='backup.create' AND status='processing'
-           AND attempt_count=? AND lease_owner=? AND lease_expires_at>?
-           AND EXISTS (
-             SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
-           )`
-      ).bind(
-        leaseExpiresAt,
-        now,
-        claim.jobId,
-        claim.attemptNumber,
-        claim.leaseOwner,
-        now,
-        ...schedulerBindings({ scheduler: input.scheduler, claimNow: now }),
-      ),
-      operationGuard(
-        input.db,
-        `backup_renew_${claim.jobId}_${claim.attemptNumber}_${nowMs}`,
-        `changes()=1 AND EXISTS (
-           SELECT 1 FROM outbox_jobs
-           WHERE id=? AND status='processing' AND attempt_count=?
-             AND lease_owner=? AND lease_expires_at=? AND updated_at=?
-         )`,
-        [claim.jobId, claim.attemptNumber, claim.leaseOwner, leaseExpiresAt, now],
-      ),
-    ])
-    fixedArray(results, 2)
+    const renewed = await input.db.prepare(
+      `UPDATE outbox_jobs
+       SET lease_expires_at=?,updated_at=?
+       WHERE id=? AND type='backup.create' AND status='processing'
+         AND attempt_count=? AND lease_owner=? AND lease_expires_at>?
+         AND EXISTS (
+           SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+         )
+       RETURNING lease_expires_at,updated_at`
+    ).bind(
+      leaseExpiresAt,
+      now,
+      claim.jobId,
+      claim.attemptNumber,
+      claim.leaseOwner,
+      now,
+      ...schedulerBindings({ scheduler: input.scheduler, claimNow: now }),
+    ).first()
+    const exact = dataSnapshot(renewed, ['lease_expires_at', 'updated_at'])
+    if (exact.lease_expires_at !== leaseExpiresAt || exact.updated_at !== now) invalid()
     return { now, leaseExpiresAt }
   } catch (error) {
-    if (isD1OutboxOperationGuardFailure(error)) throw new Error('BACKUP_LEASE_LOST')
+    if (error?.message === 'BACKUP_STATE_INVALID'
+      || isD1OutboxOperationGuardFailure(error)) throw new Error('BACKUP_LEASE_LOST')
     throw error
   }
 }
 
 async function cleanupReclaimedArtifacts(input, candidate, claim) {
   if (candidate.oldAttempt === null) return
-  if (typeof input.archive.delete !== 'function') invalid()
-  const keyPairs = [2, 1].map((version) => backupObjectKeys({
+  if (typeof input.archive.delete !== 'function' || typeof input.archive.head !== 'function') invalid()
+  const keyPairs = [3, 2, 1].map((version) => backupObjectKeys({
     backupId: candidate.backup.id,
     localMonth: candidate.backup.local_month,
     version,
@@ -882,16 +886,25 @@ async function cleanupReclaimedArtifacts(input, candidate, claim) {
   await renewClaim(input, claim)
   for (const keys of keyPairs) {
     await input.archive.delete(keys.manifestKey)
-    await renewClaim(input, claim)
+    if (await input.archive.head(keys.manifestKey) !== null) invalid()
     await input.archive.delete(keys.objectKey)
-    await renewClaim(input, claim)
+    if (await input.archive.head(keys.objectKey) !== null) invalid()
   }
+  await renewClaim(input, claim)
 }
 
-async function completeClaim(input, candidate, claim, stored, manifestResult, keys, bookmark) {
-  const completedMs = input.now()
-  const completedAt = instantFromMs(completedMs)
-  const expiresAt = expiryFor(candidate.backup)
+async function cleanupCurrentArtifacts(input, claim, keys) {
+  if (typeof input.archive.delete !== 'function' || typeof input.archive.head !== 'function') invalid()
+  await renewClaim(input, claim)
+  await input.archive.delete(keys.manifestKey)
+  if (await input.archive.head(keys.manifestKey) !== null) invalid()
+  await input.archive.delete(keys.objectKey)
+  if (await input.archive.head(keys.objectKey) !== null) invalid()
+  await renewClaim(input, claim)
+}
+
+async function completeClaim(input, candidate, claim, stored, manifestResult, keys, bookmark, final) {
+  const { completedAt, expiresAt } = final
   const statements = [
     input.db.prepare(
       `UPDATE backup_runs
@@ -956,6 +969,113 @@ async function completeClaim(input, candidate, claim, stored, manifestResult, ke
   }
 }
 
+const FINALIZATION_ROW_KEYS = Object.freeze([
+  ...BACKUP_COLUMNS.map((column) => `backup_${column}`),
+  ...JOB_COLUMNS.map((column) => `job_${column}`),
+  ...ATTEMPT_COLUMNS.map((column) => `attempt_${column}`),
+])
+
+const sameFields = (actual, expected, keys) => keys.every((key) => actual[key] === expected[key])
+
+async function readFinalizationState(input, candidate, claim) {
+  const response = await input.db.prepare(
+    `SELECT
+       ${BACKUP_COLUMNS.map((column) => `b.${column} AS backup_${column}`).join(',')},
+       ${JOB_COLUMNS.map((column) => `j.${column} AS job_${column}`).join(',')},
+       ${ATTEMPT_COLUMNS.map((column) => `a.${column} AS attempt_${column}`).join(',')}
+     FROM backup_runs AS b
+     JOIN outbox_jobs AS j ON j.id=? AND j.aggregate_id=b.id
+     JOIN outbox_attempts AS a ON a.id=? AND a.job_id=j.id
+     WHERE b.id=?
+     LIMIT 2`
+  ).bind(claim.jobId, claim.attemptId, candidate.backup.id).all()
+  const rows = fixedArray(dataProperty(response, 'results'))
+  if (rows.length !== 1) invalid()
+  const row = dataSnapshot(rows[0], FINALIZATION_ROW_KEYS)
+  return {
+    backup: recordFrom(row, 'backup', BACKUP_COLUMNS),
+    job: recordFrom(row, 'job', JOB_COLUMNS),
+    attempt: recordFrom(row, 'attempt', ATTEMPT_COLUMNS),
+  }
+}
+
+function exactStoredFinalization(state, candidate, claim, manifestResult, stored, keys, bookmark, final) {
+  const expectedBackup = {
+    ...candidate.backup,
+    status: 'stored',
+    version: 3,
+    export_bookmark: bookmark,
+    object_key: keys.objectKey,
+    manifest_key: keys.manifestKey,
+    ssec_key_version: manifestResult.databaseFields.ssecKeyVersion,
+    wrapped_ssec_key_b64: manifestResult.databaseFields.wrappedSsecKeyB64,
+    wrap_nonce_b64: manifestResult.databaseFields.wrapNonceB64,
+    object_etag: stored.etag,
+    object_size: stored.size,
+    started_at: candidate.backup.started_at ?? claim.claimedAt,
+    completed_at: final.completedAt,
+    expires_at: final.expiresAt,
+    restore_verified_at: null,
+    last_error_code: null,
+    updated_at: final.completedAt,
+  }
+  const expectedJob = {
+    ...candidate.job,
+    status: 'succeeded',
+    attempt_count: claim.attemptNumber,
+    lease_owner: null,
+    lease_expires_at: null,
+    last_error_code: null,
+    updated_at: final.completedAt,
+  }
+  const expectedAttempt = {
+    id: claim.attemptId,
+    job_id: claim.jobId,
+    attempt_number: claim.attemptNumber,
+    started_at: claim.claimedAt,
+    completed_at: final.completedAt,
+    result: 'succeeded',
+    error_code: null,
+    provider_reference: null,
+  }
+  return sameFields(state.backup, expectedBackup, BACKUP_COLUMNS)
+    && sameFields(state.job, expectedJob, JOB_COLUMNS)
+    && sameFields(state.attempt, expectedAttempt, ATTEMPT_COLUMNS)
+}
+
+function exactPendingFinalization(state, candidate, claim) {
+  const expectedBackup = {
+    ...candidate.backup,
+    status: 'exporting',
+    version: 2,
+    started_at: candidate.backup.started_at ?? claim.claimedAt,
+    updated_at: candidate.backup.started_at ?? claim.claimedAt,
+  }
+  const expectedJob = {
+    ...candidate.job,
+    status: 'processing',
+    attempt_count: claim.attemptNumber,
+    lease_owner: claim.leaseOwner,
+    last_error_code: candidate.oldAttempt === null ? null : 'OUTBOX_LEASE_EXPIRED',
+  }
+  const stableJobKeys = JOB_COLUMNS.filter((key) => !['lease_expires_at', 'updated_at'].includes(key))
+  const expectedAttempt = {
+    id: claim.attemptId,
+    job_id: claim.jobId,
+    attempt_number: claim.attemptNumber,
+    started_at: claim.claimedAt,
+    completed_at: null,
+    result: null,
+    error_code: null,
+    provider_reference: null,
+  }
+  return sameFields(state.backup, expectedBackup, BACKUP_COLUMNS)
+    && sameFields(state.job, expectedJob, stableJobKeys)
+    && validInstant(state.job.lease_expires_at) && validInstant(state.job.updated_at)
+    && state.job.lease_expires_at > state.job.updated_at
+    && sameFields(state.attempt, expectedAttempt, ATTEMPT_COLUMNS)
+}
+
 const stableFailureCode = (error) => {
   const value = error?.message
   return typeof value === 'string' && /^BACKUP_[A-Z0-9_]{1,55}$/.test(value)
@@ -970,7 +1090,7 @@ async function failClaim(input, candidate, claim, error) {
     fixedArray(await input.db.batch([
       input.db.prepare(
         `UPDATE backup_runs
-         SET status='failed',version=version+1,last_error_code=?,updated_at=?
+         SET status='failed',version=version+1,completed_at=?,last_error_code=?,updated_at=?
          WHERE id=? AND status='exporting' AND version=2
            AND EXISTS (
              SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
@@ -981,6 +1101,7 @@ async function failClaim(input, candidate, claim, error) {
                AND j.lease_owner=? AND j.lease_expires_at>?
            )`
       ).bind(
+        failedAt,
         code,
         failedAt,
         candidate.backup.id,
@@ -1046,7 +1167,7 @@ async function terminalizeExhaustedClaim(input, candidate) {
       ),
       input.db.prepare(
         `UPDATE backup_runs
-         SET status='failed',version=version+1,last_error_code=?,updated_at=?
+         SET status='failed',version=version+1,completed_at=?,last_error_code=?,updated_at=?
          WHERE changes()=1
            AND ${exportingBackupPredicate('backup_runs')}
            AND EXISTS (
@@ -1057,6 +1178,7 @@ async function terminalizeExhaustedClaim(input, candidate) {
              WHERE ${oldProcessingJobPredicate('j')} AND j.lease_expires_at<?
            )`
       ).bind(
+        failedAt,
         errorCode,
         failedAt,
         ...exportingBackupBindings(backup),
@@ -1149,13 +1271,16 @@ export async function runNextBackupCreate(input) {
   }
   const claim = await claimCandidate(captured, candidate)
   let rawSsecKey
+  let artifactWriteStarted = false
+  let finalizationUncertain = false
+  let finalizationPending = false
   try {
     await cleanupReclaimedArtifacts(
       { ...runner, scheduler: captured.scheduler },
       candidate,
       claim,
     )
-    const migrationsBefore = await readAppliedMigrations(runner.db)
+    const recoveryBefore = await recoverySnapshot(runner.db)
     const restoreSentinel = restoreSentinelFor(candidate.backup)
     await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
     const exported = await Reflect.apply(runner.pollExport, undefined, [{
@@ -1165,8 +1290,8 @@ export async function runNextBackupCreate(input) {
       now: runner.now,
       signal: runner.signal,
     }])
-    const migrationsAfter = await readAppliedMigrations(runner.db)
-    if (canonicalJson(migrationsBefore) !== canonicalJson(migrationsAfter)) {
+    const recoveryAfter = await recoverySnapshot(runner.db)
+    if (canonicalJson(recoveryBefore) !== canonicalJson(recoveryAfter)) {
       throw new Error('BACKUP_MIGRATION_SET_CHANGED')
     }
     await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
@@ -1176,38 +1301,54 @@ export async function runNextBackupCreate(input) {
       signal: runner.signal,
     }])
     rawSsecKey = runner.rawKeyFactory()
-    if (!(rawSsecKey instanceof Uint8Array) || rawSsecKey.byteLength !== 32) invalid()
+    if (!(rawSsecKey instanceof Uint8Array)
+      || !(rawSsecKey.buffer instanceof ArrayBuffer)
+      || rawSsecKey.byteOffset !== 0
+      || rawSsecKey.byteLength !== 32
+      || rawSsecKey.buffer.byteLength !== 32) invalid()
     const keys = backupObjectKeys({
       backupId: candidate.backup.id,
       localMonth: candidate.backup.local_month,
-      version: 2,
+      version: 3,
     })
     const metadata = {
       backupId: candidate.backup.id,
-      format: 'bwm-d1-sql-v2',
+      format: 'bwm-d1-sql-v3',
       retentionClass: candidate.backup.retention_class,
       sourceAppEnv: runner.source.appEnv,
       sourceDatabaseId: runner.source.databaseId,
     }
     await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
-    const stored = await runner.archive.put(keys.objectKey, downloaded.body, {
-      ssecKey: rawSsecKey.buffer,
-      customMetadata: metadata,
-      onlyIf: { etagDoesNotMatch: '*' },
-    })
+    const streamed = sha256Readable(downloaded.body)
+    artifactWriteStarted = true
+    let stored
+    try {
+      stored = await runner.archive.put(keys.objectKey, streamed.body, {
+        ssecKey: rawSsecKey.buffer,
+        customMetadata: metadata,
+        onlyIf: { etagDoesNotMatch: '*' },
+      })
+    } catch (error) {
+      await streamed.abort(error)
+      throw error
+    }
     if (!stored || typeof stored.etag !== 'string' || stored.etag.length === 0
       || !Number.isSafeInteger(stored.size) || stored.size < 0) invalid()
+    const digest = await streamed.result()
+    if (digest.byteCount !== stored.size) invalid()
     const manifestResult = await createBackupManifest({
       facts: {
-        format: 'bwm-d1-sql-v2',
+        format: 'bwm-d1-sql-v3',
         backupId: candidate.backup.id,
         createdAt: candidate.backup.created_at,
         localDay: candidate.backup.local_day,
         localMonth: candidate.backup.local_month,
         retentionClass: candidate.backup.retention_class,
         source: runner.source,
-        appliedMigrations: migrationsBefore,
+        appliedMigrations: recoveryBefore.appliedMigrations,
         restoreSentinel,
+        recoveryFacts: recoveryBefore.recoveryFacts,
+        plaintextSqlSha256: digest.plaintextSqlSha256,
         objectKey: keys.objectKey,
         objectEtag: stored.etag,
         objectSize: stored.size,
@@ -1225,22 +1366,77 @@ export async function runNextBackupCreate(input) {
     if (!storedManifest || typeof storedManifest.etag !== 'string'
       || storedManifest.etag.length === 0
       || storedManifest.size !== manifestResult.bytes.byteLength) invalid()
-    await completeClaim(
-      { ...runner, scheduler: captured.scheduler },
-      candidate,
-      claim,
-      stored,
-      manifestResult,
-      keys,
-      exported.atBookmark,
-    )
+    const final = {
+      completedAt: instantFromMs(runner.now()),
+      expiresAt: expiryFor(candidate.backup),
+    }
+    try {
+      await completeClaim(
+        { ...runner, scheduler: captured.scheduler },
+        candidate,
+        claim,
+        stored,
+        manifestResult,
+        keys,
+        exported.atBookmark,
+        final,
+      )
+    } catch {
+      let state
+      try { state = await readFinalizationState(runner, candidate, claim) } catch {
+        finalizationUncertain = true
+        throw new Error('BACKUP_FINALIZE_UNCERTAIN')
+      }
+      if (!exactStoredFinalization(
+        state, candidate, claim, manifestResult, stored, keys, exported.atBookmark, final,
+      )) {
+        if (exactPendingFinalization(state, candidate, claim)) {
+          try {
+            await cleanupCurrentArtifacts(
+              { ...runner, scheduler: captured.scheduler }, claim, keys,
+            )
+          } catch {}
+          finalizationPending = true
+        } else {
+          finalizationUncertain = true
+        }
+        throw new Error('BACKUP_FINALIZE_UNCERTAIN')
+      }
+    }
     return { claimed: true, result: 'succeeded', backupId: candidate.backup.id }
   } catch (error) {
+    if (finalizationPending) throw new Error('BACKUP_FINALIZE_UNCERTAIN')
+    if (finalizationUncertain) {
+      return {
+        claimed: true,
+        result: 'dead',
+        backupId: candidate.backup.id,
+        errorCode: 'BACKUP_FINALIZE_UNCERTAIN',
+      }
+    }
+    let failure = error
+    if (artifactWriteStarted) {
+      try {
+        await cleanupCurrentArtifacts(
+          { ...runner, scheduler: captured.scheduler },
+          claim,
+          backupObjectKeys({
+            backupId: candidate.backup.id,
+            localMonth: candidate.backup.local_month,
+            version: 3,
+          }),
+        )
+      } catch (cleanupError) {
+        failure = cleanupError?.message === 'BACKUP_LEASE_LOST'
+          ? cleanupError
+          : new Error('BACKUP_ORPHAN_CLEANUP_FAILED')
+      }
+    }
     const code = await failClaim(
       { ...runner, scheduler: captured.scheduler },
       candidate,
       claim,
-      error,
+      failure,
     )
     return { claimed: true, result: 'dead', backupId: candidate.backup.id, errorCode: code }
   } finally {

@@ -13,6 +13,12 @@ import {
   stagingMigrationStatus,
   validateStagingBackupConfig,
 } from '../../scripts/backup-staging-lib.mjs'
+import {
+  WORKBOOK_ROUNDTRIP_MIGRATIONS,
+} from '../../worker/operations/backup-recovery.js'
+import fixtureV2 from '../fixtures/backup-format-v2.json' with { type: 'json' }
+import fixtureV3 from '../fixtures/backup-format-v3.json' with { type: 'json' }
+import workbookRecoveryFacts from '../fixtures/backup-recovery-workbook-facts.json' with { type: 'json' }
 
 const config = JSON.parse(readFileSync(new URL('../../wrangler.json', import.meta.url), 'utf8'))
 const environment = Object.freeze({ APP_ENV: 'staging', DATA_MODE: 'fictional' })
@@ -74,7 +80,11 @@ function successfulSetup(overrides = {}) {
     version: 2,
     createdAt: new Date(now).toISOString(),
   }
-  const migrations = [{ id: 1, name: '0001_security_primitives.sql' }, { id: 2, name: '0002_identity_operations.sql' }]
+  const migrations = structuredClone(WORKBOOK_ROUNDTRIP_MIGRATIONS)
+  const recoverySnapshot = {
+    appliedMigrations: migrations,
+    recoveryFacts: structuredClone(workbookRecoveryFacts),
+  }
   const events = []
   let leaseVersion = 2
   const store = {
@@ -83,6 +93,7 @@ function successfulSetup(overrides = {}) {
     async insertQueued() { events.push('queued'); return { ...exporting, status: 'queued', version: 1 } },
     async markExporting() { events.push('exporting'); return exporting },
     async readMigrations() { events.push('migrations'); return migrations },
+    async readRecoverySnapshot() { events.push('recovery'); return structuredClone(recoverySnapshot) },
     async renewLease({ phase }) { events.push(`renew:${phase}`); leaseVersion += 1; return { backupId, owner, version: leaseVersion } },
     async rereadLease() { events.push('reread'); return { backupId, owner, version: leaseVersion } },
     async markStored() { events.push('stored'); return { status: 'stored', version: 3 } },
@@ -92,7 +103,7 @@ function successfulSetup(overrides = {}) {
     async releaseLease() { events.push('release'); return { phase: 'idle' } },
   }
   const archive = {
-    async putSql({ body }) { events.push('put-sql'); await body.pipeTo(new WritableStream({ write() {} })); return { etag: 'etag-demand-public', size: 4 } },
+    async putSql({ body }) { events.push('put-sql'); await body.pipeTo(new WritableStream({ write() {} })); return { etag: 'etag-demand-public', size: 4, plaintextSqlSha256: '9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a' } },
     async putManifest({ bytes }) { events.push('put-manifest'); return { etag: 'manifest-etag-public', size: bytes.byteLength } },
     async headSql() {
       events.push('head-sql')
@@ -101,7 +112,7 @@ function successfulSetup(overrides = {}) {
         size: 4,
         customMetadata: {
           backupId,
-          format: 'bwm-d1-sql-v2',
+          format: 'bwm-d1-sql-v3',
           retentionClass: 'daily',
           sourceAppEnv: source.appEnv,
           sourceDatabaseId: source.databaseId,
@@ -135,14 +146,72 @@ function successfulSetup(overrides = {}) {
   return { backupId, events, input, migrations, store }
 }
 
+function pendingBackupRow(setup, overrides = {}) {
+  const createdAt = '2026-08-27T12:34:56.789Z'
+  const status = overrides.status ?? 'exporting'
+  const failedStatus = status === 'failed'
+  return {
+    id: setup.backupId,
+    status,
+    version: overrides.version ?? (status === 'queued' ? 1 : 2),
+    localDay: '2026-08-27',
+    localMonth: '2026-08',
+    retentionClass: 'daily',
+    exportBookmark: null,
+    objectKey: null,
+    manifestKey: null,
+    ssecKeyVersion: null,
+    wrappedSsecKeyB64: null,
+    wrapNonceB64: null,
+    objectEtag: null,
+    objectSize: null,
+    startedAt: status === 'queued' ? null : createdAt,
+    completedAt: failedStatus ? createdAt : null,
+    expiresAt: null,
+    restoreVerifiedAt: null,
+    lastErrorCode: null,
+    createdAt,
+    updatedAt: createdAt,
+    ...overrides,
+  }
+}
+
+function storedBackupRow(setup, facts, overrides = {}) {
+  const createdAt = '2026-08-27T12:34:56.789Z'
+  return {
+    id: setup.backupId,
+    status: 'stored',
+    version: 3,
+    localDay: '2026-08-27',
+    localMonth: '2026-08',
+    retentionClass: 'daily',
+    exportBookmark: facts.bookmark,
+    objectKey: facts.keys.objectKey,
+    manifestKey: facts.keys.manifestKey,
+    ssecKeyVersion: facts.databaseFields.ssecKeyVersion,
+    wrappedSsecKeyB64: facts.databaseFields.wrappedSsecKeyB64,
+    wrapNonceB64: facts.databaseFields.wrapNonceB64,
+    objectEtag: facts.objectEtag,
+    objectSize: facts.objectSize,
+    startedAt: createdAt,
+    completedAt: facts.completedAt,
+    expiresAt: facts.expiresAt,
+    restoreVerifiedAt: null,
+    lastErrorCode: null,
+    createdAt,
+    updatedAt: facts.completedAt,
+    ...overrides,
+  }
+}
+
 test('demand creation brackets export with migrations, publishes manifest last, fences R2, and finalizes one row', async () => {
   const setup = successfulSetup()
   const result = await createStagingBackup(setup.input)
   assert.deepEqual(result, {
     backupId: setup.backupId,
     completedAt: '2026-08-27T12:34:56.789Z',
-    manifestKey: `backups/v2/2026/08/${setup.backupId}.manifest.json`,
-    migrationCount: 2,
+    manifestKey: `backups/v3/2026/08/${setup.backupId}.manifest.json`,
+    migrationCount: 21,
     migrationSetSha256: (await migrationEvidence(setup.migrations)).migrationSetSha256,
     objectEtag: 'etag-demand-public',
     objectSize: 4,
@@ -150,8 +219,8 @@ test('demand creation brackets export with migrations, publishes manifest last, 
     retentionClass: 'daily',
     status: 'stored',
   })
-  assert.deepEqual(setup.events.filter((event) => ['migrations', 'export', 'put-sql', 'put-manifest', 'stored'].includes(event)), [
-    'migrations', 'export', 'migrations', 'put-sql', 'put-manifest', 'stored',
+  assert.deepEqual(setup.events.filter((event) => ['recovery', 'export', 'put-sql', 'put-manifest', 'stored'].includes(event)), [
+    'recovery', 'export', 'recovery', 'put-sql', 'put-manifest', 'stored',
   ])
   const sqlIndex = setup.events.indexOf('put-sql')
   const manifestIndex = setup.events.indexOf('put-manifest')
@@ -162,13 +231,18 @@ test('demand creation brackets export with migrations, publishes manifest last, 
   assert.equal(setup.events.at(-1), 'release')
 })
 
-test('migration drift compensates manifest-first and never publishes a manifest', async () => {
+test('recovery snapshot drift compensates manifest-first and never publishes a manifest', async () => {
   const setup = successfulSetup()
   let reads = 0
-  setup.input.store.readMigrations = async () => {
-    setup.events.push('migrations')
+  setup.input.store.readRecoverySnapshot = async () => {
+    setup.events.push('recovery')
     reads += 1
-    return reads === 1 ? setup.migrations : [...setup.migrations, { id: 3, name: '0003_drift.sql' }]
+    const snapshot = {
+      appliedMigrations: setup.migrations,
+      recoveryFacts: structuredClone(workbookRecoveryFacts),
+    }
+    if (reads === 2) snapshot.recoveryFacts.activity.version += 1
+    return snapshot
   }
   await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
   assert.equal(setup.events.includes('put-sql'), false)
@@ -180,6 +254,33 @@ test('migration drift compensates manifest-first and never publishes a manifest'
     assert.equal(setup.events[index + 1], 'reread')
   }
   assert.equal(setup.events.some((event) => event === 'failed:BACKUP_MIGRATION_SET_CHANGED'), true)
+})
+
+test('cleanup proves the manifest absent before deleting the SQL object', async () => {
+  const setup = successfulSetup()
+  setup.input.archive.putManifest = async () => { throw new Error('manifest put marker') }
+  setup.input.archive.deleteObject = async ({ key, signal }) => {
+    assert.ok(signal instanceof AbortSignal)
+    assert.equal(signal.aborted, false)
+    setup.events.push(`delete:${key}`)
+  }
+  setup.input.archive.objectAbsent = async ({ key, signal }) => {
+    assert.ok(signal instanceof AbortSignal)
+    assert.equal(signal.aborted, false)
+    setup.events.push(`absent:${key}`)
+    return true
+  }
+
+  await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
+  assert.deepEqual(
+    setup.events.filter((event) => event.startsWith('delete:') || event.startsWith('absent:')),
+    [
+      `delete:backups/v3/2026/08/${setup.backupId}.manifest.json`,
+      `absent:backups/v3/2026/08/${setup.backupId}.manifest.json`,
+      `delete:backups/v3/2026/08/${setup.backupId}.sql`,
+      `absent:backups/v3/2026/08/${setup.backupId}.sql`,
+    ],
+  )
 })
 
 test('one-live-day refusal performs no export or R2 mutation', async () => {
@@ -200,28 +301,20 @@ test('migration status prints only bounded evidence', async () => {
 })
 
 test('status rejects a database-controlled manifest key before any R2 read', async () => {
-  const source = validateStagingBackupConfig({ config, environment }).source
+  const manifest = JSON.parse(Buffer.from(
+    fixtureV3.variants.core.canonicalManifestBase64Url, 'base64url',
+  ).toString('utf8'))
   let manifestReads = 0
   await assert.rejects(statusStagingBackup({
-    backupId: 'bkp_status_public_20260827',
-    source,
+    backupId: manifest.backupId,
+    source: manifest.source,
     keyring: { getBackupKek: async () => { throw new Error('must not open') } },
     store: {
       async readBackup() {
         return {
-          id: 'bkp_status_public_20260827',
-          status: 'stored',
-          version: 3,
-          localDay: '2026-08-27',
-          localMonth: '2026-08',
-          retentionClass: 'daily',
+          ...statusRowForManifest(manifest),
           objectKey: 'workbook-objects/not-a-backup.sql',
           manifestKey: 'workbook-objects/not-a-backup.manifest.json',
-          objectEtag: 'status-etag-public',
-          objectSize: 4,
-          completedAt: '2026-08-27T12:34:56.789Z',
-          lastErrorCode: null,
-          createdAt: '2026-08-27T12:00:00.000Z',
         }
       },
     },
@@ -233,29 +326,111 @@ test('status rejects a database-controlled manifest key before any R2 read', asy
   assert.equal(manifestReads, 0)
 })
 
+const fixtureBytes = (value) => new Uint8Array(Buffer.from(value, 'base64url'))
+const deriveFixtureKey = (seed) => Uint8Array.from(
+  { length: 32 }, (_, index) => (seed + index * 29) & 0xff,
+)
+const fixtureKeyring = (seed) => ({
+  getBackupKek: async (version) => version === 1
+    ? crypto.subtle.importKey(
+      'raw', deriveFixtureKey(seed), { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'],
+    )
+    : null,
+})
+
+function statusRowForManifest(manifest) {
+  return {
+    id: manifest.backupId,
+    status: 'stored',
+    version: 3,
+    localDay: manifest.localDay,
+    localMonth: manifest.localMonth,
+    retentionClass: manifest.retentionClass,
+    exportBookmark: manifest.atBookmark,
+    objectKey: manifest.objectKey,
+    manifestKey: manifest.objectKey.replace(/\.sql$/, '.manifest.json'),
+    ssecKeyVersion: manifest.wrappedSsecKey.kekVersion,
+    wrappedSsecKeyB64: manifest.wrappedSsecKey.ciphertext,
+    wrapNonceB64: manifest.wrappedSsecKey.nonce,
+    objectEtag: manifest.objectEtag,
+    objectSize: manifest.objectSize,
+    startedAt: manifest.createdAt,
+    completedAt: manifest.createdAt,
+    expiresAt: '2026-10-01T00:00:00.000Z',
+    restoreVerifiedAt: null,
+    lastErrorCode: null,
+    createdAt: manifest.createdAt,
+    updatedAt: manifest.createdAt,
+  }
+}
+
+test('status authenticates exact v3 recovery manifests and preserves v2 compatibility', async () => {
+  const variants = [
+    {
+      bytes: fixtureBytes(fixtureV2.canonicalManifestBase64Url),
+      manifest: fixtureV2.manifest,
+      kekSeed: fixtureV2.publicDerivationSeeds.backupKek,
+    },
+    {
+      bytes: fixtureBytes(fixtureV3.variants.workbook.canonicalManifestBase64Url),
+      manifest: JSON.parse(Buffer.from(
+        fixtureV3.variants.workbook.canonicalManifestBase64Url, 'base64url',
+      ).toString('utf8')),
+      kekSeed: fixtureV3.backupKekSeed,
+    },
+  ]
+  for (const variant of variants) {
+    const result = await statusStagingBackup({
+      backupId: variant.manifest.backupId,
+      source: variant.manifest.source,
+      keyring: fixtureKeyring(variant.kekSeed),
+      store: { readBackup: async () => statusRowForManifest(variant.manifest) },
+      getManifest: async (key) => {
+        assert.equal(key, statusRowForManifest(variant.manifest).manifestKey)
+        return variant.bytes
+      },
+    })
+    assert.equal(result.backupId, variant.manifest.backupId)
+    assert.equal(result.migrationCount, variant.manifest.appliedMigrations.length)
+    assert.equal(result.status, 'stored')
+  }
+})
+
+test('status accepts exact completed failed rows and rejects leftover artifact facts', async () => {
+  const setup = successfulSetup()
+  for (const row of [
+    pendingBackupRow(setup, { status: 'failed', version: 2, startedAt: null, lastErrorCode: 'BACKUP_CREATE_FAILED' }),
+    pendingBackupRow(setup, { status: 'failed', version: 3, lastErrorCode: 'BACKUP_CREATE_FAILED' }),
+  ]) {
+    const input = {
+      backupId: setup.backupId,
+      source: setup.input.source,
+      keyring: setup.input.keyring,
+      store: { readBackup: async () => row },
+      getManifest: async () => { throw new Error('must not read failed manifest') },
+    }
+    assert.deepEqual(await statusStagingBackup(input), {
+      backupId: setup.backupId,
+      cleanupRequired: false,
+      errorCode: 'BACKUP_CREATE_FAILED',
+      status: 'failed',
+    })
+    input.store.readBackup = async () => ({ ...row, exportBookmark: 'leftover-public' })
+    await assert.rejects(statusStagingBackup(input), /^Error: BACKUP_STAGING_FAILED$/)
+  }
+})
+
 test('an uncertain final CAS accepts only the exact stored object facts and keeps artifacts', async () => {
   const setup = successfulSetup()
-  setup.input.store.markStored = async () => {
+  let storedFacts
+  setup.input.store.markStored = async (facts) => {
+    storedFacts = facts
     setup.events.push('stored-timeout')
     throw new Error('provider timeout marker')
   }
   setup.input.store.readBackup = async () => {
     setup.events.push('read-backup')
-    return {
-      id: setup.backupId,
-      status: 'stored',
-      version: 3,
-      localDay: '2026-08-27',
-      localMonth: '2026-08',
-      retentionClass: 'daily',
-      objectKey: `backups/v2/2026/08/${setup.backupId}.sql`,
-      manifestKey: `backups/v2/2026/08/${setup.backupId}.manifest.json`,
-      objectEtag: 'etag-demand-public',
-      objectSize: 4,
-      completedAt: '2026-08-27T12:34:56.789Z',
-      lastErrorCode: null,
-      createdAt: '2026-08-27T12:34:56.789Z',
-    }
+    return storedBackupRow(setup, storedFacts)
   }
   const result = await createStagingBackup(setup.input)
   assert.equal(result.status, 'stored')
@@ -263,7 +438,23 @@ test('an uncertain final CAS accepts only the exact stored object facts and keep
   assert.deepEqual(setup.events.slice(-3), ['stored-timeout', 'read-backup', 'release'])
 })
 
-test('an uncertain final CAS rejects an inexact stored reread before artifact preservation', async () => {
+test('an uncertain final CAS preserves artifacts when one authenticated stored field differs', async () => {
+  const setup = successfulSetup()
+  let storedFacts
+  setup.input.store.markStored = async (facts) => {
+    storedFacts = facts
+    throw new Error('provider timeout marker')
+  }
+  setup.input.store.readBackup = async () => storedBackupRow(setup, storedFacts, {
+    exportBookmark: 'other-bookmark-public',
+  })
+  await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
+  assert.equal(setup.events.some((event) => event.startsWith('delete:')), false)
+  assert.equal(setup.events.some((event) => event.startsWith('failed:')), false)
+  assert.equal(setup.events.includes('release'), false)
+})
+
+test('an uncertain final CAS preserves artifacts for an ambiguous inexact reread', async () => {
   const setup = successfulSetup()
   setup.input.store.markStored = async () => { throw new Error('provider timeout marker') }
   setup.input.store.readBackup = async () => ({
@@ -283,7 +474,22 @@ test('an uncertain final CAS rejects an inexact stored reread before artifact pr
     attackerControlledExtra: true,
   })
   await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
-  assert.equal(setup.events.some((event) => event.startsWith('delete:')), true)
+  assert.equal(setup.events.some((event) => event.startsWith('delete:')), false)
+  assert.equal(setup.events.some((event) => event.startsWith('failed:')), false)
+  assert.equal(setup.events.includes('release'), false)
+})
+
+test('an uncertain final CAS cleans exact pending artifacts and leaves the owned row for stale reclaim', async () => {
+  const setup = successfulSetup()
+  setup.input.store.markStored = async () => { throw new Error('provider timeout marker') }
+  setup.input.store.readBackup = async () => pendingBackupRow(setup)
+  await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
+  assert.deepEqual(setup.events.filter((event) => event.startsWith('delete:')), [
+    `delete:backups/v3/2026/08/${setup.backupId}.manifest.json`,
+    `delete:backups/v3/2026/08/${setup.backupId}.sql`,
+  ])
+  assert.equal(setup.events.some((event) => event.startsWith('failed:')), false)
+  assert.equal(setup.events.includes('release'), false)
 })
 
 test('a release failure after stored finalization reports the valid backup and never deletes it', async () => {
@@ -307,21 +513,7 @@ test('an uncertain exporting CAS continues only from the exact owned exporting r
   }
   setup.input.store.readBackup = async () => {
     setup.events.push('read-backup')
-    return {
-      id: setup.backupId,
-      status: 'exporting',
-      version: 2,
-      localDay: '2026-08-27',
-      localMonth: '2026-08',
-      retentionClass: 'daily',
-      objectKey: null,
-      manifestKey: null,
-      objectEtag: null,
-      objectSize: null,
-      completedAt: null,
-      lastErrorCode: null,
-      createdAt: '2026-08-27T12:34:56.789Z',
-    }
+    return pendingBackupRow(setup)
   }
   const result = await createStagingBackup(setup.input)
   assert.equal(result.status, 'stored')
@@ -331,20 +523,8 @@ test('an uncertain exporting CAS continues only from the exact owned exporting r
 test('a failed exporting CAS marks its already-created queued row failed without export', async () => {
   const setup = successfulSetup()
   setup.input.store.markExporting = async () => { throw new Error('provider failure marker') }
-  setup.input.store.readBackup = async () => ({
-    id: setup.backupId,
-    status: 'queued',
-    version: 1,
-    localDay: '2026-08-27',
-    localMonth: '2026-08',
-    retentionClass: 'daily',
-    objectKey: null,
-    manifestKey: null,
-    objectEtag: null,
-    objectSize: null,
-    completedAt: null,
-    lastErrorCode: null,
-    createdAt: '2026-08-27T12:34:56.789Z',
+  setup.input.store.readBackup = async () => pendingBackupRow(setup, {
+    status: 'queued', version: 1,
   })
   await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
   assert.equal(setup.events.includes('export'), false)
@@ -369,21 +549,7 @@ test('an uncertain failed-row CAS keeps the lease when an exact reread is still 
   }
   setup.input.store.readBackup = async () => {
     setup.events.push('read-backup')
-    return {
-      id: setup.backupId,
-      status: 'exporting',
-      version: 2,
-      localDay: '2026-08-27',
-      localMonth: '2026-08',
-      retentionClass: 'daily',
-      objectKey: null,
-      manifestKey: null,
-      objectEtag: null,
-      objectSize: null,
-      completedAt: null,
-      lastErrorCode: null,
-      createdAt: '2026-08-27T12:34:56.789Z',
-    }
+    return pendingBackupRow(setup)
   }
   await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
   assert.equal(setup.events.includes('failed-timeout'), true)
@@ -400,21 +566,9 @@ test('an uncertain failed-row CAS releases only after an exact failed-row reread
   }
   setup.input.store.readBackup = async () => {
     setup.events.push('read-backup')
-    return {
-      id: setup.backupId,
-      status: 'failed',
-      version: 3,
-      localDay: '2026-08-27',
-      localMonth: '2026-08',
-      retentionClass: 'daily',
-      objectKey: null,
-      manifestKey: null,
-      objectEtag: null,
-      objectSize: null,
-      completedAt: null,
-      lastErrorCode: 'BACKUP_CREATE_FAILED',
-      createdAt: '2026-08-27T12:34:56.789Z',
-    }
+    return pendingBackupRow(setup, {
+      status: 'failed', version: 3, lastErrorCode: 'BACKUP_CREATE_FAILED',
+    })
   }
   await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
   assert.equal(setup.events.at(-1), 'release')
@@ -436,7 +590,7 @@ test('a concurrent one-live/day insert loser refuses before export or R2 writes'
   assert.equal(setup.events.some((event) => event.startsWith('put-')), false)
 })
 
-test('an expired owner is taken over by CAS and its v2 then v1 artifacts are removed before a new row', async () => {
+test('an expired owner is taken over by CAS and its v3, v2 then v1 artifacts are removed before a new row', async () => {
   const setup = successfulSetup()
   setup.input.store.acquireLease = async () => {
     setup.events.push('acquire-stale')
@@ -449,7 +603,9 @@ test('an expired owner is taken over by CAS and its v2 then v1 artifacts are rem
   }
   const result = await createStagingBackup(setup.input)
   assert.equal(result.status, 'stored')
-  assert.deepEqual(setup.events.filter((event) => event.startsWith('delete:')).slice(0, 4), [
+  assert.deepEqual(setup.events.filter((event) => event.startsWith('delete:')).slice(0, 6), [
+    'delete:backups/v3/2026/08/bkp_stale_public_20260826.manifest.json',
+    'delete:backups/v3/2026/08/bkp_stale_public_20260826.sql',
     'delete:backups/v2/2026/08/bkp_stale_public_20260826.manifest.json',
     'delete:backups/v2/2026/08/bkp_stale_public_20260826.sql',
     'delete:backups/v1/2026/08/bkp_stale_public_20260826.manifest.json',
@@ -794,7 +950,11 @@ test('S3 upload uses one conditional put through 8 MiB and returns exact head me
     signal,
     checkpoint: async () => {},
   })
-  assert.deepEqual(stored, { etag: 'small-etag-public', size: 8 * 1024 * 1024 })
+  assert.deepEqual(stored, {
+    etag: 'small-etag-public',
+    size: 8 * 1024 * 1024,
+    plaintextSqlSha256: '63d102527006eb9d7ceaa749bf66302543d599dc720c2615f06e88fba890de58',
+  })
   assert.equal(commands.length, 1)
   assert.equal(commands[0].constructor.name, 'PutObjectCommand')
   assert.equal(commands[0].input.IfNoneMatch, '*')
@@ -839,7 +999,11 @@ test('S3 upload above 8 MiB emits exact parts, fences completion, and aborts a f
     signal: new AbortController().signal,
     checkpoint: async () => { checkpoints.push(calls.length) },
   })
-  assert.deepEqual(result, { etag: 'multipart-etag-public', size: 10 * 1024 * 1024 })
+  assert.deepEqual(result, {
+    etag: 'multipart-etag-public',
+    size: 10 * 1024 * 1024,
+    plaintextSqlSha256: '6e4894de2abce787a79777e258a115ccc339c1d795d3ae3768374b31c97cb4cb',
+  })
   assert.deepEqual(calls.map(({ name }) => name), [
     'CreateMultipartUploadCommand',
     'UploadPartCommand',
@@ -874,6 +1038,54 @@ test('S3 upload above 8 MiB emits exact parts, fences completion, and aborts a f
     checkpoint: async () => {},
   }), /upload failure marker/)
   assert.deepEqual(failedCalls, ['CreateMultipartUploadCommand', 'UploadPartCommand', 'AbortMultipartUploadCommand'])
+})
+
+test('S3 upload rejects unpaired or extra ETag quotes', async () => {
+  for (const etag of ['"unpaired-public', 'unpaired-public"', '""extra-public""']) {
+    const archive = createS3BackupArchive({
+      bucket: 'backup-staging-public',
+      client: { send: async () => ({ ETag: etag }) },
+    })
+    await assert.rejects(archive.putSql({
+      key: 'backups/v3/2026/08/bkp_s3_public_20260827.sql',
+      body: streamFrom([new Uint8Array([1])]),
+      ssecKey: new Uint8Array(32).fill(4),
+      customMetadata: { ...s3Metadata, format: 'bwm-d1-sql-v3' },
+      signal: new AbortController().signal,
+      checkpoint: async () => {},
+    }), /^Error: BACKUP_STAGING_FAILED$/)
+  }
+})
+
+test('a failed S3 put cancels an unfinished plaintext reader', async () => {
+  let cancelled = false
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(8 * 1024 * 1024 + 1))
+    },
+    cancel() { cancelled = true },
+  })
+  const archive = createS3BackupArchive({
+    bucket: 'backup-staging-public',
+    client: {
+      async send(command) {
+        if (command.constructor.name === 'CreateMultipartUploadCommand') {
+          return { UploadId: 'cancel-reader-public' }
+        }
+        if (command.constructor.name === 'AbortMultipartUploadCommand') return {}
+        throw new Error('put failure marker')
+      },
+    },
+  })
+  await assert.rejects(archive.putSql({
+    key: 'backups/v3/2026/08/bkp_s3_public_20260827.sql',
+    body,
+    ssecKey: new Uint8Array(32).fill(4),
+    customMetadata: { ...s3Metadata, format: 'bwm-d1-sql-v3' },
+    signal: new AbortController().signal,
+    checkpoint: async () => {},
+  }), /put failure marker/)
+  assert.equal(cancelled, true)
 })
 
 test('a failed multipart abort stays retryable and never reuses the cancelled upload signal', async () => {
