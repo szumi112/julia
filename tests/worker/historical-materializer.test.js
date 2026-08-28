@@ -339,6 +339,31 @@ beforeAll(async () => {
 })
 
 describe('historical projection materializer', () => {
+  it('bounds specialist mapping reads before materializing a corrupt result set', async () => {
+    let sql = null
+    let bindings = null
+    const db = {
+      prepare(value) {
+        sql = value
+        return {
+          bind(...values) {
+            bindings = values
+            return {
+              async all() { return { results: Array.from({ length: 101 }, () => ({})) } },
+            }
+          },
+        }
+      },
+    }
+
+    await expect(loadAuthenticatedWorkbookSpecialistMappings({
+      db, keyring: {}, dataKey: {}, importId: 'wbi_bounded_mappings',
+      config: {}, centreId: 'centre_1',
+    })).rejects.toThrow(/CRYPTO_FAILURE/)
+    expect(sql).toMatch(/LIMIT \?$/)
+    expect(bindings).toEqual(['wbi_bounded_mappings', 101])
+  })
+
   it('creates, projects, and completes a creator/correlation-bound idempotent job', async () => {
     const command = (expectedVersion, idempotencyKey, db = env.DB) => ({
       db, actor, keyring, config, centreId: 'centre_1', importId: IMPORT_ID,

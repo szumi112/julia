@@ -61,8 +61,9 @@ export async function loadAuthenticatedWorkbookSpecialistMappings({
     `SELECT id,source_value_kind,source_value_digest,source_value_hmac_version,
             source_value_envelope,specialist_id
      FROM workbook_resolutions
-     WHERE import_id=? AND kind='specialist_mapping' ORDER BY id`,
-  ).bind(importId).all()).results
+     WHERE import_id=? AND kind='specialist_mapping' ORDER BY id
+     LIMIT ?`,
+  ).bind(importId, 101).all()).results
   if (!Array.isArray(rows) || rows.length > 100) fail()
   const bySourceValue = new Map()
   const byDigest = new Map()
