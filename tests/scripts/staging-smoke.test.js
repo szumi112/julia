@@ -20,6 +20,13 @@ import {
 const successful = (role) => ({
   role,
   ...(role === 'owner' ? { authorityRefreshClearsState: true } : {}),
+  exportEvidence: {
+    actor: role,
+    scope: role === 'specialist' ? 'own' : 'centre',
+    status: 'verified',
+    byteSize: 4_096,
+    sha256: 'a'.repeat(64),
+  },
   routesOk: true,
   actionsOk: true,
   guardedSurfacesOk: true,
@@ -32,7 +39,7 @@ const successful = (role) => ({
   exportOutOfScopeAbsent: true,
 })
 
-test('three-actor smoke returns only allow-listed boolean evidence and cleans every actor', async () => {
+test('three-actor smoke returns only allow-listed evidence and cleans every actor', async () => {
   const cleanup = []
   const actors = Object.fromEntries(['owner', 'coordinator', 'specialist'].map((role) => [
     role,
@@ -67,6 +74,34 @@ test('three-actor smoke fails closed and still cleans all actor resources', asyn
   ]))
   await assert.rejects(runStagingSmoke({ actors }), /^Error: STAGING_SMOKE_FAILED$/)
   assert.deepEqual(cleanup.sort(), ['coordinator', 'owner', 'specialist'])
+})
+
+test('export evidence requires exact actor, scope, status, bounded bytes and SHA-256', async () => {
+  const hostileEvidence = [
+    { actor: 'coordinator' },
+    { scope: 'centre' },
+    { status: 'ok' },
+    { byteSize: 0 },
+    { byteSize: 10_485_761 },
+    { sha256: 'A'.repeat(64) },
+    { sha256: 'a'.repeat(63) },
+    { extra: true },
+  ]
+  for (const patch of hostileEvidence) {
+    const actors = Object.fromEntries(['owner', 'coordinator', 'specialist'].map((role) => [
+      role,
+      {
+        async run() {
+          const value = successful(role)
+          return role === 'specialist'
+            ? { ...value, exportEvidence: { ...value.exportEvidence, ...patch } }
+            : value
+        },
+        async cleanup() { return true },
+      },
+    ]))
+    await assert.rejects(runStagingSmoke({ actors }), /^Error: STAGING_SMOKE_FAILED$/)
+  }
 })
 
 test('route evidence uses the independent complete role matrix', () => {

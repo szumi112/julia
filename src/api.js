@@ -798,6 +798,96 @@ const captureWorkspaceAppointment = (raw, bounds = null) => {
   })
 }
 
+const captureOwnPaymentAppointment = (raw, bounds) => {
+  const value = captureDataObject(raw, [
+    'id', 'serviceId', 'startsAt', 'status', 'version', 'charge', 'payment',
+  ])
+  if (!value || typeof value.id !== 'string' || !APPOINTMENT_ID.test(value.id)
+    || typeof value.serviceId !== 'string' || !WORKSPACE_SERVICE_IDS.has(value.serviceId)
+    || !validInstant(value.startsAt) || value.startsAt < bounds.lower
+    || value.startsAt >= bounds.upper
+    || !['scheduled', 'completed', 'cancelled', 'noshow'].includes(value.status)
+    || !workspacePositive(value.version, 4_096)) return null
+  const charge = captureDataObject(value.charge, [
+    'id', 'serviceId', 'expectedAmountGrosze', 'currency', 'version',
+  ])
+  if (!charge || typeof charge.id !== 'string' || !CHARGE_ID.test(charge.id)
+    || charge.serviceId !== value.serviceId
+    || !workspacePositive(charge.expectedAmountGrosze, 1_000_000)
+    || charge.currency !== 'PLN' || !workspacePositive(charge.version, 257)
+    || charge.version > value.version) return null
+  const payment = captureDataObject(value.payment, [
+    'status', 'collectedGrosze', 'outstandingGrosze', 'latestMethod', 'latestReceivedAt',
+  ])
+  if (!payment || !safeCount(payment.collectedGrosze)
+    || payment.collectedGrosze > charge.expectedAmountGrosze
+    || !safeCount(payment.outstandingGrosze)) return null
+  const billable = ['completed', 'noshow'].includes(value.status)
+  const expectedOutstanding = billable
+    ? charge.expectedAmountGrosze - payment.collectedGrosze : 0
+  const expectedStatus = payment.collectedGrosze === 0 ? 'unpaid'
+    : expectedOutstanding === 0 ? 'paid' : 'partial'
+  const latestNull = payment.latestMethod === null && payment.latestReceivedAt === null
+  if ((!billable && payment.collectedGrosze !== 0)
+    || payment.status !== expectedStatus
+    || payment.outstandingGrosze !== expectedOutstanding
+    || latestNull !== (payment.collectedGrosze === 0)
+    || (!latestNull && (!PAYMENT_METHODS.has(payment.latestMethod)
+      || !validInstant(payment.latestReceivedAt)))) return null
+  return Object.freeze({
+    id: value.id,
+    serviceId: value.serviceId,
+    startsAt: value.startsAt,
+    status: value.status,
+    version: value.version,
+    charge: Object.freeze({
+      id: charge.id,
+      serviceId: charge.serviceId,
+      expectedAmountGrosze: charge.expectedAmountGrosze,
+      currency: 'PLN',
+      version: charge.version,
+    }),
+    payment: Object.freeze({
+      status: payment.status,
+      collectedGrosze: payment.collectedGrosze,
+      outstandingGrosze: payment.outstandingGrosze,
+      latestMethod: payment.latestMethod,
+      latestReceivedAt: payment.latestReceivedAt,
+    }),
+  })
+}
+
+const acceptedOwnPayments = (payload, requested) => {
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['window', 'appointments'])
+  const window = data && captureDataObject(data.window, ['from', 'to', 'timeZone', 'complete'])
+  const rows = data && captureDenseArray(data.appointments, 500)
+  const bounds = workspaceBounds(requested)
+  if (!window || !rows || !bounds
+    || window.from !== requested.from || window.to !== requested.to
+    || window.timeZone !== 'Europe/Warsaw' || window.complete !== true) return null
+  const appointments = rows.map((value) => captureOwnPaymentAppointment(value, bounds))
+  if (appointments.some((value) => !value)) return null
+  const appointmentIds = new Set()
+  const chargeIds = new Set()
+  let previous = null
+  for (const appointment of appointments) {
+    if (appointmentIds.has(appointment.id) || chargeIds.has(appointment.charge.id)
+      || (previous && (previous.startsAt > appointment.startsAt
+        || (previous.startsAt === appointment.startsAt
+          && binaryCompare(previous.id, appointment.id) >= 0)))) return null
+    appointmentIds.add(appointment.id)
+    chargeIds.add(appointment.charge.id)
+    previous = appointment
+  }
+  return Object.freeze({
+    window: Object.freeze({
+      from: window.from, to: window.to, timeZone: 'Europe/Warsaw', complete: true,
+    }),
+    appointments: Object.freeze(appointments),
+  })
+}
+
 const APPOINTMENT_INPUT_KEYS = Object.freeze([
   'clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes',
   'expectedAmountGrosze', 'location', 'status',
@@ -3247,6 +3337,17 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       { validate: (payload) => acceptedWorkspace(payload, accepted) },
     )
   }
+  const loadOwnPaymentsWindow = (options) => {
+    const accepted = acceptedWorkspaceOptions(options)
+    if (!accepted) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    return requestJson(
+      `${API_ROOT}/payments/own?from=${accepted.from}&to=${accepted.to}`,
+      {
+        method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
+      },
+      { validate: (payload) => acceptedOwnPayments(payload, accepted) },
+    )
+  }
   const loadActivityWorkspace = (options) => {
     const requested = activityCapture(
       captureActivityMonthWindow, options,
@@ -4426,6 +4527,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     getCapabilityOverrides,
     replaceCapabilityOverrides,
     loadWorkspaceWindow,
+    loadOwnPaymentsWindow,
     loadActivityWorkspace,
     getOperationsHealth,
     getOperationalActions,

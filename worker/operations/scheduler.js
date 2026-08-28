@@ -439,7 +439,7 @@ async function dueFacts(db, scheduledTime) {
        EXISTS (
          SELECT 1 FROM backup_runs
          WHERE local_month=? AND retention_class='monthly'
-           AND status IN ('queued','exporting','stored','restore_verified')
+           AND status IN ('queued','exporting')
        ) AS has_live_monthly,
        EXISTS (
          SELECT 1 FROM backup_runs

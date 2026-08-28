@@ -27,6 +27,7 @@ import { Payments } from './views/Payments.jsx'
 import { Finance } from './views/Finance.jsx'
 import { Reports } from './views/Reports.jsx'
 import { ProtectedFinance } from './views/ProtectedFinance.jsx'
+import { OwnPayments } from './views/OwnPayments.jsx'
 import { ProtectedReports } from './views/ProtectedReports.jsx'
 import { Registry } from './views/Registry.jsx'
 import { WorkbookExport } from './views/WorkbookExport.jsx'
@@ -104,10 +105,9 @@ const ACTIVE_OF = { client: 'clients', psych: 'team', tusGroup: 'tus' }
 const META_K = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent) ? '⌘ K' : 'Ctrl K'
 
 function AppSpecialistPayments() {
-  const { actor } = useShell()
   return (
     <div>
-      <Payments ownSpecialistId={actor.specialistId} />
+      <OwnPayments />
       <WorkbookExport own />
     </div>
   )

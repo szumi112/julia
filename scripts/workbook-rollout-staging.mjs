@@ -125,6 +125,7 @@ async function main() {
         api,
         workbook: Object.freeze({ buffer: workbook.bytes }),
         approvedFingerprint: AUTHORITATIVE_WORKBOOK_FINGERPRINT,
+        creatorId: sessionData.actor.id,
         resolutions,
         expectedReconciliation: EXPECTED_RECONCILIATION,
       }))

@@ -6,13 +6,20 @@ import {
   CORE_MIGRATION_STAGE_E_NAMES,
 } from './core-migration-stages.js'
 
-const KNOWN_MIGRATIONS = Object.freeze([
+const PRE_STAGE_MIGRATIONS = Object.freeze([
   ...CORE_MIGRATION_STAGE_A_NAMES,
   ...CORE_MIGRATION_STAGE_B_NAMES,
   ...CORE_MIGRATION_STAGE_C_NAMES,
   ...CORE_MIGRATION_STAGE_D_NAMES,
+])
+const POST_STAGE_MIGRATIONS = Object.freeze([
+  ...PRE_STAGE_MIGRATIONS,
   ...CORE_MIGRATION_STAGE_E_NAMES,
 ])
+const EXPECTED_MIGRATIONS = Object.freeze({
+  'pre-stage': PRE_STAGE_MIGRATIONS,
+  'post-stage': POST_STAGE_MIGRATIONS,
+})
 
 const failed = () => { throw new Error('MIGRATION_STATUS_STAGING_FAILED') }
 const plain = (value) => value !== null && typeof value === 'object'
@@ -23,13 +30,14 @@ const exactRow = (value) => plain(value)
   && Object.hasOwn(value, 'id')
   && Object.hasOwn(value, 'name')
 
-export async function migrationStatusEvidence(rows) {
+export async function migrationStatusEvidence(rows, expectation) {
   try {
-    if (!Array.isArray(rows) || rows.length !== KNOWN_MIGRATIONS.length) failed()
+    const expected = EXPECTED_MIGRATIONS[expectation]
+    if (!expected || !Array.isArray(rows) || rows.length !== expected.length) failed()
     const migrationNames = []
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index]
-      if (!exactRow(row) || row.id !== index + 1 || row.name !== KNOWN_MIGRATIONS[index]) failed()
+      if (!exactRow(row) || row.id !== index + 1 || row.name !== expected[index]) failed()
       migrationNames.push(row.name)
     }
     const names = Object.freeze(migrationNames)
@@ -43,6 +51,7 @@ export async function migrationStatusEvidence(rows) {
         migrationNames: names,
         migrationCount: names.length,
         migrationSetSha256,
+        expectation,
         status: 'ok',
       })
     } finally {

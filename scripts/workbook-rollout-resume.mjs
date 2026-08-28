@@ -2,71 +2,156 @@ import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 
 import {
-  replayStagingWorkbookOperations,
   runStagingWorkbookRollout,
   verifyStagingWorkbookTerminal,
 } from './workbook-rollout-staging-lib.mjs'
 import { validateWorkbookRolloutJournal } from './workbook-rollout-journal.mjs'
-import { WorkbookRolloutHttpError } from './workbook-rollout-staging-http.mjs'
 
+const EVIDENCE_KEYS = Object.freeze([
+  'artifactCount', 'workbookObjectCount', 'templateCount', 'importCount', 'planCount',
+  'sourceRecordCount', 'quarantineCount', 'resolutionCount', 'resolutionSetCount',
+  'jobCount', 'candidateCount', 'decisionCount', 'financeEntryCount', 'financeLinkCount',
+  'historicalOccurrenceCount', 'activityChargeCount', 'projectionLinkCount',
+  'workbookVoidCount', 'manualVoidCount', 'createdRecordCount', 'voidedRecordCount',
+  'auditEventCount', 'outboxMessageCount',
+])
 const failed = () => { throw new Error('WORKBOOK_ROLLOUT_STAGING_FAILED') }
 const plain = (value) => value !== null && typeof value === 'object'
   && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+const exact = (value, keys) => plain(value) && Reflect.ownKeys(value).length === keys.length
+  && keys.every((key) => Object.hasOwn(value, key))
+const identifier = (value, prefix) => typeof value === 'string'
+  && new RegExp(`^${prefix}_[A-Za-z0-9_-]{1,120}$`).test(value)
+
+function importIdentity(value) {
+  if (!exact(value, ['importId', 'artifactId'])
+    || !identifier(value.importId, 'wbi') || !identifier(value.artifactId, 'wba')) failed()
+  return Object.freeze({ importId: value.importId, artifactId: value.artifactId })
+}
+
+function importState(value, expectedIdentity = null) {
+  const keys = [
+    'artifactId', 'converged', 'createdRecords', 'importId', 'status', 'version',
+    'voidedRecords',
+  ]
+  if (!exact(value, keys) || !identifier(value.importId, 'wbi')
+    || !identifier(value.artifactId, 'wba')
+    || !['ready', 'materializing', 'complete', 'failed'].includes(value.status)
+    || !Number.isSafeInteger(value.version) || value.version < 1
+    || !Number.isSafeInteger(value.createdRecords) || value.createdRecords < 0
+    || !Number.isSafeInteger(value.voidedRecords) || value.voidedRecords < 0
+    || typeof value.converged !== 'boolean'
+    || (expectedIdentity !== null && (value.importId !== expectedIdentity.importId
+      || value.artifactId !== expectedIdentity.artifactId))) failed()
+  return value
+}
+
+function operatorEvidence(value) {
+  if (!exact(value, EVIDENCE_KEYS)
+    || EVIDENCE_KEYS.some((key) => !Number.isSafeInteger(value[key]) || value[key] < 0)) failed()
+  return Object.freeze(Object.fromEntries(EVIDENCE_KEYS.map((key) => [key, value[key]])))
+}
+
+function inMemoryIdentity(identityFactory) {
+  if (typeof identityFactory !== 'function') failed()
+  const value = identityFactory()
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    .test(value ?? '')) failed()
+  return value
+}
+
+function resultFor(identity, expectedReconciliation) {
+  if (!plain(expectedReconciliation)) failed()
+  return Object.freeze({
+    artifactId: identity.artifactId,
+    importId: identity.importId,
+    acceptedCount: expectedReconciliation.activeAcceptedSourceRecords,
+    quarantinedCount: expectedReconciliation.quarantinedSourceRecords,
+    previewWritesZero: true,
+    terminalComplete: true,
+    artifactVerified: true,
+    reconciliationMatched: true,
+    replayIdentityMatch: true,
+    replayWritesZero: true,
+    status: 'ok',
+  })
+}
+
+async function continueWithRecovery({ api, input, identity }) {
+  let lastError
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return Object.freeze({
+        confirmed: true,
+        state: importState(await api.continue(input), identity),
+      })
+    } catch (error) { lastError = error }
+  }
+  const observed = importState(await api.status(identity.importId), identity)
+  if (observed.version <= input.expectedVersion) throw lastError
+  return Object.freeze({ confirmed: true, state: observed })
+}
+
+async function resumeConfirmedImport({
+  api, state, expectedReconciliation, approvedFingerprint, identityFactory,
+}) {
+  const identity = importIdentity(state.importIdentity)
+  const runIdentity = inMemoryIdentity(identityFactory)
+  let current = importState(await api.status(identity.importId), identity)
+  const operations = []
+  for (let ordinal = 1; current.status !== 'complete'; ordinal += 1) {
+    if (current.status === 'failed' || ordinal > 256) failed()
+    const input = Object.freeze({
+      importId: identity.importId,
+      expectedVersion: current.version,
+      idempotencyKey: `rollout-continue-${runIdentity}-${ordinal}`,
+    })
+    const advanced = await continueWithRecovery({ api, input, identity })
+    if (advanced.confirmed) operations.push(input)
+    current = advanced.state
+  }
+  if (!current.converged) failed()
+
+  const beforeReplay = operatorEvidence(await api.operatorEvidence())
+  let replay = current
+  for (const operation of operations) {
+    replay = importState(await api.continue(operation), identity)
+  }
+  const afterReplay = operatorEvidence(await api.operatorEvidence())
+  if (!isDeepStrictEqual(beforeReplay, afterReplay)
+    || replay.status !== 'complete' || replay.converged !== true) failed()
+
+  const result = resultFor(identity, expectedReconciliation)
+  return verifyStagingWorkbookTerminal({
+    api, result, expectedReconciliation, approvedFingerprint,
+    committedFingerprint: approvedFingerprint,
+  })
+}
 
 export async function runResumableStagingWorkbookRollout({
   journal,
   api,
   workbook,
   approvedFingerprint,
+  creatorId,
   resolutions,
   expectedReconciliation,
   identityFactory = randomUUID,
-  now = () => Date.now(),
 }) {
   try {
     if (!journal || typeof journal.load !== 'function' || typeof journal.save !== 'function'
-      || !plain(api) || !Array.isArray(resolutions) || typeof now !== 'function') failed()
+      || !plain(api) || !Array.isArray(resolutions)
+      || !/^[a-f0-9]{64}$/.test(approvedFingerprint ?? '')
+      || !identifier(creatorId, 'stf')) failed()
     let state = await journal.load()
     if (state !== null) validateWorkbookRolloutJournal(state)
-    if (state !== null && (state.fingerprint !== approvedFingerprint || !isDeepStrictEqual(
-      state.rolloutRequest,
-      { workbookFingerprint: approvedFingerprint, resolutions },
-    ))) failed()
-    if (state !== null && state.result !== null) {
-      if (state.phase !== 'complete' || state.fingerprint !== approvedFingerprint
-        || !isDeepStrictEqual(state.importIdentity, {
-          importId: state.result.importId, artifactId: state.result.artifactId,
-        })) failed()
-      await replayStagingWorkbookOperations({
-        api,
-        workbook,
-        commitOperation: state.commitOperation,
-        continuations: state.continuations,
-        importIdentity: state.importIdentity,
-      })
-      return verifyStagingWorkbookTerminal({
-        api, result: state.result, expectedReconciliation,
-        approvedFingerprint,
-        committedFingerprint: state.commitOperation.body.workbookFingerprint,
-      })
-    }
+    if (state !== null && (state.fingerprint !== approvedFingerprint
+      || state.creatorId !== creatorId)) failed()
     if (state === null) {
-      const rolloutIdentity = identityFactory()
       state = {
-        schema: 'workbook_rollout_journal.v1',
-        environment: 'staging',
-        fingerprint: approvedFingerprint,
-        rolloutIdentity,
-        commitIdempotencyKey: `rollout-commit-${rolloutIdentity}`,
-        rolloutRequest: { workbookFingerprint: approvedFingerprint, resolutions },
-        phase: 'initialized',
-        preview: null,
-        previewRecordedAtMs: null,
-        pendingOperation: null,
-        commitOperation: null,
-        importIdentity: null,
-        continuations: [],
-        result: null,
+        schema: 'workbook_rollout_journal.v2', environment: 'staging',
+        fingerprint: approvedFingerprint, creatorId, phase: 'initialized',
+        importIdentity: null, result: null,
       }
       await journal.save(state)
     }
@@ -74,201 +159,111 @@ export async function runResumableStagingWorkbookRollout({
       state = { ...state, ...patch }
       await journal.save(state)
     }
-    const operationBody = (input) => ({
-      workbookFingerprint: approvedFingerprint,
-      previewToken: input.previewToken,
-      planDigest: state.preview?.planDigest,
-      resolutions: input.resolutions,
-    })
-    let replayMode = false
-    const wrappedApi = Object.freeze({
-      operatorEvidence: (...args) => api.operatorEvidence(...args),
-      async status(...args) {
-        if (state.pendingOperation?.kind === 'continue') {
-          const pending = state.pendingOperation
-          return wrappedApi.continue({
-            importId: pending.body.importId,
-            expectedVersion: pending.body.expectedVersion,
-            idempotencyKey: pending.idempotencyKey,
-          })
-        }
-        return api.status(...args)
-      },
-      artifactVerification: (...args) => api.artifactVerification(...args),
-      reconciliation: (...args) => api.reconciliation(...args),
-      async preview(input) {
-        if (state.preview !== null) {
-          const commitAttempted = state.commitOperation !== null
-            || state.pendingOperation?.kind === 'commit'
-          const observedNow = now()
-          if (!Number.isSafeInteger(observedNow) || observedNow < 0) failed()
-          const age = observedNow - state.previewRecordedAtMs
-          if (commitAttempted || (Number.isSafeInteger(age) && age >= 0 && age < 300_000)) {
-            return state.preview
-          }
-          await persist({
-            phase: 'initialized', preview: null, previewRecordedAtMs: null,
-            pendingOperation: null,
-          })
-        }
-        const operation = {
-          kind: 'preview', idempotencyKey: null,
-          body: { workbookFingerprint: approvedFingerprint },
-        }
-        await persist({ phase: 'preview_pending', pendingOperation: operation })
-        const response = await api.preview(input)
-        const previewRecordedAtMs = now()
-        if (!Number.isSafeInteger(previewRecordedAtMs) || previewRecordedAtMs < 0) failed()
-        await persist({
-          phase: 'previewed', preview: response,
-          previewRecordedAtMs, pendingOperation: null,
-        })
-        return response
-      },
-      async commit(input) {
-        replayMode = state.commitOperation !== null
-        const operation = {
-          kind: 'commit', idempotencyKey: input.idempotencyKey,
-          body: operationBody(input),
-        }
-        const expected = state.commitOperation ?? (
-          state.pendingOperation?.kind === 'commit' ? state.pendingOperation : null
-        )
-        if (expected && !isDeepStrictEqual(
-          { kind: expected.kind, idempotencyKey: expected.idempotencyKey, body: expected.body },
-          operation,
-        )) failed()
-        const uncertainReplay = state.pendingOperation?.kind === 'commit'
-        const beforeUncertainReplay = uncertainReplay ? await api.operatorEvidence() : null
-        await persist({
-          phase: replayMode ? 'replay_commit_pending' : 'commit_pending',
-          pendingOperation: operation,
-        })
-        let response
-        try {
-          response = await api.commit(input)
-        } catch (error) {
-          if (uncertainReplay && error instanceof WorkbookRolloutHttpError
-            && error.definitivePrewrite
-            && error.code === 'WORKBOOK_PREVIEW_TOKEN_INVALID'
-            && isDeepStrictEqual(beforeUncertainReplay, await api.operatorEvidence())) {
-            await persist({
-              phase: 'initialized', preview: null, previewRecordedAtMs: null,
-              pendingOperation: null,
-            })
-          }
-          throw error
-        }
-        if (uncertainReplay && !isDeepStrictEqual(
-          beforeUncertainReplay, await api.operatorEvidence(),
-        )) failed()
-        await persist({
-          phase: 'committed', pendingOperation: null,
-          commitOperation: { ...operation, response },
-          importIdentity: { importId: response.importId, artifactId: response.artifactId },
-        })
-        return response
-      },
-      async continue(input) {
-        const operation = {
-          kind: 'continue', idempotencyKey: input.idempotencyKey,
-          body: { importId: input.importId, expectedVersion: input.expectedVersion },
-        }
-        const existingIndex = state.continuations.findIndex((entry) => (
-          entry.idempotencyKey === operation.idempotencyKey
-        ))
-        if (existingIndex >= 0 && !isDeepStrictEqual(
-          { kind: state.continuations[existingIndex].kind,
-            idempotencyKey: state.continuations[existingIndex].idempotencyKey,
-            body: state.continuations[existingIndex].body }, operation,
-        )) failed()
-        if (state.pendingOperation?.kind === 'continue'
-          && state.pendingOperation.idempotencyKey === operation.idempotencyKey
-          && !isDeepStrictEqual(state.pendingOperation, operation)) failed()
-        const uncertainReplay = state.pendingOperation?.kind === 'continue'
-        const beforeUncertainReplay = uncertainReplay ? await api.operatorEvidence() : null
-        const continuations = existingIndex >= 0 ? [...state.continuations] : [
-          ...state.continuations, { ...operation, response: null },
-        ]
-        await persist({
-          phase: replayMode
-            ? 'replay_continue_pending' : 'continue_pending',
-          pendingOperation: operation, continuations,
-        })
-        let response
-        try {
-          response = await api.continue(input)
-        } catch (error) {
-          if (uncertainReplay && error instanceof WorkbookRolloutHttpError
-            && error.definitivePrewrite && error.code === 'VERSION_CONFLICT'
-            && isDeepStrictEqual(beforeUncertainReplay, await api.operatorEvidence())) {
-            const observed = await api.status(operation.body.importId)
-            const safeObserved = plain(observed)
-              && observed.importId === state.importIdentity?.importId
-              && observed.artifactId === state.importIdentity?.artifactId
-              && ['ready', 'materializing', 'complete'].includes(observed.status)
-              && Number.isSafeInteger(observed.version)
-              && observed.version > operation.body.expectedVersion
-              && observed.version === error.details?.currentVersion
-              && Number.isSafeInteger(observed.createdRecords)
-              && observed.createdRecords >= 0
-              && Number.isSafeInteger(observed.voidedRecords)
-              && observed.voidedRecords >= 0
-              && typeof observed.converged === 'boolean'
-            if (safeObserved) {
-              await persist({
-                phase: 'committed', pendingOperation: null,
-                continuations: continuations.filter((entry) => (
-                  entry.idempotencyKey !== operation.idempotencyKey
-                )),
-              })
-            }
-          }
-          throw error
-        }
-        if (uncertainReplay && !isDeepStrictEqual(
-          beforeUncertainReplay, await api.operatorEvidence(),
-        )) failed()
-        const index = continuations.findIndex((entry) => (
-          entry.idempotencyKey === operation.idempotencyKey
-        ))
-        continuations[index] = { ...operation, response }
-        await persist({ phase: 'committed', pendingOperation: null, continuations })
-        return response
-      },
-    })
-    let pendingContinuationUsed = false
-    const continueIdempotencyKey = (_version, _runOrdinal) => {
-      if (!pendingContinuationUsed && state.pendingOperation?.kind === 'continue') {
-        pendingContinuationUsed = true
-        return state.pendingOperation.idempotencyKey
-      }
-      return `rollout-continue-${state.rolloutIdentity}-${state.continuations.length + 1}`
-    }
-    if (state.pendingOperation?.kind === 'continue') {
-      const pending = state.pendingOperation
-      await wrappedApi.continue({
-        importId: pending.body.importId,
-        expectedVersion: pending.body.expectedVersion,
-        idempotencyKey: pending.idempotencyKey,
+    if (state.phase === 'complete') {
+      return verifyStagingWorkbookTerminal({
+        api, result: state.result, expectedReconciliation, approvedFingerprint,
+        committedFingerprint: approvedFingerprint,
       })
     }
+    if (state.phase === 'import_confirmed') {
+      const result = await resumeConfirmedImport({
+        api, state, expectedReconciliation, approvedFingerprint, identityFactory,
+      })
+      await persist({ phase: 'complete', result })
+      return result
+    }
+
+    const runIdentity = inMemoryIdentity(identityFactory)
+    const commitIdempotencyKey = `rollout-commit-${runIdentity}`
+    let confirmedCommitInput = null
+    let discovered = false
+    const confirmedContinuations = []
+    const continuationInputs = new Map()
+    const confirmImport = async (value) => {
+      const identity = importIdentity(value)
+      await persist({ phase: 'import_confirmed', importIdentity: identity })
+      return identity
+    }
+    const discover = async () => {
+      const value = await api.discoverImport({
+        fingerprint: approvedFingerprint, creatorId,
+      })
+      return value === null ? null : importIdentity(value)
+    }
+    const wrappedApi = Object.freeze({
+      operatorEvidence: (...args) => api.operatorEvidence(...args),
+      preview: (...args) => api.preview(...args),
+      status: (...args) => api.status(...args),
+      artifactVerification: (...args) => api.artifactVerification(...args),
+      reconciliation: (...args) => api.reconciliation(...args),
+      async commit(input) {
+        if (confirmedCommitInput !== null) {
+          if (!isDeepStrictEqual(input, confirmedCommitInput)) failed()
+          return importState(await api.commit(input), state.importIdentity)
+        }
+        if (discovered) return importState(
+          await api.status(state.importIdentity.importId), state.importIdentity,
+        )
+        const existing = await discover()
+        if (existing !== null) {
+          await confirmImport(existing)
+          discovered = true
+          return importState(await api.status(existing.importId), existing)
+        }
+        let response
+        let lastError
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            response = importState(await api.commit(input))
+            lastError = null
+            break
+          } catch (error) { lastError = error }
+        }
+        if (lastError) {
+          const recovered = await discover()
+          if (recovered === null) throw lastError
+          await confirmImport(recovered)
+          confirmedCommitInput = input
+          return importState(await api.status(recovered.importId), recovered)
+        }
+        const identity = await confirmImport({
+          importId: response.importId, artifactId: response.artifactId,
+        })
+        confirmedCommitInput = input
+        return importState(response, identity)
+      },
+      async continue(input) {
+        const existing = continuationInputs.get(input.idempotencyKey)
+        if (existing) {
+          if (!isDeepStrictEqual(existing, input)) failed()
+          return importState(await api.continue(input), state.importIdentity)
+        }
+        const advanced = await continueWithRecovery({
+          api, input, identity: state.importIdentity,
+        })
+        if (advanced.confirmed) {
+          continuationInputs.set(input.idempotencyKey, input)
+          confirmedContinuations.push(input)
+        }
+        return advanced.state
+      },
+    })
     const result = await runStagingWorkbookRollout({
       api: wrappedApi,
       workbook,
       approvedFingerprint,
       resolutions,
-      commitIdempotencyKey: state.commitIdempotencyKey,
-      continueIdempotencyKey,
-      recordedContinuations: () => state.continuations.map(({ body, idempotencyKey }) => ({
-        importId: body.importId,
-        expectedVersion: body.expectedVersion,
-        idempotencyKey,
-      })),
+      commitIdempotencyKey,
+      continueIdempotencyKey: (_version, ordinal) => (
+        `rollout-continue-${runIdentity}-${ordinal}`
+      ),
+      recordedContinuations: () => confirmedContinuations,
       expectedReconciliation,
       maximumContinuations: 256,
     })
-    await persist({ phase: 'complete', pendingOperation: null, result })
+    if (state.phase !== 'import_confirmed' || state.importIdentity?.importId !== result.importId
+      || state.importIdentity?.artifactId !== result.artifactId) failed()
+    await persist({ phase: 'complete', result })
     return result
   } catch {
     throw new Error('WORKBOOK_ROLLOUT_STAGING_FAILED')

@@ -164,6 +164,26 @@ const emptyWorkspaceBody = (from = '2026-08-01', to = '2026-08-31') => ({
   },
 })
 
+const ownPaymentsBody = () => ({
+  data: {
+    window: {
+      from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true,
+    },
+    appointments: [{
+      id: 'apt_own_august', serviceId: 'zajecia',
+      startsAt: '2026-08-10T08:00:00.000Z', status: 'completed', version: 2,
+      charge: {
+        id: 'chg_own_august', serviceId: 'zajecia', expectedAmountGrosze: 18_000,
+        currency: 'PLN', version: 1,
+      },
+      payment: {
+        status: 'partial', collectedGrosze: 7_000, outstandingGrosze: 11_000,
+        latestMethod: 'card', latestReceivedAt: '2026-08-10T09:00:00.000Z',
+      },
+    }],
+  },
+})
+
 const fullWorkspaceBody = () => ({
   data: {
     window: {
@@ -347,6 +367,58 @@ test('rejects invalid workspace windows without fetching and constructs the exac
   assert.equal(header(calls[0], 'X-CSRF-Token'), null)
   assert.equal(header(calls[0], 'Idempotency-Key'), null)
   assert.equal(Object.hasOwn(calls[0].init, 'body'), false)
+})
+
+test('own payments API reads only the dedicated narrow projection', async () => {
+  assert.equal(typeof apiClient.loadOwnPaymentsWindow, 'function')
+  const source = ownPaymentsBody()
+  const { calls, fetchImpl } = queuedFetch(parsedResponse(source))
+  const client = createApiClient({ fetchImpl })
+  const result = await client.loadOwnPaymentsWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+
+  assert.deepEqual(result, source.data)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, '/api/v1/payments/own?from=2026-08-01&to=2026-08-31')
+  assert.equal(calls[0].init.method, 'GET')
+  assert.equal(Object.isFrozen(result), true)
+  assert.equal(Object.isFrozen(result.window), true)
+  assert.equal(Object.isFrozen(result.appointments), true)
+  assert.equal(Object.isFrozen(result.appointments[0].charge), true)
+  assert.equal(Object.isFrozen(result.appointments[0].payment), true)
+  assert.doesNotMatch(JSON.stringify(result), /client|specialists|displayName/i)
+})
+
+test('own payments API rejects invalid windows and widened or incoherent responses', async () => {
+  const noFetch = queuedFetch()
+  for (const input of [
+    null,
+    { from: '2026-08-01' },
+    { from: '2026-08-01', to: '2026-08-31', extra: true },
+    { from: '2026-08-31', to: '2026-08-01' },
+  ]) await assert.rejects(
+    createApiClient({ fetchImpl: noFetch.fetchImpl }).loadOwnPaymentsWindow(input),
+    { code: 'CLIENT_INPUT_INVALID' },
+  )
+  assert.equal(noFetch.calls.length, 0)
+
+  const hostile = [
+    (body) => { body.data.specialists = [] },
+    (body) => { body.data.appointments[0].clientId = 'cl_leaked' },
+    (body) => { body.data.appointments[0].startsAt = '2026-09-01T08:00:00.000Z' },
+    (body) => { body.data.appointments[0].charge.expectedAmountGrosze = 0 },
+    (body) => { body.data.appointments[0].payment.collectedGrosze = 8_000 },
+    (body) => { body.data.appointments[0].payment.latestMethod = null },
+  ]
+  for (const mutate of hostile) {
+    const body = ownPaymentsBody()
+    mutate(body)
+    const { fetchImpl } = queuedFetch(parsedResponse(body))
+    await assert.rejects(createApiClient({ fetchImpl }).loadOwnPaymentsWindow({
+      from: '2026-08-01', to: '2026-08-31',
+    }), { code: 'INVALID_RESPONSE', status: 200 })
+  }
 })
 
 test('captures workspace inputs without coercion or value access and never mutates them', async () => {

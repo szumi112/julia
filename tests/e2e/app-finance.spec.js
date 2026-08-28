@@ -63,6 +63,20 @@ const workspace = (from, to) => ({ data: {
   )),
   historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: '2026-07',
 } })
+const ownPayments = (from, to) => ({ data: {
+  window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
+  appointments: appointments.filter((item) => (
+    item.startsAt.slice(0, 10) >= from && item.startsAt.slice(0, 10) <= to
+  )).map((item) => ({
+    id: item.id,
+    serviceId: item.serviceId,
+    startsAt: item.startsAt,
+    status: item.status,
+    version: item.version,
+    charge: item.charge,
+    payment: item.payment,
+  })),
+} })
 
 const monthKeys = (end) => {
   const [year, month] = end.split('-').map(Number)
@@ -220,6 +234,15 @@ const routeWorkspace = async (page, requests = []) => page.route(
     const to = url.searchParams.get('to')
     requests.push({ from, to })
     await route.fulfill(json(workspace(from, to)))
+  },
+)
+const routeOwnPayments = async (page, requests = []) => page.route(
+  '**/api/v1/payments/own?*', async (route) => {
+    const url = new URL(route.request().url())
+    const from = url.searchParams.get('from')
+    const to = url.searchParams.get('to')
+    requests.push({ from, to })
+    await route.fulfill(json(ownPayments(from, to)))
   },
 )
 const routeRegistry = async (page, imports = []) => page.route(
@@ -866,6 +889,7 @@ test('@owner can retry a failed continuation and cannot overlap it with a void',
 test('@coordinator @specialist keeps capability-scoped finance controls', async ({ page }, testInfo) => {
   await freezeTime(page)
   await routeWorkspace(page)
+  await routeOwnPayments(page)
   await routeRegistry(page, [registryImport()])
   await page.route('**/api/v1/finance/window?*', (route) => (
     route.fulfill(json(financeWindow('2026-07')))
@@ -924,16 +948,24 @@ test('@owner with a proven specialist profile falls back to own payments after c
     financeRequests += 1
     return route.fulfill(json(financeWindow('2026-07')))
   })
-  await routeWorkspace(page)
+  const workspaceRequests = []
+  const ownRequests = []
+  await routeWorkspace(page, workspaceRequests)
+  await routeOwnPayments(page, ownRequests)
 
   await page.goto('./#/payments?ym=2026-07')
   await expect(page.getByRole('heading', { name: 'Finanse i płatności' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cały zespół' })).toHaveCount(0)
   await expect(page.getByRole('tab', { name: 'Przychody' })).toHaveCount(0)
   expect(financeRequests).toBe(0)
+  expect(ownRequests.length).toBeGreaterThan(0)
+  expect(ownRequests.every(({ from, to }) => (
+    from === '2026-07-01' && to === '2026-07-31'
+  ))).toBe(true)
+  expect(workspaceRequests).toEqual([])
 })
 
-test('@owner does not advertise own payments for a partial workspace grant', async ({ page }) => {
+test('@owner keeps own payments with charge-read alone and never loads workspace', async ({ page }) => {
   await freezeTime(page)
   await page.route('**/api/v1/session', async (route) => {
     const response = await route.fetch()
@@ -950,12 +982,17 @@ test('@owner does not advertise own payments for a partial workspace grant', asy
     workspaceRequests += 1
     return route.fulfill(json(workspace('2026-07-01', '2026-07-31')))
   })
+  const ownRequests = []
+  await routeOwnPayments(page, ownRequests)
 
   await page.goto('./#/payments?ym=2026-07')
-  await expect(page).toHaveURL(/#\/tus(?:\?|$)/)
-  await expect(page.getByRole('heading', { name: 'Grupy TUS' })).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Finanse' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Finanse i płatności' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Finanse' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Eksportuj własne dane' })).toHaveCount(0)
+  expect(ownRequests.length).toBeGreaterThan(0)
+  expect(ownRequests.every(({ from, to }) => (
+    from === '2026-07-01' && to === '2026-07-31'
+  ))).toBe(true)
   expect(workspaceRequests).toBe(0)
 })
 

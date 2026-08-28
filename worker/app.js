@@ -71,7 +71,7 @@ import {
   postAppointmentEdit,
   postAppointmentPayment,
 } from './routes/appointments.js'
-import { postPaymentCorrection } from './routes/payments.js'
+import { getOwnPayments, postPaymentCorrection } from './routes/payments.js'
 import {
   postSpecialistAccountLink,
   postSpecialistProfile,
@@ -193,6 +193,7 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'appointments.cancel', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/cancellation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'] }),
   descriptor({ id: 'appointments.payment', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/payments$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'] }),
   descriptor({ id: 'payments.correct', pathPattern: `^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
+  descriptor({ id: 'payments.own', path: '/api/v1/payments/own', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'appointment.charge.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'finance.list', path: '/api/v1/finance', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null }),
   descriptor({ id: 'finance.window', path: '/api/v1/finance/window', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'finance.entry.void', pathPattern: `^/api/v1/finance/entries/${'fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'}/voids$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.entry.voided'], bodyKeys: ['expectedVersion', 'reason'], freshAuth: true }),
@@ -873,6 +874,14 @@ export function createApp(deps = {}) {
     }
     const result = await (deps.postPaymentCorrection ?? postPaymentCorrection)(input)
     return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/payments/own', async (c) => {
+    if (c.get('routeId') !== 'payments.own') throw new AppError('NOT_FOUND')
+    const result = await (deps.getOwnPayments ?? getOwnPayments)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'), url: c.req.url,
+      ...(deps.loadOwnPaymentsWindow ? { load: deps.loadOwnPaymentsWindow } : {}),
+    })
+    return readResponse(c, result)
   })
   app.get('/api/v1/finance', async (c) => {
     if (c.get('routeId') !== 'finance.list') throw new AppError('NOT_FOUND')

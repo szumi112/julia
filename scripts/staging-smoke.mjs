@@ -216,6 +216,8 @@ async function writeAndScanExport({ response, path, assertions, expectedUrl }) {
     if (read.bytesRead !== contentLength) failed()
     const scan = scanXlsxSentinels(readback, assertions)
     return Object.freeze({
+      byteSize: contentLength,
+      sha256: await sha256(readback),
       exportHeadersOk: true,
       exportInScopePresent: scan.inScopePresent,
       exportOutOfScopeAbsent: scan.outOfScopeAbsent,
@@ -641,6 +643,13 @@ function createActorExecutor({
       return Object.freeze({
         role,
         ...(role === 'owner' ? { authorityRefreshClearsState } : {}),
+        exportEvidence: Object.freeze({
+          actor: role,
+          scope: role === 'specialist' ? 'own' : 'centre',
+          status: 'verified',
+          byteSize: exportEvidence.byteSize,
+          sha256: exportEvidence.sha256,
+        }),
         routesOk,
         actionsOk: capabilitiesOk && deniedOk && allowedUiActionsOk,
         guardedSurfacesOk,

@@ -783,7 +783,7 @@ describe('backup due facts and atomic dormant publication', () => {
     const cases = [
       { suffix: 'live_day', row: { status: 'queued', retentionClass: 'daily', sameDay: true }, want: [true, false, false] },
       { suffix: 'live_month', row: { status: 'queued', retentionClass: 'monthly', sameDay: false }, want: [false, true, false] },
-      { suffix: 'stored_month', row: { status: 'stored', retentionClass: 'monthly', sameDay: false }, want: [false, true, true] },
+      { suffix: 'stored_month', row: { status: 'stored', retentionClass: 'monthly', sameDay: false }, want: [false, false, true] },
       { suffix: 'dead_history', row: { status: 'failed', retentionClass: 'monthly', sameDay: true, alsoPruned: true }, want: [false, false, false] },
     ]
     for (const item of cases) {
@@ -824,6 +824,38 @@ describe('backup due facts and atomic dormant publication', () => {
       })
     }
     expect(captures).toHaveLength(cases.length)
+  })
+
+  it('enqueues a daily backup after a real stored monthly row on a later local day', async () => {
+    const context = await cryptoContext()
+    const scheduledTime = Date.UTC(2040 + ++serial, 0, 3, 2, 15)
+    const local = partsInWarsaw(scheduledTime)
+    await seedBackup({
+      id: 'bkp_stored_month_before_daily',
+      localDay: `${local.month}-01`,
+      localMonth: local.month,
+      retentionClass: 'monthly',
+      status: 'stored',
+      createdAt: nowIso(scheduledTime - 86_400_000),
+    })
+    const deps = schedulerDeps('stored_month_daily', context, scheduledTime, {
+      backupDue: undefined,
+      backupIdFactory: () => 'bkp_daily_after_stored_month',
+    })
+
+    await expect(runScheduled({ scheduledTime, env: runtimeEnv(), deps })).resolves.toMatchObject({
+      status: 'succeeded',
+      backupEnqueued: true,
+    })
+    await expect(env.DB.prepare(
+      `SELECT local_day,local_month,retention_class,status
+       FROM backup_runs WHERE id=?`,
+    ).bind('bkp_daily_after_stored_month').first()).resolves.toEqual({
+      local_day: local.day,
+      local_month: local.month,
+      retention_class: 'daily',
+      status: 'queued',
+    })
   })
 
   it('atomically inserts one exact queued backup and one encrypted dormant job behind its scheduler fence', async () => {

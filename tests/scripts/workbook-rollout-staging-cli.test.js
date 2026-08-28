@@ -33,6 +33,107 @@ const job = {
   totalRecords: 2235, processedRecords: 64, version: 2,
   updatedAt: '2026-08-28T10:00:00.000Z', completedAt: null,
 }
+const registryImport = ({
+  id = 'wbi_registry_http', artifactId = 'wba_registry_http',
+  fingerprint = '1'.repeat(64), creatorId = 'stf_http_one',
+} = {}) => ({
+  id,
+  artifact: {
+    id: artifactId, fingerprint, byteSize: 2048,
+    parserVersion: 2, materializerVersion: 2,
+    createdAt: '2026-08-28T10:00:00.000Z',
+  },
+  status: 'ready', version: 1, phase: null, progress: null,
+  summary: {
+    sourceCount: 0, quarantineCount: 0, conflictCount: 0,
+    duplicateCount: 0, resolutionCount: 0,
+  },
+  resolutionVersion: 0, createdByStaffId: creatorId,
+  createdAt: '2026-08-28T10:00:00.000Z',
+  updatedAt: '2026-08-28T10:00:00.000Z',
+})
+
+test('HTTP adapter discovers one exact creator-bound fingerprint through bounded registry pages', async () => {
+  const fingerprint = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
+  const paths = []
+  const api = createStagingWorkbookApi({
+    origin: ORIGIN, csrfToken: 'private-csrf', expectedActorId: 'stf_http_one',
+    expectedAuthorityRevision: 7,
+    requestContext: {
+      async post() { throw new Error('unused') },
+      async get(path) {
+        paths.push(path)
+        if (path === '/api/v1/workbooks/registry?section=imports') return response({ data: {
+          cursor: null, nextCursor: 'c_20_r7', imports: [registryImport()],
+          exports: [], entries: [], complete: false,
+        } }, 200, path)
+        return response({ data: {
+          cursor: 'c_20_r7', nextCursor: null,
+          imports: [registryImport({ fingerprint })], exports: [], entries: [], complete: true,
+        } }, 200, path)
+      },
+    },
+  })
+
+  assert.deepEqual(await api.discoverImport({ fingerprint, creatorId: 'stf_http_one' }), {
+    importId: 'wbi_registry_http', artifactId: 'wba_registry_http',
+  })
+  assert.deepEqual(paths, [
+    '/api/v1/workbooks/registry?section=imports',
+    '/api/v1/workbooks/registry?section=imports&cursor=c_20_r7',
+  ])
+})
+
+test('HTTP adapter fails closed on wrong-creator, ambiguous or unbounded import discovery', async () => {
+  const fingerprint = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
+  const cases = [
+    [
+      registryImport({ fingerprint, creatorId: 'stf_other_owner' }),
+    ],
+    [
+      registryImport({ fingerprint }),
+      registryImport({ id: 'wbi_registry_other', artifactId: 'wba_registry_other', fingerprint }),
+    ],
+  ]
+  for (const imports of cases) {
+    const api = createStagingWorkbookApi({
+      origin: ORIGIN, csrfToken: 'private-csrf', expectedActorId: 'stf_http_one',
+      expectedAuthorityRevision: 7,
+      requestContext: {
+        async post() { throw new Error('unused') },
+        async get(path) { return response({ data: {
+          cursor: null, nextCursor: null, imports, exports: [], entries: [], complete: true,
+        } }, 200, path) },
+      },
+    })
+    await assert.rejects(
+      api.discoverImport({ fingerprint, creatorId: 'stf_http_one' }),
+      /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/,
+    )
+  }
+
+  let page = 0
+  const api = createStagingWorkbookApi({
+    origin: ORIGIN, csrfToken: 'private-csrf', expectedActorId: 'stf_http_one',
+    expectedAuthorityRevision: 7,
+    requestContext: {
+      async post() { throw new Error('unused') },
+      async get(path) {
+        const cursor = page === 0 ? null : `c_${page * 20}_r7`
+        page += 1
+        return response({ data: {
+          cursor, nextCursor: `c_${page * 20}_r7`, imports: [],
+          exports: [], entries: [], complete: false,
+        } }, 200, path)
+      },
+    },
+  })
+  await assert.rejects(
+    api.discoverImport({ fingerprint, creatorId: 'stf_http_one' }),
+    /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/,
+  )
+  assert.equal(page, 20)
+})
 
 test('HTTP adapter uses only guarded creator-bound rollout endpoints and normalizes count-only DTOs', async () => {
   const calls = []
@@ -379,7 +480,7 @@ test('HTTP adapter refuses actor or authority drift before a refreshed mutation 
   }
 })
 
-test('HTTP adapter refreshes and retries the exact staging export mutation once', async () => {
+test('HTTP adapter accepts the Worker legacy export mode and rejects compatible', async () => {
   const calls = []
   let ordinal = 0
   const api = createStagingWorkbookApi({
@@ -400,15 +501,20 @@ test('HTTP adapter refreshes and retries the exact staging export mutation once'
       },
     },
   })
-  const result = await api.exportWorkbook({ format: 'panel-v2', idempotencyKey: 'export-key' })
+  const result = await api.exportWorkbook({ format: 'legacy', idempotencyKey: 'export-key' })
   assert.equal(result.status(), 200)
   assert.equal(calls.length, 2)
+  assert.deepEqual(calls[0].options.data, { format: 'legacy' })
   assert.deepEqual(calls[0].options.data, calls[1].options.data)
   assert.equal(calls[0].options.headers['Idempotency-Key'], 'export-key')
   assert.equal(calls[1].options.headers['Idempotency-Key'], 'export-key')
   assert.equal(calls[0].options.headers['X-CSRF-Token'], 'first-csrf')
   assert.equal(calls[1].options.headers['X-CSRF-Token'], 'second-csrf')
   assert.equal(calls.every(({ options }) => options.maxRedirects === 0), true)
+  await assert.rejects(api.exportWorkbook({
+    format: 'compatible', idempotencyKey: 'unsupported-key',
+  }), /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/)
+  assert.equal(calls.length, 2)
 })
 
 test('HTTP adapter composes with the rollout using bound actor and preview metadata', async () => {

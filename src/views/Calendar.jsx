@@ -7,7 +7,11 @@ import { Button, IconBtn, Segmented, Avatar, Chip, Pill, EmptyState } from '../u
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
-import { sessionMatchesFilters, sessionsForRole } from '../workspace.js'
+import {
+  compareCalendarSessionOrder,
+  sessionMatchesFilters,
+  sessionsForRole,
+} from '../workspace.js'
 import { serviceBadge } from '../services.js'
 import {
   monthKey, addMonths, fmtMonthYear, toISODate, parseISO, pad2, cap,
@@ -589,7 +593,7 @@ export function CalendarView({ params = {} }) {
 
   const agendaSel = selected || (ym === curYm ? today : `${ym}-01`)
   const agendaSessions = useMemo(
-    () => (byDate[agendaSel] || []).slice().sort((a, b) => (a.time < b.time ? -1 : 1)),
+    () => (byDate[agendaSel] || []).slice().sort(compareCalendarSessionOrder),
     [byDate, agendaSel]
   )
   const weekDays = useMemo(() => weekDaysFor(agendaSel), [agendaSel])
@@ -957,7 +961,7 @@ export function CalendarView({ params = {} }) {
               style={{ gridTemplateColumns: `repeat(${showWeekends ? 7 : 5}, 1fr)` }}
             >
               {cells.map((cell) => {
-                const items = (byDate[cell.iso] || []).toSorted((a, b) => a.time.localeCompare(b.time) || a.id.localeCompare(b.id))
+                const items = (byDate[cell.iso] || []).toSorted(compareCalendarSessionOrder)
                 const historicalItems = historicalModel.exactByDay[cell.iso] || []
                 const itemCount = items.length + historicalItems.length
                 return (
@@ -1054,7 +1058,7 @@ export function CalendarView({ params = {} }) {
                 )}
                 {(daySessions.length > 0 || dayHistoricalRows.length > 0) &&
                   dayThread(
-                    daySessions.toSorted((a, b) => a.time.localeCompare(b.time) || a.id.localeCompare(b.id)),
+                    daySessions.toSorted(compareCalendarSessionOrder),
                     dayHistoricalRows,
                     canDrag,
                     selected,

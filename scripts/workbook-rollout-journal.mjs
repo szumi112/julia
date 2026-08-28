@@ -3,26 +3,23 @@ import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { lstat, open, realpath, rename, unlink } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
-import { isDeepStrictEqual } from 'node:util'
-
-import {
-  WORKBOOK_MATERIALIZER_VERSION,
-  WORKBOOK_PARSER_VERSION,
-} from '../src/workbook-import.js'
 
 const MAX_BYTES = 1024 * 1024
 const LOCK_MARKER = 'workbook_rollout_lock.v1\n'
-const PHASES = new Set([
-  'initialized', 'preview_pending', 'previewed', 'commit_pending', 'committed',
-  'continue_pending', 'materialized', 'replay_commit_pending',
-  'replay_continue_pending', 'complete',
-])
+const PHASES = new Set(['initialized', 'import_confirmed', 'complete'])
 const TOP_KEYS = Object.freeze([
-  'schema', 'environment', 'fingerprint', 'rolloutIdentity', 'commitIdempotencyKey',
-  'rolloutRequest', 'phase', 'preview', 'previewRecordedAtMs', 'pendingOperation',
-  'commitOperation', 'importIdentity',
-  'continuations', 'result',
+  'schema', 'environment', 'fingerprint', 'creatorId', 'phase', 'importIdentity', 'result',
 ])
+const RESULT_KEYS = Object.freeze([
+  'artifactId', 'importId', 'acceptedCount', 'quarantinedCount',
+  'previewWritesZero', 'terminalComplete', 'artifactVerified',
+  'reconciliationMatched', 'replayIdentityMatch', 'replayWritesZero', 'status',
+])
+const RETIRED_LEGACY = Object.freeze({
+  schema: 'workbook_rollout_journal.retired.v1',
+  environment: 'staging',
+  phase: 'retired',
+})
 const refused = () => { throw new Error('WORKBOOK_ROLLOUT_STAGING_REFUSED') }
 const plain = (value) => value !== null && typeof value === 'object'
   && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
@@ -30,200 +27,45 @@ const exact = (value, keys) => plain(value) && Reflect.ownKeys(value).length ===
   && keys.every((key) => Object.hasOwn(value, key))
 const identifier = (value, prefix) => typeof value === 'string'
   && new RegExp(`^${prefix}_[A-Za-z0-9_-]{1,120}$`).test(value)
-const secret = (value) => typeof value === 'string' && value.length >= 1 && value.length <= 4096
-  && value === value.trim() && !/[\p{Cc}\p{Cf}]/u.test(value)
 
-function resolutionsDto(value) {
-  return Array.isArray(value) && value.length <= 100
-    && value.every((entry) => exact(entry, ['conflictId', 'specialistId'])
-      && identifier(entry.conflictId, 'wmc') && identifier(entry.specialistId, 'sp'))
-    && new Set(value.map(({ conflictId }) => conflictId)).size === value.length
+function importIdentityDto(value) {
+  return exact(value, ['importId', 'artifactId'])
+    && identifier(value.importId, 'wbi') && identifier(value.artifactId, 'wba')
 }
 
-function stateDto(value) {
-  return exact(value, [
-    'importId', 'artifactId', 'status', 'version', 'createdRecords', 'voidedRecords',
-    'converged',
-  ]) && identifier(value.importId, 'wbi') && identifier(value.artifactId, 'wba')
-    && ['ready', 'materializing', 'complete', 'failed'].includes(value.status)
-    && Number.isSafeInteger(value.version) && value.version >= 1
-    && Number.isSafeInteger(value.createdRecords) && value.createdRecords >= 0
-    && Number.isSafeInteger(value.voidedRecords) && value.voidedRecords >= 0
-    && typeof value.converged === 'boolean'
-}
-
-function operationDto(value, responseKey = false) {
-  const keys = ['kind', 'idempotencyKey', 'body', ...(responseKey ? ['response'] : [])]
-  if (!exact(value, keys)) return false
-  if (value.kind === 'preview') return !responseKey && value.idempotencyKey === null
-    && exact(value.body, ['workbookFingerprint'])
-    && /^[a-f0-9]{64}$/.test(value.body.workbookFingerprint ?? '')
-  if (value.kind === 'commit') return secret(value.idempotencyKey)
-    && exact(value.body, [
-      'workbookFingerprint', 'previewToken', 'planDigest', 'resolutions',
-    ])
-    && /^[a-f0-9]{64}$/.test(value.body.workbookFingerprint ?? '')
-    && secret(value.body.previewToken)
-    && /^v1_[A-Za-z0-9_-]{43}$/.test(value.body.planDigest ?? '')
-    && resolutionsDto(value.body.resolutions)
-    && (!responseKey || stateDto(value.response))
-  if (value.kind === 'continue') return secret(value.idempotencyKey)
-    && exact(value.body, ['importId', 'expectedVersion'])
-    && identifier(value.body.importId, 'wbi')
-    && Number.isSafeInteger(value.body.expectedVersion) && value.body.expectedVersion >= 1
-    && (!responseKey || value.response === null || stateDto(value.response))
-  return false
-}
-
-function safeJson(value, depth = 0) {
-  if (depth > 12) refused()
-  if (value === null || typeof value === 'boolean') return
-  if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value) || value < 0) refused()
-    return
-  }
-  if (typeof value === 'string') {
-    if (value.length > 8192 || /[\p{Cc}\p{Cf}]/u.test(value)) refused()
-    return
-  }
-  if (Array.isArray(value)) {
-    if (value.length > 512) refused()
-    value.forEach((entry) => safeJson(entry, depth + 1))
-    return
-  }
-  if (!plain(value) || Reflect.ownKeys(value).length > 128) refused()
-  for (const [key, entry] of Object.entries(value)) {
-    if (key.length < 1 || key.length > 128) refused()
-    safeJson(entry, depth + 1)
-  }
+function resultDto(value, importIdentity) {
+  return exact(value, RESULT_KEYS)
+    && identifier(value.artifactId, 'wba') && identifier(value.importId, 'wbi')
+    && Number.isSafeInteger(value.acceptedCount) && value.acceptedCount >= 0
+    && Number.isSafeInteger(value.quarantinedCount) && value.quarantinedCount >= 0
+    && RESULT_KEYS.slice(4, -1).every((key) => value[key] === true)
+    && value.status === 'ok'
+    && value.importId === importIdentity?.importId
+    && value.artifactId === importIdentity?.artifactId
 }
 
 export function validateWorkbookRolloutJournal(value) {
-  if (!exact(value, TOP_KEYS) || value.schema !== 'workbook_rollout_journal.v1'
+  if (!exact(value, TOP_KEYS) || value.schema !== 'workbook_rollout_journal.v2'
     || value.environment !== 'staging' || !/^[a-f0-9]{64}$/.test(value.fingerprint ?? '')
-    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-      .test(value.rolloutIdentity ?? '')
-    || value.commitIdempotencyKey !== `rollout-commit-${value.rolloutIdentity}`
-    || !PHASES.has(value.phase) || !Array.isArray(value.continuations)
-    || value.continuations.length > 256
-    || !(value.previewRecordedAtMs === null
-      || (Number.isSafeInteger(value.previewRecordedAtMs) && value.previewRecordedAtMs >= 0))) refused()
-  if (!exact(value.rolloutRequest, ['workbookFingerprint', 'resolutions'])
-    || value.rolloutRequest.workbookFingerprint !== value.fingerprint
-    || !resolutionsDto(value.rolloutRequest.resolutions)
-    || !(value.preview === null || (exact(value.preview, [
-      'fingerprint', 'parserVersion', 'materializerVersion', 'planDigest',
-      'previewToken', 'conflictIds', 'workbookKind',
-    ]) && value.preview.fingerprint === value.fingerprint
-      && value.preview.parserVersion === WORKBOOK_PARSER_VERSION
-      && value.preview.materializerVersion === WORKBOOK_MATERIALIZER_VERSION
-      && /^v1_[A-Za-z0-9_-]{43}$/.test(value.preview.planDigest ?? '')
-      && value.preview.workbookKind === 'legacy'
-      && secret(value.preview.previewToken) && Array.isArray(value.preview.conflictIds)
-      && value.preview.conflictIds.length <= 100
-      && value.preview.conflictIds.every((id) => identifier(id, 'wmc'))
-      && new Set(value.preview.conflictIds).size === value.preview.conflictIds.length))
-    || !(value.pendingOperation === null || operationDto(value.pendingOperation))
-    || !(value.commitOperation === null || operationDto(value.commitOperation, true))
-    || !(value.importIdentity === null || (exact(value.importIdentity, ['importId', 'artifactId'])
-      && identifier(value.importIdentity.importId, 'wbi')
-      && identifier(value.importIdentity.artifactId, 'wba')))
-    || !value.continuations.every((entry) => operationDto(entry, true)
-      && entry.kind === 'continue')) refused()
-  const requestResolutions = value.rolloutRequest.resolutions
-  const resolutionIds = requestResolutions.map(({ conflictId }) => conflictId).sort()
-  if ((value.preview === null) !== (value.previewRecordedAtMs === null)
-    || (value.preview !== null && !isDeepStrictEqual(
-      [...value.preview.conflictIds].sort(), resolutionIds,
-    ))) refused()
-  if (value.commitOperation !== null) {
-    const operation = value.commitOperation
-    if (operation.idempotencyKey !== value.commitIdempotencyKey
-      || operation.body.workbookFingerprint !== value.fingerprint
-      || operation.body.previewToken !== value.preview?.previewToken
-      || operation.body.planDigest !== value.preview?.planDigest
-      || !isDeepStrictEqual(operation.body.resolutions, requestResolutions)
-      || value.importIdentity === null
-      || operation.response.importId !== value.importIdentity.importId
-      || operation.response.artifactId !== value.importIdentity.artifactId) refused()
-  } else if (value.importIdentity !== null) refused()
-  value.continuations.forEach((entry, index) => {
-    if (value.importIdentity === null
-      || entry.idempotencyKey !== `rollout-continue-${value.rolloutIdentity}-${index + 1}`
-      || entry.body.importId !== value.importIdentity.importId
-      || (entry.response !== null && (entry.response.importId !== value.importIdentity.importId
-        || entry.response.artifactId !== value.importIdentity.artifactId))) refused()
-  })
-  const expectedPending = value.pendingOperation?.kind === 'continue'
-    ? value.continuations.find((entry) => (
-      entry.idempotencyKey === value.pendingOperation.idempotencyKey
-    )) : null
-  if (value.pendingOperation?.kind === 'preview'
-    && value.pendingOperation.body.workbookFingerprint !== value.fingerprint) refused()
-  if (value.pendingOperation?.kind === 'commit') {
-    const operation = value.pendingOperation
-    if (operation.idempotencyKey !== value.commitIdempotencyKey
-      || operation.body.workbookFingerprint !== value.fingerprint
-      || operation.body.previewToken !== value.preview?.previewToken
-      || operation.body.planDigest !== value.preview?.planDigest
-      || !isDeepStrictEqual(operation.body.resolutions, requestResolutions)
-      || (value.commitOperation !== null && !isDeepStrictEqual(
-        operation,
-        {
-          kind: value.commitOperation.kind,
-          idempotencyKey: value.commitOperation.idempotencyKey,
-          body: value.commitOperation.body,
-        },
-      ))) refused()
-  }
-  if (value.pendingOperation?.kind === 'continue'
-    && (value.importIdentity === null
-      || value.pendingOperation.body.importId !== value.importIdentity.importId
-      || expectedPending === undefined
-      || !isDeepStrictEqual(value.pendingOperation, {
-        kind: expectedPending.kind,
-        idempotencyKey: expectedPending.idempotencyKey,
-        body: expectedPending.body,
-      }))) refused()
-  const phaseValid = {
-    initialized: value.preview === null && value.pendingOperation === null
-      && value.commitOperation === null && value.continuations.length === 0,
-    preview_pending: value.preview === null && value.pendingOperation?.kind === 'preview'
-      && value.commitOperation === null && value.continuations.length === 0,
-    previewed: value.preview !== null && value.pendingOperation === null
-      && value.commitOperation === null && value.continuations.length === 0,
-    commit_pending: value.preview !== null && value.pendingOperation?.kind === 'commit'
-      && value.commitOperation === null && value.continuations.length === 0,
-    replay_commit_pending: value.preview !== null && value.pendingOperation?.kind === 'commit'
-      && value.commitOperation !== null,
-    committed: value.preview !== null && value.pendingOperation === null
-      && value.commitOperation !== null,
-    continue_pending: value.preview !== null && value.pendingOperation?.kind === 'continue'
-      && value.commitOperation !== null,
-    replay_continue_pending: value.preview !== null
-      && value.pendingOperation?.kind === 'continue' && value.commitOperation !== null,
-    materialized: false,
-    complete: value.preview !== null && value.pendingOperation === null
-      && value.commitOperation !== null,
-  }[value.phase]
+    || !identifier(value.creatorId, 'stf') || !PHASES.has(value.phase)
+    || !(value.importIdentity === null || importIdentityDto(value.importIdentity))
+    || !(value.result === null || resultDto(value.result, value.importIdentity))) refused()
+  const phaseValid = value.phase === 'initialized'
+    ? value.importIdentity === null && value.result === null
+    : value.phase === 'import_confirmed'
+      ? value.importIdentity !== null && value.result === null
+      : value.importIdentity !== null && value.result !== null
   if (!phaseValid) refused()
-  const resultKeys = [
-    'artifactId', 'importId', 'acceptedCount', 'quarantinedCount',
-    'previewWritesZero', 'terminalComplete', 'artifactVerified',
-    'reconciliationMatched', 'replayIdentityMatch', 'replayWritesZero', 'status',
-  ]
-  if ((value.phase === 'complete') !== (value.result !== null)) refused()
-  if (value.result !== null && (!exact(value.result, resultKeys)
-    || !/^wba_[A-Za-z0-9_-]{1,120}$/.test(value.result.artifactId ?? '')
-    || !/^wbi_[A-Za-z0-9_-]{1,120}$/.test(value.result.importId ?? '')
-    || !Number.isSafeInteger(value.result.acceptedCount) || value.result.acceptedCount < 0
-    || !Number.isSafeInteger(value.result.quarantinedCount) || value.result.quarantinedCount < 0
-    || resultKeys.slice(4, -1).some((key) => value.result[key] !== true)
-    || value.result.status !== 'ok'
-    || value.importIdentity?.importId !== value.result.importId
-    || value.importIdentity?.artifactId !== value.result.artifactId)) refused()
-  safeJson(value)
   return value
+}
+
+function retirementFor(value) {
+  if (exact(value, ['schema', 'environment', 'phase'])
+    && value.schema === RETIRED_LEGACY.schema
+    && value.environment === RETIRED_LEGACY.environment
+    && value.phase === RETIRED_LEGACY.phase) return RETIRED_LEGACY
+  if (plain(value) && value.schema === 'workbook_rollout_journal.v1') return RETIRED_LEGACY
+  return null
 }
 
 async function parentDescriptor(path) {
@@ -377,6 +219,44 @@ export async function createWorkbookRolloutJournal(path) {
   } finally { await parent.handle.close() }
 
   const lockPath = `${path}.lock`
+  const writeValue = async (value, validate) => {
+    validate(value)
+    let bytes
+    let tempHandle
+    const tempPath = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`)
+    const parentBefore = await parentDescriptor(path)
+    try {
+      const existing = await existingDescriptor(path, false)
+      await existing?.handle.close()
+      bytes = Buffer.from(JSON.stringify(value))
+      if (bytes.length < 1 || bytes.length > MAX_BYTES) refused()
+      tempHandle = await open(tempPath, constants.O_WRONLY | constants.O_CREAT
+        | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+      await tempHandle.chmod(0o600)
+      const tempStats = await tempHandle.stat()
+      if (!tempStats.isFile() || (tempStats.mode & 0o777) !== 0o600) refused()
+      await tempHandle.writeFile(bytes)
+      await tempHandle.sync()
+      await tempHandle.close()
+      tempHandle = null
+      await rename(tempPath, path)
+      await parentBefore.handle.sync()
+      const saved = await existingDescriptor(path, true)
+      await saved.handle.close()
+      const parentAfter = await lstat(dirname(path))
+      if (parentAfter.dev !== parentBefore.stats.dev || parentAfter.ino !== parentBefore.stats.ino) {
+        refused()
+      }
+    } catch (error) {
+      if (error?.message === 'WORKBOOK_ROLLOUT_STAGING_REFUSED') throw error
+      refused()
+    } finally {
+      bytes?.fill(0)
+      await tempHandle?.close()
+      await unlink(tempPath).catch(() => {})
+      await parentBefore.handle.close()
+    }
+  }
   return Object.freeze({
     async runExclusive(task) {
       if (typeof task !== 'function') refused()
@@ -424,10 +304,11 @@ export async function createWorkbookRolloutJournal(path) {
       const descriptor = await existingDescriptor(path, false)
       if (!descriptor) return null
       let bytes
+      let parsed
       try {
         bytes = await descriptor.handle.readFile()
         if (bytes.length !== descriptor.stats.size) refused()
-        return validateWorkbookRolloutJournal(JSON.parse(bytes.toString('utf8')))
+        parsed = JSON.parse(bytes.toString('utf8'))
       } catch (error) {
         if (error?.message === 'WORKBOOK_ROLLOUT_STAGING_REFUSED') throw error
         refused()
@@ -435,42 +316,17 @@ export async function createWorkbookRolloutJournal(path) {
         bytes?.fill(0)
         await descriptor.handle.close()
       }
+      const retirement = retirementFor(parsed)
+      if (retirement) {
+        await writeValue(retirement, (value) => {
+          if (value !== RETIRED_LEGACY) refused()
+        })
+        return null
+      }
+      return validateWorkbookRolloutJournal(parsed)
     },
     async save(value) {
-      validateWorkbookRolloutJournal(value)
-      let bytes
-      let tempHandle
-      const tempPath = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`)
-      const parentBefore = await parentDescriptor(path)
-      try {
-        const existing = await existingDescriptor(path, false)
-        await existing?.handle.close()
-        bytes = Buffer.from(JSON.stringify(value))
-        if (bytes.length < 1 || bytes.length > MAX_BYTES) refused()
-        tempHandle = await open(tempPath, constants.O_WRONLY | constants.O_CREAT
-          | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
-        await tempHandle.chmod(0o600)
-        const tempStats = await tempHandle.stat()
-        if (!tempStats.isFile() || (tempStats.mode & 0o777) !== 0o600) refused()
-        await tempHandle.writeFile(bytes)
-        await tempHandle.sync()
-        await tempHandle.close()
-        tempHandle = null
-        await rename(tempPath, path)
-        await parentBefore.handle.sync()
-        const saved = await existingDescriptor(path, true)
-        await saved.handle.close()
-        const parentAfter = await lstat(dirname(path))
-        if (parentAfter.dev !== parentBefore.stats.dev || parentAfter.ino !== parentBefore.stats.ino) refused()
-      } catch (error) {
-        if (error?.message === 'WORKBOOK_ROLLOUT_STAGING_REFUSED') throw error
-        refused()
-      } finally {
-        bytes?.fill(0)
-        await tempHandle?.close()
-        await unlink(tempPath).catch(() => {})
-        await parentBefore.handle.close()
-      }
+      await writeValue(value, validateWorkbookRolloutJournal)
     },
   })
 }

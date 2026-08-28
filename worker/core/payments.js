@@ -1,4 +1,5 @@
 import { encodeBase64Url } from '../security/encoding.js'
+import { AppError } from '../http/errors.js'
 import {
   createIdempotencyStatement,
   createUnitOfWork,
@@ -10,7 +11,9 @@ import { auditEventStatement } from '../audit/events.js'
 import { createOwnershipCapabilityBoundary } from './crypto.js'
 import { createRecordVersionBuilder } from './versions.js'
 import { captureAuthorityActor } from '../identity/authority-actor.js'
+import { authorize } from '../identity/policy.js'
 import { encryptForScope } from '../security/envelope.js'
+import { parseWorkspaceQuery } from './workspace.js'
 import {
   APPOINTMENT_VERSION_CAP,
   appointmentLedgerDto,
@@ -56,6 +59,12 @@ const CORRECTION_OPERATION = 'payments.correct'
 const DAY_MS = 86_400_000
 const ownership = createOwnershipCapabilityBoundary()
 const versionBuilder = createRecordVersionBuilder(ownership.consumer)
+const OWN_PAYMENT_LIMIT = 500
+const OWN_PAYMENT_ROW_KEYS = Object.freeze([
+  'id', 'specialist_id', 'service_id', 'starts_at', 'status', 'version',
+  'charge_id', 'charge_service_id', 'expected_amount_grosze', 'currency',
+  'charge_version', 'collected_grosze', 'latest_method', 'latest_received_at',
+])
 
 const validation = (field) => { throw new TypeError(`VALIDATION_FAILED/${field}`) }
 const notFound = () => { throw new Error('NOT_FOUND') }
@@ -88,6 +97,139 @@ const captureExact = (value, keys, fail = () => validation('body')) => {
 
 const canonicalInstant = (value) => typeof value === 'string' && INSTANT.test(value)
   && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value
+
+const ownPaymentsInvalid = () => { throw new Error('INTERNAL_ERROR') }
+
+const OWN_PAYMENTS_SQL = `
+  SELECT appointment.id,appointment.specialist_id,appointment.service_id,
+         appointment.starts_at,appointment.status,appointment.version,
+         charge.id AS charge_id,charge.service_id AS charge_service_id,
+         charge.expected_amount_grosze,charge.currency,charge.version AS charge_version,
+         COALESCE((
+           SELECT SUM(payment.amount_grosze)
+           FROM payment_entries AS payment
+           WHERE payment.appointment_id=appointment.id
+             AND NOT EXISTS (
+               SELECT 1 FROM payment_corrections AS correction
+               WHERE correction.reversed_entry_id=payment.id
+             )
+         ),0) AS collected_grosze,
+         (
+           SELECT payment.method
+           FROM payment_entries AS payment
+           WHERE payment.appointment_id=appointment.id
+             AND NOT EXISTS (
+               SELECT 1 FROM payment_corrections AS correction
+               WHERE correction.reversed_entry_id=payment.id
+             )
+           ORDER BY payment.received_at DESC,payment.id DESC
+           LIMIT 1
+         ) AS latest_method,
+         (
+           SELECT payment.received_at
+           FROM payment_entries AS payment
+           WHERE payment.appointment_id=appointment.id
+             AND NOT EXISTS (
+               SELECT 1 FROM payment_corrections AS correction
+               WHERE correction.reversed_entry_id=payment.id
+             )
+           ORDER BY payment.received_at DESC,payment.id DESC
+           LIMIT 1
+         ) AS latest_received_at
+  FROM appointments AS appointment INDEXED BY appointments_specialist_starts_id_idx
+  JOIN session_charges AS charge ON charge.appointment_id=appointment.id
+  WHERE appointment.specialist_id=?
+    AND appointment.starts_at>=? AND appointment.starts_at<?
+  ORDER BY appointment.starts_at,appointment.id
+  LIMIT ?`
+
+export async function loadOwnPaymentsWindow(input) {
+  const command = captureExact(input, ['db', 'actor', 'url'], ownPaymentsInvalid)
+  const actor = captureAuthorityActor(command.actor)
+  if (!actor || !isSpecialistId(actor.specialistId)
+    || !actor.capabilities.includes('appointment.charge.read')) throw new Error('FORBIDDEN')
+  if (typeof command.url !== 'string' || typeof command.db?.prepare !== 'function') {
+    ownPaymentsInvalid()
+  }
+  const window = parseWorkspaceQuery(command.url)
+  const statement = command.db.prepare(OWN_PAYMENTS_SQL)
+  if (!statement || typeof statement.bind !== 'function') ownPaymentsInvalid()
+  const bound = statement.bind(
+    actor.specialistId, window.lower, window.upper, OWN_PAYMENT_LIMIT + 1,
+  )
+  if (!bound || typeof bound.all !== 'function') ownPaymentsInvalid()
+  const pending = bound.all()
+  if (!(pending instanceof Promise)) ownPaymentsInvalid()
+  const result = await pending
+  const rows = result?.results
+  if (!Array.isArray(rows) || rows.length > OWN_PAYMENT_LIMIT) {
+    if (Array.isArray(rows) && rows.length > OWN_PAYMENT_LIMIT) {
+      throw new AppError('WORKSPACE_RESULT_LIMIT', {
+        field: 'appointments', limit: OWN_PAYMENT_LIMIT,
+      })
+    }
+    ownPaymentsInvalid()
+  }
+  const seenAppointments = new Set()
+  const seenCharges = new Set()
+  const appointments = rows.map((candidate) => {
+    const row = captureExact(candidate, OWN_PAYMENT_ROW_KEYS, ownPaymentsInvalid)
+    const billable = ['completed', 'noshow'].includes(row.status)
+    const latestNull = row.latest_method === null && row.latest_received_at === null
+    if (!isAppointmentId(row.id) || seenAppointments.has(row.id)
+      || row.specialist_id !== actor.specialistId
+      || !authorize(actor, 'appointment.charge.read', {
+        kind: 'appointment', appointmentId: row.id, specialistId: row.specialist_id,
+      }, { nowMs: 0 })
+      || !Object.hasOwn(SERVICE_BY_ID, row.service_id)
+      || !canonicalInstant(row.starts_at)
+      || !['scheduled', 'completed', 'cancelled', 'noshow'].includes(row.status)
+      || !Number.isSafeInteger(row.version) || row.version < 1
+      || !isChargeId(row.charge_id) || seenCharges.has(row.charge_id)
+      || row.charge_service_id !== row.service_id || row.currency !== 'PLN'
+      || !Number.isSafeInteger(row.expected_amount_grosze)
+      || row.expected_amount_grosze < 1 || row.expected_amount_grosze > 1_000_000
+      || !Number.isSafeInteger(row.charge_version) || row.charge_version < 1
+      || !Number.isSafeInteger(row.collected_grosze) || row.collected_grosze < 0
+      || row.collected_grosze > row.expected_amount_grosze
+      || (!billable && row.collected_grosze !== 0)
+      || (latestNull !== (row.collected_grosze === 0))
+      || (!latestNull && (!METHODS.includes(row.latest_method)
+        || !canonicalInstant(row.latest_received_at)))) ownPaymentsInvalid()
+    seenAppointments.add(row.id)
+    seenCharges.add(row.charge_id)
+    const outstandingGrosze = billable
+      ? row.expected_amount_grosze - row.collected_grosze : 0
+    return Object.freeze({
+      id: row.id,
+      serviceId: row.service_id,
+      startsAt: row.starts_at,
+      status: row.status,
+      version: row.version,
+      charge: Object.freeze({
+        id: row.charge_id,
+        serviceId: row.charge_service_id,
+        expectedAmountGrosze: row.expected_amount_grosze,
+        currency: row.currency,
+        version: row.charge_version,
+      }),
+      payment: Object.freeze({
+        status: row.collected_grosze === 0 ? 'unpaid'
+          : outstandingGrosze === 0 ? 'paid' : 'partial',
+        collectedGrosze: row.collected_grosze,
+        outstandingGrosze,
+        latestMethod: row.latest_method,
+        latestReceivedAt: row.latest_received_at,
+      }),
+    })
+  })
+  return Object.freeze({ data: Object.freeze({
+    window: Object.freeze({
+      from: window.from, to: window.to, timeZone: 'Europe/Warsaw', complete: true,
+    }),
+    appointments: Object.freeze(appointments),
+  }) })
+}
 
 export function validateRecordPaymentBody(value) {
   const body = captureExact(value, BODY_KEYS)

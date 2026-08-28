@@ -37,7 +37,8 @@ async function pinnedWranglerPath() {
 }
 
 async function main() {
-  if (process.argv.length !== 2) refused()
+  if (process.argv.length !== 3 || !['pre-stage', 'post-stage'].includes(process.argv[2])) refused()
+  const expectation = process.argv[2]
   const config = JSON.parse(await readFile(join(projectRoot, 'wrangler.json'), 'utf8'))
   const selected = validateStagingBackupConfig({ config, environment: process.env })
   const apiToken = requiredSecret(process.env, 'CLOUDFLARE_API_TOKEN')
@@ -54,7 +55,7 @@ async function main() {
   })
   try {
     const store = createDemandBackupStore({ query: runner.query })
-    const evidence = await migrationStatusEvidence(await store.readMigrations())
+    const evidence = await migrationStatusEvidence(await store.readMigrations(), expectation)
     process.stdout.write(`${JSON.stringify(evidence)}\n`)
   } finally {
     await runner.cleanup()

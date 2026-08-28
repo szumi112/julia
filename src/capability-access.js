@@ -4,8 +4,8 @@ const allOf = (...capabilities) => Object.freeze({
   allOf: Object.freeze(capabilities),
 })
 
-const anyRule = (...rules) => Object.freeze({
-  anyRule: Object.freeze(rules),
+const anyOf = (...capabilities) => Object.freeze({
+  anyOf: Object.freeze(capabilities),
 })
 
 const WORKSPACE_READ = allOf(
@@ -24,7 +24,7 @@ const PROTECTED_ROUTE_RULES = Object.freeze({
   english: allOf('tus.manage'),
   team: allOf('staff.manage'),
   psych: allOf('staff.manage'),
-  payments: anyRule(allOf('finance.centre.read'), WORKSPACE_READ),
+  payments: anyOf('appointment.charge.read', 'finance.centre.read'),
   ledger: allOf('finance.centre.read'),
   reports: allOf('finance.centre.read'),
   settings: allOf(),
@@ -149,6 +149,6 @@ export function protectedPaymentsSurface(capabilities, specialistId) {
   if (!accepted) return 'unavailable'
   if (accepted.has('finance.centre.read')) return 'centre'
   if (typeof specialistId === 'string' && specialistId.startsWith('sp_')
-    && satisfiesRule(accepted, WORKSPACE_READ)) return 'own'
+    && accepted.has('appointment.charge.read')) return 'own'
   return 'unavailable'
 }
