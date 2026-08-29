@@ -148,7 +148,7 @@ export function ProtectedReports({ params = {} }) {
 
       <section className="card card--pad report-window__trend" aria-labelledby="report-trend-title">
         <h2 className="card-title" id="report-trend-title">Trend sześciu miesięcy</h2>
-        <div className="report-window__chart">
+        <div className="chart-frame">
           <AreaChart
             data={window.trend.map((point) => ({
               ym: point.month,

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { BarFill } from '../charts.jsx'
+import { AreaChart, BarFill } from '../charts.jsx'
 import { addMonths, cap, fmtMoney, fmtMonthYear, fmtShortDate } from '../format.js'
 import {
   FINANCE_WINDOW_MIN_MONTH,
@@ -282,6 +282,19 @@ export function ProtectedFinance({ params = {} }) {
       </div>
       <Kpis values={window.kpis} />
       <MonthlySettlement values={window.kpis} />
+      <section className="card card--pad finance-window__trend" data-reveal aria-labelledby="finance-trend-title">
+        <h2 className="card-title" id="finance-trend-title">Przychody · sześć miesięcy</h2>
+        <div className="chart-frame">
+          <AreaChart
+            data={window.trend.map((point) => ({
+              ym: point.month,
+              revenue: point.revenueGrosze / 100,
+            }))}
+            height={200}
+            label={`Przychody w sześciu miesiącach do ${fmtMonthYear(selectedMonth)}`}
+          />
+        </div>
+      </section>
       {monthView.emptyCopy ? <p className="finance-window__empty" role="status">
         {monthView.emptyCopy}
       </p> : null}
