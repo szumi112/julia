@@ -753,7 +753,7 @@ export function Registry({ params = {} }) {
 
   return (
     <div className="registry-view" ref={revealRef}>
-      <div className="view-head registry-view__hero" data-reveal><div>
+      <div className="view-head" data-reveal><div>
         <div className="eyebrow">Pochodzenie danych</div>
         <h1 className="display view-head__title" ref={resultRef} tabIndex={-1}>Rejestr <em>skoroszytów</em></h1>
         <p className="view-head__sub">Historia importów, eksportów i jawnych rozstrzygnięć.</p>
