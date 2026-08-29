@@ -167,9 +167,9 @@ beforeAll(async () => {
     id: 'key_workbook_materialization_identity', createdAt: NOW,
   })
   for (const [id, name] of [
-    ['sp_staging_workbook_anna_janowska', 'Anna'],
-    ['sp_staging_workbook_julia_wolanin', 'Julia'],
-    ['sp_staging_workbook_justyna_j_j', 'Justyna'],
+    ['sp_staging_workbook_anna_janowska', 'Anna Janowska'],
+    ['sp_generated_workbook_julia', 'Julia Wolanin'],
+    ['sp_staging_workbook_justyna_j_j', 'Justyna J-J'],
   ]) await env.DB.prepare(`INSERT INTO specialists
     (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
      archived_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`).bind(
@@ -344,9 +344,39 @@ describe('approved workbook materialization', () => {
       readPanel: async () => ({ edits: [], kind: 'legacy', metadata: null, voidIds: [] }),
       nonceFactory: () => new Uint8Array(16).fill(7),
     })
+    expect(preview.data.proposedMappings.find(({ sourceValue }) => sourceValue === ''))
+      .toMatchObject({ specialistId: 'sp_generated_workbook_julia' })
+    const artifactDescriptor = ({ objectKey }) => ({
+      environment: 'staging', centreId: 'centre_1', objectKey,
+      fingerprint: APPROVED, byteSize: bytes.byteLength,
+      parserVersion: 2, materializerVersion: 2,
+      contentNonce: 'A'.repeat(16), workbookKekVersion: 1,
+      metadataHmacVersion: 1, metadataSignature: 'B'.repeat(43),
+    })
+    await expect(createWorkbookImport({
+      db: env.DB, bucket: env.ARCHIVE, actor, keyring, config, centreId: 'centre_1',
+      nowMs: NOW_MS + 500, correlationId: 'corr_workbook_materialization_directory_race',
+      idFactory, bytes, filename: 'approved-fictional.xlsx',
+      previewToken: preview.data.previewToken,
+      idempotencyKey: 'workbook-materialization-directory-race',
+      parse: async () => parsed,
+      readPanel: async () => ({ edits: [], kind: 'legacy', metadata: null, voidIds: [] }),
+      storeArtifact: async (input) => {
+        await env.DB.prepare(`UPDATE specialists SET version=version+1,updated_at=?
+          WHERE id=?`).bind(
+          new Date(NOW_MS + 500).toISOString(), 'sp_generated_workbook_julia',
+        ).run()
+        return artifactDescriptor(input)
+      },
+    })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+    expect((await env.DB.prepare(`SELECT count(*) AS count FROM workbook_artifacts
+      WHERE fingerprint=?`).bind(APPROVED).first()).count).toBe(0)
     const importBudget = createD1QueryBudget(env.DB, {
       totalLimit: 50, recoveryReserve: 8,
     })
+    for (let index = 0; index < 3; index += 1) {
+      await importBudget.work.prepare(`SELECT ${index} AS value`).first()
+    }
     const imported = await createWorkbookImport({
       db: importBudget.work, bucket: env.ARCHIVE, actor, keyring, config, centreId: 'centre_1',
       nowMs: NOW_MS + 1_000, correlationId: 'corr_workbook_materialization_import',
@@ -355,15 +385,13 @@ describe('approved workbook materialization', () => {
       idempotencyKey: 'workbook-materialization-import',
       parse: async () => parsed,
       readPanel: async () => ({ edits: [], kind: 'legacy', metadata: null, voidIds: [] }),
-      storeArtifact: async ({ objectKey }) => ({
-        environment: 'staging', centreId: 'centre_1', objectKey,
-        fingerprint: APPROVED, byteSize: bytes.byteLength,
-        parserVersion: 2, materializerVersion: 2,
-        contentNonce: 'A'.repeat(16), workbookKekVersion: 1,
-        metadataHmacVersion: 1, metadataSignature: 'B'.repeat(43),
-      }),
+      storeArtifact: async (input) => artifactDescriptor(input),
     })
-    expect(importBudget.usage().used).toBeLessThanOrEqual(42)
+    expect(importBudget.usage().workRemaining).toBeGreaterThanOrEqual(2)
+    expect(await env.DB.prepare(`SELECT specialist_id FROM workbook_resolutions
+      WHERE import_id=? AND kind='specialist_mapping' AND source_value_kind='blank'`).bind(
+      imported.body.data.import.id,
+    ).first('specialist_id')).toBe('sp_generated_workbook_julia')
     await expect(continueWorkbookImport({
       db: env.DB, actor: otherOwner, keyring, config, centreId: 'centre_1',
       nowMs: NOW_MS + 2_000, correlationId: 'corr_workbook_materialization_other',

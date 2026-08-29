@@ -5,6 +5,18 @@ const CONFLICT_ID = /^wmc_[A-Za-z0-9_-]{1,123}$/
 const PLAN_DIGEST = /^v[1-9]\d*_[A-Za-z0-9_-]{43}$/
 const ERROR_CODE = /^[A-Z][A-Z0-9_]{2,63}$/
 
+export const specialistOptionsForSelect = (options) => {
+  const labelCounts = new Map()
+  for (const { label } of options) {
+    labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1)
+  }
+  return options.map(({ id, label }) => ({
+    id,
+    label,
+    selectLabel: labelCounts.get(label) > 1 ? `${label} · ${id}` : label,
+  }))
+}
+
 export const WORKBOOK_FLOW_ACTIONS = Object.freeze({
   FILE_SELECTED: 'file-selected',
   PREVIEW_SUCCEEDED: 'preview-succeeded',

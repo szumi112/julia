@@ -9,6 +9,7 @@ import {
   readWorkbookArtifact,
   storeWorkbookArtifact,
   verifyWorkbookPreviewToken,
+  verifyWorkbookPreviewTokenContext,
 } from '../../worker/security/workbook-artifacts.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 
@@ -169,6 +170,14 @@ describe('workbook HMAC domain', () => {
       keyring,
       config,
       expected,
+      nowMs: 1_800_000_100_000,
+    })).resolves.toMatchObject(expected)
+    const { planDigest: _planDigest, ...stableExpected } = expected
+    await expect(verifyWorkbookPreviewTokenContext({
+      token,
+      keyring,
+      config,
+      expected: stableExpected,
       nowMs: 1_800_000_100_000,
     })).resolves.toMatchObject(expected)
     for (const mismatch of [

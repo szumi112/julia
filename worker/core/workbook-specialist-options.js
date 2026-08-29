@@ -39,14 +39,22 @@ const labelsForRows = async ({ db, keyring, rows }) => {
   return Object.freeze(labels)
 }
 
-export async function loadWorkbookSpecialistOptions({ db, keyring } = {}) {
+export async function loadWorkbookSpecialistDirectory({ db, keyring } = {}) {
   if (!db?.prepare || !keyring) fail()
   const rows = (await db.prepare(
-    `SELECT id,display_name_envelope FROM specialists
+    `SELECT id,display_name_envelope,version FROM specialists
      WHERE status='active' ORDER BY id LIMIT 101`,
   ).all()).results
-  if (!Array.isArray(rows) || rows.length > 100) fail()
-  return labelsForRows({ db, keyring, rows })
+  if (!Array.isArray(rows) || rows.length > 100
+    || rows.some(({ version }) => !Number.isSafeInteger(version) || version < 1)) fail()
+  return Object.freeze({
+    options: await labelsForRows({ db, keyring, rows }),
+    snapshot: Object.freeze(rows.map(({ id, version }) => Object.freeze({ id, version }))),
+  })
+}
+
+export async function loadWorkbookSpecialistOptions(input) {
+  return (await loadWorkbookSpecialistDirectory(input)).options
 }
 
 export async function loadWorkbookSpecialistLabels({ db, keyring, ids } = {}) {

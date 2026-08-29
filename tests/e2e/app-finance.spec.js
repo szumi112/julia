@@ -327,7 +327,15 @@ test('@owner preserves the exact file and idempotency key across an ambiguous cr
   await freezeTime(page)
   await routeWorkspace(page)
   await routeRegistry(page)
-  await page.route('**/api/v1/workbooks/preview', (route) => route.fulfill(json(previewWithConflict)))
+  const duplicateSpecialistId = 'sp_anna_duplicate'
+  await page.route('**/api/v1/workbooks/preview', (route) => route.fulfill(json({ data: {
+    ...previewWithConflict.data,
+    specialistOptions: [{
+      id: specialist.id, label: specialist.displayName,
+    }, {
+      id: duplicateSpecialistId, label: specialist.displayName,
+    }],
+  } })))
   const keys = []
   const submittedResolutions = []
   let attempts = 0
@@ -357,7 +365,13 @@ test('@owner preserves the exact file and idempotency key across an ambiguous cr
   await expect(page.getByText('5 ostrzeżeń wymaga przeglądu', { exact: true })).toBeVisible()
   await expect(page.getByText('Fikcyjny arkusz · wiersz 4', { exact: true })).toBeVisible()
   const mappingSelect = page.getByLabel('Wybierz specjalistkę — konflikt 1')
-  await mappingSelect.selectOption(specialist.id)
+  await expect(mappingSelect.getByRole('option', {
+    name: `Anna Nowak · ${specialist.id}`, exact: true,
+  })).toHaveCount(1)
+  await expect(mappingSelect.getByRole('option', {
+    name: `Anna Nowak · ${duplicateSpecialistId}`, exact: true,
+  })).toHaveCount(1)
+  await mappingSelect.selectOption(duplicateSpecialistId)
   await page.getByRole('button', { name: 'Zapisz i rozpocznij import' }).click()
   await expect(page.getByRole('alert')).toContainText(
     'Ten sam plik i klucz operacji zostały zachowane',
@@ -372,9 +386,9 @@ test('@owner preserves the exact file and idempotency key across an ambiguous cr
   expect(keys[0]).toBe(keys[1])
   expect(keys[0]).toMatch(/^workbook-import-/)
   expect(submittedResolutions).toEqual([[
-    { conflictId: `wmc_${'Q'.repeat(43)}`, specialistId: specialist.id },
+    { conflictId: `wmc_${'Q'.repeat(43)}`, specialistId: duplicateSpecialistId },
   ], [
-    { conflictId: `wmc_${'Q'.repeat(43)}`, specialistId: specialist.id },
+    { conflictId: `wmc_${'Q'.repeat(43)}`, specialistId: duplicateSpecialistId },
   ]])
   expect(await page.getByLabel('Wybierz plik XLSX')
     .evaluate((input) => input.files.length)).toBe(0)
@@ -403,7 +417,9 @@ test('@owner clears a definitively rejected create and requires a fresh preview'
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
   await page.getByRole('button', { name: 'Zapisz i rozpocznij import' }).click()
-  await expect(page.getByRole('alert')).toContainText('Plik został usunięty')
+  await expect(page.getByRole('alert')).toContainText(
+    'Plik mógł zostać już zaimportowany albo lista specjalistek się zmieniła',
+  )
   await expect(page.getByRole('button', { name: 'Zapisz i rozpocznij import' }))
     .toHaveCount(0)
   expect(await page.getByLabel('Wybierz plik XLSX')
@@ -1226,6 +1242,12 @@ test('@coordinator reads centre resolution labels directly without workspace', a
       ...(section === 'resolutions' ? {
         specialistLabels: [{ id: specialist.id, label: specialist.displayName }],
         items: [{
+          id: 'wbr_finance_e2e_blank', kind: 'specialist_mapping',
+          decision: 'blank_assigned_to_julia', specialistId: specialist.id,
+          serviceId: null, targetId: null, resolvedByStaffId: 'stf_local_owner',
+          sourceRecordId: null, conflictId: null, sourceValue: '',
+          version: 1, createdAt: NOW, choices: [],
+        }, {
           id: 'wbr_finance_e2e_resolution', kind: 'specialist_mapping',
           decision: 'explicit_match', specialistId: specialist.id,
           serviceId: null, targetId: null, resolvedByStaffId: 'stf_local_owner',
@@ -1239,7 +1261,9 @@ test('@coordinator reads centre resolution labels directly without workspace', a
   await page.goto('./#/ledger')
   await page.getByRole('button', { name: 'Przejrzyj import' }).click()
   await page.getByRole('tab', { name: 'Rozstrzygnięcia' }).click()
-  await expect(page.getByText(specialist.displayName, { exact: true })).toBeVisible()
+  await expect(page.getByText(specialist.displayName, { exact: true })).toHaveCount(2)
   await expect(page.getByText('Jawnie przypisano specjalistkę', { exact: true })).toBeVisible()
+  await expect(page.getByText('Przypisano pustą wartość źródłową', { exact: true }))
+    .toBeVisible()
   expect(workspaceRequests).toBe(0)
 })

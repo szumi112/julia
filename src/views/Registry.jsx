@@ -13,6 +13,7 @@ import {
   createWorkbookFlowState,
   matchesWorkbookContinuationImport,
   matchesWorkbookResolutionResult,
+  specialistOptionsForSelect,
   workbookFlowReducer,
 } from '../workbook-flow.js'
 import { WorkbookExport } from './WorkbookExport.jsx'
@@ -45,7 +46,7 @@ const reasonLabel = Object.freeze({
 const decisionLabel = Object.freeze({
   recorded: 'Zapisano zestaw przypisań',
   explicit_match: 'Jawnie przypisano specjalistkę',
-  blank_assigned_to_julia: 'Pustą wartość przypisano do Julii',
+  blank_assigned_to_julia: 'Przypisano pustą wartość źródłową',
   accepted: 'Przyjęto pozycję z kwarantanny',
   rejected: 'Odrzucono pozycję z kwarantanny',
   person: 'Rozpoznano osobę', counterparty: 'Rozpoznano kontrahenta',
@@ -212,6 +213,7 @@ function ResolutionPanel({ flow, values, specialists, onChange, onSubmit, saving
   ]))
   const complete = conflicts.length > 0
     && conflicts.every(({ id }) => selected.has(id))
+  const specialistSelectOptions = specialistOptionsForSelect(specialists)
   return <section className="card card--pad registry-resolutions" aria-labelledby="registry-resolutions-title">
     <h2 className="card-title" id="registry-resolutions-title" ref={headingRef} tabIndex={-1}>Rozstrzygnij przypisania</h2>
     <p className="muted">Każdy konflikt wymaga jawnego przypisania aktywnej specjalistki.</p>
@@ -231,7 +233,9 @@ function ResolutionPanel({ flow, values, specialists, onChange, onSubmit, saving
           onChange={(event) => onChange(conflict.id, event.target.value)}
         >
           <option value="">Wybierz specjalistkę</option>
-          {specialists.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+          {specialistSelectOptions.map(({ id, selectLabel }) => (
+            <option key={id} value={id}>{selectLabel}</option>
+          ))}
         </select>
       </Field>
     </div>)}

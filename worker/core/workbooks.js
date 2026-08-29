@@ -14,7 +14,7 @@ import {
   digestWorkbookSourceValue,
   readWorkbookArtifact,
   storeWorkbookArtifact,
-  verifyWorkbookPreviewToken,
+  verifyWorkbookPreviewTokenContext,
 } from '../security/workbook-artifacts.js'
 import { auditEventStatement } from '../audit/events.js'
 import {
@@ -34,16 +34,19 @@ import { authorize } from '../identity/policy.js'
 import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { resolveCurrentAuthorityActor } from '../identity/staff.js'
 import {
+  loadWorkbookSpecialistDirectory,
   loadWorkbookSpecialistLabels,
-  loadWorkbookSpecialistOptions,
 } from './workbook-specialist-options.js'
 import { parseWorkbookMaterializationProgress } from './workbook-materialization-progress.js'
+import { isD1CoreDirectoryInvariantFailure } from '../db/errors.js'
 
 export const APPROVED_WORKBOOK_FINGERPRINT = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 
 const MAX_WORKBOOK_BYTES = 5 * 1024 * 1024
 const MAX_WORKBOOK_EXPORT_BYTES = 10 * 1024 * 1024
 const MAX_WORKBOOK_EXPORT_ROWS = 5_000
+// The approved 2,235-record workbook uses 17 statements and leaves two route-budget queries.
+const SOURCE_INSERT_CHUNK_SIZE = 132
 const CENTRE_ID = /^centre_[A-Za-z0-9][A-Za-z0-9_-]{0,120}$/
 const FINGERPRINT = /^[0-9a-f]{64}$/
 const IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -59,7 +62,7 @@ const IDENTITY_SCOPE = Object.freeze({
   type: 'staff_directory', id: 'centre_1', purpose: 'identity',
 })
 const OPTIONAL_PREVIEW_KEYS = Object.freeze([
-  'db', 'loadPanelState', 'nonceFactory', 'parse', 'readPanel',
+  'db', 'loadPanelState', 'loadSpecialistOptions', 'nonceFactory', 'parse', 'readPanel',
 ])
 const REQUIRED_PREVIEW_KEYS = Object.freeze([
   'bytes', 'filename', 'actor', 'keyring', 'config', 'centreId', 'nowMs',
@@ -70,21 +73,18 @@ const PROFILE_MAPPINGS = Object.freeze({
     resolutionCode: 'blank_assigned_to_julia',
     sourceValue: '',
     sourceValueKind: 'blank',
-    specialistId: 'sp_staging_workbook_julia_wolanin',
   }),
   'Anna Janowska': Object.freeze({
     displayName: 'Anna Janowska',
     resolutionCode: 'explicit_match',
     sourceValue: 'Anna Janowska',
     sourceValueKind: 'explicit_name',
-    specialistId: 'sp_staging_workbook_anna_janowska',
   }),
   'Justyna J-J': Object.freeze({
     displayName: 'Justyna J-J',
     resolutionCode: 'explicit_match',
     sourceValue: 'Justyna J-J',
     sourceValueKind: 'explicit_name',
-    specialistId: 'sp_staging_workbook_justyna_j_j',
   }),
 })
 
@@ -737,6 +737,19 @@ const specialistSnapshotInvariant = (db, specialistIds) => db.prepare(
    ) != ?`,
 ).bind(JSON.stringify(specialistIds), specialistIds.length)
 
+const specialistDirectorySnapshotInvariant = (db, snapshot) => db.prepare(
+  `INSERT INTO core_directory_invariant_failures (failure_kind)
+   SELECT 'workbook_specialist_directory_changed' WHERE
+     (SELECT count(*) FROM specialists WHERE status='active') != ?
+     OR EXISTS (
+       SELECT 1 FROM json_each(?) AS expected
+       LEFT JOIN specialists AS specialist
+         ON specialist.id=json_extract(expected.value,'$.id')
+       WHERE specialist.id IS NULL OR specialist.status!='active'
+         OR specialist.version!=json_extract(expected.value,'$.version')
+     )`,
+).bind(snapshot.length, JSON.stringify(snapshot))
+
 const validExportBytes = (bytes) => {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1
     || bytes.byteLength > MAX_WORKBOOK_EXPORT_BYTES) {
@@ -1107,6 +1120,8 @@ async function inspectWorkbook(input, includeSpecialistOptions = false) {
     || (command.parse !== undefined && typeof command.parse !== 'function')
     || (command.readPanel !== undefined && typeof command.readPanel !== 'function')
     || (command.loadPanelState !== undefined && typeof command.loadPanelState !== 'function')
+    || (command.loadSpecialistOptions !== undefined
+      && typeof command.loadSpecialistOptions !== 'function')
     || (command.nonceFactory !== undefined && typeof command.nonceFactory !== 'function')) {
     previewInvalid()
   }
@@ -1154,14 +1169,37 @@ async function inspectWorkbook(input, includeSpecialistOptions = false) {
     loadPanelState: command.loadPanelState,
   })
 
+  let specialistDirectorySnapshot = null
+  let specialistOptions = Object.freeze([])
+  if (panel.kind === 'legacy' || includeSpecialistOptions) {
+    if (command.loadSpecialistOptions) {
+      specialistOptions = await command.loadSpecialistOptions({
+        db: command.db, keyring: command.keyring,
+      })
+    } else {
+      const directory = await loadWorkbookSpecialistDirectory({
+        db: command.db, keyring: command.keyring,
+      })
+      specialistOptions = directory.options
+      specialistDirectorySnapshot = directory.snapshot
+    }
+  }
   const values = panel.kind === 'legacy' ? sourceValues(parsed.rows) : new Set()
   const proposedMappings = [...values]
-    .map((sourceValue) => PROFILE_MAPPINGS[sourceValue] ?? null)
+    .map((sourceValue) => {
+      const mapping = PROFILE_MAPPINGS[sourceValue] ?? null
+      if (!mapping) return null
+      const matches = specialistOptions.filter(({ label }) => label === mapping.displayName)
+      return matches.length === 1
+        ? Object.freeze({ ...mapping, specialistId: matches[0].id })
+        : null
+    })
     .filter(Boolean)
     .sort((left, right) => compareUtf16CodeUnits(left.displayName, right.displayName))
+  const proposedSourceValues = new Set(proposedMappings.map(({ sourceValue }) => sourceValue))
   const mappingConflicts = []
   for (const sourceValue of [...values]
-    .filter((value) => !Object.hasOwn(PROFILE_MAPPINGS, value))
+    .filter((value) => !proposedSourceValues.has(value))
     .sort(compareUtf16CodeUnits)) {
     const provenance = await digestWorkbookSourceValue({
       keyring: command.keyring,
@@ -1228,7 +1266,7 @@ async function inspectWorkbook(input, includeSpecialistOptions = false) {
       quarantine: parsed.quarantinedRows,
       workbookKind: panel.kind,
       specialistOptions: includeSpecialistOptions
-        ? await loadWorkbookSpecialistOptions({ db: command.db, keyring: command.keyring })
+        ? specialistOptions
         : Object.freeze([]),
       specialistLabels: includeSpecialistOptions
         ? await loadWorkbookSpecialistLabels({
@@ -1240,6 +1278,7 @@ async function inspectWorkbook(input, includeSpecialistOptions = false) {
   const response = Object.freeze({ data: Object.freeze(responseData) })
   return Object.freeze({
     callbacks, panel, panelPlan: panelMerge.plan, parsed, planDigest, response,
+    specialistDirectorySnapshot,
   })
 }
 
@@ -1588,7 +1627,7 @@ const resolutionRowsFor = async ({
 const valuesStatement = (db, sql, values) => db.prepare(sql).bind(JSON.stringify(values))
 const sourceInsertStatements = (db, records) => {
   const statements = []
-  for (let offset = 0; offset < records.length; offset += 100) {
+  for (let offset = 0; offset < records.length; offset += SOURCE_INSERT_CHUNK_SIZE) {
     statements.push(valuesStatement(db, `INSERT INTO workbook_source_records
       (id,import_id,source_key,sheet_index,sheet_name,row_number,block_index,
        record_type,disposition,accounting_month,occurred_on,period_precision,
@@ -1615,7 +1654,7 @@ const sourceInsertStatements = (db, records) => {
              json_extract(value,'$.warningCodesJson'),
              json_extract(value,'$.sourcePayloadVersion'),
              json_extract(value,'$.sourcePayloadEnvelope'),json_extract(value,'$.createdAt')
-      FROM json_each(?)`, records.slice(offset, offset + 100)))
+      FROM json_each(?)`, records.slice(offset, offset + SOURCE_INSERT_CHUNK_SIZE)))
   }
   return statements
 }
@@ -1627,8 +1666,8 @@ const replayRow = (db, actorId, idempotencyKey) => db.prepare(
 
 export async function createWorkbookImport(input) {
   const optional = [
-    'artifactNonceFactory', 'loadPanelState', 'nonceFactory', 'parse', 'readPanel',
-    'resolutions', 'storeArtifact',
+    'artifactNonceFactory', 'loadPanelState', 'loadSpecialistOptions', 'nonceFactory',
+    'parse', 'readPanel', 'resolutions', 'storeArtifact',
   ]
   const required = [
     'db', 'bucket', 'actor', 'keyring', 'config', 'centreId', 'nowMs',
@@ -1679,6 +1718,7 @@ export async function createWorkbookImport(input) {
   const inspected = await inspectWorkbook({
     bytes: command.bytes,
     filename: command.filename,
+    db: command.db,
     actor: command.actor,
     keyring: command.keyring,
     config: command.config,
@@ -1687,13 +1727,15 @@ export async function createWorkbookImport(input) {
     ...(command.parse ? { parse: command.parse } : {}),
     ...(command.readPanel ? { readPanel: command.readPanel } : {}),
     ...(command.loadPanelState ? { loadPanelState: command.loadPanelState } : {}),
+    ...(command.loadSpecialistOptions
+      ? { loadSpecialistOptions: command.loadSpecialistOptions } : {}),
     ...(command.nonceFactory ? { nonceFactory: command.nonceFactory } : {}),
   })
   const mappingConflicts = inspected.response.data.conflicts
     .filter(({ code }) => code === 'SPECIALIST_MAPPING_REQUIRED')
   const blockingConflicts = inspected.response.data.conflicts
     .filter(({ code }) => code !== 'SPECIALIST_MAPPING_REQUIRED')
-  await verifyWorkbookPreviewToken({
+  const verifiedPreview = await verifyWorkbookPreviewTokenContext({
     token: command.previewToken,
     keyring: command.keyring,
     config: command.config,
@@ -1704,14 +1746,13 @@ export async function createWorkbookImport(input) {
       byteSize: command.bytes.byteLength,
       parserVersion: inspected.parsed.parserVersion,
       materializerVersion: inspected.parsed.materializerVersion,
-      planDigest: inspected.planDigest,
     },
     nowMs: command.nowMs,
   })
   const requestHash = await sha256Base64(JSON.stringify([
     'workbooks.import.request.v3', submittedFingerprint, command.filename,
     inspected.parsed.parserVersion, inspected.parsed.materializerVersion,
-    inspected.planDigest, canonicalResolutions,
+    verifiedPreview.planDigest, canonicalResolutions,
   ]))
   const replay = await replayRow(command.db, command.actor.id, command.idempotencyKey)
   if (replay) {
@@ -1719,6 +1760,9 @@ export async function createWorkbookImport(input) {
     const replayed = await loadImportRow(command.db, replay.import_id, command.actor.id)
     await requireCurrentAuthority(command.db, command.actor)
     return importResponse(replayed)
+  }
+  if (verifiedPreview.planDigest !== inspected.planDigest) {
+    throw new Error('WORKBOOK_IMPORT_CONFLICT')
   }
   const expectedConflictIds = mappingConflicts.map(({ id }) => id)
     .sort(compareUtf16CodeUnits)
@@ -1737,9 +1781,11 @@ export async function createWorkbookImport(input) {
     const conflict = mappingByConflict.get(conflictId)
     return Object.freeze({
       displayName: specialistId,
-      resolutionCode: 'explicit_match',
+      resolutionCode: conflict.sourceValue === ''
+        ? 'blank_assigned_to_julia'
+        : 'explicit_match',
       sourceValue: conflict.sourceValue,
-      sourceValueKind: 'explicit_name',
+      sourceValueKind: conflict.sourceValue === '' ? 'blank' : 'explicit_name',
       specialistId,
     })
   })
@@ -1978,7 +2024,11 @@ export async function createWorkbookImport(input) {
       },
       reasonEnvelope: null,
     }),
-    specialistSnapshotInvariant(command.db, specialistIds),
+    inspected.specialistDirectorySnapshot
+      ? specialistDirectorySnapshotInvariant(
+        command.db, inspected.specialistDirectorySnapshot,
+      )
+      : specialistSnapshotInvariant(command.db, specialistIds),
     authoritySnapshotInvariant(command.db, command.actor),
   )
   try {
@@ -2014,6 +2064,9 @@ export async function createWorkbookImport(input) {
       return importResponse(replayed)
     }
     try { await command.bucket.delete(descriptor.objectKey) } catch { /* Best-effort orphan cleanup. */ }
+    if (isD1CoreDirectoryInvariantFailure(error)) {
+      throw new Error('WORKBOOK_IMPORT_CONFLICT')
+    }
     throw error
   }
   await requireCurrentAuthority(command.db, command.actor)

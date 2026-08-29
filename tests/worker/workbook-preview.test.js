@@ -190,6 +190,14 @@ describe('no-write workbook preview', () => {
       edits: [], kind: 'legacy', metadata: null, voidIds: [],
     }))
     const keyring = await ring()
+    const specialistOptions = Object.freeze([
+      Object.freeze({
+        id: 'sp_staging_workbook_anna_janowska', label: 'Anna Janowska',
+      }),
+      Object.freeze({
+        id: 'sp_staging_workbook_julia_wolanin', label: 'Julia Wolanin',
+      }),
+    ])
     const result = await previewWorkbook({
       bytes,
       filename: 'fictional.xlsx',
@@ -200,6 +208,7 @@ describe('no-write workbook preview', () => {
       nowMs: 1_800_000_000_000,
       parse,
       readPanel,
+      loadSpecialistOptions: async () => specialistOptions,
       nonceFactory: () => new Uint8Array(16).fill(12),
     })
 
@@ -239,7 +248,7 @@ describe('no-write workbook preview', () => {
       conflicts: [],
       quarantine: [parsed().quarantinedRows[0]],
       workbookKind: 'legacy',
-      specialistOptions: [],
+      specialistOptions,
       specialistLabels: [],
     })
     await expect(verifyWorkbookPreviewToken({
@@ -258,6 +267,106 @@ describe('no-write workbook preview', () => {
       nowMs: 1_800_000_100_000,
     })).resolves.toMatchObject({ fingerprint: APPROVED })
     expect(JSON.stringify(result)).not.toContain('BWM_')
+  })
+
+  it('binds known legacy mappings to the unique active specialist profiles', async () => {
+    const specialistOptions = Object.freeze([
+      Object.freeze({ id: 'sp_generated_anna_profile', label: 'Anna Janowska' }),
+      Object.freeze({ id: 'sp_generated_julia_profile', label: 'Julia Wolanin' }),
+    ])
+    const result = await previewWorkbook({
+      bytes: new Uint8Array([1]),
+      filename: 'fictional.xlsx',
+      actor: owner,
+      keyring: await ring(),
+      config,
+      centreId: 'centre_1',
+      nowMs: 1_800_000_000_000,
+      parse: async () => parsed(),
+      readPanel: async () => ({ edits: [], kind: 'legacy', metadata: null, voidIds: [] }),
+      loadSpecialistOptions: async () => specialistOptions,
+    })
+
+    expect(result.data.proposedMappings).toEqual([
+      {
+        displayName: 'Anna Janowska',
+        resolutionCode: 'explicit_match',
+        sourceValue: 'Anna Janowska',
+        sourceValueKind: 'explicit_name',
+        specialistId: 'sp_generated_anna_profile',
+      },
+      {
+        displayName: 'Julia Wolanin',
+        resolutionCode: 'blank_assigned_to_julia',
+        sourceValue: '',
+        sourceValueKind: 'blank',
+        specialistId: 'sp_generated_julia_profile',
+      },
+    ])
+    expect(result.data.conflicts).toEqual([])
+    expect(result.data.specialistOptions).toEqual(specialistOptions)
+  })
+
+  it('requires an explicit choice when a known legacy target is not uniquely active', async () => {
+    const result = await previewWorkbook({
+      bytes: new Uint8Array([1]),
+      filename: 'fictional.xlsx',
+      actor: owner,
+      keyring: await ring(),
+      config,
+      centreId: 'centre_1',
+      nowMs: 1_800_000_000_000,
+      parse: async () => parsed(),
+      readPanel: async () => ({ edits: [], kind: 'legacy', metadata: null, voidIds: [] }),
+      loadSpecialistOptions: async () => Object.freeze([
+        Object.freeze({ id: 'sp_generated_anna_profile', label: 'Anna Janowska' }),
+      ]),
+    })
+
+    expect(result.data.proposedMappings).toEqual([{
+      displayName: 'Anna Janowska',
+      resolutionCode: 'explicit_match',
+      sourceValue: 'Anna Janowska',
+      sourceValueKind: 'explicit_name',
+      specialistId: 'sp_generated_anna_profile',
+    }])
+    expect(result.data.conflicts).toEqual([{
+      id: expect.stringMatching(/^wmc_[A-Za-z0-9_-]{43}$/),
+      code: 'SPECIALIST_MAPPING_REQUIRED',
+      sourceValue: '',
+    }])
+  })
+
+  it('requires an explicit choice when a known legacy target name is ambiguous', async () => {
+    const result = await previewWorkbook({
+      bytes: new Uint8Array([1]),
+      filename: 'fictional.xlsx',
+      actor: owner,
+      keyring: await ring(),
+      config,
+      centreId: 'centre_1',
+      nowMs: 1_800_000_000_000,
+      parse: async () => parsed(),
+      readPanel: async () => ({ edits: [], kind: 'legacy', metadata: null, voidIds: [] }),
+      loadSpecialistOptions: async () => Object.freeze([
+        Object.freeze({ id: 'sp_generated_anna_profile', label: 'Anna Janowska' }),
+        Object.freeze({ id: 'sp_generated_julia_first', label: 'Julia Wolanin' }),
+        Object.freeze({ id: 'sp_generated_julia_second', label: 'Julia Wolanin' }),
+      ]),
+    })
+
+    expect(result.data.proposedMappings).toEqual([{
+      displayName: 'Anna Janowska',
+      resolutionCode: 'explicit_match',
+      sourceValue: 'Anna Janowska',
+      sourceValueKind: 'explicit_name',
+      specialistId: 'sp_generated_anna_profile',
+    }])
+    expect(result.data.conflicts).toEqual([{
+      id: expect.stringMatching(/^wmc_[A-Za-z0-9_-]{43}$/),
+      code: 'SPECIALIST_MAPPING_REQUIRED',
+      sourceValue: '',
+    }])
   })
 
   it('rejects the cd66 legacy artifact and never accepts unknown explicit specialist names', async () => {

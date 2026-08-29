@@ -6,6 +6,7 @@ import {
   createWorkbookFlowState,
   matchesWorkbookContinuationImport,
   matchesWorkbookResolutionResult,
+  specialistOptionsForSelect,
   workbookFlowReducer,
 } from '../../src/workbook-flow.js'
 
@@ -21,6 +22,21 @@ const imported = (overrides = {}) => ({
 })
 
 const event = (type, values = {}) => ({ type, generation: 7, ...values })
+
+test('workbook specialist options expose ids only when labels are ambiguous', () => {
+  assert.deepEqual(specialistOptionsForSelect([
+    { id: 'sp_anna', label: 'Anna Nowak' },
+    { id: 'sp_beata', label: 'Beata Kowalska' },
+    { id: 'sp_anna_second', label: 'Anna Nowak' },
+  ]), [
+    { id: 'sp_anna', label: 'Anna Nowak', selectLabel: 'Anna Nowak · sp_anna' },
+    { id: 'sp_beata', label: 'Beata Kowalska', selectLabel: 'Beata Kowalska' },
+    {
+      id: 'sp_anna_second', label: 'Anna Nowak',
+      selectLabel: 'Anna Nowak · sp_anna_second',
+    },
+  ])
+})
 
 test('workbook flow follows preview/review/commit and drops file/token at acceptance', () => {
   let state = createWorkbookFlowState(7)

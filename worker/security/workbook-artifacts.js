@@ -364,10 +364,10 @@ export async function createWorkbookPreviewToken({
   }
 }
 
-export async function verifyWorkbookPreviewToken({ token, keyring, config, expected, nowMs }) {
+const authenticateWorkbookPreviewToken = async ({ token, keyring, config, nowMs }) => {
   try {
     if (config?.appEnv !== 'staging' || typeof token !== 'string'
-      || !exactInstantMs(nowMs) || !expected || typeof expected !== 'object') tokenInvalid()
+      || !exactInstantMs(nowMs)) tokenInvalid()
     const match = TOKEN.exec(token)
     if (!match || !Number.isSafeInteger(Number(match[1]))) tokenInvalid()
     const hmacVersion = Number(match[1])
@@ -384,13 +384,6 @@ export async function verifyWorkbookPreviewToken({ token, keyring, config, expec
     const payload = JSON.parse(payloadText)
     if (!validPreviewPayload(payload) || JSON.stringify(payload) !== payloadText
       || payload[1] !== config.appEnv
-      || payload[2] !== expected.centreId
-      || payload[3] !== expected.actorId
-      || payload[4] !== expected.fingerprint
-      || payload[5] !== expected.byteSize
-      || payload[6] !== expected.parserVersion
-      || payload[7] !== expected.materializerVersion
-      || payload[8] !== expected.planDigest
       || nowMs < payload[9] || nowMs > payload[10]) tokenInvalid()
     return Object.freeze({
       centreId: payload[2],
@@ -403,6 +396,38 @@ export async function verifyWorkbookPreviewToken({ token, keyring, config, expec
       issuedAtMs: payload[9],
       expiresAtMs: payload[10],
     })
+  } catch (error) {
+    if (error?.message === 'WORKBOOK_PREVIEW_TOKEN_INVALID') throw error
+    tokenInvalid()
+  }
+}
+
+export async function verifyWorkbookPreviewTokenContext({
+  token, keyring, config, expected, nowMs,
+}) {
+  try {
+    if (!expected || typeof expected !== 'object') tokenInvalid()
+    const verified = await authenticateWorkbookPreviewToken({
+      token, keyring, config, nowMs,
+    })
+    if (verified.centreId !== expected.centreId
+      || verified.actorId !== expected.actorId
+      || verified.fingerprint !== expected.fingerprint
+      || verified.byteSize !== expected.byteSize
+      || verified.parserVersion !== expected.parserVersion
+      || verified.materializerVersion !== expected.materializerVersion) tokenInvalid()
+    return verified
+  } catch (error) {
+    if (error?.message === 'WORKBOOK_PREVIEW_TOKEN_INVALID') throw error
+    tokenInvalid()
+  }
+}
+
+export async function verifyWorkbookPreviewToken(input) {
+  try {
+    const verified = await verifyWorkbookPreviewTokenContext(input)
+    if (verified.planDigest !== input.expected.planDigest) tokenInvalid()
+    return verified
   } catch (error) {
     if (error?.message === 'WORKBOOK_PREVIEW_TOKEN_INVALID') throw error
     tokenInvalid()

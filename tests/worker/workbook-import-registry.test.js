@@ -117,7 +117,7 @@ let financeKey
 let panelExportSeed
 const previewDb = Object.freeze({
   prepare(sql) {
-    if (sql.includes('SELECT id,display_name_envelope FROM specialists')) return {
+    if (sql.includes('SELECT id,display_name_envelope')) return {
       async all() { return { results: [] } },
     }
     return env.DB.prepare(sql)
@@ -369,20 +369,31 @@ const withoutCurrentAuthority = Object.freeze({
 })
 
 describe('workbook import reservation', () => {
-  it('requires exact opaque mapping choices and persists an effective versioned mapping', async () => {
+  it('requires exact choices and persists blank and explicit source kinds', async () => {
     const bytes = new TextEncoder().encode('fictional-legacy-mapping-resolution')
     let parses = 0
-    const parseUnknown = async (arrayBuffer, options) => {
+    const parseBlank = async (arrayBuffer, options) => {
       parses += 1
       const value = await parser(arrayBuffer, options)
       return Object.freeze({
         ...value,
         fingerprint: APPROVED_WORKBOOK_FINGERPRINT,
-        rows: Object.freeze([Object.freeze({
-          ...value.rows[0], specialistName: 'Fikcyjna Nieznana Specjalistka',
-          periodPrecision: 'day', periodMonth: '2025-09',
-        })]),
+        rows: Object.freeze([
+          Object.freeze({
+            ...value.rows[0], specialistName: null,
+            periodPrecision: 'day', periodMonth: '2025-09',
+          }),
+          Object.freeze({
+            ...value.rows[0], sourceKey: 'workbook:v1:0:4:0', rowNumber: 4,
+            specialistName: 'Fikcyjna Nieznana Specjalistka',
+            periodPrecision: 'day', periodMonth: '2025-09',
+          }),
+        ]),
         quarantinedRows: Object.freeze([]),
+        reconciliation: Object.freeze({
+          ...value.reconciliation,
+          sourceCandidates: 2, acceptedRows: 2, quarantinedRows: 0,
+        }),
       })
     }
     const readLegacy = async () => ({
@@ -390,11 +401,16 @@ describe('workbook import reservation', () => {
     })
     const preview = await previewWorkbook({
       bytes, filename: 'fictional-legacy.xlsx', actor, keyring, config,
-      centreId: 'centre_1', nowMs: NOW_MS, parse: parseUnknown,
+      centreId: 'centre_1', nowMs: NOW_MS, parse: parseBlank,
       readPanel: readLegacy, nonceFactory: () => new Uint8Array(16).fill(13),
     })
-    const conflict = preview.data.conflicts[0]
-    expect(conflict).toMatchObject({
+    const [blankConflict, explicitConflict] = preview.data.conflicts
+    expect(blankConflict).toMatchObject({
+      id: expect.stringMatching(/^wmc_[A-Za-z0-9_-]{43}$/),
+      code: 'SPECIALIST_MAPPING_REQUIRED',
+      sourceValue: '',
+    })
+    expect(explicitConflict).toMatchObject({
       id: expect.stringMatching(/^wmc_[A-Za-z0-9_-]{43}$/),
       code: 'SPECIALIST_MAPPING_REQUIRED',
       sourceValue: 'Fikcyjna Nieznana Specjalistka',
@@ -406,9 +422,11 @@ describe('workbook import reservation', () => {
       workbookKekVersion: 1, metadataHmacVersion: 1,
       metadataSignature: 'B'.repeat(43),
     })
+    let activeOptions = Object.freeze([])
     const base = {
       ...command(bytes, preview.data.previewToken, 'workbook-import-mapping'),
-      filename: 'fictional-legacy.xlsx', parse: parseUnknown, readPanel: readLegacy,
+      filename: 'fictional-legacy.xlsx', parse: parseBlank, readPanel: readLegacy,
+      loadSpecialistOptions: async () => activeOptions,
       storeArtifact,
     }
     await expect(createWorkbookImport(base)).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
@@ -420,35 +438,57 @@ describe('workbook import reservation', () => {
         specialistId: 'sp_staging_workbook_anna_janowska',
       }],
     })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
-    const imported = await createWorkbookImport({
-      ...base,
-      resolutions: [{
-        conflictId: conflict.id,
-        specialistId: 'sp_staging_workbook_anna_janowska',
-      }],
-    })
+    const resolutions = Object.freeze([Object.freeze({
+      conflictId: blankConflict.id,
+      specialistId: 'sp_staging_workbook_anna_janowska',
+    }), Object.freeze({
+      conflictId: explicitConflict.id,
+      specialistId: 'sp_staging_workbook_justyna_j_j',
+    })])
+    const imported = await createWorkbookImport({ ...base, resolutions })
     const afterImported = await importWriteEvidence()
+    activeOptions = Object.freeze([
+      Object.freeze({ id: 'sp_staging_workbook_julia_wolanin', label: 'Julia Wolanin' }),
+    ])
+    await expect(createWorkbookImport({
+      ...base, idFactory: () => 'must_not_generate', resolutions,
+    })).resolves.toEqual({ status: 200, body: imported.body })
+    await expect(createWorkbookImport({
+      ...base,
+      idempotencyKey: 'workbook-import-mapping-stale-plan',
+      resolutions,
+    })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
+    activeOptions = Object.freeze([])
     for (const resolutions of [[], [{
       conflictId: `wmc_${'x'.repeat(43)}`,
       specialistId: 'sp_staging_workbook_anna_janowska',
     }], [{
-      conflictId: conflict.id,
+      conflictId: blankConflict.id,
       specialistId: 'sp_staging_workbook_julia_wolanin',
+    }, {
+      conflictId: explicitConflict.id,
+      specialistId: 'sp_staging_workbook_justyna_j_j',
     }]]) await expect(createWorkbookImport({
       ...base,
       idFactory: () => 'must_not_generate',
       resolutions,
     })).rejects.toThrow(/^IDEMPOTENCY_CONFLICT$/)
     expect(await importWriteEvidence()).toEqual(afterImported)
-    expect(parses).toBe(7)
-    expect(await env.DB.prepare(`SELECT specialist_id FROM workbook_resolutions
-      WHERE import_id=? AND kind='specialist_mapping'`).bind(
+    expect(parses).toBe(9)
+    expect((await env.DB.prepare(`SELECT source_value_kind,specialist_id
+      FROM workbook_resolutions
+      WHERE import_id=? AND kind='specialist_mapping'
+      ORDER BY source_value_kind`).bind(
       imported.body.data.import.id,
-    ).first('specialist_id')).toBe('sp_staging_workbook_anna_janowska')
+    ).all()).results).toEqual([{
+      source_value_kind: 'blank', specialist_id: 'sp_staging_workbook_anna_janowska',
+    }, {
+      source_value_kind: 'explicit_name', specialist_id: 'sp_staging_workbook_justyna_j_j',
+    }])
     expect(await env.DB.prepare(`SELECT version,resolution_count
       FROM workbook_import_resolution_sets WHERE import_id=?`).bind(
       imported.body.data.import.id,
-    ).first()).toEqual({ version: 1, resolution_count: 1 })
+    ).first()).toEqual({ version: 1, resolution_count: 2 })
     const endedAt = new Date(NOW_MS + 2_000).toISOString()
     await env.DB.prepare(`UPDATE workbook_materialization_jobs
       SET status='failed',version=version+1,updated_at=? WHERE import_id=?`).bind(
@@ -1157,7 +1197,7 @@ describe('workbook import reservation', () => {
     ).first()).toEqual({ status: 'ready', cursor: 0, version: 1 })
   })
 
-  it('invalidates a preview when current Panel base state changes before exact-file commit', async () => {
+  it('rejects a stale authenticated plan when Panel base state changes before commit', async () => {
     const bytes = new TextEncoder().encode('fictional-workbook-panel-stale-preview')
     const callbacks = createWorkbookPanelMetadataCallbacks({
       keyring, config, centreId: 'centre_1',
@@ -1212,7 +1252,7 @@ describe('workbook import reservation', () => {
       ...command(bytes, preview.data.previewToken, 'workbook-import-stale-panel-plan'),
       readPanel,
       loadPanelState: stateAt(3),
-    })).rejects.toThrow(/^WORKBOOK_PREVIEW_TOKEN_INVALID$/)
+    })).rejects.toThrow(/^WORKBOOK_IMPORT_CONFLICT$/)
     expect((await env.DB.prepare(
       'SELECT count(*) AS count FROM workbook_artifacts',
     ).first()).count).toBe(beforeArtifacts)

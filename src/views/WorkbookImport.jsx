@@ -5,7 +5,7 @@ import { ApiError } from '../api.js'
 import { financeRepository } from '../finance-repository.js'
 import { fmtMonthYear, fmtShortDate, plural } from '../format.js'
 import { useShell } from '../shell-ctx.js'
-import { WORKBOOK_FLOW_ACTIONS } from '../workbook-flow.js'
+import { specialistOptionsForSelect, WORKBOOK_FLOW_ACTIONS } from '../workbook-flow.js'
 import { Button, EmptyState, Field } from '../ui.jsx'
 
 const importKey = () => `workbook-import-${crypto.randomUUID()}`
@@ -89,6 +89,7 @@ export function WorkbookImport({
   const allowed = canPerformAction(capabilities, 'finance.import.preview')
     && canPerformAction(capabilities, 'finance.import.create')
   const specialists = flow.preview?.specialistOptions ?? []
+  const specialistSelectOptions = specialistOptionsForSelect(specialists)
   const specialistNames = useMemo(() => new Map(
     (flow.preview?.specialistLabels ?? []).map(({ id, label }) => [id, label]),
   ), [flow.preview?.specialistLabels])
@@ -204,6 +205,8 @@ export function WorkbookImport({
             generation,
             errorCode: 'WORKBOOK_COMMIT_FAILED',
           })
+        } else if (error instanceof ApiError && error.code === 'WORKBOOK_IMPORT_CONFLICT') {
+          fail('WORKBOOK_IMPORT_CONFLICT')
         } else fail('WORKBOOK_COMMIT_REJECTED')
       }
     }
@@ -307,7 +310,9 @@ export function WorkbookImport({
                   onChange={(event) => changeResolution(conflict.id, event.target.value)}
                 >
                   <option value="">Wybierz specjalistkę</option>
-                  {specialists.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
+                  {specialistSelectOptions.map(({ id, selectLabel }) => (
+                    <option key={id} value={id}>{selectLabel}</option>
+                  ))}
                 </select>
               </Field>
             </div>
@@ -340,6 +345,10 @@ export function WorkbookImport({
       {flow.phase === 'review' && flow.errorCode === 'WORKBOOK_COMMIT_FAILED'
         ? <p className="form-error" role="alert">
           Nie udało się potwierdzić zapisu. Ten sam plik i klucz operacji zostały zachowane do bezpiecznej ponownej próby.
+        </p> : null}
+      {flow.phase === 'failed' && flow.errorCode === 'WORKBOOK_IMPORT_CONFLICT'
+        ? <p className="form-error" role="alert">
+          Nie można zapisać tego podglądu. Plik mógł zostać już zaimportowany albo lista specjalistek się zmieniła. Wybierz plik ponownie.
         </p> : null}
       {flow.phase === 'failed' && ['WORKBOOK_COMMIT_REJECTED', 'WORKBOOK_PREVIEW_FAILED']
         .includes(flow.errorCode) ? <p className="form-error" role="alert">
