@@ -1734,6 +1734,30 @@ describe('guarded Access reconciliation publication', () => {
       "SELECT count(*) AS count FROM outbox_jobs WHERE type='staff.invitation.email'"
     ).first()).count).toBe(before.jobs)
   })
+
+  it('supplies the provider with a runtime fetch closure instead of globalThis.fetch', async () => {
+    const fixture = await provisioningFixture()
+    const providerResponse = new Response(null, { status: 204 })
+    const runtimeFetch = vi.fn(async () => providerResponse)
+    vi.stubGlobal('fetch', runtimeFetch)
+    try {
+      const provider = async (request) => {
+        if (typeof request.fetch !== 'function' || request.fetch === globalThis.fetch) {
+          throw new Error('runtime_fetch_invalid')
+        }
+        const response = await request.fetch('https://provider.example.test/check')
+        if (response !== providerResponse) throw new Error('runtime_fetch_response_invalid')
+      }
+
+      await expect(handlers.handleAccessReconcile(reconcileInput(
+        fixture.cryptoContext,
+        { actorId: fixture.owner.id, generation: 1 },
+        { providers: { reconcileAccessGroup: provider } },
+      ))).resolves.toEqual({ result: 'succeeded' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 describe('authoritative outbox handler dispatch', () => {

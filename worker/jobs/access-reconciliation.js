@@ -21,6 +21,7 @@ const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const LEASE_MS = 60_000
 const PROVIDER_TIMEOUT_MS = 15_000
 const PROVIDER_RUNWAY_MS = (PROVIDER_TIMEOUT_MS * 3) + 1_000
+const runtimeFetch = (...args) => fetch(...args)
 const PROVISIONING_PUBLICATION_LIMIT = 2
 const DOMAIN_SEPARATOR = 'bwm:access-desired-set:v1\n'
 const textEncoder = new TextEncoder()
@@ -987,9 +988,7 @@ export async function handleAccessReconcile(input) {
       ...providerConfig,
       emails: membership.emails,
       timeoutMs: PROVIDER_TIMEOUT_MS,
-      ...(providers.reconcileAccessGroup
-        ? {}
-        : { fetch: providers.fetch ?? globalThis.fetch }),
+      fetch: providers.fetch ?? runtimeFetch,
     })
   } catch (error) {
     await releaseLease(input.db, lease, observedNowMs())
