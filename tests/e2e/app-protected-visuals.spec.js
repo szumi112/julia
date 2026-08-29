@@ -37,6 +37,8 @@ test('@owner enriches protected Finanse without replacing its summary, tabs or l
   await expect(page.getByRole('region', { name: 'Rozliczenie miesiąca' })).toBeVisible()
   await expect(page.getByRole('img', { name: /Przychody w sześciu miesiącach/ })).toBeVisible()
   await expect(page.getByText('Brak należności', { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Przychody według usługi' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Wpłaty według formy' })).toBeVisible()
   const backgrounds = await page.locator('.finance-window__kpi').evaluateAll((items) => (
     items.map((item) => getComputedStyle(item).backgroundColor)
   ))

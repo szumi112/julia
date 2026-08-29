@@ -3907,6 +3907,8 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
   overflow: hidden;
   border-top: 4px solid var(--coral);
 }
+.finance-window__insights { margin-bottom: 22px; }
+.finance-window__insight-meta { margin-top: 6px; font-size: 12.5px; }
 .finance-window__table { margin-top: 18px; overflow: hidden; border-top: 4px solid var(--coral); }
 .finance-window__table > .card-title { padding: 18px 20px 0; }
 .finance-window__table .table-scroll { margin-top: 12px; }
