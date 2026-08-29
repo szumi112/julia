@@ -436,19 +436,17 @@ describe('loadAccessProviderConfig', () => {
 
 describe('loadEmailProviderConfig', () => {
   const email = {
-    SCW_PROJECT_ID: '11111111-1111-4111-8111-111111111111',
-    SCW_FROM_EMAIL: 'powiadomienia@example.test',
-    SCW_FROM_NAME: 'Bear with me',
-    SCW_SECRET_KEY: 'provider-secret',
+    RESEND_FROM_EMAIL: 'powiadomienia@example.test',
+    RESEND_FROM_NAME: 'Bear with me',
+    RESEND_API_KEY: 're_provider-secret',
   }
 
   it('returns one immutable isolated provider config for canonical bindings', () => {
     const result = loadEmailProviderConfig(email, { appEnv: 'staging' })
     expect(result).toEqual({
-      projectId: email.SCW_PROJECT_ID,
-      fromEmail: email.SCW_FROM_EMAIL,
-      fromName: email.SCW_FROM_NAME,
-      secret: email.SCW_SECRET_KEY,
+      fromEmail: email.RESEND_FROM_EMAIL,
+      fromName: email.RESEND_FROM_NAME,
+      apiKey: email.RESEND_API_KEY,
     })
     expect(Object.isFrozen(result)).toBe(true)
     expect(loadConfig(valid)).not.toHaveProperty('emailProvider')
@@ -465,30 +463,26 @@ describe('loadEmailProviderConfig', () => {
     expect(new TextEncoder().encode(withinLimit).byteLength).toBe(245)
     expect(loadEmailProviderConfig({
       ...email,
-      SCW_FROM_EMAIL: withinLimit,
+      RESEND_FROM_EMAIL: withinLimit,
     }, { appEnv: 'staging' }).fromEmail).toBe(withinLimit)
     expect(() => loadEmailProviderConfig({
       ...email,
-      SCW_FROM_EMAIL: overLimit,
+      RESEND_FROM_EMAIL: overLimit,
     }, { appEnv: 'staging' })).toThrow(/^PROVIDER_CONFIG_INVALID$/)
   })
 
   it.each([
-    ['SCW_PROJECT_ID', '11111111111141118111111111111111'],
-    ['SCW_PROJECT_ID', '11111111-1111-4111-8111-11111111111A'],
-    ['SCW_PROJECT_ID', 'project_1'],
-    ['SCW_FROM_EMAIL', ' Powiadomienia@example.test'],
-    ['SCW_FROM_EMAIL', 'Powiadomienia@example.test'],
-    ['SCW_FROM_EMAIL', 'Bear with me <powiadomienia@example.test>'],
-    ['SCW_FROM_EMAIL', `${'a'.repeat(243)}@example.test`],
-    ['SCW_FROM_NAME', ' Bear with me'],
-    ['SCW_FROM_NAME', '\u0105'.repeat(61)],
-    ['SCW_FROM_NAME', 'Bear\nwith me'],
-    ['SCW_FROM_NAME', 'Bear\u0085with me'],
-    ['SCW_FROM_NAME', 'Bear\u009fwith me'],
-    ['SCW_SECRET_KEY', ''],
-    ['SCW_SECRET_KEY', '   '],
-    ['SCW_SECRET_KEY', 'secret value'],
+    ['RESEND_FROM_EMAIL', ' Powiadomienia@example.test'],
+    ['RESEND_FROM_EMAIL', 'Powiadomienia@example.test'],
+    ['RESEND_FROM_EMAIL', 'Bear with me <powiadomienia@example.test>'],
+    ['RESEND_FROM_EMAIL', `${'a'.repeat(243)}@example.test`],
+    ['RESEND_FROM_NAME', ' Bear with me'],
+    ['RESEND_FROM_NAME', '\u0105'.repeat(61)],
+    ['RESEND_FROM_NAME', 'Bear\nwith me'],
+    ['RESEND_FROM_NAME', 'Bear<with me'],
+    ['RESEND_API_KEY', ''],
+    ['RESEND_API_KEY', '   '],
+    ['RESEND_API_KEY', 'secret value'],
   ])('rejects malformed %s with a fixed error that does not reveal the binding', (key, value) => {
     let error
     try {

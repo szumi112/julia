@@ -2,7 +2,7 @@ import { loadEmailProviderConfig } from '../config.js'
 import { acceptPhaseOneAccessEmail } from '../identity/canonical-email.js'
 import { decodeBase64Url, encodeBase64Url } from '../security/encoding.js'
 import { blindEmailCandidates, decryptForScope } from '../security/envelope.js'
-import { sendInvitationEmail } from '../providers/scaleway-email.js'
+import { sendInvitationEmail } from '../providers/resend-email.js'
 import { expireInvitation } from '../identity/invitations.js'
 import {
   accessDesiredFingerprint,

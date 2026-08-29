@@ -18,7 +18,7 @@ const SECRET_NAMES = [
   'CF_ACCESS_GROUP_TOKEN',
   'CF_D1_BOOTSTRAP_TOKEN',
   'CF_D1_EXPORT_TOKEN',
-  'SCW_SECRET_KEY',
+  'RESEND_API_KEY',
 ]
 const BACKEND_BINDINGS = [
   'ACCESS_AUD',
@@ -47,10 +47,9 @@ const BACKEND_BINDINGS = [
   'CF_D1_EXPORT_TOKEN',
   'DATA_MODE',
   'DB',
-  'SCW_FROM_EMAIL',
-  'SCW_FROM_NAME',
-  'SCW_PROJECT_ID',
-  'SCW_SECRET_KEY',
+  'RESEND_FROM_EMAIL',
+  'RESEND_FROM_NAME',
+  'RESEND_API_KEY',
 ]
 const DEPLOY_ENVIRONMENT_NAMES = ['production', 'staging']
 const ZEROED_DATABASE_ID = /^0{8}-0{4}-0{4}-0{4}-0{11}[0-9a-f]$/
@@ -248,13 +247,12 @@ const PROTECTED_PROVIDER_BINDINGS = Object.freeze([
   'CF_ACCOUNT_ID',
   'CF_ACCESS_GROUP_ID',
   'CF_ACCESS_GROUP_NAME',
-  'SCW_PROJECT_ID',
-  'SCW_FROM_EMAIL',
-  'SCW_FROM_NAME',
+  'RESEND_FROM_EMAIL',
+  'RESEND_FROM_NAME',
 ])
 const REQUIRED_PROVIDER_SECRETS = Object.freeze([
   'CF_ACCESS_GROUP_TOKEN',
-  'SCW_SECRET_KEY',
+  'RESEND_API_KEY',
 ])
 const PROVIDER_PLACEHOLDERS = new Set([
   'change-me',
@@ -289,7 +287,7 @@ const assertProtectedProviderBindings = (workerConfig, vars, expectedEnvironment
   try {
     loadEmailProviderConfig({
       ...vars,
-      SCW_SECRET_KEY: 'artifact-email-provider-secret',
+      RESEND_API_KEY: 'artifact-email-provider-secret',
     }, { appEnv: expectedEnvironment })
   } catch {
     throw new Error('Generated Worker email provider configuration is invalid')

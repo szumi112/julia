@@ -394,7 +394,7 @@ describe('real-handler free-tier outbox drain', () => {
     expect(invitation).toEqual({ status: 'pending', email_sent_at: EMAIL_NOW, version: 2 })
     expect(completedJob).toEqual({ status: 'succeeded' })
     expect(delivery).toEqual({
-      provider: 'scaleway_tem',
+      provider: 'resend',
       provider_reference: EMAIL_PROVIDER_ID,
       status: 'accepted',
     })

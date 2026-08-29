@@ -1131,7 +1131,7 @@ export async function finalizeAcceptedInvitationEmail(db, cryptoContext, input =
     db.prepare(
       `INSERT INTO delivery_attempts
        (id,outbox_job_id,provider,provider_reference,status,error_code,attempted_at)
-       VALUES (?,?,'scaleway_tem',?,'accepted',NULL,?)`
+       VALUES (?,?,'resend',?,'accepted',NULL,?)`
     ).bind(deliveryId, job.id, input.providerId, validated.now),
     db.prepare(
       `UPDATE staff_invitations
@@ -1225,7 +1225,7 @@ export async function finalizeAcceptedInvitationEmail(db, cryptoContext, input =
          )
          AND EXISTS (
            SELECT 1 FROM delivery_attempts
-           WHERE id=? AND outbox_job_id=? AND provider='scaleway_tem'
+           WHERE id=? AND outbox_job_id=? AND provider='resend'
              AND provider_reference=? AND status='accepted'
              AND error_code IS NULL AND attempted_at=?
          )
@@ -1326,7 +1326,7 @@ export async function finalizeAcceptedInvitationEmail(db, cryptoContext, input =
        )=0
        AND EXISTS (
          SELECT 1 FROM delivery_attempts
-         WHERE id=? AND outbox_job_id=? AND provider='scaleway_tem'
+         WHERE id=? AND outbox_job_id=? AND provider='resend'
            AND provider_reference=? AND status='accepted'
            AND error_code IS NULL AND attempted_at=?
        )

@@ -36,7 +36,7 @@ const REQUIRED_SECRETS = [
   'BWM_WORKBOOK_KEK_V1',
   'CF_ACCESS_GROUP_TOKEN',
   'CF_D1_EXPORT_TOKEN',
-  'SCW_SECRET_KEY',
+  'RESEND_API_KEY',
 ]
 const STAGING_REQUIRED_SECRETS = [
   'BWM_BACKUP_KEK_V1',
@@ -73,6 +73,7 @@ const fail = (message) => {
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 const trimmedNonEmpty = (value) => typeof value === 'string' && value.length > 0 && value === value.trim()
+const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength
 
 const requireExactFields = (section, path, required, optional = []) => {
   if (!isPlainObject(section)) fail(`${path} must be an object`)
@@ -139,19 +140,23 @@ const inheritedVersionVars = (config) => {
   return values
 }
 
-const validateScalewaySection = (path, scaleway) => {
-  requireExactFields(scaleway, path, ['projectId', 'fromEmail', 'fromName'])
-  if (typeof scaleway.projectId !== 'string' || !PROVIDER_UUID.test(scaleway.projectId)) {
-    fail(`${path}.projectId must be a lowercase UUID`)
-  }
-  if (typeof scaleway.fromEmail !== 'string' || !SENDER_EMAIL.test(scaleway.fromEmail) || scaleway.fromEmail.includes('..')) {
+const validateResendSection = (path, resend) => {
+  requireExactFields(resend, path, ['fromEmail', 'fromName'])
+  if (typeof resend.fromEmail !== 'string'
+    || utf8Bytes(resend.fromEmail) > 254
+    || !SENDER_EMAIL.test(resend.fromEmail)
+    || resend.fromEmail.includes('..')) {
     fail(`${path}.fromEmail must be a lowercase public sender email address`)
   }
-  if (!trimmedNonEmpty(scaleway.fromName)) fail(`${path}.fromName must be a non-empty trimmed string`)
+  if (!trimmedNonEmpty(resend.fromName)
+    || utf8Bytes(resend.fromName) > 120
+    || /[<>\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(resend.fromName)) {
+    fail(`${path}.fromName must be a safe non-empty trimmed string`)
+  }
 }
 
 const validateEnvironmentSection = (name, section, local) => {
-  requireExactFields(section, name, ENVIRONMENT_FIELDS, ['scaleway'])
+  requireExactFields(section, name, ENVIRONMENT_FIELDS, ['resend'])
   if (typeof section.accountId !== 'string' || !ACCOUNT_ID.test(section.accountId)) {
     fail(`${name}.accountId must be exactly 32 lowercase hex characters`)
   }
@@ -191,7 +196,7 @@ const validateEnvironmentSection = (name, section, local) => {
     fail(`${name}.accessGroupId must be a lowercase UUID`)
   }
 
-  if (Object.hasOwn(section, 'scaleway')) validateScalewaySection(`${name}.scaleway`, section.scaleway)
+  if (Object.hasOwn(section, 'resend')) validateResendSection(`${name}.resend`, section.resend)
 }
 
 const buildEnvironmentBlock = (name, section, inheritedVars) => {
@@ -209,10 +214,9 @@ const buildEnvironmentBlock = (name, section, inheritedVars) => {
     CF_ACCESS_GROUP_ID: section.accessGroupId,
     CF_ACCESS_GROUP_NAME: section.accessGroupName,
   }
-  if (section.scaleway) {
-    vars.SCW_PROJECT_ID = section.scaleway.projectId
-    vars.SCW_FROM_EMAIL = section.scaleway.fromEmail
-    vars.SCW_FROM_NAME = section.scaleway.fromName
+  if (section.resend) {
+    vars.RESEND_FROM_EMAIL = section.resend.fromEmail
+    vars.RESEND_FROM_NAME = section.resend.fromName
   }
   // No per-env triggers: both top-level crons are inherited deliberately, because
   // worker/index.js requires exactly the minute and five-minute patterns.
@@ -276,8 +280,8 @@ export const applyProviderResults = ({ config, document }) => {
   const warnings = []
   const env = {}
   for (const name of ENVIRONMENT_NAMES) {
-    if (!Object.hasOwn(document[name], 'scaleway')) {
-      warnings.push(`${name} has no scaleway section: SCW_* vars are omitted, so invitation emails will dead-letter until the email provider is configured`)
+    if (!Object.hasOwn(document[name], 'resend')) {
+      warnings.push(`${name} has no resend section: RESEND_* vars are omitted, so invitation emails will dead-letter until the email provider is configured`)
     }
     const block = buildEnvironmentBlock(name, document[name], inheritedVars)
     assertRuntimeAcceptsVars(name, block.vars)

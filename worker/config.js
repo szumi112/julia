@@ -4,7 +4,6 @@ import { decodeBase64Url, encodeBase64Url } from './security/encoding.js'
 const BASE64_URL_KEY = /^[A-Za-z0-9_-]{43}$/
 const VERSION = /^[1-9]\d*$/
 const TEAM_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
-const PROVIDER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ACCESS_ACCOUNT_ID = /^[0-9a-f]{32}$/
 const ACCESS_GROUP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const BACKUP_ACCOUNT_ID = /^[0-9a-f]{32}$/
@@ -276,12 +275,16 @@ export function loadAccessProviderConfig(env, config) {
 export function loadEmailProviderConfig(env, config) {
   if (config?.appEnv === 'development') throw new Error('PROVIDER_DISABLED')
   if (!['staging', 'production'].includes(config?.appEnv)) throw new Error('PROVIDER_CONFIG_INVALID')
-  const value = { projectId: env?.SCW_PROJECT_ID, fromEmail: env?.SCW_FROM_EMAIL, fromName: env?.SCW_FROM_NAME, secret: env?.SCW_SECRET_KEY }
-  if (!PROVIDER_UUID.test(value.projectId ?? '')
-    || !canonicalEmail(value.fromEmail)
+  const value = {
+    fromEmail: env?.RESEND_FROM_EMAIL,
+    fromName: env?.RESEND_FROM_NAME,
+    apiKey: env?.RESEND_API_KEY,
+  }
+  if (!canonicalEmail(value.fromEmail)
     || !saneName(value.fromName)
-    || typeof value.secret !== 'string'
-    || value.secret.length < 1
-    || /\s/u.test(value.secret)) throw new Error('PROVIDER_CONFIG_INVALID')
+    || /[<>]/u.test(value.fromName)
+    || typeof value.apiKey !== 'string'
+    || value.apiKey.length < 1
+    || /\s/u.test(value.apiKey)) throw new Error('PROVIDER_CONFIG_INVALID')
   return Object.freeze(value)
 }

@@ -289,7 +289,7 @@ budget in one place.
   (`scheduler.js`, `outbox-drain.js`), Warsaw-time helpers (`clock.js`), and backup
   format/creation (`backup-format.js`, `backups.js`).
 - `worker/providers/` — external integrations: the Cloudflare Access management API
-  (`cloudflare-access.js`) and Scaleway transactional email (`scaleway-email.js`).
+  (`cloudflare-access.js`) and Resend transactional email (`resend-email.js`).
 - `worker/logging/` — `safe-log.js`, an allow-listed structured logger that refuses
   to log anything not on its field allowlist (no accidental PII/secret leakage).
 - `worker/core/` — server-side domain logic mirroring `src/core-records.js`
