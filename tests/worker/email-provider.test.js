@@ -90,6 +90,16 @@ describe('Resend invitation email provider request', () => {
     expect(init.body).toBe(JSON.stringify(body))
   })
 
+  it('calls the fetch implementation without a receiver', async () => {
+    const fetch = function () {
+      if (this !== undefined) throw new TypeError('Illegal invocation')
+      return Promise.resolve(response(acceptedBody()))
+    }
+
+    await expect(sendInvitationEmail({ ...valid, fetch }))
+      .resolves.toEqual({ providerId: PROVIDER_ID })
+  })
+
   it('uses dedicated text and HTML escaping for every interpolated value', () => {
     expect(escapeInvitationText('line\r\nnext\u0000')).toBe('line next ')
     expect(escapeInvitationHtml(`https://example.test/?a=1&b="<tag>'`))

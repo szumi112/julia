@@ -220,6 +220,7 @@ async function request(input, validated, method, body) {
   const controller = new validated.AbortControllerImpl()
   const timer = validated.setTimeoutImpl(() => controller.abort(), validated.timeoutMs)
   const requestEndpoint = endpoint(input)
+  const fetchImpl = input.fetch
   let fetchAbortListener
   const fetchAborted = new Promise((_, reject) => {
     fetchAbortListener = () => reject(new Error('ACCESS_PROVIDER_FETCH_ABORTED'))
@@ -230,7 +231,7 @@ async function request(input, validated, method, body) {
   try {
     try {
       response = await Promise.race([
-        Promise.resolve().then(() => input.fetch(requestEndpoint, {
+        Promise.resolve().then(() => fetchImpl(requestEndpoint, {
           method,
           headers: method === 'PUT'
             ? {

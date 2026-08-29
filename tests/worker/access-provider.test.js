@@ -131,6 +131,26 @@ describe('Cloudflare Access provider', () => {
     }))
   })
 
+  it('calls the fetch implementation without a receiver', async () => {
+    const desired = [
+      { email: { email: 'anna@example.test' } },
+      { email: { email: 'zoe@example.test' } },
+    ]
+    let requestCount = 0
+    const fetch = function () {
+      if (this !== undefined) throw new TypeError('Illegal invocation')
+      requestCount += 1
+      return Promise.resolve(ok(group({
+        include: requestCount === 1 ? [] : desired,
+      })))
+    }
+
+    await expect(reconcileAccessGroup(input(fetch))).resolves.toEqual({
+      reconciled: true,
+    })
+    expect(requestCount).toBe(3)
+  })
+
   it.each([
     ['initial GET with a wrong URL', 0, 'wrong URL'],
     ['initial GET marked redirected', 0, 'redirected'],

@@ -282,7 +282,8 @@ function validatedProviderId(parsed) {
 }
 
 async function sendAndValidate(input, request, signal) {
-  const response = await input.fetch(ENDPOINT, { ...request, signal })
+  const fetchImpl = input.fetch
+  const response = await fetchImpl(ENDPOINT, { ...request, signal })
   if (!response
     || response.redirected !== false
     || response.url !== ENDPOINT
