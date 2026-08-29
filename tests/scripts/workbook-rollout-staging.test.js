@@ -144,24 +144,20 @@ const terminal = Object.freeze({
   converged: true,
 })
 
-test('approved rollout actor and every reviewed resolution are bound to Julia', () => {
+test('approved rollout actor is the linked Julia specialist and has no mapping conflicts', () => {
   const actor = {
     id: 'stf_julia', displayName: 'Julia Wolanin', professionalTitle: 'Specjalistka',
-    role: 'owner', specialistId: 'sp_fictional_julia',
+    role: 'owner', specialistId: 'sp_staging_workbook_julia_wolanin',
   }
-  const resolutions = [{
-    conflictId: 'wmc_mapping_one', specialistId: 'sp_fictional_julia',
-  }]
+  const resolutions = []
   assert.deepEqual(assertApprovedRolloutActorAndResolutions({ actor, resolutions }), resolutions)
   for (const hostile of [
     { actor: { ...actor, displayName: 'Inna Osoba' }, resolutions },
     { actor: { ...actor, professionalTitle: null }, resolutions },
     { actor: { ...actor, specialistId: 'sp_other' }, resolutions },
-    { actor, resolutions: [] },
-    { actor, resolutions: [...resolutions, {
-      conflictId: 'wmc_mapping_two', specialistId: 'sp_fictional_julia',
+    { actor, resolutions: [{
+      conflictId: 'wmc_mapping_one', specialistId: actor.specialistId,
     }] },
-    { actor, resolutions: [{ ...resolutions[0], specialistId: 'sp_other' }] },
   ]) {
     assert.throws(() => assertApprovedRolloutActorAndResolutions(hostile),
       /^Error: WORKBOOK_ROLLOUT_STAGING_FAILED$/)

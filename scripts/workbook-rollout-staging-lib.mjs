@@ -67,6 +67,7 @@ const STATE_KEYS = Object.freeze([
   'status', 'version', 'voidedRecords',
 ])
 const IMPORT_STATUSES = new Set(['ready', 'materializing', 'complete', 'failed'])
+const STAGING_ROLLOUT_SPECIALIST_ID = 'sp_staging_workbook_julia_wolanin'
 const RESULT_KEYS = Object.freeze([
   'artifactId', 'importId', 'acceptedCount', 'quarantinedCount',
   'previewWritesZero', 'terminalComplete', 'artifactVerified',
@@ -177,10 +178,9 @@ export function assertApprovedRolloutActorAndResolutions({ actor, resolutions })
     if (!plain(actor) || !identifier(actor.id, 'stf') || actor.role !== 'owner'
       || actor.displayName !== 'Julia Wolanin'
       || actor.professionalTitle !== 'Specjalistka'
-      || !identifier(actor.specialistId, 'sp')) failed()
+      || actor.specialistId !== STAGING_ROLLOUT_SPECIALIST_ID) failed()
     const reviewed = resolutionDto(resolutions)
-    if (reviewed.length !== 1
-      || reviewed.some(({ specialistId }) => specialistId !== actor.specialistId)) failed()
+    if (reviewed.length !== 0) failed()
     return resolutions
   } catch {
     throw new Error('WORKBOOK_ROLLOUT_STAGING_FAILED')
