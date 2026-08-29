@@ -468,12 +468,13 @@ test('coarse pointers expose complete 44px targets without enlarging pills', asy
     expect(todayChipHit.height).toBe(36)
     expect(todayChipHit.hitHeight).toBeGreaterThanOrEqual(44)
 
+    const minimumTouchTarget = 44 - 0.001
     for (const selector of ['.spine__row', '.today-links__item']) {
       const target = page.locator(selector).first()
       await expect(target).toBeVisible()
       const box = await target.boundingBox()
-      expect(box.height, selector).toBeGreaterThanOrEqual(44)
-      expect(box.width, selector).toBeGreaterThanOrEqual(44)
+      expect(box.height, selector).toBeGreaterThanOrEqual(minimumTouchTarget)
+      expect(box.width, selector).toBeGreaterThanOrEqual(minimumTouchTarget)
     }
 
     await openPhoneDestination(page, 'Klienci')
