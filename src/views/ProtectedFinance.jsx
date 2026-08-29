@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { AreaChart, BarFill, Donut, toneColor } from '../charts.jsx'
-import { addMonths, cap, fmtMoney, fmtMonthName, fmtMonthYear, fmtShortDate } from '../format.js'
+import {
+  addMonths, cap, fmtMoney, fmtMonthName, fmtMonthYear, fmtShortDate, plural,
+} from '../format.js'
 import {
   FINANCE_WINDOW_MIN_MONTH,
   financeMonthView,
@@ -13,8 +15,8 @@ import { canAccessProtectedRoute } from '../capability-access.js'
 import { useApp, useWorkspaceWindow } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
-import { Button, EmptyState, IconBtn, MoneyKpi, Pill, TableScroll, Tabs } from '../ui.jsx'
-import { useRouteParamsSync } from '../ux-patterns.jsx'
+import { Button, Chip, EmptyState, IconBtn, MoneyKpi, Pill, TableScroll, Tabs } from '../ui.jsx'
+import { FilterGroup, useRouteParamsSync } from '../ux-patterns.jsx'
 import { monthWorkspaceRange } from '../workspace-view.js'
 import {
   ProtectedPaymentAction,
@@ -91,27 +93,45 @@ function MonthlySettlement({ values }) {
 
 function LedgerTable({
   rows, kind, specialistNames, appointmentLabels, onReconciled, paymentContext,
+  unpaidOnly, onUnpaidOnlyChange,
 }) {
   const headingRef = useRef(null)
-  const visible = rows.filter((row) => (
+  const rowsForKind = rows.filter((row) => (
     kind === 'income' ? row.kind === 'income'
       : kind === 'payments' ? row.kind === 'income'
       : kind === 'expenses' ? row.kind === 'expense'
         : row.kind === 'income' && row.invoiceStatus !== 'not_required'
   ))
+  const visible = kind === 'payments' && unpaidOnly
+    ? rowsForKind.filter((row) => row.receivableGrosze - row.collectedGrosze > 0)
+    : rowsForKind
   const title = kind === 'income' ? 'Przychody miesiąca'
     : kind === 'payments' ? 'Płatności i zaległości miesiąca'
       : kind === 'expenses' ? 'Wydatki miesiąca' : 'Faktury miesiąca'
   if (kind === 'payments') return (
     <section className="card finance-window__table" data-reveal aria-labelledby="finance-payments-title">
-      <h2 className="card-title" id="finance-payments-title" ref={headingRef} tabIndex={-1}>
-        {title}
-      </h2>
+      <div className="finance-window__table-head">
+        <div>
+          <h2 className="card-title" id="finance-payments-title" ref={headingRef} tabIndex={-1}>
+            {title}
+          </h2>
+          <span className="faint">{visible.length} {plural(
+            visible.length, 'rozliczenie', 'rozliczenia', 'rozliczeń',
+          )}</span>
+        </div>
+        <FilterGroup label="Widok rozliczeń">
+          <Chip on={!unpaidOnly} onClick={() => onUnpaidOnlyChange(false)}>Wszystkie</Chip>
+          <Chip on={unpaidOnly} onClick={() => onUnpaidOnlyChange(true)}>Zaległości</Chip>
+        </FilterGroup>
+      </div>
       <TableScroll label="Przewijana tabela rozliczeń"><table className="table" aria-label="Lista rozliczeń">
         <thead><tr><th>Data</th><th>Źródło</th><th className="right">Należne</th>
           <th className="right">Wpłacono</th><th className="right">Pozostało</th><th></th></tr></thead>
         <tbody>{visible.length === 0 ? <tr><td colSpan={6}>
-          <EmptyState icon="payments" title="Brak rozliczeń w tym miesiącu" />
+          <EmptyState
+            icon="payments"
+            title={unpaidOnly ? 'Brak zaległości w tym miesiącu' : 'Brak rozliczeń w tym miesiącu'}
+          />
         </td></tr> : visible.map((row) => {
           const outstandingGrosze = row.receivableGrosze - row.collectedGrosze
           return <tr key={row.id}>
@@ -187,10 +207,14 @@ export function ProtectedFinance({ params = {} }) {
       }).initialMonth,
       tab: TAB_IDS.has(params.tab ?? route.params?.tab) ? params.tab ?? route.params.tab
         : TAB_IDS.has(saved.tab) ? saved.tab : 'payments',
+      unpaidOnly: typeof (params.unpaidOnly ?? route.params?.unpaidOnly) === 'boolean'
+        ? params.unpaidOnly ?? route.params.unpaidOnly
+        : saved.unpaidOnly === true,
     }
   })
   const [selectedMonth, setSelectedMonth] = useState(initial.month)
   const [tab, setTab] = useState(initial.tab)
+  const [unpaidOnly, setUnpaidOnly] = useState(initial.unpaidOnly)
   const headingRef = useRef(null)
   const pendingMonthFocusRef = useRef(false)
   const finance = useFinanceWindow(selectedMonth)
@@ -207,11 +231,12 @@ export function ProtectedFinance({ params = {} }) {
   const serverCurrentMonth = window?.currentMonth ?? browserMonth
 
   useEffect(() => {
-    patchViewState('payments', { ym: selectedMonth, tab })
-  }, [patchViewState, selectedMonth, tab])
+    patchViewState('payments', { ym: selectedMonth, tab, unpaidOnly })
+  }, [patchViewState, selectedMonth, tab, unpaidOnly])
   useRouteParamsSync('payments', {
     ym: selectedMonth === serverCurrentMonth ? undefined : selectedMonth,
     tab: tab === 'payments' ? undefined : tab,
+    unpaidOnly: tab === 'payments' && unpaidOnly ? true : undefined,
   })
 
   const selectedRows = useMemo(() => window?.rows ?? [], [window?.rows])
@@ -386,6 +411,8 @@ export function ProtectedFinance({ params = {} }) {
           appointmentLabels={appointmentLabels}
           onReconciled={finance.reload}
           paymentContext={paymentContext}
+          unpaidOnly={unpaidOnly}
+          onUnpaidOnlyChange={setUnpaidOnly}
         />
       </Tabs>
     </div>

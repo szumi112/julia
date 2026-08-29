@@ -122,7 +122,7 @@ const financeWindow = (selectedMonth) => {
       },
     },
     specialistLabels: populated ? [{ id: specialist.id, label: specialist.displayName }] : [],
-    rows: populated ? financeRows : [],
+    rows: populated ? financeRows.map((row) => ({ ...row })) : [],
     coverage: {
       dateOnlyCount: 0, monthOnlyCount: 0,
       timedCount: populated ? financeRows.length : 0, unknownCount: 0,
@@ -258,6 +258,52 @@ const routeRegistry = async (page, imports = []) => page.route(
     })))
   },
 )
+
+test('@owner filters protected settlements to outstanding balances and restores the filter from the route', async ({ page }) => {
+  await freezeTime(page)
+  await routeWorkspace(page)
+  const response = financeWindow('2026-07')
+  response.data.rows[0].collectedGrosze = 18_000
+  response.data.rows[0].paymentMethod = 'cash'
+  response.data.kpis.collectedGrosze = 18_000
+  response.data.kpis.outstandingGrosze = 342_000
+  response.data.trend[5].collectedGrosze = 18_000
+  response.data.trend[5].outstandingGrosze = 342_000
+  response.data.splits.payment = { cash: 18_000, outstanding: 342_000 }
+  await page.route('**/api/v1/finance/window?*', (route) => (
+    route.fulfill(json(response))
+  ))
+
+  await page.goto('./#/payments?unpaidOnly=true&ym=2026-07')
+
+  const table = page.getByRole('table', { name: 'Lista rozliczeń' })
+  const filters = page.getByRole('group', { name: 'Widok rozliczeń' })
+  await expect(filters.getByRole('button', { name: 'Zaległości' }))
+    .toHaveAttribute('aria-pressed', 'true')
+  await expect(table.getByRole('row')).toHaveCount(20)
+  await expect(table.getByText('1 lip', { exact: true })).toHaveCount(0)
+
+  await filters.getByRole('button', { name: 'Wszystkie' }).click()
+  await expect(table.getByRole('row')).toHaveCount(21)
+  await expect(table.getByText('1 lip', { exact: true })).toBeVisible()
+  await expect(page).toHaveURL(/#\/payments\?ym=2026-07$/)
+
+  await filters.getByRole('button', { name: 'Zaległości' }).click()
+  await page.getByRole('tab', { name: 'Przychody' }).click()
+  await expect(page).toHaveURL(/#\/payments\?tab=income&ym=2026-07$/)
+  await page.getByRole('tab', { name: 'Płatności i zaległości' }).click()
+  await expect(filters.getByRole('button', { name: 'Zaległości' }))
+    .toHaveAttribute('aria-pressed', 'true')
+  await expect(table.getByRole('row')).toHaveCount(20)
+  await expect(page).toHaveURL(/#\/payments\?unpaidOnly=true&ym=2026-07$/)
+
+  await page.getByRole('link', { name: 'Raporty', exact: true }).click()
+  await page.getByRole('link', { name: 'Finanse', exact: true }).click()
+  await expect(filters.getByRole('button', { name: 'Zaległości' }))
+    .toHaveAttribute('aria-pressed', 'true')
+  await expect(table.getByRole('row')).toHaveCount(20)
+  await expect(page).toHaveURL(/#\/payments\?unpaidOnly=true&ym=2026-07$/)
+})
 
 test('@owner uses one authoritative finance window, latest month and unknown-period route', async ({ page }) => {
   await freezeTime(page)
