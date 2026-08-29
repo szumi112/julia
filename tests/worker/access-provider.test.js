@@ -91,7 +91,7 @@ describe('Cloudflare Access provider', () => {
     expect(JSON.parse(fetch.mock.calls[1][1].body).include).toEqual(sentinel)
   })
 
-  it('uses exact GET/PUT/GET requests and emits one deterministic controlled body', async () => {
+  it('uses exact GET/PUT/GET requests with a Workers-compatible manual redirect policy', async () => {
     const desired = [
       { email: { email: 'anna@example.test' } },
       { email: { email: 'zoe@example.test' } },
@@ -114,7 +114,7 @@ describe('Cloudflare Access provider', () => {
     ])
     for (const [, init] of fetch.mock.calls) {
       expect(init.headers.Authorization).toBe(`Bearer ${TOKEN}`)
-      expect(init.redirect).toBe('error')
+      expect(init.redirect).toBe('manual')
       expect(init.signal).toBeInstanceOf(AbortSignal)
     }
     expect(fetch.mock.calls[0][1].headers).toEqual({ Authorization: `Bearer ${TOKEN}` })
@@ -129,6 +129,57 @@ describe('Cloudflare Access provider', () => {
       require: [{ email_domain: { domain: 'example.test' } }],
       exclude: [{ email: { email: 'blocked@example.test' } }],
     }))
+  })
+
+  it('calls the fetch implementation without a receiver', async () => {
+    const desired = [
+      { email: { email: 'anna@example.test' } },
+      { email: { email: 'zoe@example.test' } },
+    ]
+    let requestCount = 0
+    const fetch = function () {
+      if (this !== undefined) throw new TypeError('Illegal invocation')
+      requestCount += 1
+      return Promise.resolve(ok(group({
+        include: requestCount === 1 ? [] : desired,
+      })))
+    }
+
+    await expect(reconcileAccessGroup(input(fetch))).resolves.toEqual({
+      reconciled: true,
+    })
+    expect(requestCount).toBe(3)
+  })
+
+  it('calls timeout implementations without a receiver', async () => {
+    const desired = [
+      { email: { email: 'anna@example.test' } },
+      { email: { email: 'zoe@example.test' } },
+    ]
+    let timerId = 0
+    const setTimeout = function () {
+      if (this !== undefined) throw new TypeError('Illegal invocation')
+      timerId += 1
+      return timerId
+    }
+    const cleared = []
+    const clearTimeout = function (id) {
+      if (this !== undefined) throw new TypeError('Illegal invocation')
+      cleared.push(id)
+    }
+    let requestCount = 0
+    const fetch = vi.fn(async () => {
+      requestCount += 1
+      return ok(group({
+        include: requestCount === 1 ? [] : desired,
+      }))
+    })
+
+    await expect(reconcileAccessGroup(input(fetch, {
+      setTimeout,
+      clearTimeout,
+    }))).resolves.toEqual({ reconciled: true })
+    expect(cleared).toEqual([1, 2, 3])
   })
 
   it.each([

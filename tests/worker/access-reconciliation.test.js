@@ -1734,6 +1734,59 @@ describe('guarded Access reconciliation publication', () => {
       "SELECT count(*) AS count FROM outbox_jobs WHERE type='staff.invitation.email'"
     ).first()).count).toBe(before.jobs)
   })
+
+  it('supplies the provider with a runtime fetch closure instead of globalThis.fetch', async () => {
+    const fixture = await provisioningFixture()
+    const providerResponse = new Response(null, { status: 204 })
+    const runtimeFetch = vi.fn(async () => providerResponse)
+    vi.stubGlobal('fetch', runtimeFetch)
+    try {
+      const provider = async (request) => {
+        if (typeof request.fetch !== 'function' || request.fetch === globalThis.fetch) {
+          throw new Error('runtime_fetch_invalid')
+        }
+        const response = await request.fetch('https://provider.example.test/check')
+        if (response !== providerResponse) throw new Error('runtime_fetch_response_invalid')
+      }
+
+      await expect(handlers.handleAccessReconcile(reconcileInput(
+        fixture.cryptoContext,
+        { actorId: fixture.owner.id, generation: 1 },
+        { providers: { reconcileAccessGroup: provider } },
+      ))).resolves.toEqual({ result: 'succeeded' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('logs only a fixed Access provider code when reconciliation fails', async () => {
+    const fixture = await provisioningFixture()
+    const providerError = Object.assign(new Error('ACCESS_PROVIDER_HTTP'), {
+      secretMarker: 'provider-response-must-not-be-logged',
+    })
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(handlers.handleAccessReconcile(reconcileInput(
+        fixture.cryptoContext,
+        { actorId: fixture.owner.id, generation: 1 },
+        {
+          providers: {
+            reconcileAccessGroup: vi.fn().mockRejectedValue(providerError),
+          },
+        },
+      ))).rejects.toBe(providerError)
+
+      expect(consoleError).toHaveBeenCalledTimes(1)
+      expect(consoleError).toHaveBeenCalledWith(JSON.stringify({
+        errorCode: 'ACCESS_PROVIDER_HTTP',
+        event: 'access.provider.failed',
+        result: 'failure',
+      }))
+      expect(JSON.stringify(consoleError.mock.calls)).not.toContain(providerError.secretMarker)
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
 })
 
 describe('authoritative outbox handler dispatch', () => {

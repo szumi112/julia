@@ -282,7 +282,8 @@ function validatedProviderId(parsed) {
 }
 
 async function sendAndValidate(input, request, signal) {
-  const response = await input.fetch(ENDPOINT, { ...request, signal })
+  const fetchImpl = input.fetch
+  const response = await fetchImpl(ENDPOINT, { ...request, signal })
   if (!response
     || response.redirected !== false
     || response.url !== ENDPOINT
@@ -319,7 +320,7 @@ export async function sendInvitationEmail(input = {}) {
       'Idempotency-Key': input.jobId,
     },
     body: JSON.stringify(body),
-    redirect: 'error',
+    redirect: 'manual',
   }
   const controller = new AbortController()
   let timeout
