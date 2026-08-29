@@ -1,6 +1,6 @@
 import { cloneElement, isValidElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Icon } from './icons.jsx'
-import { initials, fmtNumber } from './format.js'
+import { initials, fmtNumber, fmtMoney } from './format.js'
 import { useToasts } from './store.jsx'
 import { useMagnetic, useCountUp, motionOK } from './anim.js'
 import { pageCount, pageSlice } from './pagination.js'
@@ -299,6 +299,22 @@ export function Stat({ label, value, fmt = fmtNumber, sub, tone }) {
       <div className="stat__value"><span ref={ref}>{fmt(value)}</span></div>
       {sub && <div className="stat__sub">{sub}</div>}
     </div>
+  )
+}
+
+// Money KPI card for the protected finance surfaces — the boxed, toned
+// cousin of Figure/Stat with the same count-up. `grosze` keeps the API's
+// integer money; the card formats złote.
+export function MoneyKpi({ label, grosze, tone }) {
+  const ref = useCountUp(grosze / 100, fmtMoney)
+  return (
+    <article
+      className={`finance-window__kpi ${tone ? `finance-window__kpi--${tone}` : ''}`}
+      data-reveal
+    >
+      <span>{label}</span>
+      <strong ref={ref}>{fmtMoney(grosze / 100)}</strong>
+    </article>
   )
 }
 

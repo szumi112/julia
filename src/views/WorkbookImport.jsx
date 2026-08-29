@@ -214,7 +214,7 @@ export function WorkbookImport({
 
   if (!allowed) return null
   return (
-    <section className="card card--pad workbook-import" aria-labelledby="workbook-import-title">
+    <section className="card card--pad workbook-import" data-reveal aria-labelledby="workbook-import-title">
       <h2 className="card-title" id="workbook-import-title">Import skoroszytu</h2>
       <Field label="Wybierz plik XLSX" hint="Plik trafia bezpośrednio do bezpiecznego podglądu na serwerze.">
         <input

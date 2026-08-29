@@ -14,6 +14,10 @@ export const tok = (name, fallback) => {
   return tokens[name]
 }
 
+// Resolve a palette tone name (e.g. 'sage', 'sky-deep') to its concrete
+// colour for SVG attributes, which cannot read var() directly.
+export const toneColor = (tone) => tok(`--${tone}`, '#6d6188')
+
 // Catmull-Rom → cubic bezier smooth path
 const smoothPath = (pts) => {
   if (pts.length < 2) return ''

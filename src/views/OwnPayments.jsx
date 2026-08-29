@@ -13,7 +13,8 @@ import {
 import { ownPaymentCivilDate } from '../own-payments.js'
 import { SERVICE_BY_ID } from '../services.js'
 import { useShell } from '../shell-ctx.js'
-import { Button, EmptyState, IconBtn, Pager, Pill, usePagination } from '../ui.jsx'
+import { useReveal } from '../anim.js'
+import { Button, EmptyState, IconBtn, MoneyKpi, Pager, Pill, usePagination } from '../ui.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { monthWorkspaceRange } from '../workspace-view.js'
 
@@ -54,6 +55,7 @@ export function OwnPayments() {
 
   const requestKey = `${range.from}|${range.to}`
   const status = request.key === requestKey ? request.status : 'loading'
+  const revealRef = useReveal([status, selectedMonth])
   const appointments = useMemo(() => (
     status === 'ready'
       ? request.data.appointments.filter(({ status: value }) => (
@@ -81,8 +83,8 @@ export function OwnPayments() {
   const reload = useCallback(() => setReloadToken((value) => value + 1), [])
 
   return (
-    <div className="finance-window">
-      <div className="view-head">
+    <div className="finance-window" ref={revealRef}>
+      <div className="view-head" data-reveal>
         <div>
           <div className="eyebrow">Własne rozliczenia</div>
           <h1 className="display view-head__title">Finanse <em>i płatności</em></h1>
@@ -123,15 +125,14 @@ export function OwnPayments() {
         <>
           <section className="finance-window__kpis" aria-label="Podsumowanie własnych rozliczeń">
             {[
-              ['Należne', summary.due],
-              ['Wpłacono', summary.collected],
-              ['Pozostało do zapłaty', summary.outstanding],
-            ].map(([label, value]) => <article className="finance-window__kpi" key={label}>
-              <span>{label}</span>
-              <strong>{fmtMoney(value / 100)}</strong>
-            </article>)}
+              ['Należne', summary.due, 'coral'],
+              ['Wpłacono', summary.collected, 'sage'],
+              ['Pozostało do zapłaty', summary.outstanding, 'amber'],
+            ].map(([label, value, tone]) => (
+              <MoneyKpi key={label} label={label} grosze={value} tone={tone} />
+            ))}
           </section>
-          <section className="card finance-window__table" aria-labelledby="own-payments-title">
+          <section className="card finance-window__table" data-reveal aria-labelledby="own-payments-title">
             <h2 className="card-title" id="own-payments-title">
               Własne sesje · {fmtMonthYear(selectedMonth)}
             </h2>

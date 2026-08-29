@@ -83,7 +83,7 @@ export function WorkbookExport({ own = false, onComplete }) {
     </div>
   )
   return (
-    <section className="card card--pad workbook-export" aria-labelledby="workbook-export-title">
+    <section className="card card--pad workbook-export" data-reveal aria-labelledby="workbook-export-title">
       <h2 className="card-title" id="workbook-export-title">Eksport skoroszytu</h2>
       <p className="muted">Zakres wybiera serwer na podstawie bieżących uprawnień.</p>
       <div className="row workbook-export__actions">

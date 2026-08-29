@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { BarFill } from '../charts.jsx'
-import { addMonths, cap, fmtMoney, fmtMonthYear, fmtShortDate } from '../format.js'
+import { AreaChart, BarFill, Donut, toneColor } from '../charts.jsx'
+import { addMonths, cap, fmtMoney, fmtMonthName, fmtMonthYear, fmtShortDate } from '../format.js'
 import {
   FINANCE_WINDOW_MIN_MONTH,
   financeMonthView,
   warsawMonthKey,
 } from '../finance-reporting.js'
+import { paymentMixParts, serviceRevenueRanks } from '../finance-charts.js'
 import { SERVICE_BY_ID } from '../services.js'
 import { canAccessProtectedRoute } from '../capability-access.js'
 import { useApp, useWorkspaceWindow } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { Button, EmptyState, IconBtn, Pill, TableScroll, Tabs } from '../ui.jsx'
+import { useReveal } from '../anim.js'
+import { Button, EmptyState, IconBtn, MoneyKpi, Pill, TableScroll, Tabs } from '../ui.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { monthWorkspaceRange } from '../workspace-view.js'
 import {
@@ -28,6 +30,7 @@ const TABS = Object.freeze([
 ])
 const TAB_IDS = new Set(TABS.map(({ value }) => value))
 const money = (value) => fmtMoney(value / 100)
+const share = (part, whole) => (whole > 0 ? Math.round((part / whole) * 100) : 0)
 const invoiceLabel = Object.freeze({
   action_required: 'Wymaga wystawienia', issued: 'Wystawiona',
   not_issued: 'Niewystawiona', not_required: 'Nie wymaga', unknown: 'Do sprawdzenia',
@@ -44,10 +47,7 @@ function Kpis({ values }) {
   return (
     <section className="finance-window__kpis" aria-label="Podsumowanie finansowe">
       {items.map(([label, value, tone]) => (
-        <article className={`finance-window__kpi finance-window__kpi--${tone}`} key={label}>
-          <span>{label}</span>
-          <strong>{money(value)}</strong>
-        </article>
+        <MoneyKpi key={label} label={label} grosze={value} tone={tone} />
       ))}
     </section>
   )
@@ -61,7 +61,7 @@ function MonthlySettlement({ values }) {
   const settlementSummary = due > 0 ? `${collectedShare}% wpłacone` : 'Brak należności'
 
   return (
-    <section className="card card--pad finance-window__balance" aria-label="Rozliczenie miesiąca">
+    <section className="card card--pad finance-window__balance" data-reveal aria-label="Rozliczenie miesiąca">
       <div className="finance-window__balance-head">
         <h2 className="card-title">Rozliczenie miesiąca</h2>
         <span className="hbar__val">{settlementSummary}</span>
@@ -103,7 +103,7 @@ function LedgerTable({
     : kind === 'payments' ? 'Płatności i zaległości miesiąca'
       : kind === 'expenses' ? 'Wydatki miesiąca' : 'Faktury miesiąca'
   if (kind === 'payments') return (
-    <section className="card finance-window__table" aria-labelledby="finance-payments-title">
+    <section className="card finance-window__table" data-reveal aria-labelledby="finance-payments-title">
       <h2 className="card-title" id="finance-payments-title" ref={headingRef} tabIndex={-1}>
         {title}
       </h2>
@@ -134,7 +134,7 @@ function LedgerTable({
     </section>
   )
   return (
-    <section className="card finance-window__table" aria-labelledby={`finance-${kind}-title`}>
+    <section className="card finance-window__table" data-reveal aria-labelledby={`finance-${kind}-title`}>
       <h2 className="card-title" id={`finance-${kind}-title`}>{title}</h2>
       <TableScroll label={`Przewijana tabela — ${title}`}>
         <table className="table">
@@ -202,6 +202,7 @@ export function ProtectedFinance({ params = {} }) {
   const paymentContext = useProtectedPaymentContext(
     selectedMonth, tab === 'payments' && canLoadWorkspace, workspaceState,
   )
+  const revealRef = useReveal([finance.status, selectedMonth])
   const window = finance.data
   const serverCurrentMonth = window?.currentMonth ?? browserMonth
 
@@ -223,6 +224,14 @@ export function ProtectedFinance({ params = {} }) {
       id, clientNames.get(clientId) ?? 'Klient niedostępny',
     ]))
   }, [state.clients, state.sessions])
+  const serviceRanks = useMemo(() => (window === null ? [] : serviceRevenueRanks(
+    window.splits.service,
+    (id) => SERVICE_BY_ID[id]?.label ?? 'Nie ustalono',
+  )), [window])
+  const paymentMix = useMemo(
+    () => (window === null ? [] : paymentMixParts(window.splits.payment)),
+    [window],
+  )
   const monthView = window ? financeMonthView({
     requestedMonth: null,
     savedMonth: selectedMonth,
@@ -258,9 +267,11 @@ export function ProtectedFinance({ params = {} }) {
     </div>
   )
 
+  const paymentMixTotal = paymentMix.reduce((total, part) => total + part.value, 0)
+
   return (
-    <div className="finance-window">
-      <div className="view-head">
+    <div className="finance-window" ref={revealRef}>
+      <div className="view-head" data-reveal>
         <div>
           <div className="eyebrow">Finanse centrum</div>
           <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>
@@ -283,6 +294,84 @@ export function ProtectedFinance({ params = {} }) {
       </div>
       <Kpis values={window.kpis} />
       <MonthlySettlement values={window.kpis} />
+      <section className="card card--pad finance-window__trend" data-reveal aria-labelledby="finance-trend-title">
+        <h2 className="card-title" id="finance-trend-title">Przychody · sześć miesięcy</h2>
+        <div className="chart-frame">
+          <AreaChart
+            data={window.trend.map((point) => ({
+              ym: point.month,
+              revenue: point.revenueGrosze / 100,
+            }))}
+            height={200}
+            label={`Przychody w sześciu miesiącach do ${fmtMonthYear(selectedMonth)}`}
+          />
+        </div>
+      </section>
+      <div className="grid-31 finance-window__insights">
+        <section className="card card--pad" data-reveal aria-labelledby="finance-services-title">
+          <h2 className="card-title" id="finance-services-title">Przychody według usługi</h2>
+          {serviceRanks.length === 0 ? (
+            <p className="muted">Brak przychodów w tym miesiącu</p>
+          ) : (
+            <div className="hbar" style={{ marginTop: 20 }}>
+              {serviceRanks.map(({ id, label, value }) => (
+                <div className="hbar__row hbar__row--labeled" key={id}>
+                  <span className="hbar__name"><span>{label}</span></span>
+                  <div>
+                    <div className="hbar__track" style={{ height: 18 }}>
+                      <BarFill
+                        segments={[{ value, color: 'var(--coral)', label }]}
+                        totalMax={serviceRanks[0].value}
+                      />
+                    </div>
+                    <div className="row row--between finance-window__insight-meta">
+                      <span className="muted">{money(value)}</span>
+                      <span>{share(value, window.kpis.revenueGrosze)}%</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        <section
+          className="card card--pad"
+          data-reveal
+          aria-labelledby="finance-mix-title"
+          style={{ alignSelf: 'start', display: 'flex', flexDirection: 'column', alignItems: 'center' }}
+        >
+          <h2 className="card-title" id="finance-mix-title" style={{ alignSelf: 'stretch' }}>
+            Wpłaty według formy
+          </h2>
+          {paymentMix.length === 0 ? (
+            <p className="muted" style={{ alignSelf: 'stretch' }}>Brak wpłat w tym miesiącu</p>
+          ) : (
+            <>
+              <div style={{ marginTop: 18 }}>
+                <Donut
+                  parts={paymentMix.map(({ label, tone, value }) => ({
+                    label, value: value / 100, color: toneColor(tone),
+                  }))}
+                  centerTop={money(paymentMixTotal)}
+                  centerBottom={cap(fmtMonthName(selectedMonth))}
+                  label={`Wpłaty według formy — ${fmtMonthYear(selectedMonth)}`}
+                />
+              </div>
+              <div className="stack" style={{ gap: 10, marginTop: 22, alignSelf: 'stretch' }}>
+                {paymentMix.map(({ id, label, tone, value }) => (
+                  <div className="row row--between" key={id} style={{ fontSize: 13.5 }}>
+                    <span className="row" style={{ gap: 8 }}>
+                      <span className="legend__swatch" style={{ background: `var(--${tone})` }} />
+                      {label}
+                    </span>
+                    <span style={{ fontWeight: 650 }}>{share(value, paymentMixTotal)}%</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </section>
+      </div>
       {monthView.emptyCopy ? <p className="finance-window__empty" role="status">
         {monthView.emptyCopy}
       </p> : null}

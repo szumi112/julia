@@ -9,6 +9,7 @@ import {
 } from '../finance-reporting.js'
 import { SERVICE_BY_ID } from '../services.js'
 import { useShell } from '../shell-ctx.js'
+import { useReveal } from '../anim.js'
 import { Button, EmptyState, IconBtn, TableScroll } from '../ui.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { useFinanceWindow } from './use-finance-window.js'
@@ -28,7 +29,7 @@ const paymentTone = (id) => id === 'outstanding' ? 'amber' : 'sage'
 function MoneySplit({ title, rows, tone, toneFor }) {
   const maxValue = Math.max(...rows.map(({ value }) => Math.max(value, 0)), 1)
   return (
-    <section className="card card--pad report-window__split">
+    <section className="card card--pad report-window__split" data-reveal>
       <h2 className="card-title">{title}</h2>
       {rows.length === 0 ? <p className="muted">Brak danych</p> : (
         <dl>{rows.map(({ id, label, value }) => <div key={id}>
@@ -83,6 +84,7 @@ export function ProtectedReports({ params = {} }) {
     pendingMonthFocusRef.current = false
     requestAnimationFrame(() => headingRef.current?.focus({ preventScroll: true }))
   }, [finance.status, selectedMonth])
+  const revealRef = useReveal([finance.status, selectedMonth])
 
   const selectMonth = (month) => {
     pendingMonthFocusRef.current = true
@@ -119,8 +121,8 @@ export function ProtectedReports({ params = {} }) {
   })).sort((left, right) => left.label.localeCompare(right.label, 'pl'))
 
   return (
-    <div className="report-window">
-      <div className="view-head">
+    <div className="report-window" ref={revealRef}>
+      <div className="view-head" data-reveal>
         <div>
           <div className="eyebrow">Raporty centrum</div>
           <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>Raport — <em>{fmtMonthYear(selectedMonth)}</em></h1>
@@ -146,9 +148,9 @@ export function ProtectedReports({ params = {} }) {
         </Button>
       ) : null}
 
-      <section className="card card--pad report-window__trend" aria-labelledby="report-trend-title">
+      <section className="card card--pad report-window__trend" data-reveal aria-labelledby="report-trend-title">
         <h2 className="card-title" id="report-trend-title">Trend sześciu miesięcy</h2>
-        <div className="report-window__chart">
+        <div className="chart-frame">
           <AreaChart
             data={window.trend.map((point) => ({
               ym: point.month,
@@ -189,7 +191,7 @@ export function ProtectedReports({ params = {} }) {
           tone="sage"
           toneFor={paymentTone}
         />
-        <section className="card card--pad report-window__split">
+        <section className="card card--pad report-window__split" data-reveal>
           <h2 className="card-title">Faktury</h2>
           <dl>{Object.entries(window.splits.invoice)
             .map(([id, value]) => ({ id, label: INVOICE_LABELS[id] ?? 'Do sprawdzenia', value }))
@@ -199,7 +201,7 @@ export function ProtectedReports({ params = {} }) {
             <dd>{value.count} · {money(value.revenueGrosze)}</dd>
           </div>)}</dl>
         </section>
-        <section className="card card--pad report-window__split">
+        <section className="card card--pad report-window__split" data-reveal>
           <h2 className="card-title">TUS i angielski</h2>
           <dl>{Object.entries(window.splits.program).map(([program, value]) => <div key={program}>
             <dt>{program === 'tus' ? 'TUS' : 'Angielski'}</dt>
@@ -210,7 +212,7 @@ export function ProtectedReports({ params = {} }) {
         </section>
       </div>
 
-      <section className="card card--pad report-window__coverage" aria-labelledby="coverage-title">
+      <section className="card card--pad report-window__coverage" data-reveal aria-labelledby="coverage-title">
         <h2 className="card-title" id="coverage-title">Pokrycie czasu i dat</h2>
         <dl>
           <div><dt>Dokładna godzina</dt><dd>{window.coverage.timedCount}</dd></div>
@@ -219,7 +221,7 @@ export function ProtectedReports({ params = {} }) {
           <div><dt>Okres nieustalony w wybranym miesiącu</dt><dd>{window.coverage.unknownCount}</dd></div>
         </dl>
       </section>
-      {window.unknownPeriodCount > 0 ? <section className="card card--pad report-window__unknown">
+      {window.unknownPeriodCount > 0 ? <section className="card card--pad report-window__unknown" data-reveal>
         <h2 className="card-title">Nieustalony miesiąc księgowy</h2>
         <p>{window.unknownPeriodCount} {plural(
           window.unknownPeriodCount,
