@@ -6,6 +6,7 @@ import { fmtMoney, fmtMonthYear, plural } from '../format.js'
 import { financeRepository } from '../finance-repository.js'
 import { serviceLabel } from '../services.js'
 import { useShell } from '../shell-ctx.js'
+import { useReveal } from '../anim.js'
 import { Button, EmptyState, Field, Pill, TableScroll, Tabs } from '../ui.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import {
@@ -335,6 +336,7 @@ export function Registry({ params = {} }) {
   const voidRequestRef = useRef(null)
   const canVoid = canPerformAction(capabilities, 'finance.entry.void')
   const operationBusy = continuing !== null || resolutionSaving || voiding
+  const revealRef = useReveal()
   const abortMutationControllers = (...operations) => {
     for (const operation of operations) {
       mutationControllersRef.current[operation]?.abort()
@@ -750,8 +752,8 @@ export function Registry({ params = {} }) {
   }
 
   return (
-    <div className="registry-view">
-      <div className="view-head registry-view__hero"><div>
+    <div className="registry-view" ref={revealRef}>
+      <div className="view-head registry-view__hero" data-reveal><div>
         <div className="eyebrow">Pochodzenie danych</div>
         <h1 className="display view-head__title" ref={resultRef} tabIndex={-1}>Rejestr <em>skoroszytów</em></h1>
         <p className="view-head__sub">Historia importów, eksportów i jawnych rozstrzygnięć.</p>
