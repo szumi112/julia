@@ -328,16 +328,17 @@ export function Toggle({ on, onChange, label, disabled }) {
   )
 }
 
-export function Avatar({ name, color = '#b03a1c', size = 38 }) {
+export function Avatar({ name, color = '#b03a1c', size = 38, variant = 'solid' }) {
+  const softVariant = variant !== 'solid'
   return (
     <span
-      className="avatar"
+      className={`avatar${softVariant ? ` avatar--${variant}` : ''}`}
       aria-hidden="true"
       style={{
         width: size,
         height: size,
         fontSize: size * 0.36,
-        background: `linear-gradient(135deg, ${color}, ${color}cc)`,
+        ...(softVariant ? {} : { background: `linear-gradient(135deg, ${color}, ${color}cc)` }),
       }}
     >
       {initials(name)}

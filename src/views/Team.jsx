@@ -58,10 +58,15 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
         </div> : null}
       </div>
       <div className="grid-2 team-grid">
-        {psychologists.map((psychologist) => (
+        {psychologists.map((psychologist, index) => (
           <article className="card team-card" key={psychologist.id} data-psych-id={psychologist.id}>
             <div className="team-card__profile">
-              <Avatar name={psychologist.name} color={psychologist.color} size={52} />
+              <Avatar
+                name={psychologist.name}
+                color={psychologist.color}
+                size={52}
+                variant={index % 2 === 0 ? 'sky' : 'pink'}
+              />
               <div className="team-card__identity">
                 <h2 className="team-card__name">{psychologist.name}</h2>
                 <span className="team-card__spec">{psychologist.professionalTitle} · {fmtMoney(psychologist.rate)} / sesja</span>
