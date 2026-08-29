@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto'
-import { chmod, lstat, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdtemp, open, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { unstable_splitSqlQuery } from 'wrangler'
+import {
+  BACKUP_SQL_IMPORT_MAX_BYTES,
+  BACKUP_SQL_MAX_BYTES,
+} from '../worker/operations/backup-limits.js'
 import {
   backupObjectKeys,
   canonicalJson,
@@ -25,6 +31,9 @@ const FRESH_TARGET_SQL = `SELECT count(*) AS application_object_count
 FROM sqlite_schema
 WHERE name NOT GLOB 'sqlite_*'
   AND name NOT GLOB '_cf_*'`
+const FOREIGN_KEYS_SQL = 'PRAGMA foreign_keys'
+const INTEGRITY_SQL = 'PRAGMA quick_check'
+const FOREIGN_KEY_CHECK_SQL = 'PRAGMA foreign_key_check'
 const SOURCE_ROW_KEYS = Object.freeze([
   'id', 'status', 'version', 'localDay', 'localMonth', 'retentionClass',
   'exportBookmark', 'objectKey', 'manifestKey', 'ssecKeyVersion',
@@ -54,11 +63,167 @@ const validOpaque = (value) => typeof value === 'string' && value.length > 0
   && value.length <= 1024 && value === value.trim()
   && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value)
 
+export function reorderD1RestoreSql(source) {
+  if (typeof source !== 'string'
+    || new TextEncoder().encode(source).byteLength > BACKUP_SQL_MAX_BYTES) failed()
+  let statements
+  try { statements = unstable_splitSqlQuery(source) } catch { failed() }
+  if (!Array.isArray(statements) || statements.length < 1) failed()
+  const groups = {
+    pragmas: [],
+    tables: [],
+    sequence: [],
+    inserts: [],
+    indexes: [],
+    views: [],
+    triggers: [],
+  }
+  for (const statement of statements) {
+    if (typeof statement !== 'string' || statement.length === 0) failed()
+    const normalized = statement.trimStart()
+    if (/^PRAGMA\s+defer_foreign_keys\s*=\s*(?:TRUE|ON|1);?\s*$/i.test(normalized)) {
+      groups.pragmas.push(statement)
+    } else if (/^CREATE TABLE\s/i.test(normalized)) {
+      groups.tables.push(statement)
+    } else if (/^DELETE FROM\s+sqlite_sequence;?\s*$/i.test(normalized)) {
+      groups.sequence.push(statement)
+    } else if (/^INSERT INTO\s/i.test(normalized)) {
+      groups.inserts.push(statement)
+    } else if (/^CREATE (?:UNIQUE )?INDEX\s/i.test(normalized)) {
+      groups.indexes.push(statement)
+    } else if (/^CREATE VIEW\s/i.test(normalized)) {
+      groups.views.push(statement)
+    } else if (/^CREATE TRIGGER\s/i.test(normalized)) {
+      groups.triggers.push(statement)
+    } else {
+      failed()
+    }
+  }
+  if (groups.pragmas.length !== 1 || groups.tables.length < 1
+    || groups.inserts.length < 1 || groups.sequence.length > 1) failed()
+  const terminated = (statement) => {
+    const trimmed = statement.trimEnd()
+    return trimmed.endsWith(';') ? trimmed : `${trimmed};`
+  }
+  const insertTable = (statement) => {
+    const match = statement.trimStart().match(
+      /^INSERT INTO\s+(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))\s+/i,
+    )
+    if (!match) failed()
+    return match[1] === undefined ? match[2] : match[1].replaceAll('""', '"')
+  }
+  const identifierKey = (value) => value.replace(/[A-Z]/g, (character) => character.toLowerCase())
+  const ordinaryInserts = []
+  const sequenceInserts = []
+  for (const statement of groups.inserts) {
+    const name = insertTable(statement)
+    if (identifierKey(name) === 'sqlite_sequence') sequenceInserts.push(statement)
+    else ordinaryInserts.push({ name: identifierKey(name), statement })
+  }
+  if (sequenceInserts.length > 0 && groups.sequence.length !== 1) failed()
+  const insertsByTable = new Map()
+  for (const entry of ordinaryInserts) {
+    const entries = insertsByTable.get(entry.name) ?? []
+    entries.push(entry)
+    insertsByTable.set(entry.name, entries)
+  }
+  let database
+  let orderedInserts
+  try {
+    database = new DatabaseSync(':memory:')
+    database.exec('PRAGMA foreign_keys=OFF;')
+    const tableNames = new Map()
+    for (const statement of groups.tables) {
+      const before = new Set(database.prepare(
+        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'",
+      ).all().map(({ name }) => name))
+      database.exec(terminated(statement))
+      const added = database.prepare(
+        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'",
+      ).all().map(({ name }) => name).filter((name) => !before.has(name))
+      const addedKey = added.length === 1 ? identifierKey(added[0]) : null
+      if (addedKey === null || tableNames.has(addedKey)) failed()
+      tableNames.set(addedKey, added[0])
+    }
+    for (const statement of groups.indexes) database.exec(terminated(statement))
+    if (ordinaryInserts.some(({ name }) => !tableNames.has(name))) failed()
+    const dependencies = new Map()
+    for (const [key, name] of tableNames) {
+      const quoted = name.replaceAll('"', '""')
+      const rows = database.prepare(`PRAGMA foreign_key_list("${quoted}")`).all()
+      const parents = new Set()
+      for (const row of rows) {
+        if (typeof row.table !== 'string') failed()
+        const parent = identifierKey(row.table)
+        if (!tableNames.has(parent)) failed()
+        if (insertsByTable.has(parent)) parents.add(parent)
+      }
+      dependencies.set(key, parents)
+    }
+    const orderedTables = []
+    const visiting = new Set()
+    const visited = new Set()
+    const visit = (key) => {
+      if (visited.has(key) || visiting.has(key)) return
+      visiting.add(key)
+      for (const dependency of dependencies.get(key) ?? []) visit(dependency)
+      visiting.delete(key)
+      visited.add(key)
+      orderedTables.push(key)
+    }
+    for (const key of insertsByTable.keys()) visit(key)
+    orderedInserts = orderedTables.flatMap((key) => insertsByTable.get(key))
+    if (orderedInserts.length !== ordinaryInserts.length) failed()
+    database.exec('PRAGMA foreign_keys=ON; BEGIN;')
+    for (const statement of groups.pragmas) database.exec(terminated(statement))
+    for (const { statement } of orderedInserts) database.exec(terminated(statement))
+    for (const statement of groups.sequence) database.exec(terminated(statement))
+    for (const statement of sequenceInserts) database.exec(terminated(statement))
+    for (const statement of groups.views) database.exec(terminated(statement))
+    for (const statement of groups.triggers) database.exec(terminated(statement))
+    database.exec('COMMIT;')
+    if (database.prepare('PRAGMA foreign_key_check').all().length !== 0) failed()
+  } catch {
+    try { database?.exec('ROLLBACK;') } catch {}
+    failed()
+  } finally {
+    try { database?.close() } catch { failed() }
+  }
+  const result = [
+    ...groups.pragmas,
+    ...groups.tables,
+    ...groups.indexes,
+    ...orderedInserts.map(({ statement }) => statement),
+    ...groups.sequence,
+    ...sequenceInserts,
+    ...groups.views,
+    ...groups.triggers,
+  ].map(terminated).join('\n') + '\n'
+  if (new TextEncoder().encode(result).byteLength > BACKUP_SQL_IMPORT_MAX_BYTES) failed()
+  return result
+}
+
 function parseWranglerOutput(stdout, operation) {
   if (typeof stdout !== 'string'
     || new TextEncoder().encode(stdout).byteLength > WRANGLER_OUTPUT_MAX_BYTES) failed()
   let parsed
-  try { parsed = JSON.parse(stdout) } catch { failed() }
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    if (operation !== 'import') failed()
+    const candidates = []
+    for (let index = 0; index < stdout.length; index += 1) {
+      if (stdout[index] === '[' && (index === 0 || stdout[index - 1] === '\n')) candidates.push(index)
+    }
+    if (candidates.length !== 1 || candidates[0] === 0) failed()
+    const prefix = stdout.slice(0, candidates[0])
+    if (!prefix.endsWith('\n') || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(prefix.replaceAll('\n', ''))) failed()
+    const lines = prefix.slice(0, -1).split('\n')
+    if (lines.length < 1 || lines.length > 32
+      || lines.some((line) => line.length > 512
+        || !/^(?:├ [^\[\]{}"\\\r\n]{1,512}|│(?: [^\[\]{}"\\\r\n]{1,512})?)$/u.test(line))) failed()
+    try { parsed = JSON.parse(stdout.slice(candidates[0])) } catch { failed() }
+  }
   if (!Array.isArray(parsed) || parsed.length !== 1 || !ownObject(parsed[0])) failed()
   const entry = parsed[0]
   const entryKeys = operation === 'import'
@@ -205,7 +370,7 @@ export function createPinnedWranglerRunner(input) {
         ? ['operation', 'target', 'targetId', 'backupId']
         : ['operation', 'target', 'targetId']
     if (!exactObject(command, keys)
-      || !['freshness', 'import', 'migrations', 'recovery', 'sentinel'].includes(operation)
+      || !['freshness', 'import', 'integrity', 'migrations', 'recovery', 'sentinel'].includes(operation)
       || (operation === 'import'
         && (typeof command.filePath !== 'string' || command.filePath.length === 0))
       || (operation === 'sentinel'
@@ -217,6 +382,19 @@ export function createPinnedWranglerRunner(input) {
         || !exactObject(rows[0], ['application_object_count'])
         || rows[0].application_object_count !== 0) failed()
       return { fresh: true }
+    }
+    if (operation === 'integrity') {
+      const foreignKeys = await executeSql(command, operation, FOREIGN_KEYS_SQL)
+      if (!Array.isArray(foreignKeys) || foreignKeys.length !== 1
+        || !exactObject(foreignKeys[0], ['foreign_keys'])
+        || foreignKeys[0].foreign_keys !== 1) failed()
+      const integrity = await executeSql(command, operation, INTEGRITY_SQL)
+      if (!Array.isArray(integrity) || integrity.length !== 1
+        || !exactObject(integrity[0], ['quick_check'])
+        || integrity[0].quick_check !== 'ok') failed()
+      const foreignKeyCheck = await executeSql(command, operation, FOREIGN_KEY_CHECK_SQL)
+      if (!Array.isArray(foreignKeyCheck) || foreignKeyCheck.length !== 0) failed()
+      return { valid: true }
     }
     if (operation === 'migrations') {
       const rows = await executeSql(
@@ -240,11 +418,11 @@ export function createPinnedWranglerRunner(input) {
   const cleanup = async () => {
     if (directory === null) return
     const owned = directory
+    try { await rm(owned, { recursive: true, force: true }) } catch { failed() }
     directory = null
     configPath = null
     pinnedTarget = null
     pinnedTargetId = null
-    try { await rm(owned, { recursive: true, force: true }) } catch { failed() }
   }
 
   return Object.freeze({ runCommand, cleanup })
@@ -395,7 +573,7 @@ export function createRestoreSourceStore(input) {
     ]
     if (!exactObject(facts, keys) || !BACKUP_ID.test(facts.backupId)
       || !validInstant(facts.createdAt) || !validInstant(facts.verifiedAt)
-      || !Number.isSafeInteger(facts.objectSize) || facts.objectSize < 0
+      || !Number.isSafeInteger(facts.objectSize) || facts.objectSize < 1
       || !Number.isSafeInteger(facts.ssecKeyVersion) || facts.ssecKeyVersion < 1
       || !['daily', 'monthly'].includes(facts.retentionClass)
       || !validOpaque(facts.exportBookmark) || !validOpaque(facts.objectKey)
@@ -496,6 +674,50 @@ async function writeStream0600(directory, stream, expectedSize) {
   return { filePath, ...evidence }
 }
 
+export async function prepareD1RestoreImportFile(input) {
+  if (!exactObject(input, ['directory', 'sourcePath', 'expectedSize'])
+    || typeof input.directory !== 'string' || input.directory.length === 0
+    || input.sourcePath !== join(input.directory, 'restore.sql')
+    || !Number.isSafeInteger(input.expectedSize) || input.expectedSize < 1
+    || input.expectedSize > BACKUP_SQL_MAX_BYTES) failed()
+  const directoryStats = await lstat(input.directory)
+  const sourceStats = await lstat(input.sourcePath)
+  if (directoryStats.isSymbolicLink() || !directoryStats.isDirectory()
+    || (directoryStats.mode & 0o077) !== 0 || sourceStats.isSymbolicLink()
+    || !sourceStats.isFile() || (sourceStats.mode & 0o077) !== 0
+    || sourceStats.size !== input.expectedSize) failed()
+  let sourceBytes
+  let importBytes
+  try {
+    sourceBytes = await readFile(input.sourcePath)
+    if (sourceBytes.byteLength !== input.expectedSize) failed()
+    let source
+    try { source = new TextDecoder('utf-8', { fatal: true }).decode(sourceBytes) } catch { failed() }
+    importBytes = new TextEncoder().encode(reorderD1RestoreSql(source))
+    if (importBytes.byteLength < 1 || importBytes.byteLength > BACKUP_SQL_IMPORT_MAX_BYTES) failed()
+    const importPath = join(input.directory, 'restore-import.sql')
+    await writeFile(importPath, importBytes, { flag: 'wx', mode: 0o600 })
+    const importStats = await lstat(importPath)
+    if (importStats.isSymbolicLink() || !importStats.isFile()
+      || (importStats.mode & 0o077) !== 0 || importStats.size !== importBytes.byteLength) failed()
+    return { filePath: importPath }
+  } finally {
+    sourceBytes?.fill(0)
+    importBytes?.fill(0)
+  }
+}
+
+export async function removeRestoreTemporaryDirectory(input) {
+  if (!exactObject(input, ['directory', 'filePath'])
+    || typeof input.directory !== 'string' || input.directory.length === 0
+    || !(input.filePath === null
+      || input.filePath === join(input.directory, 'restore.sql')
+      || input.filePath === join(input.directory, 'restore-import.sql'))) failed()
+  await rm(input.directory, { recursive: true, force: true })
+  if (input.filePath !== null) await proveAbsent(input.filePath)
+  await proveAbsent(input.directory)
+}
+
 async function sha256(value) {
   const bytes = new TextEncoder().encode(canonicalJson(value))
   try {
@@ -538,7 +760,8 @@ export async function restoreBackup(input) {
   const required = [
     'request', 'expectedSource', 'sourceDatabaseNames', 'sourceDatabaseIds',
     'productionDatabaseNames', 'productionDatabaseIds', 'tempRoot', 'keyring',
-    'provider', 'runCommand', 'cleanupTarget',
+    'provider', 'prepareImport', 'removeTemporaryDirectory', 'runCommand',
+    'cleanupTarget',
   ]
   const keys = input && Reflect.ownKeys(input).includes('signal') ? [...required, 'signal'] : required
   if (!exactObject(input, keys) || typeof input.tempRoot !== 'string' || input.tempRoot.length === 0
@@ -549,6 +772,8 @@ export async function restoreBackup(input) {
     || typeof input.provider.headObject !== 'function'
     || typeof input.provider.getObject !== 'function' || typeof input.provider.markRestoreVerified !== 'function'
     || typeof input.provider.readSourceBackup !== 'function'
+    || typeof input.prepareImport !== 'function'
+    || typeof input.removeTemporaryDirectory !== 'function'
     || typeof input.runCommand !== 'function' || typeof input.cleanupTarget !== 'function'
     || (Object.hasOwn(input, 'signal') && !(input.signal instanceof AbortSignal))) refused()
   const policy = {
@@ -563,6 +788,7 @@ export async function restoreBackup(input) {
   let filePath = null
   let rawSsecKey
   let targetCleaned = false
+  let temporaryRemovalAttempts = 0
   const checkpoint = () => { if (input.signal?.aborted === true) failed() }
   const cleanupBeforeBoundary = async () => {
     let cleanupFailed = false
@@ -571,13 +797,21 @@ export async function restoreBackup(input) {
     if (temporaryDirectory !== null) {
       const ownedDirectory = temporaryDirectory
       const ownedFile = filePath
-      temporaryDirectory = null
-      filePath = null
-      try {
-        await rm(ownedDirectory, { recursive: true, force: true })
-        if (ownedFile !== null) await proveAbsent(ownedFile)
-        await proveAbsent(ownedDirectory)
-      } catch { cleanupFailed = true }
+      let removed = false
+      while (temporaryRemovalAttempts < 2 && !removed) {
+        temporaryRemovalAttempts += 1
+        try {
+          await input.removeTemporaryDirectory({
+            directory: ownedDirectory,
+            filePath: ownedFile,
+          })
+          removed = true
+        } catch { /* Retain ownership and retry once. */ }
+      }
+      if (removed) {
+        temporaryDirectory = null
+        filePath = null
+      } else cleanupFailed = true
     }
     if (!targetCleaned) {
       try {
@@ -633,9 +867,22 @@ export async function restoreBackup(input) {
     const written = await writeStream0600(temporaryDirectory, body, manifest.objectSize)
     filePath = written.filePath
     if (version === 3 && written.plaintextSqlSha256 !== manifest.plaintextSqlSha256) failed()
+    const prepared = await input.prepareImport({
+      directory: temporaryDirectory,
+      sourcePath: filePath,
+      expectedSize: manifest.objectSize,
+    })
+    if (!exactObject(prepared, ['filePath'])
+      || prepared.filePath !== join(temporaryDirectory, 'restore-import.sql')) failed()
+    filePath = prepared.filePath
     const imported = await input.runCommand({ operation: 'import', target: restoredTarget.name, targetId: restoredTarget.id, filePath })
     checkpoint()
     if (!exactObject(imported, ['imported', 'finalBookmark']) || imported.imported !== true || !validOpaque(imported.finalBookmark)) failed()
+    const integrity = await input.runCommand({
+      operation: 'integrity', target: restoredTarget.name, targetId: restoredTarget.id,
+    })
+    checkpoint()
+    if (!exactObject(integrity, ['valid']) || integrity.valid !== true) failed()
     const migrationResponse = await input.runCommand({
       operation: 'migrations',
       target: restoredTarget.name,

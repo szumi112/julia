@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
+import * as restoreModule from '../../scripts/restore-backup-lib.mjs'
+import { BACKUP_SQL_IMPORT_MAX_BYTES } from '../../worker/operations/backup-limits.js'
 import {
   createPinnedWranglerRunner,
   createRestoreSourceStore,
+  prepareD1RestoreImportFile,
+  removeRestoreTemporaryDirectory,
   restoreBackup,
   validateRestoreRequest,
   writeRestoreStream,
@@ -62,10 +67,27 @@ test('Wrangler restore commands use one strict envelope and a temporary binding 
       invocations.push(args)
       configPath = args[args.indexOf('--config') + 1]
       assert.equal(statSync(configPath).mode & 0o777, 0o600)
-      if (args.includes('--file')) return { stdout: JSON.stringify([{
-        results: [{ 'Total queries executed': 15, 'Rows read': 2, 'Rows written': 3, 'Database size (MB)': '1.25' }],
+      if (args.includes('--file')) return {
+        stdout: `├ Checking if file needs uploading\n│\n${JSON.stringify([{
+          results: [{ 'Total queries executed': 15, 'Rows read': 2, 'Rows written': 3, 'Database size (MB)': '1.25' }],
+          success: true,
+          finalBookmark: 'restore-final-bookmark',
+          meta: { opaque: true },
+        }])}`,
+      }
+      if (args.includes('PRAGMA foreign_keys')) return { stdout: JSON.stringify([{
+        results: [{ foreign_keys: 1 }],
         success: true,
-        finalBookmark: 'restore-final-bookmark',
+        meta: { opaque: true },
+      }]) }
+      if (args.includes('PRAGMA quick_check')) return { stdout: JSON.stringify([{
+        results: [{ quick_check: 'ok' }],
+        success: true,
+        meta: { opaque: true },
+      }]) }
+      if (args.includes('PRAGMA foreign_key_check')) return { stdout: JSON.stringify([{
+        results: [],
+        success: true,
         meta: { opaque: true },
       }]) }
       if (args.some((value) => value.includes('WITH migration_snapshot'))) return { stdout: JSON.stringify([{
@@ -95,13 +117,14 @@ test('Wrangler restore commands use one strict envelope and a temporary binding 
   })
   try {
     assert.deepEqual(await runner.runCommand({ operation: 'import', target: target.name, targetId: target.id, filePath: '/opaque/restore.sql' }), { imported: true, finalBookmark: 'restore-final-bookmark' })
+    assert.deepEqual(await runner.runCommand({ operation: 'integrity', target: target.name, targetId: target.id }), { valid: true })
     assert.deepEqual(await runner.runCommand({ operation: 'migrations', target: target.name, targetId: target.id }), { migrations: fixtureV2.manifest.appliedMigrations })
     assert.deepEqual(await runner.runCommand({ operation: 'sentinel', target: target.name, targetId: target.id, backupId: fixtureV2.manifest.backupId }), { sentinel: fixtureV2.manifest.restoreSentinel })
     assert.equal((await runner.runCommand({ operation: 'recovery', target: target.name, targetId: target.id })).recoveryFacts.kind, 'workbook_roundtrip_v1')
   } finally {
     await runner.cleanup()
   }
-  assert.equal(invocations.length, 4)
+  assert.equal(invocations.length, 7)
   for (const args of invocations) {
     assert.deepEqual(args.slice(0, 4), ['/opaque/wrangler.js', 'd1', 'execute', 'RESTORE_TARGET'])
     for (const flag of ['--remote', '--json', '--x-provision=false', '--x-auto-create=false', '--install-skills=false']) assert.equal(args.includes(flag), true)
@@ -111,6 +134,30 @@ test('Wrangler restore commands use one strict envelope and a temporary binding 
   assert.ok(configPath)
   assert.equal(existsSync(configPath), false)
   rmSync(tempRoot, { recursive: true, force: true })
+})
+
+test('Wrangler restore integrity rejects every reported foreign-key violation', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'bwm-restore-runner-fk-invalid-'))
+  const runner = createPinnedWranglerRunner({
+    tempRoot,
+    wranglerPath: '/opaque/wrangler.js',
+    async execute(args) {
+      const results = args.includes('PRAGMA foreign_keys')
+        ? [{ foreign_keys: 1 }]
+        : args.includes('PRAGMA quick_check')
+          ? [{ quick_check: 'ok' }]
+          : [{ table: 'child', rowid: 1, parent: 'parent', fkid: 0 }]
+      return { stdout: JSON.stringify([{ results, success: true, meta: { opaque: true } }]) }
+    },
+  })
+  try {
+    await assert.rejects(runner.runCommand({
+      operation: 'integrity', target: target.name, targetId: target.id,
+    }), /^Error: RESTORE_FAILED$/)
+  } finally {
+    await runner.cleanup()
+    rmSync(tempRoot, { recursive: true, force: true })
+  }
 })
 
 test('Wrangler parsing rejects ambiguous, recursive, oversized, and inexact success output', async () => {
@@ -126,6 +173,31 @@ test('Wrangler parsing rejects ambiguous, recursive, oversized, and inexact succ
     for (const stdout of outputs) {
       const runner = createPinnedWranglerRunner({ tempRoot, wranglerPath: '/opaque/wrangler.js', execute: async () => ({ stdout }) })
       await assert.rejects(runner.runCommand({ operation: 'migrations', target: target.name, targetId: target.id }), /^Error: RESTORE_FAILED$/)
+      await runner.cleanup()
+    }
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('Wrangler import parsing rejects unknown, ambiguous, and control-bearing progress output', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'bwm-restore-runner-import-invalid-'))
+  const valid = JSON.stringify([{
+    results: [{ 'Total queries executed': 15, 'Rows read': 2, 'Rows written': 3, 'Database size (MB)': '1.25' }],
+    success: true,
+    finalBookmark: 'restore-final-bookmark',
+    meta: { opaque: true },
+  }])
+  const outputs = [
+    `unexpected progress\n${valid}`,
+    `├ Checking if file needs uploading\n│\n[]\n${valid}`,
+    `├ {"hidden":true}\n│\n${valid}`,
+    `├ Checking if file needs uploading\u001b[0m\n│\n${valid}`,
+  ]
+  try {
+    for (const stdout of outputs) {
+      const runner = createPinnedWranglerRunner({ tempRoot, wranglerPath: '/opaque/wrangler.js', execute: async () => ({ stdout }) })
+      await assert.rejects(runner.runCommand({ operation: 'import', target: target.name, targetId: target.id, filePath: '/opaque/restore.sql' }), /^Error: RESTORE_FAILED$/)
       await runner.cleanup()
     }
   } finally {
@@ -171,6 +243,207 @@ test('restore stream retries short writes and rejects zero progress', async () =
   await assert.rejects(writeRestoreStream({ async write() { return { bytesWritten: 0 } } }, new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1])); controller.close() } }), 1), /^Error: RESTORE_FAILED$/)
 })
 
+function executeReorderedRestore(source) {
+  assert.equal(typeof restoreModule.reorderD1RestoreSql, 'function')
+  const database = new DatabaseSync(':memory:')
+  try {
+    database.exec('PRAGMA foreign_keys=ON; BEGIN;')
+    database.exec(restoreModule.reorderD1RestoreSql(source))
+    database.exec('COMMIT;')
+    return database
+  } catch (error) {
+    try { database.exec('ROLLBACK;') } catch {}
+    database.close()
+    throw error
+  }
+}
+
+test('restore import ordering preserves one exact AUTOINCREMENT sequence row', () => {
+  const database = executeReorderedRestore([
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE auto_record (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL);',
+    'INSERT INTO auto_record VALUES (7, \'restored\');',
+    'DELETE FROM sqlite_sequence;',
+    'INSERT INTO "sqlite_sequence" VALUES (\'auto_record\', 7);',
+  ].join('\n'))
+  try {
+    assert.deepEqual(database.prepare(
+      "SELECT name,seq FROM sqlite_sequence WHERE name='auto_record'",
+    ).all().map((row) => ({ ...row })), [{ name: 'auto_record', seq: 7 }])
+    database.exec("INSERT INTO auto_record(value) VALUES ('next');")
+    assert.equal(database.prepare("SELECT id FROM auto_record WHERE value='next'").get().id, 8)
+  } finally { database.close() }
+})
+
+test('restore import ordering treats SQLite identifiers case-insensitively', () => {
+  const database = executeReorderedRestore([
+    'PRAGMA defer_foreign_keys=ON;',
+    'CREATE TABLE "CaseRecord" (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL);',
+    'INSERT INTO caserecord VALUES (7, \'restored\');',
+    'DELETE FROM sqlite_sequence;',
+    'INSERT INTO "SQLITE_SEQUENCE" VALUES (\'CaseRecord\', 7);',
+  ].join('\n'))
+  try {
+    assert.equal(database.prepare('SELECT value FROM CASErecord WHERE id=7').get().value, 'restored')
+    assert.deepEqual(database.prepare(
+      "SELECT name,seq FROM sqlite_sequence WHERE name='CaseRecord'",
+    ).all().map((row) => ({ ...row })), [{ name: 'CaseRecord', seq: 7 }])
+  } finally { database.close() }
+})
+
+test('restore import ordering compiles valid views and triggers before remote import', () => {
+  const database = executeReorderedRestore([
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE record (id INTEGER PRIMARY KEY, value TEXT NOT NULL);',
+    "INSERT INTO record VALUES (1, 'restored');",
+    'CREATE VIEW record_values AS SELECT value FROM record;',
+    'CREATE TRIGGER record_value_guard BEFORE UPDATE OF value ON record BEGIN SELECT RAISE(ABORT, \'guarded\'); END;',
+  ].join('\n'))
+  try {
+    assert.deepEqual(database.prepare('SELECT value FROM record_values').all().map((row) => ({ ...row })), [
+      { value: 'restored' },
+    ])
+    assert.throws(() => database.exec("UPDATE record SET value='changed' WHERE id=1"), /guarded/)
+  } finally { database.close() }
+})
+
+test('restore import ordering rejects invalid inserts, views, and triggers locally', () => {
+  const prefix = [
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE record (id INTEGER PRIMARY KEY);',
+    'INSERT INTO record VALUES (1);',
+  ]
+  for (const statement of [
+    'INSERT INTO record VALUES (2, 3);',
+    'CREATE VIEW broken_view AS SELECT FROM record;',
+    'CREATE TRIGGER broken_trigger AFTER INSERT ON record BEGIN SELECT FROM; END;',
+  ]) {
+    assert.throws(
+      () => restoreModule.reorderD1RestoreSql([...prefix, statement].join('\n')),
+      /^Error: RESTORE_FAILED$/,
+    )
+  }
+})
+
+test('restore rewrite has a separate bounded ceiling for normalized statement separators', () => {
+  const source = [
+    'PRAGMA defer_foreign_keys=TRUE',
+    'CREATE TABLE record(id INTEGER PRIMARY KEY)',
+    'INSERT INTO record VALUES(1)',
+  ].join(';')
+  const output = restoreModule.reorderD1RestoreSql(source)
+  assert.ok(Buffer.byteLength(output) > Buffer.byteLength(source))
+  assert.ok(Buffer.byteLength(output) <= BACKUP_SQL_IMPORT_MAX_BYTES)
+})
+
+test('production restore preparation enforces private files, exact size, UTF-8, and symlink boundaries', async () => {
+  const outer = mkdtempSync(join(tmpdir(), 'bwm-restore-prepare-'))
+  const secure = join(outer, 'secure')
+  mkdirSync(secure, { mode: 0o700 })
+  const sourcePath = join(secure, 'restore.sql')
+  const source = [
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE record(id INTEGER PRIMARY KEY);',
+    'INSERT INTO record VALUES(1);',
+  ].join('\n')
+  writeFileSync(sourcePath, source, { mode: 0o600 })
+  try {
+    const prepared = await prepareD1RestoreImportFile({
+      directory: secure,
+      sourcePath,
+      expectedSize: Buffer.byteLength(source),
+    })
+    assert.equal(prepared.filePath, join(secure, 'restore-import.sql'))
+    assert.equal(statSync(prepared.filePath).mode & 0o777, 0o600)
+    assert.match(readFileSync(prepared.filePath, 'utf8'), /INSERT INTO record VALUES\(1\);/)
+    rmSync(prepared.filePath)
+
+    await assert.rejects(prepareD1RestoreImportFile({
+      directory: secure, sourcePath, expectedSize: Buffer.byteLength(source) + 1,
+    }), /^Error: RESTORE_FAILED$/)
+    writeFileSync(sourcePath, new Uint8Array([0xc3, 0x28]), { flag: 'w', mode: 0o600 })
+    await assert.rejects(prepareD1RestoreImportFile({
+      directory: secure, sourcePath, expectedSize: 2,
+    }), /^Error: RESTORE_FAILED$/)
+
+    rmSync(sourcePath)
+    const outside = join(outer, 'outside.sql')
+    writeFileSync(outside, source, { mode: 0o600 })
+    symlinkSync(outside, sourcePath)
+    await assert.rejects(prepareD1RestoreImportFile({
+      directory: secure, sourcePath, expectedSize: Buffer.byteLength(source),
+    }), /^Error: RESTORE_FAILED$/)
+    rmSync(sourcePath)
+    writeFileSync(sourcePath, source, { mode: 0o600 })
+    chmodSync(secure, 0o755)
+    await assert.rejects(prepareD1RestoreImportFile({
+      directory: secure, sourcePath, expectedSize: Buffer.byteLength(source),
+    }), /^Error: RESTORE_FAILED$/)
+  } finally {
+    rmSync(outer, { recursive: true, force: true })
+  }
+})
+
+test('restore import ordering supports populated self-referencing foreign keys', () => {
+  const database = executeReorderedRestore([
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE node (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES node(id));',
+    'INSERT INTO node VALUES (1, 1);',
+  ].join('\n'))
+  try { assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []) } finally { database.close() }
+})
+
+test('restore import ordering supports populated mutual foreign-key cycles', () => {
+  const database = executeReorderedRestore([
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE left_node (id INTEGER PRIMARY KEY, right_id INTEGER REFERENCES right_node(id));',
+    'INSERT INTO left_node VALUES (1, 1);',
+    'CREATE TABLE right_node (id INTEGER PRIMARY KEY, left_id INTEGER REFERENCES left_node(id));',
+    'INSERT INTO right_node VALUES (1, 1);',
+  ].join('\n'))
+  try { assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []) } finally { database.close() }
+})
+
+test('restore import ordering creates standalone UNIQUE parent indexes before child data', () => {
+  const source = [
+    'PRAGMA defer_foreign_keys=TRUE;',
+    'CREATE TABLE child (parent_code TEXT REFERENCES parent(code));',
+    "INSERT INTO child VALUES ('one');",
+    'CREATE TABLE parent (code TEXT NOT NULL);',
+    "INSERT INTO parent VALUES ('one');",
+    'CREATE UNIQUE INDEX parent_code_unique ON parent(code);',
+  ].join('\n')
+  const reordered = restoreModule.reorderD1RestoreSql(source)
+  assert.ok(reordered.indexOf("INSERT INTO parent VALUES ('one')")
+    < reordered.indexOf("INSERT INTO child VALUES ('one')"))
+  const database = executeReorderedRestore(source)
+  try { assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []) } finally { database.close() }
+})
+
+test('restore imports only the private prepared copy after authenticating the source bytes', async () => {
+  const setup = restoreInput({
+    fixture: fixtureV3Core,
+    expectedSource: fixtureV3Core.manifest.source,
+  })
+  let prepared = false
+  setup.input.prepareImport = async ({ directory, sourcePath, expectedSize }) => {
+    prepared = true
+    assert.equal(expectedSize, fixtureV3Core.manifest.objectSize)
+    assert.equal(statSync(sourcePath).size, expectedSize)
+    const importPath = join(directory, 'restore-import.sql')
+    writeFileSync(importPath, readFileSync(sourcePath), { flag: 'wx', mode: 0o600 })
+    return { filePath: importPath }
+  }
+  try {
+    await restoreBackup(setup.input)
+    assert.equal(prepared, true)
+    assert.match(setup.readImportedPath(), /restore-import\.sql$/)
+    assert.equal(existsSync(setup.readImportedPath()), false)
+  } finally {
+    rmSync(setup.input.tempRoot, { recursive: true, force: true })
+  }
+})
+
 function restoreInput({
   fixture = fixtureV2,
   allowLegacyUnverified = false,
@@ -180,6 +453,8 @@ function restoreInput({
   recoveryFacts = fixture.manifest.recoveryFacts,
   describedTarget = target,
   fresh = true,
+  integrity = { valid: true },
+  removeTemporaryDirectory,
   signal,
 } = {}) {
   const sql = fixture.sqlBase64Url
@@ -227,6 +502,7 @@ function restoreInput({
       assert.deepEqual(readFileSync(command.filePath), sql)
       return { imported: true, finalBookmark: 'restore-final-bookmark' }
     }
+    if (command.operation === 'integrity') return integrity
     if (command.operation === 'migrations') return { migrations }
     if (command.operation === 'recovery') {
       return { appliedMigrations: migrations, recoveryFacts }
@@ -241,6 +517,14 @@ function restoreInput({
     tempRoot: mkdtempSync(join(tmpdir(), 'bwm-restore-test-')),
     keyring,
     provider,
+    async prepareImport({ directory, sourcePath, expectedSize }) {
+      calls.push({ operation: 'prepare-import', expectedSize })
+      assert.equal(statSync(sourcePath).size, expectedSize)
+      const importPath = join(directory, 'restore-import.sql')
+      writeFileSync(importPath, readFileSync(sourcePath), { flag: 'wx', mode: 0o600 })
+      return { filePath: importPath }
+    },
+    removeTemporaryDirectory: removeTemporaryDirectory ?? removeRestoreTemporaryDirectory,
     runCommand,
     async cleanupTarget() {
       calls.push({ operation: 'cleanup-target' })
@@ -373,10 +657,11 @@ test('v2 restore verifies only manifest-bound migrations and intrinsic exported-
     })
     assert.deepEqual(setup.calls.map(({ operation }) => operation), [
       'describe', 'freshness', 'head-manifest', 'get-manifest', 'head-object',
-      'get-object', 'import', 'migrations', 'sentinel', 'cleanup-target', 'mark',
+      'get-object', 'prepare-import', 'import', 'integrity', 'migrations',
+      'sentinel', 'cleanup-target', 'mark',
     ])
-    assert.deepEqual(setup.calls[8], { operation: 'sentinel', target: target.name, targetId: target.id, backupId: fixtureV2.manifest.backupId })
-    assert.deepEqual(setup.calls[10].value, {
+    assert.deepEqual(setup.calls[10], { operation: 'sentinel', target: target.name, targetId: target.id, backupId: fixtureV2.manifest.backupId })
+    assert.deepEqual(setup.calls[12].value, {
       backupId: fixtureV2.manifest.backupId,
       localDay: fixtureV2.manifest.localDay,
       localMonth: fixtureV2.manifest.localMonth,
@@ -390,9 +675,9 @@ test('v2 restore verifies only manifest-bound migrations and intrinsic exported-
       ssecKeyVersion: fixtureV2.manifest.wrappedSsecKey.kekVersion,
       wrappedSsecKeyB64: fixtureV2.manifest.wrappedSsecKey.ciphertext,
       wrapNonceB64: fixtureV2.manifest.wrappedSsecKey.nonce,
-      verifiedAt: setup.calls[10].value.verifiedAt,
+      verifiedAt: setup.calls[12].value.verifiedAt,
     })
-    assert.match(setup.calls[10].value.verifiedAt, /^\d{4}-\d{2}-\d{2}T/)
+    assert.match(setup.calls[12].value.verifiedAt, /^\d{4}-\d{2}-\d{2}T/)
     assert.equal(existsSync(setup.readImportedPath()), false)
     assert.deepEqual(setup.readObservedSsecKey(), new Uint8Array(32))
   } finally {
@@ -422,8 +707,8 @@ test('v3 restore authenticates exact core and workbook recovery facts before the
       })
       assert.deepEqual(setup.calls.map(({ operation }) => operation), [
         'describe', 'freshness', 'head-manifest', 'get-manifest', 'head-object',
-        'get-object', 'import', 'migrations', 'sentinel', 'recovery',
-        'cleanup-target', 'mark',
+        'get-object', 'prepare-import', 'import', 'integrity', 'migrations',
+        'sentinel', 'recovery', 'cleanup-target', 'mark',
       ])
       assert.deepEqual(setup.calls[3].value, {
         key: fixture.objectKeys.manifestKey,
@@ -486,6 +771,21 @@ test('v3 target recovery mismatches and plaintext digest drift prevent the sourc
   }
 })
 
+test('post-import integrity failure prevents every restore-verification claim', async () => {
+  const setup = restoreInput({
+    fixture: fixtureV3Core,
+    expectedSource: fixtureV3Core.manifest.source,
+    integrity: { valid: false },
+  })
+  try {
+    await assert.rejects(restoreBackup(setup.input), /^Error: RESTORE_FAILED$/)
+    assert.equal(setup.calls.some(({ operation }) => operation === 'integrity'), true)
+    assert.equal(setup.calls.some(({ operation }) => operation === 'mark'), false)
+  } finally {
+    rmSync(setup.input.tempRoot, { recursive: true, force: true })
+  }
+})
+
 test('fresh-target preflight is first and a non-empty target blocks every archive read', async () => {
   const setup = restoreInput({ fresh: false })
   try {
@@ -518,7 +818,8 @@ test('a v1 restore is explicit legacy_unverified and can never mark recovery evi
     })
     assert.deepEqual(setup.calls.map(({ operation }) => operation), [
       'describe', 'freshness', 'head-manifest', 'get-manifest', 'head-object',
-      'get-object', 'import', 'migrations', 'cleanup-target',
+      'get-object', 'prepare-import', 'import', 'integrity', 'migrations',
+      'cleanup-target',
     ])
   } finally {
     rmSync(setup.input.tempRoot, { recursive: true, force: true })
@@ -607,6 +908,44 @@ test('restore aborts between commands and always removes the plaintext file', as
     await assert.rejects(restoreBackup(setup.input), /^Error: RESTORE_FAILED$/)
     assert.ok(setup.readImportedPath())
     assert.equal(existsSync(setup.readImportedPath()), false)
+  } finally {
+    rmSync(setup.input.tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('restore retries transient private-directory cleanup before marking the source', async () => {
+  let attempts = 0
+  const setup = restoreInput({
+    async removeTemporaryDirectory({ directory, filePath }) {
+      attempts += 1
+      if (attempts === 1) throw new Error('TRANSIENT_REMOVE_FAILURE')
+      rmSync(directory, { recursive: true, force: true })
+      assert.equal(existsSync(filePath), false)
+      assert.equal(existsSync(directory), false)
+    },
+  })
+  try {
+    const result = await restoreBackup(setup.input)
+    assert.equal(result.sourceMarkedVerified, true)
+    assert.equal(attempts, 2)
+    assert.equal(setup.calls.some(({ operation }) => operation === 'mark'), true)
+  } finally {
+    rmSync(setup.input.tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('persistent private-directory cleanup failure stops after two attempts and never marks the source', async () => {
+  let attempts = 0
+  const setup = restoreInput({
+    async removeTemporaryDirectory() {
+      attempts += 1
+      throw new Error('PERSISTENT_REMOVE_FAILURE')
+    },
+  })
+  try {
+    await assert.rejects(restoreBackup(setup.input), /^Error: RESTORE_FAILED$/)
+    assert.equal(attempts, 2)
+    assert.equal(setup.calls.some(({ operation }) => operation === 'mark'), false)
   } finally {
     rmSync(setup.input.tempRoot, { recursive: true, force: true })
   }

@@ -4,6 +4,11 @@ import test from 'node:test'
 import fixture from '../fixtures/backup-format-v1.json' with { type: 'json' }
 import fixtureV2 from '../fixtures/backup-format-v2.json' with { type: 'json' }
 import {
+  BACKUP_SQL_IMPORT_MAX_BYTES,
+  BACKUP_SQL_MAX_BYTES,
+  nextBackupSqlByteCount,
+} from '../../worker/operations/backup-limits.js'
+import {
   backupObjectKeys, canonicalJson, createBackupManifest, expectedObjectMetadata, openBackupManifest, parseCanonicalManifest,
 } from '../../worker/operations/backup-format.js'
 import * as backupFormat from '../../worker/operations/backup-format.js'
@@ -112,7 +117,7 @@ test('parseCanonicalManifest validates every schema field and relationship', () 
     (m) => delete m.format, (m) => { m.extra = true }, (m) => { m.format = 'other' },
     (m) => { m.createdAt = '2026-08-03T12:34:56Z' }, (m) => { m.createdAt = '2026-02-30T12:34:56.789Z' }, (m) => { m.localDay = '2026-02-30' },
     (m) => { m.localMonth = '2026-07' }, (m) => { m.objectKey = 'backups/v1/2026/08/other.sql' },
-    (m) => { m.retentionClass = 'yearly' }, (m) => { m.objectSize = -1 }, (m) => { m.objectSize = 1.5 },
+    (m) => { m.retentionClass = 'yearly' }, (m) => { m.objectSize = -1 }, (m) => { m.objectSize = 0 }, (m) => { m.objectSize = 1.5 },
     (m) => { m.objectSize = Number.MAX_SAFE_INTEGER + 1 }, (m) => { m.wrappedSsecKey = {} },
     (m) => { m.wrappedSsecKey.extra = true }, (m) => { m.wrappedSsecKey.algorithm = 'A128GCM' },
     (m) => { m.wrappedSsecKey.kekVersion = 0 }, (m) => { m.wrappedSsecKey.kekVersion = 1.5 }, (m) => { m.wrappedSsecKey.kekVersion = Number.MAX_SAFE_INTEGER + 1 },
@@ -120,6 +125,26 @@ test('parseCanonicalManifest validates every schema field and relationship', () 
     (m) => { m.wrappedSsecKey.ciphertext = `${fixture.publicEncoding.ciphertext}=` }, (m) => { m.wrappedSsecKey.ciphertext = fixture.publicEncoding.ciphertext.replace(/.$/, '+') },
   ]
   for (const change of changes) { const manifest = valid(); change(manifest); invalid(() => parseCanonicalManifest(bytes(canonical(manifest)))) }
+})
+
+test('backup manifests publish and enforce the bounded restore SQL contract', () => {
+  assert.equal(BACKUP_SQL_MAX_BYTES, 64 * 1024 * 1024)
+  assert.equal(BACKUP_SQL_IMPORT_MAX_BYTES, BACKUP_SQL_MAX_BYTES * 2)
+  assert.equal(nextBackupSqlByteCount(0, 1), 1)
+  assert.equal(nextBackupSqlByteCount(BACKUP_SQL_MAX_BYTES - 1, 1), BACKUP_SQL_MAX_BYTES)
+  for (const [current, chunk] of [
+    [BACKUP_SQL_MAX_BYTES, 1],
+    [BACKUP_SQL_MAX_BYTES - 1, 2],
+    [-1, 1],
+    [0, 0],
+    [0, 1.5],
+  ]) assert.equal(nextBackupSqlByteCount(current, chunk), null)
+  const maximum = valid()
+  maximum.objectSize = BACKUP_SQL_MAX_BYTES
+  assert.deepEqual(parseCanonicalManifest(bytes(canonical(maximum))), maximum)
+  const oversized = valid()
+  oversized.objectSize = BACKUP_SQL_MAX_BYTES + 1
+  invalid(() => parseCanonicalManifest(bytes(canonical(oversized))))
 })
 
 test('parseCanonicalManifest rejects every missing and wrong root or wrapped-key field', () => {

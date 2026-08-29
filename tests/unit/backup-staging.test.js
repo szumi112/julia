@@ -16,6 +16,7 @@ import {
 import {
   WORKBOOK_ROUNDTRIP_MIGRATIONS,
 } from '../../worker/operations/backup-recovery.js'
+import { BACKUP_SQL_MAX_BYTES } from '../../worker/operations/backup-limits.js'
 import fixtureV2 from '../fixtures/backup-format-v2.json' with { type: 'json' }
 import fixtureV3 from '../fixtures/backup-format-v3.json' with { type: 'json' }
 import workbookRecoveryFacts from '../fixtures/backup-recovery-workbook-facts.json' with { type: 'json' }
@@ -235,6 +236,27 @@ test('demand creation brackets export with migrations, publishes manifest last, 
   assert.equal(setup.events[manifestIndex - 1], 'renew:creating')
   assert.equal(setup.events[manifestIndex + 1], 'reread')
   assert.equal(setup.events.at(-1), 'release')
+})
+
+test('demand creation rejects an unrestorable SQL object before manifest finalization and cleans it', async () => {
+  const setup = successfulSetup()
+  setup.input.archive.putSql = async ({ body }) => {
+    setup.events.push('put-sql')
+    await body.pipeTo(new WritableStream({ write() {} }))
+    return {
+      etag: 'etag-oversized-public',
+      size: BACKUP_SQL_MAX_BYTES + 1,
+      plaintextSqlSha256: '9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a',
+    }
+  }
+  await assert.rejects(createStagingBackup(setup.input), /^Error: BACKUP_STAGING_FAILED$/)
+  assert.equal(setup.events.includes('put-manifest'), false)
+  assert.equal(setup.events.includes('stored'), false)
+  assert.equal(setup.events.includes('failed:BACKUP_CREATE_FAILED'), true)
+  assert.deepEqual(setup.events.filter((event) => event.startsWith('delete:')), [
+    `delete:backups/v3/2026/08/${setup.backupId}.manifest.json`,
+    `delete:backups/v3/2026/08/${setup.backupId}.sql`,
+  ])
 })
 
 test('recovery snapshot drift compensates manifest-first and never publishes a manifest', async () => {
@@ -973,7 +995,7 @@ test('S3 upload uses one conditional put through 8 MiB and returns exact head me
   })
   assert.ok(signals[0] instanceof AbortSignal)
   assert.notEqual(signals[0], signal)
-  assert.equal(bytes.every((value) => value === 0), true)
+  assert.equal(bytes.every((value) => value === 11), true)
 
   assert.deepEqual(await archive.headSql({
     key: 'backups/v2/2026/08/bkp_s3_public_20260827.sql',
@@ -1021,7 +1043,8 @@ test('S3 upload above 8 MiB emits exact parts, fences completion, and aborts a f
     2 * 1024 * 1024,
   ])
   assert.deepEqual(checkpoints, [0, 1, 2, 2, 3, 3, 4])
-  assert.equal(chunks.every((chunk) => chunk.every((value) => value === 0)), true)
+  assert.equal(chunks[0].every((value) => value === 21), true)
+  assert.equal(chunks[1].every((value) => value === 22), true)
 
   const failedCalls = []
   const failingArchive = createS3BackupArchive({
@@ -1044,6 +1067,72 @@ test('S3 upload above 8 MiB emits exact parts, fences completion, and aborts a f
     checkpoint: async () => {},
   }), /upload failure marker/)
   assert.deepEqual(failedCalls, ['CreateMultipartUploadCommand', 'UploadPartCommand', 'AbortMultipartUploadCommand'])
+})
+
+test('S3 multipart upload owns aliased stream chunks without corrupting later parts', async () => {
+  const uploaded = []
+  const shared = new Uint8Array(8 * 1024 * 1024).fill(31)
+  const archive = createS3BackupArchive({
+    bucket: 'backup-staging-public',
+    client: {
+      async send(command) {
+        const name = command.constructor.name
+        if (name === 'CreateMultipartUploadCommand') return { UploadId: 'aliased-upload-public' }
+        if (name === 'UploadPartCommand') {
+          uploaded.push(new Uint8Array(command.input.Body))
+          return { ETag: `"part-${command.input.PartNumber}-aliased"` }
+        }
+        if (name === 'CompleteMultipartUploadCommand') return { ETag: '"aliased-etag-public"' }
+        throw new Error(`unexpected ${name}`)
+      },
+    },
+  })
+  const result = await archive.putSql({
+    key: 'backups/v3/2026/08/bkp_s3_public_20260827.sql',
+    body: streamFrom([shared, shared]),
+    ssecKey: new Uint8Array(32).fill(4),
+    customMetadata: { ...s3Metadata, format: 'bwm-d1-sql-v3' },
+    signal: new AbortController().signal,
+    checkpoint: async () => {},
+  })
+  assert.equal(result.size, shared.byteLength * 2)
+  assert.deepEqual(uploaded.map((part) => [part[0], part.at(-1)]), [[31, 31], [31, 31]])
+  assert.equal(shared.every((value) => value === 31), true)
+})
+
+test('S3 upload aborts at the shared SQL byte ceiling before uploading overflow', async () => {
+  const calls = []
+  const archive = createS3BackupArchive({
+    bucket: 'backup-staging-public',
+    client: {
+      async send(command) {
+        const name = command.constructor.name
+        calls.push(name)
+        if (name === 'CreateMultipartUploadCommand') return { UploadId: 'bounded-upload-public' }
+        if (name === 'UploadPartCommand') return { ETag: `"part-${command.input.PartNumber}-bounded"` }
+        if (name === 'AbortMultipartUploadCommand') return {}
+        throw new Error(`unexpected ${name}`)
+      },
+    },
+  })
+  const part = new Uint8Array(8 * 1024 * 1024).fill(19)
+  const body = streamFrom([
+    ...Array.from({ length: BACKUP_SQL_MAX_BYTES / part.byteLength }, () => part),
+    new Uint8Array([1]),
+  ])
+  await assert.rejects(archive.putSql({
+    key: 'backups/v3/2026/08/bkp_s3_public_20260827.sql',
+    body,
+    ssecKey: new Uint8Array(32).fill(4),
+    customMetadata: { ...s3Metadata, format: 'bwm-d1-sql-v3' },
+    signal: new AbortController().signal,
+    checkpoint: async () => {},
+  }), /^Error: BACKUP_STAGING_FAILED$/)
+  assert.deepEqual(calls, [
+    'CreateMultipartUploadCommand',
+    ...Array.from({ length: BACKUP_SQL_MAX_BYTES / part.byteLength }, () => 'UploadPartCommand'),
+    'AbortMultipartUploadCommand',
+  ])
 })
 
 test('S3 upload rejects unpaired or extra ETag quotes', async () => {

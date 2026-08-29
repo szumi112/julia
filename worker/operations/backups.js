@@ -7,6 +7,7 @@ import {
   expectedObjectMetadata,
 } from './backup-format.js'
 import { readBackupRecoverySnapshot } from './backup-recovery.js'
+import { BACKUP_SQL_MAX_BYTES, nextBackupSqlByteCount } from './backup-limits.js'
 
 const BACKUP_JOB_LIMIT = 1
 const BACKUP_LEASE_MS = 12 * 60 * 1000
@@ -790,10 +791,11 @@ function sha256Readable(body) {
   let byteCount = 0
   const readable = body.pipeThrough(new TransformStream({
     async transform(chunk, controller) {
-      if (!(chunk instanceof Uint8Array) || chunk.byteLength === 0
-        || !Number.isSafeInteger(byteCount + chunk.byteLength)) invalid()
+      if (!(chunk instanceof Uint8Array)) invalid()
+      const nextByteCount = nextBackupSqlByteCount(byteCount, chunk.byteLength)
+      if (nextByteCount === null) invalid()
       await writer.write(chunk)
-      byteCount += chunk.byteLength
+      byteCount = nextByteCount
       controller.enqueue(chunk)
     },
     async flush() { await writer.close() },
@@ -1333,7 +1335,8 @@ export async function runNextBackupCreate(input) {
       throw error
     }
     if (!stored || typeof stored.etag !== 'string' || stored.etag.length === 0
-      || !Number.isSafeInteger(stored.size) || stored.size < 0) invalid()
+      || !Number.isSafeInteger(stored.size) || stored.size < 1
+      || stored.size > BACKUP_SQL_MAX_BYTES) invalid()
     const digest = await streamed.result()
     if (digest.byteCount !== stored.size) invalid()
     const manifestResult = await createBackupManifest({
@@ -1907,7 +1910,12 @@ function rejectDuplicateEnvelopeKeys(text) {
       skipSpace()
       if (text[index] !== ':') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
       index += 1
-      scanValue(watch === 'top' && key === 'result' ? 'result' : null, depth)
+      const childWatch = watch === 'top' && key === 'result'
+        ? 'result'
+        : watch === 'result' && key === 'result'
+          ? 'nestedResult'
+          : null
+      scanValue(childWatch, depth)
       skipSpace()
       if (text[index] === '}') { index += 1; return }
       if (text[index] !== ',') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
@@ -2023,6 +2031,37 @@ function exportEnvelope(value, firstBookmark) {
     || typeof envelope.success !== 'boolean') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
   if (envelope.success !== true) adapterFail('BACKUP_EXPORT_START_FAILED')
   const resultKeys = Reflect.ownKeys(envelope.result ?? {})
+  if (resultKeys.length === 5) {
+    const current = parsedExactObject(envelope.result, [
+      'at_bookmark', 'messages', 'status', 'success', 'type',
+    ])
+    if (!validBookmark(current.at_bookmark)
+      || (firstBookmark !== null && current.at_bookmark !== firstBookmark)
+      || !Array.isArray(current.messages)
+      || current.messages.some((message) => typeof message !== 'string')
+      || current.status !== 'active' || current.success !== true || current.type !== 'export') {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    return { complete: false, atBookmark: current.at_bookmark }
+  }
+  if (resultKeys.length === 6) {
+    const current = parsedExactObject(envelope.result, [
+      'at_bookmark', 'messages', 'result', 'status', 'success', 'type',
+    ])
+    const result = parsedExactObject(current.result, ['filename', 'signed_url'])
+    if (!validBookmark(current.at_bookmark)
+      || (firstBookmark !== null && current.at_bookmark !== firstBookmark)
+      || !Array.isArray(current.messages)
+      || current.messages.some((message) => typeof message !== 'string')
+      || current.status !== 'complete' || current.success !== true || current.type !== 'export'
+      || !validFilename(result.filename)
+      || !canonicalDownloadUrl(result.signed_url)) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    return {
+      complete: true,
+      atBookmark: current.at_bookmark,
+      downloadUrl: result.signed_url,
+    }
+  }
   if (resultKeys.length === 1 && resultKeys[0] === 'at_bookmark') {
     const result = parsedExactObject(envelope.result, ['at_bookmark'])
     if (!validBookmark(result.at_bookmark)

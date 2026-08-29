@@ -13,6 +13,8 @@ import {
 import {
   createPinnedWranglerRunner,
   createRestoreSourceStore,
+  prepareD1RestoreImportFile,
+  removeRestoreTemporaryDirectory,
   restoreBackup,
   validateRestoreRequest,
 } from './restore-backup-lib.mjs'
@@ -340,6 +342,8 @@ async function main() {
       tempRoot: tmpdir(),
       keyring,
       provider,
+      prepareImport: prepareD1RestoreImportFile,
+      removeTemporaryDirectory: removeRestoreTemporaryDirectory,
       runCommand: targetRunner.runCommand,
       cleanupTarget: targetRunner.cleanup,
       signal: controller.signal,

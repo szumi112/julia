@@ -4,6 +4,7 @@ import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import * as backupsModule from '../../worker/operations/backups.js'
 import { enqueueOutboxStatement } from '../../worker/jobs/outbox.js'
 import { openBackupManifest, parseCanonicalManifest } from '../../worker/operations/backup-format.js'
+import { BACKUP_SQL_MAX_BYTES } from '../../worker/operations/backup-limits.js'
 import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import recoveryRow from '../fixtures/backup-recovery-workbook-row.json'
@@ -894,6 +895,66 @@ describe('operational backup create runner', () => {
     }])
     expect(pollExport).toHaveBeenCalledOnce()
     expect(downloadExport).toHaveBeenCalledOnce()
+  })
+
+  it('rejects and removes a zero-byte SQL artifact before manifest finalization', async () => {
+    const scenario = await finalizationScenario('zero_byte_sql')
+    scenario.input.downloadExport = async () => ({
+      body: new ReadableStream({ start(controller) { controller.close() } }),
+    })
+
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: scenario.seeded.backupId,
+      errorCode: 'BACKUP_STATE_INVALID',
+    })
+    expect(scenario.objects.size).toBe(0)
+    expect(scenario.mutations.filter((entry) => entry.startsWith('put:'))).toHaveLength(1)
+    expect(scenario.mutations.filter((entry) => entry.startsWith('delete:'))).toHaveLength(2)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({
+      status: 'failed', version: 3, object_size: null,
+    })
+  })
+
+  it('stops the Worker upload stream at the shared SQL byte ceiling', async () => {
+    const scenario = await finalizationScenario('oversized_sql_stream')
+    const part = new Uint8Array(8 * 1024 * 1024).fill(23)
+    scenario.input.downloadExport = async () => ({
+      body: new ReadableStream({
+        start(controller) {
+          for (let index = 0; index < BACKUP_SQL_MAX_BYTES / part.byteLength; index += 1) {
+            controller.enqueue(part)
+          }
+          controller.enqueue(new Uint8Array([1]))
+          controller.close()
+        },
+      }),
+    })
+    let uploadedBytes = 0
+    const cleanup = []
+    scenario.input.archive = {
+      async put(_key, value) {
+        const reader = value.getReader()
+        while (true) {
+          const result = await reader.read()
+          if (result.done) break
+          uploadedBytes += result.value.byteLength
+        }
+        return { etag: 'oversized-sql-etag', size: uploadedBytes }
+      },
+      async delete(key) { cleanup.push(`delete:${key}`) },
+      async head(key) { cleanup.push(`head:${key}`); return null },
+    }
+
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: scenario.seeded.backupId,
+      errorCode: 'BACKUP_STATE_INVALID',
+    })
+    expect(uploadedBytes).toBe(BACKUP_SQL_MAX_BYTES)
+    expect(cleanup.filter((entry) => entry.startsWith('delete:'))).toHaveLength(2)
   })
 
   it('accepts an exact stored finalization when the committed batch response is lost', async () => {
@@ -2536,6 +2597,145 @@ describe('D1 export REST request and response contract', () => {
     expect(input.wait).not.toHaveBeenCalled()
   })
 
+  it('accepts the current Cloudflare nested completed export response', async () => {
+    const fetch = vi.fn(async () => rawExportResponse(JSON.stringify({
+      errors: [],
+      messages: [],
+      result: {
+        at_bookmark: EXPORT_BOOKMARK,
+        messages: ['Export complete'],
+        result: {
+          filename: EXPORT_FILENAME,
+          signed_url: EXPORT_URL,
+        },
+        status: 'complete',
+        success: true,
+        type: 'export',
+      },
+      success: true,
+    })))
+    const { input } = exportInput({ fetch })
+
+    await expect(pollD1Export(input)).resolves.toEqual({
+      downloadUrl: EXPORT_URL,
+      atBookmark: EXPORT_BOOKMARK,
+    })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(input.wait).not.toHaveBeenCalled()
+  })
+
+  it('polls the current Cloudflare nested active export response', async () => {
+    const fetch = sequenceFetch([
+      rawExportResponse(JSON.stringify({
+        errors: [],
+        messages: [],
+        result: {
+          at_bookmark: EXPORT_BOOKMARK,
+          messages: ['Export scheduled'],
+          status: 'active',
+          success: true,
+          type: 'export',
+        },
+        success: true,
+      })),
+      rawExportResponse(JSON.stringify({
+        errors: [],
+        messages: [],
+        result: {
+          at_bookmark: EXPORT_BOOKMARK,
+          messages: ['Export complete'],
+          result: {
+            filename: EXPORT_FILENAME,
+            signed_url: EXPORT_URL,
+          },
+          status: 'complete',
+          success: true,
+          type: 'export',
+        },
+        success: true,
+      })),
+    ])
+    const { input } = exportInput({ fetch })
+
+    await expect(pollD1Export(input)).resolves.toEqual({
+      downloadUrl: EXPORT_URL,
+      atBookmark: EXPORT_BOOKMARK,
+    })
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(input.wait).toHaveBeenCalledExactlyOnceWith(10_000)
+  })
+
+  it.each([
+    ['active with a terminal result', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [],
+      result: { filename: EXPORT_FILENAME, signed_url: EXPORT_URL },
+      status: 'active', success: true, type: 'export',
+    }],
+    ['complete without a terminal result', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [], status: 'complete',
+      success: true, type: 'export',
+    }],
+    ['unknown status', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [], status: 'pending',
+      success: true, type: 'export',
+    }],
+    ['wrong type', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [], status: 'active',
+      success: true, type: 'import',
+    }],
+    ['false nested success', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [], status: 'active',
+      success: false, type: 'export',
+    }],
+    ['non-array messages', {
+      at_bookmark: EXPORT_BOOKMARK, messages: {}, status: 'active',
+      success: true, type: 'export',
+    }],
+    ['non-string message', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [1], status: 'active',
+      success: true, type: 'export',
+    }],
+    ['terminal result with an extra field', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [],
+      result: { extra: true, filename: EXPORT_FILENAME, signed_url: EXPORT_URL },
+      status: 'complete', success: true, type: 'export',
+    }],
+    ['terminal result missing its URL', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [],
+      result: { filename: EXPORT_FILENAME },
+      status: 'complete', success: true, type: 'export',
+    }],
+  ])('rejects current nested Cloudflare export drift: %s', async (_name, result) => {
+    const error = await exportError(exportInput({
+      fetch: vi.fn(async () => rawExportResponse(JSON.stringify({
+        errors: [], messages: [], result, success: true,
+      }))),
+    }).input)
+    expect(error).toEqual(new Error('BACKUP_EXPORT_RESPONSE_INVALID'))
+  })
+
+  it('requires current nested Cloudflare polls to preserve the first bookmark', async () => {
+    const current = (bookmark) => rawExportResponse(JSON.stringify({
+      errors: [],
+      messages: [],
+      result: {
+        at_bookmark: bookmark,
+        messages: [],
+        status: 'active',
+        success: true,
+        type: 'export',
+      },
+      success: true,
+    }))
+    const fetch = sequenceFetch([
+      current(EXPORT_BOOKMARK),
+      current('bookmark-fixture-changed'),
+    ])
+    await expect(pollD1Export(exportInput({ fetch }).input)).rejects
+      .toThrow(/^BACKUP_EXPORT_RESPONSE_INVALID$/)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
   it.each([
     ['false success', exportResponse(null, { success: false }), 'BACKUP_EXPORT_START_FAILED'],
     ['HTTP failure', rawExportResponse('{}', { status: 503 }), 'BACKUP_EXPORT_START_FAILED'],
@@ -2655,6 +2855,7 @@ describe('D1 export REST request and response contract', () => {
     '{"errors":[],"messages":[],"result":{"at_bookmark":"bookmark-fixture-1","at_bookmark":"bookmark-fixture-1"},"success":true}',
     `{"errors":[],"messages":[],"result":{"at_bookmark":"${EXPORT_BOOKMARK}","filename":"${EXPORT_FILENAME}","filename":"${EXPORT_FILENAME}","signed_url":"${EXPORT_URL}"},"success":true}`,
     `{"errors":[],"messages":[],"result":{"at_bookmark":"${EXPORT_BOOKMARK}","filename":"${EXPORT_FILENAME}","signed_url":"${EXPORT_URL}","signed_url":"${EXPORT_URL}"},"success":true}`,
+    `{"errors":[],"messages":[],"result":{"at_bookmark":"${EXPORT_BOOKMARK}","messages":[],"result":{"filename":"${EXPORT_FILENAME}","signed_url":"https://ignored.example.test/a","signed_url":"${EXPORT_URL}"},"status":"complete","success":true,"type":"export"},"success":true}`,
     '{"errors":[],"messages":[],"result":{"at_bookmark":"bookmark-fixture-1"},"\\u0073uccess":true,"success":true}',
   ])('rejects duplicate JSON keys before parsing: %s', async (raw) => {
     const error = await exportError(exportInput({

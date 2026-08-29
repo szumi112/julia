@@ -2,6 +2,7 @@ import {
   recoveryFactsMatchMigrations,
   validateBackupRecoveryFacts,
 } from './backup-recovery.js'
+import { BACKUP_SQL_MAX_BYTES } from './backup-limits.js'
 
 const INVALID = 'BACKUP_MANIFEST_INVALID'
 const CRYPTO_FAILED = 'BACKUP_CRYPTO_FAILED'
@@ -201,7 +202,8 @@ function commonFactsValue(facts, version) {
     || facts.localDay.slice(0, 7) !== facts.localMonth
     || !['daily', 'monthly'].includes(facts.retentionClass)
     || !validOpaque(facts.objectEtag) || !validOpaque(facts.atBookmark)
-    || !Number.isSafeInteger(facts.objectSize) || facts.objectSize < 0) invalid()
+    || !Number.isSafeInteger(facts.objectSize) || facts.objectSize < 1
+    || facts.objectSize > BACKUP_SQL_MAX_BYTES) invalid()
   const keys = backupObjectKeys({
     backupId: facts.backupId,
     localMonth: facts.localMonth,

@@ -6,6 +6,7 @@ import {
   openBackupManifest,
 } from '../worker/operations/backup-format.js'
 import { partsInWarsaw } from '../worker/operations/clock.js'
+import { nextBackupSqlByteCount } from '../worker/operations/backup-limits.js'
 import {
   readBackupRecoverySnapshotWithQuery,
   recoveryFactsMatchMigrations,
@@ -706,7 +707,7 @@ export async function statusStagingBackup(input) {
       || typeof row.wrappedSsecKeyB64 !== 'string' || row.wrappedSsecKeyB64.length === 0
       || typeof row.wrapNonceB64 !== 'string' || row.wrapNonceB64.length === 0
       || typeof row.objectEtag !== 'string' || row.objectEtag.length === 0
-      || !Number.isSafeInteger(row.objectSize) || row.objectSize < 0) failed()
+      || !Number.isSafeInteger(row.objectSize) || row.objectSize < 1) failed()
     if ((row.status === 'stored' && (row.version !== 3 || row.restoreVerifiedAt !== null
       || row.updatedAt !== row.completedAt))
       || (row.status === 'restore_verified' && (row.version !== 4
@@ -1135,12 +1136,19 @@ export function createS3BackupArchive(input) {
       const part = await reader.read()
       if (part.done) { ended = true; return }
       if (!(part.value instanceof Uint8Array) || part.value.byteLength === 0) failed()
+      const nextTotal = nextBackupSqlByteCount(total, part.value.byteLength)
       if (!Number.isSafeInteger(pending + part.value.byteLength)
-        || !Number.isSafeInteger(total + part.value.byteLength)) failed()
-      digest.update(part.value)
-      queue.push({ bytes: part.value, offset: 0 })
+        || nextTotal === null) failed()
+      const owned = Uint8Array.from(part.value)
+      try {
+        digest.update(owned)
+        queue.push({ bytes: owned, offset: 0 })
+      } catch (error) {
+        owned.fill(0)
+        throw error
+      }
       pending += part.value.byteLength
-      total += part.value.byteLength
+      total = nextTotal
     }
     try {
       while (!ended && pending <= MULTIPART_PART_BYTES) await fill()
