@@ -37,6 +37,9 @@ const statusLabel = Object.freeze({
   uploading: 'Przesyłanie', ready: 'Gotowy', materializing: 'Przetwarzanie',
   conflicts: 'Wymaga rozstrzygnięcia', complete: 'Zakończony', failed: 'Niepowodzenie',
 })
+const statusClass = (status) => (
+  Object.hasOwn(statusLabel, status) ? status : 'unknown'
+)
 const kindLabel = Object.freeze({ expense: 'Wydatek', income: 'Przychód' })
 const reasonLabel = Object.freeze({
   SERVICE_DATE_INVALID: 'Niepoprawna data usługi',
@@ -63,7 +66,10 @@ function ImportList({
 }) {
   if (values.length === 0) return <EmptyState icon="ledger" title="Brak importów" />
   return <div className="registry-list">{values.map((item) => (
-    <article className="registry-list__item" key={item.id}>
+    <article
+      className={`registry-list__item registry-list__item--${statusClass(item.status)}`}
+      key={item.id}
+    >
       <div>
         <h3>Import z {dateTime(item.createdAt)}</h3>
         <Pill tone={item.status === 'complete' ? 'sage' : item.status === 'failed' ? 'error' : 'amber'}>
@@ -117,7 +123,7 @@ function ImportList({
 function ExportList({ values }) {
   if (values.length === 0) return <EmptyState icon="ledger" title="Brak historii eksportów" />
   return <div className="registry-list">{values.map((item) => <article
-    className="registry-list__item" key={item.id}
+    className="registry-list__item registry-list__item--export" key={item.id}
   >
     <div><h3>Eksport z {dateTime(item.createdAt)}</h3>
       <p>{item.format === 'panel-v2' ? 'Panel-v2' : 'Format zgodny'} · {
@@ -745,7 +751,7 @@ export function Registry({ params = {} }) {
 
   return (
     <div className="registry-view">
-      <div className="view-head"><div>
+      <div className="view-head registry-view__hero"><div>
         <div className="eyebrow">Pochodzenie danych</div>
         <h1 className="display view-head__title" ref={resultRef} tabIndex={-1}>Rejestr <em>skoroszytów</em></h1>
         <p className="view-head__sub">Historia importów, eksportów i jawnych rozstrzygnięć.</p>

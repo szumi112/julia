@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { BarFill } from '../charts.jsx'
 import { addMonths, cap, fmtMoney, fmtMonthYear, fmtShortDate } from '../format.js'
 import {
   FINANCE_WINDOW_MIN_MONTH,
@@ -34,20 +35,56 @@ const invoiceLabel = Object.freeze({
 
 function Kpis({ values }) {
   const items = [
-    ['Przychody', values.revenueGrosze],
-    ['Wpłacono', values.collectedGrosze],
-    ['Pozostało do zapłaty', values.outstandingGrosze],
-    ['Wydatki', values.expensesGrosze],
-    ['Dochód', values.incomeGrosze],
+    ['Przychody', values.revenueGrosze, 'coral'],
+    ['Wpłacono', values.collectedGrosze, 'sage'],
+    ['Pozostało do zapłaty', values.outstandingGrosze, 'amber'],
+    ['Wydatki', values.expensesGrosze, 'pink'],
+    ['Dochód', values.incomeGrosze, 'sky'],
   ]
   return (
     <section className="finance-window__kpis" aria-label="Podsumowanie finansowe">
-      {items.map(([label, value]) => (
-        <article className="finance-window__kpi" key={label}>
+      {items.map(([label, value, tone]) => (
+        <article className={`finance-window__kpi finance-window__kpi--${tone}`} key={label}>
           <span>{label}</span>
           <strong>{money(value)}</strong>
         </article>
       ))}
+    </section>
+  )
+}
+
+function MonthlySettlement({ values }) {
+  const collected = Math.max(values.collectedGrosze, 0)
+  const outstanding = Math.max(values.outstandingGrosze, 0)
+  const due = collected + outstanding
+  const collectedShare = due > 0 ? Math.round((collected / due) * 100) : 0
+  const settlementSummary = due > 0 ? `${collectedShare}% wpłacone` : 'Brak należności'
+
+  return (
+    <section className="card card--pad finance-window__balance" aria-label="Rozliczenie miesiąca">
+      <div className="finance-window__balance-head">
+        <h2 className="card-title">Rozliczenie miesiąca</h2>
+        <span className="hbar__val">{settlementSummary}</span>
+      </div>
+      <div className="hbar__track finance-window__balance-track" aria-hidden="true">
+        <BarFill
+          segments={[
+            { value: collected, color: 'var(--sage)', label: 'wpłacono' },
+            { value: outstanding, color: 'var(--amber-mid)', label: 'pozostało do zapłaty' },
+          ]}
+          totalMax={Math.max(due, 1)}
+        />
+      </div>
+      <dl className="finance-window__balance-legend">
+        <div>
+          <dt><span className="finance-window__balance-swatch finance-window__balance-swatch--paid" />Wpłacono</dt>
+          <dd>{money(collected)}</dd>
+        </div>
+        <div>
+          <dt><span className="finance-window__balance-swatch finance-window__balance-swatch--due" />Pozostało do zapłaty</dt>
+          <dd>{money(outstanding)}</dd>
+        </div>
+      </dl>
     </section>
   )
 }
@@ -245,6 +282,7 @@ export function ProtectedFinance({ params = {} }) {
         </div>
       </div>
       <Kpis values={window.kpis} />
+      <MonthlySettlement values={window.kpis} />
       {monthView.emptyCopy ? <p className="finance-window__empty" role="status">
         {monthView.emptyCopy}
       </p> : null}

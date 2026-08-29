@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
+import { AreaChart, BarFill } from '../charts.jsx'
 import { addMonths, cap, fmtMoney, fmtMonthYear, plural } from '../format.js'
 import {
   FINANCE_WINDOW_MIN_MONTH,
@@ -22,14 +23,29 @@ const INVOICE_LABELS = Object.freeze({
   action_required: 'Wymaga wystawienia', issued: 'Wystawiona',
   not_issued: 'Niewystawiona', not_required: 'Nie wymaga', unknown: 'Do sprawdzenia',
 })
+const paymentTone = (id) => id === 'outstanding' ? 'amber' : 'sage'
 
-function MoneySplit({ title, rows }) {
+function MoneySplit({ title, rows, tone, toneFor }) {
+  const maxValue = Math.max(...rows.map(({ value }) => Math.max(value, 0)), 1)
   return (
     <section className="card card--pad report-window__split">
       <h2 className="card-title">{title}</h2>
       {rows.length === 0 ? <p className="muted">Brak danych</p> : (
         <dl>{rows.map(({ id, label, value }) => <div key={id}>
-          <dt>{label}</dt><dd>{money(value)}</dd>
+          <dt>{label}</dt>
+          <dd>
+            <span>{money(value)}</span>
+            <div className="hbar__track report-window__split-track" aria-hidden="true">
+              <BarFill
+                segments={[{
+                  value: Math.max(value, 0),
+                  color: `var(--${toneFor?.(id) ?? tone})`,
+                  label,
+                }]}
+                totalMax={maxValue}
+              />
+            </div>
+          </dd>
         </div>)}</dl>
       )}
     </section>
@@ -132,6 +148,15 @@ export function ProtectedReports({ params = {} }) {
 
       <section className="card card--pad report-window__trend" aria-labelledby="report-trend-title">
         <h2 className="card-title" id="report-trend-title">Trend sześciu miesięcy</h2>
+        <div className="report-window__chart">
+          <AreaChart
+            data={window.trend.map((point) => ({
+              ym: point.month,
+              revenue: point.revenueGrosze / 100,
+            }))}
+            label="Przychody w sześciu miesiącach"
+          />
+        </div>
         <TableScroll label="Przewijana tabela trendu sześciu miesięcy"><table className="table">
           <caption className="sr-only">Przychody, wpłaty i wydatki w sześciu miesiącach</caption>
           <thead><tr><th>Miesiąc</th><th className="right">Przychody</th>
@@ -151,14 +176,18 @@ export function ProtectedReports({ params = {} }) {
         <MoneySplit
           title="Przychody według specjalistki"
           rows={moneyRows(window.splits.specialist, (id) => specialistNames.get(id) ?? 'Nie ustalono')}
+          tone="coral"
         />
         <MoneySplit
           title="Przychody według usługi"
           rows={moneyRows(window.splits.service, (id) => SERVICE_BY_ID[id]?.label ?? 'Nie ustalono')}
+          tone="sky-deep"
         />
         <MoneySplit
           title="Płatności i zaległości"
           rows={moneyRows(window.splits.payment, (id) => PAYMENT_LABELS[id] ?? 'Nie ustalono')}
+          tone="sage"
+          toneFor={paymentTone}
         />
         <section className="card card--pad report-window__split">
           <h2 className="card-title">Faktury</h2>
