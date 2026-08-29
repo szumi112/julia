@@ -14,7 +14,7 @@ import {
   validateStagingBackupConfig,
 } from '../../scripts/backup-staging-lib.mjs'
 import {
-  WORKBOOK_ROUNDTRIP_MIGRATIONS,
+  CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS,
 } from '../../worker/operations/backup-recovery.js'
 import { BACKUP_SQL_MAX_BYTES } from '../../worker/operations/backup-limits.js'
 import fixtureV2 from '../fixtures/backup-format-v2.json' with { type: 'json' }
@@ -87,7 +87,7 @@ function successfulSetup(overrides = {}) {
     version: 2,
     createdAt: new Date(now).toISOString(),
   }
-  const migrations = structuredClone(WORKBOOK_ROUNDTRIP_MIGRATIONS)
+  const migrations = structuredClone(CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS)
   const recoverySnapshot = {
     appliedMigrations: migrations,
     recoveryFacts: structuredClone(workbookRecoveryFacts),
@@ -218,7 +218,7 @@ test('demand creation brackets export with migrations, publishes manifest last, 
     backupId: setup.backupId,
     completedAt: '2026-08-27T12:34:56.789Z',
     manifestKey: `backups/v3/2026/08/${setup.backupId}.manifest.json`,
-    migrationCount: 21,
+    migrationCount: 22,
     migrationSetSha256: (await migrationEvidence(setup.migrations)).migrationSetSha256,
     objectEtag: 'etag-demand-public',
     objectSize: 4,

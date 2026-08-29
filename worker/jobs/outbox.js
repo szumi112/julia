@@ -592,6 +592,207 @@ async function actionFor(db, cryptoContext, input) {
   }
 }
 
+const RECOVERY_LINEAGE_KEYS = Object.freeze([
+  'recovery_id',
+  'source_job_id',
+  'replacement_job_id',
+  'operational_action_id',
+  'requested_by_staff_id',
+  'correlation_id',
+  'recovery_created_at',
+  'source_type',
+  'source_aggregate_type',
+  'source_aggregate_id',
+  'source_status',
+  'action_fingerprint',
+  'action_kind',
+  'action_severity',
+  'action_status',
+  'action_entity_type',
+  'action_entity_id',
+  'action_details_envelope',
+  'action_version',
+  'action_created_at',
+  'action_updated_at',
+  'action_resolved_at',
+])
+
+async function recoveryLineageFor(db, replacement) {
+  let lineage
+  try {
+    lineage = await db.prepare(
+      `SELECT recovery.id AS recovery_id,recovery.source_job_id,
+              recovery.replacement_job_id,recovery.operational_action_id,
+              recovery.requested_by_staff_id,recovery.correlation_id,
+              recovery.created_at AS recovery_created_at,
+              source.type AS source_type,
+              source.aggregate_type AS source_aggregate_type,
+              source.aggregate_id AS source_aggregate_id,
+              source.status AS source_status,
+              action.fingerprint AS action_fingerprint,
+              action.kind AS action_kind,action.severity AS action_severity,
+              action.status AS action_status,
+              action.entity_type AS action_entity_type,
+              action.entity_id AS action_entity_id,
+              action.details_envelope AS action_details_envelope,
+              action.version AS action_version,
+              action.created_at AS action_created_at,
+              action.updated_at AS action_updated_at,
+              action.resolved_at AS action_resolved_at
+       FROM outbox_job_recoveries AS recovery
+       JOIN outbox_jobs AS source ON source.id=recovery.source_job_id
+       JOIN operational_actions AS action
+         ON action.id=recovery.operational_action_id
+       WHERE recovery.replacement_job_id=?`,
+    ).bind(replacement.id).first()
+  } catch (error) {
+    if (String(error?.message ?? '').includes('no such table: outbox_job_recoveries')) {
+      return null
+    }
+    throw error
+  }
+  if (!lineage) return null
+  if (!exactKeys(lineage, RECOVERY_LINEAGE_KEYS)
+    || !validId(lineage.recovery_id)
+    || !lineage.recovery_id.startsWith('rcv_')
+    || !validId(lineage.source_job_id)
+    || lineage.replacement_job_id !== replacement.id
+    || !validId(lineage.operational_action_id)
+    || !validId(lineage.requested_by_staff_id)
+    || !validId(lineage.correlation_id)
+    || !validInstant(lineage.recovery_created_at)
+    || lineage.source_job_id === replacement.id
+    || lineage.source_type !== replacement.type
+    || lineage.source_aggregate_type !== replacement.aggregate_type
+    || lineage.source_aggregate_id !== replacement.aggregate_id
+    || lineage.source_status !== 'dead'
+    || lineage.action_fingerprint !== `outbox.dead:${lineage.source_job_id}`
+    || lineage.action_kind !== 'outbox_job_failed'
+    || lineage.action_severity !== 'critical'
+    || lineage.action_status !== 'open'
+    || lineage.action_entity_type !== 'outbox_job'
+    || lineage.action_entity_id !== lineage.source_job_id
+    || typeof lineage.action_details_envelope !== 'string'
+    || lineage.action_version !== 1
+    || !validInstant(lineage.action_created_at)
+    || !validInstant(lineage.action_updated_at)
+    || lineage.action_updated_at !== lineage.action_created_at
+    || lineage.action_resolved_at !== null) invalidState()
+  return Object.freeze(lineage)
+}
+
+function recoveryResolution(db, lineage, replacement, now, idFactory) {
+  if (!lineage) return null
+  const auditId = idFrom(idFactory)
+  const nextVersion = lineage.action_version + 1
+  if (!Number.isSafeInteger(nextVersion)) invalidState()
+  const metadata = JSON.stringify({ actionVersion: nextVersion })
+  const exactLineage = `EXISTS (
+    SELECT 1 FROM outbox_job_recoveries
+    WHERE id=? AND source_job_id=? AND replacement_job_id=?
+      AND operational_action_id=? AND requested_by_staff_id=?
+      AND correlation_id=? AND created_at=?
+  )`
+  const lineageBindings = [
+    lineage.recovery_id,
+    lineage.source_job_id,
+    lineage.replacement_job_id,
+    lineage.operational_action_id,
+    lineage.requested_by_staff_id,
+    lineage.correlation_id,
+    lineage.recovery_created_at,
+  ]
+  const resolvedAction = `EXISTS (
+    SELECT 1 FROM operational_actions
+    WHERE id=? AND fingerprint=? AND kind='outbox_job_failed'
+      AND severity='critical' AND status='resolved'
+      AND entity_type='outbox_job' AND entity_id=? AND details_envelope=?
+      AND version=? AND created_at=? AND updated_at=? AND resolved_at=?
+  )`
+  const actionBindings = [
+    lineage.operational_action_id,
+    lineage.action_fingerprint,
+    lineage.source_job_id,
+    lineage.action_details_envelope,
+    nextVersion,
+    lineage.action_created_at,
+    now,
+    now,
+  ]
+  const resolutionAudit = `EXISTS (
+    SELECT 1 FROM audit_events
+    WHERE id=? AND occurred_at=? AND actor_staff_id IS NULL
+      AND action='operational_action.resolved'
+      AND entity_type='operational_action' AND entity_id=?
+      AND result='success' AND reason_envelope IS NULL
+      AND correlation_id=? AND metadata_json=?
+  )`
+  const auditBindings = [
+    auditId,
+    now,
+    lineage.operational_action_id,
+    lineage.correlation_id,
+    metadata,
+  ]
+  return Object.freeze({
+    statements: Object.freeze([
+      db.prepare(
+        `UPDATE operational_actions
+         SET status='resolved',version=version+1,updated_at=?,resolved_at=?
+         WHERE id=? AND fingerprint=? AND kind='outbox_job_failed'
+           AND severity='critical' AND status='open'
+           AND entity_type='outbox_job' AND entity_id=? AND details_envelope=?
+           AND version=? AND created_at=? AND updated_at=? AND resolved_at IS NULL
+           AND ${exactLineage}
+           AND EXISTS (
+             SELECT 1 FROM outbox_jobs
+             WHERE id=? AND status='processing' AND attempt_count=?
+               AND lease_owner=? AND lease_expires_at=?
+           )`,
+      ).bind(
+        now,
+        now,
+        lineage.operational_action_id,
+        lineage.action_fingerprint,
+        lineage.source_job_id,
+        lineage.action_details_envelope,
+        lineage.action_version,
+        lineage.action_created_at,
+        lineage.action_updated_at,
+        ...lineageBindings,
+        replacement.id,
+        replacement.attempt_count,
+        replacement.lease_owner,
+        replacement.lease_expires_at,
+      ),
+      operationGuard(
+        db,
+        `resolve_recovery_${lineage.recovery_id}`,
+        `changes()=1 AND ${exactLineage} AND ${resolvedAction}`,
+        [...lineageBindings, ...actionBindings],
+      ),
+      auditEventStatement(db, {
+        id: auditId,
+        occurredAt: now,
+        actorStaffId: null,
+        action: 'operational_action.resolved',
+        entityType: 'operational_action',
+        entityId: lineage.operational_action_id,
+        result: 'success',
+        correlationId: lineage.correlation_id,
+        metadata: { actionVersion: nextVersion },
+        reasonEnvelope: null,
+      }),
+    ]),
+    predicate: `AND ${exactLineage} AND ${resolvedAction} AND ${resolutionAudit}`,
+    bindings: Object.freeze([
+      ...lineageBindings,
+      ...actionBindings,
+      ...auditBindings,
+    ]),
+  })
+}
+
 async function reapOne(db, cryptoContext, row, now, idFactory) {
   if (!validProcessingJob(row) || row.lease_expires_at > now) invalidState()
   const attempt = await openAttempt(db, row.id)
@@ -607,6 +808,7 @@ async function reapOne(db, cryptoContext, row, now, idFactory) {
   const errorCode = email ? 'EMAIL_DELIVERY_AMBIGUOUS' : 'OUTBOX_LEASE_EXPIRED'
   const attemptResult = dead ? 'dead' : 'retry'
   const jobStatus = dead ? 'dead' : 'queued'
+  const lineage = dead ? await recoveryLineageFor(db, row) : null
   const action = dead
     ? await actionFor(db, cryptoContext, {
         idFactory,
@@ -616,6 +818,7 @@ async function reapOne(db, cryptoContext, row, now, idFactory) {
         now,
       })
     : null
+  const resolution = recoveryResolution(db, lineage, row, now, idFactory)
   const statements = [
     db.prepare(
       `UPDATE outbox_attempts
@@ -625,6 +828,7 @@ async function reapOne(db, cryptoContext, row, now, idFactory) {
     ).bind(now, attemptResult, errorCode, attempt.id, row.id, row.attempt_count),
   ]
   if (action?.statement) statements.push(action.statement)
+  if (resolution) statements.push(...resolution.statements)
   statements.push(
     db.prepare(
       `UPDATE outbox_jobs
@@ -682,7 +886,8 @@ async function reapOne(db, cryptoContext, row, now, idFactory) {
        SELECT count(*) FROM outbox_attempts
        WHERE job_id=? AND completed_at IS NULL
      )=0
-     ${actionPredicate}`,
+     ${actionPredicate}
+     ${resolution?.predicate ?? ''}`,
     [
       row.id,
       jobStatus,
@@ -712,6 +917,7 @@ async function reapOne(db, cryptoContext, row, now, idFactory) {
             action.updatedAt,
           ]
         : []),
+      ...(resolution?.bindings ?? []),
     ],
   ))
   try {
@@ -895,6 +1101,7 @@ export async function finalizeAcceptedInvitationEmail(db, cryptoContext, input =
     || staff.version < 1
     || invitation.email_lookup !== staff.email_lookup) return false
 
+  const lineage = await recoveryLineageFor(db, job)
   const nextInvitation = {
     ...invitation,
     email_sent_at: validated.now,
@@ -904,6 +1111,7 @@ export async function finalizeAcceptedInvitationEmail(db, cryptoContext, input =
   const deliveryId = idFrom(input.idFactory)
   const versionId = idFrom(input.idFactory)
   const auditId = idFrom(input.idFactory)
+  const resolution = recoveryResolution(db, lineage, job, validated.now, input.idFactory)
   const snapshot = JSON.stringify(await encryptForScope(
     cryptoContext.keyring,
     cryptoContext.dataKey,
@@ -1151,7 +1359,8 @@ export async function finalizeAcceptedInvitationEmail(db, cryptoContext, input =
            AND entity_type='staff_invitation' AND entity_id=?
            AND result='success' AND reason_envelope IS NULL
            AND correlation_id=? AND metadata_json=?
-       )`,
+       )
+       ${resolution?.predicate ?? ''}`,
       [
         job.id,
         invitation.id,
@@ -1195,9 +1404,11 @@ export async function finalizeAcceptedInvitationEmail(db, cryptoContext, input =
         invitation.id,
         job.id,
         metadata,
+        ...(resolution?.bindings ?? []),
       ],
     ),
   ]
+  if (resolution) statements.splice(-2, 0, ...resolution.statements)
   try {
     await db.batch(statements)
     return true
@@ -1258,6 +1469,7 @@ export async function finalizeOutboxJob(db, cryptoContext, input = {}) {
     ? instantFromMs(input.nowMs + retryDelayMs(input.attemptNumber))
     : row.scheduled_at
   const errorCode = input.errorCode
+  const lineage = jobStatus === 'queued' ? null : await recoveryLineageFor(db, row)
   const action = jobStatus === 'dead'
     ? await actionFor(db, cryptoContext, {
         idFactory: input.idFactory,
@@ -1267,6 +1479,7 @@ export async function finalizeOutboxJob(db, cryptoContext, input = {}) {
         now: validated.now,
       })
     : null
+  const resolution = recoveryResolution(db, lineage, row, validated.now, input.idFactory)
   const statements = [
     db.prepare(
       `UPDATE outbox_attempts
@@ -1293,6 +1506,7 @@ export async function finalizeOutboxJob(db, cryptoContext, input = {}) {
     ),
   ]
   if (action?.statement) statements.push(action.statement)
+  if (resolution) statements.push(...resolution.statements)
   statements.push(
     db.prepare(
       `UPDATE outbox_jobs
@@ -1351,7 +1565,8 @@ export async function finalizeOutboxJob(db, cryptoContext, input = {}) {
        SELECT count(*) FROM outbox_attempts
        WHERE job_id=? AND completed_at IS NULL
      )=0
-     ${actionPredicate}`,
+     ${actionPredicate}
+     ${resolution?.predicate ?? ''}`,
     [
       row.id,
       jobStatus,
@@ -1382,6 +1597,7 @@ export async function finalizeOutboxJob(db, cryptoContext, input = {}) {
             action.updatedAt,
           ]
         : []),
+      ...(resolution?.bindings ?? []),
     ],
   ))
   try {

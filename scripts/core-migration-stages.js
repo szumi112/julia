@@ -32,6 +32,7 @@ export const CORE_MIGRATION_STAGE_E_NAMES = Object.freeze([
   '0019_dual_role_specialists.sql',
   '0020_capability_overrides.sql',
   '0021_finance_reporting_registry.sql',
+  '0022_outbox_job_recoveries.sql',
 ])
 
 export const CORE_MIGRATION_REMOTE_ENV_NAMES = Object.freeze(['production', 'staging'])

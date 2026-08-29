@@ -830,11 +830,55 @@ describe('operations HTTP shell', () => {
     })
   })
 
+  it('passes the canonical recovery command facts and returns accepted', async () => {
+    const service = vi.fn(async () => ({
+      data: {
+        action: { id: 'action_1', status: 'open', version: 1 },
+        recovery: { kind: 'access', status: 'queued' },
+      },
+    }))
+    const input = deps({
+      requestOperationalActionRecovery: service,
+      now: () => 1_800_000_000_000,
+      idFactory: () => 'generated_1',
+      verifyCsrfToken: vi.fn(async () => true),
+    })
+    const response = await createApp(input).request(
+      '/api/v1/operations/actions/action_1/recovery-attempts',
+      {
+        method: 'POST',
+        headers: {
+          origin,
+          'content-type': 'application/json',
+          'idempotency-key': 'recovery-key',
+          'sec-fetch-site': 'same-origin',
+          'x-correlation-id': correlationId,
+          'x-csrf-token': 'csrf-token',
+        },
+        body: '{"version":1}',
+      },
+    )
+
+    expect(response.status).toBe(202)
+    expect(service).toHaveBeenCalledWith({
+      db: undefined,
+      cryptoContext: input.cryptoContext,
+      actor,
+      nowMs: 1_800_000_000_000,
+      correlationId,
+      idFactory: input.idFactory,
+      actionId: 'action_1',
+      idempotencyKey: 'recovery-key',
+      body: { version: 1 },
+    })
+  })
+
   it.each([
     ['POST', '/api/v1/operations/health', 'GET, HEAD, OPTIONS'],
     ['DELETE', '/api/v1/operations/actions', 'GET, HEAD, OPTIONS'],
     ['POST', '/api/v1/security/audit?limit=1', 'GET, HEAD, OPTIONS'],
     ['GET', '/api/v1/operations/actions/action_1/resolution', 'POST, OPTIONS'],
+    ['GET', '/api/v1/operations/actions/action_1/recovery-attempts', 'POST, OPTIONS'],
   ])('rejects %s %s with route-specific Allow before dependencies', async (method, path, allow) => {
     const input = deps({
       config: undefined,
@@ -844,6 +888,7 @@ describe('operations HTTP shell', () => {
       listOpenOperationalActions: vi.fn(),
       listSecurityAudit: vi.fn(),
       resolveOperationalAction: vi.fn(),
+      requestOperationalActionRecovery: vi.fn(),
     })
     const response = await createApp(input).request(path, { method })
 
@@ -861,12 +906,16 @@ describe('operations HTTP shell', () => {
     '/api/v1/operations/actions/action.1/resolution',
     '/api/v1/operations/actions/action_1%2Fextra/resolution',
     '/api/v1/operations/actions/action_1/resolution/',
+    '/api/v1/operations/actions/action_1/recovery-attempts?x=1',
+    '/api/v1/operations/actions/action.1/recovery-attempts',
+    '/api/v1/operations/actions/action_1/recovery-attempts/',
   ])('keeps noncanonical operations variant %s unmatched', async (path) => {
     const service = vi.fn()
     const input = deps({
       getOperationalHealth: service,
       listOpenOperationalActions: service,
       resolveOperationalAction: service,
+      requestOperationalActionRecovery: service,
       listSecurityAudit: service,
     })
     const response = await createApp(input).request(path, {
@@ -882,11 +931,13 @@ describe('operations HTTP shell', () => {
     ['/api/v1/operations/actions', 'GET, HEAD, OPTIONS'],
     ['/api/v1/security/audit?limit=1', 'GET, HEAD, OPTIONS'],
     ['/api/v1/operations/actions/action_1/resolution', 'POST, OPTIONS'],
+    ['/api/v1/operations/actions/action_1/recovery-attempts', 'POST, OPTIONS'],
   ])('authenticates OPTIONS %s without selecting a service, CSRF, or body', async (path, allow) => {
     const input = deps({
       getOperationalHealth: null,
       listOpenOperationalActions: null,
       resolveOperationalAction: null,
+      requestOperationalActionRecovery: null,
       listSecurityAudit: null,
       verifyCsrfToken: vi.fn(),
       readJsonBodyOnce: vi.fn(),
@@ -1262,6 +1313,7 @@ describe('safeLog', () => {
     'operations.health',
     'operations.actions',
     'operations.action-resolution',
+    'operations.action-recovery',
     'security.audit',
   ])('keeps the accepted safe route id %s', (routeId) => {
     const output = vi.spyOn(console, 'info').mockImplementation(() => {})

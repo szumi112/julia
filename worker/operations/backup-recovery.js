@@ -40,6 +40,11 @@ export const WORKBOOK_ROUNDTRIP_MIGRATIONS = Object.freeze([
   migration(21, '0021_finance_reporting_registry.sql'),
 ])
 
+export const CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS = Object.freeze([
+  ...WORKBOOK_ROUNDTRIP_MIGRATIONS,
+  migration(22, '0022_outbox_job_recoveries.sql'),
+])
+
 const ARTIFACT_KEYS = Object.freeze([
   'id', 'fingerprint', 'byteSize', 'parserVersion', 'materializerVersion',
 ])
@@ -189,6 +194,11 @@ function sameMigrations(left, right) {
   ))
 }
 
+function supportedWorkbookMigrations(migrations) {
+  return sameMigrations(migrations, WORKBOOK_ROUNDTRIP_MIGRATIONS)
+    || sameMigrations(migrations, CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS)
+}
+
 function validateCore(value) {
   const facts = capturedObject(value, ['kind'])
   if (facts.kind !== 'core_pre_workbook_v1') fail()
@@ -286,7 +296,7 @@ export function recoveryFactsMatchMigrations(recoveryFacts, appliedMigrations) {
     const migrations = migrationRows(appliedMigrations)
     if (facts.kind === 'core_pre_workbook_v1') {
       if (!sameMigrations(migrations, CORE_PRE_WORKBOOK_MIGRATIONS)) fail()
-    } else if (!sameMigrations(migrations, WORKBOOK_ROUNDTRIP_MIGRATIONS)) fail()
+    } else if (!supportedWorkbookMigrations(migrations)) fail()
     return true
   } catch { fail() }
 }
@@ -699,7 +709,7 @@ async function readSnapshotWithQuery(query) {
     try { parsed = JSON.parse(raw.applied_migrations_json) } catch { fail() }
     const migrations = migrationRows(parsed)
     if (JSON.stringify(migrations) !== raw.applied_migrations_json
-      || !sameMigrations(migrations, WORKBOOK_ROUNDTRIP_MIGRATIONS)) fail()
+      || !supportedWorkbookMigrations(migrations)) fail()
     const recoveryFacts = factsFromRow(raw)
     recoveryFactsMatchMigrations(recoveryFacts, migrations)
     return { appliedMigrations: migrations, recoveryFacts }

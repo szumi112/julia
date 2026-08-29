@@ -784,6 +784,41 @@ describe('stored operational health evaluation', () => {
     expect(result.actionCandidates.some(({ kind }) => kind === 'outbox_job_failed')).toBe(false)
   })
 
+  it('excludes only a terminal replacement with exact auto-resolution evidence', async () => {
+    let deadSql = null
+    const db = trackedDb(healthReadDb({
+      succeededJob: {
+        id: 'job_recovery_health_success',
+        type: ORDINARY_TYPES[0],
+        status: 'succeeded',
+        updated_at: nowIso(NOW_MS - 1_000),
+      },
+    }), {
+      first({ sql }) {
+        if (sql.includes("name='outbox_job_recoveries'")) return { present: 1 }
+        return undefined
+      },
+      prepare(sql) {
+        if (sql.includes("status='dead'")) deadSql = sql
+      },
+    })
+
+    expect(checkFor(await evaluate(NOW_MS, { db }), 'outbox.processing')).toMatchObject({
+      status: 'ok',
+      detailCode: 'OUTBOX_HEALTHY',
+      lastSuccessAt: nowIso(NOW_MS - 1_000),
+    })
+    expect(deadSql).toContain('AND NOT EXISTS')
+    expect(deadSql).toContain('FROM outbox_job_recoveries AS recovery')
+    expect(deadSql).toContain('JOIN operational_actions AS action')
+    expect(deadSql).toContain("action.status='resolved'")
+    expect(deadSql).toContain('action.version=2')
+    expect(deadSql).toContain("action.fingerprint='outbox.dead:' || job.id")
+    expect(deadSql).toContain('resolution.actor_staff_id IS NULL')
+    expect(deadSql).toContain('action.resolved_at=replacement.updated_at')
+    expect(deadSql).not.toContain("job.status='dead'\n       AND action.status='open'")
+  })
+
   it('excludes dormant failed backup.create history from ordinary outbox health', async () => {
     expect(checkFor(await evaluate(), 'outbox.processing')).toMatchObject({
       status: 'ok', detailCode: 'OUTBOX_HEALTHY', lastSuccessAt: null,
@@ -1889,7 +1924,7 @@ describe('atomic scheduled operational publication', () => {
       createdActions: 10,
       publicationAttempts: 1,
     })
-    expect(executions).toBe(25)
+    expect(executions).toBe(26)
     expect(maxBindings).toBeLessThanOrEqual(39)
   })
 

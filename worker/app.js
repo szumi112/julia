@@ -28,6 +28,7 @@ import {
   getOperationalHealth,
   listOpenOperationalActions,
   listSecurityAudit,
+  requestOperationalActionRecovery,
   resolveOperationalAction,
 } from './routes/operations.js'
 import { getSession } from './routes/session.js'
@@ -126,6 +127,7 @@ const STAFF_INVITATIONS_PATH = '/api/v1/staff/invitations'
 const STAFF_ID = /^\/api\/v1\/staff\/stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}\/deactivation$/
 const SPECIALIST_INVITATION_ID = /^\/api\/v1\/specialists\/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}\/invitations$/
 const ACTION_RESOLUTION_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/resolution$/
+const ACTION_RECOVERY_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/recovery-attempts$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const INVALID_WORKBOOK_FILENAME_TEXT = /[\p{Cc}\p{Cf}]/u
 const CLIENT_PATH_ID = 'cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}'
@@ -255,6 +257,7 @@ const OPERATION_SERVICES = Object.freeze({
   getOperationalHealth,
   listOpenOperationalActions,
   listSecurityAudit,
+  requestOperationalActionRecovery,
   resolveOperationalAction,
 })
 
@@ -294,6 +297,10 @@ const routeFor = (request) => {
   const resolution = url.search === '' ? ACTION_RESOLUTION_PATH.exec(url.pathname) : null
   if (resolution) {
     return { id: 'operations.action-resolution', expected: 'human', methods: ['POST', 'OPTIONS'], allow: OPERATIONS_MUTATION_ALLOW, service: 'resolveOperationalAction', actionId: resolution[1] }
+  }
+  const recovery = url.search === '' ? ACTION_RECOVERY_PATH.exec(url.pathname) : null
+  if (recovery) {
+    return { id: 'operations.action-recovery', expected: 'human', methods: ['POST', 'OPTIONS'], allow: OPERATIONS_MUTATION_ALLOW, service: 'requestOperationalActionRecovery', actionId: recovery[1] }
   }
   return { id: 'unmatched', expected: 'human', methods: null }
 }
@@ -545,6 +552,7 @@ export function createApp(deps = {}) {
     if (isMutationMethod(method)) {
       validateMutationMetadata(request, config, { bodyMode: route.bodyMode ?? 'json' })
       if (route.id === 'operations.action-resolution'
+        || route.id === 'operations.action-recovery'
         || (route.core && route.idempotency !== false)) validateResolutionIdempotency(request)
     }
     else if (method === 'OPTIONS') validateOptionsOrigin(request, config)
@@ -613,7 +621,8 @@ export function createApp(deps = {}) {
           rejectDuplicateTopLevelKeys: route.core || route.id === 'staff.invitations'
             || route.id === 'specialists.invitations'
             || route.id === 'staff.deactivation'
-            || route.id === 'operations.action-resolution',
+            || route.id === 'operations.action-resolution'
+            || route.id === 'operations.action-recovery',
         }))
       }
       if (route.core && route.bodyMode === 'json') {
@@ -1469,6 +1478,21 @@ export function createApp(deps = {}) {
     })
     return c.json(result)
   })
+  app.post('/api/v1/operations/actions/:actionId/recovery-attempts', async (c) => {
+    if (c.get('routeId') !== 'operations.action-recovery') throw new AppError('NOT_FOUND')
+    const result = await c.get('operationService')({
+      db: c.env?.DB ?? deps.db,
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+      actionId: c.get('routeActionId'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      body: c.get('jsonBody'),
+    })
+    return c.json(result, 202)
+  })
   app.get('/api/v1/security/audit', async (c) => {
     if (c.get('routeId') !== 'security.audit') throw new AppError('NOT_FOUND')
     const result = await c.get('operationService')({
@@ -1496,6 +1520,10 @@ export function createApp(deps = {}) {
   }
   app.options('/api/v1/operations/actions/:actionId/resolution', (c) => {
     if (c.get('routeId') !== 'operations.action-resolution') throw new AppError('NOT_FOUND')
+    return new Response(null, { status: 204, headers: { Allow: OPERATIONS_MUTATION_ALLOW } })
+  })
+  app.options('/api/v1/operations/actions/:actionId/recovery-attempts', (c) => {
+    if (c.get('routeId') !== 'operations.action-recovery') throw new AppError('NOT_FOUND')
     return new Response(null, { status: 204, headers: { Allow: OPERATIONS_MUTATION_ALLOW } })
   })
   app.options('/api/v1/*', (c) => {

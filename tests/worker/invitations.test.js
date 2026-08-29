@@ -344,6 +344,34 @@ describe('staff invitation input', () => {
     expect(specialistIdFor('stf_opaque-payload_1')).toBe('sp_opaque-payload_1')
   })
 
+  it('accepts a live team identity when fictional patient data runs in staging', () => {
+    expect(validateInvitationInput({
+      displayName: '  Z\u0307aneta Testowa  ',
+      email: '  TEAM.MEMBER@QA.INVALID  ',
+      role: 'coordinator',
+    }, { appEnv: 'staging', dataMode: 'fictional' })).toEqual({
+      displayName: '\u017baneta Testowa',
+      email: 'team.member@qa.invalid',
+      role: 'coordinator',
+    })
+  })
+
+  it('keeps live team identities disabled outside staging while data is fictional', () => {
+    expect(() => validateInvitationInput({
+      displayName: 'Production Team Member',
+      email: 'team.member@qa.invalid',
+      role: 'coordinator',
+    }, { appEnv: 'production', dataMode: 'fictional' })).toThrow('VALIDATION_FAILED')
+  })
+
+  it('does not let the legacy specialist data-mode marker bypass the environment boundary', () => {
+    expect(() => validateInvitationInput({
+      displayName: 'Production Specialist',
+      email: 'specialist@qa.invalid',
+      role: 'specialist',
+    }, { appEnv: 'production', dataMode: 'staging-access' })).toThrow('VALIDATION_FAILED')
+  })
+
   it.each([
     ['displayName', { displayName: '', email: 'anna@example.test', role: 'owner' }],
     ['displayName', { displayName: 'x'.repeat(121), email: 'anna@example.test', role: 'owner' }],

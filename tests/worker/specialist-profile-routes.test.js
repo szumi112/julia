@@ -294,6 +294,59 @@ describe('specialist profile creation', () => {
     ).first()).count).toBe(beforeAudits)
   })
 
+  it('does not replay a staging-only live address outside fictional staging', async () => {
+    const profileIds = [
+      'profile_live_replay',
+      'profile_live_replay_version',
+      'profile_live_replay_audit',
+    ]
+    const created = await createSpecialistProfile({
+      db: env.DB, recoveryDb: env.DB, actor, keyring: cryptoContext.keyring,
+      nowMs: NOW_MS + 1_100, correlationId: CORRELATION_ID,
+      idFactory: () => profileIds.shift(),
+      body: {
+        displayName: 'Live Replay Specialist', professionalTitle: 'Specjalistka',
+        standardRateGrosze: 18000,
+      },
+      idempotencyKey: 'profile-live-replay-create',
+    })
+    const invitationInput = {
+      email: 'live.replay@qa.invalid',
+      expectedVersion: created.body.data.specialist.version,
+    }
+    const invitationIds = (() => {
+      let value = 0
+      return () => `profile_live_replay_invite_${++value}`
+    })()
+    const invited = await inviteSpecialistProfile({
+      db: env.DB, cryptoContext, actor,
+      specialistId: created.body.data.specialist.id,
+      input: invitationInput,
+      idempotencyKey: 'profile-live-replay-invite',
+      correlationId: CORRELATION_ID,
+      nowMs: NOW_MS + 1_200,
+      appEnv: 'staging',
+      dataMode: 'fictional',
+      idFactory: invitationIds,
+    })
+    expect(invited.data.staff.email).toBe('live.replay@qa.invalid')
+
+    await expect(inviteSpecialistProfile({
+      db: env.DB, cryptoContext, actor,
+      specialistId: created.body.data.specialist.id,
+      input: invitationInput,
+      idempotencyKey: 'profile-live-replay-invite',
+      correlationId: CORRELATION_ID,
+      nowMs: NOW_MS + 1_200,
+      appEnv: 'production',
+      dataMode: 'fictional',
+      idFactory: () => { throw new Error('id factory must not run on rejected replay') },
+    })).rejects.toMatchObject({
+      message: 'VALIDATION_FAILED',
+      details: { field: 'email' },
+    })
+  })
+
   it('keeps changed specialist invitation replay tuples conflict-safe', async () => {
     const base = {
       db: env.DB, cryptoContext, actor, specialistId: 'sp_profile_one',

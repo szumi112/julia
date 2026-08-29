@@ -97,7 +97,7 @@ test('@owner creates, edits, and invites one stable specialist profile', async (
   const accessDialog = page.getByRole('dialog', {
     name: 'Aktywuj dostęp — Anna Janowska-Kowalska',
   })
-  await accessDialog.getByLabel('Adres e-mail').fill('anna-j@gmail.com')
+  await accessDialog.getByLabel('Adres e-mail').fill('anna-j@example.test')
   await accessDialog.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
   await expect(accessDialog.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
   await expect(accessDialog).toContainText(
@@ -110,7 +110,7 @@ test('@owner creates, edits, and invites one stable specialist profile', async (
   expect(invitationAttempts).toHaveLength(2)
   expect(invitationAttempts[1]).toEqual(invitationAttempts[0])
   expect(JSON.parse(invitationAttempts[0].body)).toEqual({
-    email: 'anna-j@gmail.com',
+    email: 'anna-j@example.test',
     expectedVersion: 2,
   })
   expect(invitationAttempts[0].key).toMatch(/^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/)

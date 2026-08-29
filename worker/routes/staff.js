@@ -41,7 +41,13 @@ export async function postInvitation(input) {
   if (!allowed(input.actor, input.nowMs)) return deny(input)
   const key = input.idempotencyKey
   if (!key) throw new Error('VALIDATION_FAILED')
-  return inviteStaff({ ...input, input: input.body, idempotencyKey: key, dataMode: input.config.dataMode })
+  return inviteStaff({
+    ...input,
+    input: input.body,
+    idempotencyKey: key,
+    appEnv: input.config.appEnv,
+    dataMode: input.config.dataMode,
+  })
 }
 export async function postSpecialistInvitation(input) {
   if (!allowed(input.actor, input.nowMs)) return deny(input)
@@ -51,6 +57,7 @@ export async function postSpecialistInvitation(input) {
     ...input,
     input: input.body,
     idempotencyKey: key,
+    appEnv: input.config.appEnv,
     dataMode: input.config.dataMode,
   })
 }

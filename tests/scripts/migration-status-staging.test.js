@@ -33,13 +33,14 @@ const exactNames = [
   '0019_dual_role_specialists.sql',
   '0020_capability_overrides.sql',
   '0021_finance_reporting_registry.sql',
+  '0022_outbox_job_recoveries.sql',
 ]
 const preStageNames = exactNames.slice(0, 15)
 
 test('migration status returns fixed exact pre-stage and post-stage evidence', async () => {
   const cases = [
     ['pre-stage', preStageNames, 'e16e136ee03ef9e15ba9b73e2ba986505b4ea6d04add1dd2bbf8d39ac51b77fc'],
-    ['post-stage', exactNames, 'f96af3398c37002ac216d95cab9fb8577cb44090f8405c4970019ee6c763ea73'],
+    ['post-stage', exactNames, '7f8477c18385bb6b063ad36a31ad7df871aafa93577ec6d1ec727a9bb744b38b'],
   ]
   for (const [expectation, names, migrationSetSha256] of cases) {
     const result = await migrationStatusEvidence(names.map((name, index) => ({

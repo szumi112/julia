@@ -39,6 +39,8 @@ const seedStaff = async ({
   status = 'active',
   specialistId = null,
   version = 1,
+  createdAt = NOW,
+  updatedAt = createdAt,
 } = {}) => {
   const row = {
     id,
@@ -50,10 +52,10 @@ const seedStaff = async ({
     access_subject: status === 'active' ? `subject_${id}` : null,
     specialist_id: specialistId,
     version,
-    activated_at: status === 'active' ? NOW : null,
-    disabled_at: status === 'disabled' ? NOW : null,
-    created_at: NOW,
-    updated_at: NOW,
+    activated_at: status === 'active' ? createdAt : null,
+    disabled_at: status === 'disabled' ? updatedAt : null,
+    created_at: createdAt,
+    updated_at: updatedAt,
   }
   await activeDb.prepare(
     `INSERT INTO staff_users
@@ -143,6 +145,20 @@ const noCommands = () => createStagingSpecialistMaterializer({
   updateProfile: async () => { throw new Error('unexpected update') },
   linkAccount: async () => { throw new Error('unexpected link') },
 })
+
+const injectBeforeFirstBatch = (mutation) => {
+  let injected = false
+  return Object.freeze({
+    prepare: (...args) => activeDb.prepare(...args),
+    async batch(statements) {
+      if (!injected) {
+        injected = true
+        await mutation()
+      }
+      return activeDb.batch(statements)
+    },
+  })
+}
 
 const directCommands = () => {
   const calls = { create: [], update: [], link: [] }
@@ -424,16 +440,158 @@ describe('staging specialist desired-state materializer', () => {
     await expect(noCommands()(input())).rejects.toThrow('STAGING_SEED_INVALID')
   })
 
-  it('rejects multiple exact Julia owner matches without guessing', async () => {
+  it('rejects multiple Julia identities and a duplicate fallback name outside the active owner role', async () => {
     await useScenario('MATERIALIZER_AMBIGUOUS')
-    for (const index of [0, 1]) {
-      await seedStaff({
-        id: `stf_materializer_match_${index}`,
-        displayName: 'Julia Wolanin',
-        role: 'owner',
-      })
+    const activeOwner = await seedStaff({
+      id: 'stf_materializer_match_0',
+      displayName: 'Julia Wolanin',
+      role: 'owner',
+    })
+    const inactiveCoordinator = await seedStaff({
+      id: 'stf_materializer_match_1',
+      displayName: 'Julia Wolanin',
+      role: 'coordinator',
+      status: 'disabled',
+    })
+    await expect(noCommands()(input())).rejects.toThrow('STAGING_SEED_INVALID')
+
+    for (const staff of [activeOwner, inactiveCoordinator]) {
+      await run(
+        `UPDATE staff_users
+         SET display_name_envelope=?,version=version+1,updated_at=?
+         WHERE id=? AND version=1`,
+        await envelope(staff.id, 'display_name', 'Właściciel'),
+        new Date(NOW_MS + 1_000).toISOString(),
+        staff.id,
+      )
     }
     await expect(noCommands()(input())).rejects.toThrow('STAGING_SEED_INVALID')
+    expect((await activeDb.prepare(
+      `SELECT count(*) AS count FROM audit_events
+       WHERE action='staff.profile.updated'`,
+    ).first()).count).toBe(0)
+  })
+
+  it('rolls back fallback convergence when a Julia identity appears after selection', async () => {
+    await useScenario('MATERIALIZER_FALLBACK_IDENTITY_RACE')
+    const fallback = await seedStaff({
+      id: 'stf_materializer_fallback_identity_race',
+      displayName: 'Właściciel',
+      role: 'owner',
+    })
+    const racingDb = injectBeforeFirstBatch(async () => {
+      await seedStaff({
+        id: 'stf_materializer_concurrent_julia',
+        displayName: 'Julia Wolanin',
+        role: 'coordinator',
+        status: 'pending',
+      })
+    })
+
+    await expect(noCommands()(input({
+      db: racingDb,
+      recoveryDb: racingDb,
+    }))).rejects.toThrow('STAGING_SEED_INVALID')
+
+    const stored = await activeDb.prepare(
+      'SELECT display_name_envelope,version FROM staff_users WHERE id=?',
+    ).bind(fallback.id).first()
+    expect(stored.version).toBe(1)
+    expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE,
+      recordId: fallback.id,
+      field: 'display_name',
+      envelope: JSON.parse(stored.display_name_envelope),
+    })).toBe('Właściciel')
+    expect((await activeDb.prepare(
+      `SELECT count(*) AS count FROM audit_events
+       WHERE action='staff.profile.updated' AND entity_id=?`,
+    ).bind(fallback.id).first()).count).toBe(0)
+    expect((await activeDb.prepare(
+      `SELECT count(*) AS count FROM record_versions
+       WHERE entity_type='staff_user' AND entity_id=?`,
+    ).bind(fallback.id).first()).count).toBe(0)
+  })
+
+  it('rolls back fallback convergence when an account link appears after selection', async () => {
+    await useScenario('MATERIALIZER_FALLBACK_LINK_RACE')
+    const fallback = await seedStaff({
+      id: 'stf_materializer_fallback_link_race',
+      displayName: 'Właściciel',
+      role: 'owner',
+    })
+    const profile = await seedProfile({
+      id: 'sp_materializer_fallback_link_race',
+      displayName: 'Profil historyczny',
+    })
+    const racingDb = injectBeforeFirstBatch(() => run(
+      `INSERT INTO specialist_account_links
+       (id,specialist_id,staff_user_id,lifecycle,changed_by_staff_id,version,created_at)
+       VALUES (?,?,?,'released',?,1,?)`,
+      'spl_materializer_fallback_link_race',
+      profile.id,
+      fallback.id,
+      fallback.id,
+      NOW,
+    ))
+
+    await expect(noCommands()(input({
+      db: racingDb,
+      recoveryDb: racingDb,
+    }))).rejects.toThrow('STAGING_SEED_INVALID')
+
+    const stored = await activeDb.prepare(
+      'SELECT display_name_envelope,version FROM staff_users WHERE id=?',
+    ).bind(fallback.id).first()
+    expect(stored.version).toBe(1)
+    expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE,
+      recordId: fallback.id,
+      field: 'display_name',
+      envelope: JSON.parse(stored.display_name_envelope),
+    })).toBe('Właściciel')
+    expect((await activeDb.prepare(
+      `SELECT count(*) AS count FROM audit_events
+       WHERE action='staff.profile.updated' AND entity_id=?`,
+    ).bind(fallback.id).first()).count).toBe(0)
+    expect((await activeDb.prepare(
+      `SELECT count(*) AS count FROM record_versions
+       WHERE entity_type='staff_user' AND entity_id=?`,
+    ).bind(fallback.id).first()).count).toBe(0)
+  })
+
+  it('rejects a stale scheduled timestamp before writing fallback convergence', async () => {
+    await useScenario('MATERIALIZER_FALLBACK_STALE_TIME')
+    const future = new Date(NOW_MS + 1_000).toISOString()
+    const fallback = await seedStaff({
+      id: 'stf_materializer_fallback_stale_time',
+      displayName: 'Właściciel',
+      role: 'owner',
+      createdAt: future,
+      updatedAt: future,
+    })
+
+    await expect(noCommands()(input())).rejects.toThrow('STAGING_SEED_INVALID')
+
+    const stored = await activeDb.prepare(
+      'SELECT display_name_envelope,version,updated_at FROM staff_users WHERE id=?',
+    ).bind(fallback.id).first()
+    expect(stored.version).toBe(1)
+    expect(stored.updated_at).toBe(future)
+    expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE,
+      recordId: fallback.id,
+      field: 'display_name',
+      envelope: JSON.parse(stored.display_name_envelope),
+    })).toBe('Właściciel')
+    expect((await activeDb.prepare(
+      `SELECT count(*) AS count FROM audit_events
+       WHERE action='staff.profile.updated' AND entity_id=?`,
+    ).bind(fallback.id).first()).count).toBe(0)
+    expect((await activeDb.prepare(
+      `SELECT count(*) AS count FROM record_versions
+       WHERE entity_type='staff_user' AND entity_id=?`,
+    ).bind(fallback.id).first()).count).toBe(0)
   })
 
   it('rejects a Julia owner already linked to a different reciprocal profile', async () => {
@@ -544,7 +702,7 @@ describe('staging specialist desired-state materializer', () => {
     await useScenario('MATERIALIZER_CREATE')
     const julia = await seedStaff({
       id: 'stf_materializer_julia_create',
-      displayName: 'Julia Wolanin',
+      displayName: 'Właściciel',
       role: 'owner',
     })
     const harness = directCommands()
@@ -555,7 +713,10 @@ describe('staging specialist desired-state materializer', () => {
     expect(harness.calls.update).toHaveLength(0)
     expect(harness.calls.link).toHaveLength(1)
     expect(harness.calls.link[0].actor).toMatchObject({
-      id: julia.id, role: 'owner', specialistId: null, version: 1,
+      id: julia.id, role: 'owner', specialistId: null, version: 2,
+    })
+    expect(harness.calls.link[0].body).toMatchObject({
+      expectedStaffVersion: 2,
     })
     expect(harness.calls.create.every((call) => (
       call.body.professionalTitle === 'Specjalistka'
@@ -563,11 +724,66 @@ describe('staging specialist desired-state materializer', () => {
       && !call.idempotencyKey.includes('Anna')
       && !call.idempotencyKey.includes('Justyna')
     ))).toBe(true)
-    expect(await activeDb.prepare(
-      'SELECT role,status,specialist_id,version FROM staff_users WHERE id=?',
-    ).bind(julia.id).first()).toEqual({
+    const storedJulia = await activeDb.prepare(
+      `SELECT display_name_envelope,role,status,specialist_id,version
+       FROM staff_users WHERE id=?`,
+    ).bind(julia.id).first()
+    expect(storedJulia).toMatchObject({
       role: 'owner', status: 'active',
-      specialist_id: 'sp_staging_workbook_julia_wolanin', version: 2,
+      specialist_id: 'sp_staging_workbook_julia_wolanin', version: 3,
+    })
+    expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE,
+      recordId: julia.id,
+      field: 'display_name',
+      envelope: JSON.parse(storedJulia.display_name_envelope),
+    })).toBe('Julia Wolanin')
+    const convergenceVersion = await activeDb.prepare(
+      `SELECT version,snapshot_envelope,changed_by_staff_id,changed_at,correlation_id
+       FROM record_versions
+       WHERE entity_type='staff_user' AND entity_id=? AND version=2`,
+    ).bind(julia.id).first()
+    expect(convergenceVersion).toMatchObject({
+      version: 2,
+      changed_by_staff_id: null,
+      changed_at: NOW,
+    })
+    const snapshot = JSON.parse(await decryptForScope(
+      cryptoContext.keyring,
+      cryptoContext.dataKey,
+      {
+        expectedScope: SCOPE,
+        recordId: julia.id,
+        field: 'record_version',
+        envelope: JSON.parse(convergenceVersion.snapshot_envelope),
+      },
+    ))
+    expect(snapshot).toMatchObject({
+      id: julia.id,
+      role: 'owner',
+      status: 'active',
+      specialist_id: null,
+      version: 2,
+      updated_at: NOW,
+    })
+    expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE,
+      recordId: julia.id,
+      field: 'display_name',
+      envelope: JSON.parse(snapshot.display_name_envelope),
+    })).toBe('Julia Wolanin')
+    expect(await activeDb.prepare(
+      `SELECT actor_staff_id,action,entity_type,entity_id,result,correlation_id,metadata_json
+       FROM audit_events
+       WHERE action='staff.profile.updated' AND entity_id=?`,
+    ).bind(julia.id).first()).toEqual({
+      actor_staff_id: null,
+      action: 'staff.profile.updated',
+      entity_type: 'staff_user',
+      entity_id: julia.id,
+      result: 'success',
+      correlation_id: convergenceVersion.correlation_id,
+      metadata_json: '{"staffVersion":2}',
     })
 
     await expect(harness.materialize(input())).resolves.toEqual({
@@ -575,6 +791,10 @@ describe('staging specialist desired-state materializer', () => {
     })
     expect(harness.calls.create).toHaveLength(3)
     expect(harness.calls.link).toHaveLength(1)
+    expect((await activeDb.prepare(
+      `SELECT count(*) AS count FROM audit_events
+       WHERE action='staff.profile.updated' AND entity_id=?`,
+    ).bind(julia.id).first()).count).toBe(1)
     expect((await activeDb.prepare(
       `SELECT count(*) AS count FROM specialist_account_links
        WHERE specialist_id='sp_staging_workbook_julia_wolanin'
@@ -593,6 +813,46 @@ describe('staging specialist desired-state materializer', () => {
     })).resolves.toEqual({
       created: 0, updated: 0, linked: 0, confirmed: 4,
     })
+  })
+
+  it('converges a fallback owner and missing profiles through the real scheduled dependencies', async () => {
+    await useScenario('MATERIALIZER_REAL_CREATE')
+    const owner = await seedStaff({
+      id: 'stf_materializer_real_create',
+      displayName: 'Właściciel',
+      role: 'owner',
+    })
+
+    await expect(ensureStagingSpecialistProfiles({
+      env: {
+        ...env,
+        APP_ENV: 'staging',
+        APP_ORIGIN: 'https://staging.bearwithme-panel.app',
+        DATA_MODE: 'fictional',
+        DB: activeDb,
+      },
+      scheduledTime: NOW_MS,
+    })).resolves.toEqual({
+      created: 3, updated: 0, linked: 1, confirmed: 0,
+    })
+
+    expect(await activeDb.prepare(
+      `SELECT role,status,specialist_id,version
+       FROM staff_users WHERE id=?`,
+    ).bind(owner.id).first()).toEqual({
+      role: 'owner',
+      status: 'active',
+      specialist_id: 'sp_staging_workbook_julia_wolanin',
+      version: 3,
+    })
+    expect((await activeDb.prepare(
+      `SELECT count(*) AS count FROM specialists
+       WHERE id IN (?,?,?) AND status='active'`,
+    ).bind(
+      'sp_staging_workbook_anna_janowska',
+      'sp_staging_workbook_julia_wolanin',
+      'sp_staging_workbook_justyna_j_j',
+    ).first()).count).toBe(3)
   })
 
   it('backfills a legacy Julia title/rate through the normal edit before link', async () => {

@@ -24,6 +24,12 @@ import {
   isCoreAuditAction,
 } from './core-audit-contract.js'
 import {
+  captureSystemAuditEvent,
+  captureSystemAuditMetadata,
+  isSystemAuditAction,
+  SYSTEM_AUDIT_SCHEMAS,
+} from './system-audit-contract.js'
+import {
   captureHistoricalClient,
   captureHistoricalOccurrence,
   captureHistoricalPeriod,
@@ -155,6 +161,8 @@ const SERVER_STATUS = Object.freeze({
   FINANCE_WINDOW_LIMIT: 409,
   FINANCE_WINDOW_RETRY: 409,
   STAFF_INVITATION_CONFLICT: 409,
+  OUTBOX_RECOVERY_CONFLICT: 409,
+  OUTBOX_RECOVERY_UNSAFE: 409,
   SPECIALIST_LINK_CONFLICT: 409,
   LAST_ACTIVE_OWNER: 409,
   VERSION_CONFLICT: 409,
@@ -210,11 +218,16 @@ const ORDINARY_OUTBOX_TYPES = new Set([
   'staff.invitation.email',
   'staff.invitation.expire',
 ])
-const OUTBOX_FAILURE_CODES = new Set([
-  'OUTBOX_HANDLER_FAILURE',
-  'OUTBOX_HANDLER_RETRY',
-  'OUTBOX_LEASE_EXPIRED',
-  'EMAIL_DELIVERY_AMBIGUOUS',
+const ORDINARY_OUTBOX_FAILURE_PAIRS = new Set([
+  'staff.access.reconcile:OUTBOX_HANDLER_FAILURE',
+  'staff.access.reconcile:OUTBOX_HANDLER_RETRY',
+  'staff.access.reconcile:OUTBOX_LEASE_EXPIRED',
+  'staff.invitation.email:OUTBOX_HANDLER_FAILURE',
+  'staff.invitation.email:OUTBOX_HANDLER_RETRY',
+  'staff.invitation.email:EMAIL_DELIVERY_AMBIGUOUS',
+  'staff.invitation.expire:OUTBOX_HANDLER_FAILURE',
+  'staff.invitation.expire:OUTBOX_HANDLER_RETRY',
+  'staff.invitation.expire:OUTBOX_LEASE_EXPIRED',
 ])
 const HEALTH_CHECKS = Object.freeze([
   Object.freeze({
@@ -257,6 +270,9 @@ const AUDIT_SCHEMAS = Object.freeze({
   ...Object.fromEntries(Object.entries(CORE_AUDIT_SCHEMAS).map(([action, schema]) => [action,
     Object.freeze({ entityTypes: Object.freeze([schema.entityType]), result: 'success', metadata: schema.metadata })
   ])),
+  ...Object.fromEntries(Object.entries(SYSTEM_AUDIT_SCHEMAS).map(([action, schema]) => [action,
+    Object.freeze({ entityTypes: Object.freeze([schema.entityType]), result: 'success', metadata: schema.metadata, system: true })
+  ])),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' } }),
   'backup.pruned': Object.freeze({ entityTypes: ['backup_run'], result: 'success', metadata: { backupVersion: 'version' }, system: true }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: { newKekVersion: 'version', oldKekVersion: 'version' } }),
@@ -264,6 +280,7 @@ const AUDIT_SCHEMAS = Object.freeze({
   'identity.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' } }),
   'identity.reindex': Object.freeze({ entityTypes: ['staff_invitation', 'staff_user'], result: 'success', metadata: { version: 'version' } }),
   'operational_action.resolved': Object.freeze({ entityTypes: ['operational_action'], result: 'success', metadata: { actionVersion: 'version' } }),
+  'outbox.recovery.requested': Object.freeze({ entityTypes: ['outbox_job'], result: 'success', metadata: { actionVersion: 'version', desiredGeneration: 'nullableVersion', invitationVersion: 'nullableVersion', replacementJobId: 'id' }, human: true }),
   'staff.access.reconciled': Object.freeze({ entityTypes: ['access_group'], result: 'success', metadata: { appliedGeneration: 'version', desiredGeneration: 'version', invitationCount: 'count' } }),
   'staff.bootstrap': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' } }),
   'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', staffVersion: 'version' } }),
@@ -1637,8 +1654,9 @@ const acceptedActionDetails = (action) => {
     if (action.severity !== 'critical' || action.entityType !== 'outbox_job'
       || !validId(action.entityId)
       || details.jobId !== action.entityId) return null
-    const known = ORDINARY_OUTBOX_TYPES.has(details.outboxType)
-      && OUTBOX_FAILURE_CODES.has(details.errorCode)
+    const known = ORDINARY_OUTBOX_FAILURE_PAIRS.has(
+      `${details.outboxType}:${details.errorCode}`,
+    )
     const unknown = !ORDINARY_OUTBOX_TYPES.has(details.outboxType)
       && details.outboxType !== 'backup.create'
       && OUTBOX_TYPE.test(details.outboxType ?? '')
@@ -1665,7 +1683,7 @@ const acceptedActions = (payload) => {
   for (const raw of values) {
     const value = captureExactObject(raw, [
       'id', 'kind', 'severity', 'entityType', 'entityId', 'details', 'version',
-      'createdAt', 'updatedAt',
+      'recovery', 'createdAt', 'updatedAt',
     ])
     if (!value || !validId(value.id) || !validId(value.entityId) || value.version !== 1
       || !validInstant(value.createdAt) || value.updatedAt !== value.createdAt
@@ -1674,6 +1692,25 @@ const acceptedActions = (payload) => {
         || (previous.createdAt === value.createdAt && previous.id <= value.id)))) return null
     const details = acceptedActionDetails(value)
     if (!details) return null
+    const recoveryManaged = value.kind === 'outbox_job_failed'
+      && ['staff.access.reconcile', 'staff.invitation.email'].includes(details.outboxType)
+    if ((recoveryManaged && value.recovery === null)
+      || (!recoveryManaged && value.recovery !== null)) return null
+    let recovery = null
+    if (value.recovery !== null) {
+      const captured = captureExactObject(value.recovery, ['kind', 'status'])
+      if (!captured || value.kind !== 'outbox_job_failed'
+        || !['access', 'email'].includes(captured.kind)
+        || !['available', 'unsafe', 'queued', 'processing'].includes(captured.status)
+        || (captured.kind === 'access'
+          && (details.outboxType !== 'staff.access.reconcile'
+            || captured.status === 'unsafe'))
+        || (captured.kind === 'email'
+          && details.outboxType !== 'staff.invitation.email')
+        || (details.errorCode === 'EMAIL_DELIVERY_AMBIGUOUS'
+          && captured.status !== 'unsafe')) return null
+      recovery = Object.freeze({ kind: captured.kind, status: captured.status })
+    }
     ids.add(value.id)
     previous = value
     actions.push(Object.freeze({
@@ -1683,6 +1720,7 @@ const acceptedActions = (payload) => {
       entityType: value.entityType,
       entityId: value.entityId,
       details,
+      recovery,
       version: value.version,
       createdAt: value.createdAt,
       updatedAt: value.updatedAt,
@@ -1691,6 +1729,25 @@ const acceptedActions = (payload) => {
   return Object.freeze({
     actions: Object.freeze(actions),
     truncated: data.truncated,
+  })
+}
+
+const acceptedRecovery = (payload, status, actionId, version) => {
+  if (status !== 202) return null
+  const outer = captureExactObject(payload, ['data'])
+  const data = outer && captureExactObject(outer.data, ['action', 'recovery'])
+  const action = data && captureExactObject(data.action, ['id', 'status', 'version'])
+  const recovery = data && captureExactObject(data.recovery, ['kind', 'status'])
+  if (!action || !recovery || action.id !== actionId || action.status !== 'open'
+    || action.version !== version || !['access', 'email'].includes(recovery.kind)
+    || recovery.status !== 'queued') return null
+  return Object.freeze({
+    action: Object.freeze({
+      id: action.id,
+      status: action.status,
+      version: action.version,
+    }),
+    recovery: Object.freeze({ kind: recovery.kind, status: recovery.status }),
   })
 }
 
@@ -1716,6 +1773,7 @@ const acceptedResolution = (payload, actionId, version) => {
 
 const acceptedAuditMetadata = (action, value, schema) => {
   if (isCoreAuditAction(action)) return captureCoreAuditMetadata(action, value)
+  if (isSystemAuditAction(action)) return captureSystemAuditMetadata(action, value)
   const schemaKeys = Object.keys(schema.metadata)
   const legacyKeys = Object.keys(schema.legacyMetadata ?? {})
   let types = schema.metadata
@@ -1732,6 +1790,8 @@ const acceptedAuditMetadata = (action, value, schema) => {
       ? safeCount(metadata[key])
       : types[key] === 'nullableVersion'
         ? metadata[key] === null || positive(metadata[key])
+        : types[key] === 'id'
+          ? validId(metadata[key])
         : types[key] === 'assignmentId'
           ? typeof metadata[key] === 'string' && ASSIGNMENT_ID.test(metadata[key])
           : types[key] === 'paymentId'
@@ -1772,6 +1832,7 @@ const acceptedAudit = (payload, limit) => {
       || (previous && (previous.occurredAt < value.occurredAt
         || (previous.occurredAt === value.occurredAt && previous.id <= value.id)))) return null
     if (schema.system && value.actorStaffId !== null) return null
+    if (schema.human && value.actorStaffId === null) return null
     if (schema.entityId && !schema.entityId.test(value.entityId)) return null
     if (value.action === 'backup.pruned' && !BACKUP_ID.test(value.entityId)) return null
     if (value.action === 'specialist.backfilled' && !SPECIALIST_ID.test(value.entityId)) return null
@@ -1779,7 +1840,20 @@ const acceptedAudit = (payload, limit) => {
       && value.entityId !== 'core_directory_specialist_backfill_v1') return null
     const metadata = acceptedAuditMetadata(value.action, value.metadata, schema)
     if (!metadata) return null
+    if (value.action === 'outbox.recovery.requested'
+      && (!STAFF_ID.test(value.actorStaffId ?? '')
+        || metadata.actionVersion !== 1
+        || ((metadata.desiredGeneration === null)
+          === (metadata.invitationVersion === null)))) return null
     if (isCoreAuditAction(value.action) && !browserCoreAuditEvent({
+      action: value.action,
+      actorStaffId: value.actorStaffId,
+      entityType: value.entityType,
+      entityId: value.entityId,
+      result: value.result,
+      metadata,
+    })) return null
+    if (isSystemAuditAction(value.action) && !browserSystemAuditEvent({
       action: value.action,
       actorStaffId: value.actorStaffId,
       entityType: value.entityType,
@@ -1809,6 +1883,8 @@ const acceptedAudit = (payload, limit) => {
 
 export const BROWSER_CORE_AUDIT_SCHEMAS = CORE_AUDIT_SCHEMAS
 export const browserCoreAuditEvent = captureCoreAuditEvent
+export const BROWSER_SYSTEM_AUDIT_SCHEMAS = SYSTEM_AUDIT_SCHEMAS
+export const browserSystemAuditEvent = captureSystemAuditEvent
 
 const acceptedInviteInput = (input) => plainObject(input)
   && Object.keys(input).length === 3
@@ -4512,6 +4588,25 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       idempotencyKey,
     )
   }
+  const recoverOperationalAction = (actionId, version, options) => {
+    let idempotencyKey
+    try {
+      const acceptedOptions = captureExactObject(options, ['idempotencyKey'])
+      if (typeof actionId !== 'string' || !ID.test(actionId)
+        || !positive(version) || version >= Number.MAX_SAFE_INTEGER
+        || !acceptedOptions) throw new Error('invalid')
+      idempotencyKey = acceptedOptions.idempotencyKey
+      if (!acceptedKey(idempotencyKey)) throw new Error('invalid')
+    } catch {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    return mutation(
+      `${API_ROOT}/operations/actions/${actionId}/recovery-attempts`,
+      JSON.stringify({ version }),
+      (payload, status) => acceptedRecovery(payload, status, actionId, version),
+      idempotencyKey,
+    )
+  }
   const subscribeSession = (listener) => {
     if (typeof listener !== 'function') throw clientError('CLIENT_INPUT_INVALID')
     listeners.add(listener)
@@ -4574,6 +4669,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     deactivateStaff,
     changeStaffRole,
     resolveOperationalAction,
+    recoverOperationalAction,
     createIdempotencyKey,
     clearSession,
     subscribeSession,

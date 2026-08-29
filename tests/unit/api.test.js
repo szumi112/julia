@@ -3185,6 +3185,7 @@ const actionsBody = (facts = ACTION_FACTS, truncated = false) => ({
   data: {
     actions: facts.map((fact, index) => ({
       ...structuredClone(fact),
+      recovery: fact.recovery ?? null,
       version: 1,
       createdAt: new Date(Date.parse(OPERATIONS_NOW) - index).toISOString(),
       updatedAt: new Date(Date.parse(OPERATIONS_NOW) - index).toISOString(),
@@ -3201,12 +3202,14 @@ const AUDIT_FACTS = [
   { action: 'identity.denied', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'denied', metadata: { version: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'identity.reindex', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { version: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'operational_action.resolved', entityType: 'operational_action', entityId: 'act_audit', result: 'success', metadata: { actionVersion: 2 }, actorStaffId: 'stf_audit_actor' },
+  { action: 'outbox.recovery.requested', entityType: 'outbox_job', entityId: 'job_audit_recovery', result: 'success', metadata: { actionVersion: 1, desiredGeneration: 4, invitationVersion: null, replacementJobId: 'job_audit_replacement' }, actorStaffId: 'stf_audit_actor' },
   { action: 'staff.access.reconciled', entityType: 'access_group', entityId: 'centre_1', result: 'success', metadata: { appliedGeneration: 2, desiredGeneration: 2, invitationCount: 0 }, actorStaffId: 'stf_audit_actor' },
   { action: 'staff.bootstrap', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 1, invitationVersion: 1, specialistVersion: null, staffVersion: 1 }, actorStaffId: null },
   { action: 'staff.deactivated', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 2, specialistVersion: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'staff.invitation.email_accepted', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { invitationVersion: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'staff.invitation.expired', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 2, specialistVersion: null, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'staff.invited', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 1, specialistVersion: 1, staffVersion: 1 }, actorStaffId: 'stf_audit_actor' },
+  { action: 'staff.profile.updated', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { staffVersion: 2 }, actorStaffId: null },
   { action: 'specialist.backfilled', entityType: 'specialist', entityId: 'sp_audit_backfilled', result: 'success', metadata: { specialistVersion: 1, stateVersion: 2 }, actorStaffId: null },
   { action: 'core_directory.upgrade.advanced', entityType: 'system_state', entityId: 'core_directory_specialist_backfill_v1', result: 'success', metadata: { createdCount: 0, processedCount: 1, stateVersion: 2 }, actorStaffId: null },
   { action: 'client.created', entityType: 'client', entityId: 'cl_audit_created', result: 'success', metadata: { clientVersion: 1, assignmentId: 'asg_audit_created', assignmentVersion: 1 }, actorStaffId: 'stf_audit_actor' },
@@ -3227,6 +3230,9 @@ const IDENTITY_AUDIT_ACTIONS = new Set([
   'staff.invitation.expired',
   'staff.invited',
 ])
+const STAFF_PROFILE_AUDIT_FACT = AUDIT_FACTS.find(
+  ({ action }) => action === 'staff.profile.updated',
+)
 
 const IDENTITY_AUDIT_FACTS = AUDIT_FACTS.filter(
   ({ action }) => IDENTITY_AUDIT_ACTIONS.has(action),
@@ -3374,6 +3380,106 @@ test('operational actions project and deeply freeze all six accepted kinds', asy
   assertDeepFrozen(result)
 })
 
+test('operational actions accept and freeze exact recovery dispositions', async (t) => {
+  const cases = [
+    ['access available', 'staff.access.reconcile', 'OUTBOX_HANDLER_FAILURE', { kind: 'access', status: 'available' }],
+    ['access queued', 'staff.access.reconcile', 'OUTBOX_HANDLER_RETRY', { kind: 'access', status: 'queued' }],
+    ['access processing', 'staff.access.reconcile', 'OUTBOX_LEASE_EXPIRED', { kind: 'access', status: 'processing' }],
+    ['email available', 'staff.invitation.email', 'OUTBOX_HANDLER_FAILURE', { kind: 'email', status: 'available' }],
+    ['email unsafe', 'staff.invitation.email', 'EMAIL_DELIVERY_AMBIGUOUS', { kind: 'email', status: 'unsafe' }],
+    ['email queued', 'staff.invitation.email', 'OUTBOX_HANDLER_RETRY', { kind: 'email', status: 'queued' }],
+    ['email processing', 'staff.invitation.email', 'OUTBOX_HANDLER_FAILURE', { kind: 'email', status: 'processing' }],
+  ]
+  for (const [name, outboxType, errorCode, recovery] of cases) {
+    await t.test(name, async () => {
+      const fact = structuredClone(ACTION_FACTS[4])
+      fact.details = { ...fact.details, outboxType, errorCode }
+      fact.recovery = recovery
+      const body = actionsBody([fact])
+      const { fetchImpl } = queuedFetch(jsonResponse(body))
+
+      const result = await createApiClient({ fetchImpl }).getOperationalActions()
+
+      assert.deepEqual(result, body.data)
+      assert.notEqual(result.actions[0].recovery, body.data.actions[0].recovery)
+      assertDeepFrozen(result)
+    })
+  }
+})
+
+test('operational actions reject malformed or mismatched recovery dispositions', async (t) => {
+  const cases = [
+    ['missing recovery', (action) => { delete action.recovery }],
+    ['extra recovery key', (action) => { action.recovery = { kind: 'access', status: 'available', provider: 'private' } }],
+    ['unknown kind', (action) => { action.recovery = { kind: 'queue', status: 'available' } }],
+    ['unknown status', (action) => { action.recovery = { kind: 'access', status: 'done' } }],
+    ['recovery on non-outbox action', (action) => { action.recovery = { kind: 'access', status: 'available' } }],
+    ['access recovery on email', (action) => {
+      action.details.outboxType = 'staff.invitation.email'
+      action.recovery = { kind: 'access', status: 'available' }
+    }],
+    ['email recovery on access', (action) => {
+      action.details.outboxType = 'staff.access.reconcile'
+      action.recovery = { kind: 'email', status: 'available' }
+    }],
+    ['unsafe access recovery', (action) => { action.recovery = { kind: 'access', status: 'unsafe' } }],
+    ['missing managed access recovery', (action) => {
+      action.details = {
+        ...action.details,
+        errorCode: 'OUTBOX_HANDLER_FAILURE',
+        outboxType: 'staff.access.reconcile',
+      }
+      action.recovery = null
+    }],
+    ['missing managed email recovery', (action) => {
+      action.details = {
+        ...action.details,
+        errorCode: 'OUTBOX_HANDLER_FAILURE',
+        outboxType: 'staff.invitation.email',
+      }
+      action.recovery = null
+    }],
+    ['ambiguous access delivery', (action) => {
+      action.details = {
+        ...action.details,
+        errorCode: 'EMAIL_DELIVERY_AMBIGUOUS',
+        outboxType: 'staff.access.reconcile',
+      }
+      action.recovery = { kind: 'access', status: 'available' }
+    }],
+    ['expired email lease', (action) => {
+      action.details = {
+        ...action.details,
+        errorCode: 'OUTBOX_LEASE_EXPIRED',
+        outboxType: 'staff.invitation.email',
+      }
+      action.recovery = { kind: 'email', status: 'available' }
+    }],
+    ['ambiguous invitation expiry', (action) => {
+      action.details = {
+        ...action.details,
+        errorCode: 'EMAIL_DELIVERY_AMBIGUOUS',
+        outboxType: 'staff.invitation.expire',
+      }
+      action.recovery = null
+    }],
+  ]
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const fact = structuredClone(name === 'recovery on non-outbox action'
+        ? ACTION_FACTS[0]
+        : ACTION_FACTS[4])
+      const body = actionsBody([fact])
+      mutate(body.data.actions[0])
+      const { fetchImpl } = queuedFetch(parsedResponse(body))
+      await assert.rejects(
+        createApiClient({ fetchImpl }).getOperationalActions(),
+        assertInvalidResponse,
+      )
+    })
+  }
+})
+
 test('operational actions accept and freeze a centre-scoped denial overflow spike', async () => {
   const { fetchImpl } = queuedFetch(jsonResponse(actionsBody([DENIAL_OVERFLOW_FACT])))
 
@@ -3412,17 +3518,25 @@ test('operational actions reject malformed centre-scoped denial overflow spikes'
 })
 
 test('operational actions accept only the frozen ordinary and bounded unknown outbox combinations', async (t) => {
-  const types = ['staff.access.reconcile', 'staff.invitation.email', 'staff.invitation.expire']
-  const codes = ['OUTBOX_HANDLER_FAILURE', 'OUTBOX_HANDLER_RETRY', 'OUTBOX_LEASE_EXPIRED', 'EMAIL_DELIVERY_AMBIGUOUS']
-  for (const outboxType of types) {
-    for (const errorCode of codes) {
-      await t.test(`${outboxType} ${errorCode}`, async () => {
-        const fact = structuredClone(ACTION_FACTS[4])
-        fact.details = { ...fact.details, errorCode, outboxType }
-        const { fetchImpl } = queuedFetch(jsonResponse(actionsBody([fact])))
-        assert.equal((await createApiClient({ fetchImpl }).getOperationalActions()).actions.length, 1)
-      })
-    }
+  const cases = [
+    ['staff.access.reconcile', 'OUTBOX_HANDLER_FAILURE', { kind: 'access', status: 'available' }],
+    ['staff.access.reconcile', 'OUTBOX_HANDLER_RETRY', { kind: 'access', status: 'queued' }],
+    ['staff.access.reconcile', 'OUTBOX_LEASE_EXPIRED', { kind: 'access', status: 'processing' }],
+    ['staff.invitation.email', 'OUTBOX_HANDLER_FAILURE', { kind: 'email', status: 'available' }],
+    ['staff.invitation.email', 'OUTBOX_HANDLER_RETRY', { kind: 'email', status: 'queued' }],
+    ['staff.invitation.email', 'EMAIL_DELIVERY_AMBIGUOUS', { kind: 'email', status: 'unsafe' }],
+    ['staff.invitation.expire', 'OUTBOX_HANDLER_FAILURE', null],
+    ['staff.invitation.expire', 'OUTBOX_HANDLER_RETRY', null],
+    ['staff.invitation.expire', 'OUTBOX_LEASE_EXPIRED', null],
+  ]
+  for (const [outboxType, errorCode, recovery] of cases) {
+    await t.test(`${outboxType} ${errorCode}`, async () => {
+      const fact = structuredClone(ACTION_FACTS[4])
+      fact.details = { ...fact.details, errorCode, outboxType }
+      fact.recovery = recovery
+      const { fetchImpl } = queuedFetch(jsonResponse(actionsBody([fact])))
+      assert.equal((await createApiClient({ fetchImpl }).getOperationalActions()).actions.length, 1)
+    })
   }
   await t.test('unknown bounded type with OUTBOX_TYPE_INVALID', async () => {
     const fact = structuredClone(ACTION_FACTS[4])
@@ -3525,7 +3639,7 @@ test('security audit builds URLSearchParams in cursor-limit order and validates 
   })
 })
 
-test('security audit projects and deeply freezes all twenty-four exact registry actions with opaque correlations', async () => {
+test('security audit projects and deeply freezes all twenty-five exact registry actions with opaque correlations', async () => {
   const body = auditBody()
   const { fetchImpl } = queuedFetch(jsonResponse(body))
   const result = await createApiClient({ fetchImpl }).getSecurityAudit({ limit: 50 })
@@ -3629,7 +3743,10 @@ test('security audit rejects malformed registries, list invariants, and cursor p
     ['zero version', (body) => { body.data.events[0].metadata.version = 0 }],
     ['fractional version', (body) => { body.data.events[0].metadata.version = 1.5 }],
     ['string version', (body) => { body.data.events[0].metadata.version = '1' }],
-    ['negative count', (body) => { body.data.events[7].metadata.invitationCount = -1 }],
+    ['negative count', (body) => {
+      body.data.events.find(({ action }) => action === 'staff.access.reconciled')
+        .metadata.invitationCount = -1
+    }],
     ['invalid actor', (body) => { body.data.events[0].actorStaffId = 'actor space' }],
     ['short page with cursor', (body) => { body.data.nextCursor = AUDIT_CURSOR }],
     ['malformed next cursor', (body) => { body.data.events = Array.from({ length: 50 }, (_, index) => ({ ...body.data.events[0], id: `audit_${String(999 - index).padStart(3, '0')}`, occurredAt: new Date(Date.parse(OPERATIONS_NOW) - index).toISOString() })); body.data.nextCursor = 'opaque' }],
@@ -3675,6 +3792,58 @@ test('security audit accepts both identity.reindex entities and rejects every ma
   }
 })
 
+test('security audit accepts no malformed staff profile system event', async (t) => {
+  const cases = [
+    ['non-null actor', (event) => { event.actorStaffId = 'stf_actor' }],
+    ['non-staff entity id', (event) => { event.entityId = 'profile_target' }],
+  ]
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const body = auditBody([STAFF_PROFILE_AUDIT_FACT])
+      mutate(body.data.events[0])
+      const { fetchImpl } = queuedFetch(jsonResponse(body))
+      await assert.rejects(
+        createApiClient({ fetchImpl }).getSecurityAudit(),
+        assertInvalidResponse,
+      )
+    })
+  }
+})
+
+test('security audit accepts only an exact human outbox recovery request event', async (t) => {
+  const fact = AUDIT_FACTS.find(({ action }) => action === 'outbox.recovery.requested')
+  const { fetchImpl } = queuedFetch(jsonResponse(auditBody([fact])))
+  const result = await createApiClient({ fetchImpl }).getSecurityAudit()
+  assert.deepEqual(result.events[0].metadata, fact.metadata)
+  assertDeepFrozen(result)
+
+  const cases = [
+    ['system actor', (event) => { event.actorStaffId = null }],
+    ['non-staff human actor', (event) => { event.actorStaffId = 'actor_recovery' }],
+    ['wrong entity', (event) => { event.entityType = 'staff_invitation' }],
+    ['missing replacement', (event) => { delete event.metadata.replacementJobId }],
+    ['invalid replacement', (event) => { event.metadata.replacementJobId = 'bad id' }],
+    ['zero action version', (event) => { event.metadata.actionVersion = 0 }],
+    ['advanced action version', (event) => { event.metadata.actionVersion = 2 }],
+    ['zero desired generation', (event) => { event.metadata.desiredGeneration = 0 }],
+    ['zero invitation version', (event) => { event.metadata.invitationVersion = 0 }],
+    ['no aggregate version', (event) => { event.metadata.desiredGeneration = null }],
+    ['two aggregate versions', (event) => { event.metadata.invitationVersion = 2 }],
+    ['extra metadata', (event) => { event.metadata.provider = 'private' }],
+  ]
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const body = auditBody([fact])
+      mutate(body.data.events[0])
+      const queued = queuedFetch(jsonResponse(body))
+      await assert.rejects(
+        createApiClient({ fetchImpl: queued.fetchImpl }).getSecurityAudit(),
+        assertInvalidResponse,
+      )
+    })
+  }
+})
+
 test('operational resolution sends captured version, current CSRF, explicit key, and projects exact result', async () => {
   const response = { data: { action: { id: 'act_access_lag', status: 'resolved', version: 2, resolvedAt: OPERATIONS_NOW, updatedAt: OPERATIONS_NOW } } }
   const { calls, fetchImpl } = queuedFetch(jsonResponse(sessionBody()), jsonResponse(response))
@@ -3697,6 +3866,184 @@ test('operational resolution sends captured version, current CSRF, explicit key,
   assert.equal(header(call, 'Idempotency-Key'), 'resolve-key-0001')
   assert.equal(header(call, 'Authorization'), null)
   assert.equal(call.init.body, '{"version":1}')
+})
+
+test('operational recovery sends captured version, current CSRF, explicit key, and projects exact queued result', async () => {
+  const response = {
+    data: {
+      action: { id: 'act_outbox_dead', status: 'open', version: 1 },
+      recovery: { kind: 'access', status: 'queued' },
+    },
+  }
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse(response, 202),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  const result = await client.recoverOperationalAction(
+    'act_outbox_dead',
+    1,
+    { idempotencyKey: 'recover-key-0001' },
+  )
+
+  assert.deepEqual(result, response.data)
+  assert.notEqual(result, response.data)
+  assert.notEqual(result.action, response.data.action)
+  assert.notEqual(result.recovery, response.data.recovery)
+  assertDeepFrozen(result)
+  const call = calls[1]
+  assert.equal(call.url, '/api/v1/operations/actions/act_outbox_dead/recovery-attempts')
+  assert.equal(call.init.method, 'POST')
+  assert.equal(call.init.credentials, 'same-origin')
+  assert.equal(header(call, 'Accept'), 'application/json')
+  assert.equal(header(call, 'Content-Type'), 'application/json')
+  assert.equal(header(call, 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(call, 'Idempotency-Key'), 'recover-key-0001')
+  assert.equal(header(call, 'Authorization'), null)
+  assert.equal(call.init.body, '{"version":1}')
+})
+
+test('operational recovery rejects public input and malformed exact results', async (t) => {
+  const hiddenExtra = Object.defineProperty(
+    { idempotencyKey: 'recover-key-0001' },
+    'extra',
+    { value: true },
+  )
+  const invalidInputs = [
+    ['', 1, { idempotencyKey: 'recover-key-0001' }],
+    ['bad id', 1, { idempotencyKey: 'recover-key-0001' }],
+    ['act_ok', 0, { idempotencyKey: 'recover-key-0001' }],
+    ['act_ok', Number.MAX_SAFE_INTEGER, { idempotencyKey: 'recover-key-0001' }],
+    ['act_ok', 1, undefined],
+    ['act_ok', 1, {}],
+    ['act_ok', 1, { idempotencyKey: 'bad key' }],
+    ['act_ok', 1, { idempotencyKey: 'recover-key-0001', extra: true }],
+    ['act_ok', 1, hiddenExtra],
+  ]
+  for (const args of invalidInputs) {
+    const { calls, fetchImpl } = queuedFetch()
+    await assert.rejects(
+      Promise.resolve().then(() => (
+        createApiClient({ fetchImpl }).recoverOperationalAction(...args)
+      )),
+      assertClientInput,
+    )
+    assert.equal(calls.length, 0)
+  }
+
+  const valid = {
+    data: {
+      action: { id: 'act_ok', status: 'open', version: 1 },
+      recovery: { kind: 'email', status: 'queued' },
+    },
+  }
+  const malformed = [
+    ['wrong HTTP status', (body) => body, 200],
+    ['extra outer key', (body) => { body.extra = true }],
+    ['extra data key', (body) => { body.data.extra = true }],
+    ['extra action key', (body) => { body.data.action.updatedAt = OPERATIONS_NOW }],
+    ['wrong action id', (body) => { body.data.action.id = 'act_other' }],
+    ['resolved action', (body) => { body.data.action.status = 'resolved' }],
+    ['advanced action version', (body) => { body.data.action.version = 2 }],
+    ['extra recovery key', (body) => { body.data.recovery.provider = 'private' }],
+    ['unknown recovery kind', (body) => { body.data.recovery.kind = 'queue' }],
+    ['nonqueued recovery', (body) => { body.data.recovery.status = 'processing' }],
+  ]
+  for (const [name, mutate, status = 202] of malformed) {
+    await t.test(name, async () => {
+      const body = structuredClone(valid)
+      mutate(body)
+      const { fetchImpl } = queuedFetch(
+        jsonResponse(sessionBody()),
+        jsonResponse(body, status),
+      )
+      const client = createApiClient({ fetchImpl })
+      await client.getSession()
+      await assert.rejects(
+        client.recoverOperationalAction(
+          'act_ok',
+          1,
+          { idempotencyKey: 'recover-key-0001' },
+        ),
+        assertInvalidResponse,
+      )
+    })
+  }
+})
+
+test('operational recovery retries exactly once after CSRF_EXPIRED with the same key', async () => {
+  const refreshed = sessionBody({
+    csrfToken: TOKEN_B,
+    csrfExpiresAt: '2033-05-18T03:33:18.000Z',
+  })
+  const result = {
+    data: {
+      action: { id: 'act_ok', status: 'open', version: 1 },
+      recovery: { kind: 'email', status: 'queued' },
+    },
+  }
+  const { calls, fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    errorResponse('CSRF_EXPIRED', 403),
+    jsonResponse(refreshed),
+    jsonResponse(result, 202),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+  await client.recoverOperationalAction(
+    'act_ok',
+    1,
+    { idempotencyKey: 'recover-key-0001' },
+  )
+
+  assert.equal(calls.length, 4)
+  assert.equal(calls[2].url, '/api/v1/session')
+  assert.equal(header(calls[1], 'X-CSRF-Token'), TOKEN_A)
+  assert.equal(header(calls[3], 'X-CSRF-Token'), TOKEN_B)
+  assert.equal(header(calls[1], 'Idempotency-Key'), 'recover-key-0001')
+  assert.equal(header(calls[3], 'Idempotency-Key'), 'recover-key-0001')
+  assert.equal(calls.filter((call) => call.init.method === 'POST').length, 2)
+})
+
+test('operational recovery recognizes typed conflicts and never retries non-CSRF outcomes', async (t) => {
+  const outcomes = [
+    ['conflict', errorResponse('OUTBOX_RECOVERY_CONFLICT', 409), 'OUTBOX_RECOVERY_CONFLICT', false],
+    ['unsafe', errorResponse('OUTBOX_RECOVERY_UNSAFE', 409), 'OUTBOX_RECOVERY_UNSAFE', false],
+    ['network', new Error('private provider failure'), 'NETWORK_ERROR', true],
+    ['malformed', jsonResponse({ data: { action: { raw: 'ciphertext-private' } } }, 202), 'INVALID_RESPONSE', true],
+    ['forbidden', errorResponse('FORBIDDEN', 403), 'FORBIDDEN', false],
+    ['server error', errorResponse('INTERNAL_ERROR', 500), 'INTERNAL_ERROR', true],
+  ]
+  for (const [name, outcome, code, retainsKey] of outcomes) {
+    await t.test(name, async () => {
+      const { calls, fetchImpl } = queuedFetch(
+        jsonResponse(sessionBody()),
+        outcome,
+        ...(code === 'FORBIDDEN' ? [jsonResponse(sessionBody())] : []),
+      )
+      const client = createApiClient({ fetchImpl })
+      await client.getSession()
+      await assert.rejects(
+        client.recoverOperationalAction(
+          'act_ok',
+          1,
+          { idempotencyKey: 'recover-key-0001' },
+        ),
+        (error) => {
+          assert.ok(error instanceof ApiError)
+          assert.equal(error.code, code)
+          assert.equal(error.idempotencyKey, retainsKey ? 'recover-key-0001' : undefined)
+          assert.doesNotMatch(JSON.stringify(error), /private provider|ciphertext-private/)
+          return true
+        },
+      )
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.equal(calls.length, code === 'FORBIDDEN' ? 3 : 2)
+      assert.equal(calls.filter((call) => call.init.method === 'POST').length, 1)
+    })
+  }
 })
 
 test('operational resolution rejects public input access and malformed exact results before leaking data', async (t) => {

@@ -33,6 +33,8 @@ export const isD1CoreDirectoryInvariantFailure = (error) => exactSignal(error, '
 
 export const isD1OutboxOperationGuardFailure = (error) => exactSignal(error, 'outbox_operation_guard_failed')
 
+export const isD1InvalidOutboxRecoveryEdge = (error) => exactSignal(error, 'invalid_recovery_edge')
+
 export const isD1MissingColumn = (error, column) => {
   if (!MISSING_COLUMNS.has(column)) return false
   const escaped = column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

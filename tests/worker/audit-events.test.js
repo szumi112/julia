@@ -108,6 +108,45 @@ describe('shared audit statement constructor', () => {
     })).toThrow(/^AUDIT_EVENT_INVALID$/)
   })
 
+  it('accepts only one exact recovery branch in a human recovery audit', () => {
+    const base = {
+      ...event,
+      id: 'aud_outbox_recovery_requested',
+      actorStaffId: 'stf_recovery_actor',
+      action: 'outbox.recovery.requested',
+      entityType: 'outbox_job',
+      entityId: 'job_recovery_source',
+      result: 'success',
+      metadata: {
+        actionVersion: 1,
+        desiredGeneration: 7,
+        invitationVersion: null,
+        replacementJobId: 'job_recovery_replacement',
+      },
+      reasonEnvelope: null,
+    }
+    expect(() => auditEventStatement(env.DB, base)).not.toThrow()
+    expect(() => auditEventStatement(env.DB, {
+      ...base,
+      id: 'aud_outbox_recovery_email_requested',
+      metadata: { ...base.metadata, desiredGeneration: null, invitationVersion: 3 },
+    })).not.toThrow()
+    for (const [index, metadata] of [
+      { ...base.metadata, actionVersion: 2 },
+      { ...base.metadata, desiredGeneration: null },
+      { ...base.metadata, invitationVersion: 3 },
+    ].entries()) expect(() => auditEventStatement(env.DB, {
+      ...base,
+      id: `aud_outbox_recovery_invalid_${index}`,
+      metadata,
+    })).toThrow(/^AUDIT_EVENT_INVALID$/)
+    expect(() => auditEventStatement(env.DB, {
+      ...base,
+      id: 'aud_outbox_recovery_system_actor',
+      actorStaffId: null,
+    })).toThrow(/^AUDIT_EVENT_INVALID$/)
+  })
+
   it('returns a tagged prepared statement with a frozen non-sensitive descriptor', async () => {
     const statement = auditEventStatement(env.DB, event)
     expect(auditDescriptorFor(statement)).toEqual({
@@ -125,6 +164,7 @@ describe('shared audit statement constructor', () => {
     ['identity.denied', 'staff_user', 'denied', { version: 2 }],
     ['identity.reindex', 'staff_user', 'success', { version: 3 }],
     ['identity.reindex', 'staff_invitation', 'success', { version: 3 }],
+    ['staff.profile.updated', 'staff_user', 'success', { staffVersion: 2 }],
     ['data_key.rewrapped', 'data_key', 'success', { newKekVersion: 2, oldKekVersion: 1 }],
   ])('accepts the exact null-reason schema for %s/%s', async (action, entityType, result, metadata) => {
     const id = `aud_${action.replaceAll('.', '_')}_${entityType}`
@@ -135,6 +175,29 @@ describe('shared audit statement constructor', () => {
     await statement.run()
     expect((await env.DB.prepare('SELECT metadata_json FROM audit_events WHERE id=?').bind(id).first()).metadata_json)
       .toBe(JSON.stringify(Object.fromEntries(Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right)))))
+  })
+
+  it('accepts staff profile convergence only as a typed system event', () => {
+    const base = {
+      ...event,
+      id: 'aud_staff_profile_system',
+      action: 'staff.profile.updated',
+      entityType: 'staff_user',
+      entityId: 'stf_profile_target',
+      result: 'success',
+      metadata: { staffVersion: 2 },
+    }
+    expect(() => auditEventStatement(env.DB, base)).not.toThrow()
+    expect(() => auditEventStatement(env.DB, {
+      ...base,
+      id: 'aud_staff_profile_human',
+      actorStaffId: 'stf_actor',
+    })).toThrow(/^AUDIT_EVENT_INVALID$/)
+    expect(() => auditEventStatement(env.DB, {
+      ...base,
+      id: 'aud_staff_profile_bad_entity',
+      entityId: 'profile_target',
+    })).toThrow(/^AUDIT_EVENT_INVALID$/)
   })
 
   it.each([

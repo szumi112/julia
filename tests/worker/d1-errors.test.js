@@ -80,6 +80,12 @@ it('classifies only exact D1 guard errors', () => {
   expect(d1Errors.isD1OutboxOperationGuardFailure(
     new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT')
   )).toBe(false)
+  expect(d1Errors.isD1InvalidOutboxRecoveryEdge(
+    new Error('D1_ERROR: invalid_recovery_edge: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)')
+  )).toBe(true)
+  expect(d1Errors.isD1InvalidOutboxRecoveryEdge(
+    new Error('transport invalid_recovery_edge downstream')
+  )).toBe(false)
   expect(classifyOwnerTransitionError(new Error('last_active_owner: SQLITE_CONSTRAINT'))).toBe('LAST_ACTIVE_OWNER')
   expect(classifyOwnerTransitionError(new Error('D1_ERROR: identity_collision: SQLITE_CONSTRAINT'))).toBeNull()
   expect(classifyOwnerTransitionError(new Error('unknown'))).toBeNull()

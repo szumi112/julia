@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { ApiError, apiClient } from '../api.js'
 import { useDrawerFX } from '../anim.js'
+import { useAuth } from '../auth.jsx'
 import { canPerformAction } from '../capability-access.js'
 import {
   permissionChoicesFor,
@@ -29,7 +30,6 @@ const STAFF_STATUS_TONES = Object.freeze({
   pending: 'amber',
 })
 const INVITATION_STATUS_LABELS = Object.freeze({
-  pending: 'Zaproszenie wysłane',
   provisioning: 'Konfiguracja dostępu w toku',
 })
 const UNKNOWN_ROLE = 'Rola niedostępna'
@@ -87,7 +87,7 @@ const expiryFormat = new Intl.DateTimeFormat('pl-PL', {
 })
 
 const bytes = (value) => new TextEncoder().encode(value).byteLength
-const canonicalEmail = (value) => {
+const canonicalEmail = (value, environment) => {
   if (typeof value !== 'string' || INVALID_TEXT.test(value)) return null
   const email = value.trim().toLowerCase().normalize('NFC')
   if (bytes(email) > 254
@@ -95,7 +95,7 @@ const canonicalEmail = (value) => {
     || email.startsWith('.')
     || email.includes('..')
     || email.includes('.@')
-    || !email.endsWith('@example.test')) return null
+    || (environment !== 'staging' && !email.endsWith('@example.test'))) return null
   return email
 }
 const displayNameFor = (value) => value.trim().normalize('NFC')
@@ -106,6 +106,12 @@ const labelFor = (labels, value, fallback) => (
   typeof value === 'string' && Object.hasOwn(labels, value) ? labels[value] : fallback
 )
 const expiryLabel = (value) => expiryFormat.format(new Date(value))
+const invitationLabel = (invitation) => {
+  if (invitation.status !== 'pending') {
+    return labelFor(INVITATION_STATUS_LABELS, invitation.status, UNKNOWN_STATE)
+  }
+  return invitation.emailSentAt === null ? 'Oczekuje na wysłanie' : 'Przyjęte do wysłania'
+}
 const sameOrdered = (left, right) => left.length === right.length
   && left.every((value, index) => value === right[index])
 const targetLabel = (person) => (
@@ -137,7 +143,7 @@ function useNativeModal(fallbackRef) {
   return dialogRef
 }
 
-function InvitationDrawer({ onChanged, onClose, onDirtyChange, onForbidden }) {
+function InvitationDrawer({ environment, onChanged, onClose, onDirtyChange, onForbidden }) {
   const { toast } = useApp()
   const dialogRef = useNativeModal()
   const drawerRef = useRef(null)
@@ -176,7 +182,7 @@ function InvitationDrawer({ onChanged, onClose, onDirtyChange, onForbidden }) {
     event?.preventDefault()
     if (saveStatus === 'saving') return
     const displayName = displayNameFor(form.displayName)
-    const email = canonicalEmail(form.email)
+    const email = canonicalEmail(form.email, environment)
     const role = ROLE_OPTIONS[Number(form.roleIndex)]?.value
     const nextErrors = {
       displayName: validDisplayName(displayName) ? null : 'Podaj imię i nazwisko',
@@ -266,7 +272,9 @@ function InvitationDrawer({ onChanged, onClose, onDirtyChange, onForbidden }) {
           <Field
             label="Adres e-mail"
             error={errors.email}
-            hint="W środowisku testowym użyj adresu w domenie example.test."
+            hint={environment === 'staging'
+              ? 'Na ten adres wyślemy zaproszenie do chronionego panelu.'
+              : 'W środowisku testowym użyj adresu w domenie example.test.'}
           >
             <input
               className="input"
@@ -963,6 +971,7 @@ export function PermissionsAccess({ sectionRef }) {
 
 export function StaffAccess({ sectionRef }) {
   const { toast } = useApp()
+  const { session } = useAuth()
   const { actor, capabilities, registerLeaveGuard } = useShell()
   const canInvite = canPerformAction(capabilities, 'staff.invite')
   const canChangeRole = actor?.role === 'owner'
@@ -974,6 +983,7 @@ export function StaffAccess({ sectionRef }) {
   const [roleChange, setRoleChange] = useState(null)
   const [deactivation, setDeactivation] = useState(null)
   const requestRef = useRef(0)
+  const requestInFlightRef = useRef(null)
   const inviteDirtyRef = useRef(false)
   const roleDirtyRef = useRef(false)
   const headingRef = useRef(null)
@@ -984,9 +994,11 @@ export function StaffAccess({ sectionRef }) {
     roleDirtyRef.current = dirty
   }, [])
 
-  const loadStaff = useCallback(async () => {
+  const loadStaff = useCallback(async ({ background = false } = {}) => {
+    if (background && requestInFlightRef.current !== null) return false
     const requestId = ++requestRef.current
-    setLoadStatus('loading')
+    requestInFlightRef.current = requestId
+    if (!background) setLoadStatus('loading')
     try {
       const result = await apiClient.listStaff()
       if (requestRef.current !== requestId) return false
@@ -995,9 +1007,12 @@ export function StaffAccess({ sectionRef }) {
       return true
     } catch {
       if (requestRef.current !== requestId) return false
+      if (background) return false
       setStaff([])
       setLoadStatus('error')
       return false
+    } finally {
+      if (requestInFlightRef.current === requestId) requestInFlightRef.current = null
     }
   }, [])
 
@@ -1008,6 +1023,21 @@ export function StaffAccess({ sectionRef }) {
     return () => {
       window.clearTimeout(timer)
       requestRef.current += 1
+      requestInFlightRef.current = null
+    }
+  }, [loadStaff])
+
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === 'visible') void loadStaff({ background: true })
+    }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    const interval = window.setInterval(refresh, 15_000)
+    return () => {
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+      window.clearInterval(interval)
     }
   }, [loadStaff])
 
@@ -1018,6 +1048,7 @@ export function StaffAccess({ sectionRef }) {
 
   const clearForbidden = () => {
     requestRef.current += 1
+    requestInFlightRef.current = null
     setStaff([])
     setLoadStatus('error')
     toast('Uprawnienia do listy personelu uległy zmianie.', 'alert')
@@ -1087,11 +1118,7 @@ export function StaffAccess({ sectionRef }) {
                 {person.invitation && (
                   <div className="staff-access-row__invitation">
                     <span>
-                      {labelFor(
-                        INVITATION_STATUS_LABELS,
-                        person.invitation.status,
-                        UNKNOWN_STATE,
-                      )}
+                      {invitationLabel(person.invitation)}
                     </span>
                     <span>Ważne do {expiryLabel(person.invitation.expiresAt)}</span>
                   </div>
@@ -1103,6 +1130,7 @@ export function StaffAccess({ sectionRef }) {
       </section>
       {canInvite && inviteOpen && (
         <InvitationDrawer
+          environment={session.environment}
           onChanged={loadStaff}
           onClose={() => setInviteOpen(false)}
           onDirtyChange={setInviteDirty}

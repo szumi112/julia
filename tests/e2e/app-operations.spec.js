@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs'
 import { test, expect } from '@playwright/test'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const VISUAL_DIR = '.superpowers/visual/task-9-gate-f'
 const CURSOR = `v1.1.QQ.${'A'.repeat(43)}`
@@ -134,6 +135,7 @@ const ACTION_SPECS = [
       jobId: 'outbox_provider_reference_private',
       outboxType: 'staff.access.reconcile',
     },
+    recovery: { kind: 'access', status: 'available' },
   },
   {
     id: 'act_backup_stale',
@@ -185,7 +187,13 @@ const makeActions = (specs = ACTION_SPECS) => specs.map((spec, index) => {
 })
 
 const actionsEnvelope = (actions = makeActions(), truncated = false) => json(200, {
-  data: { actions, truncated },
+  data: {
+    actions: actions.map((action) => ({
+      ...action,
+      recovery: action.recovery ?? null,
+    })),
+    truncated,
+  },
 })
 
 const resolvedEnvelope = (id, version = 2) => json(200, {
@@ -197,6 +205,13 @@ const resolvedEnvelope = (id, version = 2) => json(200, {
       resolvedAt: '2026-07-31T08:30:00.000Z',
       updatedAt: '2026-07-31T08:30:00.000Z',
     },
+  },
+})
+
+const recoveryEnvelope = (id, kind) => json(202, {
+  data: {
+    action: { id, status: 'open', version: 1 },
+    recovery: { kind, status: 'queued' },
   },
 })
 
@@ -246,11 +261,13 @@ async function installOperationsRoutes(page, {
   health = (route) => route.fulfill(healthEnvelope()),
   actions = (route) => route.fulfill(actionsEnvelope()),
   resolution = (route) => route.fulfill(resolvedEnvelope('act_scheduler_stale')),
+  recovery = (route) => route.fulfill(recoveryEnvelope('act_outbox_failed', 'access')),
   audit = (route) => route.fulfill(auditEnvelope()),
 } = {}) {
   await page.route('**/api/v1/operations/health', health)
   await page.route('**/api/v1/operations/actions', actions)
   await page.route('**/api/v1/operations/actions/*/resolution', resolution)
+  await page.route('**/api/v1/operations/actions/*/recovery-attempts', recovery)
   await page.route('**/api/v1/security/audit*', audit)
 }
 
@@ -791,6 +808,145 @@ test('@owner resolution is a top-layer keyboard modal and sends one exact mutati
   await expect(page.getByRole('tab', { name: 'Działania' })).toBeFocused()
   expect(posts).toBe(1)
   expect(actionsReads).toBe(2)
+})
+
+test('@owner safely queues one failed Access recovery and renders its live state', async ({ page }) => {
+  const available = makeActions([{
+    ...ACTION_SPECS[1],
+    recovery: { kind: 'access', status: 'available' },
+  }])
+  const queued = makeActions([{
+    ...ACTION_SPECS[1],
+    recovery: { kind: 'access', status: 'queued' },
+  }])
+  let actionReads = 0
+  let posts = 0
+  let requestRecord
+  await installOperationsRoutes(page, {
+    actions: (route) => {
+      actionReads += 1
+      return route.fulfill(actionsEnvelope(actionReads === 1 ? available : queued))
+    },
+    recovery: (route) => {
+      posts += 1
+      requestRecord = route.request()
+      return route.fulfill(recoveryEnvelope('act_outbox_failed', 'access'))
+    },
+  })
+
+  await openActions(page)
+  const retry = page.getByRole('button', { name: 'Ponów zadanie' })
+  await retry.click()
+  const dialog = page.getByRole('alertdialog', { name: 'Ponów nieudane zadanie' })
+  await expect(dialog).toContainText('bezpieczne zadanie zastępcze')
+  await dialog.getByRole('button', { name: 'Ponów zadanie' }).click()
+
+  await expect(dialog).toHaveCount(0)
+  await expect(page.getByText('Ponowienie zadania zostało zlecone.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Ponawianie w toku', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Ponów zadanie' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Oznacz jako rozwiązane' })).toHaveCount(0)
+  expect(posts).toBe(1)
+  expect(actionReads).toBe(2)
+  expect(operationPath(requestRecord)).toBe('/api/v1/operations/actions/act_outbox_failed/recovery-attempts')
+  expect(requestRecord.postDataJSON()).toEqual({ version: 1 })
+  expect(requestRecord.headers()['x-csrf-token']).toMatch(CSRF)
+  expect(requestRecord.headers()['idempotency-key']).toMatch(ACTION_KEY)
+})
+
+test('@coordinator can see a recoverable failure but cannot retry or disposition it', async ({ page }) => {
+  const actions = makeActions([{
+    ...ACTION_SPECS[1],
+    recovery: { kind: 'access', status: 'available' },
+  }])
+  await installOperationsRoutes(page, {
+    actions: (route) => route.fulfill(actionsEnvelope(actions)),
+  })
+
+  await openActions(page)
+
+  await expect(page.getByText('Nieudane zadanie', { exact: true })).toBeVisible()
+  await expect(page.getByText('Wymaga działania właściciela', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Ponów zadanie' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Oznacz jako rozwiązane' })).toHaveCount(0)
+})
+
+test('@owner without staff management cannot retry or disposition a recoverable failure', async ({ page }) => {
+  const actions = makeActions([{
+    ...ACTION_SPECS[1],
+    recovery: { kind: 'access', status: 'available' },
+  }])
+  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope({
+    capabilities: ROLE_DEFAULT_CAPABILITIES.owner.filter(
+      (capability) => capability !== 'staff.manage',
+    ),
+  })))
+  await installOperationsRoutes(page, {
+    actions: (route) => route.fulfill(actionsEnvelope(actions)),
+  })
+
+  await openActions(page)
+
+  await expect(page.getByText(
+    'Brakuje uprawnienia do zarządzania personelem.',
+    { exact: true },
+  )).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Ponów zadanie' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Oznacz jako rozwiązane' })).toHaveCount(0)
+})
+
+test('@owner explains an unsafe email recovery and offers only manual disposition', async ({ page }) => {
+  const email = {
+    ...ACTION_SPECS[1],
+    details: {
+      ...ACTION_SPECS[1].details,
+      errorCode: 'EMAIL_DELIVERY_AMBIGUOUS',
+      outboxType: 'staff.invitation.email',
+    },
+    recovery: { kind: 'email', status: 'unsafe' },
+  }
+  await installOperationsRoutes(page, {
+    actions: (route) => route.fulfill(actionsEnvelope(makeActions([email]))),
+  })
+
+  await openActions(page)
+
+  await expect(page.getByText('Nie można bezpiecznie ponowić', { exact: true })).toBeVisible()
+  await expect(page.getByText(
+    'Ponowienie mogłoby wysłać zaproszenie drugi raz. Sprawdź stan ręcznie przed zamknięciem działania.',
+    { exact: true },
+  )).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Ponów zadanie' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Oznacz jako rozwiązane' })).toBeVisible()
+})
+
+test('@owner capability loss closes an unsafe email disposition confirmation', async ({ page }) => {
+  const email = {
+    ...ACTION_SPECS[1],
+    details: {
+      ...ACTION_SPECS[1].details,
+      errorCode: 'EMAIL_DELIVERY_AMBIGUOUS',
+      outboxType: 'staff.invitation.email',
+    },
+    recovery: { kind: 'email', status: 'unsafe' },
+  }
+  await installOperationsRoutes(page, {
+    actions: (route) => route.fulfill(actionsEnvelope(makeActions([email]))),
+  })
+
+  await openActions(page)
+  await page.getByRole('button', { name: 'Oznacz jako rozwiązane' }).click()
+  await expect(page.getByRole('alertdialog')).toBeVisible()
+
+  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope({
+    capabilities: ROLE_DEFAULT_CAPABILITIES.owner.filter(
+      (capability) => capability !== 'staff.manage',
+    ),
+  })))
+  await page.evaluate(() => window.dispatchEvent(new Event('bwm:test-auth-refresh')))
+
+  await expect(page.getByRole('alertdialog')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Oznacz jako rozwiązane' })).toHaveCount(0)
 })
 
 test('@owner correction synchronously locks duplicate resolution confirmation', async ({ page }) => {

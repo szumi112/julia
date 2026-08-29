@@ -597,6 +597,26 @@ describe('staff owner HTTP operations', () => {
     )).toBe(1)
   })
 
+  it('accepts a live team address through the fictional staging HTTP route', async () => {
+    const fixture = await actorFixture('owner', 'live_staging_owner')
+    const deps = appDeps(fixture, { idFactory: ids('live_staging') })
+    const request = mutation('/api/v1/staff/invitations', JSON.stringify({
+      displayName: 'Staging Team Member',
+      email: 'team.member@qa.invalid',
+      role: 'coordinator',
+    }), 'live-staging-invite-key')
+
+    const response = await createApp(deps).request(request.path, request.init)
+
+    expect(response.status).toBe(201)
+    expect((await response.json()).data.staff).toMatchObject({
+      displayName: 'Staging Team Member',
+      email: 'team.member@qa.invalid',
+      role: 'coordinator',
+      status: 'pending',
+    })
+  })
+
   it('changes a staff role through the protected optimistic route', async () => {
     const fixture = await actorFixture('owner', 'role_http_owner')
     const target = await seedActiveStaff(fixture.cryptoContext, {
@@ -810,7 +830,7 @@ describe('staff request validation and public errors', () => {
       'displayName',
     ],
     [
-      { displayName: 'Anna', email: 'anna@real.test', role: 'owner' },
+      { displayName: 'Anna', email: 'anna@-real.test', role: 'owner' },
       'email',
     ],
     [

@@ -28,6 +28,7 @@ const sessionEnvelope = ({
   },
   authorityRevision = 1,
   capabilities = ['appointment.manage'],
+  environment = 'development',
 } = {}) => {
   const csrfExpiresAt = '2030-01-01T00:00:00.000Z'
   const csrfExpiresUnix = Date.parse(csrfExpiresAt) / 1000
@@ -39,7 +40,7 @@ const sessionEnvelope = ({
       csrfExpiresAt,
       csrfToken: `v1.${csrfExpiresUnix}.${'A'.repeat(22)}.${'B'.repeat(43)}`,
       dataMode: 'fictional',
-      environment: 'development',
+      environment,
     },
   })
 }
@@ -766,6 +767,199 @@ test('@owner rejects an invalid staff email inline without a request', async ({ 
 
   await expect(drawer.getByText('Podaj poprawny adres e-mail', { exact: true })).toBeVisible()
   expect(invitationRequests).toBe(0)
+})
+
+test('@owner submits a live team address in fictional staging', async ({ page }) => {
+  const invitationRequests = []
+  await page.route('**/api/v1/session', (route) => route.fulfill(sessionEnvelope({
+    capabilities: ROLE_DEFAULT_CAPABILITIES.owner,
+    environment: 'staging',
+  })))
+  await page.route('**/api/v1/staff/invitations', async (route) => {
+    invitationRequests.push(route.request().postDataJSON())
+    await route.fulfill(json(201, {
+      data: {
+        staff: {
+          id: 'stf_live_staging',
+          displayName: 'Staging Team Member',
+          email: 'team.member@qa.invalid',
+          role: 'coordinator',
+          status: 'pending',
+          version: 1,
+          specialistId: null,
+        },
+        invitation: {
+          id: 'inv_live_staging',
+          status: 'provisioning',
+          expiresAt: '2030-01-02T00:00:00.000Z',
+          emailSentAt: null,
+          version: 1,
+        },
+      },
+    }))
+  })
+  await openSettings(page)
+  const drawer = await fillStaffInvitation(page, {
+    displayName: 'Staging Team Member',
+    email: 'team.member@qa.invalid',
+  })
+
+  await expect(drawer.getByText(
+    'Na ten adres wyślemy zaproszenie do chronionego panelu.',
+    { exact: true },
+  )).toBeVisible()
+  await drawer.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
+
+  await expect(drawer).toHaveCount(0)
+  expect(invitationRequests).toEqual([{
+    displayName: 'Staging Team Member',
+    email: 'team.member@qa.invalid',
+    role: 'coordinator',
+  }])
+})
+
+test('@owner distinguishes queued invitation mail from provider acceptance', async ({ page }) => {
+  await page.route('**/api/v1/staff', (route) => route.fulfill(json(200, {
+    data: {
+      staff: [
+        {
+          id: 'stf_mail_queued',
+          displayName: 'Mail Queued',
+          email: 'mail.queued@example.test',
+          role: 'coordinator',
+          status: 'pending',
+          version: 1,
+          specialistId: null,
+          invitation: {
+            id: 'inv_mail_queued',
+            status: 'pending',
+            expiresAt: '2030-01-02T00:00:00.000Z',
+            emailSentAt: null,
+            version: 2,
+          },
+        },
+        {
+          id: 'stf_mail_accepted',
+          displayName: 'Mail Accepted',
+          email: 'mail.accepted@example.test',
+          role: 'coordinator',
+          status: 'pending',
+          version: 1,
+          specialistId: null,
+          invitation: {
+            id: 'inv_mail_accepted',
+            status: 'pending',
+            expiresAt: '2030-01-02T00:00:00.000Z',
+            emailSentAt: '2029-12-20T12:00:00.000Z',
+            version: 3,
+          },
+        },
+      ],
+    },
+  })))
+
+  await openSettings(page)
+
+  const queued = page.locator('.staff-access-row').filter({ hasText: 'Mail Queued' })
+  const accepted = page.locator('.staff-access-row').filter({ hasText: 'Mail Accepted' })
+  await expect(queued).toContainText('Oczekuje na wysłanie')
+  await expect(queued).not.toContainText('Przyjęte do wysłania')
+  await expect(accepted).toContainText('Przyjęte do wysłania')
+})
+
+test('@owner refreshes asynchronous invitation state on focus without overlapping requests', async ({ page }) => {
+  let listRequests = 0
+  let releaseRefresh
+  const refreshReleased = new Promise((resolve) => { releaseRefresh = resolve })
+  await page.route('**/api/v1/staff', async (route) => {
+    listRequests += 1
+    if (listRequests === 2) await refreshReleased
+    await route.fulfill(json(200, {
+      data: {
+        staff: [{
+          id: 'stf_focus_refresh',
+          displayName: 'Focus Refresh',
+          email: 'focus.refresh@example.test',
+          role: 'coordinator',
+          status: 'pending',
+          version: 1,
+          specialistId: null,
+          invitation: {
+            id: 'inv_focus_refresh',
+            status: 'pending',
+            expiresAt: '2030-01-02T00:00:00.000Z',
+            emailSentAt: listRequests === 1 ? null : '2029-12-20T12:00:00.000Z',
+            version: listRequests === 1 ? 2 : 3,
+          },
+        }],
+      },
+    }))
+  })
+
+  try {
+    await openSettings(page)
+    const row = page.locator('.staff-access-row').filter({ hasText: 'Focus Refresh' })
+    await expect(row).toContainText('Oczekuje na wysłanie')
+
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('focus'))
+      window.dispatchEvent(new Event('focus'))
+    })
+    await expect.poll(() => listRequests, { timeout: 1_500 }).toBe(2)
+    await expect(row).toContainText('Oczekuje na wysłanie')
+    await expect(page.getByText('Pobieranie listy personelu…', { exact: true })).toHaveCount(0)
+
+    releaseRefresh()
+    await expect(row).toContainText('Przyjęte do wysłania')
+    expect(listRequests).toBe(2)
+  } finally {
+    releaseRefresh()
+  }
+})
+
+test('@owner keeps the current staff list when a background refresh fails', async ({ page }) => {
+  let listRequests = 0
+  await page.route('**/api/v1/staff', async (route) => {
+    listRequests += 1
+    if (listRequests > 1) {
+      await route.abort('connectionfailed')
+      return
+    }
+    await route.fulfill(json(200, {
+      data: {
+        staff: [{
+          id: 'stf_background_failure',
+          displayName: 'Background Failure',
+          email: 'background.failure@example.test',
+          role: 'coordinator',
+          status: 'pending',
+          version: 1,
+          specialistId: null,
+          invitation: {
+            id: 'inv_background_failure',
+            status: 'pending',
+            expiresAt: '2030-01-02T00:00:00.000Z',
+            emailSentAt: null,
+            version: 2,
+          },
+        }],
+      },
+    }))
+  })
+
+  await openSettings(page)
+  const row = page.locator('.staff-access-row').filter({ hasText: 'Background Failure' })
+  await expect(row).toContainText('Oczekuje na wysłanie')
+
+  const failed = page.waitForEvent('requestfailed', (request) => (
+    new URL(request.url()).pathname === '/api/v1/staff'
+  ))
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await failed
+
+  await expect(row).toContainText('Oczekuje na wysłanie')
+  await expect(page.getByText('Nie udało się pobrać listy personelu.', { exact: true })).toHaveCount(0)
+  expect(listRequests).toBe(2)
 })
 
 test('@owner staff invitation drawer guards a changed draft', async ({ page }) => {

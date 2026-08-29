@@ -15,3 +15,8 @@ test('operations audit copy labels every activity action in Polish', async () =>
     assert.match(source, new RegExp(`'${escaped}': '[^']+'`))
   }
 })
+
+test('operations audit copy labels staff profile updates in Polish', async () => {
+  const source = await readFile(new URL('../../src/views/Operations.jsx', import.meta.url), 'utf8')
+  assert.match(source, /'staff\.profile\.updated': '[^']+'/)
+})

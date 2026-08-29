@@ -2,6 +2,10 @@ import { execFileSync } from 'node:child_process'
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import {
+  loadAccessProviderConfig,
+  loadEmailProviderConfig,
+} from '../worker/config.js'
 
 const RUNTIME_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdn.jsdelivr.net']
 const SECRET_NAMES = [
@@ -35,12 +39,17 @@ const BACKEND_BINDINGS = [
   'BWM_LOOKUP_HMAC_V1',
   'BWM_WORKBOOK_HMAC_V1',
   'BWM_WORKBOOK_KEK_V1',
+  'CF_ACCESS_GROUP_ID',
+  'CF_ACCESS_GROUP_NAME',
   'CF_ACCESS_GROUP_TOKEN',
   'CF_ACCOUNT_ID',
   'CF_D1_DATABASE_ID',
   'CF_D1_EXPORT_TOKEN',
   'DATA_MODE',
   'DB',
+  'SCW_FROM_EMAIL',
+  'SCW_FROM_NAME',
+  'SCW_PROJECT_ID',
   'SCW_SECRET_KEY',
 ]
 const DEPLOY_ENVIRONMENT_NAMES = ['production', 'staging']
@@ -235,6 +244,67 @@ const isLocalDevOrigin = (value) => {
     || url.hostname === '[::1]'
 }
 
+const PROTECTED_PROVIDER_BINDINGS = Object.freeze([
+  'CF_ACCOUNT_ID',
+  'CF_ACCESS_GROUP_ID',
+  'CF_ACCESS_GROUP_NAME',
+  'SCW_PROJECT_ID',
+  'SCW_FROM_EMAIL',
+  'SCW_FROM_NAME',
+])
+const REQUIRED_PROVIDER_SECRETS = Object.freeze([
+  'CF_ACCESS_GROUP_TOKEN',
+  'SCW_SECRET_KEY',
+])
+const PROVIDER_PLACEHOLDERS = new Set([
+  'change-me',
+  'changeme',
+  'example',
+  'placeholder',
+  'replace-me',
+  'replaceme',
+  'todo',
+  'your-value-here',
+])
+const ZERO_PROVIDER_IDENTIFIER = /^(?:0{32}|00000000-0000-0000-0000-000000000000)$/
+
+const assertProtectedProviderBindings = (workerConfig, vars, expectedEnvironment) => {
+  for (const name of PROTECTED_PROVIDER_BINDINGS) {
+    if (typeof vars[name] !== 'string' || vars[name].length === 0) {
+      throw new Error(`Generated Worker config must include provider binding ${name}`)
+    }
+    const normalized = vars[name].trim().toLowerCase()
+    if (PROVIDER_PLACEHOLDERS.has(normalized) || ZERO_PROVIDER_IDENTIFIER.test(normalized)) {
+      throw new Error(`Generated Worker provider configuration contains placeholder ${name}`)
+    }
+  }
+  try {
+    loadAccessProviderConfig({
+      ...vars,
+      CF_ACCESS_GROUP_TOKEN: 'artifact-access-provider-token',
+    }, { appEnv: expectedEnvironment })
+  } catch {
+    throw new Error('Generated Worker Access provider configuration is invalid')
+  }
+  try {
+    loadEmailProviderConfig({
+      ...vars,
+      SCW_SECRET_KEY: 'artifact-email-provider-secret',
+    }, { appEnv: expectedEnvironment })
+  } catch {
+    throw new Error('Generated Worker email provider configuration is invalid')
+  }
+  const requiredSecrets = workerConfig.secrets?.required
+  if (!Array.isArray(requiredSecrets)) {
+    throw new Error('Generated Worker config must declare required provider secrets')
+  }
+  for (const name of REQUIRED_PROVIDER_SECRETS) {
+    if (!requiredSecrets.includes(name)) {
+      throw new Error(`Generated Worker config must require provider secret ${name}`)
+    }
+  }
+}
+
 // The @cloudflare/vite-plugin resolves CLOUDFLARE_ENV at build time and stamps the
 // generated Worker config with targetEnvironment plus the flattened env block, so
 // a deploy for a named environment must never ship the local placeholder config.
@@ -249,6 +319,7 @@ const assertDeployEnvironment = (workerConfig, expectedEnvironment) => {
   if (isLocalDevOrigin(vars.APP_ORIGIN)) {
     throw new Error('Generated Worker config vars.APP_ORIGIN must not be a local development origin')
   }
+  assertProtectedProviderBindings(workerConfig, vars, expectedEnvironment)
   const databases = workerConfig.d1_databases
   if (!Array.isArray(databases)
     || databases.length < 1

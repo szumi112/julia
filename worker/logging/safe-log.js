@@ -14,6 +14,7 @@ const METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELE
 const ROUTES = new Set([
   'health.live',
   'operations.action-resolution',
+  'operations.action-recovery',
   'operations.actions',
   'operations.health',
   'security.audit',

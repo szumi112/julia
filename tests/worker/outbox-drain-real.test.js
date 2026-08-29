@@ -299,7 +299,7 @@ describe('real-handler free-tier outbox drain', () => {
 
     expect(results.length).toBeGreaterThan(1)
     expect(results.every((result) => result.status === 'succeeded')).toBe(true)
-    expect(Math.max(...usages.map(({ statements }) => statements))).toBe(49)
+    expect(Math.max(...usages.map(({ statements }) => statements))).toBe(50)
     expect(Math.max(...usages.map(({ maxBindings }) => maxBindings))).toBe(45)
     expect(accessJobs.results.length).toBeGreaterThan(1)
     expect(accessJobs.results.every((job) => job.status === 'succeeded')).toBe(true)

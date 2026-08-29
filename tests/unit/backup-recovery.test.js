@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   CORE_PRE_WORKBOOK_MIGRATIONS,
+  CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS,
   WORKBOOK_ROUNDTRIP_MIGRATIONS,
   readBackupRecoverySnapshotWithQuery,
   readBackupRecoverySnapshot,
@@ -185,6 +186,21 @@ test('reads the exact terminal workbook snapshot and preserves only count-only f
   assert.equal(JSON.stringify(result).includes('sheet_name'), false)
 })
 
+test('accepts both the proven 0001-0021 rollback snapshot and current 0001-0022 snapshot', async () => {
+  for (const migrations of [
+    WORKBOOK_ROUNDTRIP_MIGRATIONS,
+    CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS,
+  ]) {
+    const result = await readBackupRecoverySnapshotWithQuery(async () => [workbookRow({
+      applied_migrations_json: JSON.stringify(migrations),
+    })])
+    assert.deepEqual(result, {
+      appliedMigrations: migrations,
+      recoveryFacts: workbookFacts(),
+    })
+  }
+})
+
 test('workbook recovery fails closed for absent, ambiguous, incomplete and inconsistent state', async () => {
   const variants = [
     [],
@@ -227,6 +243,7 @@ test('compound snapshot failure never disguises a partial workbook schema as cor
     WORKBOOK_ROUNDTRIP_MIGRATIONS.slice(0, 16),
     WORKBOOK_ROUNDTRIP_MIGRATIONS.slice(0, 20),
     WORKBOOK_ROUNDTRIP_MIGRATIONS,
+    CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS,
   ]) {
     let calls = 0
     await assert.rejects(readBackupRecoverySnapshotWithQuery(async () => {

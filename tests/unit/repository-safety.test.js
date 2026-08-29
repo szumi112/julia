@@ -205,6 +205,19 @@ const environmentWorkerConfig = (overrides = {}) => ({
   vars: {
     APP_ENV: 'staging',
     APP_ORIGIN: 'https://staging.bearwithme-panel.app',
+    CF_ACCOUNT_ID: 'a'.repeat(32),
+    CF_ACCESS_GROUP_ID: '11111111-1111-4111-8111-111111111111',
+    CF_ACCESS_GROUP_NAME: 'Bear with me - panel - staging',
+    SCW_PROJECT_ID: '22222222-2222-4222-8222-222222222222',
+    SCW_FROM_EMAIL: 'panel@qa.invalid',
+    SCW_FROM_NAME: 'Bear with me',
+  },
+  secrets: {
+    required: [
+      'BWM_DATA_KEK_V1',
+      'CF_ACCESS_GROUP_TOKEN',
+      'SCW_SECRET_KEY',
+    ],
   },
   d1_databases: [{
     binding: 'DB',
@@ -218,6 +231,87 @@ test('deploy inspection accepts an artifact resolved for the requested environme
   const root = deployFixture(t, { workerConfig: environmentWorkerConfig() })
   assert.doesNotThrow(() => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }))
   assert.doesNotThrow(() => inspectDeployArtifact({ root, secretValues: {} }))
+})
+
+test('deploy inspection rejects a protected artifact without complete provider bindings', (t) => {
+  for (const name of [
+    'CF_ACCOUNT_ID',
+    'CF_ACCESS_GROUP_ID',
+    'CF_ACCESS_GROUP_NAME',
+    'SCW_PROJECT_ID',
+    'SCW_FROM_EMAIL',
+    'SCW_FROM_NAME',
+  ]) {
+    const vars = { ...environmentWorkerConfig().vars }
+    delete vars[name]
+    const root = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({ vars }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }),
+      new RegExp(name),
+    )
+  }
+})
+
+test('deploy inspection rejects malformed protected-provider configuration', (t) => {
+  for (const [name, value] of [
+    ['CF_ACCOUNT_ID', 'not-an-account-id'],
+    ['CF_ACCESS_GROUP_ID', 'not-a-group-id'],
+    ['CF_ACCESS_GROUP_NAME', ' Bear with me'],
+    ['SCW_PROJECT_ID', 'not-a-project-id'],
+    ['SCW_FROM_EMAIL', 'Panel@qa.invalid'],
+    ['SCW_FROM_NAME', 'Bear with me\u0000'],
+  ]) {
+    const root = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({
+        vars: { ...environmentWorkerConfig().vars, [name]: value },
+      }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }),
+      /provider configuration/i,
+      name,
+    )
+  }
+})
+
+test('deploy inspection rejects placeholder protected-provider configuration', (t) => {
+  for (const [name, value] of [
+    ['CF_ACCOUNT_ID', '0'.repeat(32)],
+    ['CF_ACCESS_GROUP_ID', '00000000-0000-0000-0000-000000000000'],
+    ['CF_ACCESS_GROUP_NAME', 'change-me'],
+    ['SCW_PROJECT_ID', '00000000-0000-0000-0000-000000000000'],
+    ['SCW_FROM_NAME', 'placeholder'],
+  ]) {
+    const root = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({
+        vars: { ...environmentWorkerConfig().vars, [name]: value },
+      }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }),
+      /provider configuration/i,
+      name,
+    )
+  }
+})
+
+test('deploy inspection requires provider secrets in the generated worker contract', (t) => {
+  for (const name of ['CF_ACCESS_GROUP_TOKEN', 'SCW_SECRET_KEY']) {
+    const root = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({
+        secrets: {
+          required: environmentWorkerConfig().secrets.required
+            .filter((candidate) => candidate !== name),
+        },
+      }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }),
+      new RegExp(name),
+    )
+  }
 })
 
 test('deploy inspection rejects an artifact that does not target the requested environment', (t) => {
@@ -380,7 +474,16 @@ test('backend binding names cannot appear in browser files but may appear in Wor
 })
 
 test('staging backup and provider bindings stay out of browser artifacts', (t) => {
-  for (const binding of ['BWM_BACKUP_KEK_V2', 'CF_ACCOUNT_ID', 'CF_D1_DATABASE_ID']) {
+  for (const binding of [
+    'BWM_BACKUP_KEK_V2',
+    'CF_ACCESS_GROUP_ID',
+    'CF_ACCESS_GROUP_NAME',
+    'CF_ACCOUNT_ID',
+    'CF_D1_DATABASE_ID',
+    'SCW_FROM_EMAIL',
+    'SCW_FROM_NAME',
+    'SCW_PROJECT_ID',
+  ]) {
     const allowedRoot = deployFixture(t, { worker: `const value = env.${binding}` })
     assert.doesNotThrow(() => inspectDeployArtifact({ root: allowedRoot, secretValues: {} }))
 

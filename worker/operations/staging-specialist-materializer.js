@@ -3,7 +3,10 @@ import {
   updateSpecialistProfile,
 } from '../core/specialist-profiles.js'
 import { linkSpecialistAccount } from '../core/specialist-account-links.js'
-import { decryptForScope } from '../security/envelope.js'
+import { auditEventStatement } from '../audit/events.js'
+import { createSystemUnitOfWork } from '../db/unit-of-work.js'
+import { resolveCurrentAuthorityActor } from '../identity/staff.js'
+import { decryptForScope, encryptForScope } from '../security/envelope.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
 
 const SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
@@ -13,9 +16,11 @@ const INPUT_KEYS = Object.freeze([
 const DEPENDENCY_KEYS = Object.freeze(['createProfile', 'updateProfile', 'linkAccount'])
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const STAFF_CAP = 128
 const PROFILE_CAP = 128
 const PROFESSIONAL_TITLE = 'Specjalistka'
+const FALLBACK_OWNER_NAME = 'Właściciel'
 const failure = () => { throw new Error('STAGING_SEED_INVALID') }
 const emptyResult = () => Object.freeze({ created: 0, updated: 0, linked: 0, confirmed: 0 })
 
@@ -94,6 +99,15 @@ const canonicalName = (value) => {
   return canonical
 }
 
+const validInstant = (value) => {
+  try {
+    return typeof value === 'string' && INSTANT.test(value)
+      && new Date(value).toISOString() === value
+  } catch {
+    return false
+  }
+}
+
 const exactTitle = (value) => {
   if (typeof value !== 'string' || value !== value.trim()
     || value !== value.normalize('NFC') || !isWellFormedUnicode(value)
@@ -133,7 +147,9 @@ const decrypt = async (context, recordId, field, serialized) => {
 const loadDirectory = async (db, context) => {
   const [staffResult, profileResult] = await Promise.all([
     db.prepare(
-      `SELECT id,display_name_envelope,role,status,specialist_id,version
+      `SELECT id,email_lookup,email_envelope,display_name_envelope,role,status,
+              access_subject,specialist_id,version,activated_at,disabled_at,
+              created_at,updated_at
        FROM staff_users ORDER BY id LIMIT ?`,
     ).bind(STAFF_CAP + 1).all(),
     db.prepare(
@@ -150,12 +166,25 @@ const loadDirectory = async (db, context) => {
   const staff = []
   for (const row of staffRows) {
     if (!STAFF_ID.test(row.id ?? '')
+      || typeof row.email_lookup !== 'string' || row.email_lookup.length < 1
+      || typeof row.email_envelope !== 'string' || row.email_envelope.length < 1
       || !['owner', 'coordinator', 'specialist'].includes(row.role)
       || !['pending', 'active', 'disabled'].includes(row.status)
+      || (row.access_subject !== null
+        && (typeof row.access_subject !== 'string' || row.access_subject.length < 1))
       || (row.specialist_id !== null && !SPECIALIST_ID.test(row.specialist_id ?? ''))
       || !Number.isSafeInteger(row.version) || row.version < 1
       || typeof row.display_name_envelope !== 'string'
-      || row.display_name_envelope.length < 1) failure()
+      || row.display_name_envelope.length < 1
+      || !validInstant(row.created_at) || !validInstant(row.updated_at)
+      || row.updated_at < row.created_at
+      || (row.activated_at !== null && !validInstant(row.activated_at))
+      || (row.disabled_at !== null && !validInstant(row.disabled_at))
+      || (row.status === 'pending' && (row.access_subject !== null
+        || row.activated_at !== null || row.disabled_at !== null))
+      || (row.status === 'active' && (row.access_subject === null
+        || row.activated_at === null || row.disabled_at !== null))
+      || (row.status === 'disabled' && row.disabled_at === null)) failure()
     const displayName = await decrypt(
       context,
       row.id,
@@ -170,6 +199,7 @@ const loadDirectory = async (db, context) => {
       status: row.status,
       specialistId: row.specialist_id,
       version: row.version,
+      row: Object.freeze({ ...row }),
     }))
   }
 
@@ -231,13 +261,201 @@ const linkedDesiredProfile = () => {
 const exactManagedAccount = (directory, desired) => {
   const selector = desired.linkSelector
   if (!selector) failure()
-  const candidates = directory.staff.filter((staff) => (
-    staff.role === selector.role
-    && staff.status === 'active'
-    && staff.canonicalName === selector.displayName
+  const identities = directory.staff.filter((staff) => (
+    staff.canonicalName === selector.displayName
   ))
-  if (candidates.length !== 1) failure()
-  return candidates[0]
+  if (identities.length !== 1) failure()
+  const candidate = identities[0]
+  if (candidate.role !== selector.role || candidate.status !== 'active') failure()
+  return candidate
+}
+
+const fallbackManagedAccount = async (db, directory, desired) => {
+  const selector = desired.linkSelector
+  if (!selector || directory.staff.some((staff) => (
+    staff.canonicalName === selector.displayName
+  ))) failure()
+  const fallbackIdentities = directory.staff.filter((staff) => (
+    staff.canonicalName === FALLBACK_OWNER_NAME
+  ))
+  if (fallbackIdentities.length !== 1) failure()
+  const activeOwners = directory.staff.filter((staff) => (
+    staff.role === selector.role && staff.status === 'active'
+  ))
+  if (activeOwners.length !== 1) failure()
+  const fallback = fallbackIdentities[0]
+  if (fallback.id !== activeOwners[0].id) failure()
+  if (fallback.canonicalName !== FALLBACK_OWNER_NAME || fallback.specialistId !== null) {
+    failure()
+  }
+  const links = await db.prepare(
+    `SELECT specialist_id
+     FROM specialist_account_links
+     WHERE staff_user_id=?
+     ORDER BY created_at,id LIMIT 1`,
+  ).bind(fallback.id).all()
+  if (!Array.isArray(links?.results) || links.results.length !== 0
+    || directory.profiles.some((profile) => profile.staffUserId === fallback.id)) failure()
+  return fallback
+}
+
+const generatedId = () => crypto.randomUUID().replaceAll('-', '')
+
+const convergedStaffRevision = (directory, staff, nextVersion) => {
+  if (!Number.isSafeInteger(nextVersion) || nextVersion < 1) failure()
+  let previousId = null
+  let found = false
+  const revisions = directory.staff.map((candidate) => {
+    if (previousId !== null && candidate.id <= previousId) failure()
+    previousId = candidate.id
+    if (candidate.id === staff.id) found = true
+    return `${candidate.id}:${candidate.id === staff.id ? nextVersion : candidate.version}`
+  })
+  if (!found) failure()
+  return revisions.join('|')
+}
+
+const convergeFallbackOwner = async (db, context, directory, staff, nowMs) => {
+  let now
+  try { now = new Date(nowMs).toISOString() } catch { failure() }
+  if (!validInstant(now) || staff.displayName !== FALLBACK_OWNER_NAME
+    || staff.role !== 'owner' || staff.status !== 'active'
+    || staff.specialistId !== null || now < staff.row.updated_at) failure()
+  const correlationId = crypto.randomUUID()
+  const auditId = generatedId()
+  const versionId = generatedId()
+  const displayNameEnvelope = JSON.stringify(await encryptForScope(
+    context.keyring,
+    context.dataKey,
+    {
+      expectedScope: SCOPE,
+      recordId: staff.id,
+      field: 'display_name',
+      plaintext: 'Julia Wolanin',
+    },
+  ))
+  const next = Object.freeze({
+    ...staff.row,
+    display_name_envelope: displayNameEnvelope,
+    version: staff.version + 1,
+    updated_at: now,
+  })
+  const expectedStaffRevision = convergedStaffRevision(directory, staff, next.version)
+  const snapshotEnvelope = JSON.stringify(await encryptForScope(
+    context.keyring,
+    context.dataKey,
+    {
+      expectedScope: SCOPE,
+      recordId: staff.id,
+      field: 'record_version',
+      plaintext: JSON.stringify(next),
+    },
+  ))
+  const unit = createSystemUnitOfWork(db, { correlationId })
+  unit.domain(db.prepare(
+    `UPDATE staff_users
+     SET display_name_envelope=?,version=version+1,updated_at=?
+     WHERE id=? AND email_lookup=? AND email_envelope=? AND display_name_envelope=?
+       AND role='owner' AND status='active' AND access_subject IS ?
+       AND specialist_id IS NULL AND version=? AND activated_at IS ?
+       AND disabled_at IS NULL AND created_at=? AND updated_at=?`,
+  ).bind(
+    displayNameEnvelope,
+    now,
+    staff.id,
+    staff.row.email_lookup,
+    staff.row.email_envelope,
+    staff.row.display_name_envelope,
+    staff.row.access_subject,
+    staff.version,
+    staff.row.activated_at,
+    staff.row.created_at,
+    staff.row.updated_at,
+  ))
+  unit.version(db.prepare(
+    `INSERT INTO record_versions
+     (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+      changed_at,correlation_id)
+     VALUES (?,'staff_user',?,?,?,?,?,?)`,
+  ).bind(
+    versionId,
+    staff.id,
+    next.version,
+    snapshotEnvelope,
+    null,
+    now,
+    correlationId,
+  ))
+  unit.audit(auditEventStatement(db, {
+    id: auditId,
+    occurredAt: now,
+    actorStaffId: null,
+    action: 'staff.profile.updated',
+    entityType: 'staff_user',
+    entityId: staff.id,
+    result: 'success',
+    correlationId,
+    metadata: { staffVersion: next.version },
+    reasonEnvelope: null,
+  }))
+  unit.guard(db.prepare(
+    `INSERT INTO core_directory_invariant_failures (failure_kind)
+     SELECT 'staging_owner_profile_update_postcondition'
+     WHERE NOT (
+       EXISTS (SELECT 1 FROM staff_users
+         WHERE id=? AND email_lookup=? AND email_envelope=? AND display_name_envelope=?
+           AND role='owner' AND status='active' AND access_subject IS ?
+           AND specialist_id IS NULL AND version=? AND activated_at IS ?
+           AND disabled_at IS NULL AND created_at=? AND updated_at=?)
+       AND coalesce((
+         SELECT group_concat(revision,'|')
+         FROM (
+           SELECT id || ':' || CAST(version AS TEXT) AS revision
+           FROM staff_users ORDER BY id
+         ) AS ordered_staff
+       ),'')=?
+       AND NOT EXISTS (SELECT 1 FROM specialist_account_links WHERE staff_user_id=?)
+       AND NOT EXISTS (SELECT 1 FROM specialists WHERE staff_user_id=?)
+       AND EXISTS (SELECT 1 FROM record_versions
+         WHERE id=? AND entity_type='staff_user' AND entity_id=? AND version=?
+           AND snapshot_envelope=? AND changed_by_staff_id IS NULL AND changed_at=?
+           AND correlation_id=?)
+       AND EXISTS (SELECT 1 FROM audit_events
+         WHERE id=? AND occurred_at=? AND actor_staff_id IS NULL
+           AND action='staff.profile.updated' AND entity_type='staff_user'
+           AND entity_id=? AND result='success' AND reason_envelope IS NULL
+           AND correlation_id=? AND metadata_json=?)
+     )`,
+  ).bind(
+    staff.id,
+    next.email_lookup,
+    next.email_envelope,
+    next.display_name_envelope,
+    next.access_subject,
+    next.version,
+    next.activated_at,
+    next.created_at,
+    next.updated_at,
+    expectedStaffRevision,
+    staff.id,
+    staff.id,
+    versionId,
+    staff.id,
+    next.version,
+    snapshotEnvelope,
+    now,
+    correlationId,
+    auditId,
+    now,
+    staff.id,
+    correlationId,
+    JSON.stringify({ staffVersion: next.version }),
+  ))
+  try {
+    await unit.commit()
+  } catch {
+    failure()
+  }
 }
 
 const resolveProfile = (directory, desired) => {
@@ -266,13 +484,6 @@ const currentClaim = (directory, profile) => {
   if (!statusesMatch) failure()
   return staff
 }
-
-const ownerActor = (staff) => Object.freeze({
-  id: staff.id,
-  role: staff.role,
-  specialistId: staff.specialistId,
-  version: staff.version,
-})
 
 const idFactoryForCreate = (profileId) => {
   let first = true
@@ -318,10 +529,19 @@ export function createStagingSpecialistMaterializer(value) {
     if (!input.db?.prepare || !input.db?.batch || !input.recoveryDb?.prepare
       || !input.keyring || !Number.isSafeInteger(input.nowMs) || input.nowMs < 0) failure()
     const context = await loadContext(input.db, input.keyring)
-    const directory = await loadDirectory(input.db, context)
+    let directory = await loadDirectory(input.db, context)
     const juliaDesired = linkedDesiredProfile()
+    const exactJuliaIdentities = directory.staff.filter((staff) => (
+      staff.canonicalName === juliaDesired.linkSelector.displayName
+    ))
+    if (exactJuliaIdentities.length === 0) {
+      const fallback = await fallbackManagedAccount(input.db, directory, juliaDesired)
+      await convergeFallbackOwner(input.db, context, directory, fallback, input.nowMs)
+      directory = await loadDirectory(input.db, context)
+    }
     const julia = exactManagedAccount(directory, juliaDesired)
-    const actor = ownerActor(julia)
+    let actor
+    try { actor = await resolveCurrentAuthorityActor(input.db, julia.row) } catch { failure() }
     const counts = { created: 0, updated: 0, linked: 0, confirmed: 0 }
     const resolved = new Map()
     const initialProfiles = new Map()

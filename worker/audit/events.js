@@ -6,6 +6,12 @@ import {
   CORE_AUDIT_SCHEMAS,
   isCoreAuditAction,
 } from '../../src/core-audit-contract.js'
+import {
+  captureSystemAuditEvent,
+  captureSystemAuditMetadata,
+  isSystemAuditAction,
+  SYSTEM_AUDIT_SCHEMAS,
+} from '../../src/system-audit-contract.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
@@ -23,12 +29,16 @@ const schemas = Object.freeze({
   ...Object.fromEntries(Object.entries(CORE_AUDIT_SCHEMAS).map(([action, schema]) => [action,
     Object.freeze({ entityTypes: Object.freeze([schema.entityType]), result: 'success', metadata: schema.metadata, reasonPolicy: 'null', human: true })
   ])),
+  ...Object.fromEntries(Object.entries(SYSTEM_AUDIT_SCHEMAS).map(([action, schema]) => [action,
+    Object.freeze({ entityTypes: Object.freeze([schema.entityType]), result: 'success', metadata: schema.metadata, reasonPolicy: 'null', system: true })
+  ])),
   'identity.activation': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
   'identity.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
   'identity.reindex': Object.freeze({ entityTypes: ['staff_user', 'staff_invitation'], result: 'success', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'null' }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: Object.freeze({ oldKekVersion: 'version', newKekVersion: 'version' }), reasonPolicy: 'null' }),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: Object.freeze({ version: 'version' }), reasonPolicy: 'encrypted' }),
   'operational_action.resolved': Object.freeze({ entityTypes: ['operational_action'], result: 'success', metadata: Object.freeze({ actionVersion: 'version' }), reasonPolicy: 'null' }),
+  'outbox.recovery.requested': Object.freeze({ entityTypes: ['outbox_job'], result: 'success', metadata: Object.freeze({ actionVersion: 'version', desiredGeneration: 'nullableVersion', invitationVersion: 'nullableVersion', replacementJobId: 'id' }), reasonPolicy: 'null', human: true }),
   'staff.invited': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
   'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', desiredGeneration: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
   'staff.invitation.expired': Object.freeze({ entityTypes: ['staff_invitation'], result: 'success', metadata: Object.freeze({ staffVersion: 'version', invitationVersion: 'version', desiredGeneration: 'version', specialistVersion: 'nullableVersion' }), reasonPolicy: 'null' }),
@@ -55,6 +65,12 @@ function metadataJson(action, metadata) {
     return JSON.stringify(Object.fromEntries(Object.entries(captured)
       .sort(([left], [right]) => left.localeCompare(right))))
   }
+  if (isSystemAuditAction(action)) {
+    const captured = captureSystemAuditMetadata(action, metadata)
+    if (!captured) throw new Error('AUDIT_EVENT_INVALID')
+    return JSON.stringify(Object.fromEntries(Object.entries(captured)
+      .sort(([left], [right]) => left.localeCompare(right))))
+  }
   const schema = schemas[action]?.metadata
   if (!exactObject(metadata, Object.keys(schema ?? {})) || Object.keys(metadata).length > 8) throw new Error('AUDIT_EVENT_INVALID')
   for (const [key, type] of Object.entries(schema)) {
@@ -69,6 +85,12 @@ function metadataJson(action, metadata) {
       || (type === 'correctionId' && (typeof value !== 'string' || !CORRECTION_ID.test(value)))
       || (type === 'nullablePaymentId' && value !== null
         && (typeof value !== 'string' || !PAYMENT_ID.test(value)))) throw new Error('AUDIT_EVENT_INVALID')
+  }
+  if (action === 'outbox.recovery.requested'
+    && (metadata.actionVersion !== 1
+      || ((metadata.desiredGeneration === null)
+        === (metadata.invitationVersion === null)))) {
+    throw new Error('AUDIT_EVENT_INVALID')
   }
   const text = JSON.stringify(Object.fromEntries(Object.entries(metadata).sort(([left], [right]) => left.localeCompare(right))))
   if (text.length > 512) throw new Error('AUDIT_EVENT_INVALID')
@@ -107,6 +129,9 @@ export function auditEventStatement(db, event) {
   if (isCoreAuditAction(action) && !writerCoreAuditEvent({
     action, actorStaffId, entityType, entityId, result, metadata,
   })) throw new Error('AUDIT_EVENT_INVALID')
+  if (isSystemAuditAction(action) && !writerSystemAuditEvent({
+    action, actorStaffId, entityType, entityId, result, metadata,
+  })) throw new Error('AUDIT_EVENT_INVALID')
   const reasonValid = schema?.reasonPolicy === 'null'
     ? reasonEnvelope === null
     : schema?.reasonPolicy === 'encrypted' && validReasonEnvelope(reasonEnvelope)
@@ -127,6 +152,8 @@ export function auditEventStatement(db, event) {
 
 export const WRITER_CORE_AUDIT_SCHEMAS = CORE_AUDIT_SCHEMAS
 export const writerCoreAuditEvent = captureCoreAuditEvent
+export const WRITER_SYSTEM_AUDIT_SCHEMAS = SYSTEM_AUDIT_SCHEMAS
+export const writerSystemAuditEvent = captureSystemAuditEvent
 
 export async function encryptAuditReason(input = {}) {
   const keys = ['keyring', 'dataKey', 'expectedScope', 'auditEventId', 'plaintext']

@@ -51,13 +51,15 @@ const positive = (value) => Number.isSafeInteger(value) && value > 0
 
 export { specialistIdFor }
 
-export function validateInvitationInput(input, { dataMode } = {}) {
+export function validateInvitationInput(input, { appEnv, dataMode } = {}) {
   if (!exactObject(input, ['displayName', 'email', 'role'])) validation('displayName')
   if (typeof input.displayName !== 'string') validation('displayName')
   const displayName = input.displayName.normalize('NFC').trim()
   if (!displayName || new TextEncoder().encode(displayName).byteLength > 120) validation('displayName')
   if (typeof input.email !== 'string') validation('email')
-  const email = normalizeCanonicalEmail(input.email, { fictional: dataMode === 'fictional' })
+  const email = normalizeCanonicalEmail(input.email, {
+    fictional: !(appEnv === 'staging' && dataMode === 'fictional'),
+  })
   if (email === null) validation('email')
   if (!roles.has(input.role)) validation('role')
   return Object.freeze({ displayName, email, role: input.role })
@@ -435,13 +437,14 @@ function lifecycleGuardStatement(db, staffId, transition) {
   ).bind(...specialist.bindings, ...authority.bindings)
 }
 
-export async function inviteStaff({ db, cryptoContext, actor, input, idempotencyKey, correlationId, nowMs, dataMode, targetSpecialist = null, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
+export async function inviteStaff({ db, cryptoContext, actor, input, idempotencyKey, correlationId, nowMs, appEnv, dataMode, targetSpecialist = null, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
   if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
     || !cryptoContext?.scope || !validId(correlationId) || !Number.isSafeInteger(nowMs)
     || nowMs < 0 || !IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) throw new Error('VALIDATION_FAILED')
   const owner = await activeOwner(db, actor, nowMs)
   const request = validateInvitationInput(input, {
-    dataMode: targetSpecialist ? 'staging-access' : dataMode,
+    appEnv,
+    dataMode,
   })
   const idem = invitationIdempotency(
     owner, idempotencyKey, request, targetSpecialist, cryptoContext.scope,
@@ -820,6 +823,7 @@ export async function inviteSpecialistProfile({
   idempotencyKey,
   correlationId,
   nowMs,
+  appEnv,
   dataMode,
   idFactory,
 } = {}) {
@@ -838,9 +842,12 @@ export async function inviteSpecialistProfile({
     throw new Error('STAFF_INVITATION_CONFLICT')
   }
   let displayName
-  const replayEmail = normalizeCanonicalEmail(input.email)
-  if (replayEmail !== null && validId(correlationId)
-    && Number.isSafeInteger(nowMs) && nowMs >= 0 && IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) {
+  const replayEmail = normalizeCanonicalEmail(input.email, {
+    fictional: !(appEnv === 'staging' && dataMode === 'fictional'),
+  })
+  if (replayEmail === null) validation('email')
+  if (validId(correlationId) && Number.isSafeInteger(nowMs) && nowMs >= 0
+    && IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) {
     try {
       displayName = await decryptForScope(
         cryptoContext.keyring,
@@ -896,6 +903,7 @@ export async function inviteSpecialistProfile({
     idempotencyKey,
     correlationId,
     nowMs,
+    appEnv,
     dataMode,
     targetSpecialist: Object.freeze(profile),
     idFactory,
