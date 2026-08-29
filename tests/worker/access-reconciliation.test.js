@@ -1758,6 +1758,35 @@ describe('guarded Access reconciliation publication', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('logs only a fixed Access provider code when reconciliation fails', async () => {
+    const fixture = await provisioningFixture()
+    const providerError = Object.assign(new Error('ACCESS_PROVIDER_HTTP'), {
+      secretMarker: 'provider-response-must-not-be-logged',
+    })
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(handlers.handleAccessReconcile(reconcileInput(
+        fixture.cryptoContext,
+        { actorId: fixture.owner.id, generation: 1 },
+        {
+          providers: {
+            reconcileAccessGroup: vi.fn().mockRejectedValue(providerError),
+          },
+        },
+      ))).rejects.toBe(providerError)
+
+      expect(consoleError).toHaveBeenCalledTimes(1)
+      expect(consoleError).toHaveBeenCalledWith(JSON.stringify({
+        errorCode: 'ACCESS_PROVIDER_HTTP',
+        event: 'access.provider.failed',
+        result: 'failure',
+      }))
+      expect(JSON.stringify(consoleError.mock.calls)).not.toContain(providerError.secretMarker)
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
 })
 
 describe('authoritative outbox handler dispatch', () => {

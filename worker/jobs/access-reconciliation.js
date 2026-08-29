@@ -3,6 +3,7 @@ import { isD1OutboxOperationGuardFailure } from '../db/errors.js'
 import { createUnitOfWork } from '../db/unit-of-work.js'
 import { loadAccessProviderConfig } from '../config.js'
 import { acceptPhaseOneAccessEmail } from '../identity/canonical-email.js'
+import { safeLog } from '../logging/safe-log.js'
 import {
   blindEmailCandidates,
   decryptForScope,
@@ -22,9 +23,36 @@ const LEASE_MS = 60_000
 const PROVIDER_TIMEOUT_MS = 15_000
 const PROVIDER_RUNWAY_MS = (PROVIDER_TIMEOUT_MS * 3) + 1_000
 const runtimeFetch = (...args) => fetch(...args)
+const ACCESS_PROVIDER_FAILURE_CODES = new Set([
+  'ACCESS_PROVIDER_BODY_ABORTED',
+  'ACCESS_PROVIDER_CONFIG_INVALID',
+  'ACCESS_PROVIDER_FETCH_ABORTED',
+  'ACCESS_PROVIDER_GROUP_DRIFT',
+  'ACCESS_PROVIDER_HTTP',
+  'ACCESS_PROVIDER_NETWORK',
+  'ACCESS_PROVIDER_RESPONSE_INVALID',
+  'ACCESS_PROVIDER_TIMEOUT',
+  'ACCESS_PROVIDER_VERIFICATION_MISMATCH',
+  'PROVIDER_CONFIG_INVALID',
+  'PROVIDER_DISABLED',
+])
 const PROVISIONING_PUBLICATION_LIMIT = 2
 const DOMAIN_SEPARATOR = 'bwm:access-desired-set:v1\n'
 const textEncoder = new TextEncoder()
+
+const accessProviderFailureCode = (error) => {
+  try {
+    if ((typeof error !== 'object' || error === null) && typeof error !== 'function') {
+      return 'ACCESS_PROVIDER_UNKNOWN'
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(error, 'message')
+    return ACCESS_PROVIDER_FAILURE_CODES.has(descriptor?.value)
+      ? descriptor.value
+      : 'ACCESS_PROVIDER_UNKNOWN'
+  } catch {
+    return 'ACCESS_PROVIDER_UNKNOWN'
+  }
+}
 
 const ownObject = (value) => value !== null && typeof value === 'object'
   && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
@@ -992,6 +1020,13 @@ export async function handleAccessReconcile(input) {
     })
   } catch (error) {
     await releaseLease(input.db, lease, observedNowMs())
+    try {
+      safeLog('error', {
+        errorCode: accessProviderFailureCode(error),
+        event: 'access.provider.failed',
+        result: 'failure',
+      })
+    } catch {}
     throw error
   }
   const finalNowMs = observedNowMs()
