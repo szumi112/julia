@@ -11,7 +11,8 @@ import { SERVICE_BY_ID } from '../services.js'
 import { canAccessProtectedRoute } from '../capability-access.js'
 import { useApp, useWorkspaceWindow } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { Button, EmptyState, IconBtn, Pill, TableScroll, Tabs } from '../ui.jsx'
+import { useReveal } from '../anim.js'
+import { Button, EmptyState, IconBtn, MoneyKpi, Pill, TableScroll, Tabs } from '../ui.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { monthWorkspaceRange } from '../workspace-view.js'
 import {
@@ -44,10 +45,7 @@ function Kpis({ values }) {
   return (
     <section className="finance-window__kpis" aria-label="Podsumowanie finansowe">
       {items.map(([label, value, tone]) => (
-        <article className={`finance-window__kpi finance-window__kpi--${tone}`} key={label}>
-          <span>{label}</span>
-          <strong>{money(value)}</strong>
-        </article>
+        <MoneyKpi key={label} label={label} grosze={value} tone={tone} />
       ))}
     </section>
   )
@@ -61,7 +59,7 @@ function MonthlySettlement({ values }) {
   const settlementSummary = due > 0 ? `${collectedShare}% wpłacone` : 'Brak należności'
 
   return (
-    <section className="card card--pad finance-window__balance" aria-label="Rozliczenie miesiąca">
+    <section className="card card--pad finance-window__balance" data-reveal aria-label="Rozliczenie miesiąca">
       <div className="finance-window__balance-head">
         <h2 className="card-title">Rozliczenie miesiąca</h2>
         <span className="hbar__val">{settlementSummary}</span>
@@ -103,7 +101,7 @@ function LedgerTable({
     : kind === 'payments' ? 'Płatności i zaległości miesiąca'
       : kind === 'expenses' ? 'Wydatki miesiąca' : 'Faktury miesiąca'
   if (kind === 'payments') return (
-    <section className="card finance-window__table" aria-labelledby="finance-payments-title">
+    <section className="card finance-window__table" data-reveal aria-labelledby="finance-payments-title">
       <h2 className="card-title" id="finance-payments-title" ref={headingRef} tabIndex={-1}>
         {title}
       </h2>
@@ -134,7 +132,7 @@ function LedgerTable({
     </section>
   )
   return (
-    <section className="card finance-window__table" aria-labelledby={`finance-${kind}-title`}>
+    <section className="card finance-window__table" data-reveal aria-labelledby={`finance-${kind}-title`}>
       <h2 className="card-title" id={`finance-${kind}-title`}>{title}</h2>
       <TableScroll label={`Przewijana tabela — ${title}`}>
         <table className="table">
@@ -202,6 +200,7 @@ export function ProtectedFinance({ params = {} }) {
   const paymentContext = useProtectedPaymentContext(
     selectedMonth, tab === 'payments' && canLoadWorkspace, workspaceState,
   )
+  const revealRef = useReveal([finance.status, selectedMonth])
   const window = finance.data
   const serverCurrentMonth = window?.currentMonth ?? browserMonth
 
@@ -259,8 +258,8 @@ export function ProtectedFinance({ params = {} }) {
   )
 
   return (
-    <div className="finance-window">
-      <div className="view-head">
+    <div className="finance-window" ref={revealRef}>
+      <div className="view-head" data-reveal>
         <div>
           <div className="eyebrow">Finanse centrum</div>
           <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>

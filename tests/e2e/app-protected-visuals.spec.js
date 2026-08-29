@@ -40,6 +40,7 @@ test('@owner enriches protected Finanse without replacing its summary, tabs or l
     items.map((item) => getComputedStyle(item).backgroundColor)
   ))
   expect(new Set(backgrounds).size).toBeGreaterThanOrEqual(4)
+  await expect(page.locator('.finance-window__kpi strong').first()).toHaveText(/zł/)
   await expect(page.locator('.finance-window__table')).toBeVisible()
 })
 
@@ -101,4 +102,18 @@ test('@owner gives protected Team avatars a visible surface and readable initial
   })
   expect(contrast(colors.foreground, colors.background)).toBeGreaterThanOrEqual(4.5)
   expect(colors.shadow).toBe('none')
+})
+
+test('@specialist own payments render toned, readable KPI cards', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.goto('./#/payments')
+
+  await expect(page.getByRole('heading', { level: 1, name: /Finanse/ })).toBeVisible()
+  const kpis = page.locator('.finance-window__kpi')
+  await expect(kpis).toHaveCount(3)
+  await expect(kpis.first()).toHaveText(/zł/)
+  const backgrounds = await kpis.evaluateAll((items) => (
+    items.map((item) => getComputedStyle(item).backgroundColor)
+  ))
+  expect(new Set(backgrounds).size).toBe(3)
 })
