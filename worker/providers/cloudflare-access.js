@@ -218,7 +218,9 @@ async function responseBodyJson(response, controller) {
 
 async function request(input, validated, method, body) {
   const controller = new validated.AbortControllerImpl()
-  const timer = validated.setTimeoutImpl(() => controller.abort(), validated.timeoutMs)
+  const setTimeoutImpl = validated.setTimeoutImpl
+  const clearTimeoutImpl = validated.clearTimeoutImpl
+  const timer = setTimeoutImpl(() => controller.abort(), validated.timeoutMs)
   const requestEndpoint = endpoint(input)
   const fetchImpl = input.fetch
   let fetchAbortListener
@@ -273,7 +275,7 @@ async function request(input, validated, method, body) {
     if (response === undefined) fail('ACCESS_PROVIDER_NETWORK', true)
     fail('ACCESS_PROVIDER_RESPONSE_INVALID')
   } finally {
-    validated.clearTimeoutImpl(timer)
+    clearTimeoutImpl(timer)
   }
 }
 

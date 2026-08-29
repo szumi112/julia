@@ -151,6 +151,37 @@ describe('Cloudflare Access provider', () => {
     expect(requestCount).toBe(3)
   })
 
+  it('calls timeout implementations without a receiver', async () => {
+    const desired = [
+      { email: { email: 'anna@example.test' } },
+      { email: { email: 'zoe@example.test' } },
+    ]
+    let timerId = 0
+    const setTimeout = function () {
+      if (this !== undefined) throw new TypeError('Illegal invocation')
+      timerId += 1
+      return timerId
+    }
+    const cleared = []
+    const clearTimeout = function (id) {
+      if (this !== undefined) throw new TypeError('Illegal invocation')
+      cleared.push(id)
+    }
+    let requestCount = 0
+    const fetch = vi.fn(async () => {
+      requestCount += 1
+      return ok(group({
+        include: requestCount === 1 ? [] : desired,
+      }))
+    })
+
+    await expect(reconcileAccessGroup(input(fetch, {
+      setTimeout,
+      clearTimeout,
+    }))).resolves.toEqual({ reconciled: true })
+    expect(cleared).toEqual([1, 2, 3])
+  })
+
   it.each([
     ['initial GET with a wrong URL', 0, 'wrong URL'],
     ['initial GET marked redirected', 0, 'redirected'],
