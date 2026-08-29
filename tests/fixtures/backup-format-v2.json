@@ -1,0 +1,111 @@
+{
+  "manifest": {
+    "format": "bwm-d1-sql-v2",
+    "backupId": "bkp_gate2_202608",
+    "createdAt": "2026-08-27T12:34:56.789Z",
+    "localDay": "2026-08-27",
+    "localMonth": "2026-08",
+    "retentionClass": "daily",
+    "source": {
+      "accountId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "appEnv": "staging",
+      "dataMode": "fictional",
+      "databaseId": "11111111-2222-4333-8444-555555555555"
+    },
+    "appliedMigrations": [
+      {
+        "id": 1,
+        "name": "0001_security_primitives.sql"
+      },
+      {
+        "id": 2,
+        "name": "0002_identity_operations.sql"
+      }
+    ],
+    "restoreSentinel": {
+      "kind": "backup_run_v1",
+      "backupId": "bkp_gate2_202608",
+      "createdAt": "2026-08-27T12:34:56.789Z",
+      "localDay": "2026-08-27",
+      "localMonth": "2026-08",
+      "retentionClass": "daily",
+      "status": "exporting",
+      "version": 2
+    },
+    "objectKey": "backups/v2/2026/08/bkp_gate2_202608.sql",
+    "objectEtag": "public-etag-v2",
+    "objectSize": 23456,
+    "atBookmark": "public-bookmark-v2",
+    "wrappedSsecKey": {
+      "algorithm": "A256GCM",
+      "kekVersion": 1,
+      "nonce": "AAECAwQFBgcICQoL",
+      "ciphertext": "TYCdmUTzV5IehdunBQKODzXs5a1X6C1s6QN6HHbhZ0QnASvCYsRXh24UWBBD-o5G"
+    }
+  },
+  "facts": {
+    "format": "bwm-d1-sql-v2",
+    "backupId": "bkp_gate2_202608",
+    "createdAt": "2026-08-27T12:34:56.789Z",
+    "localDay": "2026-08-27",
+    "localMonth": "2026-08",
+    "retentionClass": "daily",
+    "source": {
+      "accountId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "appEnv": "staging",
+      "dataMode": "fictional",
+      "databaseId": "11111111-2222-4333-8444-555555555555"
+    },
+    "appliedMigrations": [
+      {
+        "id": 1,
+        "name": "0001_security_primitives.sql"
+      },
+      {
+        "id": 2,
+        "name": "0002_identity_operations.sql"
+      }
+    ],
+    "restoreSentinel": {
+      "kind": "backup_run_v1",
+      "backupId": "bkp_gate2_202608",
+      "createdAt": "2026-08-27T12:34:56.789Z",
+      "localDay": "2026-08-27",
+      "localMonth": "2026-08",
+      "retentionClass": "daily",
+      "status": "exporting",
+      "version": 2
+    },
+    "objectKey": "backups/v2/2026/08/bkp_gate2_202608.sql",
+    "objectEtag": "public-etag-v2",
+    "objectSize": 23456,
+    "atBookmark": "public-bookmark-v2"
+  },
+  "publicDerivationSeeds": {
+    "rawSsecKey": 37,
+    "backupKek": 101
+  },
+  "aadText": "bwm:backup-key:v2\n{\"appliedMigrations\":[{\"id\":1,\"name\":\"0001_security_primitives.sql\"},{\"id\":2,\"name\":\"0002_identity_operations.sql\"}],\"atBookmark\":\"public-bookmark-v2\",\"backupId\":\"bkp_gate2_202608\",\"createdAt\":\"2026-08-27T12:34:56.789Z\",\"format\":\"bwm-d1-sql-v2\",\"localDay\":\"2026-08-27\",\"localMonth\":\"2026-08\",\"objectEtag\":\"public-etag-v2\",\"objectKey\":\"backups/v2/2026/08/bkp_gate2_202608.sql\",\"objectSize\":23456,\"restoreSentinel\":{\"backupId\":\"bkp_gate2_202608\",\"createdAt\":\"2026-08-27T12:34:56.789Z\",\"kind\":\"backup_run_v1\",\"localDay\":\"2026-08-27\",\"localMonth\":\"2026-08\",\"retentionClass\":\"daily\",\"status\":\"exporting\",\"version\":2},\"retentionClass\":\"daily\",\"source\":{\"accountId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"appEnv\":\"staging\",\"dataMode\":\"fictional\",\"databaseId\":\"11111111-2222-4333-8444-555555555555\"}}",
+  "canonicalManifestJson": "{\"appliedMigrations\":[{\"id\":1,\"name\":\"0001_security_primitives.sql\"},{\"id\":2,\"name\":\"0002_identity_operations.sql\"}],\"atBookmark\":\"public-bookmark-v2\",\"backupId\":\"bkp_gate2_202608\",\"createdAt\":\"2026-08-27T12:34:56.789Z\",\"format\":\"bwm-d1-sql-v2\",\"localDay\":\"2026-08-27\",\"localMonth\":\"2026-08\",\"objectEtag\":\"public-etag-v2\",\"objectKey\":\"backups/v2/2026/08/bkp_gate2_202608.sql\",\"objectSize\":23456,\"restoreSentinel\":{\"backupId\":\"bkp_gate2_202608\",\"createdAt\":\"2026-08-27T12:34:56.789Z\",\"kind\":\"backup_run_v1\",\"localDay\":\"2026-08-27\",\"localMonth\":\"2026-08\",\"retentionClass\":\"daily\",\"status\":\"exporting\",\"version\":2},\"retentionClass\":\"daily\",\"source\":{\"accountId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"appEnv\":\"staging\",\"dataMode\":\"fictional\",\"databaseId\":\"11111111-2222-4333-8444-555555555555\"},\"wrappedSsecKey\":{\"algorithm\":\"A256GCM\",\"ciphertext\":\"TYCdmUTzV5IehdunBQKODzXs5a1X6C1s6QN6HHbhZ0QnASvCYsRXh24UWBBD-o5G\",\"kekVersion\":1,\"nonce\":\"AAECAwQFBgcICQoL\"}}",
+  "canonicalManifestBase64Url": "eyJhcHBsaWVkTWlncmF0aW9ucyI6W3siaWQiOjEsIm5hbWUiOiIwMDAxX3NlY3VyaXR5X3ByaW1pdGl2ZXMuc3FsIn0seyJpZCI6MiwibmFtZSI6IjAwMDJfaWRlbnRpdHlfb3BlcmF0aW9ucy5zcWwifV0sImF0Qm9va21hcmsiOiJwdWJsaWMtYm9va21hcmstdjIiLCJiYWNrdXBJZCI6ImJrcF9nYXRlMl8yMDI2MDgiLCJjcmVhdGVkQXQiOiIyMDI2LTA4LTI3VDEyOjM0OjU2Ljc4OVoiLCJmb3JtYXQiOiJid20tZDEtc3FsLXYyIiwibG9jYWxEYXkiOiIyMDI2LTA4LTI3IiwibG9jYWxNb250aCI6IjIwMjYtMDgiLCJvYmplY3RFdGFnIjoicHVibGljLWV0YWctdjIiLCJvYmplY3RLZXkiOiJiYWNrdXBzL3YyLzIwMjYvMDgvYmtwX2dhdGUyXzIwMjYwOC5zcWwiLCJvYmplY3RTaXplIjoyMzQ1NiwicmVzdG9yZVNlbnRpbmVsIjp7ImJhY2t1cElkIjoiYmtwX2dhdGUyXzIwMjYwOCIsImNyZWF0ZWRBdCI6IjIwMjYtMDgtMjdUMTI6MzQ6NTYuNzg5WiIsImtpbmQiOiJiYWNrdXBfcnVuX3YxIiwibG9jYWxEYXkiOiIyMDI2LTA4LTI3IiwibG9jYWxNb250aCI6IjIwMjYtMDgiLCJyZXRlbnRpb25DbGFzcyI6ImRhaWx5Iiwic3RhdHVzIjoiZXhwb3J0aW5nIiwidmVyc2lvbiI6Mn0sInJldGVudGlvbkNsYXNzIjoiZGFpbHkiLCJzb3VyY2UiOnsiYWNjb3VudElkIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJhcHBFbnYiOiJzdGFnaW5nIiwiZGF0YU1vZGUiOiJmaWN0aW9uYWwiLCJkYXRhYmFzZUlkIjoiMTExMTExMTEtMjIyMi00MzMzLTg0NDQtNTU1NTU1NTU1NTU1In0sIndyYXBwZWRTc2VjS2V5Ijp7ImFsZ29yaXRobSI6IkEyNTZHQ00iLCJjaXBoZXJ0ZXh0IjoiVFlDZG1VVHpWNUllaGR1bkJRS09EelhzNWExWDZDMXM2UU42SEhiaFowUW5BU3ZDWXNSWGgyNFVXQkJELW81RyIsImtla1ZlcnNpb24iOjEsIm5vbmNlIjoiQUFFQ0F3UUZCZ2NJQ1FvTCJ9fQ",
+  "objectKeys": {
+    "objectKey": "backups/v2/2026/08/bkp_gate2_202608.sql",
+    "manifestKey": "backups/v2/2026/08/bkp_gate2_202608.manifest.json"
+  },
+  "metadata": {
+    "backupId": "bkp_gate2_202608",
+    "format": "bwm-d1-sql-v2",
+    "retentionClass": "daily",
+    "sourceAppEnv": "staging",
+    "sourceDatabaseId": "11111111-2222-4333-8444-555555555555"
+  },
+  "publicEncoding": {
+    "nonce": "AAECAwQFBgcICQoL",
+    "ciphertext": "TYCdmUTzV5IehdunBQKODzXs5a1X6C1s6QN6HHbhZ0QnASvCYsRXh24UWBBD-o5G"
+  },
+  "databaseFields": {
+    "ssecKeyVersion": 1,
+    "wrappedSsecKeyB64": "TYCdmUTzV5IehdunBQKODzXs5a1X6C1s6QN6HHbhZ0QnASvCYsRXh24UWBBD-o5G",
+    "wrapNonceB64": "AAECAwQFBgcICQoL"
+  }
+}

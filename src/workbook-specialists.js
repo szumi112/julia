@@ -1,3 +1,5 @@
+import { compareUtf16CodeUnits } from './code-unit-order.js'
+
 const collator = new Intl.Collator('pl-PL', { sensitivity: 'base', usage: 'sort' })
 
 const canonicalName = (value) => {
@@ -18,6 +20,6 @@ export function specialistProfilesFromWorkbook(rows) {
     if (name) names.add(name)
   }
   return Object.freeze([...names]
-    .sort((left, right) => collator.compare(left, right) || left.localeCompare(right))
+    .sort((left, right) => collator.compare(left, right) || compareUtf16CodeUnits(left, right))
     .map((displayName) => Object.freeze({ displayName, standardRateGrosze: 18000 })))
 }

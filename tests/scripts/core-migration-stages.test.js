@@ -36,6 +36,15 @@ const STAGE_C_NAMES = Object.freeze([
 const STAGE_D_NAMES = Object.freeze([
   '0015_unclaimed_specialist_profiles.sql',
 ])
+const STAGE_E_NAMES = Object.freeze([
+  '0016_workbook_source_records.sql',
+  '0017_historical_workspace.sql',
+  '0018_activity_workspace.sql',
+  '0019_dual_role_specialists.sql',
+  '0020_capability_overrides.sql',
+  '0021_finance_reporting_registry.sql',
+  '0022_outbox_job_recoveries.sql',
+])
 
 const migration = (name) => Object.freeze({
   name,
@@ -130,6 +139,25 @@ test('stage D selects only the unclaimed specialist profile migration', async ()
 
   assert.deepEqual(selected.map(({ name }) => name), STAGE_D_NAMES)
   assert.equal(selected[0], source.at(-1))
+  assert.equal(Object.isFrozen(selected), true)
+})
+
+test('stage E selects the ordered workbook workspace migrations', async () => {
+  const module = await loadStageModule()
+  assert.ok(module, 'core migration stage selector must exist')
+  const source = [
+    ...STAGE_A_NAMES.map(migration),
+    ...STAGE_B_NAMES.map(migration),
+    ...STAGE_C_NAMES.map(migration),
+    ...STAGE_D_NAMES.map(migration),
+    ...STAGE_E_NAMES.map(migration),
+  ]
+
+  const selected = module.selectCoreMigrationStage(source, 'stage-e')
+
+  assert.deepEqual(module.CORE_MIGRATION_STAGE_E_NAMES, STAGE_E_NAMES)
+  assert.deepEqual(selected.map(({ name }) => name), STAGE_E_NAMES)
+  assert.equal(selected.at(-1), source.at(-1))
   assert.equal(Object.isFrozen(selected), true)
 })
 
@@ -269,11 +297,17 @@ test('stage commands accept only fictional non-production execution', async () =
     local: true,
     stage: 'stage-d',
   })
+  assert.deepEqual(module.normalizeCoreMigrationStageInput({
+    APP_ENV: 'development',
+    DATA_MODE: 'fictional',
+  }, ['stage-e', '--local']), {
+    local: true,
+    stage: 'stage-e',
+  })
 
   for (const fixture of [
     [{ APP_ENV: 'production', DATA_MODE: 'fictional' }, ['stage-a']],
     [{ APP_ENV: 'development', DATA_MODE: 'real' }, ['stage-a']],
-    [{ APP_ENV: 'development', DATA_MODE: 'fictional' }, ['stage-e']],
     [{ APP_ENV: 'development', DATA_MODE: 'fictional' }, ['stage-a', '--remote']],
   ]) {
     assert.throws(
@@ -314,6 +348,13 @@ test('remote stage input accepts explicit envs and keeps every local guard', asy
     envName: 'staging',
     local: false,
     stage: 'stage-d',
+  })
+  assert.deepEqual(module.normalizeCoreMigrationStageInput({
+    DATA_MODE: 'fictional',
+  }, ['stage-e', '--remote', '--env', 'staging']), {
+    envName: 'staging',
+    local: false,
+    stage: 'stage-e',
   })
 
   for (const fixture of [

@@ -2,9 +2,15 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Icon, BearMark } from './icons.jsx'
 import { Avatar, Button, EmptyState, IconBtn, PopItem, Popover } from './ui.jsx'
 import { useApp, useToasts } from './store.jsx'
-import { ShellCtx } from './shell-ctx.js'
+import {
+  canAccessShellRoute,
+  resolveShellRoute,
+  ShellCtx,
+  useShell,
+} from './shell-ctx.js'
 import { DEMO_ROLES } from './data.js'
 import { shellRoleFor } from './auth-role.js'
+import { canPerformAction, protectedPaymentsSurface } from './capability-access.js'
 import { useIsCompact, useIsPhone } from './responsive.js'
 import { TodayCockpit } from './cockpit.jsx'
 import { motionOK, brandBurst } from './anim.js'
@@ -16,14 +22,24 @@ import { Clients, ClientDetail } from './views/Clients.jsx'
 import { Team, PsychDetail } from './views/Team.jsx'
 import { TusGroups } from './views/Tus.jsx'
 import { TusGroupDetail } from './views/TusGroup.jsx'
+import { English } from './views/English.jsx'
 import { Payments } from './views/Payments.jsx'
 import { Finance } from './views/Finance.jsx'
 import { Reports } from './views/Reports.jsx'
+import { ProtectedFinance } from './views/ProtectedFinance.jsx'
+import { OwnPayments } from './views/OwnPayments.jsx'
+import { ProtectedReports } from './views/ProtectedReports.jsx'
+import { Registry } from './views/Registry.jsx'
+import { WorkbookExport } from './views/WorkbookExport.jsx'
 import { Settings } from './views/Settings.jsx'
 import { SessionDrawer } from './views/SessionForm.jsx'
 import { ClientDrawer } from './views/ClientForm.jsx'
 import { PsychDrawer } from './views/PsychForm.jsx'
 import { TusGroupDrawer, TusKidDrawer, TusClassDrawer } from './views/TusForms.jsx'
+import {
+  ActivityClassDrawer, ActivityGroupDrawer, ActivityMembershipDrawer,
+  ActivityParticipantDrawer,
+} from './views/ActivityForms.jsx'
 import { CommandPalette } from './command-palette.jsx'
 import {
   patchRouteViewState as patchRegistryRoute,
@@ -37,28 +53,14 @@ const NAV = [
   { id: 'calendar', label: 'Kalendarz', icon: 'calendar' },
   { id: 'clients', label: 'Klienci', icon: 'clients' },
   { id: 'tus', label: 'Zajęcia TUS', icon: 'group' },
+  { id: 'english', label: 'Angielski', icon: 'clients' },
   { id: 'team', label: 'Zespół', icon: 'team' },
   { id: 'payments', label: 'Finanse', icon: 'payments' },
-  { id: 'ledger', label: 'Rejestr', icon: 'reports' },
+  { id: 'ledger', label: 'Rejestr', icon: 'ledger' },
   { id: 'reports', label: 'Raporty', icon: 'reports' },
 ]
 
-const DEMO_ROLE_NAV = {
-  owner: ['dashboard', 'calendar', 'clients', 'tus', 'team', 'payments', 'reports', 'settings'],
-  coordinator: ['dashboard', 'calendar', 'clients', 'tus', 'payments', 'settings'],
-  therapist: ['dashboard', 'calendar', 'clients', 'tus', 'settings'],
-}
-const APP_ROLE_NAV = {
-  owner: ['dashboard', 'calendar', 'clients', 'team', 'payments', 'ledger', 'reports', 'settings'],
-  coordinator: ['dashboard', 'calendar', 'clients', 'payments', 'ledger', 'reports', 'settings'],
-  therapist: ['dashboard', 'calendar', 'clients', 'payments', 'settings'],
-}
 const EMPTY_CAPABILITIES = Object.freeze([])
-const canAccessInMode = (routeName, role, appMode) => {
-  if (appMode === 'app' && ['tus', 'tusGroup', 'psych'].includes(routeName)) return false
-  const matrix = appMode === 'app' ? APP_ROLE_NAV : DEMO_ROLE_NAV
-  return Boolean(matrix[role.id]?.includes(ACTIVE_OF[routeName] || routeName))
-}
 
 const routeTitle = (routeName) => {
   const navItem = NAV.find((item) => item.id === routeName)
@@ -72,6 +74,7 @@ const TITLES = {
   client: 'Karta klienta',
   tus: 'Zajęcia TUS',
   tusGroup: 'Grupa TUS',
+  english: 'Angielski',
   team: 'Zespół',
   psych: 'Profil specjalistki',
   payments: 'Finanse',
@@ -87,6 +90,7 @@ const VIEWS = {
   client: ClientDetail,
   tus: TusGroups,
   tusGroup: TusGroupDetail,
+  english: English,
   team: Team,
   psych: PsychDetail,
   payments: Payments,
@@ -103,22 +107,18 @@ const META_K = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent) ? '⌘ K' : 'Ct
 function AppSpecialistPayments() {
   return (
     <div>
-      <div className="view-head">
-        <div>
-          <div className="eyebrow">Twoje finanse</div>
-          <h1 className="display view-head__title">Rozliczenia <em>specjalisty</em></h1>
-          <p className="view-head__sub">Widoczne są wyłącznie rozliczenia przypisane do tego konta.</p>
-        </div>
-      </div>
-      <section className="specialist-payments-empty" aria-label="Rozliczenia specjalisty">
-        <EmptyState
-          icon="payments"
-          title="Brak rozliczeń specjalisty"
-          hint="W środowisku testowym nie ma rozliczeń przypisanych do tego konta."
-        />
-      </section>
+      <OwnPayments />
+      <WorkbookExport own />
     </div>
   )
+}
+
+function AppUnavailablePayments() {
+  return <div className="view-head"><div>
+    <div className="eyebrow">Zakres uprawnień</div>
+    <h1 className="display view-head__title">Finanse <em>niedostępne</em></h1>
+    <p className="view-head__sub">Bieżące uprawnienia nie obejmują widoku finansowego.</p>
+  </div></div>
 }
 
 // Real hash links wherever the shell navigates: plain clicks go through the
@@ -245,7 +245,7 @@ function MobileRoleControls({ appMode, role, onRoleChange, onLogout }) {
         <Avatar name={role.name} size={40} />
         <span>
           <b>{role.name}</b>
-          <small>{role.label}</small>
+          <small>{role.professionalTitle ?? role.label}</small>
         </span>
       </div>
       {appMode === 'demo' && (
@@ -275,7 +275,7 @@ function MobileRoleControls({ appMode, role, onRoleChange, onLogout }) {
 
 // Compact-shell navigation: the sidebar slides in from the left as a drawer,
 // with the same GSAP choreography as the form drawers (mirrored).
-const PHONE_MENU_IDS = ['clients', 'team', 'ledger', 'payments', 'reports', 'settings']
+const PHONE_MENU_IDS = ['clients', 'english', 'team', 'ledger', 'payments', 'reports', 'settings']
 
 function MobileNavDrawer({
   appMode,
@@ -383,7 +383,7 @@ function MobileNavDrawer({
 const PHONE_TAB_IDS = new Set(['dashboard', 'calendar', 'tus'])
 const PHONE_TABS = NAV.filter((item) => PHONE_TAB_IDS.has(item.id))
 
-function MobileTabbar({ route, navigate, onAdd, onMenu }) {
+function MobileTabbar({ route, navigate, canAccessRoute, onAdd, onMenu }) {
   const barRef = useRef(null)
   const [pill, setPill] = useState(null)
   const activeId = ACTIVE_OF[route.name] || route.name
@@ -431,7 +431,7 @@ function MobileTabbar({ route, navigate, onAdd, onMenu }) {
     <nav className="tabbar" ref={barRef} aria-label="Nawigacja dolna">
       {pill && <span className="tabbar__pill" style={{ transform: `translateX(${pill.left}px)` }} />}
       <div className="tabbar__side">
-        {PHONE_TABS.slice(0, 2).map(tab)}
+        {PHONE_TABS.slice(0, 2).filter((item) => canAccessRoute(item.id)).map(tab)}
       </div>
       {onAdd && (
         <button className="tabbar__fab" onClick={onAdd} aria-label="Nowa sesja">
@@ -439,7 +439,7 @@ function MobileTabbar({ route, navigate, onAdd, onMenu }) {
         </button>
       )}
       <div className="tabbar__side">
-        {PHONE_TABS.slice(2).map(tab)}
+        {PHONE_TABS.slice(2).filter((item) => canAccessRoute(item.id)).map(tab)}
         <button
           type="button"
           data-id="menu"
@@ -512,7 +512,7 @@ function Topbar({
                   <Avatar name={role.name} size={37} />
                   <span>
                     <span className="userchip__name">{role.name}</span>
-                    <span className="userchip__role">{role.label}</span>
+                    <span className="userchip__role">{role.professionalTitle ?? role.label}</span>
                   </span>
                 </div>
               ) : (
@@ -532,7 +532,7 @@ function Topbar({
                       <span>
                         <span className="userchip__mode">Tryb demonstracyjny</span>
                         <span className="userchip__name">{role.name}</span>
-                        <span className="userchip__role">{role.label}</span>
+                        <span className="userchip__role">{role.professionalTitle ?? role.label}</span>
                       </span>
                     </button>
                   }
@@ -665,18 +665,28 @@ export function Shell({
   const actor = isApp ? session.actor : null
   const capabilities = isApp ? session.capabilities : EMPTY_CAPABILITIES
   const dataMode = isApp ? session.dataMode : 'fictional'
+  const authorityGeneration = isApp ? session.authorityRevision : 0
+  const routeAuthority = useMemo(() => ({
+    appMode,
+    capabilities,
+    roleId: role.id,
+  }), [appMode, capabilities, role.id])
   const canAccessRoute = useCallback(
-    (routeName, targetRole = role) => canAccessInMode(routeName, targetRole, appMode),
-    [appMode, role]
+    (routeName, targetRole = role) => canAccessShellRoute({
+      appMode,
+      capabilities,
+      roleId: targetRole.id,
+    }, routeName),
+    [appMode, capabilities, role]
   )
-  const [route, setRoute] = useState(() => {
+  const [storedRoute, setRoute] = useState(() => {
     const requested = routeFromHash(window.location.hash)
-    if (!requested || !VIEWS[requested.name]
-      || !canAccessInMode(requested.name, role, appMode)) {
-      return { name: 'dashboard' }
-    }
-    return requested
+    return resolveShellRoute(routeAuthority, requested) || { name: 'settings' }
   })
+  const route = useMemo(
+    () => resolveShellRoute(routeAuthority, storedRoute) || { name: 'settings' },
+    [routeAuthority, storedRoute]
+  )
   const [drawer, setDrawer] = useState(null)
   const [overlay, setOverlay] = useState(null)
   const [roleMenuOpen, setRoleMenuOpen] = useState(false)
@@ -688,6 +698,7 @@ export function Shell({
   const viewRegistryRef = useRef({})
   const routeRef = useRef(route)
   const roleRef = useRef(role)
+  const routeAuthorityRef = useRef(routeAuthority)
   // distinguishes hash-driven route commits (replace) from in-app navigation
   // (push) so browser back/forward walks views, not filter tweaks
   const fromHashRef = useRef(false)
@@ -705,6 +716,28 @@ export function Shell({
   const routeParamsKey = JSON.stringify(route.params || {})
   routeRef.current = route
   roleRef.current = role
+  routeAuthorityRef.current = routeAuthority
+
+  // A refreshed authority can invalidate the stored route before the shell
+  // state commit. Derive the safe route during render so the old view never
+  // paints, then synchronously discard stale shell state and replace the hash.
+  useLayoutEffect(() => {
+    if (route === storedRoute) return
+    const nextHash = routeHref(route.name)
+    viewRegistryRef.current = {}
+    leaveGuardsRef.current.clear()
+    setPendingLeave(null)
+    setRoleMenuOpen(false)
+    setDrawer(null)
+    setOverlay(null)
+    clearToasts()
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(window.history.state, '', nextHash)
+    }
+    committedHashRef.current = nextHash
+    routeRef.current = route
+    setRoute(route)
+  }, [clearToasts, route, storedRoute])
 
   useEffect(() => {
     const viaHash = fromHashRef.current
@@ -720,7 +753,9 @@ export function Shell({
       ? routeHref(route.name, route.params)
       : currentHash
     const viewChanged = previousName !== route.name
-    if (!viaHash && previousName && viewChanged) {
+    const previousAccessible = previousName
+      && canAccessShellRoute(routeAuthorityRef.current, previousName)
+    if (!viaHash && previousAccessible && viewChanged) {
       window.history.pushState(window.history.state, '', nextHash)
     } else if (nextHash !== currentHash) {
       window.history.replaceState(window.history.state, '', nextHash)
@@ -736,14 +771,19 @@ export function Shell({
       const currentRole = roleRef.current
       const currentRoute = routeRef.current
       const requested = routeFromHash(window.location.hash)
-      const accessible = requested
-        && VIEWS[requested.name]
-        && canAccessInMode(requested.name, currentRole, appMode)
-      const nextRoute = accessible ? requested : { name: 'dashboard' }
+      const nextRoute = resolveShellRoute(routeAuthorityRef.current, requested)
+        || { name: 'settings' }
       if (
         currentRoute.name === nextRoute.name
         && JSON.stringify(currentRoute.params || {}) === JSON.stringify(nextRoute.params || {})
-      ) return
+      ) {
+        const nextHash = routeHref(nextRoute.name, nextRoute.params)
+        if (window.location.hash !== nextHash) {
+          window.history.replaceState(window.history.state, '', nextHash)
+        }
+        committedHashRef.current = nextHash
+        return
+      }
       const commit = () => {
         viewRegistryRef.current = patchRegistryRoute(
           viewRegistryRef.current,
@@ -765,7 +805,7 @@ export function Shell({
     }
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
-  }, [appMode])
+  }, [])
 
   useMonthSettled()
 
@@ -849,7 +889,7 @@ export function Shell({
   const navigate = useCallback((name, params) => {
     const currentRole = roleRef.current
     const currentRoute = routeRef.current
-    if (!canAccessInMode(name, currentRole, appMode)) return
+    if (!canAccessShellRoute(routeAuthorityRef.current, name)) return
     if (currentRoute.name === name && JSON.stringify(currentRoute.params) === JSON.stringify(params)) return
     if (leaveBlocked()) {
       setPendingLeave(() => () => requestLeave(() => navigate(name, params)))
@@ -866,7 +906,7 @@ export function Shell({
     const nextRoute = { name, params }
     routeRef.current = nextRoute
     setRoute(nextRoute)
-  }, [appMode, requestLeave])
+  }, [requestLeave])
 
   const setDemoRole = useCallback((roleId) => {
     if (isApp) return
@@ -884,7 +924,11 @@ export function Shell({
     const parentRoute = ACTIVE_OF[currentRoute.name]
     const candidate = parentRoute || currentRoute.name
     const nextRoute = {
-      name: canAccessInMode(candidate, nextRole, 'demo') ? candidate : 'dashboard',
+      name: canAccessShellRoute({
+        appMode: 'demo',
+        capabilities: EMPTY_CAPABILITIES,
+        roleId: nextRole.id,
+      }, candidate) ? candidate : 'dashboard',
     }
     if (leaveBlocked()) {
       setPendingLeave(() => () => requestLeave(() => setDemoRole(roleId)))
@@ -912,7 +956,8 @@ export function Shell({
     setRoleMenuOpen(open)
   }, [])
   const openSessionForm = useCallback((opts = {}) => {
-    if (isApp && !capabilities.includes('appointment.manage')) return
+    if (isApp && !canPerformAction(capabilities, opts.session
+      ? 'appointment.edit' : 'appointment.create')) return
     setDrawer({ kind: 'session', opts })
     openOverlay('drawer')
   }, [capabilities, isApp, openOverlay])
@@ -941,6 +986,30 @@ export function Shell({
     setDrawer({ kind: 'tusClass', opts })
     openOverlay('drawer')
   }, [isApp, openOverlay])
+  const openActivityGroupForm = useCallback((opts = {}) => {
+    const actionId = opts.group ? 'activity.group.edit' : 'activity.group.create'
+    if (!isApp || !canPerformAction(capabilities, actionId)) return
+    setDrawer({ kind: 'activityGroup', opts })
+    openOverlay('drawer')
+  }, [capabilities, isApp, openOverlay])
+  const openActivityParticipantForm = useCallback((opts = {}) => {
+    const actionId = opts.participant ? 'activity.participant.edit' : 'activity.participant.create'
+    if (!isApp || !canPerformAction(capabilities, actionId)) return
+    setDrawer({ kind: 'activityParticipant', opts })
+    openOverlay('drawer')
+  }, [capabilities, isApp, openOverlay])
+  const openActivityMembershipForm = useCallback((opts = {}) => {
+    const actionId = opts.membership ? 'activity.membership.edit' : 'activity.membership.create'
+    if (!isApp || !canPerformAction(capabilities, actionId)) return
+    setDrawer({ kind: 'activityMembership', opts })
+    openOverlay('drawer')
+  }, [capabilities, isApp, openOverlay])
+  const openActivityClassForm = useCallback((opts = {}) => {
+    const actionId = opts.activityClass ? 'activity.class.edit' : 'activity.class.create'
+    if (!isApp || !canPerformAction(capabilities, actionId)) return
+    setDrawer({ kind: 'activityClass', opts })
+    openOverlay('drawer')
+  }, [capabilities, isApp, openOverlay])
   const openTeamBoard = useCallback(() => {
     if (isApp) return
     setDrawer({ kind: 'board' })
@@ -957,9 +1026,15 @@ export function Shell({
     viewRef.current?.focus({ preventScroll: true })
   }, [role.id, route.name, routeParamsKey])
 
-  const View = isApp && route.name === 'payments' && role.id === 'therapist'
-    ? AppSpecialistPayments
-    : VIEWS[route.name] || Dashboard
+  const paymentsSurface = isApp
+    ? protectedPaymentsSurface(capabilities, actor?.specialistId) : null
+  const View = !isApp ? VIEWS[route.name] || Dashboard
+    : route.name === 'payments' && paymentsSurface === 'own' ? AppSpecialistPayments
+      : route.name === 'payments' && paymentsSurface === 'centre' ? ProtectedFinance
+        : route.name === 'payments' ? AppUnavailablePayments
+        : route.name === 'ledger' ? Registry
+          : route.name === 'reports' ? ProtectedReports
+            : VIEWS[route.name] || Dashboard
   const hasOverlay = overlay !== null
   const handleCockpitChange = useCallback((open) => {
     if (open) openOverlay('cockpit')
@@ -975,6 +1050,7 @@ export function Shell({
   const shellValue = useMemo(() => ({
     actor,
     appMode,
+    authorityGeneration,
     capabilities,
     dataMode,
     role,
@@ -991,18 +1067,32 @@ export function Shell({
     openTusGroupForm,
     openTusKidForm,
     openTusClassForm,
+    openActivityGroupForm,
+    openActivityParticipantForm,
+    openActivityMembershipForm,
+    openActivityClassForm,
     openTeamBoard,
     registerLeaveGuard,
   }), [
     getViewState, navigate, openClientForm, openPsychForm, openSessionForm, openTeamBoard,
+    openActivityClassForm, openActivityGroupForm, openActivityMembershipForm, openActivityParticipantForm,
     openTusClassForm, openTusGroupForm, openTusKidForm, patchViewState, registerLeaveGuard,
-    actor, appMode, canAccessRoute, capabilities, dataMode, isApp, resetViewState,
+    actor, appMode, authorityGeneration, canAccessRoute, capabilities, dataMode, isApp, resetViewState,
     role, route, setDemoRole,
   ])
 
   return (
     <ShellCtx.Provider value={shellValue}>
-      <a className="skip-link" href="#main-content" inert={hasOverlay ? '' : undefined}>Przejdź do treści</a>
+      <a
+        className="skip-link"
+        href="#main-content"
+        inert={hasOverlay ? '' : undefined}
+        onClick={(event) => {
+          event.preventDefault()
+          contentRef.current?.focus({ preventScroll: true })
+          contentRef.current?.scrollIntoView({ block: 'start' })
+        }}
+      >Przejdź do treści</a>
       <div
         className="shell"
         ref={shellRef}
@@ -1055,6 +1145,7 @@ export function Shell({
           <MobileTabbar
             route={route}
             navigate={navigate}
+            canAccessRoute={canAccessRoute}
             onAdd={isApp ? undefined : openNewSession}
             onMenu={openNavigation}
           />
@@ -1079,6 +1170,10 @@ export function Shell({
       {!isApp && overlay === 'drawer' && drawer?.kind === 'tusGroup' && <TusGroupDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'tusKid' && <TusKidDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'tusClass' && <TusClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {isApp && overlay === 'drawer' && drawer?.kind === 'activityGroup' && <ActivityGroupDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {isApp && overlay === 'drawer' && drawer?.kind === 'activityParticipant' && <ActivityParticipantDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {isApp && overlay === 'drawer' && drawer?.kind === 'activityMembership' && <ActivityMembershipDrawer opts={drawer.opts} onClose={closeDrawer} />}
+      {isApp && overlay === 'drawer' && drawer?.kind === 'activityClass' && <ActivityClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'board' && <BoardDrawer onClose={closeDrawer} />}
       {overlay === 'palette' && <CommandPalette onClose={() => closeOverlay('palette')} />}
       {pendingLeave && (

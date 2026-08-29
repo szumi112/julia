@@ -4,7 +4,6 @@ import { decodeBase64Url, encodeBase64Url } from './security/encoding.js'
 const BASE64_URL_KEY = /^[A-Za-z0-9_-]{43}$/
 const VERSION = /^[1-9]\d*$/
 const TEAM_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
-const PROVIDER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ACCESS_ACCOUNT_ID = /^[0-9a-f]{32}$/
 const ACCESS_GROUP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const BACKUP_ACCOUNT_ID = /^[0-9a-f]{32}$/
@@ -91,6 +90,8 @@ const schema = z.object({
   ACTIVE_DATA_KEK_VERSION: version,
   ACTIVE_LOOKUP_KEY_VERSION: version,
   ACTIVE_BACKUP_KEK_VERSION: version,
+  ACTIVE_WORKBOOK_KEK_VERSION: version,
+  ACTIVE_WORKBOOK_HMAC_VERSION: version,
 }).superRefine((value, context) => {
   const originIsValid = value.APP_ENV === 'development'
     ? isDevelopmentOrigin(value.APP_ORIGIN)
@@ -109,9 +110,13 @@ export function loadConfig(env) {
   const dataVersion = Number(value.ACTIVE_DATA_KEK_VERSION)
   const lookupVersion = Number(value.ACTIVE_LOOKUP_KEY_VERSION)
   const backupVersion = Number(value.ACTIVE_BACKUP_KEK_VERSION)
+  const workbookKekVersion = Number(value.ACTIVE_WORKBOOK_KEK_VERSION)
+  const workbookHmacVersion = Number(value.ACTIVE_WORKBOOK_HMAC_VERSION)
   key.parse(env[`BWM_DATA_KEK_V${dataVersion}`])
   key.parse(env[`BWM_LOOKUP_HMAC_V${lookupVersion}`])
   key.parse(env[`BWM_BACKUP_KEK_V${backupVersion}`])
+  key.parse(env[`BWM_WORKBOOK_KEK_V${workbookKekVersion}`])
+  key.parse(env[`BWM_WORKBOOK_HMAC_V${workbookHmacVersion}`])
 
   return Object.freeze({
     appEnv: value.APP_ENV,
@@ -123,6 +128,8 @@ export function loadConfig(env) {
     activeDataKekVersion: dataVersion,
     activeLookupKeyVersion: lookupVersion,
     activeBackupKekVersion: backupVersion,
+    activeWorkbookKekVersion: workbookKekVersion,
+    activeWorkbookHmacVersion: workbookHmacVersion,
     localAuth: value.APP_ENV === 'development',
   })
 }
@@ -268,12 +275,16 @@ export function loadAccessProviderConfig(env, config) {
 export function loadEmailProviderConfig(env, config) {
   if (config?.appEnv === 'development') throw new Error('PROVIDER_DISABLED')
   if (!['staging', 'production'].includes(config?.appEnv)) throw new Error('PROVIDER_CONFIG_INVALID')
-  const value = { projectId: env?.SCW_PROJECT_ID, fromEmail: env?.SCW_FROM_EMAIL, fromName: env?.SCW_FROM_NAME, secret: env?.SCW_SECRET_KEY }
-  if (!PROVIDER_UUID.test(value.projectId ?? '')
-    || !canonicalEmail(value.fromEmail)
+  const value = {
+    fromEmail: env?.RESEND_FROM_EMAIL,
+    fromName: env?.RESEND_FROM_NAME,
+    apiKey: env?.RESEND_API_KEY,
+  }
+  if (!canonicalEmail(value.fromEmail)
     || !saneName(value.fromName)
-    || typeof value.secret !== 'string'
-    || value.secret.length < 1
-    || /\s/u.test(value.secret)) throw new Error('PROVIDER_CONFIG_INVALID')
+    || /[<>]/u.test(value.fromName)
+    || typeof value.apiKey !== 'string'
+    || value.apiKey.length < 1
+    || /\s/u.test(value.apiKey)) throw new Error('PROVIDER_CONFIG_INVALID')
   return Object.freeze(value)
 }

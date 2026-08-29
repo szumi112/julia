@@ -8,10 +8,19 @@ import {
   CORE_AUDIT_SCHEMAS,
   isCoreAuditAction,
 } from '../../src/core-audit-contract.js'
+import {
+  captureSystemAuditEvent,
+  captureSystemAuditMetadata,
+  isSystemAuditAction,
+  SYSTEM_AUDIT_SCHEMAS,
+} from '../../src/system-audit-contract.js'
 import { isD1IdentityCollision } from '../db/errors.js'
 import { createUnitOfWork } from '../db/unit-of-work.js'
 import { authorize } from '../identity/policy.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
+import { resolveCurrentAuthorityActor } from '../identity/staff.js'
 import { isCorrelationId } from '../logging/safe-log.js'
+import { requestOutboxRecovery } from '../operations/outbox-recovery.js'
 import { decodeBase64Url, encodeBase64Url } from '../security/encoding.js'
 import { decryptForScope } from '../security/envelope.js'
 
@@ -36,7 +45,6 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
 const CURSOR_MAC_PREFIX = 'bwm.security-audit.cursor.v1'
 const MAX_CURSOR_POSITION_BYTES = 177
 const MAX_CURSOR_POSITION_TEXT = 236
-const ROLES = new Set(['owner', 'coordinator', 'specialist'])
 const DENIAL_CAPABILITIES = new Set([
   'operations.health.read',
   'security.audit.read',
@@ -69,6 +77,17 @@ const ACTION_ROW_KEYS = Object.freeze([
   'id', 'fingerprint', 'kind', 'severity', 'status', 'entity_type', 'entity_id',
   'details_envelope', 'version', 'created_at', 'updated_at', 'resolved_at',
 ])
+const RECOVERY_STATE_ROW_KEYS = Object.freeze([
+  'action_id', 'source_job_id', 'source_type', 'source_aggregate_type',
+  'source_aggregate_id', 'source_status', 'source_attempt_count',
+  'source_max_attempts', 'source_error_code', 'source_updated_at',
+  'source_lease_owner',
+  'source_lease_expires_at', 'attempt_job_id', 'attempt_number',
+  'attempt_completed_at', 'attempt_result', 'attempt_error_code',
+  'attempt_provider_reference',
+  'recovery_id', 'replacement_job_id', 'replacement_status',
+  'accepted_delivery', 'other_live_email',
+])
 const ENVELOPE_KEYS = Object.freeze([
   'format', 'algorithm', 'dataKeyId', 'dataKeyVersion', 'nonce', 'ciphertext',
 ])
@@ -80,6 +99,9 @@ const AUDIT_SCHEMAS = Object.freeze({
   ...Object.fromEntries(Object.entries(CORE_AUDIT_SCHEMAS).map(([action, schema]) => [action,
     Object.freeze({ entityTypes: Object.freeze([schema.entityType]), result: 'success', metadata: schema.metadata, reason: 'null' })
   ])),
+  ...Object.fromEntries(Object.entries(SYSTEM_AUDIT_SCHEMAS).map(([action, schema]) => [action,
+    Object.freeze({ entityTypes: Object.freeze([schema.entityType]), result: 'success', metadata: schema.metadata, reason: 'null', system: true })
+  ])),
   'authorization.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' }, reason: 'encrypted' }),
   'backup.pruned': Object.freeze({ entityTypes: ['backup_run'], result: 'success', metadata: { backupVersion: 'version' }, reason: 'null', system: true }),
   'data_key.rewrapped': Object.freeze({ entityTypes: ['data_key'], result: 'success', metadata: { newKekVersion: 'version', oldKekVersion: 'version' }, reason: 'null' }),
@@ -87,6 +109,7 @@ const AUDIT_SCHEMAS = Object.freeze({
   'identity.denied': Object.freeze({ entityTypes: ['staff_user'], result: 'denied', metadata: { version: 'version' }, reason: 'null' }),
   'identity.reindex': Object.freeze({ entityTypes: ['staff_invitation', 'staff_user'], result: 'success', metadata: { version: 'version' }, reason: 'null' }),
   'operational_action.resolved': Object.freeze({ entityTypes: ['operational_action'], result: 'success', metadata: { actionVersion: 'version' }, reason: 'null' }),
+  'outbox.recovery.requested': Object.freeze({ entityTypes: ['outbox_job'], result: 'success', metadata: { actionVersion: 'version', desiredGeneration: 'nullableVersion', invitationVersion: 'nullableVersion', replacementJobId: 'id' }, reason: 'null', human: true }),
   'staff.access.reconciled': Object.freeze({ entityTypes: ['access_group'], result: 'success', metadata: { appliedGeneration: 'version', desiredGeneration: 'version', invitationCount: 'count' }, reason: 'null' }),
   'staff.bootstrap': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', invitationVersion: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', invitationVersion: 'version', staffVersion: 'version' }, reason: 'null' }),
   'staff.deactivated': Object.freeze({ entityTypes: ['staff_user'], result: 'success', metadata: { desiredGeneration: 'version', specialistVersion: 'nullableVersion', staffVersion: 'version' }, legacyMetadata: { desiredGeneration: 'version', staffVersion: 'version' }, reason: 'null' }),
@@ -246,12 +269,9 @@ function captureDb(value) {
 }
 
 function captureActor(value, failure = invalid) {
-  const actor = exactSnapshot(value, ['id', 'role', 'specialistId', 'version'], failure)
-  if (!validId(actor.id) || !ROLES.has(actor.role) || !positive(actor.version)
-    || (actor.role === 'specialist'
-      ? !validId(actor.specialistId)
-      : actor.specialistId !== null && !validId(actor.specialistId))) failure()
-  return Object.freeze(actor)
+  const actor = captureAuthorityActor(value)
+  if (!actor) failure()
+  return actor
 }
 
 function captureCryptoContext(value) {
@@ -345,15 +365,8 @@ function actionIdFrom(factory) {
 
 function actorFromRow(row) {
   const captured = exactSnapshot(row, ACTOR_ROW_KEYS, invalidState)
-  const actor = {
-    id: captured.id,
-    role: captured.role,
-    specialistId: captured.specialist_id,
-    version: captured.version,
-  }
-  captureActor(actor, invalidState)
   if (!['pending', 'active', 'disabled'].includes(captured.status)) invalidState()
-  return Object.freeze({ ...captured, actor: Object.freeze(actor) })
+  return Object.freeze(captured)
 }
 
 async function readCurrentActor(input) {
@@ -362,13 +375,23 @@ async function readCurrentActor(input) {
      FROM staff_users WHERE id=?`
   ).bind(input.actor.id).all()
   const rows = captureAllRows(result, 1)
-  return rows.length === 1 ? actorFromRow(rows[0]) : null
+  if (rows.length !== 1) return null
+  const row = actorFromRow(rows[0])
+  if (row.status !== 'active') return Object.freeze({ ...row, actor: null })
+  let actor
+  try { actor = await resolveCurrentAuthorityActor(input.db, row) } catch { invalidState() }
+  return Object.freeze({ ...row, actor })
 }
 
 const sameActor = (row, actor) => row.id === actor.id
   && row.role === actor.role
   && row.specialist_id === actor.specialistId
   && row.version === actor.version
+  && row.actor.authorityRevision === actor.authorityRevision
+  && row.actor.capabilities.length === actor.capabilities.length
+  && row.actor.capabilities.every((capability, index) => (
+    capability === actor.capabilities[index]
+  ))
 
 async function persistDenial(input, capability) {
   const auditId = actionIdFrom(input.idFactory)
@@ -562,7 +585,7 @@ function validateActionDetails(row, details) {
   return details
 }
 
-const publicAction = ({ row, details }) => ({
+const publicAction = ({ row, details, recovery = null }) => ({
   id: row.id,
   kind: row.kind,
   severity: row.severity,
@@ -572,11 +595,146 @@ const publicAction = ({ row, details }) => ({
   version: row.version,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
+  recovery,
 })
 
 function requireNewestFirst(previous, current) {
   if (previous.created_at < current.created_at
     || (previous.created_at === current.created_at && previous.id <= current.id)) invalidState()
+}
+
+async function readRecoveryStates(input, actions) {
+  const eligible = new Map(actions.filter(ownerRecoveryDisposition).map((action) => (
+    [action.row.id, action]
+  )))
+  if (eligible.size === 0) return new Map()
+  let result
+  try {
+    result = await input.db.prepare(
+      `SELECT source_action.id AS action_id,source.id AS source_job_id,
+              source.type AS source_type,
+              source.aggregate_type AS source_aggregate_type,
+              source.aggregate_id AS source_aggregate_id,
+              source.status AS source_status,
+              source.attempt_count AS source_attempt_count,
+              source.max_attempts AS source_max_attempts,
+              source.last_error_code AS source_error_code,
+              source.updated_at AS source_updated_at,
+              source.lease_owner AS source_lease_owner,
+              source.lease_expires_at AS source_lease_expires_at,
+              attempt.job_id AS attempt_job_id,
+              attempt.attempt_number AS attempt_number,
+              attempt.completed_at AS attempt_completed_at,
+              attempt.result AS attempt_result,
+              attempt.error_code AS attempt_error_code,
+              attempt.provider_reference AS attempt_provider_reference,
+              recovery.id AS recovery_id,
+              recovery.replacement_job_id AS replacement_job_id,
+              replacement.status AS replacement_status,
+              EXISTS (
+                SELECT 1
+                FROM delivery_attempts AS delivery
+                JOIN outbox_jobs AS delivery_job
+                  ON delivery_job.id=delivery.outbox_job_id
+                WHERE delivery_job.type='staff.invitation.email'
+                  AND delivery_job.aggregate_type='staff_invitation'
+                  AND delivery_job.aggregate_id=source.aggregate_id
+                  AND delivery.status='accepted'
+              ) AS accepted_delivery,
+              EXISTS (
+                SELECT 1 FROM outbox_jobs AS other
+                WHERE other.type='staff.invitation.email'
+                  AND other.aggregate_type='staff_invitation'
+                  AND other.aggregate_id=source.aggregate_id
+                  AND other.id!=source.id
+                  AND (recovery.replacement_job_id IS NULL
+                    OR other.id!=recovery.replacement_job_id)
+                  AND other.status IN ('queued','processing','succeeded')
+              ) AS other_live_email
+       FROM outbox_jobs AS source
+       JOIN operational_actions AS source_action
+         ON source_action.entity_type='outbox_job'
+        AND source_action.entity_id=source.id
+       JOIN outbox_attempts AS attempt
+         ON attempt.job_id=source.id
+        AND attempt.attempt_number=source.attempt_count
+       LEFT JOIN outbox_job_recoveries AS recovery
+         ON recovery.source_job_id=source.id
+        AND recovery.operational_action_id=source_action.id
+       LEFT JOIN outbox_jobs AS replacement
+         ON replacement.id=recovery.replacement_job_id
+       WHERE source_action.status='open'
+         AND source_action.kind='outbox_job_failed'
+         AND source.type IN ('staff.access.reconcile','staff.invitation.email')
+       ORDER BY source_action.created_at DESC,source_action.id DESC
+       LIMIT 101`,
+    ).all()
+  } catch (error) {
+    if (String(error?.message ?? '').includes('no such table: outbox_job_recoveries')) {
+      invalidState()
+    }
+    throw error
+  }
+  const rows = captureAllRows(result, 101)
+  const states = new Map()
+  for (const value of rows) {
+    const row = exactSnapshot(value, RECOVERY_STATE_ROW_KEYS, invalidState)
+    const action = eligible.get(row.action_id)
+    if (!action) continue
+    if (states.has(row.action_id)
+      || row.source_job_id !== action.row.entity_id
+      || row.source_type !== action.details.outboxType
+      || row.source_status !== 'dead'
+      || !positive(row.source_attempt_count)
+      || row.source_max_attempts !== 8
+      || row.source_attempt_count > 8
+      || !validInstant(row.source_updated_at)
+      || row.source_lease_owner !== null
+      || row.source_lease_expires_at !== null
+      || row.source_error_code !== action.details.errorCode
+      || row.attempt_job_id !== row.source_job_id
+      || row.attempt_number !== row.source_attempt_count
+      || !validInstant(row.attempt_completed_at)
+      || row.attempt_completed_at !== row.source_updated_at
+      || row.attempt_result !== 'dead'
+      || row.attempt_error_code !== row.source_error_code
+      || row.attempt_provider_reference !== null
+      || ![0, 1].includes(row.accepted_delivery)
+      || ![0, 1].includes(row.other_live_email)) invalidState()
+    const kind = row.source_type === 'staff.access.reconcile' ? 'access' : 'email'
+    if ((kind === 'access'
+        && (row.source_aggregate_type !== 'access_group'
+          || row.source_aggregate_id !== 'centre_1'
+          || !['OUTBOX_HANDLER_FAILURE', 'OUTBOX_HANDLER_RETRY',
+            'OUTBOX_LEASE_EXPIRED'].includes(row.source_error_code)
+          || (['OUTBOX_HANDLER_RETRY', 'OUTBOX_LEASE_EXPIRED'].includes(
+            row.source_error_code,
+          ) && row.source_attempt_count !== row.source_max_attempts)))
+      || (kind === 'email'
+        && (row.source_aggregate_type !== 'staff_invitation'
+          || !['OUTBOX_HANDLER_FAILURE', 'OUTBOX_HANDLER_RETRY',
+            'EMAIL_DELIVERY_AMBIGUOUS'].includes(row.source_error_code)
+          || (row.source_error_code === 'OUTBOX_HANDLER_RETRY'
+            && row.source_attempt_count !== row.source_max_attempts)))) invalidState()
+    const hasRecovery = row.recovery_id !== null
+      || row.replacement_job_id !== null || row.replacement_status !== null
+    let status
+    if (hasRecovery) {
+      if (!validId(row.recovery_id) || !row.recovery_id.startsWith('rcv_')
+        || !validId(row.replacement_job_id)
+        || !['queued', 'processing'].includes(row.replacement_status)) invalidState()
+      status = row.replacement_status
+    } else {
+      status = kind === 'email'
+        && (row.source_error_code === 'EMAIL_DELIVERY_AMBIGUOUS'
+          || row.accepted_delivery === 1 || row.other_live_email === 1)
+        ? 'unsafe'
+        : 'available'
+    }
+    states.set(row.action_id, Object.freeze({ kind, status }))
+  }
+  if (states.size !== eligible.size) invalidState()
+  return states
 }
 
 async function readOpenActions(input, canReadSecurity) {
@@ -610,8 +768,13 @@ async function readOpenActions(input, canReadSecurity) {
   const validated = []
   for (const row of identities) validated.push(await validateCapturedAction(input, row))
   await revalidate()
+  const recoveryStates = await readRecoveryStates(input, validated)
+  await revalidate()
   return Object.freeze({
-    actions: validated.slice(0, 100).map(publicAction),
+    actions: validated.slice(0, 100).map((action) => publicAction({
+      ...action,
+      recovery: recoveryStates.get(action.row.id) ?? null,
+    })),
     truncated: validated.length === 101,
   })
 }
@@ -653,6 +816,11 @@ const actionCapability = (row) => row.kind === 'authorization_denial_spike'
   ? 'security.audit.read'
   : 'operations.health.read'
 
+const ownerRecoveryDisposition = (action) => action.row.kind === 'outbox_job_failed'
+  && ['staff.access.reconcile', 'staff.invitation.email'].includes(
+    action.details.outboxType,
+  )
+
 const IMMUTABLE_ACTION_KEYS = Object.freeze([
   'id', 'fingerprint', 'kind', 'severity', 'entity_type', 'entity_id',
   'details_envelope', 'created_at',
@@ -665,6 +833,7 @@ function resolutionGuard(input, action, auditId) {
   const row = action.row
   const metadata = '{"actionVersion":2}'
   const rolePredicate = row.kind === 'authorization_denial_spike'
+      || ownerRecoveryDisposition(action)
     ? `role='owner'`
     : `role IN ('owner','coordinator')`
   return input.db.prepare(
@@ -679,6 +848,14 @@ function resolutionGuard(input, action, auditId) {
        AND (SELECT count(*) FROM staff_users
             WHERE id=? AND role=? AND status='active' AND specialist_id IS ?
               AND version=? AND ${rolePredicate})=1
+       AND NOT EXISTS (
+         SELECT 1
+         FROM outbox_job_recoveries AS recovery
+         JOIN outbox_jobs AS replacement
+           ON replacement.id=recovery.replacement_job_id
+         WHERE recovery.operational_action_id=?
+           AND replacement.status IN ('queued','processing')
+       )
        AND (SELECT count(*) FROM operational_actions
             WHERE id=? AND fingerprint=? AND kind=? AND severity=?
               AND status='resolved' AND entity_type=? AND entity_id=?
@@ -697,6 +874,7 @@ function resolutionGuard(input, action, auditId) {
     input.actor.role,
     input.actor.specialistId,
     input.actor.version,
+    row.id,
     row.id,
     row.fingerprint,
     row.kind,
@@ -730,6 +908,7 @@ async function attemptedAuditExists(input, auditId) {
 async function recoverResolutionCollision(input, originalAction, auditId, error) {
   if (!isD1IdentityCollision(error)) throw error
   if (await attemptedAuditExists(input, auditId)) throw error
+  await ensureNoPendingRecovery(input, originalAction.row.id)
 
   const currentActor = await readCurrentActor(input)
   const capability = actionCapability(originalAction.row)
@@ -867,6 +1046,11 @@ function auditMetadata(action, schema, text) {
     if (!captured) invalidState()
     return captured
   }
+  if (isSystemAuditAction(action)) {
+    const captured = captureSystemAuditMetadata(action, metadata)
+    if (!captured) invalidState()
+    return captured
+  }
   const keys = Object.keys(metadata)
   const schemaKeys = Object.keys(schema.metadata)
   const legacyKeys = Object.keys(schema.legacyMetadata ?? {})
@@ -882,6 +1066,7 @@ function auditMetadata(action, schema, text) {
     if ((type === 'version' && !positive(shape[key]))
       || (type === 'nullableVersion' && shape[key] !== null && !positive(shape[key]))
       || (type === 'count' && !safeCount(shape[key]))
+      || (type === 'id' && !validId(shape[key]))
       || (type === 'assignmentId' && (typeof shape[key] !== 'string' || !ASSIGNMENT_ID.test(shape[key])))
       || (type === 'paymentId' && (typeof shape[key] !== 'string' || !PAYMENT_ID.test(shape[key])))
       || (type === 'correctionId' && (typeof shape[key] !== 'string' || !CORRECTION_ID.test(shape[key])))
@@ -906,6 +1091,10 @@ function validateAuditEvent(input, value) {
       || envelope.dataKeyVersion !== input.cryptoContext.dataKey.dek_version) invalidState()
   } else if (row.reason_envelope !== null) invalidState()
   const metadata = auditMetadata(row.action, schema, row.metadata_json)
+  if (row.action === 'outbox.recovery.requested'
+    && (metadata.actionVersion !== 1
+      || ((metadata.desiredGeneration === null)
+        === (metadata.invitationVersion === null)))) invalidState()
   if (isCoreAuditAction(row.action) && !readerCoreAuditEvent({
     action: row.action,
     actorStaffId: row.actor_staff_id,
@@ -914,7 +1103,16 @@ function validateAuditEvent(input, value) {
     result: row.result,
     metadata,
   })) invalidState()
+  if (isSystemAuditAction(row.action) && !readerSystemAuditEvent({
+    action: row.action,
+    actorStaffId: row.actor_staff_id,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    result: row.result,
+    metadata,
+  })) invalidState()
   if (schema.system && row.actor_staff_id !== null) invalidState()
+  if (schema.human && !STAFF_ID.test(row.actor_staff_id ?? '')) invalidState()
   if (row.action === 'backup.pruned'
     && (row.entity_type !== 'backup_run'
       || !BACKUP_ID.test(row.entity_id) || row.result !== 'success'
@@ -928,6 +1126,8 @@ function validateAuditEvent(input, value) {
 
 export const READER_CORE_AUDIT_SCHEMAS = CORE_AUDIT_SCHEMAS
 export const readerCoreAuditEvent = captureCoreAuditEvent
+export const READER_SYSTEM_AUDIT_SCHEMAS = SYSTEM_AUDIT_SCHEMAS
+export const readerSystemAuditEvent = captureSystemAuditEvent
 
 const publicAuditEvent = ({ row, metadata }) => ({
   id: row.id,
@@ -1034,6 +1234,43 @@ async function commitResolution(input, action, requestedVersion) {
   }
 }
 
+async function ensureNoPendingRecovery(input, actionId) {
+  let row
+  try {
+    const result = await input.db.prepare(
+      `SELECT recovery.id AS recovery_id,
+              recovery.operational_action_id AS operational_action_id,
+              recovery.replacement_job_id AS replacement_job_id,
+              replacement.status AS replacement_status
+       FROM outbox_job_recoveries AS recovery
+       JOIN outbox_jobs AS replacement
+         ON replacement.id=recovery.replacement_job_id
+       WHERE recovery.operational_action_id=?`,
+    ).bind(actionId).all()
+    const rows = captureAllRows(result, 1)
+    row = rows[0] ?? null
+  } catch (error) {
+    if (String(error?.message ?? '').includes('no such table: outbox_job_recoveries')) return
+    throw error
+  }
+  if (row === null) return
+  const captured = exactSnapshot(row, [
+    'recovery_id',
+    'operational_action_id',
+    'replacement_job_id',
+    'replacement_status',
+  ], invalidState)
+  if (!validId(captured.recovery_id)
+    || captured.operational_action_id !== actionId
+    || !validId(captured.replacement_job_id)
+    || !['queued', 'processing', 'succeeded', 'dead'].includes(
+      captured.replacement_status,
+    )) invalidState()
+  if (['queued', 'processing'].includes(captured.replacement_status)) {
+    throw new Error('OUTBOX_RECOVERY_CONFLICT')
+  }
+}
+
 export async function getOperationalHealth(value) {
   const input = captureInput(value)
   await requireCapability(input, 'operations.health.read')
@@ -1061,9 +1298,28 @@ export async function resolveOperationalAction(value) {
     await requireCapability(input, 'security.audit.read')
   }
   const action = await validateCapturedAction(input, row)
+  if (ownerRecoveryDisposition(action)) await requireCapability(input, 'staff.manage')
   const body = resolutionBody(input.body)
   if (row.status !== 'open' || body.version !== row.version) versionConflict(row.version)
+  await ensureNoPendingRecovery(input, row.id)
   return commitResolution(input, action, body.version)
+}
+
+export async function requestOperationalActionRecovery(value) {
+  const input = captureInput(value, ['actionId', 'idempotencyKey', 'body'])
+  await requireCapability(input, 'operations.health.read')
+  await requireCapability(input, 'staff.manage')
+  return requestOutboxRecovery({
+    db: input.db,
+    cryptoContext: input.cryptoContext,
+    actor: input.actor,
+    actionId: input.actionId,
+    body: input.body,
+    idempotencyKey: input.idempotencyKey,
+    correlationId: input.correlationId,
+    nowMs: input.nowMs,
+    idFactory: input.idFactory,
+  })
 }
 
 export async function listSecurityAudit(value) {

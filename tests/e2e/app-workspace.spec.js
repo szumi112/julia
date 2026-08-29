@@ -29,7 +29,8 @@ const freezeTime = async (page, iso) => {
 }
 
 const activeSpecialist = {
-  id: 'sp_anna', displayName: 'Anna Nowak', standardRateGrosze: 18_000,
+  id: 'sp_anna', displayName: 'Anna Nowak', professionalTitle: 'Specjalistka',
+  standardRateGrosze: 18_000,
   status: 'active', version: 3, staffVersion: 4,
 }
 
@@ -164,19 +165,121 @@ const reversedPaymentAppointment = {
   }],
 }
 
-const workspaceEnvelope = (from, to, appointment = null) => json(200, {
-  data: {
-    window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
-    specialists: [activeSpecialist],
-    clients: [activeClient],
-    appointments: appointment === null ? [] : [appointment],
-  },
+const historicalWorkbookClient = {
+  id: 'hcl_workbook_history', name: 'Historia bez godziny', status: 'historical',
+  activeClientId: null, version: 1,
+  createdAt: '2026-07-20T08:00:00.000Z', updatedAt: '2026-07-20T08:00:00.000Z',
+}
+
+const historicalWorkbookOccurrence = {
+  id: 'hoc_workbook_history', historicalClientId: 'hcl_workbook_history',
+  counterparty: null, specialistId: 'sp_anna', serviceId: 'zajecia',
+  serviceLabel: 'Wizyta historyczna bez godziny',
+  period: { precision: 'month', day: null, month: '2026-07' },
+  status: 'recorded', version: 1, sourceRecordId: 'wbs_workbook_history',
+  createdAt: '2026-07-20T08:00:00.000Z', updatedAt: '2026-07-20T08:00:00.000Z',
+}
+
+const workspaceData = (from, to, {
+  specialists = [activeSpecialist],
+  clients = [activeClient],
+  appointments = [],
+  historicalClients = [],
+  historicalOccurrences = [],
+  latestPopulatedMonth = null,
+} = {}) => ({
+  window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
+  specialists,
+  clients,
+  appointments,
+  historicalClients,
+  historicalOccurrences,
+  latestPopulatedMonth,
 })
+
+const workspaceEnvelope = (from, to, appointment = null) => json(200, {
+  data: workspaceData(from, to, {
+    appointments: appointment === null ? [] : [appointment],
+  }),
+})
+
+const financeMonths = (selectedMonth) => {
+  const [year, month] = selectedMonth.split('-').map(Number)
+  return Array.from({ length: 6 }, (_, index) => {
+    const date = new Date(Date.UTC(year, month - 6 + index, 1))
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`
+  })
+}
+
+const zeroFinanceKpis = () => ({
+  revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0,
+  expensesGrosze: 0, incomeGrosze: 0,
+})
+
+// This mirrors the complete GET /api/v1/finance/window DTO.  Finance owns the
+// ledger amounts; workspace only supplies the appointment used by payment actions.
+const financeWindow = (selectedMonth, appointment = null, specialistLabels = [
+  { id: activeSpecialist.id, label: activeSpecialist.displayName },
+]) => {
+  const paymentTotals = (appointment?.paymentEntries ?? [])
+    .filter(({ correctedAt }) => correctedAt === null)
+    .reduce((totals, { method, amountGrosze }) => {
+      totals.set(method, (totals.get(method) ?? 0) + amountGrosze)
+      return totals
+    }, new Map())
+  paymentTotals.set('outstanding', appointment === null ? 0 : appointment.payment.outstandingGrosze)
+  const paymentSplit = Object.fromEntries([...paymentTotals.entries()]
+    .sort(([left], [right]) => left.localeCompare(right)))
+  const row = appointment === null ? null : {
+    id: `fin_${appointment.id.slice(4)}`, sourceKind: 'panel', appointmentId: appointment.id,
+    accountingMonth: selectedMonth, occurredOn: appointment.startsAt.slice(0, 10),
+    kind: 'income', recordType: 'income',
+    revenueGrosze: appointment.charge.expectedAmountGrosze,
+    receivableGrosze: appointment.charge.expectedAmountGrosze,
+    collectedGrosze: appointment.payment.collectedGrosze, expenseGrosze: 0,
+    specialistId: appointment.specialistId, serviceId: appointment.serviceId,
+    program: null, paymentMethod: 'unknown', invoiceStatus: 'not_required',
+    version: Math.max(appointment.version, appointment.charge.version),
+  }
+  const revenueGrosze = row?.revenueGrosze ?? 0
+  const collectedGrosze = row?.collectedGrosze ?? 0
+  const selected = {
+    revenueGrosze, collectedGrosze, outstandingGrosze: revenueGrosze - collectedGrosze,
+    expensesGrosze: 0, incomeGrosze: revenueGrosze,
+  }
+  const months = financeMonths(selectedMonth)
+  return {
+    currentMonth: '2026-07', selectedMonth, fromMonth: months[0], toMonth: selectedMonth,
+    months, latestPopulatedMonth: row ? selectedMonth : null, kpis: selected,
+    trend: months.map((month) => ({
+      month, ...(month === selectedMonth ? selected : zeroFinanceKpis()),
+    })),
+    splits: {
+      specialist: row ? { [row.specialistId]: revenueGrosze } : {},
+      service: row ? { zajecia: revenueGrosze } : {},
+      payment: row ? paymentSplit : {},
+      invoice: row ? { not_required: { count: 1, revenueGrosze } } : {},
+      program: {
+        english: { count: 0, revenueGrosze: 0 },
+        tus: { count: 0, revenueGrosze: 0 },
+      },
+    },
+    specialistLabels: row ? specialistLabels : [], rows: row ? [row] : [],
+    coverage: {
+      dateOnlyCount: 0, monthOnlyCount: 0, timedCount: row ? 1 : 0, unknownCount: 0,
+    },
+    unknownPeriodCount: 0, complete: true,
+  }
+}
 
 const containsHistory = (from, to) => from <= '2026-07-15' && to >= '2026-07-15'
 
-test('@owner gates deferred surfaces and waits for a complete monthly report', async ({ page }) => {
+test('@owner exposes protected activities and waits for a complete monthly report', async ({ page }) => {
   await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  let startFinance
+  let releaseFinance
+  const financeStarted = new Promise((resolve) => { startFinance = resolve })
+  const financeReleased = new Promise((resolve) => { releaseFinance = resolve })
   await page.route('**/api/v1/workspace?*', async (route) => {
     const url = new URL(route.request().url())
     await new Promise((resolve) => setTimeout(resolve, 300))
@@ -186,10 +289,15 @@ test('@owner gates deferred surfaces and waits for a complete monthly report', a
       completedAppointment,
     ))
   })
+  await page.route('**/api/v1/finance/window?*', async (route) => {
+    startFinance()
+    await financeReleased
+    await route.fulfill(json(200, { data: financeWindow('2026-07', completedAppointment) }))
+  })
 
   await page.goto('./#/tus')
-  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
-  await expect(page.getByRole('link', { name: 'Zajęcia TUS', exact: true })).toHaveCount(0)
+  await expect(page.locator('.topbar__title b')).toHaveText('Zajęcia TUS')
+  await expect(page.getByRole('link', { name: 'Zajęcia TUS', exact: true })).toHaveCount(1)
 
   await page.goto('./#/team')
   await expect(page.getByRole('status', { name: 'Stan zespołu' })).toContainText('Wczytywanie zespołu')
@@ -201,7 +309,8 @@ test('@owner gates deferred surfaces and waits for a complete monthly report', a
   await expect(page.getByRole('link', { name: 'Otwórz profil — Anna Nowak' })).toHaveCount(0)
 
   await page.goto('./#/psych?id=sp_anna')
-  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
+  await expect(page.locator('.topbar__title b')).toHaveText('Profil specjalistki')
+  await expect(page.getByRole('heading', { level: 1, name: 'Anna Nowak' })).toBeVisible()
 
   await page.goto('./#/settings')
   await expect(page.getByText('Google Calendar', { exact: true })).toHaveCount(0)
@@ -209,33 +318,66 @@ test('@owner gates deferred surfaces and waits for a complete monthly report', a
   await expect(page.getByRole('form', { name: 'Dane centrum' })).toHaveCount(0)
 
   await page.goto('./#/reports?ym=2026-07')
-  await expect(page.getByRole('status', { name: 'Stan raportu' })).toContainText('Wczytywanie raportu')
-  await expect(page.getByRole('heading', { level: 1, name: /Raport miesięczny/ })).toBeVisible()
+  await financeStarted
+  await expect(page.getByRole('status').filter({ hasText: 'Wczytywanie raportu…' })).toBeVisible()
+  releaseFinance()
+  await expect(page.getByRole('heading', { level: 1, name: 'Raport — lipiec 2026' })).toBeVisible()
+  await expect(page.locator('.month-nav__label')).toHaveText('Lipiec 2026')
   await expect(page.getByRole('heading', { name: 'Zajęcia grupowe TUS' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Eksport (demo)' })).toHaveCount(0)
 })
 
 test('@owner falls back from invalid civil report months without rendering errors', async ({ page }) => {
   const pageErrors = []
-  const windows = []
+  const financeRequests = []
   page.on('pageerror', (error) => pageErrors.push(error.message))
   await freezeTime(page, '2026-07-15T08:00:00.000Z')
   await page.route('**/api/v1/workspace?*', async (route) => {
     const url = new URL(route.request().url())
     const from = url.searchParams.get('from')
     const to = url.searchParams.get('to')
-    windows.push({ from, to })
     await route.fulfill(workspaceEnvelope(from, to, completedAppointment))
+  })
+  await page.route('**/api/v1/finance/window?*', async (route) => {
+    const month = new URL(route.request().url()).searchParams.get('month')
+    financeRequests.push(month)
+    await route.fulfill(json(200, { data: financeWindow(month, completedAppointment) }))
   })
 
   for (const ym of ['2025-00', '2025-13']) {
     await page.goto(`./#/reports?ym=${ym}`)
-    await expect(page.getByRole('heading', { level: 1, name: /Raport miesięczny/ })).toBeVisible()
-    await expect(page.locator('.month-nav__label')).toHaveText('lipiec 2026')
+    await expect(page.getByRole('heading', { level: 1, name: 'Raport — lipiec 2026' })).toBeVisible()
+    await expect(page.locator('.month-nav__label')).toHaveText('Lipiec 2026')
   }
 
   expect(pageErrors).toEqual([])
-  expect(windows).toEqual([{ from: '2026-07-01', to: '2026-07-31' }])
+  expect(financeRequests.length).toBeGreaterThanOrEqual(2)
+  expect(financeRequests.every((month) => month === '2026-07')).toBe(true)
+})
+
+test('@owner keeps untimed workbook history outside Calendar sessions', async ({ page }) => {
+  const pageErrors = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const url = new URL(route.request().url())
+    await route.fulfill(json(200, { data: workspaceData(
+      url.searchParams.get('from'), url.searchParams.get('to'), {
+        appointments: [scheduledAppointment],
+        historicalClients: [historicalWorkbookClient],
+        historicalOccurrences: [historicalWorkbookOccurrence],
+        latestPopulatedMonth: '2026-07',
+      },
+    ) }))
+  })
+
+  await page.goto('./#/calendar?date=2026-07-15')
+  const plan = page.getByRole('region', { name: 'Plan dnia' })
+  await expect(plan.getByText('Ola Aktywna', { exact: true })).toBeVisible()
+  await expect(plan.getByText('Historia bez godziny', { exact: true })).toHaveCount(0)
+  await expect(plan.getByText('Wizyta historyczna bez godziny', { exact: true }))
+    .toHaveCount(0)
+  expect(pageErrors).toEqual([])
 })
 
 test('@owner renders only complete canonical workspace windows as read-only history', async ({ page }) => {
@@ -252,14 +394,16 @@ test('@owner renders only complete canonical workspace windows as read-only hist
       await new Promise((resolve) => setTimeout(resolve, 600))
     }
     const history = containsHistory(from, to)
-    await route.fulfill(json(200, {
-      data: {
-        window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
-        specialists: [activeSpecialist],
-        clients: history ? [activeClient, archivedClient] : [activeClient],
-        appointments: history ? [historicalAppointment, scheduledAppointment] : [],
-      },
-    }))
+    await route.fulfill(json(200, { data: workspaceData(from, to, {
+      clients: history ? [activeClient, archivedClient] : [activeClient],
+      appointments: history ? [historicalAppointment, scheduledAppointment] : [],
+    }) }))
+  })
+  await page.route('**/api/v1/finance/window?*', async (route) => {
+    const month = new URL(route.request().url()).searchParams.get('month')
+    await route.fulfill(json(200, { data: financeWindow(month, historicalAppointment, [{
+      id: 'sp_history', label: 'Specjalistka archiwalna',
+    }]) }))
   })
 
   await page.goto('./#/clients')
@@ -292,8 +436,8 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await expect(page.getByRole('main').getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(1)
 
   await page.goto('./#/psych?id=sp_anna')
-  await expect(page.locator('.topbar__title b')).toHaveText('Dziś')
-  await expect(page.getByRole('heading', { level: 1, name: 'Anna Nowak' })).toHaveCount(0)
+  await expect(page.locator('.topbar__title b')).toHaveText('Profil specjalistki')
+  await expect(page.getByRole('heading', { level: 1, name: 'Anna Nowak' })).toBeVisible()
 
   await page.setViewportSize({ width: 390, height: 844 })
   const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
@@ -312,11 +456,18 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await expect(archivedRow.getByRole('button', { name: /Płatność:/ })).toHaveCount(0)
 
   await page.goto('./#/payments?ym=2026-07')
+  await page.getByRole('tab', { name: 'Przychody' }).click()
+  const income = page.locator('.finance-window__table').filter({
+    has: page.getByRole('heading', { name: 'Przychody miesiąca' }),
+  })
+  await expect(income).toContainText('Zofia Historyczna')
+  await expect(income).toContainText('Specjalistka archiwalna')
+  await page.getByRole('tab', { name: 'Płatności i zaległości' }).click()
   const ledger = page.getByRole('table', { name: 'Lista rozliczeń' })
-  await expect(ledger).toContainText('Zofia Historyczna')
-  await expect(ledger).toContainText('Specjalistka niedostępna')
+  const historicalPaymentRow = ledger.locator('tbody tr', { hasText: 'Zofia Historyczna' })
   await expect(page.getByRole('button', { name: 'Wszystkie okresy' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /Zaksięguj wpłatę/ })).toHaveCount(0)
+  await expect(historicalPaymentRow.getByRole('button', { name: /Zaksięguj wpłatę/ })).toHaveCount(0)
+  await expect(historicalPaymentRow.getByRole('button', { name: /Skoryguj wpłatę/ })).toHaveCount(0)
 
   await page.goto('./#/calendar?date=2026-04-15&ym=2026-04&mode=cal')
   await expect(page.getByRole('status', { name: 'Stan kalendarza' })).toContainText('Wczytywanie kalendarza')
@@ -331,17 +482,11 @@ test('@owner does not drag a read-only Calendar appointment', async ({ page }) =
   await freezeTime(page, '2026-07-15T08:00:00.000Z')
   await page.route('**/api/v1/workspace?*', async (route) => {
     const url = new URL(route.request().url())
-    await route.fulfill(json(200, {
-      data: {
-        window: {
-          from: url.searchParams.get('from'), to: url.searchParams.get('to'),
-          timeZone: 'Europe/Warsaw', complete: true,
-        },
-        specialists: [activeSpecialist],
-        clients: [archivedClient],
-        appointments: [archivedScheduledAppointment],
+    await route.fulfill(json(200, { data: workspaceData(
+      url.searchParams.get('from'), url.searchParams.get('to'), {
+        clients: [archivedClient], appointments: [archivedScheduledAppointment],
       },
-    }))
+    ) }))
   })
   await page.route('**/api/v1/appointments/apt_history/edits', async (route) => {
     edits += 1
@@ -516,9 +661,11 @@ test('@owner rolls a Calendar drag back after the canonical reschedule command c
   await expect(target.locator('.cal__item', { hasText: 'Ola' })).toHaveCount(0)
 })
 
-test('@owner records a protected payment from Payments and reloads the canonical month', async ({ page }) => {
+test('@owner reconciles POST /appointments/:appointmentId/payments in the finance window', async ({ page }) => {
   const payments = []
   let workspaceReads = 0
+  let paymentAccepted = false
+  let financeReadsAfterPayment = 0
   let appointment = completedAppointment
   await freezeTime(page, '2026-07-15T08:00:00.000Z')
   await page.route('**/api/v1/workspace?*', async (route) => {
@@ -530,9 +677,15 @@ test('@owner records a protected payment from Payments and reloads the canonical
       appointment,
     ))
   })
+  await page.route('**/api/v1/finance/window?*', async (route) => {
+    if (paymentAccepted) financeReadsAfterPayment += 1
+    const month = new URL(route.request().url()).searchParams.get('month')
+    await route.fulfill(json(200, { data: financeWindow(month, appointment) }))
+  })
   await page.route('**/api/v1/appointments/apt_scheduled/payments', async (route) => {
     payments.push({ method: route.request().method(), body: route.request().postData() })
     appointment = paymentRecordedAppointment
+    paymentAccepted = true
     await route.fulfill(json(200, { data: { appointment: paymentRecordedAppointment } }))
   })
 
@@ -546,7 +699,10 @@ test('@owner records a protected payment from Payments and reloads the canonical
   await entry.getByLabel('Data wpłaty').fill('2026-01-04')
   await entry.getByRole('button', { name: 'Zapisz wpłatę' }).click()
 
-  await expect(row).toContainText('120 zł')
+  await expect(row.locator('td').nth(3)).toHaveText('120 zł')
+  await expect(row.locator('td').nth(4)).toHaveText('60 zł')
+  await expect(page.getByRole('heading', { name: 'Finanse — lipiec 2026' })).toBeVisible()
+  await expect(page.getByText('Finanse są teraz niedostępne', { exact: true })).toHaveCount(0)
   expect(payments).toEqual([{
     method: 'POST',
     body: JSON.stringify({
@@ -557,6 +713,7 @@ test('@owner records a protected payment from Payments and reloads the canonical
     }),
   }])
   await expect.poll(() => workspaceReads).toBe(2)
+  await expect.poll(() => financeReadsAfterPayment).toBeGreaterThan(0)
 })
 
 test('@owner keeps protected payment input after a command failure', async ({ page }) => {
@@ -570,6 +727,10 @@ test('@owner keeps protected payment input after a command failure', async ({ pa
       url.searchParams.get('to'),
       completedAppointment,
     ))
+  })
+  await page.route('**/api/v1/finance/window?*', async (route) => {
+    const month = new URL(route.request().url()).searchParams.get('month')
+    await route.fulfill(json(200, { data: financeWindow(month, completedAppointment) }))
   })
   await page.route('**/api/v1/appointments/apt_scheduled/payments', (route) => (
     route.fulfill(errorEnvelope(409, 'PAYMENT_AMOUNT_CONFLICT'))
@@ -593,9 +754,11 @@ test('@owner keeps protected payment input after a command failure', async ({ pa
   expect(workspaceReads).toBe(1)
 })
 
-test('@owner corrects one canonical payment entry and shows reloaded history without Undo', async ({ page }) => {
+test('@owner reconciles POST /payments/:paymentId/corrections in the finance window', async ({ page }) => {
   const corrections = []
   let workspaceReads = 0
+  let correctionAccepted = false
+  let financeReadsAfterCorrection = 0
   let appointment = paymentRecordedAppointment
   await freezeTime(page, '2026-07-15T08:00:00.000Z')
   await page.route('**/api/v1/workspace?*', async (route) => {
@@ -605,9 +768,15 @@ test('@owner corrects one canonical payment entry and shows reloaded history wit
       url.searchParams.get('from'), url.searchParams.get('to'), appointment,
     ))
   })
+  await page.route('**/api/v1/finance/window?*', async (route) => {
+    if (correctionAccepted) financeReadsAfterCorrection += 1
+    const month = new URL(route.request().url()).searchParams.get('month')
+    await route.fulfill(json(200, { data: financeWindow(month, appointment) }))
+  })
   await page.route('**/api/v1/payments/pay_recorded/corrections', async (route) => {
     corrections.push({ method: route.request().method(), body: route.request().postData() })
     appointment = correctedPaymentAppointment
+    correctionAccepted = true
     await route.fulfill(json(200, { data: { appointment: correctedPaymentAppointment } }))
   })
 
@@ -623,7 +792,11 @@ test('@owner corrects one canonical payment entry and shows reloaded history wit
   await correction.getByRole('button', { name: 'Zapisz korektę' }).click()
 
   await expect(ledger).toContainText('Skorygowana')
-  await expect(ledger).toContainText('100 zł')
+  const row = ledger.locator('tbody tr', { hasText: 'Ola Aktywna' })
+  await expect(row.locator('td').nth(3)).toHaveText('100 zł')
+  await expect(row.locator('td').nth(4)).toHaveText('80 zł')
+  await expect(page.getByRole('heading', { name: 'Finanse — lipiec 2026' })).toBeVisible()
+  await expect(page.getByText('Finanse są teraz niedostępne', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Cofnij' })).toHaveCount(0)
   expect(corrections).toEqual([{
     method: 'POST',
@@ -638,6 +811,7 @@ test('@owner corrects one canonical payment entry and shows reloaded history wit
     }),
   }])
   await expect.poll(() => workspaceReads).toBe(2)
+  await expect.poll(() => financeReadsAfterCorrection).toBeGreaterThan(0)
 })
 
 test('@owner keeps protected correction input after a command failure', async ({ page }) => {
@@ -647,6 +821,10 @@ test('@owner keeps protected correction input after a command failure', async ({
     await route.fulfill(workspaceEnvelope(
       url.searchParams.get('from'), url.searchParams.get('to'), paymentRecordedAppointment,
     ))
+  })
+  await page.route('**/api/v1/finance/window?*', async (route) => {
+    const month = new URL(route.request().url()).searchParams.get('month')
+    await route.fulfill(json(200, { data: financeWindow(month, paymentRecordedAppointment) }))
   })
   await page.route('**/api/v1/payments/pay_recorded/corrections', (route) => (
     route.fulfill(errorEnvelope(409, 'PAYMENT_CORRECTION_CONFLICT'))
@@ -693,6 +871,10 @@ test('@owner cannot replay an accepted correction after an unrelated canonical l
       url.searchParams.get('from'), url.searchParams.get('to'), null,
     ))
   })
+  await page.route('**/api/v1/finance/window?*', async (route) => {
+    const month = new URL(route.request().url()).searchParams.get('month')
+    await route.fulfill(json(200, { data: financeWindow(month, paymentRecordedAppointment) }))
+  })
   await page.route('**/api/v1/payments/pay_recorded/corrections', async (route) => {
     corrections.push({ method: route.request().method(), body: route.request().postData() })
     await route.fulfill(json(200, { data: { appointment: reversedPaymentAppointment } }))
@@ -733,6 +915,10 @@ test('@owner cannot replay an accepted payment after an unrelated canonical load
     await route.fulfill(workspaceEnvelope(
       url.searchParams.get('from'), url.searchParams.get('to'), null,
     ))
+  })
+  await page.route('**/api/v1/finance/window?*', async (route) => {
+    const month = new URL(route.request().url()).searchParams.get('month')
+    await route.fulfill(json(200, { data: financeWindow(month, completedAppointment) }))
   })
   await page.route('**/api/v1/appointments/apt_scheduled/payments', async (route) => {
     payments.push({ method: route.request().method(), body: route.request().postData() })

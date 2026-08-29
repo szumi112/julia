@@ -854,10 +854,9 @@ describe('authoritative invitation email dispatch', () => {
     await expect(dispatch(defaultProvider, {
       providers: { fetch },
       bindings: {
-        SCW_PROJECT_ID: '11111111-1111-4111-8111-111111111111',
-        SCW_FROM_EMAIL: 'powiadomienia@example.test',
-        SCW_FROM_NAME: 'Bear with me',
-        SCW_SECRET_KEY: 'provider-secret',
+        RESEND_FROM_EMAIL: 'powiadomienia@example.test',
+        RESEND_FROM_NAME: 'Bear with me',
+        RESEND_API_KEY: 're_provider-secret',
       },
     })).resolves.toEqual({ result: 'dead' })
     expect(fetch).not.toHaveBeenCalled()
@@ -903,7 +902,7 @@ describe('accepted invitation email finalization', () => {
     })
     const delivery = await row('delivery_attempts', 'outbox_job_id', value.jobId)
     expect(delivery).toMatchObject({
-      provider: 'scaleway_tem',
+      provider: 'resend',
       provider_reference: PROVIDER_ID,
       status: 'accepted',
       error_code: null,

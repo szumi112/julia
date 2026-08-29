@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import fixture from '../fixtures/backup-format-v1.json'
+import fixtureV2 from '../fixtures/backup-format-v2.json'
+import fixtureV3 from '../fixtures/backup-format-v3.json'
 import {
   backupObjectKeys, canonicalJson, createBackupManifest, expectedObjectMetadata, openBackupManifest, parseCanonicalManifest,
 } from '../../worker/operations/backup-format.js'
@@ -37,6 +39,28 @@ const keyring = async ({ active = 1, versions = { 1: fixture.publicDerivationSee
 })
 
 describe('backup format under workerd', () => {
+  it('opens and recreates both canonical v3 recovery variants byte-for-byte', async () => {
+    const ring = await keyring()
+    for (const variant of Object.values(fixtureV3.variants)) {
+      const manifestBytes = raw(variant.canonicalManifestBase64Url)
+      const manifest = parseCanonicalManifest(manifestBytes)
+      expect(manifest.backupId).toBe(variant.backupId)
+      expect(manifest.recoveryFacts.kind).toBe(variant.recoveryKind)
+      expect(expectedObjectMetadata(manifest)).toEqual(variant.metadata)
+      const opened = await openBackupManifest({ bytes: manifestBytes, keyring: ring })
+      expect(opened.rawSsecKey).toEqual(derive(variant.rawSsecKeySeed))
+      opened.rawSsecKey.fill(0)
+      const { wrappedSsecKey: _wrapped, ...facts } = manifest
+      const recreated = await createBackupManifest({
+        facts: structuredClone(facts),
+        rawSsecKey: derive(variant.rawSsecKeySeed),
+        keyring: ring,
+        nonceFactory: () => raw(manifest.wrappedSsecKey.nonce),
+      })
+      expect(recreated.bytes).toEqual(manifestBytes)
+    }
+  })
+
   it('serializes the shared public fixture canonically', () => {
     for (const entry of fixture.canonicalCases) expect(canonicalJson(entry.value)).toBe(entry.json)
     expect(canonicalJson(fixture.manifest)).toBe(fixture.canonicalManifestJson)
@@ -519,5 +543,43 @@ describe('backup format under workerd', () => {
       expect(pattern.test(publicText)).toBe(false)
     }
     expect(errors).toEqual(['Error:BACKUP_CRYPTO_FAILED', 'Error:BACKUP_MANIFEST_INVALID'])
+  })
+})
+
+describe('backup manifest v2 under workerd', () => {
+  it('reproduces and opens the shared authenticated source/migrations/sentinel vector', async () => {
+    expect(backupObjectKeys({
+      backupId: fixtureV2.manifest.backupId,
+      localMonth: fixtureV2.manifest.localMonth,
+      version: 2,
+    })).toEqual(fixtureV2.objectKeys)
+    expect(parseCanonicalManifest(raw(fixtureV2.canonicalManifestBase64Url))).toEqual(fixtureV2.manifest)
+    expect(expectedObjectMetadata(fixtureV2.manifest)).toEqual(fixtureV2.metadata)
+    const ring = await keyring()
+    const result = await createBackupManifest({
+      facts: structuredClone(fixtureV2.facts),
+      rawSsecKey: derive(fixtureV2.publicDerivationSeeds.rawSsecKey),
+      keyring: ring,
+      nonceFactory: () => raw(fixtureV2.publicEncoding.nonce),
+    })
+    expect(result.manifest).toEqual(fixtureV2.manifest)
+    expect(new TextDecoder().decode(result.bytes)).toBe(fixtureV2.canonicalManifestJson)
+    const opened = await openBackupManifest({ bytes: result.bytes, keyring: ring })
+    expect(opened.manifest).toEqual(fixtureV2.manifest)
+    expect([...opened.rawSsecKey]).toEqual([...derive(fixtureV2.publicDerivationSeeds.rawSsecKey)])
+  })
+
+  it('rejects migration drift and sentinel/source tampering before decryption succeeds', async () => {
+    const ring = await keyring()
+    for (const mutate of [
+      (m) => { m.appliedMigrations.reverse() },
+      (m) => { m.appliedMigrations[1].name = '0002_tampered.sql' },
+      (m) => { m.restoreSentinel.backupId = 'bkp_other' },
+      (m) => { m.source.appEnv = 'production' },
+    ]) {
+      const manifest = structuredClone(fixtureV2.manifest)
+      mutate(manifest)
+      await manifestInvalid(() => openBackupManifest({ bytes: bytes(canonicalJson(manifest)), keyring: ring }))
+    }
   })
 })

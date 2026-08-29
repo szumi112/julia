@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fmtMoney, fmtWeekRange, isoWeek, relDayLabel, toISODate, untilLabel } from '../../src/format.js'
+import {
+  METHOD_LABELS, fmtMoney, fmtWeekRange, isoWeek, relDayLabel, toISODate, untilLabel,
+} from '../../src/format.js'
+
+test('payment method labels include the canonical monthly settlement method', () => {
+  assert.equal(METHOD_LABELS.monthly, 'Miesięcznie')
+})
 
 test('money formatting preserves cents only for fractional złoty values', () => {
   assert.equal(fmtMoney(91.79), '91,79\u00a0zł')

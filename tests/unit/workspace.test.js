@@ -19,6 +19,19 @@ const state = {
   psychologists: [],
 }
 
+test('calendar session ordering compares time then stable id with explicit code-unit order', () => {
+  assert.equal(typeof workspace.compareCalendarSessionOrder, 'function')
+  const compare = workspace.compareCalendarSessionOrder
+  const items = [
+    { id: 's_2', time: '09:00' },
+    { id: 's_10', time: '09:00' },
+    { id: 's_early', time: '08:59' },
+  ]
+  assert.deepEqual(items.toSorted(compare).map(({ id }) => id), ['s_early', 's_10', 's_2'])
+  assert.equal(compare(items[0], items[0]), 0)
+  assert.equal(compare({ id: '\u00e4', time: '09:00' }, { id: 'z', time: '09:00' }), 1)
+})
+
 test('therapist scope contains only their own sessions', () => {
   assert.deepEqual(sessionsForRole(state, roleById('therapist')).map((s) => s.id), ['s-therapist'])
 })

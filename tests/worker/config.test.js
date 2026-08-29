@@ -22,9 +22,13 @@ const valid = {
   ACTIVE_DATA_KEK_VERSION: '1',
   ACTIVE_LOOKUP_KEY_VERSION: '1',
   ACTIVE_BACKUP_KEK_VERSION: '1',
+  ACTIVE_WORKBOOK_KEK_VERSION: '1',
+  ACTIVE_WORKBOOK_HMAC_VERSION: '1',
   BWM_DATA_KEK_V1: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
   BWM_LOOKUP_HMAC_V1: 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ',
   BWM_BACKUP_KEK_V1: 'CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg',
+  BWM_WORKBOOK_KEK_V1: 'CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk',
+  BWM_WORKBOOK_HMAC_V1: 'CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgo',
 }
 
 const backupConfig = Object.freeze({ appEnv: 'staging', activeBackupKekVersion: 1 })
@@ -77,6 +81,8 @@ describe('loadConfig', () => {
       activeDataKekVersion: 1,
       activeLookupKeyVersion: 1,
       activeBackupKekVersion: 1,
+      activeWorkbookKekVersion: 1,
+      activeWorkbookHmacVersion: 1,
       localAuth: false,
     })
     expect(Object.isFrozen(result)).toBe(true)
@@ -114,6 +120,10 @@ describe('loadConfig', () => {
     ['ACTIVE_DATA_KEK_VERSION', '1e0'],
     ['ACTIVE_DATA_KEK_VERSION', ' 1'],
     ['ACTIVE_DATA_KEK_VERSION', '0'],
+    ['ACTIVE_WORKBOOK_KEK_VERSION', '01'],
+    ['ACTIVE_WORKBOOK_HMAC_VERSION', '0'],
+    ['BWM_WORKBOOK_KEK_V1', 'short'],
+    ['BWM_WORKBOOK_HMAC_V1', 'short'],
   ])('fails closed for invalid %s', (key, value) => {
     expect(() => loadConfig({ ...valid, [key]: value })).toThrow()
   })
@@ -426,19 +436,17 @@ describe('loadAccessProviderConfig', () => {
 
 describe('loadEmailProviderConfig', () => {
   const email = {
-    SCW_PROJECT_ID: '11111111-1111-4111-8111-111111111111',
-    SCW_FROM_EMAIL: 'powiadomienia@example.test',
-    SCW_FROM_NAME: 'Bear with me',
-    SCW_SECRET_KEY: 'provider-secret',
+    RESEND_FROM_EMAIL: 'powiadomienia@example.test',
+    RESEND_FROM_NAME: 'Bear with me',
+    RESEND_API_KEY: 're_provider-secret',
   }
 
   it('returns one immutable isolated provider config for canonical bindings', () => {
     const result = loadEmailProviderConfig(email, { appEnv: 'staging' })
     expect(result).toEqual({
-      projectId: email.SCW_PROJECT_ID,
-      fromEmail: email.SCW_FROM_EMAIL,
-      fromName: email.SCW_FROM_NAME,
-      secret: email.SCW_SECRET_KEY,
+      fromEmail: email.RESEND_FROM_EMAIL,
+      fromName: email.RESEND_FROM_NAME,
+      apiKey: email.RESEND_API_KEY,
     })
     expect(Object.isFrozen(result)).toBe(true)
     expect(loadConfig(valid)).not.toHaveProperty('emailProvider')
@@ -455,30 +463,26 @@ describe('loadEmailProviderConfig', () => {
     expect(new TextEncoder().encode(withinLimit).byteLength).toBe(245)
     expect(loadEmailProviderConfig({
       ...email,
-      SCW_FROM_EMAIL: withinLimit,
+      RESEND_FROM_EMAIL: withinLimit,
     }, { appEnv: 'staging' }).fromEmail).toBe(withinLimit)
     expect(() => loadEmailProviderConfig({
       ...email,
-      SCW_FROM_EMAIL: overLimit,
+      RESEND_FROM_EMAIL: overLimit,
     }, { appEnv: 'staging' })).toThrow(/^PROVIDER_CONFIG_INVALID$/)
   })
 
   it.each([
-    ['SCW_PROJECT_ID', '11111111111141118111111111111111'],
-    ['SCW_PROJECT_ID', '11111111-1111-4111-8111-11111111111A'],
-    ['SCW_PROJECT_ID', 'project_1'],
-    ['SCW_FROM_EMAIL', ' Powiadomienia@example.test'],
-    ['SCW_FROM_EMAIL', 'Powiadomienia@example.test'],
-    ['SCW_FROM_EMAIL', 'Bear with me <powiadomienia@example.test>'],
-    ['SCW_FROM_EMAIL', `${'a'.repeat(243)}@example.test`],
-    ['SCW_FROM_NAME', ' Bear with me'],
-    ['SCW_FROM_NAME', '\u0105'.repeat(61)],
-    ['SCW_FROM_NAME', 'Bear\nwith me'],
-    ['SCW_FROM_NAME', 'Bear\u0085with me'],
-    ['SCW_FROM_NAME', 'Bear\u009fwith me'],
-    ['SCW_SECRET_KEY', ''],
-    ['SCW_SECRET_KEY', '   '],
-    ['SCW_SECRET_KEY', 'secret value'],
+    ['RESEND_FROM_EMAIL', ' Powiadomienia@example.test'],
+    ['RESEND_FROM_EMAIL', 'Powiadomienia@example.test'],
+    ['RESEND_FROM_EMAIL', 'Bear with me <powiadomienia@example.test>'],
+    ['RESEND_FROM_EMAIL', `${'a'.repeat(243)}@example.test`],
+    ['RESEND_FROM_NAME', ' Bear with me'],
+    ['RESEND_FROM_NAME', '\u0105'.repeat(61)],
+    ['RESEND_FROM_NAME', 'Bear\nwith me'],
+    ['RESEND_FROM_NAME', 'Bear<with me'],
+    ['RESEND_API_KEY', ''],
+    ['RESEND_API_KEY', '   '],
+    ['RESEND_API_KEY', 'secret value'],
   ])('rejects malformed %s with a fixed error that does not reveal the binding', (key, value) => {
     let error
     try {

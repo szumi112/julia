@@ -17,7 +17,7 @@ const {
   runBoundedAppChild,
   runAppE2E,
 } = appE2ERunner
-import { CAPABILITIES } from '../../worker/identity/policy.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const CSP = "default-src 'none'"
 const READY_URL = 'http://127.0.0.1:5174/api/v1/session'
@@ -254,11 +254,13 @@ const readyResponse = (overrides = {}) => {
     actor: {
       id: 'stf_local_owner',
       displayName: 'Alicja Testowa',
+      professionalTitle: null,
       role: 'owner',
       specialistId: null,
       version: 1,
     },
-    capabilities: [...CAPABILITIES],
+    authorityRevision: 1,
+    capabilities: [...ROLE_DEFAULT_CAPABILITIES.owner],
     csrfToken: CSRF_TOKEN,
     csrfExpiresAt: new Date(CSRF_EXPIRES * 1000).toISOString(),
     environment: 'development',
@@ -300,11 +302,14 @@ test('readiness accepts only the exact loopback session, security headers, and s
     readyResponse({ headers: { 'content-type': 'application/jsonp' } }),
     readyResponse({ body: { environment: 'staging' } }),
     readyResponse({ body: { dataMode: 'real' } }),
+    readyResponse({ body: { authorityRevision: 0 } }),
+    readyResponse({ body: { authorityRevision: 1.5 } }),
     readyResponse({ body: { capabilities: ['staff.manage'] } }),
-    readyResponse({ body: { actor: { id: 'stf_other', displayName: 'Other', role: 'owner', specialistId: null, version: 1 } } }),
-    readyResponse({ body: { actor: { id: 'stf_local_owner', displayName: 'Alicja Testowa', role: 'owner', specialistId: null } } }),
-    readyResponse({ body: { actor: { id: 'stf_local_owner', displayName: 'Alicja Testowa', role: 'owner', specialistId: null, version: 0 } } }),
-    readyResponse({ body: { actor: { id: 'stf_local_owner', displayName: 'Alicja Testowa', role: 'owner', specialistId: null, version: 1.5 } } }),
+    readyResponse({ body: { actor: { id: 'stf_other', displayName: 'Other', professionalTitle: null, role: 'owner', specialistId: null, version: 1 } } }),
+    readyResponse({ body: { actor: { id: 'stf_local_owner', displayName: 'Alicja Testowa', professionalTitle: null, role: 'owner', specialistId: null } } }),
+    readyResponse({ body: { actor: { id: 'stf_local_owner', displayName: 'Alicja Testowa', professionalTitle: 'Specjalistka', role: 'owner', specialistId: null, version: 1 } } }),
+    readyResponse({ body: { actor: { id: 'stf_local_owner', displayName: 'Alicja Testowa', professionalTitle: null, role: 'owner', specialistId: null, version: 0 } } }),
+    readyResponse({ body: { actor: { id: 'stf_local_owner', displayName: 'Alicja Testowa', professionalTitle: null, role: 'owner', specialistId: null, version: 1.5 } } }),
     readyResponse({ body: { csrfExpiresAt: '2020-01-01T00:00:00.000Z' } }),
     readyResponse({ body: { csrfExpiresAt: 'not-a-date' } }),
     readyResponse({ body: { csrfToken: 'v1.invalid' } }),
@@ -319,11 +324,13 @@ test('readiness accepts only the exact loopback session, security headers, and s
           actor: {
             id: 'stf_local_owner',
             displayName: 'Alicja Testowa',
+            professionalTitle: null,
             role: 'owner',
             specialistId: null,
             version: 1,
           },
-          capabilities: [...CAPABILITIES],
+          authorityRevision: 1,
+          capabilities: [...ROLE_DEFAULT_CAPABILITIES.owner],
           csrfToken: CSRF_TOKEN,
           csrfExpiresAt: new Date(CSRF_EXPIRES * 1000).toISOString(),
           environment: 'development',
@@ -424,7 +431,7 @@ test('runner applies stage A, upgrades, applies stage B, seeds, then starts exac
 
   assert.deepEqual(result, { code: 'APP_E2E_READY', ok: true })
   const runs = calls.filter(({ kind }) => kind === 'run')
-  assert.equal(runs.length, 6)
+  assert.equal(runs.length, 7)
   assert.match(runs[0].args.join(' '), /d1 migrations apply DB --local/)
   assert.deepEqual(
     runs[0].args.slice(-2),
@@ -453,6 +460,9 @@ test('runner applies stage A, upgrades, applies stage B, seeds, then starts exac
   assert.match(runs[5].args.join(' '), /scripts\/apply-core-migration-stage\.js stage-d --local/)
   assert.equal(runs[5].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
   assert.equal(runs[5].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
+  assert.match(runs[6].args.join(' '), /scripts\/apply-core-migration-stage\.js stage-e --local/)
+  assert.equal(runs[6].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
+  assert.equal(runs[6].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
   const start = calls.find(({ kind }) => kind === 'start')
   assert.ok(start)
   assert.deepEqual(start.args.slice(1), [
@@ -1427,7 +1437,7 @@ test('runner rejects an in-place private-config rewrite before the next spawn', 
 test('default harness writes only credential-free private configs with separated roots', {
   skip: process.platform !== 'darwin' && process.platform !== 'linux',
 }, async () => {
-  const generatedKeys = [key(1), key(2), key(3)]
+  const generatedKeys = [key(1), key(2), key(3), key(4), key(5)]
   let ownedRoot
   const result = await runAppE2E({
     argv: [],
@@ -1486,6 +1496,8 @@ test('default harness writes only credential-free private configs with separated
           key(1),
           key(2),
           key(3),
+          key(4),
+          key(5),
         ]) {
           assert.doesNotMatch(`${wrangler}\n${vite}\n${index}`, new RegExp(secret))
         }

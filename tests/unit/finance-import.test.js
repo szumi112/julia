@@ -41,6 +41,18 @@ test('maps a workbook row to the exact protected finance input without losing it
   })
 })
 
+test('keeps the v1 finance transport envelope for additive v2 parser rows', () => {
+  const mapped = financeImportEntry(sourceRow({
+    sourceKey: 'workbook:v1:12:75:0',
+    parserVersion: 2,
+    materializerVersion: 2,
+  }), 'fib_one', [])
+
+  assert.equal(mapped.source.sourceKey, 'workbook:v1:12:75:0')
+  assert.equal(Object.hasOwn(mapped, 'parserVersion'), false)
+  assert.equal(Object.hasOwn(mapped.source, 'materializerVersion'), false)
+})
+
 test('does not invent a paid amount for an ambiguous partial workbook row', () => {
   const mapped = financeImportEntry(sourceRow({ settlementStatus: 'partial' }), 'fib_one', [])
   assert.equal(mapped.settlementStatus, 'unknown')

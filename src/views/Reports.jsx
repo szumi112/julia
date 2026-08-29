@@ -8,13 +8,11 @@ import { useApp, useWorkspaceWindow, sessionsInMonth, monthStats, availableMonth
 import { useShell } from '../shell-ctx.js'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { useReveal } from '../anim.js'
-import { useMinuteNow } from '../clock.js'
 import { Avatar, Button, Chip, EmptyState, IconBtn, Stat } from '../ui.jsx'
 import { AreaChart, Donut, BarFill } from '../charts.jsx'
-import { kidsOfGroup, tusMonthSummary } from '../tus.js'
-import { kidsWord } from './Tus.jsx'
+import { DemoTusReport } from './DemoTusReport.jsx'
 import {
-  fmtMoney, fmtNumber, monthKey, addMonths, fmtMonthYear, fmtMonthName, cap, pad2, toISODate,
+  fmtMoney, fmtNumber, monthKey, addMonths, fmtMonthYear, fmtMonthName, cap,
   billableSummary, outstandingOf, sessionsWord,
 } from '../format.js'
 import { monthWorkspaceRange } from '../workspace-view.js'
@@ -75,8 +73,6 @@ export function Reports({ params = {} }) {
   const workspaceRange = useMemo(() => monthWorkspaceRange(ym), [ym])
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const ref = useReveal([ym, psychFilter])
-  const now = useMinuteNow()
-  const nowIso = `${toISODate(now)}T${pad2(now.getHours())}:${pad2(now.getMinutes())}`
 
   const months = useMemo(() => availableMonths(state.sessions), [state.sessions])
   const maxYm = currentYm // no reports for future months
@@ -123,20 +119,6 @@ export function Reports({ params = {} }) {
   )
   const trendMonths = useMemo(() => Array.from({ length: 6 }, (_, i) => addMonths(ym, i - 5)), [ym])
   const series = useMemo(() => revenueSeries(scopedSessions, trendMonths), [scopedSessions, trendMonths])
-
-  // Group classes are led by one or two specialists, so the chip scopes them too.
-  const tusRows = useMemo(
-    () => state.tusGroups
-      .filter((group) => !selectedPsychologist || group.leaderIds.includes(selectedPsychologist.id))
-      .map((group) => ({
-        group,
-        roster: kidsOfGroup(state.tusKids, group.id),
-        summary: tusMonthSummary(group, state.tusClasses, state.tusKids, state.tusPayments, ym, nowIso),
-      })),
-    [nowIso, selectedPsychologist, state.tusClasses, state.tusGroups, state.tusKids, state.tusPayments, ym]
-  )
-  const tusKidCount = tusRows.reduce((total, row) => total + row.roster.length, 0)
-  const tusDue = tusRows.reduce((total, row) => total + row.summary.dueAmount, 0)
 
   useEffect(() => {
     patchViewState('reports', {
@@ -318,51 +300,7 @@ export function Reports({ params = {} }) {
             </div>
           )}
 
-          {!isApp && tusRows.length > 0 && (
-            <section className="card card--pad" data-reveal aria-label="Zajęcia grupowe TUS">
-              <div className="row row--between">
-                <h2 className="card-title">Zajęcia grupowe TUS · {fmtMonthYear(ym)}</h2>
-                <span className="muted" style={{ fontSize: 13 }}>
-                  {tusKidCount} {kidsWord(tusKidCount)} ·{' '}
-                  {tusDue > 0
-                    ? <span className="collect__due">{fmtMoney(tusDue)} do zapłaty</span>
-                    : <span className="collect__ok">opłaty rozliczone</span>}
-                </span>
-              </div>
-              <div className="report-tus">
-                {tusRows.map(({ group, roster, summary }) => (
-                  <article className="report-tus__group" key={group.id} data-group-id={group.id}>
-                    <div className="row row--between">
-                      <h3 className="report-tus__name">{group.name}</h3>
-                      <span className="report-tus__rate">
-                        {summary.attendanceRate == null ? '—' : `${summary.attendanceRate}%`}
-                        <small>frekwencja</small>
-                      </span>
-                    </div>
-                    <div className="gcard__stats">
-                      <span>zajęcia · <b>{summary.heldCount}/{summary.classCount}</b></span>
-                      <span>dzieci · <b>{roster.length}</b></span>
-                    </div>
-                    <div className="hbar__track" style={{ height: 14 }}>
-                      <BarFill
-                        segments={[
-                          { value: summary.paidCount, color: PAID, label: 'opłacone' },
-                          { value: summary.dueCount, color: DUE, label: 'do opłacenia' },
-                        ]}
-                        totalMax={Math.max(roster.length, 1)}
-                      />
-                    </div>
-                    <div className="row row--between collect__labels">
-                      <span className="muted">opłacone {summary.paidCount}/{roster.length}</span>
-                      {summary.dueCount > 0
-                        ? <span className="collect__due">{fmtMoney(summary.dueAmount)} do zapłaty</span>
-                        : <span className="collect__ok">wszystko opłacone</span>}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </section>
-          )}
+          {!isApp && <DemoTusReport selectedPsychologist={selectedPsychologist} ym={ym} />}
         </div>
       </section>
     </div>

@@ -21,6 +21,7 @@ import { paymentEntryFor, paymentSnapshotOf, scopedBillingSummary } from '../wor
 import {
   assertCorrectionReason, parsePaymentAmountGrosze, validatePaymentDateInput, warsawDateFromUtc,
 } from '../core-records.js'
+import { canPerformAction } from '../capability-access.js'
 import {
   clientIdentityFor,
   monthWorkspaceRange,
@@ -153,9 +154,9 @@ function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
   )
 }
 
-function AppPaymentEntry({
+export function AppPaymentEntry({
   session, client, fallbackFocusRef, paymentMutationLocked, refreshWorkspace, workspace,
-  workspaceRange,
+  workspaceRange, onReconciled,
 }) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ amount: '', method: '', paidDate: toISODate(new Date()) })
@@ -258,6 +259,7 @@ function AppPaymentEntry({
       setSaveError('Wpłata została zapisana, ale nie udało się odświeżyć rozliczeń.')
       return
     }
+    onReconciled?.()
     setOpen(false)
     focusAfterClose()
   }
@@ -351,9 +353,9 @@ function AppPaymentEntry({
   )
 }
 
-function AppPaymentCorrection({
+export function AppPaymentCorrection({
   entry, session, client, fallbackFocusRef, paymentMutationLocked, refreshWorkspace, workspace,
-  workspaceRange,
+  workspaceRange, onReconciled,
 }) {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ reason: '', replace: false, amount: '', method: '', paidDate: '' })
@@ -467,6 +469,7 @@ function AppPaymentCorrection({
       setSaveError('Korekta została zapisana, ale nie udało się odświeżyć rozliczeń.')
       return
     }
+    onReconciled?.()
     setOpen(false)
     focusAfterClose()
   }
@@ -583,13 +586,15 @@ function AppPaymentCorrection({
   )
 }
 
-export function Payments() {
+export function Payments({ ownSpecialistId = null }) {
   const { state, dispatch, toast, workspace } = useApp()
   const canonicalAppointments = useCanonicalAppointments()
   const { locked: paymentMutationLocked } = usePaymentMutationLock()
   const { appMode, capabilities, getViewState, openSessionForm, patchViewState, route } = useShell()
   const refreshWorkspace = useWorkspaceRefresh()
   const isApp = appMode === 'app'
+  const ownScope = isApp && typeof ownSpecialistId === 'string'
+    && ownSpecialistId.startsWith('sp_') ? ownSpecialistId : null
   const ref = useReveal()
   const ledgerTitleRef = useRef(null)
   const maxYm = monthKey(new Date())
@@ -609,11 +614,11 @@ export function Payments() {
       ym: validMonth(route.params?.ym)
         ? route.params.ym
         : validMonth(saved.ym) ? saved.ym : maxYm,
-      specialist: state.psychologists.some((psychologist) => psychologist.id === route.params?.specialist)
+      specialist: ownScope ?? (state.psychologists.some((psychologist) => psychologist.id === route.params?.specialist)
         ? route.params.specialist
         : state.psychologists.some((psychologist) => psychologist.id === saved.specialist)
           ? saved.specialist
-          : null,
+          : null),
       unpaidOnly: typeof route.params?.unpaidOnly === 'boolean'
         ? route.params.unpaidOnly
         : saved.unpaidOnly === true,
@@ -627,7 +632,7 @@ export function Payments() {
   const workspaceRange = useMemo(() => monthWorkspaceRange(ym), [ym])
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const canManagePayments = isApp
-    && capabilities.includes('payment.manage')
+    && canPerformAction(capabilities, 'payment.record')
     && workspaceState === 'ready'
     && workspace.status === 'ready'
 
@@ -642,16 +647,18 @@ export function Payments() {
   )
   const periodBillable = useMemo(() => periodSessions.filter(isBillable), [periodSessions])
   const scopedBillable = useMemo(
-    () => periodBillable.filter((session) => !psychFilter || session.psychId === psychFilter).reverse(),
-    [periodBillable, psychFilter]
+    () => periodBillable.filter((session) => (
+      ownScope ? session.psychId === ownScope : !psychFilter || session.psychId === psychFilter
+    )).reverse(),
+    [ownScope, periodBillable, psychFilter]
   )
   const ledgerRows = useMemo(
     () => scopedBillable.filter((session) => !unpaidOnly || outstandingOf(session) > 0),
     [scopedBillable, unpaidOnly]
   )
   const summary = useMemo(
-    () => scopedBillingSummary(periodSessions, { psychId: psychFilter }),
-    [periodSessions, psychFilter]
+    () => scopedBillingSummary(periodSessions, { psychId: ownScope ?? psychFilter }),
+    [ownScope, periodSessions, psychFilter]
   )
 
   const { pageItems, page, pages, setPage } = usePagination(ledgerRows, {
@@ -680,7 +687,9 @@ export function Payments() {
     page: page > 1 ? page : undefined,
   })
 
-  const comparisonPsychologists = psychFilter
+  const comparisonPsychologists = ownScope
+    ? psychologists.filter((psychologist) => psychologist.id === ownScope)
+    : psychFilter
     ? psychologists.filter((psychologist) => psychologist.id === psychFilter)
     : psychologists
   const comparison = useMemo(() => {
@@ -700,7 +709,8 @@ export function Payments() {
 
   const clientOf = (id) => state.clients.find((client) => client.id === id)
   const psychOf = (id) => state.psychologists.find((psychologist) => psychologist.id === id)
-  const selectedPsychologist = psychFilter ? psychOf(psychFilter) : null
+  const selectedPsychologist = ownScope ? psychOf(ownScope)
+    : psychFilter ? psychOf(psychFilter) : null
   const periodLabel = allPeriods ? 'Wszystkie okresy' : cap(fmtMonthYear(ym))
   const scopeLabel = `${periodLabel} · ${selectedPsychologist?.name || 'Cały zespół'}`
 
@@ -757,7 +767,7 @@ export function Payments() {
               </div>
             )}
           </FilterGroup>
-          <FilterGroup label="Specjalistka">
+          {!ownScope ? <FilterGroup label="Specjalistka">
             <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
             {psychologists.map((psychologist) => (
               <Chip
@@ -770,7 +780,7 @@ export function Payments() {
                 {psychologist.name.split(' ')[0]}
               </Chip>
             ))}
-          </FilterGroup>
+          </FilterGroup> : null}
         </div>
       </section>
 

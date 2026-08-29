@@ -21,6 +21,20 @@ export function Button({ children, icon, variant = 'primary', size, magnetic, cl
   )
 }
 
+export function TableScroll({ children, label }) {
+  return <div
+    className="table-scroll"
+    role="region"
+    aria-label={label}
+    tabIndex={0}
+    onKeyDown={(event) => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return
+      event.preventDefault()
+      event.currentTarget.scrollLeft += event.key === 'ArrowRight' ? 96 : -96
+    }}
+  >{children}</div>
+}
+
 export function IconBtn({ name, label, size = 19, className = '', ...rest }) {
   return (
     <button type="button" className={`icon-btn ${className}`} aria-label={label} title={label} {...rest}>
@@ -153,6 +167,66 @@ export function Segmented({ options, value, onChange, ariaLabel }) {
           {o.label}
         </button>
       ))}
+    </div>
+  )
+}
+
+export function Tabs({ options, value, onChange, ariaLabel, children, className = '' }) {
+  const baseId = useId()
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value))
+  const listRef = useRef(null)
+  const move = useCallback((index) => {
+    const next = (index + options.length) % options.length
+    onChange(options[next].value)
+    requestAnimationFrame(() => listRef.current?.querySelectorAll('[role="tab"]')[next]?.focus())
+  }, [onChange, options])
+
+  return (
+    <div className={`tabs ${className}`}>
+      <div className="tabs__list" role="tablist" aria-label={ariaLabel} ref={listRef}>
+        {options.map((option, index) => {
+          const selected = index === selectedIndex
+          return (
+            <button
+              key={option.value}
+              type="button"
+              id={`${baseId}-tab-${option.value}`}
+              className={`tabs__tab ${selected ? 'is-on' : ''}`}
+              role="tab"
+              aria-selected={selected}
+              aria-controls={`${baseId}-panel`}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => onChange(option.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+                  event.preventDefault()
+                  move(selectedIndex + 1)
+                } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+                  event.preventDefault()
+                  move(selectedIndex - 1)
+                } else if (event.key === 'Home') {
+                  event.preventDefault()
+                  move(0)
+                } else if (event.key === 'End') {
+                  event.preventDefault()
+                  move(options.length - 1)
+                }
+              }}
+            >
+              {option.label}
+            </button>
+          )
+        })}
+      </div>
+      <div
+        className="tabs__panel"
+        id={`${baseId}-panel`}
+        role="tabpanel"
+        aria-labelledby={`${baseId}-tab-${options[selectedIndex].value}`}
+        tabIndex={0}
+      >
+        {children}
+      </div>
     </div>
   )
 }

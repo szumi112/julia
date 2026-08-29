@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers'
+import { applyD1Migrations } from 'cloudflare:test'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   archiveClient,
@@ -27,15 +28,30 @@ import {
 } from '../../worker/core/crypto.js'
 import { createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db/query-budget.js'
 import { createApp } from '../../worker/app.js'
+import { selectCoreMigrationStage } from '../../scripts/core-migration-stages.js'
 import {
   applyCoreDirectoryStageB,
+  applyFinanceStageC,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
 
 const NOW_MS = 1_800_000_000_000
 const BODY = Object.freeze({
   name: 'Fikcyjna', age: 12, status: 'active', specialistId: 'sp_target',
 })
+const CLIENT_OWNER_ACTOR = authorityActor({ id: 'stf_client_owner', role: 'owner' })
+const CLIENT_COORDINATOR_ACTOR = authorityActor({
+  id: 'stf_client_coord', role: 'coordinator',
+})
+const CLIENT_SELF_ACTOR = authorityActor({
+  id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self',
+})
+const PRE_DUAL_ROLE_STAGE_E_NAMES = Object.freeze([
+  '0016_workbook_source_records.sql',
+  '0017_historical_workspace.sql',
+  '0018_activity_workspace.sql',
+])
 
 const registerRealRouteAuthorizationAndBudgetTests = () => describe('core route real authorization and shared budgets', () => {
   it('keeps real path and body guesses plus specialist out-of-scope targets opaque without residue', async () => {
@@ -131,7 +147,7 @@ const registerRealRouteAuthorizationAndBudgetTests = () => describe('core route 
       db: pendingCounter.db, keyring: v1.keyring, principal: pending.principal,
     }).request(pendingRequest.path, pendingRequest.init)
     expect(pendingResponse.status).toBe(201)
-    expect(pendingCounter.statements()).toBe(23)
+    expect(pendingCounter.statements()).toBe(24)
     expect(pendingCounter.statements()).toBeLessThanOrEqual(50)
 
     const active = await seedRealRouteActor(v1, { role: 'owner' })
@@ -144,14 +160,14 @@ const registerRealRouteAuthorizationAndBudgetTests = () => describe('core route 
       db: reindexCounter.db, keyring: v2.keyring, principal: active.principal,
     }).request(reindexRequest.path, reindexRequest.init)
     expect(reindexResponse.status).toBe(201)
-    expect(reindexCounter.statements()).toBe(18)
+    expect(reindexCounter.statements()).toBe(19)
     expect(reindexCounter.statements()).toBeLessThanOrEqual(50)
   })
 })
 
 describe('persistent client archive', () => {
   let sequence = 0
-  const actor = Object.freeze({ id: 'stf_client_owner', role: 'owner', specialistId: null })
+  const actor = authorityActor({ id: 'stf_client_owner', role: 'owner' })
   const seed = async ({ status = 'active', specialistId = 'sp_target', createdBy = actor } = {}) => {
     sequence += 1
     const marker = `archive_fixture_${sequence}`
@@ -294,7 +310,7 @@ describe('persistent client archive', () => {
     const archived = await seed(); await archive(archived)
     const cross = await seed()
     const paused = await seed({ status: 'paused' })
-    const specialist = { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' }
+    const specialist = CLIENT_SELF_ACTOR
     for (const client of [archived, { id: 'cl_archive_absent', version: 1 }, cross, paused]) {
       await expect(archive(client, { actor: specialist, idFactory: vi.fn(),
         idempotencyKey: `archive-opaque-${++sequence}-key` })).rejects.toThrow('NOT_FOUND')
@@ -302,14 +318,14 @@ describe('persistent client archive', () => {
   })
 
   it('allows a specialist to archive only their active singly assigned client', async () => {
-    const specialist = { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' }
+    const specialist = CLIENT_SELF_ACTOR
     const client = await seed({ specialistId: 'sp_client_self', createdBy: specialist })
     expect((await archive(client, { actor: specialist })).body.data.client.status).toBe('archived')
   })
 
   it('allows the coordinator centre role to archive an assigned client', async () => {
     const client = await seed()
-    const coordinator = { id: 'stf_client_coord', role: 'coordinator', specialistId: null }
+    const coordinator = CLIENT_COORDINATOR_ACTOR
     expect((await archive(client, { actor: coordinator })).body.data.client.status).toBe('archived')
   })
 
@@ -360,9 +376,9 @@ describe('persistent client archive', () => {
       config: { appEnv: 'staging', appOrigin: 'https://bearwithme-panel.app', dataMode: 'fictional' },
       db: env.DB, cryptoContext: { keyring, dataKey: staffKey, scope: staffScope },
       resolveAccessPrincipal: vi.fn(async () => ({ kind: 'human', subject: 'archive-history' })),
-      resolveActor: vi.fn(async () => ({
-        id: 'stf_archive_retained', role: 'specialist', specialistId: 'sp_archive_retained',
-        version: 2,
+      resolveActor: vi.fn(async () => authorityActor({
+        id: 'stf_archive_retained', role: 'specialist',
+        specialistId: 'sp_archive_retained', version: 2,
       })),
     })
     const day = visitAt.slice(0, 10)
@@ -767,6 +783,16 @@ const ring = () => createKeyring(env, {
 beforeAll(async () => {
   expect(await completeCoreDirectoryStageA()).toMatchObject({ status: 'complete' })
   await applyCoreDirectoryStageB()
+  await applyFinanceStageC()
+  // This suite deliberately exercises the pre-profile client schema while retaining
+  // the workbook/historical tables introduced before the dual-role migration.
+  const stageE = selectCoreMigrationStage(env.TEST_STAGE_E_MIGRATIONS, 'stage-e')
+  await applyD1Migrations(env.DB, [
+    ...PRE_DUAL_ROLE_STAGE_E_NAMES.map((name) => (
+      stageE.find((migration) => migration.name === name)
+    )),
+    stageE.find((migration) => migration.name === '0020_capability_overrides.sql'),
+  ])
   const instant = new Date(NOW_MS).toISOString()
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO staff_users
@@ -1112,7 +1138,7 @@ describe('persistent client creation', () => {
     await expect(createClient({
       db,
       recoveryDb: db,
-      actor: { id: 'stf_owner', role: 'owner', specialistId: null },
+      actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       keyring: {},
       nowMs: NOW_MS,
       correlationId: CORRELATION_ID,
@@ -1147,7 +1173,7 @@ describe('persistent client creation', () => {
     const result = await createClient({
       db: env.DB,
       recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(),
       nowMs: NOW_MS,
       correlationId: CORRELATION_ID,
@@ -1186,7 +1212,7 @@ describe('persistent client creation', () => {
     const replay = await createClient({
       db: env.DB,
       recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(),
       nowMs: NOW_MS + 1000,
       correlationId: CORRELATION_ID,
@@ -1200,7 +1226,7 @@ describe('persistent client creation', () => {
     await expect(createClient({
       db: env.DB,
       recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(),
       nowMs: NOW_MS + 2000,
       correlationId: CORRELATION_ID,
@@ -1238,7 +1264,7 @@ describe('persistent client creation', () => {
       'ordered_assignment_ver', 'ordered_audit', 'ordered_key']
     await createClient({
       db, recoveryDb: db,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS, correlationId: CORRELATION_ID,
       idFactory: () => values.shift(), body: BODY,
       idempotencyKey: 'client-create-ordered-0001',
@@ -1258,11 +1284,17 @@ describe('persistent client creation', () => {
   })
 
   it.each([
-    [{ id: 'stf_owner', role: 'owner', specialistId: null }, 'sp_target', true],
-    [{ id: 'stf_coord', role: 'coordinator', specialistId: null }, 'sp_target', true],
-    [{ id: 'stf_spec', role: 'specialist', specialistId: 'sp_target' }, 'sp_target', true],
-    [{ id: 'stf_spec', role: 'specialist', specialistId: 'sp_other' }, 'sp_target', false],
-    [{ id: 'stf_owner', role: 'owner', specialistId: 'sp_owner' }, 'sp_target', true],
+    [authorityActor({ id: 'stf_owner', role: 'owner' }), 'sp_target', true],
+    [authorityActor({ id: 'stf_coord', role: 'coordinator' }), 'sp_target', true],
+    [authorityActor({
+      id: 'stf_spec', role: 'specialist', specialistId: 'sp_target',
+    }), 'sp_target', true],
+    [authorityActor({
+      id: 'stf_spec', role: 'specialist', specialistId: 'sp_other',
+    }), 'sp_target', false],
+    [authorityActor({
+      id: 'stf_owner', role: 'owner', specialistId: 'sp_owner',
+    }), 'sp_target', true],
   ])('enforces assignment authorization for actor %o', async (actor, specialistId, allowed) => {
     const calls = []
     const db = {
@@ -1296,15 +1328,15 @@ describe('persistent client creation', () => {
 
   it('scopes the real D1 practitioner lookup and makes every opaque miss the same HTTP 404', async () => {
     const opaque = [
-      ['missing', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_absent'],
-      ['guessed', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_guessed'],
-      ['pending profile', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_pending'],
-      ['archived profile', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_archived'],
-      ['disabled staff', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_disabled_active'],
-      ['pending staff', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_pending_active'],
-      ['forward mismatch', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_forward'],
-      ['backlink mismatch', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_client_backlink'],
-      ['other specialist', { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' }, 'sp_target'],
+      ['missing', CLIENT_OWNER_ACTOR, 'sp_client_absent'],
+      ['guessed', CLIENT_OWNER_ACTOR, 'sp_client_guessed'],
+      ['pending profile', CLIENT_OWNER_ACTOR, 'sp_client_pending'],
+      ['archived profile', CLIENT_OWNER_ACTOR, 'sp_client_archived'],
+      ['disabled staff', CLIENT_OWNER_ACTOR, 'sp_client_disabled_active'],
+      ['pending staff', CLIENT_OWNER_ACTOR, 'sp_client_pending_active'],
+      ['forward mismatch', CLIENT_OWNER_ACTOR, 'sp_client_forward'],
+      ['backlink mismatch', CLIENT_OWNER_ACTOR, 'sp_client_backlink'],
+      ['other specialist', CLIENT_SELF_ACTOR, 'sp_target'],
     ]
     const envelopes = []
     for (const [label, actor, specialistId] of opaque) {
@@ -1360,9 +1392,9 @@ describe('persistent client creation', () => {
   })
 
   it.each([
-    ['owner', { id: 'stf_client_owner', role: 'owner', specialistId: null }, 'sp_target'],
-    ['coordinator', { id: 'stf_client_coord', role: 'coordinator', specialistId: null }, 'sp_target'],
-    ['specialist', { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' }, 'sp_client_self'],
+    ['owner', CLIENT_OWNER_ACTOR, 'sp_target'],
+    ['coordinator', CLIENT_COORDINATOR_ACTOR, 'sp_target'],
+    ['specialist', CLIENT_SELF_ACTOR, 'sp_client_self'],
   ])('allows %s through the real HTTP and D1 path for an exact active retained profile', async (label, actor, specialistId) => {
     const ids = [`${label}_client`, `${label}_assignment`, `${label}_client_ver`,
       `${label}_assignment_ver`, `${label}_audit`, `${label}_key`]
@@ -1420,7 +1452,7 @@ describe('persistent client creation', () => {
       }
       await expect(createClient({
         db, recoveryDb: env.DB,
-        actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
         keyring, nowMs: NOW_MS, correlationId: CORRELATION_ID,
         idFactory: () => values.shift(), body: BODY,
         idempotencyKey: `client-create-rollback-${failedAt}-0001`,
@@ -1455,7 +1487,7 @@ describe('persistent client creation', () => {
           raced = true
           await createClient({
             db: env.DB, recoveryDb: env.DB,
-            actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
             keyring, nowMs: NOW_MS, correlationId: CORRELATION_ID,
             idFactory: () => winnerIds.shift(), body: BODY, idempotencyKey: key,
           })
@@ -1468,7 +1500,7 @@ describe('persistent client creation', () => {
       'loser_assignment_ver', 'loser_audit', 'loser_key']
     const result = await createClient({
       db: budget.work, recoveryDb: budget.recovery,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring, nowMs: NOW_MS, correlationId: CORRELATION_ID,
       idFactory: () => loserIds.shift(), body: BODY, idempotencyKey: key,
     })
@@ -1496,9 +1528,7 @@ describe('persistent client creation', () => {
       resolveAccessPrincipal: vi.fn(async () => ({
         kind: 'human', subject: 'access-client-shell', normalizedEmail: 'shell@example.test',
       })),
-      resolveActor: vi.fn(async () => ({
-        id: 'stf_shell', role: 'owner', specialistId: null, version: 1,
-      })),
+      resolveActor: vi.fn(async () => authorityActor({ id: 'stf_shell', role: 'owner' })),
       verifyCsrfToken: vi.fn(async () => true),
       readJsonBodyOnce: vi.fn(async (request) => request.json()),
       createClient: create,
@@ -1541,9 +1571,7 @@ describe('persistent client creation', () => {
       resolveAccessPrincipal: vi.fn(async () => ({
         kind: 'human', subject: 'access-client-invalid', normalizedEmail: 'invalid@example.test',
       })),
-      resolveActor: vi.fn(async () => ({
-        id: 'stf_shell', role: 'owner', specialistId: null, version: 1,
-      })),
+      resolveActor: vi.fn(async () => authorityActor({ id: 'stf_shell', role: 'owner' })),
       verifyCsrfToken: vi.fn(async () => true),
       readJsonBodyOnce: vi.fn(async () => ({ ...BODY, name: ' Fikcyjna' })),
       now: () => NOW_MS,
@@ -1570,9 +1598,9 @@ describe('persistent client edit and reassignment', () => {
     status: 'paused', specialistId: 'sp_target',
   })
   let fixtureSequence = 0
-  const seedEditable = async ({ specialistId = 'sp_target', status = 'active', actor = {
-    id: 'stf_client_owner', role: 'owner', specialistId: null,
-  } } = {}) => {
+  const seedEditable = async ({
+    specialistId = 'sp_target', status = 'active', actor = CLIENT_OWNER_ACTOR,
+  } = {}) => {
     fixtureSequence += 1
     const marker = `edit_fixture_${fixtureSequence}`
     const ids = [`${marker}_client`, `${marker}_assignment`, `${marker}_client_ver`,
@@ -1723,7 +1751,7 @@ describe('persistent client edit and reassignment', () => {
     const idFactory = vi.fn()
     await expect(editClient({
       db, recoveryDb: db,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: {}, nowMs: NOW_MS, correlationId: CORRELATION_ID, idFactory,
       clientId: 'cl_missing_edit', body: editBody,
       idempotencyKey: 'client-edit-replay-first-0001',
@@ -1743,7 +1771,7 @@ describe('persistent client edit and reassignment', () => {
     }
     const result = await editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 1_000,
       correlationId: CORRELATION_ID, idFactory: () => values.shift(),
       clientId: original.id, body, idempotencyKey: 'client-edit-identity-success-0001',
@@ -1790,7 +1818,7 @@ describe('persistent client edit and reassignment', () => {
     const replayFactory = vi.fn()
     expect(await editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 2_000,
       correlationId: CORRELATION_ID, idFactory: replayFactory,
       clientId: original.id, body, idempotencyKey: 'client-edit-identity-success-0001',
@@ -1808,7 +1836,7 @@ describe('persistent client edit and reassignment', () => {
     }
     const result = await editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 2_000,
       correlationId: CORRELATION_ID, idFactory: () => values.shift(),
       clientId: original.id, body, idempotencyKey: 'client-edit-reassign-success-0001',
@@ -1858,7 +1886,7 @@ describe('persistent client edit and reassignment', () => {
     }
     const common = {
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 1_000,
       correlationId: CORRELATION_ID, idFactory: vi.fn(), clientId: original.id,
     }
@@ -1896,7 +1924,7 @@ describe('persistent client edit and reassignment', () => {
     const ids = ['coordinator_edit_client_ver_unique', 'coordinator_edit_audit_unique']
     const result = await editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_coord', role: 'coordinator', specialistId: null },
+      actor: CLIENT_COORDINATOR_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: () => ids.shift(), clientId: client.id,
       body: { expectedVersion: 1, name: 'Koordynowana', age: client.age,
@@ -1931,7 +1959,7 @@ describe('persistent client edit and reassignment', () => {
       try {
         await editClient({
           db: env.DB, recoveryDb: env.DB,
-          actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
           keyring: await ring(), nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
           idFactory, clientId,
           body: { expectedVersion: 1, name: 'Nieujawniona', age: 12,
@@ -1973,7 +2001,7 @@ describe('persistent client edit and reassignment', () => {
       try {
         await editClient({
           db: env.DB, recoveryDb: env.DB,
-          actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
           keyring: fixture.keyring, nowMs: NOW_MS + 1_000,
           correlationId: CORRELATION_ID, idFactory, clientId: fixture.clientId,
           body: { expectedVersion: 1, name: `Edycja ${kind}`, age: 12,
@@ -2014,7 +2042,7 @@ describe('persistent client edit and reassignment', () => {
       try {
         await editClient({
           db: env.DB, recoveryDb: env.DB,
-          actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
           keyring: fixture.keyring, nowMs: NOW_MS + 1_000,
           correlationId: CORRELATION_ID, idFactory, clientId: fixture.clientId,
           body: { expectedVersion: 2, name: `Stale ${kind}`, age: 12,
@@ -2074,7 +2102,7 @@ describe('persistent client edit and reassignment', () => {
       try {
         await editClient({
           db: env.DB, recoveryDb: env.DB,
-          actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
           keyring,
           nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
           idFactory, clientId: client.id,
@@ -2109,7 +2137,7 @@ describe('persistent client edit and reassignment', () => {
     const idFactory = vi.fn()
     await expect(editClient({
       db, recoveryDb: db,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: {}, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory, clientId: 'cl_hostile_history',
       body: { expectedVersion: 1, name: 'Hostile', age: 12,
@@ -2125,12 +2153,12 @@ describe('persistent client edit and reassignment', () => {
   it('enforces specialist ownership, active scope, and opaque non-reassignment', async () => {
     const owned = await seedEditable({
       specialistId: 'sp_client_self',
-      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+      actor: CLIENT_SELF_ACTOR,
     })
     const values = ['edit_owned_specialist_client_version_unique', 'edit_owned_specialist_audit_unique']
     const result = await editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+      actor: CLIENT_SELF_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 1_000,
       correlationId: CORRELATION_ID, idFactory: () => values.shift(), clientId: owned.id,
       body: { expectedVersion: 1, name: 'Własny Klient', age: 12,
@@ -2142,7 +2170,7 @@ describe('persistent client edit and reassignment', () => {
     const paused = await seedEditable({
       status: 'paused',
       specialistId: 'sp_client_self',
-      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+      actor: CLIENT_SELF_ACTOR,
     })
     const cross = await seedEditable()
     for (const [label, clientId, body] of [
@@ -2154,7 +2182,7 @@ describe('persistent client edit and reassignment', () => {
       const factory = vi.fn()
       await expect(editClient({
         db: env.DB, recoveryDb: env.DB,
-        actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+      actor: CLIENT_SELF_ACTOR,
         keyring: await ring(), nowMs: NOW_MS + 2_000,
         correlationId: CORRELATION_ID, idFactory: factory, clientId,
         body, idempotencyKey: `client-edit-specialist-${label}-0001`,
@@ -2164,11 +2192,11 @@ describe('persistent client edit and reassignment', () => {
 
     const reassignTarget = await seedEditable({
       specialistId: 'sp_client_self',
-      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+      actor: CLIENT_SELF_ACTOR,
     })
     await expect(editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_self', role: 'specialist', specialistId: 'sp_client_self' },
+      actor: CLIENT_SELF_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 2_000,
       correlationId: CORRELATION_ID, idFactory: vi.fn(), clientId: reassignTarget.id,
       body: { expectedVersion: 1, name: reassignTarget.name, age: reassignTarget.age,
@@ -2201,7 +2229,7 @@ describe('persistent client edit and reassignment', () => {
     })
     await expect(editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: vi.fn(), clientId: blocked.id, body: bodyFor(blocked),
       idempotencyKey: 'client-edit-future-block-0001',
@@ -2219,7 +2247,7 @@ describe('persistent client edit and reassignment', () => {
         `${label}_new_asg_ver`, `${label}_audit`]
       expect((await editClient({
         db: env.DB, recoveryDb: env.DB,
-        actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
         keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
         idFactory: () => ids.shift(), clientId: client.id, body: bodyFor(client),
         idempotencyKey: `client-edit-${label}-allow-0001`,
@@ -2234,7 +2262,7 @@ describe('persistent client edit and reassignment', () => {
     const normalIds = ['budget_normal_client_ver', 'budget_normal_audit']
     await editClient({
       db: normalBudget.work, recoveryDb: normalBudget.recovery,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: () => normalIds.shift(), clientId: normalClient.id,
       body: { expectedVersion: 1, name: 'Budżet Zwykły', age: 12,
@@ -2252,7 +2280,7 @@ describe('persistent client edit and reassignment', () => {
       'budget_reassign_old_ver', 'budget_reassign_new_ver', 'budget_reassign_audit']
     await editClient({
       db: reassignedBudget.work, recoveryDb: reassignedBudget.recovery,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: () => reassignIds.shift(), clientId: reassignedClient.id,
       body: { expectedVersion: 1, name: reassignedClient.name, age: 12,
@@ -2297,7 +2325,7 @@ describe('persistent client edit and reassignment', () => {
         : [`${marker}_client_ver`, `${marker}_audit`]
       await editClient({
         db, recoveryDb: env.DB,
-        actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
         keyring, nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID,
         idFactory: () => ids.shift(), clientId: client.id,
         body: { expectedVersion: 1, name: reassigned ? client.name : 'Uporządkowana',
@@ -2363,7 +2391,7 @@ describe('persistent client edit and reassignment', () => {
         : [`${marker}_client_ver`, `${marker}_audit`]
       await expect(editClient({
         db, recoveryDb: env.DB,
-        actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
         keyring, nowMs: NOW_MS + 5_000, correlationId: CORRELATION_ID,
         idFactory: () => ids.shift(), clientId: client.id,
         body: {
@@ -2396,7 +2424,7 @@ describe('persistent client edit and reassignment', () => {
           const winnerIds = ['concurrent_winner_client_ver', 'concurrent_winner_audit']
           await editClient({
             db: env.DB, recoveryDb: env.DB,
-            actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
             keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
             idFactory: () => winnerIds.shift(), clientId: client.id, body,
             idempotencyKey: key,
@@ -2409,7 +2437,7 @@ describe('persistent client edit and reassignment', () => {
     const loserIds = ['concurrent_loser_client_ver', 'concurrent_loser_audit']
     const result = await editClient({
       db: budget.work, recoveryDb: budget.recovery,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: () => loserIds.shift(), clientId: client.id, body,
       idempotencyKey: key,
@@ -2429,14 +2457,14 @@ describe('persistent client edit and reassignment', () => {
       status: 'active', specialistId: 'sp_target' }
     await editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: () => ids.shift(), clientId: client.id, body,
       idempotencyKey: 'client-edit-digest-conflict-0001',
     })
     await expect(editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
       idFactory: vi.fn(), clientId: client.id,
       body: { ...body, name: 'Druga Treść' },
@@ -2449,7 +2477,7 @@ describe('persistent client edit and reassignment', () => {
     const before = await env.DB.prepare('SELECT * FROM clients WHERE id=?').bind(client.id).first()
     await expect(editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: () => 'duplicate', clientId: client.id,
       body: { expectedVersion: 1, name: client.name, age: client.age,
@@ -2478,7 +2506,7 @@ describe('persistent client edit and reassignment', () => {
           const winnerIds = ['different_winner_client_ver', 'different_winner_audit']
           await editClient({
             db: env.DB, recoveryDb: env.DB,
-            actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
             keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
             idFactory: () => winnerIds.shift(), clientId: client.id,
             body: winnerBody, idempotencyKey: 'client-edit-different-winner-0001',
@@ -2490,7 +2518,7 @@ describe('persistent client edit and reassignment', () => {
     const loserIds = ['different_loser_client_ver', 'different_loser_audit']
     await expect(editClient({
       db, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: () => loserIds.shift(), clientId: client.id,
       body: loserBody, idempotencyKey: 'client-edit-different-loser-0001',
@@ -2522,7 +2550,7 @@ describe('persistent client edit and reassignment', () => {
             'reassign_race_winner_audit']
           await editClient({
             db: env.DB, recoveryDb: env.DB,
-            actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
             keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
             idFactory: () => winnerIds.shift(), clientId: client.id,
             body: winnerBody, idempotencyKey: 'client-edit-reassign-race-winner-0001',
@@ -2536,7 +2564,7 @@ describe('persistent client edit and reassignment', () => {
       'reassign_race_loser_audit']
     await expect(editClient({
       db, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring, nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: () => loserIds.shift(), clientId: client.id,
       body: loserBody, idempotencyKey: 'client-edit-reassign-race-loser-0001',
@@ -2561,14 +2589,14 @@ describe('persistent client edit and reassignment', () => {
       status: 'active', specialistId: 'sp_target' }
     await editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: () => ids.shift(), clientId: client.id, body,
       idempotencyKey: 'client-edit-retired-replay-0001',
     })
     await expect(editClient({
       db: env.DB, recoveryDb: env.DB,
-      actor: { id: 'stf_client_owner', role: 'owner', specialistId: null },
+      actor: CLIENT_OWNER_ACTOR,
       keyring: {}, nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID,
       idFactory: vi.fn(), clientId: client.id, body,
       idempotencyKey: 'client-edit-retired-replay-0001',
@@ -2591,9 +2619,7 @@ describe('persistent client edit and reassignment', () => {
       resolveAccessPrincipal: vi.fn(async () => ({
         kind: 'human', subject: 'access-client-edit-http', normalizedEmail: 'edit-http@example.test',
       })),
-      resolveActor: vi.fn(async () => ({
-        id: 'stf_client_owner', role: 'owner', specialistId: null, version: 1,
-      })),
+      resolveActor: vi.fn(async () => CLIENT_OWNER_ACTOR),
       verifyCsrfToken: vi.fn(async () => true),
       readJsonBodyOnce: vi.fn(async (request) => request.json()),
       editClient: service,

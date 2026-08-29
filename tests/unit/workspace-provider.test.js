@@ -2,16 +2,26 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import * as workspaceProvider from '../../src/workspace-provider.js'
+import { captureActivityWorkspace } from '../../src/activity-records.js'
+import { createApiActivityRepository } from '../../src/activity-repository.js'
 
-const { createWorkspaceProviderController } = workspaceProvider
+const { createWorkspaceAuthorityKey, createWorkspaceProviderController } = workspaceProvider
 
 const WORKSPACE_KEYS = [
-  'archiveClient', 'cancelAppointment', 'correctPayment', 'createAppointment',
-  'createClient', 'editAppointment', 'editClient', 'loadWindow', 'loadedRanges',
-  'recordPayment', 'status',
+  'activateHistoricalClient', 'activities', 'archiveClient', 'cancelAppointment', 'correctPayment',
+  'createAppointment', 'createClient', 'editAppointment', 'editClient', 'loadWindow',
+  'loadedRanges', 'recordPayment', 'status',
+]
+const ACTIVITY_KEYS = [
+  'createClass', 'createGroup', 'createMembership', 'createParticipant',
+  'editClass', 'editGroup', 'editMembership', 'editParticipant',
+  'loadWindow', 'loadedMonths', 'setAttendance', 'state', 'status',
 ]
 const range = (from, to = from) => ({ from, to })
-const specialist = () => ({ id: 'sp_anna', displayName: 'Anna', status: 'active', version: 1 })
+const specialist = () => ({
+  id: 'sp_anna', displayName: 'Anna', professionalTitle: 'Specjalistka',
+  status: 'active', version: 1,
+})
 const client = () => ({
   id: 'cl_ola', name: 'Ola', status: 'active', readOnly: false,
   assignment: { id: 'asg_ola', specialistId: 'sp_anna' },
@@ -26,9 +36,24 @@ const paymentEntry = (overrides = {}) => ({
   receivedAt: '2026-08-04T10:00:00.000Z', correctedAt: null, replacementEntryId: null,
   ...overrides,
 })
-const payload = (from, to = from, appointments = []) => ({
+const historicalClient = (overrides = {}) => ({
+  id: 'hcl_ola', name: 'Ola Historyczna', status: 'historical', activeClientId: null,
+  version: 1, createdAt: '2026-07-01T08:00:00.000Z',
+  updatedAt: '2026-07-01T08:00:00.000Z', ...overrides,
+})
+const historicalOccurrence = () => ({
+  id: 'hoc_ola', historicalClientId: 'hcl_ola', counterparty: null,
+  specialistId: 'sp_anna', serviceId: null, serviceLabel: 'Usługa historyczna',
+  period: { precision: 'month', day: null, month: '2026-07' }, status: 'recorded',
+  version: 1, sourceRecordId: 'wbs_ola', createdAt: '2026-07-01T08:00:00.000Z',
+  updatedAt: '2026-07-01T08:00:00.000Z',
+})
+const payload = (from, to = from, appointments = [], historical = null) => ({
   window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
   specialists: [specialist()], clients: [client()], appointments,
+  historicalClients: historical === null ? [] : [historicalClient(historical)],
+  historicalOccurrences: historical === null ? [] : [historicalOccurrence()],
+  latestPopulatedMonth: historical === null ? null : '2026-07',
 })
 const deferred = () => {
   let resolve
@@ -36,13 +61,85 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
+const withFixedDate = async (value, callback) => {
+  const NativeDate = globalThis.Date
+  class FixedDate extends NativeDate {
+    constructor(...args) { super(...(args.length === 0 ? [value] : args)) }
+    static now() { return new NativeDate(value).getTime() }
+  }
+  globalThis.Date = FixedDate
+  try { return await callback() } finally { globalThis.Date = NativeDate }
+}
 const repositoryWith = (overrides = {}) => Object.freeze({
   loadWindow: async ({ from, to }) => payload(from, to),
   createClient: async (input) => ({ id: 'cl_created', input }),
   editClient: async () => ({}), archiveClient: async () => ({}),
+  activateHistoricalClient: async () => ({}),
   createAppointment: async () => ({}), editAppointment: async () => ({}),
   cancelAppointment: async () => ({}), recordPayment: async () => ({}),
-  correctPayment: async () => ({}), ...overrides,
+  correctPayment: async () => ({}), activities: null, ...overrides,
+})
+
+const activityPayload = (from, to = from, overrides = {}) => ({
+  from, to, complete: true, currentDay: '2026-08-28',
+  latestPopulatedMonths: { tus: null, english: null },
+  programs: [], groups: [], groupLeaders: [], participants: [], memberships: [],
+  classes: [], attendance: [], charges: [], payments: [], ...overrides,
+})
+
+const activityRepositoryWith = (overrides = {}) => Object.freeze({
+  loadWindow: async ({ from, to }) => activityPayload(from, to),
+  createGroup: async () => ({}), editGroup: async () => ({}),
+  createParticipant: async () => ({}), editParticipant: async () => ({}),
+  createMembership: async () => ({}), editMembership: async () => ({}),
+  createClass: async () => ({}), editClass: async () => ({}),
+  setAttendance: async () => ({}), ...overrides,
+})
+
+const activityProgram = () => ({
+  id: 'apg_tus', code: 'tus', label: 'TUS', status: 'active', version: 1,
+  createdAt: '2026-08-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z',
+})
+const activityGroup = () => ({
+  id: 'agr_tus', programId: 'apg_tus', label: 'Grupa TUS', details: null,
+  status: 'active', version: 1, createdAt: '2026-08-01T10:00:00.000Z',
+  updatedAt: '2026-08-01T10:00:00.000Z',
+})
+const activityLeader = (overrides = {}) => ({
+  id: 'agl_tus', groupId: 'agr_tus', specialistId: 'sp_anna',
+  startsOn: '2026-08-01', endsOn: null, status: 'active', version: 1,
+  createdAt: '2026-08-01T10:00:00.000Z',
+  updatedAt: '2026-08-01T10:00:00.000Z', ...overrides,
+})
+const activityGroupResult = (overrides = {}) => ({
+  group: { ...activityGroup(), ...overrides }, groupLeaders: [],
+})
+const activityParticipant = (overrides = {}) => ({
+  id: 'acp_tus', programId: 'apg_tus', name: 'Fikcyjna Tusia', clientId: null,
+  historicalClientId: null, status: 'active', version: 1,
+  createdAt: '2026-08-01T10:00:00.000Z',
+  updatedAt: '2026-08-01T10:00:00.000Z', ...overrides,
+})
+const activityMembership = (overrides = {}) => ({
+  id: 'amb_tus', participantId: 'acp_tus', programId: 'apg_tus',
+  groupId: 'agr_tus', membershipKind: 'interval',
+  period: { precision: 'unknown', day: null, month: null },
+  startsOn: '2026-08-01', endsOn: '2026-08-31', status: 'inactive', version: 2,
+  createdAt: '2026-08-01T10:00:00.000Z',
+  updatedAt: '2026-08-02T10:00:00.000Z', ...overrides,
+})
+const activityDirectoryPayload = (from, to = from, overrides = {}) => activityPayload(from, to, {
+  programs: [activityProgram()], groups: [activityGroup()], ...overrides,
+})
+const activityClass = (month = '2026-08', overrides = {}) => ({
+  id: 'acl_tus', groupId: 'agr_tus', date: `${month}-12`, time: '16:30',
+  durationMinutes: 90, topic: 'Emocje', status: 'scheduled', version: 1,
+  createdAt: '2026-08-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z',
+  ...overrides,
+})
+const activityClassPayload = (from, to, month, overrides = {}) => activityPayload(from, to, {
+  programs: [activityProgram()], groups: [activityGroup()],
+  classes: [activityClass(month, overrides)],
 })
 
 const makeController = (repositoryFactory, overrides = {}) => createWorkspaceProviderController({
@@ -51,6 +148,13 @@ const makeController = (repositoryFactory, overrides = {}) => createWorkspacePro
   getState: overrides.getState || (() => ({ demoRoleId: 'owner' })),
   authorityKey: overrides.authorityKey || 'authority-one',
   clearToasts: overrides.clearToasts || (() => {}),
+})
+
+const protectedAuthorityKey = (role) => createWorkspaceAuthorityKey({
+  repositoryMode: 'api', dataMode: 'fictional', actorId: `stf_${role}`,
+  actorVersion: 1, authorityRevision: 1, role,
+  specialistId: role === 'specialist' ? 'sp_anna' : null,
+  capabilities: [], demoRoleId: null, demoAuthGeneration: null,
 })
 
 const stale = { code: 'WORKSPACE_AUTHORITY_STALE', message: 'WORKSPACE_AUTHORITY_STALE' }
@@ -70,8 +174,611 @@ test('exposes the exact workspace contract and constructs one repository with ex
   assert.equal(dependencies.dispatch, dispatch)
   assert.equal(dependencies.getState, getState)
   assert.ok(Object.isFrozen(dependencies))
+  assert.equal(controller.getSnapshot().workspace.activities, null)
   controller.getSnapshot()
   assert.equal(factoryCalls, 1)
+})
+
+test('protected activities expose an exact frozen boundary and load without touching demo reducer state', async () => {
+  const state = { tusGroups: [{ id: 'demo-group' }], tusKids: [], tusClasses: [], tusPayments: [] }
+  const activityCalls = []
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      loadWindow: async (window) => {
+        activityCalls.push(window)
+        return activityPayload(window.from, window.to)
+      },
+    }),
+  }), { getState: () => state })
+  const activities = controller.getSnapshot().workspace.activities
+  assert.deepEqual(Object.keys(activities).sort(), ACTIVITY_KEYS)
+  assert.equal(Object.isFrozen(activities), true)
+  assert.equal(Object.isFrozen(activities.state), true)
+  assert.deepEqual(activities.loadedMonths, [])
+
+  await activities.loadWindow({ from: '2026-08', to: '2026-09' })
+  assert.deepEqual(activityCalls, [{ from: '2026-08', to: '2026-09' }])
+  assert.deepEqual(controller.getSnapshot().workspace.activities.loadedMonths, [
+    { from: '2026-08', to: '2026-09' },
+  ])
+  assert.deepEqual(state.tusGroups, [{ id: 'demo-group' }])
+  assert.deepEqual(controller.getSnapshot().loadedState.loadedRanges, [])
+})
+
+test('activity commands resolve only after their explicit reconciliation window reloads', async () => {
+  const reload = deferred()
+  const events = []
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      createGroup: async (body) => {
+        events.push(['command', body])
+        return activityGroupResult()
+      },
+      loadWindow: async (window) => {
+        events.push(['load', window])
+        return reload.promise
+      },
+    }),
+  }))
+  const body = {
+    programId: 'apg_tus', label: 'Grupa TUS', details: null, leaderSpecialistIds: [],
+  }
+  let settled = false
+  const pending = controller.getSnapshot().workspace.activities
+    .createGroup(body, { from: '2026-08', to: '2026-08' })
+    .finally(() => { settled = true })
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(settled, false)
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'loading')
+  assert.deepEqual(events, [
+    ['command', body], ['load', { from: '2026-08', to: '2026-08' }],
+  ])
+
+  reload.resolve(activityDirectoryPayload('2026-08'))
+  assert.deepEqual(await pending, activityGroupResult())
+  assert.equal(controller.getSnapshot().loadedActivitiesState.writeEpoch, 1)
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'ready')
+})
+
+test('activity acknowledgement recapture preserves the reconciliation request month', async () => {
+  const reload = deferred()
+  let pending
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      createParticipant: async () => activityParticipant(),
+      loadWindow: async () => reload.promise,
+    }),
+  }))
+  await withFixedDate('2026-08-31T21:59:59.000Z', async () => {
+    pending = controller.getSnapshot().workspace.activities.createParticipant({
+      programId: 'apg_tus', name: 'Fikcyjna Tusia', clientId: null,
+      historicalClientId: null,
+    }, { from: '2026-09', to: '2026-09' })
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+  const observation = {
+    ...activityMembership(), id: 'amb_observed_tus', membershipKind: 'observation',
+    period: { precision: 'month', day: null, month: '2026-09' },
+    startsOn: null, endsOn: null, status: 'active', version: 1,
+    updatedAt: '2026-08-01T10:00:00.000Z',
+  }
+
+  await withFixedDate('2026-08-31T22:00:01.000Z', async () => {
+    reload.resolve(activityDirectoryPayload('2026-09', '2026-09', {
+      participants: [activityParticipant()], memberships: [observation],
+    }))
+    await assert.doesNotReject(pending)
+  })
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'ready')
+})
+
+test('accepted activity commands fail closed when reload omits the acknowledged entity', async () => {
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      createGroup: async () => activityGroupResult(),
+      loadWindow: async ({ from, to }) => activityPayload(from, to),
+    }),
+  }))
+
+  await assert.rejects(controller.getSnapshot().workspace.activities.createGroup({
+    programId: 'apg_tus', label: 'Grupa TUS', details: null, leaderSpecialistIds: [],
+  }, { from: '2026-08', to: '2026-08' }), {
+    code: 'WORKSPACE_RECONCILIATION_REQUIRED',
+  })
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'read-only-error')
+  await assert.rejects(
+    controller.getSnapshot().workspace.activities.createGroup({}, {}),
+    { code: 'WORKSPACE_READ_ONLY' },
+  )
+})
+
+test('centre authorities reject an omitted inactive membership acknowledgement', async () => {
+  for (const role of ['owner', 'coordinator']) {
+    let loads = 0
+    const controller = makeController(() => repositoryWith({
+      activities: activityRepositoryWith({
+        editMembership: async () => activityMembership(),
+        loadWindow: async ({ from, to }) => {
+          loads += 1
+          return activityDirectoryPayload(from, to, {
+            participants: [activityParticipant()],
+            memberships: loads === 1 ? [activityMembership({
+              endsOn: null, status: 'active', version: 1,
+              updatedAt: '2026-08-01T10:00:00.000Z',
+            })] : [],
+          })
+        },
+      }),
+    }), { authorityKey: protectedAuthorityKey(role) })
+    const activities = controller.getSnapshot().workspace.activities
+    await activities.loadWindow({ from: '2026-08', to: '2026-08' })
+
+    await assert.rejects(activities.editMembership('amb_tus', {
+      expectedVersion: 1, startsOn: '2026-08-01', endsOn: '2026-08-31',
+      status: 'inactive',
+    }, { from: '2026-08', to: '2026-08' }), {
+      code: 'WORKSPACE_RECONCILIATION_REQUIRED',
+    })
+    assert.equal(controller.getSnapshot().workspace.activities.status, 'read-only-error')
+  }
+})
+
+test('provider binds a repository membership acknowledgement to the captured command', async () => {
+  let loads = 0
+  const api = Object.freeze({
+    loadActivityWorkspace: async ({ from, to }) => {
+      loads += 1
+      return captureActivityWorkspace(activityDirectoryPayload(from, to, {
+        participants: [activityParticipant()],
+        memberships: loads === 1 ? [activityMembership({
+          endsOn: null, status: 'active', version: 1,
+          updatedAt: '2026-08-01T10:00:00.000Z',
+        })] : [],
+      }))
+    },
+    createActivityGroup: async () => {}, editActivityGroup: async () => {},
+    createActivityParticipant: async () => {}, editActivityParticipant: async () => {},
+    createActivityMembership: async () => {},
+    editActivityMembership: async () => Object.freeze(activityMembership()),
+    createActivityClass: async () => {}, editActivityClass: async () => {},
+    setActivityAttendance: async () => {},
+    createIdempotencyKey: () => 'activity-test-key',
+  })
+  const controller = makeController(() => repositoryWith({
+    activities: createApiActivityRepository({ api }),
+  }), { authorityKey: protectedAuthorityKey('specialist') })
+  const activities = controller.getSnapshot().workspace.activities
+  await activities.loadWindow({ from: '2026-08', to: '2026-08' })
+
+  await assert.rejects(activities.editMembership('amb_tus', {
+    expectedVersion: 1, startsOn: '2026-08-01', endsOn: '2026-08-31',
+    status: 'active',
+  }, { from: '2026-08', to: '2026-08' }), {
+    code: 'WORKSPACE_RECONCILIATION_REQUIRED',
+  })
+  assert.equal(loads, 1)
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'read-only-error')
+})
+
+test('ending the sole scoped membership reconciles when its participant leaves the reload', async () => {
+  let loads = 0
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      editMembership: async () => activityMembership(),
+      loadWindow: async ({ from, to }) => {
+        loads += 1
+        if (loads === 1) {
+          return activityDirectoryPayload(from, to, {
+            participants: [activityParticipant()],
+            memberships: [activityMembership({
+              endsOn: null, status: 'active', version: 1,
+              updatedAt: '2026-08-01T10:00:00.000Z',
+            })],
+          })
+        }
+        return activityDirectoryPayload(from, to)
+      },
+    }),
+  }), { authorityKey: protectedAuthorityKey('specialist') })
+  const activities = controller.getSnapshot().workspace.activities
+  await activities.loadWindow({ from: '2026-08', to: '2026-08' })
+
+  await assert.doesNotReject(activities.editMembership('amb_tus', {
+    expectedVersion: 1, startsOn: '2026-08-01', endsOn: '2026-08-31',
+    status: 'inactive',
+  }, { from: '2026-08', to: '2026-08' }))
+  assert.equal(loads, 2)
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'ready')
+  assert.equal(
+    controller.getSnapshot().workspace.activities.state.participantsById.acp_tus,
+    undefined,
+  )
+})
+
+test('a specialist reconciles a newly created future interval omitted by scoped reload', async () => {
+  let loads = 0
+  const future = activityMembership({
+    startsOn: '9999-01-01', endsOn: null, status: 'active', version: 1,
+    updatedAt: '2026-08-01T10:00:00.000Z',
+  })
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      createMembership: async () => future,
+      loadWindow: async ({ from, to }) => {
+        loads += 1
+        return activityDirectoryPayload(from, to, loads === 1
+          ? { participants: [activityParticipant()] }
+          : {})
+      },
+    }),
+  }), { authorityKey: protectedAuthorityKey('specialist') })
+  const activities = controller.getSnapshot().workspace.activities
+  await activities.loadWindow({ from: '2026-08', to: '2026-08' })
+
+  await assert.doesNotReject(activities.createMembership({
+    participantId: 'acp_tus', groupId: 'agr_tus', startsOn: '9999-01-01', endsOn: null,
+  }, { from: '2026-08', to: '2026-08' }))
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'ready')
+  assert.equal(controller.getSnapshot().loadedActivitiesState.membershipsById.amb_tus, undefined)
+})
+
+test('a specialist rejects omission of a currently effective created interval', async () => {
+  let loads = 0
+  const current = activityMembership({
+    startsOn: '2020-01-01', endsOn: null, status: 'active', version: 1,
+    updatedAt: '2026-08-01T10:00:00.000Z',
+  })
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      createMembership: async () => current,
+      loadWindow: async ({ from, to }) => {
+        loads += 1
+        return activityDirectoryPayload(from, to, loads === 1
+          ? { participants: [activityParticipant()] }
+          : {})
+      },
+    }),
+  }), { authorityKey: protectedAuthorityKey('specialist') })
+  const activities = controller.getSnapshot().workspace.activities
+  await activities.loadWindow({ from: '2026-08', to: '2026-08' })
+
+  await assert.rejects(activities.createMembership({
+    participantId: 'acp_tus', groupId: 'agr_tus', startsOn: '2020-01-01', endsOn: null,
+  }, { from: '2026-08', to: '2026-08' }), {
+    code: 'WORKSPACE_RECONCILIATION_REQUIRED',
+  })
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'read-only-error')
+})
+
+test('specialist membership visibility uses the server-trusted day, not the browser clock', async () => {
+  let loads = 0
+  const currentAtServer = activityMembership({
+    startsOn: '2026-08-01', endsOn: '2026-08-31', status: 'active', version: 1,
+    updatedAt: '2026-08-01T10:00:00.000Z',
+  })
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      createMembership: async () => currentAtServer,
+      loadWindow: async ({ from, to }) => {
+        loads += 1
+        return activityDirectoryPayload(from, to, loads === 1
+          ? { participants: [activityParticipant()] }
+          : { currentDay: '2026-08-28' })
+      },
+    }),
+  }), { authorityKey: protectedAuthorityKey('specialist') })
+  const activities = controller.getSnapshot().workspace.activities
+  await activities.loadWindow({ from: '2026-08', to: '2026-08' })
+
+  await withFixedDate('2026-09-01T10:00:00.000Z', async () => {
+    await assert.rejects(activities.createMembership({
+      participantId: 'acp_tus', groupId: 'agr_tus',
+      startsOn: '2026-08-01', endsOn: '2026-08-31',
+    }, { from: '2026-08', to: '2026-08' }), {
+      code: 'WORKSPACE_RECONCILIATION_REQUIRED',
+    })
+  })
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'read-only-error')
+})
+
+test('a specialist reconciles an omitted active interval that ended in the past', async () => {
+  let loads = 0
+  const historical = activityMembership({
+    startsOn: '2019-01-01', endsOn: '2020-01-01', status: 'active', version: 1,
+    updatedAt: '2026-08-01T10:00:00.000Z',
+  })
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      createMembership: async () => historical,
+      loadWindow: async ({ from, to }) => {
+        loads += 1
+        return activityDirectoryPayload(from, to, loads === 1
+          ? { participants: [activityParticipant()] }
+          : { currentDay: '2026-08-28' })
+      },
+    }),
+  }), { authorityKey: protectedAuthorityKey('specialist') })
+  const activities = controller.getSnapshot().workspace.activities
+  await activities.loadWindow({ from: '2026-08', to: '2026-08' })
+
+  await assert.doesNotReject(activities.createMembership({
+    participantId: 'acp_tus', groupId: 'agr_tus',
+    startsOn: '2019-01-01', endsOn: '2020-01-01',
+  }, { from: '2026-08', to: '2026-08' }))
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'ready')
+})
+
+test('a specialist reconciles a future interval edit omitted by scoped reload', async () => {
+  let loads = 0
+  const future = activityMembership({
+    startsOn: '9999-01-01', endsOn: null, status: 'active', version: 2,
+  })
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      editMembership: async () => future,
+      loadWindow: async ({ from, to }) => {
+        loads += 1
+        return activityDirectoryPayload(from, to, loads === 1 ? {
+          participants: [activityParticipant()],
+          memberships: [activityMembership({
+            endsOn: null, status: 'active', version: 1,
+            updatedAt: '2026-08-01T10:00:00.000Z',
+          })],
+        } : {})
+      },
+    }),
+  }), { authorityKey: protectedAuthorityKey('specialist') })
+  const activities = controller.getSnapshot().workspace.activities
+  await activities.loadWindow({ from: '2026-08', to: '2026-08' })
+
+  await assert.doesNotReject(activities.editMembership('amb_tus', {
+    expectedVersion: 1, startsOn: '9999-01-01', endsOn: null, status: 'active',
+  }, { from: '2026-08', to: '2026-08' }))
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'ready')
+  assert.equal(controller.getSnapshot().loadedActivitiesState.membershipsById.amb_tus, undefined)
+})
+
+test('group reconciliation requires every acknowledged active leader at the same version', async () => {
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      createGroup: async () => ({
+        group: activityGroup(), groupLeaders: [activityLeader()],
+      }),
+      loadWindow: async ({ from, to }) => activityDirectoryPayload(from, to),
+    }),
+  }))
+
+  await assert.rejects(controller.getSnapshot().workspace.activities.createGroup({
+    programId: 'apg_tus', label: 'Grupa TUS', details: null,
+    leaderSpecialistIds: ['sp_anna'],
+  }, { from: '2026-08', to: '2026-08' }), {
+    code: 'WORKSPACE_RECONCILIATION_REQUIRED',
+  })
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'read-only-error')
+})
+
+test('successful activity mutation followed by failed canonical reload is read-only and rejects', async () => {
+  const privateFailure = Object.assign(new Error('private transport'), { code: 'NETWORK_ERROR' })
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      createGroup: async () => activityGroupResult(),
+      loadWindow: async () => { throw privateFailure },
+    }),
+  }))
+  await assert.rejects(controller.getSnapshot().workspace.activities.createGroup({
+    programId: 'apg_tus', label: 'Grupa TUS', details: null, leaderSpecialistIds: [],
+  }, { from: '2026-08', to: '2026-08' }), { code: 'NETWORK_ERROR' })
+  assert.equal(controller.getSnapshot().workspace.status, 'read-only-error')
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'read-only-error')
+  await assert.rejects(
+    controller.getSnapshot().workspace.activities.createGroup({ private: true }, { bad: true }),
+    { code: 'WORKSPACE_READ_ONLY', message: 'WORKSPACE_READ_ONLY' },
+  )
+})
+
+test('activity loads keep refetching until they cover a window after consecutive writes', async () => {
+  const turns = Array.from({ length: 5 }, deferred)
+  const requests = []
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      loadWindow: (window) => {
+        requests.push(window)
+        return turns[requests.length - 1].promise
+      },
+      createGroup: async () => activityGroupResult(),
+    }),
+  }))
+  const body = {
+    programId: 'apg_tus', label: 'Grupa TUS', details: null, leaderSpecialistIds: [],
+  }
+  const waitForRequests = async (count) => {
+    for (let turn = 0; turn < 20 && requests.length < count; turn += 1) {
+      await Promise.resolve()
+    }
+    assert.equal(requests.length, count)
+  }
+
+  let augustSettled = false
+  const august = controller.getSnapshot().workspace.activities
+    .loadWindow({ from: '2026-08', to: '2026-08' })
+    .finally(() => { augustSettled = true })
+  await waitForRequests(1)
+
+  const septemberWrite = controller.getSnapshot().workspace.activities
+    .createGroup(body, { from: '2026-09', to: '2026-09' })
+  await waitForRequests(2)
+  turns[1].resolve(activityDirectoryPayload('2026-09'))
+  await septemberWrite
+
+  turns[0].resolve(activityPayload('2026-08'))
+  await waitForRequests(3)
+
+  const octoberWrite = controller.getSnapshot().workspace.activities
+    .createGroup(body, { from: '2026-10', to: '2026-10' })
+  await waitForRequests(4)
+  turns[3].resolve(activityDirectoryPayload('2026-10'))
+  await octoberWrite
+
+  turns[2].resolve(activityPayload('2026-08'))
+  await waitForRequests(5)
+  assert.equal(augustSettled, false)
+
+  turns[4].resolve(activityDirectoryPayload('2026-08'))
+  await august
+  assert.deepEqual(requests, [
+    { from: '2026-08', to: '2026-08' },
+    { from: '2026-09', to: '2026-09' },
+    { from: '2026-08', to: '2026-08' },
+    { from: '2026-10', to: '2026-10' },
+    { from: '2026-08', to: '2026-08' },
+  ])
+  assert.deepEqual(controller.getSnapshot().workspace.activities.loadedMonths, [
+    { from: '2026-08', to: '2026-10' },
+  ])
+})
+
+test('activity loads bound repeated same-generation stale-directory refetches', async () => {
+  let loads = 0
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      loadWindow: async ({ from, to }) => {
+        loads += 1
+        return activityDirectoryPayload(from, to, {
+          groupLeaders: [activityLeader(loads === 1 ? {
+            version: 2, updatedAt: '2026-08-02T10:00:00.000Z',
+          } : {})],
+        })
+      },
+    }),
+  }))
+  const activities = controller.getSnapshot().workspace.activities
+  await activities.loadWindow({ from: '2026-08', to: '2026-08' })
+
+  await assert.rejects(
+    activities.loadWindow({ from: '2026-09', to: '2026-09' }),
+    { code: 'WORKSPACE_RECONCILIATION_REQUIRED' },
+  )
+  assert.equal(loads, 4)
+  assert.equal(controller.getSnapshot().workspace.activities.status, 'read-only-error')
+})
+
+test('activity class edit reconciliation expands across cached old and requested new months', async () => {
+  const loads = []
+  const edits = []
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      loadWindow: async (window) => {
+        loads.push(window)
+        return loads.length === 1
+          ? activityClassPayload('2026-08', '2026-08', '2026-08')
+          : activityClassPayload('2026-08', '2026-09', '2026-09', {
+            date: '2026-09-02', time: null, durationMinutes: null, topic: null,
+            status: 'completed', version: 2, updatedAt: '2026-09-02T10:00:00.000Z',
+          })
+      },
+      editClass: async (...args) => {
+        edits.push(args)
+        return activityClass('2026-09', {
+          date: '2026-09-02', time: null, durationMinutes: null, topic: null,
+          status: 'completed', version: 2, updatedAt: '2026-09-02T10:00:00.000Z',
+        })
+      },
+    }),
+  }))
+  await controller.getSnapshot().workspace.activities.loadWindow({
+    from: '2026-08', to: '2026-08',
+  })
+  const body = {
+    expectedVersion: 1, date: '2026-09-02', time: null, durationMinutes: null,
+    topic: null, status: 'completed',
+  }
+  await controller.getSnapshot().workspace.activities.editClass(
+    'acl_tus', body, { from: '2026-09', to: '2026-09' },
+  )
+  assert.deepEqual(edits, [['acl_tus', body]])
+  assert.deepEqual(loads, [
+    { from: '2026-08', to: '2026-08' },
+    { from: '2026-08', to: '2026-09' },
+  ])
+  assert.equal(
+    controller.getSnapshot().workspace.activities.state.classesById.acl_tus.date,
+    '2026-09-02',
+  )
+})
+
+test('concurrent activity loads refetch an older directory response before it can roll facts back', async () => {
+  const older = deferred()
+  const newer = deferred()
+  const refetched = deferred()
+  const requests = []
+  const controller = makeController(() => repositoryWith({
+    activities: activityRepositoryWith({
+      loadWindow: (window) => {
+        requests.push(window)
+        return [older.promise, newer.promise, refetched.promise][requests.length - 1]
+      },
+    }),
+  }))
+  const olderLoad = controller.getSnapshot().workspace.activities.loadWindow({
+    from: '2026-08', to: '2026-08',
+  })
+  const newerLoad = controller.getSnapshot().workspace.activities.loadWindow({
+    from: '2026-09', to: '2026-09',
+  })
+  newer.resolve(activityDirectoryPayload('2026-09', '2026-09', {
+    groupLeaders: [activityLeader({
+      endsOn: '2026-08-31', status: 'inactive', version: 2,
+      updatedAt: '2026-09-01T10:00:00.000Z',
+    })],
+  }))
+  await newerLoad
+  older.resolve(activityDirectoryPayload('2026-08', '2026-08', {
+    groupLeaders: [activityLeader()],
+  }))
+  for (let turn = 0; turn < 20 && requests.length < 3; turn += 1) await Promise.resolve()
+  assert.equal(requests.length, 3)
+  refetched.resolve(activityDirectoryPayload('2026-08', '2026-08', {
+    groupLeaders: [activityLeader({
+      endsOn: '2026-08-31', status: 'inactive', version: 2,
+      updatedAt: '2026-09-01T10:00:00.000Z',
+    })],
+  }))
+  await olderLoad
+
+  const leader = controller.getSnapshot().workspace.activities.state
+    .groupLeadersById.agl_tus
+  assert.equal(leader.version, 2)
+  assert.equal(leader.status, 'inactive')
+  assert.deepEqual(requests, [
+    { from: '2026-08', to: '2026-08' },
+    { from: '2026-09', to: '2026-09' },
+    { from: '2026-08', to: '2026-08' },
+  ])
+})
+
+test('authority reset clears activity cache and masks old activity completion', async () => {
+  const oldLoad = deferred()
+  let factories = 0
+  const controller = makeController(() => {
+    factories += 1
+    return repositoryWith({
+      activities: activityRepositoryWith({
+        loadWindow: factories === 1
+          ? () => oldLoad.promise
+          : async ({ from, to }) => activityPayload(from, to),
+      }),
+    })
+  })
+  const pending = controller.getSnapshot().workspace.activities.loadWindow({
+    from: '2026-08', to: '2026-08',
+  })
+  controller.resetAuthority('authority-two')
+  oldLoad.resolve(activityPayload('2026-08'))
+  await assert.rejects(pending, stale)
+  assert.deepEqual(controller.getSnapshot().workspace.activities.loadedMonths, [])
+  assert.equal(controller.getSnapshot().loadedActivitiesState.authorityGeneration, 1)
 })
 
 test('rejects accessor-backed repositories without invoking their methods', () => {
@@ -127,7 +834,7 @@ test('authority reset replaces repository, clears state and toasts, and rejects 
 
 test('every old-authority mutation completion is replaced by one fixed stale error', async () => {
   const methods = [
-    'createClient', 'editClient', 'archiveClient', 'createAppointment',
+    'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient', 'createAppointment',
     'editAppointment', 'cancelAppointment', 'recordPayment', 'correctPayment',
   ]
   for (const method of methods) {
@@ -153,6 +860,10 @@ test('every old-authority mutation completion is replaced by one fixed stale err
         ? controller.getSnapshot().workspace.correctPayment('pay_ola', 1, {
           reason: 'Korekta', replacement: null,
         })
+        : method === 'activateHistoricalClient'
+          ? controller.getSnapshot().workspace.activateHistoricalClient('hcl_ola', {
+            expectedVersion: 1, specialistId: 'sp_anna',
+          })
         : controller.getSnapshot().workspace[method]('private-input', { secret: true })
     controller.resetAuthority(`next-${method}`)
     turn.resolve({ secretDto: method })
@@ -415,6 +1126,53 @@ test('successful client commands stay locked until canonical reconciliation or a
   assert.equal(controller.getSnapshot().clientMutationLocked, false)
 })
 
+test('accepted historical activation shares the client lock and unlocks only after the activated version is canonically reloaded', async () => {
+  const conflict = Object.assign(new Error('conflict'), {
+    code: 'VERSION_CONFLICT', status: 409,
+  })
+  let julyLoads = 0
+  let activationCalls = 0
+  const controller = makeController(() => repositoryWith({
+    loadWindow: async ({ from, to }) => {
+      if (from.startsWith('2026-07')) {
+        julyLoads += 1
+        if (julyLoads === 2) throw conflict
+        return payload(from, to, [], julyLoads === 1 ? {} : {
+          status: 'activated', activeClientId: 'cl_ola', version: 2,
+          updatedAt: '2026-07-20T08:00:00.000Z',
+        })
+      }
+      return {
+        ...payload(from, to),
+        latestPopulatedMonth: '2026-07',
+      }
+    },
+    activateHistoricalClient: async () => { activationCalls += 1; return {} },
+  }))
+  await controller.getSnapshot().workspace.loadWindow(range('2026-07-01', '2026-07-31'))
+  await controller.getSnapshot().workspace.activateHistoricalClient('hcl_ola', {
+    expectedVersion: 1, specialistId: 'sp_anna',
+  })
+  assert.equal(controller.getSnapshot().clientMutationLocked, true)
+  await assert.rejects(controller.getSnapshot().workspace.activateHistoricalClient('hcl_ola', {
+    expectedVersion: 1, specialistId: 'sp_anna',
+  }), { code: 'WORKSPACE_RECONCILIATION_REQUIRED' })
+
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-01'))
+  assert.equal(controller.getSnapshot().clientMutationLocked, true)
+  await assert.rejects(
+    controller.getSnapshot().workspace.loadWindow(range('2026-07-01', '2026-07-31')),
+    conflict,
+  )
+  assert.equal(controller.getSnapshot().clientMutationLocked, true)
+
+  await controller.getSnapshot().workspace.loadWindow(range('2026-07-01', '2026-07-31'))
+  assert.equal(controller.getSnapshot().clientMutationLocked, false)
+  assert.equal(controller.getSnapshot().loadedState.historicalClientsById.hcl_ola.status,
+    'activated')
+  assert.equal(activationCalls, 1)
+})
+
 test('successful appointment create, edit, and cancellation stay locked until canonical reconciliation', async () => {
   const controller = makeController(() => repositoryWith())
   await controller.getSnapshot().workspace.createAppointment({ id: 'draft' })
@@ -577,6 +1335,22 @@ test('infrastructure failure preserves caller input and disables later mutations
   controller.resetAuthority('authority-recovered')
   assert.equal(controller.getSnapshot().workspace.status, 'ready')
   assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [])
+})
+
+test('a stale API authority completion fails the current workspace closed', async () => {
+  const staleAuthority = Object.assign(new Error('SESSION_AUTHORITY_STALE'), {
+    code: 'SESSION_AUTHORITY_STALE',
+    status: 0,
+  })
+  const controller = makeController(() => repositoryWith({
+    loadWindow: async () => { throw staleAuthority },
+  }))
+
+  await assert.rejects(
+    controller.getSnapshot().workspace.loadWindow(range('2026-08-01')),
+    staleAuthority,
+  )
+  assert.equal(controller.getSnapshot().workspace.status, 'read-only-error')
 })
 
 test('invalid load response fails closed without erasing prior canonical coverage', async () => {

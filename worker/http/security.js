@@ -1,7 +1,10 @@
 const MAX_BODY_BYTES = 65_536
+const MAX_WORKBOOK_BYTES = 5 * 1024 * 1024
+const MAX_MULTIPART_OVERHEAD_BYTES = 65_536
 const MUTATIONS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 const SUPPORTED = new Set(['GET', 'HEAD', 'OPTIONS', ...MUTATIONS])
 const JSON_TYPE = /^application\/json(?:\s*;\s*charset\s*=\s*utf-8)?$/i
+const MULTIPART_TYPE = /^multipart\/form-data;\s*boundary=(?:"([0-9A-Za-z'()+_.\/:=?-]{1,70})"|([0-9A-Za-z'()+_.\/:=?-]{1,70}))$/i
 const CORS_PERMISSION_HEADERS = [
   'access-control-allow-origin',
   'access-control-allow-credentials',
@@ -124,14 +127,23 @@ export function isSupportedMethod(method) {
   return SUPPORTED.has(method)
 }
 
-export function validateMutationMetadata(request, config) {
+export function validateMutationMetadata(request, config, { bodyMode = 'json' } = {}) {
   if (request.headers.get('Origin') !== config?.appOrigin) fail('ORIGIN_INVALID')
   const fetchSite = request.headers.get('Sec-Fetch-Site')
   if (fetchSite !== null && fetchSite.toLowerCase() !== 'same-origin') fail('FETCH_METADATA_INVALID')
   const contentType = request.headers.get('Content-Type')
-  if (contentType === null || !JSON_TYPE.test(contentType) || contentType.includes(',')) fail('UNSUPPORTED_MEDIA_TYPE')
+  const mediaTypeValid = bodyMode === 'json'
+    ? contentType !== null && JSON_TYPE.test(contentType)
+    : bodyMode === 'workbook-multipart'
+      ? contentType !== null && MULTIPART_TYPE.test(contentType)
+      : false
+  if (!mediaTypeValid || contentType.includes(',')) fail('UNSUPPORTED_MEDIA_TYPE')
   if (request.headers.has('Content-Encoding')) fail('UNSUPPORTED_MEDIA_TYPE')
-  parseCanonicalContentLength(request.headers.get('Content-Length'))
+  parseCanonicalContentLength(request.headers.get('Content-Length'), {
+    maxBytes: bodyMode === 'workbook-multipart'
+      ? MAX_WORKBOOK_BYTES + MAX_MULTIPART_OVERHEAD_BYTES
+      : MAX_BODY_BYTES,
+  })
 }
 
 export function validateOptionsOrigin(request, config) {
@@ -198,9 +210,77 @@ export async function readJsonBodyOnce(request, {
   }
 }
 
+export async function readMultipartBodyOnce(request, {
+  maxWorkbookBytes = MAX_WORKBOOK_BYTES,
+  maxOverheadBytes = MAX_MULTIPART_OVERHEAD_BYTES,
+} = {}) {
+  if (!(request instanceof Request)
+    || !Number.isSafeInteger(maxWorkbookBytes) || maxWorkbookBytes < 1
+    || !Number.isSafeInteger(maxOverheadBytes) || maxOverheadBytes < 1) {
+    fail('INVALID_MULTIPART')
+  }
+  const contentType = request.headers.get('Content-Type')
+  if (contentType === null || contentType.includes(',') || !MULTIPART_TYPE.test(contentType)) {
+    fail('INVALID_MULTIPART')
+  }
+  const maxBytes = maxWorkbookBytes + maxOverheadBytes
+  parseCanonicalContentLength(request.headers.get('Content-Length'), { maxBytes })
+  const reader = request.body?.getReader()
+  if (!reader) fail('INVALID_MULTIPART')
+  const chunks = []
+  let total = 0
+  let joined
+  try {
+    for (;;) {
+      let part
+      try { part = await reader.read() } catch { fail('INVALID_MULTIPART') }
+      if (part.done) break
+      if (!(part.value instanceof Uint8Array)) fail('INVALID_MULTIPART')
+      total += part.value.byteLength
+      if (total > maxBytes) {
+        part.value.fill(0)
+        try { await reader.cancel() } catch { /* The public error is size-only. */ }
+        fail('PAYLOAD_TOO_LARGE')
+      }
+      const copy = part.value.slice()
+      part.value.fill(0)
+      chunks.push(copy)
+    }
+    joined = new Uint8Array(total)
+    let offset = 0
+    for (const chunk of chunks) {
+      joined.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+    let form
+    try {
+      form = await new Response(joined, { headers: { 'Content-Type': contentType } }).formData()
+    } catch {
+      fail('INVALID_MULTIPART')
+    }
+    const entries = [...form.entries()]
+    if (entries.length < 1 || entries.length > 16) fail('INVALID_MULTIPART')
+    let fieldBytes = 0
+    for (const [name, value] of entries) {
+      if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)) fail('INVALID_MULTIPART')
+      if (typeof value === 'string') {
+        fieldBytes += new TextEncoder().encode(value).byteLength
+        if (fieldBytes > MAX_BODY_BYTES || value.includes('\0')) fail('INVALID_MULTIPART')
+      } else if (!(value instanceof File) || value.size > maxWorkbookBytes) {
+        fail(value instanceof File ? 'PAYLOAD_TOO_LARGE' : 'INVALID_MULTIPART')
+      }
+    }
+    return form
+  } finally {
+    for (const chunk of chunks) chunk.fill(0)
+    joined?.fill(0)
+    try { reader.releaseLock() } catch { /* The stream remains consumed. */ }
+  }
+}
+
 export function applyApiSecurityHeaders(response, correlationId) {
   const headers = new Headers(response.headers)
-  headers.set('Cache-Control', 'no-store')
+  if (!headers.has('Cache-Control')) headers.set('Cache-Control', 'no-store')
   headers.set('Content-Security-Policy', "default-src 'none'")
   headers.set('Referrer-Policy', 'no-referrer')
   headers.set('X-Content-Type-Options', 'nosniff')

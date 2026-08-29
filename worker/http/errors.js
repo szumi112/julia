@@ -1,8 +1,16 @@
 const STATUS_BY_CODE = Object.freeze({
   INVALID_CONTENT_LENGTH: 400,
   INVALID_JSON: 400,
+  INVALID_MULTIPART: 400,
   VALIDATION_FAILED: 400,
+  WORKBOOK_FINGERPRINT_REJECTED: 400,
+  WORKBOOK_IMPORT_INVALID: 400,
+  WORKBOOK_PANEL_SIGNATURE_INVALID: 400,
+  WORKBOOK_PREVIEW_INVALID: 400,
+  WORKBOOK_PREVIEW_TOKEN_INVALID: 400,
+  WORKBOOK_SCOPE_MISMATCH: 400,
   ACCESS_ASSERTION_INVALID: 401,
+  REAUTH_REQUIRED: 401,
   ACCESS_DENIED: 403,
   FORBIDDEN: 403,
   ORIGIN_INVALID: 403,
@@ -12,7 +20,11 @@ const STATUS_BY_CODE = Object.freeze({
   NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
   IDEMPOTENCY_CONFLICT: 409,
+  OUTBOX_RECOVERY_CONFLICT: 409,
+  OUTBOX_RECOVERY_UNSAFE: 409,
   WORKSPACE_RESULT_LIMIT: 409,
+  ACTIVITY_RESULT_LIMIT: 409,
+  ACTIVITY_CONFLICT: 409,
   CLIENT_STATUS_CONFLICT: 409,
   CLIENT_ASSIGNMENT_CONFLICT: 409,
   CLIENT_ARCHIVE_CONFLICT: 409,
@@ -20,11 +32,23 @@ const STATUS_BY_CODE = Object.freeze({
   APPOINTMENT_PAYMENT_CONFLICT: 409,
   PAYMENT_AMOUNT_CONFLICT: 409,
   PAYMENT_CORRECTION_CONFLICT: 409,
+  WORKBOOK_IMPORT_CONFLICT: 409,
+  WORKBOOK_EXPORT_CONFLICT: 409,
+  WORKBOOK_EXPORT_LIMIT: 409,
+  WORKBOOK_REGISTRY_LIMIT: 409,
+  WORKBOOK_REGISTRY_RETRY: 409,
+  WORKBOOK_RECONCILIATION_CONFLICT: 409,
   FINANCE_IMPORT_CLOSED: 409,
   FINANCE_IMPORT_DUPLICATE: 409,
   FINANCE_IMPORT_INCOMPLETE: 409,
   FINANCE_IMPORT_OVERFLOW: 409,
+  FINANCE_ENTRY_VOIDED: 409,
+  FINANCE_ENTRY_NOT_READY: 409,
+  FINANCE_ENTRY_DEPENDENCY_CONFLICT: 409,
+  FINANCE_WINDOW_LIMIT: 409,
+  FINANCE_WINDOW_RETRY: 409,
   STAFF_INVITATION_CONFLICT: 409,
+  SPECIALIST_LINK_CONFLICT: 409,
   LAST_ACTIVE_OWNER: 409,
   VERSION_CONFLICT: 409,
   PAYLOAD_TOO_LARGE: 413,
@@ -42,9 +66,23 @@ const VALIDATION_FIELDS = new Set([
   'specialists', 'clients', 'appointments', 'paymentEntries',
   'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
   'entries', 'accountingMonth', 'kind',
-  'standardRateGrosze',
+  'professionalTitle', 'standardRateGrosze', 'staffId',
+  'expectedSpecialistVersion', 'expectedStaffVersion',
+  'allow', 'deny', 'expectedAuthorityRevision',
+  'historicalClientId', 'importId', 'expectedJobVersion', 'conflictId',
+  'classification', 'existingSubjectId',
+  'programId', 'label', 'details', 'leaderSpecialistIds', 'participantId',
+  'groupId', 'membershipId', 'classId', 'startsOn', 'endsOn', 'date', 'time',
+  'topic', 'month', 'registry', 'registryDetail', 'resolutions',
 ])
-const WORKSPACE_FIELDS = new Set(['specialists', 'clients', 'appointments', 'paymentEntries'])
+const WORKSPACE_FIELDS = new Set([
+  'specialists', 'clients', 'appointments', 'paymentEntries',
+  'historicalClients', 'historicalOccurrences',
+])
+const ACTIVITY_FIELDS = new Set([
+  'programs', 'groups', 'groupLeaders', 'participants', 'memberships', 'classes',
+  'attendance', 'charges', 'payments',
+])
 const EXACT_INTERNAL_MESSAGES = new Set(Object.keys(STATUS_BY_CODE))
 
 const safeDetails = (code, details) => {
@@ -70,6 +108,13 @@ const safeDetails = (code, details) => {
       const field = value('field')
       const limit = value('limit')
       return WORKSPACE_FIELDS.has(field) && Number.isSafeInteger(limit) && limit >= 0
+        ? { field, limit }
+        : undefined
+    }
+    if (code === 'ACTIVITY_RESULT_LIMIT') {
+      const field = value('field')
+      const limit = value('limit')
+      return ACTIVITY_FIELDS.has(field) && Number.isSafeInteger(limit) && limit >= 0
         ? { field, limit }
         : undefined
     }

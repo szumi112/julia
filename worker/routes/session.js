@@ -1,8 +1,32 @@
-import { capabilitiesForActor } from '../identity/policy.js'
+import { isD1MissingColumn } from '../db/errors.js'
 import { issueCsrfToken } from '../security/csrf.js'
 import { decryptForScope as decryptField, loadDataKey } from '../security/envelope.js'
+import { isWellFormedUnicode } from '../../src/core-records.js'
+import { acceptEffectiveCapabilities } from '../../src/capabilities.js'
 
 const denied = () => { throw new Error('ACCESS_DENIED') }
+const titleFailure = () => { throw new Error('CRYPTO_FAILURE') }
+
+const validProfessionalTitle = (value) => {
+  if (typeof value !== 'string' || !isWellFormedUnicode(value) || value !== value.trim()
+    || value !== value.normalize('NFC') || /[\p{Cc}\p{Cf}]/u.test(value)) return false
+  const encoded = new TextEncoder().encode(value)
+  const valid = encoded.byteLength >= 1 && encoded.byteLength <= 120
+  encoded.fill(0)
+  return valid
+}
+
+const sessionRowSql = (withTitle) => `
+  SELECT staff.display_name_envelope,staff.role,staff.specialist_id,
+         authority.revision AS authority_revision,
+         specialist.id AS profile_id,specialist.staff_user_id AS profile_staff_user_id,
+         specialist.status AS profile_status
+         ${withTitle ? ',specialist.professional_title_envelope' : ''}
+  FROM staff_users AS staff
+  JOIN staff_authorities AS authority ON authority.staff_id=staff.id
+  LEFT JOIN specialists AS specialist
+    ON specialist.id=staff.specialist_id AND specialist.staff_user_id=staff.id
+  WHERE staff.id=? AND staff.status='active' AND staff.access_subject=? AND staff.version=?`
 
 export async function getSession({
   db,
@@ -15,15 +39,30 @@ export async function getSession({
   issueToken = issueCsrfToken,
   loadDataKey: loadKey = loadDataKey,
 } = {}) {
+  const capabilities = acceptEffectiveCapabilities(actor?.role, actor?.capabilities)
   if (!db?.prepare || principal?.kind !== 'human' || typeof principal.subject !== 'string'
     || !actor?.id || !Number.isSafeInteger(actor.version) || actor.version < 1
+    || !Number.isSafeInteger(actor.authorityRevision) || actor.authorityRevision < 1
+    || !capabilities
     || !Number.isSafeInteger(nowMs)) denied()
-  const row = await db.prepare(
-    `SELECT display_name_envelope
-     FROM staff_users
-     WHERE id=? AND status='active' AND access_subject=? AND version=?`
-  ).bind(actor.id, principal.subject, actor.version).first()
-  if (!row) denied()
+  let row
+  let withTitle = true
+  try {
+    row = await db.prepare(sessionRowSql(true))
+      .bind(actor.id, principal.subject, actor.version).first()
+  } catch (error) {
+    if (!isD1MissingColumn(error, 'specialist.professional_title_envelope')) throw error
+    withTitle = false
+    row = await db.prepare(sessionRowSql(false))
+      .bind(actor.id, principal.subject, actor.version).first()
+  }
+  if (!row || row.role !== actor.role || row.specialist_id !== actor.specialistId
+    || row.authority_revision !== actor.authorityRevision) denied()
+  const linked = row.specialist_id !== null
+  if (linked !== (row.profile_id !== null)
+    || (linked && (row.profile_id !== row.specialist_id
+      || row.profile_staff_user_id !== actor.id
+      || !['active', 'pending'].includes(row.profile_status)))) denied()
 
   let envelope
   try {
@@ -41,6 +80,22 @@ export async function getSession({
     field: 'display_name',
     envelope,
   })
+  let professionalTitle = null
+  if (linked) {
+    if (!withTitle || row.professional_title_envelope === null) {
+      professionalTitle = 'Specjalistka'
+    } else {
+      let titleEnvelope
+      try { titleEnvelope = JSON.parse(row.professional_title_envelope) } catch { titleFailure() }
+      professionalTitle = await decryptForScope(cryptoContext.keyring, dataKey, {
+        expectedScope: cryptoContext.scope,
+        recordId: row.profile_id,
+        field: 'professional_title',
+        envelope: titleEnvelope,
+      })
+      if (!validProfessionalTitle(professionalTitle)) titleFailure()
+    }
+  }
   const csrfToken = await issueToken({
     subject: principal.subject,
     origin: config.appOrigin,
@@ -52,14 +107,15 @@ export async function getSession({
   const sessionActor = Object.freeze({
     id: actor.id,
     displayName,
+    professionalTitle,
     role: actor.role,
     specialistId: actor.specialistId,
     version: actor.version,
   })
-  const capabilities = Object.freeze([...capabilitiesForActor(actor)].sort())
   return {
     data: {
       actor: sessionActor,
+      authorityRevision: actor.authorityRevision,
       capabilities,
       csrfToken,
       csrfExpiresAt: new Date(expiresUnix * 1000).toISOString(),

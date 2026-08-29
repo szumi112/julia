@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { strToU8, zipSync } from 'fflate'
 import {
@@ -6,6 +7,10 @@ import {
   parseWorkbookCsv,
   parseWorkbookFile,
 } from '../../src/workbook-import.js'
+
+const reconciliationFixture = JSON.parse(readFileSync(new URL(
+  '../fixtures/workbook-reconciliation-v2.json', import.meta.url,
+), 'utf8'))
 
 const transactionHeader = [
   'Usługa', 'Cena', 'Klient', 'Data zakupu', 'Sposób płatności', 'Status', 'Faktura',
@@ -62,35 +67,50 @@ const columnName = (index) => {
 }
 
 const worksheetXml = (rows) => `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.map((row, rowIndex) => (
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.map((row, rowIndex) => (
   `<row r="${rowIndex + 1}">${row.map((value, columnIndex) => {
     const ref = `${columnName(columnIndex)}${rowIndex + 1}`
     if (value === '' || value === null || value === undefined) return `<c r="${ref}"/>`
+    if (typeof value === 'object' && value.formula) {
+      const prefix = value.formulaPrefix ? `${value.formulaPrefix}:` : ''
+      return `<c r="${ref}"><${prefix}f>${xmlEscape(value.formula)}</${prefix}f><v>${value.cached}</v></c>`
+    }
+    if (typeof value === 'object' && Number.isSafeInteger(value.sharedString)) {
+      return `<c r="${ref}" t="s"><v>${value.sharedString}</v></c>`
+    }
     if (typeof value === 'number') return `<c r="${ref}"><v>${value}</v></c>`
     return `<c r="${ref}" t="inlineStr"><is><t>${xmlEscape(value)}</t></is></c>`
   }).join('')}</row>`
 )).join('')}</sheetData></worksheet>`
 
-const testWorkbook = () => {
+const testWorkbook = ({ sheets = workbookSheets, sharedStrings = [], extraFiles = {},
+  extraRelationships = '' } = {}) => {
   const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${workbookSheets.map((sheet, index) => (
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((sheet, index) => (
   `<sheet name="${xmlEscape(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`
 )).join('')}</sheets></workbook>`
   const relationships = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${workbookSheets.map((_, index) => (
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_, index) => (
   `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`
-)).join('')}</Relationships>`
+)).join('')}${extraRelationships}</Relationships>`
   const files = {
     'xl/workbook.xml': strToU8(workbook),
     'xl/_rels/workbook.xml.rels': strToU8(relationships),
+    ...extraFiles,
   }
-  workbookSheets.forEach((sheet, index) => {
+  if (sharedStrings.length) {
+    files['xl/sharedStrings.xml'] = strToU8(`<?xml version="1.0" encoding="UTF-8"?>
+      <sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${sharedStrings.map((value) => (
+        `<si><t>${xmlEscape(value)}</t></si>`
+      )).join('')}</sst>`)
+  }
+  sheets.forEach((sheet, index) => {
     files[`xl/worksheets/sheet${index + 1}.xml`] = strToU8(worksheetXml(sheet.rows))
   })
   return zipSync(files)
 }
 
-test('normalizes transactions with the approved staging accounting month', () => {
+test('normalizes transactions with civil-date accounting months', () => {
   const preview = normalizeWorkbookRows({
     filename: 'fictional.xlsx',
     fingerprint: 'a'.repeat(64),
@@ -98,9 +118,9 @@ test('normalizes transactions with the approved staging accounting month', () =>
   })
 
   assert.deepEqual(preview.counts, {
-    financeRows: 3,
+    financeRows: 2,
     datedFinanceRows: 2,
-    undatedFinanceRows: 1,
+    undatedFinanceRows: 0,
     tusRows: 1,
     englishRows: 2,
     costOrAncillaryRows: 3,
@@ -110,8 +130,10 @@ test('normalizes transactions with the approved staging accounting month', () =>
     sheet: 'SierpieńWrzesień',
     rowNumber: 2,
     recordType: 'income',
-    accountingMonth: '2026-08',
+    accountingMonth: '2024-08',
     occurredOn: '2024-08-20',
+    periodPrecision: 'day',
+    periodMonth: '2024-08',
     amountGrosze: 16000,
     counterparty: 'Joanna Testowa',
     sourceLabel: 'Konsultacja psychologiczna',
@@ -127,14 +149,14 @@ test('normalizes transactions with the approved staging accounting month', () =>
     }), {}),
   })
   const undated = preview.rows.find((row) => row.sourceLabel === 'Webinar online')
-  assert.equal(undated.occurredOn, null)
-  assert.equal(undated.accountingMonth, '2026-08')
-  assert.equal(undated.paymentMethod, 'blik')
-  assert.equal(undated.settlementStatus, 'unknown')
-  assert.equal(undated.invoiceStatus, 'action_required')
+  assert.equal(undated, undefined)
+  assert.deepEqual(preview.quarantinedRows.map(({ reasonCode, accountingMonth }) => ({
+    reasonCode,
+    accountingMonth,
+  })), [{ reasonCode: 'SERVICE_DATE_MISSING', accountingMonth: '2024-09' }])
 })
 
-test('assigns the combined staging sheet to August 2026 while preserving source dates', () => {
+test('assigns every dated combined-sheet row to its civil month', () => {
   const preview = normalizeWorkbookRows({
     filename: 'fictional.xlsx',
     fingerprint: 'c'.repeat(64),
@@ -152,9 +174,130 @@ test('assigns the combined staging sheet to August 2026 while preserving source 
     accountingMonth,
     occurredOn,
   })), [
-    { accountingMonth: '2026-08', occurredOn: '2024-08-20' },
-    { accountingMonth: '2026-08', occurredOn: '2024-09-30' },
+    { accountingMonth: '2024-08', occurredOn: '2024-08-20' },
+    { accountingMonth: '2024-09', occurredOn: '2024-09-30' },
   ])
+})
+
+test('explicit exported accounting month wins and malformed nonblank values quarantine', () => {
+  const header = [...transactionHeader, 'Miesiąc księgowy']
+  const preview = normalizeWorkbookRows({
+    filename: 'round-trip.xlsx',
+    fingerprint: '9'.repeat(64),
+    sheets: [{
+      name: 'Wrzesień 2025',
+      rows: [
+        header,
+        ['Konsultacja', 180, 'Osoba Pierwsza', '2025-09-02', '', '', '', '2025-10'],
+        ['Konsultacja', 180, 'Osoba Druga', '2025-09-03', '', '', '', ''],
+        ['Konsultacja', 180, 'Osoba Trzecia', '2025-09-04', '', '', '', '2025-13'],
+      ],
+    }],
+  })
+
+  assert.deepEqual(preview.rows.map(({ accountingMonth, rowNumber }) => ({
+    accountingMonth, rowNumber,
+  })), [
+    { accountingMonth: '2025-10', rowNumber: 2 },
+    { accountingMonth: '2025-09', rowNumber: 3 },
+  ])
+  assert.deepEqual(preview.quarantinedRows.map(({ accountingMonth, reasonCode, rowNumber }) => ({
+    accountingMonth, reasonCode, rowNumber,
+  })), [{ accountingMonth: null, reasonCode: 'ACCOUNTING_MONTH_INVALID', rowNumber: 4 }])
+})
+
+test('records source-period precision independently from the accounting month', () => {
+  const header = [...transactionHeader, 'Miesiąc księgowy']
+  const preview = normalizeWorkbookRows({
+    filename: 'source-periods.xlsx',
+    fingerprint: '8'.repeat(64),
+    sheets: [
+      {
+        name: 'Wrzesień 2025',
+        rows: [
+          header,
+          ['Konsultacja', 180, 'Osoba Dzienna', '2025-09-02', '', '', '', '2025-10'],
+          ['', 180, 'Osoba Kwarantanna', '2025-09-03', '', '', '', '2025-10'],
+        ],
+      },
+      {
+        name: 'GRUPA TUS Czerwiec 2025',
+        rows: [
+          header,
+          ['Grupa TUS', 300, 'Osoba Miesięczna', '', '', '', '', '2025-10'],
+        ],
+      },
+      {
+        name: 'GRUPA TUS',
+        rows: [transactionHeader, ['Grupa TUS', 300, 'Osoba Bez Okresu', '', '', '', '']],
+      },
+      {
+        name: 'Angielski',
+        rows: [
+          ['Lipiec 2025'],
+          ['Imię i nazwisko', 'Ilość lekcji', 'Kwota'],
+          ['Osoba Angielski', 2, 120],
+        ],
+      },
+      {
+        name: 'Stałe koszty',
+        rows: [
+          ['Koszt', 'Kwota', 'Miesiąc'],
+          ['Czynsz', 2_000, 'Sierpień 2025'],
+        ],
+      },
+    ],
+  })
+
+  assert.deepEqual(preview.rows.map((row) => ({
+    sourceLabel: row.sourceLabel,
+    accountingMonth: row.accountingMonth,
+    occurredOn: row.occurredOn,
+    periodPrecision: row.periodPrecision,
+    periodMonth: row.periodMonth,
+  })), [
+    {
+      sourceLabel: 'Konsultacja', accountingMonth: '2025-10', occurredOn: '2025-09-02',
+      periodPrecision: 'day', periodMonth: '2025-09',
+    },
+    {
+      sourceLabel: 'Grupa TUS', accountingMonth: '2025-10', occurredOn: null,
+      periodPrecision: 'month', periodMonth: '2025-06',
+    },
+    {
+      sourceLabel: 'Grupa TUS', accountingMonth: null, occurredOn: null,
+      periodPrecision: 'unknown', periodMonth: null,
+    },
+    {
+      sourceLabel: 'Lekcje języka angielskiego', accountingMonth: '2025-07',
+      occurredOn: null, periodPrecision: 'month', periodMonth: '2025-07',
+    },
+    {
+      sourceLabel: 'Czynsz', accountingMonth: '2025-08', occurredOn: null,
+      periodPrecision: 'month', periodMonth: '2025-08',
+    },
+  ])
+  assert.deepEqual(preview.quarantinedRows.map((row) => ({
+    occurredOn: row.occurredOn,
+    periodPrecision: row.periodPrecision,
+    periodMonth: row.periodMonth,
+  })), [{ occurredOn: '2025-09-03', periodPrecision: 'day', periodMonth: '2025-09' }])
+})
+
+test('returns stable quarantine reasons for populated candidates with unusable service dates', () => {
+  const preview = normalizeWorkbookRows(reconciliationFixture)
+
+  assert.deepEqual(preview.quarantinedRows?.map(({ rowNumber, reasonCode, accountingMonth }) => ({
+    rowNumber,
+    reasonCode,
+    accountingMonth,
+  })), [
+    { rowNumber: 4, reasonCode: 'SERVICE_DATE_MISSING', accountingMonth: '2024-09' },
+    { rowNumber: 5, reasonCode: 'SERVICE_DATE_INVALID', accountingMonth: '2024-09' },
+  ])
+  assert.equal(preview.reconciliation.sourceCandidates, 9)
+  assert.equal(preview.reconciliation.acceptedRows, 7)
+  assert.equal(preview.reconciliation.quarantinedRows, 2)
 })
 
 test('preserves additive prices and never infers months from monetary amounts', () => {
@@ -182,19 +325,125 @@ test('preserves additive prices and never infers months from monetary amounts', 
   assert.deepEqual(preview.warnings.find(({ code }) => code === 'ACCOUNTING_MONTH_UNKNOWN'), {
     code: 'ACCOUNTING_MONTH_UNKNOWN', count: 1,
   })
+  assert.deepEqual(preview.warnings.find(({ code }) => code === 'AMOUNT_STORED_AS_TEXT'), {
+    code: 'AMOUNT_STORED_AS_TEXT', count: 1,
+  })
 })
 
-test('fails closed instead of silently dropping a populated transaction with an invalid price', () => {
+test('quarantines instead of silently dropping a populated transaction with an invalid price', () => {
   for (const price of ['do ustalenia', '200+20 na 2 sesje']) {
-    assert.throws(() => normalizeWorkbookRows({
+    const preview = normalizeWorkbookRows({
       filename: 'invalid.xlsx',
       fingerprint: 'f'.repeat(64),
       sheets: [{
         name: 'Maj 2025',
         rows: [transactionHeader, ['Konsultacja', price, 'Osoba Testowa', '2025-05-02']],
       }],
-    }), /WORKBOOK_ROW_AMOUNT_INVALID/)
+    })
+    assert.equal(preview.rows.length, 0)
+    assert.equal(preview.quarantinedRows?.[0]?.reasonCode, 'AMOUNT_INVALID')
   }
+})
+
+test('accounts for every populated transaction shape after excluding formula rows', () => {
+  const preview = normalizeWorkbookRows({
+    filename: 'transaction-candidates.xlsx',
+    fingerprint: '2'.repeat(64),
+    sheets: [{
+      name: 'Maj 2025',
+      rows: [
+        transactionHeader,
+        ['', 180, 'Osoba Bez Usługi', '2025-05-02'],
+        ['Konsultacja', 180, '', '2025-05-03'],
+        ['Konsultacja', '', 'Osoba Bez Kwoty i Daty', ''],
+        ['Suma', { formula: 'SUM(B2:B4)', cached: 360 }, '', ''],
+        ['', '', '', ''],
+      ],
+    }],
+  })
+
+  assert.deepEqual(preview.quarantinedRows.map(({ rowNumber, reasonCode, reasonCodes }) => ({
+    rowNumber,
+    reasonCode,
+    reasonCodes,
+  })), [
+    { rowNumber: 2, reasonCode: 'SERVICE_MISSING', reasonCodes: ['SERVICE_MISSING'] },
+    { rowNumber: 3, reasonCode: 'COUNTERPARTY_MISSING', reasonCodes: ['COUNTERPARTY_MISSING'] },
+    {
+      rowNumber: 4,
+      reasonCode: 'AMOUNT_MISSING',
+      reasonCodes: ['AMOUNT_MISSING', 'SERVICE_DATE_MISSING'],
+    },
+  ])
+  assert.deepEqual(preview.reconciliation, {
+    sourceCandidates: 3,
+    acceptedRows: 0,
+    quarantinedRows: 3,
+    excludedFormulaBlocks: 1,
+    excludedFormulaRows: 1,
+  })
+})
+
+test('accounts for fixed-ledger partial records and ignores formula and empty rows', () => {
+  const preview = normalizeWorkbookRows({
+    filename: 'fixed-candidates.xlsx',
+    fingerprint: '3'.repeat(64),
+    sheets: [{
+      name: 'Stałe koszty',
+      rows: [
+        ['Koszt', 'Cena'],
+        ['Wynajem', 2200],
+        ['', 150],
+        ['Materiały', 'do ustalenia'],
+        ['Suma', { formula: 'SUM(B2:B4)', cached: 2350 }],
+        ['', ''],
+      ],
+    }],
+  })
+
+  assert.deepEqual(preview.rows.map(({ sourceLabel }) => sourceLabel), ['Wynajem'])
+  assert.deepEqual(preview.quarantinedRows.map(({ rowNumber, reasonCode, reasonCodes }) => ({
+    rowNumber,
+    reasonCode,
+    reasonCodes,
+  })), [
+    { rowNumber: 3, reasonCode: 'ORPHAN_AMOUNT', reasonCodes: ['ORPHAN_AMOUNT'] },
+    { rowNumber: 4, reasonCode: 'AMOUNT_INVALID', reasonCodes: ['AMOUNT_INVALID'] },
+  ])
+  assert.equal(preview.reconciliation.sourceCandidates, 3)
+  assert.equal(preview.reconciliation.excludedFormulaBlocks, 1)
+})
+
+test('accounts for English partial records after excluding formula-only summaries', () => {
+  const preview = normalizeWorkbookRows({
+    filename: 'english-candidates.xlsx',
+    fingerprint: '4'.repeat(64),
+    sheets: [{
+      name: 'Angielski Julia',
+      rows: [
+        ['Maj 2025'],
+        ['Imię i nazwisko', 'Ilość lekcji', 'Kwota'],
+        ['Uczeń Poprawny', 2, 100],
+        ['', 2, 100],
+        ['Uczeń Bez Liczby', 'do ustalenia', 100],
+        ['Uczeń Bez Kwoty', 2, 'do ustalenia'],
+        [{ formula: 'SUM(C3:C6)', cached: 300 }, '', ''],
+        ['', '', ''],
+      ],
+    }],
+  })
+
+  assert.equal(preview.rows.length, 1)
+  assert.deepEqual(preview.quarantinedRows.map(({ rowNumber, reasonCode }) => ({
+    rowNumber,
+    reasonCode,
+  })), [
+    { rowNumber: 4, reasonCode: 'COUNTERPARTY_MISSING' },
+    { rowNumber: 5, reasonCode: 'LESSON_COUNT_INVALID' },
+    { rowNumber: 6, reasonCode: 'AMOUNT_INVALID' },
+  ])
+  assert.equal(preview.reconciliation.sourceCandidates, 4)
+  assert.equal(preview.reconciliation.excludedFormulaBlocks, 1)
 })
 
 test('normalizes raw source strings before protected payload validation', () => {
@@ -219,7 +468,7 @@ test('normalizes TUS, English, expenses, and ancillary revenue as distinct recor
   })
   const tus = preview.rows.find((row) => row.recordType === 'tus')
   assert.equal(tus.sourceLabel, 'Grupa TUS 5-6 lat')
-  assert.equal(tus.accountingMonth, '2024-09')
+  assert.equal(tus.accountingMonth, '2024-10')
   const english = preview.rows.filter((row) => row.recordType === 'english')
   assert.deepEqual(english.map(({ accountingMonth, lessonCount, amountGrosze }) => (
     { accountingMonth, lessonCount, amountGrosze }
@@ -244,8 +493,74 @@ test('parses a real OOXML zip and hashes its bytes before normalization', async 
     bytes.byteOffset + bytes.byteLength,
   ), { filename: 'mini.xlsx' })
   assert.match(preview.fingerprint, /^[0-9a-f]{64}$/)
-  assert.equal(preview.counts.financeRows, 3)
-  assert.equal(preview.rows.length, 8)
+  assert.equal(preview.counts.financeRows, 2)
+  assert.equal(preview.rows.length, 7)
+})
+
+test('excludes formula-cache summaries but retains valid records after them', async () => {
+  const fixtureSheets = reconciliationFixture.sheets.filter(({ name }) => name === 'Angielski Julia')
+  const bytes = testWorkbook({ sheets: fixtureSheets })
+  const preview = await parseWorkbookFile(bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ), { filename: 'formula-cache.xlsx' })
+
+  assert.deepEqual(preview.rows.map(({ counterparty }) => counterparty), [
+    'Uczeń Pierwszy',
+    'Uczeń Po Podsumowaniu',
+  ])
+  assert.equal(preview.reconciliation.excludedFormulaBlocks, 1)
+})
+
+test('excludes namespace-qualified formula caches and retains later records', async () => {
+  const bytes = testWorkbook({ sheets: [{
+    name: 'Angielski Julia',
+    rows: [
+      ['Maj 2025'],
+      ['Imię i nazwisko', 'Ilość lekcji', 'Kwota'],
+      ['Uczeń Pierwszy', 2, 100],
+      ['Suma', '', { formulaPrefix: 'x', formula: 'SUM(C3:C3)', cached: 100 }],
+      ['Uczeń Po Podsumowaniu', 3, 150],
+    ],
+  }] })
+  const preview = await parseWorkbookFile(bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ), { filename: 'qualified-formula.xlsx' })
+
+  assert.deepEqual(preview.rows.map(({ counterparty }) => counterparty), [
+    'Uczeń Pierwszy',
+    'Uczeń Po Podsumowaniu',
+  ])
+  assert.equal(preview.reconciliation.excludedFormulaBlocks, 1)
+})
+
+test('quarantines a shared-string OOXML service date instead of coercing its text', async () => {
+  const bytes = testWorkbook({
+    sharedStrings: ['2025-09-02'],
+    sheets: [{
+      name: 'Wrzesień',
+      rows: [
+        transactionHeader,
+        ['Konsultacja', 180, 'Osoba Testowa', { sharedString: 0 }],
+      ],
+    }],
+  })
+  const preview = await parseWorkbookFile(bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ), { filename: 'shared-date.xlsx' })
+
+  assert.equal(preview.rows.length, 0)
+  assert.equal(preview.quarantinedRows[0].reasonCode, 'SERVICE_DATE_INVALID')
+})
+
+test('adds parser and materializer versions without changing transport format version', () => {
+  const preview = normalizeWorkbookRows(reconciliationFixture)
+
+  assert.equal(preview.formatVersion, 1)
+  assert.equal(preview.parserVersion, 2)
+  assert.equal(preview.materializerVersion, 2)
 })
 
 test('parses CSV rows with quoted commas and stable source keys', async () => {
@@ -284,4 +599,77 @@ test('rejects unsafe workbook formats', async () => {
     parseWorkbookFile(new ArrayBuffer(8), { filename: 'unsafe.xlsm' }),
     /WORKBOOK_FORMAT_UNSUPPORTED/,
   )
+})
+
+test('rejects executable formulas and unsafe OOXML package relationships', async () => {
+  const cases = [
+    {
+      name: 'macro.xlsx',
+      bytes: testWorkbook({ extraFiles: { 'xl/vbaProject.bin': new Uint8Array([1]) } }),
+      code: 'WORKBOOK_MACRO_FORBIDDEN',
+    },
+    {
+      name: 'external.xlsx',
+      bytes: testWorkbook({
+        extraRelationships: '<Relationship Id="external" Type="externalLink" Target="https://example.test/source.xlsx" TargetMode="External"/>',
+      }),
+      code: 'WORKBOOK_EXTERNAL_RELATIONSHIP_FORBIDDEN',
+    },
+    {
+      name: 'malformed-relationship.xlsx',
+      bytes: testWorkbook({
+        extraRelationships: '<Relationship Id="malformed" Type="worksheet"/>',
+      }),
+      code: 'WORKBOOK_RELATIONSHIP_INVALID',
+    },
+    {
+      name: 'traversal.xlsx',
+      bytes: testWorkbook({ extraFiles: { '../escape.txt': strToU8('unsafe') } }),
+      code: 'WORKBOOK_ARCHIVE_PATH_INVALID',
+    },
+    {
+      name: 'dde.xlsx',
+      bytes: testWorkbook({ sheets: [{
+        name: 'Maj 2025',
+        rows: [
+          transactionHeader,
+          ['Konsultacja', { formula: 'DDE("cmd","/c calc")', cached: 180 }, 'Osoba Testowa', '2025-05-02'],
+        ],
+      }] }),
+      code: 'WORKBOOK_FORMULA_FORBIDDEN',
+    },
+    {
+      name: 'qualified-dde.xlsx',
+      bytes: testWorkbook({ sheets: [{
+        name: 'Maj 2025',
+        rows: [
+          transactionHeader,
+          ['Konsultacja', {
+            formulaPrefix: 'x',
+            formula: 'DDE("cmd","/c calc")',
+            cached: 180,
+          }, 'Osoba Testowa', '2025-05-02'],
+        ],
+      }] }),
+      code: 'WORKBOOK_FORMULA_FORBIDDEN',
+    },
+  ]
+
+  for (const { name, bytes, code } of cases) {
+    await assert.rejects(parseWorkbookFile(bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ), { filename: name }), new RegExp(code))
+  }
+})
+
+test('rejects an archive whose decompressed payload exceeds the parser budget', async () => {
+  const bytes = testWorkbook({
+    extraFiles: { 'xl/media/oversized.bin': new Uint8Array(26 * 1024 * 1024) },
+  })
+
+  await assert.rejects(parseWorkbookFile(bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ), { filename: 'oversized.xlsx' }), /WORKBOOK_DECOMPRESSED_SIZE_INVALID/)
 })

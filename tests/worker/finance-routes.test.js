@@ -11,17 +11,28 @@ import { createApp } from '../../worker/app.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
+  applySpecialistProfilesStageD,
+  applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
+import { authorityActor } from './fixtures.js'
+import { effectiveCapabilitiesFor } from '../../src/capabilities.js'
 
 const NOW_MS = 1_800_000_000_000
 const NOW = new Date(NOW_MS).toISOString()
 const CORRELATION_ID = '00000000-0000-4000-8000-000000000031'
-const OWNER = Object.freeze({ id: 'stf_finance_api_owner', role: 'owner', specialistId: null })
-const COORDINATOR = Object.freeze({
-  id: 'stf_finance_api_coord', role: 'coordinator', specialistId: null,
+const OWNER = authorityActor({ id: 'stf_finance_api_owner', role: 'owner' })
+const COORDINATOR = authorityActor({
+  id: 'stf_finance_api_coord', role: 'coordinator',
 })
-const SPECIALIST = Object.freeze({
+const IMPORT_COORDINATOR = authorityActor({
+  id: COORDINATOR.id,
+  role: 'coordinator',
+  capabilities: effectiveCapabilitiesFor({
+    role: 'coordinator', allow: ['finance.import'], deny: [],
+  }),
+})
+const SPECIALIST = authorityActor({
   id: 'stf_finance_api_spec', role: 'specialist', specialistId: 'sp_finance_api',
 })
 
@@ -92,6 +103,8 @@ beforeAll(async () => {
   await completeCoreDirectoryStageA()
   await applyCoreDirectoryStageB()
   await applyFinanceStageC()
+  await applySpecialistProfilesStageD()
+  await applyWorkbookRegistryStageE()
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO staff_users
       (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
@@ -111,6 +124,48 @@ beforeAll(async () => {
 })
 
 describe('protected finance import and read service', () => {
+  it('allows only a coordinator explicitly granted finance.import to start an import', async () => {
+    const body = {
+      filename: 'coordinator-fictional.xlsx', fingerprint: '9'.repeat(64),
+      formatVersion: 1, totalRows: 1,
+    }
+    await expect(startFinanceImport({
+      db: env.DB, actor: COORDINATOR, keyring: await ring(), nowMs: NOW_MS,
+      correlationId: CORRELATION_ID, idFactory: ids(), body,
+      idempotencyKey: 'coordinator-import-denied-0001',
+    })).rejects.toThrow(/^NOT_FOUND$/)
+
+    await expect(startFinanceImport({
+      db: env.DB, actor: IMPORT_COORDINATOR, keyring: await ring(), nowMs: NOW_MS,
+      correlationId: CORRELATION_ID, idFactory: ids(), body,
+      idempotencyKey: 'coordinator-import-granted-0001',
+    })).resolves.toMatchObject({
+      status: 201,
+      body: { data: { batch: { status: 'importing' } } },
+    })
+  })
+
+  it('rolls back an import slice when its authority revision is stale', async () => {
+    const fingerprint = '8'.repeat(64)
+    await expect(startFinanceImport({
+      db: env.DB,
+      actor: authorityActor({
+        id: OWNER.id, role: 'owner', authorityRevision: OWNER.authorityRevision + 1,
+      }),
+      keyring: await ring(),
+      nowMs: NOW_MS,
+      correlationId: CORRELATION_ID,
+      idFactory: ids(),
+      body: {
+        filename: 'stale-authority.xlsx', fingerprint, formatVersion: 1, totalRows: 1,
+      },
+      idempotencyKey: 'finance-stale-authority-0001',
+    })).rejects.toThrow()
+    expect(await env.DB.prepare(
+      'SELECT count(*) AS count FROM finance_import_batches WHERE fingerprint=?',
+    ).bind(fingerprint).first('count')).toBe(0)
+  })
+
   it('accepts the versioned actor shape resolved by the HTTP identity boundary', async () => {
     const listed = await listFinanceEntries({
       db: env.DB, actor: { ...OWNER, version: 1 }, keyring: await ring(), nowMs: NOW_MS,
@@ -174,6 +229,12 @@ describe('protected finance import and read service', () => {
         }),
       ],
     }
+    await expect(appendFinanceImportChunk({
+      db: env.DB, actor: IMPORT_COORDINATOR, keyring, nowMs: NOW_MS + 2,
+      correlationId: CORRELATION_ID, idFactory,
+      batchId, body: chunkBody,
+      idempotencyKey: 'finance-chunk-other-creator-0001',
+    })).rejects.toThrow(/^NOT_FOUND$/)
     const chunk = await appendFinanceImportChunk({
       db: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 2,
       correlationId: CORRELATION_ID, idFactory,
@@ -251,7 +312,7 @@ describe('protected finance import and read service', () => {
     })).rejects.toThrow('FINANCE_IMPORT_DUPLICATE')
   })
 
-  it('allows owner-only mutation and denies specialists all centre finance reads', async () => {
+  it('denies import without finance.import and specialists all centre finance reads', async () => {
     const keyring = await ring()
     for (const actor of [COORDINATOR, SPECIALIST]) {
       await expect(startFinanceImport({

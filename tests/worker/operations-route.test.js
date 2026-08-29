@@ -1,9 +1,10 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   getOperationalHealth,
   listOpenOperationalActions,
   listSecurityAudit,
+  requestOperationalActionRecovery,
   resolveOperationalAction,
 } from '../../worker/routes/operations.js'
 import {
@@ -13,6 +14,14 @@ import {
 } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { decodeBase64Url, encodeBase64Url } from '../../worker/security/encoding.js'
+import { authorityActor } from './fixtures.js'
+import {
+  applyCoreDirectoryStageB,
+  applyFinanceStageC,
+  applySpecialistProfilesStageD,
+  applyWorkbookRegistryStageE,
+  completeCoreDirectoryStageA,
+} from './apply-migrations.js'
 
 const NOW_MS = Date.parse('2042-07-31T10:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
@@ -23,6 +32,14 @@ const SCOPE = Object.freeze({
   purpose: 'identity',
 })
 let fixtureSerial = 0
+
+beforeAll(async () => {
+  await completeCoreDirectoryStageA()
+  await applyCoreDirectoryStageB()
+  await applyFinanceStageC()
+  await applySpecialistProfilesStageD()
+  await applyWorkbookRegistryStageE()
+})
 
 const ids = (prefix = 'generated') => {
   let count = 0
@@ -141,7 +158,7 @@ async function seedActiveActor({
     NOW,
     NOW,
   ).run()
-  return { id, role, specialistId, version }
+  return authorityActor({ id, role, specialistId, version })
 }
 
 const commonInput = (actor, context, changes = {}) => ({
@@ -236,6 +253,7 @@ async function seedHealthSnapshot(snapshot = validSnapshot(), {
 }
 
 function facade(real, hooks = {}) {
+  let replacedStaffRead = false
   const statement = (inner, sql, bindings = []) => ({
     __inner: inner,
     __sql: sql,
@@ -245,7 +263,16 @@ function facade(real, hooks = {}) {
     first: (column) => inner.first(column),
     async all() {
       const replacement = await hooks.all?.(sql, bindings)
-      return replacement === undefined ? inner.all() : replacement
+      if (replacement !== undefined) {
+        if (sql.includes('FROM staff_users')) replacedStaffRead = true
+        return replacement
+      }
+      if (replacedStaffRead && sql.includes('FROM staff_authorities AS authority')) {
+        return {
+          results: [{ authority_revision: 1, capability: null, decision: null }],
+        }
+      }
+      return inner.all()
     },
   })
   return {
@@ -500,12 +527,14 @@ const AUDIT_FACTS = Object.freeze([
   Object.freeze({ action: 'identity.denied', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'denied', metadata: { version: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'identity.reindex', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { version: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'operational_action.resolved', entityType: 'operational_action', entityId: 'act_audit', result: 'success', metadata: { actionVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'outbox.recovery.requested', entityType: 'outbox_job', entityId: 'job_audit_recovery', result: 'success', metadata: { actionVersion: 1, desiredGeneration: 7, invitationVersion: null, replacementJobId: 'job_audit_replacement' }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'staff.access.reconciled', entityType: 'access_group', entityId: 'centre_1', result: 'success', metadata: { appliedGeneration: 2, desiredGeneration: 2, invitationCount: 0 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'staff.bootstrap', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 1, invitationVersion: 1, specialistVersion: null, staffVersion: 1 }, actorStaffId: null }),
   Object.freeze({ action: 'staff.deactivated', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { desiredGeneration: 2, specialistVersion: 2, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'staff.invitation.email_accepted', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { invitationVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'staff.invitation.expired', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 2, specialistVersion: null, staffVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'staff.invited', entityType: 'staff_invitation', entityId: 'inv_audit', result: 'success', metadata: { desiredGeneration: 2, invitationVersion: 1, specialistVersion: 1, staffVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'staff.profile.updated', entityType: 'staff_user', entityId: 'stf_audit_target', result: 'success', metadata: { staffVersion: 2 }, actorStaffId: null }),
   Object.freeze({ action: 'specialist.backfilled', entityType: 'specialist', entityId: 'sp_audit_backfilled', result: 'success', metadata: { specialistVersion: 1, stateVersion: 2 }, actorStaffId: null }),
   Object.freeze({ action: 'core_directory.upgrade.advanced', entityType: 'system_state', entityId: 'core_directory_specialist_backfill_v1', result: 'success', metadata: { createdCount: 0, processedCount: 1, stateVersion: 2 }, actorStaffId: null }),
   Object.freeze({ action: 'client.created', entityType: 'client', entityId: 'cl_audit_created', result: 'success', metadata: { clientVersion: 1, assignmentId: 'asg_audit_created', assignmentVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
@@ -526,6 +555,12 @@ const IDENTITY_AUDIT_ACTIONS = new Set([
   'staff.invitation.expired',
   'staff.invited',
 ])
+const STAFF_PROFILE_AUDIT_FACT = AUDIT_FACTS.find(
+  ({ action }) => action === 'staff.profile.updated',
+)
+const OUTBOX_RECOVERY_AUDIT_FACT = AUDIT_FACTS.find(
+  ({ action }) => action === 'outbox.recovery.requested',
+)
 
 const IDENTITY_AUDIT_CASES = AUDIT_FACTS
   .filter(({ action }) => IDENTITY_AUDIT_ACTIONS.has(action))
@@ -594,10 +629,11 @@ async function caught(promise) {
 }
 
 describe('operations route services', () => {
-  it('exports the four Gate E services', () => {
+  it('exports the five Gate E services', () => {
     expect(getOperationalHealth).toBeTypeOf('function')
     expect(listOpenOperationalActions).toBeTypeOf('function')
     expect(resolveOperationalAction).toBeTypeOf('function')
+    expect(requestOperationalActionRecovery).toBeTypeOf('function')
     expect(listSecurityAudit).toBeTypeOf('function')
   })
 
@@ -605,9 +641,10 @@ describe('operations route services', () => {
     ['health', getOperationalHealth, []],
     ['actions', listOpenOperationalActions, []],
     ['resolution', resolveOperationalAction, ['actionId', 'idempotencyKey', 'body']],
+    ['recovery', requestOperationalActionRecovery, ['actionId', 'idempotencyKey', 'body']],
     ['audit', listSecurityAudit, ['query']],
   ])('rejects malformed exact service inputs for %s before D1', async (_label, service, extraKeys) => {
-    const actor = { id: 'stf_input', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_input', role: 'owner' })
     const context = await cryptoContext()
     const extras = extraKeys.includes('query')
       ? { query: new URLSearchParams() }
@@ -620,6 +657,15 @@ describe('operations route services', () => {
       { ...valid, extra: true },
       Object.assign(Object.create({ inherited: true }), valid),
       { ...valid, db: { prepare() {} } },
+      {
+        ...valid,
+        actor: {
+          id: actor.id,
+          role: actor.role,
+          specialistId: actor.specialistId,
+          version: actor.version,
+        },
+      },
       { ...valid, actor: { ...actor, status: 'active' } },
       { ...valid, nowMs: -1 },
       { ...valid, correlationId: 'opaque-but-not-uuid' },
@@ -645,7 +691,7 @@ describe('operations route services', () => {
 
   it('accepts 65 loaded canonical lookup keys in all four service contexts', async () => {
     const context = await cryptoContextWithLookupCount(65)
-    const actor = { id: 'stf_lookup_65', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_lookup_65', role: 'owner' })
     const services = [
       ['health', getOperationalHealth, {}, 'FROM system_state'],
       ['actions', listOpenOperationalActions, {}, 'FROM operational_actions'],
@@ -707,7 +753,7 @@ describe('operations route services', () => {
       ['sign', 'verify'],
     ))
 
-    const actor = { id: 'stf_real_crypto_key', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_real_crypto_key', role: 'owner' })
     for (const [label, target, key] of candidates) {
       const marker = new Error(`private-crypto-marker:${label}`)
       const prepare = vi.fn(() => { throw marker })
@@ -744,12 +790,10 @@ describe('operations route services', () => {
       dataKek: target === 'data' ? exportable : validDataKek,
       lookupKey: target === 'lookup' ? exportable : validLookupKey,
     })
-    const actor = {
+    const actor = authorityActor({
       id: `stf_extractable_${target}`,
       role: 'owner',
-      specialistId: null,
-      version: 1,
-    }
+    })
 
     const error = await caught(getOperationalHealth(commonInput(actor, invalidContext, {
       db: { prepare, batch: vi.fn() },
@@ -761,7 +805,7 @@ describe('operations route services', () => {
 
   it('normalizes root, nested, descriptor, and hostile keyring traps to OPERATIONS_INVALID', async () => {
     const context = await cryptoContext()
-    const actor = { id: 'stf_proxy_input', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_proxy_input', role: 'owner' })
     const valid = commonInput(actor, context)
     const revoked = Proxy.revocable(valid, {})
     revoked.revoke()
@@ -870,7 +914,6 @@ describe('operations route services', () => {
         dataKey: dataKey.object,
         scope: scope.object,
       }, `${label}:context`)
-      const capturedActor = singleReadObject(actor, `${label}:actor`)
       const db = facade(env.DB, {
         all: (sql) => {
           if (label === 'actions' && sql.includes('FROM operational_actions')) return { results: [] }
@@ -879,7 +922,7 @@ describe('operations route services', () => {
           return undefined
         },
       })
-      const root = singleReadObject(commonInput(capturedActor.object, context.object, {
+      const root = singleReadObject(commonInput(actor, context.object, {
         db,
         ...extras,
       }), `${label}:root`)
@@ -889,7 +932,7 @@ describe('operations route services', () => {
         await expect(service(root.object)).resolves.toEqual(terminal)
       }
       expect(versionReads).toBe(1)
-      for (const reads of [root.reads, context.reads, dataKey.reads, scope.reads, keyring.reads, capturedActor.reads]) {
+      for (const reads of [root.reads, context.reads, dataKey.reads, scope.reads, keyring.reads]) {
         expect([...reads.values()].every((count) => count === 1)).toBe(true)
       }
     }
@@ -897,7 +940,7 @@ describe('operations route services', () => {
 
   it('captures each D1 all-result wrapper and Proxy results array once without mutation', async () => {
     const context = await cryptoContext()
-    const actor = { id: 'stf_all_capture', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_all_capture', role: 'owner' })
     const snapshot = validSnapshot()
     const healthRow = {
       key: 'health.snapshot',
@@ -962,7 +1005,7 @@ describe('operations route services', () => {
     ['audit', listSecurityAudit, { query: new URLSearchParams() }],
   ])('normalizes a throwing D1 all-result getter in the %s reader', async (target, service, extras) => {
     const context = await cryptoContext()
-    const actor = { id: `stf_all_throw_${target}`, role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: `stf_all_throw_${target}`, role: 'owner' })
     const hostile = throwingAllResult(`private-all-marker:${target}`)
     const db = facade(env.DB, {
       all(sql) {
@@ -984,7 +1027,7 @@ describe('operations route services', () => {
 
   it('normalizes a throwing Proxy results entry without leaking or mutating it', async () => {
     const context = await cryptoContext()
-    const actor = { id: 'stf_all_proxy_throw', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_all_proxy_throw', role: 'owner' })
     const marker = new Error('private-all-proxy-entry')
     let mutations = 0
     const results = new Proxy([storedActorRow(actor)], {
@@ -1008,7 +1051,7 @@ describe('operations route services', () => {
 
   it('captures the attempted-audit collision result once before recovery classification', async () => {
     const context = await cryptoContext()
-    const actor = { id: 'stf_attempted_audit_capture', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_attempted_audit_capture', role: 'owner' })
     const row = await actionRow(context, {
       ...ACTION_FACTS[2],
       id: 'act_attempted_audit_capture',
@@ -1051,7 +1094,9 @@ describe('operations route services', () => {
     ['invalid specialist id', { specialist_id: 'bad specialist id' }],
   ])('fails closed on a malformed revalidated actor row: %s', async (_label, changes) => {
     const context = await cryptoContext()
-    const actor = { id: `stf_malformed_actor_${++fixtureSerial}`, role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({
+      id: `stf_malformed_actor_${++fixtureSerial}`, role: 'owner',
+    })
     const row = { ...storedActorRow(actor), ...changes }
     const db = facade(env.DB, {
       all: (sql) => sql.includes('FROM staff_users') ? { results: [row] } : undefined,
@@ -1059,6 +1104,71 @@ describe('operations route services', () => {
 
     await expect(getOperationalHealth(commonInput(actor, context, { db })))
       .rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+  })
+
+  it.each([
+    ['missing authority', []],
+    ['unknown capability', [{
+      authority_revision: 1,
+      capability: 'future.capability',
+      decision: 'allow',
+    }]],
+    ['extra authority field', [{
+      authority_revision: 1,
+      capability: null,
+      decision: null,
+      extra: 'private-authority-field',
+    }]],
+  ])('fails closed before the health read on malformed current authority: %s', async (_label, rows) => {
+    const context = await cryptoContext()
+    const actor = authorityActor({
+      id: `stf_malformed_authority_${++fixtureSerial}`,
+      role: 'owner',
+    })
+    let healthReads = 0
+    const db = facade(env.DB, {
+      all(sql) {
+        if (sql.includes('FROM staff_users')) return { results: [storedActorRow(actor)] }
+        if (sql.includes('FROM staff_authorities AS authority')) return { results: rows }
+        if (sql.includes('FROM system_state')) healthReads += 1
+        return undefined
+      },
+    })
+
+    await expect(getOperationalHealth(commonInput(actor, context, { db })))
+      .rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+    expect(healthReads).toBe(0)
+  })
+
+  it('re-reads the effective authority revision and persists a denial after revocation', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({
+      id: 'stf_authority_revision_revoked',
+      role: 'coordinator',
+    })
+    let healthReads = 0
+    const db = facade(env.DB, {
+      all(sql) {
+        if (sql.includes('FROM staff_authorities AS authority')) {
+          return {
+            results: [{
+              authority_revision: actor.authorityRevision + 1,
+              capability: 'operations.health.read',
+              decision: 'deny',
+            }],
+          }
+        }
+        if (sql.includes('FROM system_state')) healthReads += 1
+        return undefined
+      },
+    })
+
+    await expect(getOperationalHealth(commonInput(actor, context, {
+      db,
+      idFactory: ids('aud_authority_revision_revoked'),
+    }))).rejects.toThrow(/^FORBIDDEN$/)
+    expect(healthReads).toBe(0)
+    expect(await denialRows(actor.id)).toHaveLength(1)
   })
 
   it('propagates denial persistence failure instead of returning a bare forbidden response', async () => {
@@ -1120,7 +1230,10 @@ describe('operations route services', () => {
     ['changed version', { version: 2 }],
   ])('denies a previously authorized actor after active-row revalidation: %s', async (_label, stored) => {
     const context = await cryptoContext()
-    const inputActor = { id: `stf_revalidate_${_label.replaceAll(' ', '_')}`, role: 'owner', specialistId: null, version: 1 }
+    const inputActor = authorityActor({
+      id: `stf_revalidate_${_label.replaceAll(' ', '_')}`,
+      role: 'owner',
+    })
     const seeded = await seedActiveActor({
       id: inputActor.id,
       role: stored.role ?? inputActor.role,
@@ -1251,6 +1364,7 @@ describe('operations route services', () => {
           version: 1,
           createdAt: new Date(NOW_MS - index).toISOString(),
           updatedAt: new Date(NOW_MS - index).toISOString(),
+          recovery: null,
         })),
         truncated: false,
       },
@@ -1258,7 +1372,7 @@ describe('operations route services', () => {
     for (const action of result.data.actions) {
       expect(Object.keys(action)).toEqual([
         'id', 'kind', 'severity', 'entityType', 'entityId', 'details',
-        'version', 'createdAt', 'updatedAt',
+        'version', 'createdAt', 'updatedAt', 'recovery',
       ])
       expect(JSON.stringify(action)).not.toContain('details_envelope')
       expect(JSON.stringify(action)).not.toContain('fingerprint')
@@ -1294,6 +1408,7 @@ describe('operations route services', () => {
           version: 1,
           createdAt: row.created_at,
           updatedAt: row.updated_at,
+          recovery: null,
         }],
         truncated: false,
       },
@@ -1581,6 +1696,7 @@ describe('operations route services', () => {
           version: 1,
           createdAt: row.created_at,
           updatedAt: row.updated_at,
+          recovery: null,
         }],
         truncated: false,
       },
@@ -1603,6 +1719,386 @@ describe('operations route services', () => {
     })
     await expect(listOpenOperationalActions(commonInput(actor, context, { db })))
       .rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+  })
+
+  it.each(['queued', 'processing'])(
+    'blocks manual source resolution while its recovery replacement is %s',
+    async (replacementStatus) => {
+      const context = await cryptoContext()
+      const suffix = `recovery_pending_${replacementStatus}`
+      const actor = await seedActiveActor({ id: `stf_${suffix}`, role: 'owner' })
+      const sourceJobId = `job_${suffix}_source`
+      const replacementJobId = `job_${suffix}_replacement`
+      const action = await insertAction(await actionRow(context, {
+        id: `act_${suffix}`,
+        fingerprint: `outbox.dead:${sourceJobId}`,
+        kind: 'outbox_job_failed',
+        severity: 'critical',
+        entityType: 'outbox_job',
+        entityId: sourceJobId,
+        details: {
+          errorCode: 'OUTBOX_HANDLER_FAILURE',
+          jobId: sourceJobId,
+          outboxType: 'staff.access.reconcile',
+        },
+      }))
+      await env.DB.prepare(
+        `INSERT INTO outbox_jobs
+         (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+          attempt_count,max_attempts,scheduled_at,last_error_code,created_at,updated_at)
+         VALUES (?,'staff.access.reconcile','access_group','centre_1','{}',?,'dead',
+                 1,8,?,'OUTBOX_HANDLER_FAILURE',?,?)`,
+      ).bind(
+        sourceJobId,
+        `staff.access.reconcile:${suffix}:source`,
+        NOW,
+        NOW,
+        NOW,
+      ).run()
+      await env.DB.prepare(
+        `INSERT INTO outbox_attempts
+         (id,job_id,attempt_number,started_at,completed_at,result,error_code)
+         VALUES (?,?,1,?,?,'dead','OUTBOX_HANDLER_FAILURE')`,
+      ).bind(
+        `attempt_${suffix}_source`,
+        sourceJobId,
+        NOW,
+        NOW,
+      ).run()
+      await env.DB.prepare(
+        `INSERT INTO outbox_jobs
+         (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+          attempt_count,max_attempts,scheduled_at,created_at,updated_at)
+         VALUES (?,'staff.access.reconcile','access_group','centre_1','{}',?,'queued',
+                 0,8,?,?,?)`,
+      ).bind(
+        replacementJobId,
+        `staff.access.reconcile:${suffix}:replacement`,
+        NOW,
+        NOW,
+        NOW,
+      ).run()
+      await env.DB.prepare(
+        `INSERT INTO outbox_job_recoveries
+         (id,source_job_id,replacement_job_id,operational_action_id,
+          requested_by_staff_id,correlation_id,created_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      ).bind(
+        `rcv_${suffix}`,
+        sourceJobId,
+        replacementJobId,
+        action.id,
+        actor.id,
+        CORRELATION_ID,
+        NOW,
+      ).run()
+      if (replacementStatus === 'processing') {
+        await env.DB.prepare(
+          `UPDATE outbox_jobs
+           SET status='processing',attempt_count=1,lease_owner=?,lease_expires_at=?,
+               updated_at=? WHERE id=? AND status='queued'`,
+        ).bind(
+          `lease_${suffix}`,
+          new Date(NOW_MS + 60_000).toISOString(),
+          NOW,
+          replacementJobId,
+        ).run()
+      }
+
+      const listed = await listOpenOperationalActions(commonInput(actor, context))
+      expect(listed.data.actions.find(({ id }) => id === action.id)?.recovery).toEqual({
+        kind: 'access',
+        status: replacementStatus,
+      })
+
+      await expect(resolveOperationalAction(resolutionInput(actor, context, action.id)))
+        .rejects.toThrow(/^OUTBOX_RECOVERY_CONFLICT$/)
+      expect(await env.DB.prepare(
+        'SELECT status,version,resolved_at FROM operational_actions WHERE id=?',
+      ).bind(action.id).first()).toEqual({
+        status: 'open',
+        version: 1,
+        resolved_at: null,
+      })
+      expect(await env.DB.prepare(
+        `SELECT count(*) AS count FROM audit_events
+         WHERE action='operational_action.resolved' AND entity_id=?`,
+      ).bind(action.id).first()).toEqual({ count: 0 })
+    },
+  )
+
+  it('exposes ambiguous invitation delivery only as an email unsafe recovery state', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({ id: 'stf_recovery_unsafe_owner' })
+    const sourceJobId = 'job_recovery_unsafe_email'
+    const action = await insertAction(await actionRow(context, {
+      id: 'act_recovery_unsafe_email',
+      fingerprint: `outbox.dead:${sourceJobId}`,
+      kind: 'outbox_job_failed',
+      severity: 'critical',
+      entityType: 'outbox_job',
+      entityId: sourceJobId,
+      details: {
+        errorCode: 'EMAIL_DELIVERY_AMBIGUOUS',
+        jobId: sourceJobId,
+        outboxType: 'staff.invitation.email',
+      },
+    }))
+    await env.DB.prepare(
+      `INSERT INTO outbox_jobs
+       (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+        attempt_count,max_attempts,scheduled_at,last_error_code,created_at,updated_at)
+       VALUES (?,'staff.invitation.email','staff_invitation','inv_recovery_unsafe',
+               '{}',?,'dead',1,8,?,'EMAIL_DELIVERY_AMBIGUOUS',?,?)`,
+    ).bind(
+      sourceJobId,
+      'staff.invitation.email:inv_recovery_unsafe:1',
+      NOW,
+      NOW,
+      NOW,
+    ).run()
+    await env.DB.prepare(
+      `INSERT INTO outbox_attempts
+       (id,job_id,attempt_number,started_at,completed_at,result,error_code)
+       VALUES ('attempt_recovery_unsafe_email',?,1,?,?,'dead',
+               'EMAIL_DELIVERY_AMBIGUOUS')`,
+    ).bind(sourceJobId, NOW, NOW).run()
+
+    const listed = await listOpenOperationalActions(commonInput(actor, context))
+    expect(listed.data.actions.find(({ id }) => id === action.id)?.recovery).toEqual({
+      kind: 'email',
+      status: 'unsafe',
+    })
+  })
+
+  it('fails closed when a recovery source has a noncanonical retry ceiling', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({ id: 'stf_recovery_tampered_ceiling' })
+    const sourceJobId = 'job_recovery_tampered_ceiling'
+    await insertAction(await actionRow(context, {
+      id: 'act_recovery_tampered_ceiling',
+      fingerprint: `outbox.dead:${sourceJobId}`,
+      kind: 'outbox_job_failed',
+      severity: 'critical',
+      entityType: 'outbox_job',
+      entityId: sourceJobId,
+      details: {
+        errorCode: 'OUTBOX_HANDLER_FAILURE',
+        jobId: sourceJobId,
+        outboxType: 'staff.access.reconcile',
+      },
+    }))
+    await env.DB.prepare(
+      `INSERT INTO outbox_jobs
+       (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+        attempt_count,max_attempts,scheduled_at,last_error_code,created_at,updated_at)
+       VALUES (?,'staff.access.reconcile','access_group','centre_1','{}',?,'dead',
+               1,1,?,'OUTBOX_HANDLER_FAILURE',?,?)`,
+    ).bind(
+      sourceJobId,
+      'staff.access.reconcile:recovery-tampered-ceiling',
+      NOW,
+      NOW,
+      NOW,
+    ).run()
+    await env.DB.prepare(
+      `INSERT INTO outbox_attempts
+       (id,job_id,attempt_number,started_at,completed_at,result,error_code)
+       VALUES ('attempt_recovery_tampered_ceiling',?,1,?,?,'dead',
+               'OUTBOX_HANDLER_FAILURE')`,
+    ).bind(sourceJobId, NOW, NOW).run()
+
+    await expect(listOpenOperationalActions(commonInput(actor, context)))
+      .rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+    await env.DB.prepare(
+      `UPDATE operational_actions
+       SET status='resolved',version=2,updated_at=?,resolved_at=? WHERE id=?`,
+    ).bind(NOW, NOW, 'act_recovery_tampered_ceiling').run()
+  })
+
+  it('keeps coordinator disposition read-only for a recoverable identity failure', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({
+      id: 'stf_recovery_disposition_coordinator',
+      role: 'coordinator',
+    })
+    const sourceJobId = 'job_recovery_disposition_coordinator'
+    const action = await insertAction(await actionRow(context, {
+      id: 'act_recovery_disposition_coordinator',
+      fingerprint: `outbox.dead:${sourceJobId}`,
+      kind: 'outbox_job_failed',
+      severity: 'critical',
+      entityType: 'outbox_job',
+      entityId: sourceJobId,
+      details: {
+        errorCode: 'OUTBOX_HANDLER_FAILURE',
+        jobId: sourceJobId,
+        outboxType: 'staff.access.reconcile',
+      },
+    }))
+    await env.DB.prepare(
+      `INSERT INTO outbox_jobs
+       (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+        attempt_count,max_attempts,scheduled_at,last_error_code,created_at,updated_at)
+       VALUES (?,'staff.access.reconcile','access_group','centre_1','{}',?,'dead',
+               1,8,?,'OUTBOX_HANDLER_FAILURE',?,?)`,
+    ).bind(
+      sourceJobId,
+      'staff.access.reconcile:recovery-disposition-coordinator',
+      NOW,
+      NOW,
+      NOW,
+    ).run()
+    await env.DB.prepare(
+      `INSERT INTO outbox_attempts
+       (id,job_id,attempt_number,started_at,completed_at,result,error_code)
+       VALUES ('attempt_recovery_disposition_coordinator',?,1,?,?,'dead',
+               'OUTBOX_HANDLER_FAILURE')`,
+    ).bind(sourceJobId, NOW, NOW).run()
+
+    const listed = await listOpenOperationalActions(commonInput(actor, context))
+    expect(listed.data.actions.find(({ id }) => id === action.id)?.recovery).toEqual({
+      kind: 'access',
+      status: 'available',
+    })
+    await expect(requestOperationalActionRecovery(resolutionInput(
+      actor,
+      context,
+      action.id,
+      {
+        idFactory: ids('aud_recovery_command_coordinator'),
+        idempotencyKey: 'recovery-command-coordinator-key',
+      },
+    ))).rejects.toThrow(/^FORBIDDEN$/)
+
+    await expect(resolveOperationalAction(resolutionInput(actor, context, action.id, {
+      idFactory: ids('aud_recovery_disposition_coordinator'),
+    })))
+      .rejects.toThrow(/^FORBIDDEN$/)
+    expect(await env.DB.prepare(
+      'SELECT status,version FROM operational_actions WHERE id=?',
+    ).bind(action.id).first()).toEqual({ status: 'open', version: 1 })
+  })
+
+  it('rejects recovery when the owner cannot read operational health', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({
+      id: 'stf_recovery_health_denied_owner',
+      role: 'owner',
+    })
+    const db = facade(env.DB, {
+      all(sql) {
+        if (sql.includes('FROM staff_authorities AS authority')) {
+          return {
+            results: [{
+              authority_revision: actor.authorityRevision + 1,
+              capability: 'operations.health.read',
+              decision: 'deny',
+            }],
+          }
+        }
+        return undefined
+      },
+    })
+
+    await expect(requestOperationalActionRecovery(commonInput(actor, context, {
+      db,
+      actionId: 'act_recovery_health_denied',
+      body: { version: 1 },
+      idempotencyKey: 'recovery-health-denied-key',
+      idFactory: ids('aud_recovery_health_denied'),
+    }))).rejects.toThrow(/^FORBIDDEN$/)
+    expect(await denialRows(actor.id)).toHaveLength(1)
+  })
+
+  it('returns the typed recovery conflict when lineage races the resolution batch', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({ id: 'stf_recovery_resolution_race' })
+    const sourceJobId = 'job_recovery_resolution_race_source'
+    const replacementJobId = 'job_recovery_resolution_race_replacement'
+    const action = await insertAction(await actionRow(context, {
+      id: 'act_recovery_resolution_race',
+      fingerprint: `outbox.dead:${sourceJobId}`,
+      kind: 'outbox_job_failed',
+      severity: 'critical',
+      entityType: 'outbox_job',
+      entityId: sourceJobId,
+      details: {
+        errorCode: 'OUTBOX_HANDLER_FAILURE',
+        jobId: sourceJobId,
+        outboxType: 'staff.access.reconcile',
+      },
+    }))
+    await env.DB.prepare(
+      `INSERT INTO outbox_jobs
+       (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+        attempt_count,max_attempts,scheduled_at,last_error_code,created_at,updated_at)
+       VALUES (?,'staff.access.reconcile','access_group','centre_1','{}',?,'dead',
+               1,8,?,'OUTBOX_HANDLER_FAILURE',?,?)`,
+    ).bind(
+      sourceJobId,
+      'staff.access.reconcile:recovery-resolution-race:source',
+      NOW,
+      NOW,
+      NOW,
+    ).run()
+    await env.DB.prepare(
+      `INSERT INTO outbox_attempts
+       (id,job_id,attempt_number,started_at,completed_at,result,error_code)
+       VALUES ('attempt_recovery_resolution_race',?,1,?,?,'dead',
+               'OUTBOX_HANDLER_FAILURE')`,
+    ).bind(sourceJobId, NOW, NOW).run()
+    await env.DB.prepare(
+      `INSERT INTO outbox_jobs
+       (id,type,aggregate_type,aggregate_id,payload_envelope,idempotency_key,status,
+        attempt_count,max_attempts,scheduled_at,created_at,updated_at)
+       VALUES (?,'staff.access.reconcile','access_group','centre_1','{}',?,'queued',
+               0,8,?,?,?)`,
+    ).bind(
+      replacementJobId,
+      'staff.access.reconcile:recovery-resolution-race:replacement',
+      NOW,
+      NOW,
+      NOW,
+    ).run()
+    let raced = false
+    const db = facade(env.DB, {
+      async batch(statements) {
+        if (!raced) {
+          raced = true
+          await env.DB.prepare(
+            `INSERT INTO outbox_job_recoveries
+             (id,source_job_id,replacement_job_id,operational_action_id,
+              requested_by_staff_id,correlation_id,created_at)
+             VALUES ('rcv_recovery_resolution_race',?,?,?,?,?,?)`,
+          ).bind(
+            sourceJobId,
+            replacementJobId,
+            action.id,
+            actor.id,
+            CORRELATION_ID,
+            NOW,
+          ).run()
+        }
+        return env.DB.batch(statements.map((item) => item.__inner ?? item))
+      },
+    })
+
+    await expect(resolveOperationalAction(resolutionInput(actor, context, action.id, {
+      db,
+      idFactory: ids('aud_recovery_resolution_race'),
+    }))).rejects.toThrow(/^OUTBOX_RECOVERY_CONFLICT$/)
+    expect(await env.DB.prepare(
+      'SELECT status,version,resolved_at FROM operational_actions WHERE id=?',
+    ).bind(action.id).first()).toEqual({
+      status: 'open',
+      version: 1,
+      resolved_at: null,
+    })
+    expect(await env.DB.prepare(
+      `SELECT count(*) AS count FROM audit_events
+       WHERE action='operational_action.resolved' AND entity_id=?`,
+    ).bind(action.id).first()).toEqual({ count: 0 })
   })
 
   it('resolves one exact open action with audit -> CAS -> final guard and no replay record', async () => {
@@ -2224,6 +2720,58 @@ describe('operations route services', () => {
   })
 
   it.each([
+    ['non-null actor', { actor_staff_id: 'stf_actor' }],
+    ['non-staff entity id', { entity_id: 'profile_target' }],
+  ])('accepts no malformed staff profile system event: %s', async (_label, changes) => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({
+      id: `stf_audit_profile_${_label.replaceAll(/[^A-Za-z0-9_-]/g, '_')}`,
+    })
+    const row = await auditRow(context, STAFF_PROFILE_AUDIT_FACT, 0, changes)
+    const db = facade(env.DB, {
+      all: (sql) => sql.includes('FROM audit_events') ? { results: [row] } : undefined,
+    })
+    await expect(listSecurityAudit(commonInput(actor, context, {
+      db,
+      query: new URLSearchParams(),
+    }))).rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+  })
+
+  it.each([
+    ['null human actor', { actor_staff_id: null }],
+    ['malformed human actor', { actor_staff_id: 'actor_without_staff_prefix' }],
+    ['malformed replacement id', {
+      metadata_json: JSON.stringify({
+        actionVersion: 1,
+        desiredGeneration: 7,
+        invitationVersion: null,
+        replacementJobId: 'bad id',
+      }),
+    }],
+    ['impossible recovery branch', {
+      metadata_json: JSON.stringify({
+        actionVersion: 1,
+        desiredGeneration: null,
+        invitationVersion: null,
+        replacementJobId: 'job_audit_replacement',
+      }),
+    }],
+  ])('accepts no malformed outbox recovery audit event: %s', async (_label, changes) => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({
+      id: `stf_audit_recovery_${_label.replaceAll(/[^A-Za-z0-9_-]/g, '_')}`,
+    })
+    const row = await auditRow(context, OUTBOX_RECOVERY_AUDIT_FACT, 0, changes)
+    const db = facade(env.DB, {
+      all: (sql) => sql.includes('FROM audit_events') ? { results: [row] } : undefined,
+    })
+    await expect(listSecurityAudit(commonInput(actor, context, {
+      db,
+      query: new URLSearchParams(),
+    }))).rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
+  })
+
+  it.each([
     ['non-null actor', { actor_staff_id: 'stf_wrong' }],
     ['wrong backup id', { entity_id: 'backup_wrong' }],
     ['wrong entity', { entity_type: 'centre' }],
@@ -2332,7 +2880,7 @@ describe('operations route services', () => {
 
   it('continues without a gap from a v1 cursor with 65 loaded keys and active v65, then rejects v1 retirement', async () => {
     const context = await cryptoContextWithLookupCount(65)
-    const actor = { id: 'stf_audit_cursor_v65', role: 'owner', specialistId: null, version: 1 }
+    const actor = authorityActor({ id: 'stf_audit_cursor_v65', role: 'owner' })
     const sameInstant = new Date(NOW_MS - 1_000).toISOString()
     const position = canonicalJson({ id: 'audit_v65_z', occurredAt: sameInstant })
     const historicalCursor = await signedCursor(context, position, 1)

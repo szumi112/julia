@@ -1,0 +1,72 @@
+{
+  "kind": "workbook_roundtrip_v1",
+  "artifact": {
+    "id": "wba_recovery_fixture",
+    "fingerprint": "f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a",
+    "byteSize": 456789,
+    "parserVersion": 2,
+    "materializerVersion": 2
+  },
+  "import": {
+    "id": "wbi_recovery_fixture",
+    "status": "complete",
+    "version": 12,
+    "acceptedRecords": 2232,
+    "quarantinedRecords": 3
+  },
+  "finance": {
+    "jobId": "wbj_recovery_fixture",
+    "status": "complete",
+    "phase": "complete",
+    "version": 19,
+    "cursor": 2232,
+    "totalRecords": 2232,
+    "processedRecords": 2232,
+    "reportingRevision": 44
+  },
+  "historical": {
+    "jobId": "hpj_recovery_fixture",
+    "status": "complete",
+    "version": 2040,
+    "totalRecords": 2000,
+    "processedRecords": 2000,
+    "projectedRecords": 1997,
+    "conflictCount": 1992,
+    "resolutionCount": 1992,
+    "occurrenceCount": 1997,
+    "explicitExclusionCount": 0,
+    "automaticDeferredCount": 3,
+    "unresolvedCount": 0
+  },
+  "activity": {
+    "jobId": "apj_recovery_fixture",
+    "status": "complete",
+    "version": 192,
+    "totalRecords": 190,
+    "processedRecords": 190,
+    "projectedRecords": 190,
+    "participantLinkCount": 190,
+    "chargeLinkCount": 190,
+    "groupLinkCount": 25,
+    "membershipObservationLinkCount": 25,
+    "physicalLinkCount": 430
+  },
+  "reconciliation": {
+    "activeAcceptedSourceRecords": 2232,
+    "quarantinedSourceRecords": 3,
+    "monthlyDateQuarantines": 2,
+    "fixedOrphanAmountQuarantines": 1,
+    "amountStoredAsTextWarnings": 2,
+    "correctedCombinedSheetMonths": 45,
+    "tusRecords": 25,
+    "englishRecords": 165,
+    "formulaGhostsExcluded": 5,
+    "unexplainedDroppedCandidates": 0,
+    "replayCreatedRecords": 0,
+    "replayVoidedRecords": 0,
+    "ledgerLinksUnique": true,
+    "projectionLinksUnique": true,
+    "parentTotalsReconcile": true,
+    "crossProjectionOverlapCount": 0
+  }
+}

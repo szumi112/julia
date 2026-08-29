@@ -1,4 +1,5 @@
 import { auditEventStatement } from '../audit/events.js'
+import { CAPABILITIES, effectiveCapabilitiesFor } from '../../src/capabilities.js'
 import { isD1IdentityCollision } from '../db/errors.js'
 import { areSiblingD1QueryBudgetViews } from '../db/query-budget.js'
 import { blindEmailCandidates, blindEmailIndex, decryptForScope, encryptForScope } from '../security/envelope.js'
@@ -9,6 +10,9 @@ import {
 } from './specialists.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
+const ROLES = new Set(['owner', 'coordinator', 'specialist'])
 const tables = new Set(['staff_users', 'staff_invitations'])
 const denied = () => new Error('ACCESS_DENIED')
 const failure = () => new Error('IDENTITY_FAILURE')
@@ -17,7 +21,6 @@ const iso = (nowMs) => {
   return new Date(nowMs).toISOString()
 }
 const id = (value) => typeof value === 'string' && ID.test(value)
-const asActor = (row) => Object.freeze({ id: row.id, role: row.role, specialistId: row.specialist_id, version: row.version })
 const placeholders = (items) => items.map(() => '?').join(', ')
 const statementId = (factory) => {
   const value = factory?.()
@@ -32,6 +35,116 @@ const accountLinkId = (factory) => {
 }
 const entityType = (table) => table === 'staff_users' ? 'staff_user' : 'staff_invitation'
 const collision = isD1IdentityCollision
+
+function captureStaffActorRow(value) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw failure()
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const captured = {}
+    for (const key of ['id', 'role', 'specialist_id', 'version']) {
+      const descriptor = descriptors[key]
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw failure()
+      captured[key] = descriptor.value
+    }
+    if (typeof captured.id !== 'string' || !STAFF_ID.test(captured.id)
+      || !ROLES.has(captured.role)
+      || !Number.isSafeInteger(captured.version) || captured.version < 1
+      || (captured.specialist_id !== null
+        && (typeof captured.specialist_id !== 'string'
+          || !SPECIALIST_ID.test(captured.specialist_id)))
+      || (captured.role === 'specialist' && captured.specialist_id === null)) throw failure()
+    return captured
+  } catch {
+    throw failure()
+  }
+}
+
+function captureAuthorityRows(value) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw failure()
+    const resultDescriptor = Object.getOwnPropertyDescriptor(value, 'results')
+    if (!resultDescriptor?.enumerable || !Object.hasOwn(resultDescriptor, 'value')) throw failure()
+    const rows = resultDescriptor.value
+    if (!Array.isArray(rows) || Object.getPrototypeOf(rows) !== Array.prototype
+      || rows.length < 1 || rows.length > CAPABILITIES.length) throw failure()
+    const rowDescriptors = Object.getOwnPropertyDescriptors(rows)
+    if (Reflect.ownKeys(rowDescriptors).length !== rows.length + 1) throw failure()
+    return Array.from({ length: rows.length }, (_, index) => {
+      const item = rowDescriptors[String(index)]
+      if (!item?.enumerable || !Object.hasOwn(item, 'value')) throw failure()
+      const row = item.value
+      if (row === null || typeof row !== 'object' || Array.isArray(row)) throw failure()
+      const descriptors = Object.getOwnPropertyDescriptors(row)
+      const keys = Reflect.ownKeys(descriptors)
+      if (keys.length !== 3 || keys.some((key) => typeof key !== 'string'
+        || !['authority_revision', 'capability', 'decision'].includes(key))) throw failure()
+      const captured = {}
+      for (const key of ['authority_revision', 'capability', 'decision']) {
+        const descriptor = descriptors[key]
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) throw failure()
+        captured[key] = descriptor.value
+      }
+      return captured
+    })
+  } catch {
+    throw failure()
+  }
+}
+
+export async function resolveCurrentAuthorityActor(db, staffRow) {
+  try {
+    if (!db?.prepare) throw failure()
+    const staff = captureStaffActorRow(staffRow)
+    const result = await db.prepare(
+      `SELECT authority.revision AS authority_revision,
+              override.capability AS capability,
+              override.decision AS decision
+       FROM staff_authorities AS authority
+       JOIN staff_users AS current
+         ON current.id=authority.staff_id
+       LEFT JOIN staff_capability_overrides AS override
+         ON override.staff_id=authority.staff_id
+        AND override.decision IS NOT 'cleared'
+       WHERE authority.staff_id=?
+         AND current.role=?
+         AND current.specialist_id IS ?
+         AND current.version=?
+         AND current.status='active'
+       ORDER BY override.capability ASC`,
+    ).bind(staff.id, staff.role, staff.specialist_id, staff.version).all()
+    const rows = captureAuthorityRows(result)
+    const authorityRevision = rows[0].authority_revision
+    if (!Number.isSafeInteger(authorityRevision) || authorityRevision < 1
+      || rows.some((row) => row.authority_revision !== authorityRevision)) throw failure()
+
+    const allow = []
+    const deny = []
+    const seen = new Set()
+    for (const row of rows) {
+      if (row.capability === null && row.decision === null) {
+        if (rows.length !== 1) throw failure()
+        continue
+      }
+      if (typeof row.capability !== 'string'
+        || !['allow', 'deny'].includes(row.decision)
+        || seen.has(row.capability)) throw failure()
+      seen.add(row.capability)
+      if (row.decision === 'allow') allow.push(row.capability)
+      else deny.push(row.capability)
+    }
+    const capabilities = effectiveCapabilitiesFor({ role: staff.role, allow, deny })
+    return Object.freeze({
+      id: staff.id,
+      role: staff.role,
+      specialistId: staff.specialist_id,
+      version: staff.version,
+      authorityRevision,
+      capabilities,
+    })
+  } catch {
+    throw failure()
+  }
+}
 
 function recoveryDbFor(db, options) {
   if (options === null || (typeof options !== 'object' && typeof options !== 'function')) throw failure()
@@ -191,7 +304,7 @@ async function recoverActivation(db, context, { staff, invitation, principal, ac
     || !occupiedByTarget(attemptedInvitationVersion, invitationVersion)
     || !occupiedByTarget(attemptedSpecialistVersion, specialistVersion)
     || !occupiedByTarget(attemptedAudit, audit)) return null
-  return asActor(currentStaff)
+  return resolveCurrentAuthorityActor(db, currentStaff)
 }
 
 async function recoverReindex(db, context, table, row, activeLookup, attempt) {
@@ -315,7 +428,7 @@ async function activate(db, staff, invitation, principal, context, values, optio
     specialistGuardStatement(db, staff.id),
   ]
   await db.batch(statements)
-  return asActor(staffNext)
+  return resolveCurrentAuthorityActor(db, staffNext)
 }
 
 async function reindexOne(db, context, table, row, activeLookup, options, recoveryDb = db, changedByStaffId = options.changedByStaffId ?? null) {
@@ -373,9 +486,9 @@ async function resolveActorInternal(db, principal, cryptoContext, options, recov
       try { await reindexOne(db, context, 'staff_users', staff, activeLookup, options, recoveryDb, staff.id) } catch { throw denied() }
       const current = await db.prepare('SELECT id,role,specialist_id,version,access_subject,status FROM staff_users WHERE id=?').bind(staff.id).first()
       if (!current || current.status !== 'active' || current.access_subject !== principal.subject) throw denied()
-      return asActor(current)
+      return resolveCurrentAuthorityActor(db, current)
     }
-    return asActor(staff)
+    return resolveCurrentAuthorityActor(db, staff)
   }
   if (staff.status !== 'pending' || staff.access_subject !== null) {
     await appendDenied(db, staff, options)
@@ -409,6 +522,29 @@ async function resolveActorInternal(db, principal, cryptoContext, options, recov
 export async function resolveActor(db, principal, cryptoContext, options = {}) {
   try {
     return await resolveActorInternal(db, principal, cryptoContext, options, recoveryDbFor(db, options))
+  } catch (error) {
+    if (error?.message === 'ACCESS_DENIED') throw denied()
+    if (error?.message === 'IDENTITY_FAILURE') throw failure()
+    throw failure()
+  }
+}
+
+export async function resolveActiveActorReadOnly(db, principal, cryptoContext) {
+  try {
+    const context = requireContext(cryptoContext)
+    if (!db?.prepare || principal?.kind !== 'human'
+      || typeof principal.subject !== 'string' || !principal.subject
+      || typeof principal.normalizedEmail !== 'string' || !principal.normalizedEmail) {
+      throw denied()
+    }
+    const activeLookup = await blindEmailIndex(principal.normalizedEmail, context.keyring)
+    const row = await db.prepare(
+      `SELECT id,role,specialist_id,version
+       FROM staff_users
+       WHERE email_lookup=? AND access_subject=? AND status='active'`,
+    ).bind(activeLookup, principal.subject).first()
+    if (!row) throw denied()
+    return resolveCurrentAuthorityActor(db, row)
   } catch (error) {
     if (error?.message === 'ACCESS_DENIED') throw denied()
     if (error?.message === 'IDENTITY_FAILURE') throw failure()

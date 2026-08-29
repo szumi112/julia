@@ -1,3 +1,12 @@
+import {
+  captureHistoricalClient,
+  captureHistoricalOccurrence,
+  compareHistoricalClients,
+  compareHistoricalOccurrences,
+} from './historical-records.js'
+import { captureLoadedActivitiesState } from './loaded-activities.js'
+import { assertProfessionalTitle } from './core-records.js'
+
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
 const CIVIL_MONTH = /^(\d{4})-(\d{2})$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
@@ -13,6 +22,70 @@ const warsawDateTime = new Intl.DateTimeFormat('en-CA', {
 
 const fail = (label) => {
   throw new TypeError(`Invalid ${label}`)
+}
+
+const cloneCanonicalActivityValue = (value) => {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean'
+    || (typeof value === 'number' && Number.isSafeInteger(value))) return value
+  let descriptors
+  try {
+    if (!value || typeof value !== 'object') fail('activity projection')
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) fail('activity projection')
+      descriptors = Object.getOwnPropertyDescriptors(value)
+      const length = descriptors.length?.value
+      if (!Number.isSafeInteger(length) || length < 0
+        || Reflect.ownKeys(descriptors).length !== length + 1) fail('activity projection')
+      const result = []
+      for (let index = 0; index < length; index += 1) {
+        const descriptor = descriptors[String(index)]
+        if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) {
+          fail('activity projection')
+        }
+        result.push(cloneCanonicalActivityValue(descriptor.value))
+      }
+      return Object.freeze(result)
+    }
+    if (Object.getPrototypeOf(value) !== Object.prototype) fail('activity projection')
+    descriptors = Object.getOwnPropertyDescriptors(value)
+  } catch { fail('activity projection') }
+  const result = {}
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key]
+    if (typeof key !== 'string' || !descriptor?.enumerable
+      || !Object.hasOwn(descriptor, 'value')) fail('activity projection')
+    result[key] = cloneCanonicalActivityValue(descriptor.value)
+  }
+  return Object.freeze(result)
+}
+
+const projectedActivityMap = (map) => {
+  const descriptors = Object.getOwnPropertyDescriptors(map)
+  const result = []
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key]
+    if (typeof key !== 'string' || !descriptor?.enumerable
+      || !Object.hasOwn(descriptor, 'value')) fail('activity projection')
+    result.push(cloneCanonicalActivityValue(descriptor.value))
+  }
+  return Object.freeze(result.sort((left, right) => left.id.localeCompare(right.id)))
+}
+
+export const projectLoadedActivities = (source) => {
+  const state = captureLoadedActivitiesState(source)
+  return Object.freeze({
+    loadedMonths: cloneCanonicalActivityValue(state.loadedMonths),
+    latestPopulatedMonths: cloneCanonicalActivityValue(state.latestPopulatedMonths),
+    programs: projectedActivityMap(state.programsById),
+    groups: projectedActivityMap(state.groupsById),
+    groupLeaders: projectedActivityMap(state.groupLeadersById),
+    participants: projectedActivityMap(state.participantsById),
+    memberships: projectedActivityMap(state.membershipsById),
+    classes: projectedActivityMap(state.classesById),
+    attendance: projectedActivityMap(state.attendanceById),
+    charges: projectedActivityMap(state.chargesById),
+    payments: projectedActivityMap(state.paymentsById),
+  })
 }
 
 const daysInMonth = (year, month) => {
@@ -135,6 +208,10 @@ const presentationColor = (id) => {
   return PRESENTATION_COLORS[hash]
 }
 
+const professionalTitle = (value) => {
+  try { return assertProfessionalTitle(value) } catch { fail('workspace specialist') }
+}
+
 const warsawParts = (value, label) => {
   if (typeof value !== 'string' || !INSTANT.test(value)) fail(label)
   const instant = new Date(value)
@@ -151,9 +228,11 @@ const warsawParts = (value, label) => {
 const projectSpecialist = (item) => frozenRecord({
   id: safeText(item.id, 'workspace specialist'),
   name: safeText(item.displayName, 'workspace specialist'),
+  professionalTitle: professionalTitle(item.professionalTitle),
   rate: safeInteger(item.standardRateGrosze, 1, 1_000_000, 'workspace specialist') / 100,
   color: presentationColor(item.id),
-  status: item.status === 'active' ? 'active' : fail('workspace specialist'),
+  status: ['active', 'archived'].includes(item.status)
+    ? item.status : fail('workspace specialist'),
   version: safeInteger(item.version, 1, Number.MAX_SAFE_INTEGER, 'workspace specialist'),
   staffVersion: item.staffVersion === null ? null
     : safeInteger(item.staffVersion, 1, Number.MAX_SAFE_INTEGER, 'workspace specialist'),
@@ -230,11 +309,20 @@ const projectAppointment = (item, clientIds, specialistIds, clientsById) => {
   })
 }
 
+const projectHistoricalClient = (item) => {
+  try { return captureHistoricalClient({ ...item }) } catch { fail('workspace historical client') }
+}
+
+const projectHistoricalOccurrence = (item) => {
+  try { return captureHistoricalOccurrence({ ...item }) } catch { fail('workspace historical occurrence') }
+}
+
 export const projectLoadedWorkspace = (state) => {
   const captured = exactDataObject(state, 'loaded workspace')
   const specialists = frozenMapValues(captured.specialistsById, 'workspace specialists')
     .map(projectSpecialist)
     .toSorted((left, right) => left.name.localeCompare(right.name, 'pl') || left.id.localeCompare(right.id))
+  const activeSpecialists = specialists.filter(({ status }) => status === 'active')
   const allClients = frozenMapValues(captured.clientsById, 'workspace clients').map(projectClient)
   const rawAppointments = frozenMapValues(captured.appointmentsById, 'workspace appointments')
   const referencedClientIds = new Set(rawAppointments.map((item) => safeText(item.clientId, 'workspace appointment')))
@@ -247,10 +335,58 @@ export const projectLoadedWorkspace = (state) => {
   const sessions = rawAppointments
     .map((item) => projectAppointment(item, clientIds, specialistIds, clientsById))
     .toSorted((left, right) => `${left.date}${left.time}${left.id}`.localeCompare(`${right.date}${right.time}${right.id}`))
+  const historicalClients = frozenMapValues(
+    captured.historicalClientsById, 'workspace historical clients',
+  ).map(projectHistoricalClient).toSorted(compareHistoricalClients)
+  const historicalOccurrences = frozenMapValues(
+    captured.historicalOccurrencesById, 'workspace historical occurrences',
+  ).map(projectHistoricalOccurrence).toSorted(compareHistoricalOccurrences)
+  const historicalClientIds = new Set(historicalClients.map(({ id }) => id))
+  const referencedHistoricalClientIds = new Set()
+  const referencedHistoricalSpecialistIds = new Set()
+  const historicalCounterparties = new Map()
+  for (const occurrence of historicalOccurrences) {
+    if (!specialistIds.has(occurrence.specialistId)) fail('workspace historical occurrence')
+    referencedHistoricalSpecialistIds.add(occurrence.specialistId)
+    if (occurrence.historicalClientId !== null) {
+      if (!historicalClientIds.has(occurrence.historicalClientId)) {
+        fail('workspace historical occurrence')
+      }
+      referencedHistoricalClientIds.add(occurrence.historicalClientId)
+    } else {
+      const previous = historicalCounterparties.get(occurrence.counterparty.id)
+      if (previous !== undefined && previous !== occurrence.counterparty.name) {
+        fail('workspace historical occurrence')
+      }
+      historicalCounterparties.set(occurrence.counterparty.id, occurrence.counterparty.name)
+    }
+  }
+  if (historicalClients.some((item) => !referencedHistoricalClientIds.has(item.id)
+    || (item.activeClientId !== null && !clientIds.has(item.activeClientId)))) {
+    fail('workspace historical client')
+  }
+  const latestPopulatedMonth = captured.latestPopulatedMonth
+  if (latestPopulatedMonth !== null) captureMonth(latestPopulatedMonth)
+  const latestVisibleMonth = historicalOccurrences.reduce((latest, occurrence) => {
+    const month = occurrence.status === 'recorded' && occurrence.period.precision !== 'unknown'
+      ? occurrence.period.month : null
+    return month !== null && (latest === null || month > latest) ? month : latest
+  }, null)
+  if (latestVisibleMonth !== null
+    && (latestPopulatedMonth === null || latestPopulatedMonth < latestVisibleMonth)) {
+    fail('workspace latest populated month')
+  }
+  const historicalSpecialists = specialists.filter(({ id }) => (
+    referencedHistoricalSpecialistIds.has(id)
+  ))
   return frozenRecord({
-    psychologists: Object.freeze(specialists),
+    psychologists: Object.freeze(activeSpecialists),
+    historicalSpecialists: Object.freeze(historicalSpecialists),
     clients: Object.freeze(clients),
     sessions: Object.freeze(sessions),
+    historicalClients: Object.freeze(historicalClients),
+    historicalOccurrences: Object.freeze(historicalOccurrences),
+    latestPopulatedMonth,
   })
 }
 

@@ -16,6 +16,7 @@ import {
   loadClientCryptoContext,
 } from './crypto.js'
 import { createRecordVersionBuilder } from './versions.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 import {
   assertClientIdentity,
   assertLocation,
@@ -262,24 +263,9 @@ const captureCommand = (input) => {
 }
 
 const actorFact = (value) => {
-  try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('FORBIDDEN')
-    const descriptors = Object.getOwnPropertyDescriptors(value)
-    const result = {}
-    for (const key of ['id', 'role', 'specialistId']) {
-      const descriptor = descriptors[key]
-      if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error('FORBIDDEN')
-      result[key] = descriptor.value
-    }
-    if (typeof result.id !== 'string' || !STAFF_ID.test(result.id)
-      || !['owner', 'coordinator', 'specialist'].includes(result.role)
-      || (result.specialistId !== null && !isSpecialistId(result.specialistId))
-      || (result.role === 'specialist' && result.specialistId === null)) throw new Error('FORBIDDEN')
-    return Object.freeze(result)
-  } catch (error) {
-    if (error instanceof Error && error.message === 'FORBIDDEN') throw error
-    throw new Error('FORBIDDEN')
-  }
+  const actor = captureAuthorityActor(value)
+  if (!actor) throw new Error('FORBIDDEN')
+  return actor
 }
 
 const canonicalInstant = (value) => typeof value === 'string'

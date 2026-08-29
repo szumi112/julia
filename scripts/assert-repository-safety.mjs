@@ -2,16 +2,23 @@ import { execFileSync } from 'node:child_process'
 import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import {
+  loadAccessProviderConfig,
+  loadEmailProviderConfig,
+} from '../worker/config.js'
 
 const RUNTIME_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com', 'cdn.jsdelivr.net']
 const SECRET_NAMES = [
   'BWM_BACKUP_KEK_V1',
+  'BWM_BACKUP_KEK_V2',
   'BWM_DATA_KEK_V1',
   'BWM_LOOKUP_HMAC_V1',
+  'BWM_WORKBOOK_HMAC_V1',
+  'BWM_WORKBOOK_KEK_V1',
   'CF_ACCESS_GROUP_TOKEN',
   'CF_D1_BOOTSTRAP_TOKEN',
   'CF_D1_EXPORT_TOKEN',
-  'SCW_SECRET_KEY',
+  'RESEND_API_KEY',
 ]
 const BACKEND_BINDINGS = [
   'ACCESS_AUD',
@@ -20,20 +27,29 @@ const BACKEND_BINDINGS = [
   'ACTIVE_BACKUP_KEK_VERSION',
   'ACTIVE_DATA_KEK_VERSION',
   'ACTIVE_LOOKUP_KEY_VERSION',
+  'ACTIVE_WORKBOOK_HMAC_VERSION',
+  'ACTIVE_WORKBOOK_KEK_VERSION',
   'APP_ENV',
   'APP_ORIGIN',
   'ARCHIVE',
   'ASSETS',
   'BWM_BACKUP_KEK_V1',
+  'BWM_BACKUP_KEK_V2',
   'BWM_DATA_KEK_V1',
   'BWM_LOOKUP_HMAC_V1',
+  'BWM_WORKBOOK_HMAC_V1',
+  'BWM_WORKBOOK_KEK_V1',
+  'CF_ACCESS_GROUP_ID',
+  'CF_ACCESS_GROUP_NAME',
   'CF_ACCESS_GROUP_TOKEN',
   'CF_ACCOUNT_ID',
   'CF_D1_DATABASE_ID',
   'CF_D1_EXPORT_TOKEN',
   'DATA_MODE',
   'DB',
-  'SCW_SECRET_KEY',
+  'RESEND_FROM_EMAIL',
+  'RESEND_FROM_NAME',
+  'RESEND_API_KEY',
 ]
 const DEPLOY_ENVIRONMENT_NAMES = ['production', 'staging']
 const ZEROED_DATABASE_ID = /^0{8}-0{4}-0{4}-0{4}-0{11}[0-9a-f]$/
@@ -184,6 +200,33 @@ export const assertDirectDependencyPins = (packageJson) => {
   }
 }
 
+const RECOVERY_PACKAGE_COMMANDS = Object.freeze({
+  'backup:create:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs create',
+  'backup:status:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs status',
+  'backup:migrations:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs migrations',
+  'backup:restore': 'APP_ENV=staging DATA_MODE=fictional node scripts/restore-backup.mjs',
+})
+
+export const assertRecoveryPackageScripts = (packageJson) => {
+  const scripts = packageJson?.scripts
+  if (!scripts || typeof scripts !== 'object' || Array.isArray(scripts)) {
+    throw new Error('Recovery package commands are required')
+  }
+  for (const [name, command] of Object.entries(RECOVERY_PACKAGE_COMMANDS)) {
+    if (scripts[name] !== command) throw new Error(`Recovery package command must remain fixed: ${name}`)
+  }
+  const allowedDemandNames = new Set([
+    'backup:create:staging',
+    'backup:status:staging',
+    'backup:migrations:staging',
+  ])
+  for (const name of Object.keys(scripts)) {
+    if (/^backup:(?:create|status|migrations)(?::|$)/.test(name) && !allowedDemandNames.has(name)) {
+      throw new Error(`Production demand backup alias is forbidden: ${name}`)
+    }
+  }
+}
+
 export const assertRuntimeIndex = (html) => assertNoRuntimeHosts(html, 'index.html')
 
 const isLocalDevOrigin = (value) => {
@@ -200,6 +243,66 @@ const isLocalDevOrigin = (value) => {
     || url.hostname === '[::1]'
 }
 
+const PROTECTED_PROVIDER_BINDINGS = Object.freeze([
+  'CF_ACCOUNT_ID',
+  'CF_ACCESS_GROUP_ID',
+  'CF_ACCESS_GROUP_NAME',
+  'RESEND_FROM_EMAIL',
+  'RESEND_FROM_NAME',
+])
+const REQUIRED_PROVIDER_SECRETS = Object.freeze([
+  'CF_ACCESS_GROUP_TOKEN',
+  'RESEND_API_KEY',
+])
+const PROVIDER_PLACEHOLDERS = new Set([
+  'change-me',
+  'changeme',
+  'example',
+  'placeholder',
+  'replace-me',
+  'replaceme',
+  'todo',
+  'your-value-here',
+])
+const ZERO_PROVIDER_IDENTIFIER = /^(?:0{32}|00000000-0000-0000-0000-000000000000)$/
+
+const assertProtectedProviderBindings = (workerConfig, vars, expectedEnvironment) => {
+  for (const name of PROTECTED_PROVIDER_BINDINGS) {
+    if (typeof vars[name] !== 'string' || vars[name].length === 0) {
+      throw new Error(`Generated Worker config must include provider binding ${name}`)
+    }
+    const normalized = vars[name].trim().toLowerCase()
+    if (PROVIDER_PLACEHOLDERS.has(normalized) || ZERO_PROVIDER_IDENTIFIER.test(normalized)) {
+      throw new Error(`Generated Worker provider configuration contains placeholder ${name}`)
+    }
+  }
+  try {
+    loadAccessProviderConfig({
+      ...vars,
+      CF_ACCESS_GROUP_TOKEN: 'artifact-access-provider-token',
+    }, { appEnv: expectedEnvironment })
+  } catch {
+    throw new Error('Generated Worker Access provider configuration is invalid')
+  }
+  try {
+    loadEmailProviderConfig({
+      ...vars,
+      RESEND_API_KEY: 'artifact-email-provider-secret',
+    }, { appEnv: expectedEnvironment })
+  } catch {
+    throw new Error('Generated Worker email provider configuration is invalid')
+  }
+  const requiredSecrets = workerConfig.secrets?.required
+  if (!Array.isArray(requiredSecrets)) {
+    throw new Error('Generated Worker config must declare required provider secrets')
+  }
+  for (const name of REQUIRED_PROVIDER_SECRETS) {
+    if (!requiredSecrets.includes(name)) {
+      throw new Error(`Generated Worker config must require provider secret ${name}`)
+    }
+  }
+}
+
 // The @cloudflare/vite-plugin resolves CLOUDFLARE_ENV at build time and stamps the
 // generated Worker config with targetEnvironment plus the flattened env block, so
 // a deploy for a named environment must never ship the local placeholder config.
@@ -214,6 +317,7 @@ const assertDeployEnvironment = (workerConfig, expectedEnvironment) => {
   if (isLocalDevOrigin(vars.APP_ORIGIN)) {
     throw new Error('Generated Worker config vars.APP_ORIGIN must not be a local development origin')
   }
+  assertProtectedProviderBindings(workerConfig, vars, expectedEnvironment)
   const databases = workerConfig.d1_databases
   if (!Array.isArray(databases)
     || databases.length < 1
@@ -351,6 +455,7 @@ const runCli = () => {
   const tracked = execFileSync('git', ['ls-files', '-z']).toString().split('\0').filter(Boolean)
   assertTrackedFiles(tracked)
   assertDirectDependencyPins(parseJson('package.json'))
+  assertRecoveryPackageScripts(parseJson('package.json'))
   assertCoreMigrationConfiguration(parseJson('wrangler.json'))
   assertRuntimeIndex(readFileSync('index.html', 'utf8'))
   if (args[0] === '--dist') {

@@ -28,6 +28,20 @@ test('route hashes preserve boolean route parameters', () => {
   })
 })
 
+test('route hashes round-trip historical scalar parameters in canonical key order', () => {
+  const hash = routeHref('clients', {
+    ym: '2026-07', review: 'unknown', historyPeriod: 'known', catalog: 'historical',
+  })
+
+  assert.equal(hash, '#/clients?catalog=historical&historyPeriod=known&review=unknown&ym=2026-07')
+  assert.deepEqual(routeFromHash(hash), {
+    name: 'clients',
+    params: {
+      catalog: 'historical', historyPeriod: 'known', review: 'unknown', ym: '2026-07',
+    },
+  })
+})
+
 test('route parsing rejects empty, unrelated, and malformed hashes', () => {
   assert.equal(routeFromHash(''), null)
   assert.equal(routeFromHash('#/'), null)

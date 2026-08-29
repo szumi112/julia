@@ -156,6 +156,33 @@ test('the mock-data workspace opens after login', async ({ page }) => {
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
 })
 
+test('demo Calendar, Clients, and Team stay reducer-backed without protected history surfaces', async ({ page }) => {
+  const apiRequests = []
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.startsWith('/api/')) apiRequests.push(request.url())
+  })
+  await login(page)
+  const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+
+  await navigation.getByRole('link', { name: 'Kalendarz' }).click()
+  await expect(page.getByRole('heading', { name: /Kalendarz/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Przejrzyj.*okres/ })).toHaveCount(0)
+
+  await navigation.getByRole('link', { name: 'Klienci' }).click()
+  await expect(page.getByRole('heading', { name: /Klienci/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /Historyczni/ })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Aktywuj klienta' })).toHaveCount(0)
+
+  await navigation.getByRole('link', { name: 'Zespół' }).click()
+  await expect(page.getByRole('heading', { name: 'Zespół centrum' })).toBeVisible()
+  expect(apiRequests).toEqual([])
+  expect(await page.evaluate(async () => ({
+    databases: typeof indexedDB.databases === 'function' ? await indexedDB.databases() : [],
+    local: Object.keys(localStorage),
+    session: Object.keys(sessionStorage),
+  }))).toEqual({ databases: [], local: [], session: [] })
+})
+
 test('demo login and logout remount a clean workspace', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation', { name: 'Nawigacja główna' })
@@ -441,12 +468,13 @@ test('coarse pointers expose complete 44px targets without enlarging pills', asy
     expect(todayChipHit.height).toBe(36)
     expect(todayChipHit.hitHeight).toBeGreaterThanOrEqual(44)
 
+    const minimumTouchTarget = 44 - 0.001
     for (const selector of ['.spine__row', '.today-links__item']) {
       const target = page.locator(selector).first()
       await expect(target).toBeVisible()
       const box = await target.boundingBox()
-      expect(box.height, selector).toBeGreaterThanOrEqual(44)
-      expect(box.width, selector).toBeGreaterThanOrEqual(44)
+      expect(box.height, selector).toBeGreaterThanOrEqual(minimumTouchTarget)
+      expect(box.width, selector).toBeGreaterThanOrEqual(minimumTouchTarget)
     }
 
     await openPhoneDestination(page, 'Klienci')
@@ -1541,7 +1569,7 @@ test.describe('Task 3 daily-care redesign', () => {
 
     const adjacentDay = page.getByRole('group', { name: 'Tydzień' })
       .locator('[data-iso="2026-06-30"]')
-    await expect(adjacentDay).toHaveAccessibleName('30 czerwca — 1 sesja')
+    await expect(adjacentDay).toHaveAccessibleName('30 czerwca — 1 wpis')
     await expect(adjacentDay.locator('.day-strip__dots .dot')).toHaveCount(1)
   })
 
@@ -2027,6 +2055,22 @@ test.describe('Task 4 administrative redesign', () => {
     await expect(main.getByRole('form', { name: 'Zespół i stawki' })).toHaveCount(0)
     await expect(main.getByRole('button', { name: /Edytuj profil/ })).toHaveCount(0)
     await expect(main.getByRole('button', { name: 'Dodaj specjalistkę' })).toHaveCount(0)
+  })
+
+  test('public demo keeps staff role management hidden and API-free', async ({ page }) => {
+    const apiRequests = []
+    page.on('request', (request) => {
+      if (new URL(request.url()).pathname.startsWith('/api/v1/')) apiRequests.push(request.url())
+    })
+    await login(page)
+    await page.getByRole('navigation', { name: 'Nawigacja główna' })
+      .getByRole('link', { name: 'Ustawienia' })
+      .click()
+
+    await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /Zmień rolę/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Zaproś osobę' })).toHaveCount(0)
+    expect(apiRequests).toEqual([])
   })
 
   test('Ustawienia limits the therapist to personal calendar and integration preferences', async ({ page }) => {

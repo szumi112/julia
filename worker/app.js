@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import { isCapability } from '../src/capabilities.js'
 import { isCoreAuditAction } from '../src/core-audit-contract.js'
 import { auditEventStatement } from './audit/events.js'
 import { loadConfig } from './config.js'
@@ -8,6 +9,7 @@ import {
   applyApiSecurityHeaders,
   isMutationMethod,
   isSupportedMethod,
+  readMultipartBodyOnce,
   readJsonBodyOnce,
   validateMutationMetadata,
   validateOptionsOrigin,
@@ -17,12 +19,16 @@ import {
   createRemoteAccessJwks,
   resolveAccessPrincipal as resolvePrincipal,
 } from './identity/access-jwt.js'
-import { resolveActor as resolveStaffActor } from './identity/staff.js'
+import {
+  resolveActiveActorReadOnly,
+  resolveActor as resolveStaffActor,
+} from './identity/staff.js'
 import { isCorrelationId, safeLog } from './logging/safe-log.js'
 import {
   getOperationalHealth,
   listOpenOperationalActions,
   listSecurityAudit,
+  requestOperationalActionRecovery,
   resolveOperationalAction,
 } from './routes/operations.js'
 import { getSession } from './routes/session.js'
@@ -30,9 +36,36 @@ import {
   getStaff,
   postDeactivation,
   postInvitation,
+  postRoleChange,
   postSpecialistInvitation,
 } from './routes/staff.js'
+import {
+  getCapabilityOverride,
+  getCapabilityTargets,
+  postCapabilityOverride,
+} from './routes/capability-overrides.js'
 import { getWorkspace } from './routes/workspace.js'
+import {
+  getHistoricalProjectionReviewCatalog,
+  getHistoricalProjectionStatus,
+  postHistoricalClientActivation,
+  postHistoricalProjectionContinue,
+  postHistoricalProjectionResolution,
+} from './routes/historical-clients.js'
+import {
+  getActivityProjectionStatus,
+  getActivityWorkspace,
+  postActivityAttendance,
+  postActivityClass,
+  postActivityClassEdit,
+  postActivityGroup,
+  postActivityGroupEdit,
+  postActivityMembership,
+  postActivityMembershipEdit,
+  postActivityParticipant,
+  postActivityParticipantEdit,
+  postActivityProjectionContinue,
+} from './routes/activities.js'
 import { postClient, postClientArchive, postClientEdit } from './routes/clients.js'
 import {
   postAppointment,
@@ -40,8 +73,9 @@ import {
   postAppointmentEdit,
   postAppointmentPayment,
 } from './routes/appointments.js'
-import { postPaymentCorrection } from './routes/payments.js'
+import { getOwnPayments, postPaymentCorrection } from './routes/payments.js'
 import {
+  postSpecialistAccountLink,
   postSpecialistProfile,
   postSpecialistProfileEdit,
 } from './routes/specialists.js'
@@ -51,9 +85,33 @@ import {
   postFinanceImportChunk,
   postFinanceImportCommit,
 } from './routes/finance.js'
+import {
+  getFinanceWindow,
+  postFinanceEntryVoid,
+} from './routes/finance-reporting.js'
+import {
+  loadWorkbookRegistry,
+  loadWorkbookRegistryDetail,
+  recordWorkbookExport,
+  recordWorkbookResolutions,
+} from './core/workbook-registry.js'
+import {
+  loadWorkbookOperatorEvidence,
+  loadWorkbookReconciliationEvidence,
+  verifyWorkbookImportArtifact,
+} from './core/workbook-operator-evidence.js'
 import { verifyCsrfToken as verifyCsrf } from './security/csrf.js'
 import { loadDataKey } from './security/envelope.js'
 import { createKeyring } from './security/keyring.js'
+import {
+  createWorkbookImport,
+  continueWorkbookImport,
+  discoverWorkbookImport,
+  exportWorkbook,
+  getWorkbookImport,
+  loadWorkbookPanelState,
+  previewWorkbook,
+} from './core/workbooks.js'
 
 const IDENTITY_SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const verifiers = new WeakMap()
@@ -69,22 +127,50 @@ const STAFF_INVITATIONS_PATH = '/api/v1/staff/invitations'
 const STAFF_ID = /^\/api\/v1\/staff\/stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}\/deactivation$/
 const SPECIALIST_INVITATION_ID = /^\/api\/v1\/specialists\/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}\/invitations$/
 const ACTION_RESOLUTION_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/resolution$/
+const ACTION_RECOVERY_PATH = /^\/api\/v1\/operations\/actions\/([A-Za-z0-9][A-Za-z0-9_-]{0,127})\/recovery-attempts$/
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/
+const INVALID_WORKBOOK_FILENAME_TEXT = /[\p{Cc}\p{Cf}]/u
 const CLIENT_PATH_ID = 'cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}'
+const STAFF_PATH_ID = 'stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const APPOINTMENT_PATH_ID = 'apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const PAYMENT_PATH_ID = 'pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const FINANCE_BATCH_PATH_ID = 'fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const WORKBOOK_IMPORT_PATH_ID = 'wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const HISTORICAL_CLIENT_PATH_ID = 'hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const ACTIVITY_GROUP_PATH_ID = 'agr_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const ACTIVITY_PARTICIPANT_PATH_ID = 'acp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const ACTIVITY_MEMBERSHIP_PATH_ID = 'amb_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const ACTIVITY_CLASS_PATH_ID = 'acl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const CORE_COMMAND_ALLOW = 'POST, OPTIONS'
 const CORE_READ_ALLOW = 'GET, HEAD, OPTIONS'
 const CORE_BUDGET = Object.freeze({ totalLimit: 50, recoveryReserve: 8 })
+const CAPABILITY_MUTATION_BUDGET = Object.freeze({
+  totalLimit: 80,
+  recoveryReserve: 12,
+})
+const STAFF_ROLE_MUTATION_BUDGET = Object.freeze({
+  totalLimit: 96,
+  recoveryReserve: 16,
+})
 const coreRouteMatchers = new WeakMap()
 const descriptor = (value) => {
   const route = Object.freeze({
     ...value,
+    capability: value.capability ?? null,
+    capabilityAnyOf: value.capabilityAnyOf
+      ? Object.freeze([...value.capabilityAnyOf])
+      : null,
+    capabilityAllOf: value.capabilityAllOf
+      ? Object.freeze([...value.capabilityAllOf])
+      : null,
     methods: Object.freeze([...value.methods]),
     auditActions: Object.freeze([...value.auditActions]),
     bodyKeys: value.bodyKeys ? Object.freeze([...value.bodyKeys]) : null,
-    sharedBudget: CORE_BUDGET,
+    bodyMode: value.bodyMode ?? 'json',
+    freshAuth: value.freshAuth === true,
+    idempotency: value.idempotency !== false,
+    queryMode: value.queryMode ?? (value.bodyKeys === null ? 'any' : 'none'),
+    sharedBudget: value.sharedBudget ?? CORE_BUDGET,
     core: true,
     expected: 'human',
   })
@@ -95,9 +181,14 @@ const descriptor = (value) => {
   return route
 }
 const CORE_ROUTES = Object.freeze([
-  descriptor({ id: 'workspace', path: '/api/v1/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'client.operational.read', auditActions: [], bodyKeys: null }),
-  descriptor({ id: 'specialists.create', path: '/api/v1/specialists', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'standardRateGrosze'] }),
-  descriptor({ id: 'specialists.edit', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'standardRateGrosze'] }),
+  descriptor({ id: 'workspace', path: '/api/v1/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capabilityAllOf: ['appointment.charge.read', 'client.operational.read', 'specialist.directory.read'], auditActions: [], bodyKeys: null }),
+  descriptor({ id: 'permissions.targets', path: '/api/v1/staff/capability-targets', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'permissions.manage', auditActions: [], bodyKeys: null, queryMode: 'none', idempotency: false }),
+  descriptor({ id: 'permissions.read', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/capability-overrides$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'permissions.manage', auditActions: [], bodyKeys: null, queryMode: 'none', idempotency: false }),
+  descriptor({ id: 'permissions.replace', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/capability-overrides/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'permissions.manage', auditActions: ['staff.capabilities.updated'], bodyKeys: ['expectedAuthorityRevision', 'allow', 'deny'], queryMode: 'none', sharedBudget: CAPABILITY_MUTATION_BUDGET }),
+  descriptor({ id: 'staff.role.update', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/role$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['staff.role.updated'], bodyKeys: ['expectedVersion', 'role'], queryMode: 'none', sharedBudget: STAFF_ROLE_MUTATION_BUDGET }),
+  descriptor({ id: 'specialists.create', path: '/api/v1/specialists', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'professionalTitle', 'standardRateGrosze'] }),
+  descriptor({ id: 'specialists.edit', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze'] }),
+  descriptor({ id: 'specialists.account.link', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/account-links$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.account.linked'], bodyKeys: ['staffId', 'expectedSpecialistVersion', 'expectedStaffVersion'] }),
   descriptor({ id: 'clients.create', path: '/api/v1/clients', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'] }),
   descriptor({ id: 'clients.edit', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'] }),
   descriptor({ id: 'clients.archive', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/archive$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'] }),
@@ -106,19 +197,67 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'appointments.cancel', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/cancellation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'] }),
   descriptor({ id: 'appointments.payment', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/payments$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'] }),
   descriptor({ id: 'payments.correct', pathPattern: `^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
+  descriptor({ id: 'payments.own', path: '/api/v1/payments/own', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'appointment.charge.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'finance.list', path: '/api/v1/finance', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null }),
-  descriptor({ id: 'finance.import.start', path: '/api/v1/finance/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'] }),
-  descriptor({ id: 'finance.import.chunk', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/chunks$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'] }),
-  descriptor({ id: 'finance.import.commit', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/commit$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'finance.window', path: '/api/v1/finance/window', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'finance.entry.void', pathPattern: `^/api/v1/finance/entries/${'fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'}/voids$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.entry.voided'], bodyKeys: ['expectedVersion', 'reason'], freshAuth: true }),
+  descriptor({ id: 'finance.import.start', path: '/api/v1/finance/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'] }),
+  descriptor({ id: 'finance.import.chunk', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/chunks$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'] }),
+  descriptor({ id: 'finance.import.commit', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/commit$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'workbooks.preview', path: '/api/v1/workbooks/preview', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, bodyMode: 'workbook-multipart', idempotency: false, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.import', path: '/api/v1/workbooks/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.created', 'workbook.resolutions.recorded'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.materialized'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.discovery', path: '/api/v1/workbooks/imports/discovery', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'workbooks.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.operator.evidence', path: '/api/v1/workbooks/operator-evidence', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.artifact.verification', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/artifact-verification$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.reconciliation.evidence', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/reconciliation$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.registry', path: '/api/v1/workbooks/registry', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'workbooks.registry.detail', path: '/api/v1/workbooks/registry/details', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: ['importId', 'section', 'cursor'], idempotency: false }),
+  descriptor({ id: 'workbooks.resolutions', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.resolutions.recorded'], bodyKeys: ['expectedVersion', 'planDigest', 'resolutions'], freshAuth: true }),
+  descriptor({ id: 'workbooks.export.create', path: '/api/v1/workbooks/exports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'], auditActions: ['workbook.export.created'], bodyKeys: ['format'], freshAuth: true }),
+  descriptor({ id: 'historical.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'historical.projection.review', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/review-catalog$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], freshAuth: true }),
+  descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId', 'reviewContextDigest', 'directoryCount', 'directoryDigest'], freshAuth: true }),
+  descriptor({ id: 'historical.clients.activate', pathPattern: `^/api/v1/historical-clients/${HISTORICAL_CLIENT_PATH_ID}/activation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'] }),
+  descriptor({ id: 'activities.workspace', path: '/api/v1/activities/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'tus.manage', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'activities.groups.create', path: '/api/v1/activities/groups', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'] }),
+  descriptor({ id: 'activities.groups.edit', pathPattern: `^/api/v1/activities/groups/${ACTIVITY_GROUP_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.updated'], bodyKeys: ['expectedVersion', 'label', 'details', 'status', 'leaderSpecialistIds'] }),
+  descriptor({ id: 'activities.participants.create', path: '/api/v1/activities/participants', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.participant.created'], bodyKeys: ['programId', 'name', 'clientId', 'historicalClientId'] }),
+  descriptor({ id: 'activities.participants.edit', pathPattern: `^/api/v1/activities/participants/${ACTIVITY_PARTICIPANT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.participant.updated'], bodyKeys: ['expectedVersion', 'name', 'clientId', 'historicalClientId', 'status'] }),
+  descriptor({ id: 'activities.memberships.create', path: '/api/v1/activities/memberships', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.membership.created'], bodyKeys: ['participantId', 'groupId', 'startsOn', 'endsOn'] }),
+  descriptor({ id: 'activities.memberships.edit', pathPattern: `^/api/v1/activities/memberships/${ACTIVITY_MEMBERSHIP_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.membership.updated'], bodyKeys: ['expectedVersion', 'startsOn', 'endsOn', 'status'] }),
+  descriptor({ id: 'activities.classes.create', path: '/api/v1/activities/classes', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.class.created'], bodyKeys: ['groupId', 'date', 'time', 'durationMinutes', 'topic', 'status'] }),
+  descriptor({ id: 'activities.classes.edit', pathPattern: `^/api/v1/activities/classes/${ACTIVITY_CLASS_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.class.updated'], bodyKeys: ['expectedVersion', 'date', 'time', 'durationMinutes', 'topic', 'status'] }),
+  descriptor({ id: 'activities.attendance.set', pathPattern: `^/api/v1/activities/classes/${ACTIVITY_CLASS_PATH_ID}/attendance$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.attendance.set'], bodyKeys: ['participantId', 'status', 'expectedVersion'] }),
+  descriptor({ id: 'activities.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'activities.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], freshAuth: true }),
 ])
 export const CORE_ROUTE_DESCRIPTORS = CORE_ROUTES
-if (CORE_ROUTES.some((route) => route.auditActions.some((action) => !isCoreAuditAction(action)))) {
+if (CORE_ROUTES.some((route) => {
+  const singular = isCapability(route.capability)
+    && route.capabilityAnyOf === null && route.capabilityAllOf === null
+  const anyOf = route.capability === null && route.capabilityAllOf === null
+    && Array.isArray(route.capabilityAnyOf)
+    && route.capabilityAnyOf.length > 0
+    && new Set(route.capabilityAnyOf).size === route.capabilityAnyOf.length
+    && route.capabilityAnyOf.every(isCapability)
+  const allOf = route.capability === null && route.capabilityAnyOf === null
+    && Array.isArray(route.capabilityAllOf)
+    && route.capabilityAllOf.length > 1
+    && new Set(route.capabilityAllOf).size === route.capabilityAllOf.length
+    && route.capabilityAllOf.every(isCapability)
+  return (!singular && !anyOf && !allOf)
+    || route.auditActions.some((action) => !isCoreAuditAction(action))
+})) {
   throw new Error('CORE_ROUTE_REGISTRY_INVALID')
 }
 const OPERATION_SERVICES = Object.freeze({
   getOperationalHealth,
   listOpenOperationalActions,
   listSecurityAudit,
+  requestOperationalActionRecovery,
   resolveOperationalAction,
 })
 
@@ -135,7 +274,12 @@ const routeFor = (request) => {
     const pathMatches = typeof matcher === 'function'
       ? matcher(url.pathname)
       : matcher.test(url.pathname)
-    if (pathMatches && (route.bodyKeys === null || url.search === '')) return route
+    if (pathMatches) {
+      if (route.queryMode === 'none' && url.search !== '') {
+        return { id: 'unmatched', expected: 'human', methods: null, queryRejected: true }
+      }
+      return route
+    }
   }
   if (url.search === '' && url.pathname === STAFF_PATH) return { id: 'staff.list', expected: 'human', methods: ['GET', 'HEAD', 'OPTIONS'] }
   if (url.search === '' && url.pathname === STAFF_INVITATIONS_PATH) return { id: 'staff.invitations', expected: 'human', methods: ['POST', 'OPTIONS'] }
@@ -154,7 +298,16 @@ const routeFor = (request) => {
   if (resolution) {
     return { id: 'operations.action-resolution', expected: 'human', methods: ['POST', 'OPTIONS'], allow: OPERATIONS_MUTATION_ALLOW, service: 'resolveOperationalAction', actionId: resolution[1] }
   }
+  const recovery = url.search === '' ? ACTION_RECOVERY_PATH.exec(url.pathname) : null
+  if (recovery) {
+    return { id: 'operations.action-recovery', expected: 'human', methods: ['POST', 'OPTIONS'], allow: OPERATIONS_MUTATION_ALLOW, service: 'requestOperationalActionRecovery', actionId: recovery[1] }
+  }
   return { id: 'unmatched', expected: 'human', methods: null }
+}
+
+const isWorkbookNamespace = (request) => {
+  const pathname = new URL(request.url).pathname
+  return pathname === '/api/v1/workbooks' || pathname.startsWith('/api/v1/workbooks/')
 }
 
 const runtimeConfig = (c, deps) => deps.config ?? loadConfig(c.env)
@@ -225,6 +378,100 @@ const validateResolutionIdempotency = (request) => {
   }
 }
 
+const requireRecentHumanPrincipal = (principal, requestNowMs) => {
+  const nowSeconds = Math.floor(requestNowMs / 1_000)
+  if (!Number.isSafeInteger(principal?.issuedAt)
+    || !Number.isSafeInteger(principal?.expiresAt)
+    || principal.issuedAt > nowSeconds
+    || nowSeconds - principal.issuedAt > 300
+    || principal.expiresAt <= nowSeconds) throw new AppError('REAUTH_REQUIRED')
+}
+
+const workbookForm = (value, keys) => {
+  if (!(value instanceof FormData)) throw new AppError('INVALID_MULTIPART')
+  const entries = [...value.entries()]
+  if (entries.length !== keys.length
+    || new Set(entries.map(([key]) => key)).size !== entries.length
+    || keys.some((key) => !entries.some(([actual]) => actual === key))) {
+    throw new AppError('VALIDATION_FAILED', { field: 'body' })
+  }
+  return Object.freeze(Object.fromEntries(entries))
+}
+
+const workbookFile = async (value) => {
+  if (!(value instanceof File) || value.size < 1 || value.size > 5 * 1024 * 1024
+    || typeof value.name !== 'string' || value.name.length < 6 || value.name.length > 255
+    || value.name !== value.name.trim() || value.name !== value.name.normalize('NFC')
+    || INVALID_WORKBOOK_FILENAME_TEXT.test(value.name)
+    || !value.name.toLowerCase().endsWith('.xlsx')
+    || value.name.includes('/') || value.name.includes('\\')) {
+    throw new AppError('VALIDATION_FAILED', { field: 'filename' })
+  }
+  return Object.freeze({
+    bytes: new Uint8Array(await value.arrayBuffer()),
+    filename: value.name,
+  })
+}
+
+const workbookResolutions = (value) => {
+  if (typeof value !== 'string' || value.length > 16_384) {
+    throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+  }
+  let parsed
+  try { parsed = JSON.parse(value) } catch {
+    throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+  }
+  if (!Array.isArray(parsed) || parsed.length > 100) {
+    throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+  }
+  const result = parsed.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || Object.getPrototypeOf(item) !== Object.prototype
+      || Reflect.ownKeys(item).length !== 2
+      || typeof item.conflictId !== 'string'
+      || !/^wmc_[A-Za-z0-9_-]{43}$/.test(item.conflictId)
+      || typeof item.specialistId !== 'string'
+      || !/^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/.test(item.specialistId)) {
+      throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+    }
+    return Object.freeze({
+      conflictId: item.conflictId, specialistId: item.specialistId,
+    })
+  })
+  if (new Set(result.map(({ conflictId }) => conflictId)).size !== result.length) {
+    throw new AppError('VALIDATION_FAILED', { field: 'resolutions' })
+  }
+  return Object.freeze(result)
+}
+
+const task11CoreBoundary = async (operation, field) => {
+  try { return await operation() } catch (error) {
+    const match = /^VALIDATION_FAILED\/(registry|registryDetail|resolutions|cursor)$/.exec(
+      error?.message ?? '',
+    )
+    if (match) throw new AppError('VALIDATION_FAILED', { field })
+    throw error
+  }
+}
+
+const workbookStream = (source) => {
+  if (!(source instanceof Uint8Array) || source.byteLength < 1) throw new Error('INTERNAL_ERROR')
+  let offset = 0
+  return new ReadableStream({
+    pull(controller) {
+      if (offset >= source.byteLength) {
+        source.fill(0)
+        controller.close()
+        return
+      }
+      const end = Math.min(source.byteLength, offset + 64 * 1024)
+      controller.enqueue(source.slice(offset, end))
+      offset = end
+    },
+    cancel() { source.fill(0) },
+  })
+}
+
 const readResponse = (c, result) => {
   const response = c.json(result)
   return c.req.method === 'HEAD'
@@ -271,23 +518,42 @@ export function createApp(deps = {}) {
     c.set('routeId', route.id)
     c.set('routeAllow', route.allow)
     c.set('routeActionId', route.actionId)
-    if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
-    if (route.methods && !route.methods.includes(method)) throw new AppError('METHOD_NOT_ALLOWED')
+    const workbookNamespace = isWorkbookNamespace(request)
+    if (!workbookNamespace) {
+      if (route.queryRejected) throw new AppError('NOT_FOUND')
+      if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
+      if (route.methods && !route.methods.includes(method)) {
+        throw new AppError('METHOD_NOT_ALLOWED')
+      }
+    }
+    const config = runtimeConfig(c, deps)
+    if (workbookNamespace
+      && !(config.appEnv === 'staging' && config.dataMode === 'fictional')) {
+      throw new AppError('NOT_FOUND')
+    }
+    if (workbookNamespace) {
+      if (route.queryRejected) throw new AppError('NOT_FOUND')
+      if (!isSupportedMethod(method)) throw new AppError('METHOD_NOT_ALLOWED')
+      if (route.methods && !route.methods.includes(method)) {
+        throw new AppError('METHOD_NOT_ALLOWED')
+      }
+    }
 
     if (route.core) {
       const rawDb = c.env?.DB ?? deps.db
-      const budget = createD1QueryBudget(rawDb, CORE_BUDGET)
+      const budget = createD1QueryBudget(rawDb, route.sharedBudget)
       c.set('coreD1Budget', budget)
       c.set('coreWorkDb', budget.work)
       c.set('coreRecoveryDb', budget.recovery)
     }
 
-    const config = runtimeConfig(c, deps)
     const requestNowMs = route.expected === 'human' || isMutationMethod(method) ? nowMs(deps) : null
     c.set('nowMs', requestNowMs)
     if (isMutationMethod(method)) {
-      validateMutationMetadata(request, config)
-      if (route.id === 'operations.action-resolution' || route.core) validateResolutionIdempotency(request)
+      validateMutationMetadata(request, config, { bodyMode: route.bodyMode ?? 'json' })
+      if (route.id === 'operations.action-resolution'
+        || route.id === 'operations.action-recovery'
+        || (route.core && route.idempotency !== false)) validateResolutionIdempotency(request)
     }
     else if (method === 'OPTIONS') validateOptionsOrigin(request, config)
 
@@ -299,6 +565,7 @@ export function createApp(deps = {}) {
     })
     if (principal?.kind !== route.expected) throw new Error('ACCESS_ASSERTION_INVALID')
     c.set('principal', principal)
+    if (route.freshAuth) requireRecentHumanPrincipal(principal, requestNowMs)
 
     let keyring
     if (isMutationMethod(method)) {
@@ -322,7 +589,10 @@ export function createApp(deps = {}) {
     if (route.expected === 'human') {
       const actorDb = route.core ? c.get('coreWorkDb') : c.env?.DB ?? deps.db
       const cryptoContext = await identityCryptoContext(c, config, deps, actorDb)
-      const actor = await (deps.resolveActor ?? resolveStaffActor)(
+      const actorResolver = route.id === 'workbooks.preview'
+        ? deps.resolvePreviewActor ?? resolveActiveActorReadOnly
+        : deps.resolveActor ?? resolveStaffActor
+      const actor = await actorResolver(
         actorDb,
         principal,
         cryptoContext,
@@ -336,16 +606,26 @@ export function createApp(deps = {}) {
       )
       c.set('actor', actor)
       c.set('cryptoContext', cryptoContext)
+      if (Array.isArray(route.capabilityAllOf)
+        && !route.capabilityAllOf.every((capability) => (
+          actor?.capabilities?.includes(capability) === true
+        ))) throw new AppError('FORBIDDEN')
     }
 
     if (isMutationMethod(method)) {
-      c.set('jsonBody', await (deps.readJsonBodyOnce ?? readJsonBodyOnce)(request, {
-        rejectDuplicateTopLevelKeys: route.core || route.id === 'staff.invitations'
-          || route.id === 'specialists.invitations'
-          || route.id === 'staff.deactivation'
-          || route.id === 'operations.action-resolution',
-      }))
-      if (route.core) {
+      if (route.bodyMode === 'workbook-multipart') {
+        c.set('multipartBody', await (deps.readMultipartBodyOnce
+          ?? readMultipartBodyOnce)(request))
+      } else {
+        c.set('jsonBody', await (deps.readJsonBodyOnce ?? readJsonBodyOnce)(request, {
+          rejectDuplicateTopLevelKeys: route.core || route.id === 'staff.invitations'
+            || route.id === 'specialists.invitations'
+            || route.id === 'staff.deactivation'
+            || route.id === 'operations.action-resolution'
+            || route.id === 'operations.action-recovery',
+        }))
+      }
+      if (route.core && route.bodyMode === 'json') {
         let descriptors
         try { descriptors = Object.getOwnPropertyDescriptors(c.get('jsonBody')) } catch {
           throw new AppError('VALIDATION_FAILED', { field: 'body' })
@@ -395,6 +675,63 @@ export function createApp(deps = {}) {
     })
     return readResponse(c, result)
   })
+  app.get('/api/v1/staff/capability-targets', async (c) => {
+    if (c.get('routeId') !== 'permissions.targets') throw new AppError('NOT_FOUND')
+    const result = await getCapabilityTargets({
+      db: c.get('coreWorkDb'),
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      ...(deps.listCapabilityTargets ? { list: deps.listCapabilityTargets } : {}),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/staff/:staffId/capability-overrides', async (c) => {
+    if (c.get('routeId') !== 'permissions.read') throw new AppError('NOT_FOUND')
+    const result = await getCapabilityOverride({
+      db: c.get('coreWorkDb'),
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      staffId: c.req.param('staffId'),
+      nowMs: c.get('nowMs'),
+      ...(deps.getCapabilityOverrides ? { read: deps.getCapabilityOverrides } : {}),
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/staff/:staffId/capability-overrides/edits', async (c) => {
+    if (c.get('routeId') !== 'permissions.replace') throw new AppError('NOT_FOUND')
+    const result = await postCapabilityOverride({
+      db: c.get('coreWorkDb'),
+      recoveryDb: c.get('coreRecoveryDb'),
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      staffId: c.req.param('staffId'),
+      input: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      correlationId: c.get('correlationId'),
+      nowMs: c.get('nowMs'),
+      idFactory: deps.idFactory ?? idFactory,
+      ...(deps.replaceCapabilityOverrides
+        ? { replace: deps.replaceCapabilityOverrides } : {}),
+    })
+    return c.json(result)
+  })
+  app.post('/api/v1/staff/:staffId/role', async (c) => {
+    if (c.get('routeId') !== 'staff.role.update') throw new AppError('NOT_FOUND')
+    const result = await (deps.postRoleChange ?? postRoleChange)({
+      db: c.get('coreWorkDb'),
+      recoveryDb: c.get('coreRecoveryDb'),
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      staffId: c.req.param('staffId'),
+      body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      correlationId: c.get('correlationId'),
+      nowMs: c.get('nowMs'),
+      idFactory: deps.idFactory ?? idFactory,
+    })
+    return c.json(result)
+  })
   app.post('/api/v1/clients', async (c) => {
     if (c.get('routeId') !== 'clients.create') throw new AppError('NOT_FOUND')
     const input = {
@@ -433,6 +770,18 @@ export function createApp(deps = {}) {
       idFactory: deps.idFactory ?? idFactory, specialistId: c.req.param('specialistId'),
       body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
       ...(deps.updateSpecialistProfile ? { edit: deps.updateSpecialistProfile } : {}),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/specialists/:specialistId/account-links', async (c) => {
+    if (c.get('routeId') !== 'specialists.account.link') throw new AppError('NOT_FOUND')
+    const result = await (deps.postSpecialistAccountLink ?? postSpecialistAccountLink)({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory, specialistId: c.req.param('specialistId'),
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.linkSpecialistAccount ? { link: deps.linkSpecialistAccount } : {}),
     })
     return c.json(result.body, result.status)
   })
@@ -539,6 +888,14 @@ export function createApp(deps = {}) {
     const result = await (deps.postPaymentCorrection ?? postPaymentCorrection)(input)
     return c.json(result.body, result.status)
   })
+  app.get('/api/v1/payments/own', async (c) => {
+    if (c.get('routeId') !== 'payments.own') throw new AppError('NOT_FOUND')
+    const result = await (deps.getOwnPayments ?? getOwnPayments)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'), url: c.req.url,
+      ...(deps.loadOwnPaymentsWindow ? { load: deps.loadOwnPaymentsWindow } : {}),
+    })
+    return readResponse(c, result)
+  })
   app.get('/api/v1/finance', async (c) => {
     if (c.get('routeId') !== 'finance.list') throw new AppError('NOT_FOUND')
     const result = await (deps.getFinance ?? getFinance)({
@@ -547,6 +904,28 @@ export function createApp(deps = {}) {
       ...(deps.listFinanceEntries ? { list: deps.listFinanceEntries } : {}),
     })
     return readResponse(c, result)
+  })
+  app.get('/api/v1/finance/window', async (c) => {
+    if (c.get('routeId') !== 'finance.window') throw new AppError('NOT_FOUND')
+    const result = await (deps.getFinanceWindow ?? getFinanceWindow)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      url: c.req.url,
+      ...(deps.loadFinanceWindow ? { load: deps.loadFinanceWindow } : {}),
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/finance/entries/:entryId/voids', async (c) => {
+    if (c.get('routeId') !== 'finance.entry.void') throw new AppError('NOT_FOUND')
+    const result = await (deps.postFinanceEntryVoid ?? postFinanceEntryVoid)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      entryId: c.req.param('entryId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.voidFinanceEntry ? { service: deps.voidFinanceEntry } : {}),
+    })
+    return c.json(result.body, result.status)
   })
   app.post('/api/v1/finance/imports', async (c) => {
     if (c.get('routeId') !== 'finance.import.start') throw new AppError('NOT_FOUND')
@@ -580,6 +959,437 @@ export function createApp(deps = {}) {
       batchId: c.req.param('batchId'), body: c.get('jsonBody'),
       idempotencyKey: c.req.header('Idempotency-Key'),
       ...(deps.commitFinanceImport ? { commit: deps.commitFinanceImport } : {}),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/workbooks/preview', async (c) => {
+    if (c.get('routeId') !== 'workbooks.preview') throw new AppError('NOT_FOUND')
+    const form = workbookForm(c.get('multipartBody'), ['workbook'])
+    const file = await workbookFile(form.workbook)
+    try {
+      const config = runtimeConfig(c, deps)
+      const stateLoader = deps.loadWorkbookPanelState ?? loadWorkbookPanelState
+      const result = await (deps.previewWorkbook ?? previewWorkbook)({
+        ...file,
+        db: c.get('coreWorkDb'),
+        actor: c.get('actor'),
+        keyring: c.get('cryptoContext')?.keyring,
+        config,
+        centreId: 'centre_1',
+        nowMs: c.get('nowMs'),
+        loadPanelState: (input) => stateLoader({
+          db: c.get('coreWorkDb'),
+          keyring: c.get('cryptoContext')?.keyring,
+          ...input,
+        }),
+      })
+      return c.json(result)
+    } finally {
+      file.bytes.fill(0)
+    }
+  })
+  app.post('/api/v1/workbooks/imports', async (c) => {
+    if (c.get('routeId') !== 'workbooks.import') throw new AppError('NOT_FOUND')
+    const form = workbookForm(
+      c.get('multipartBody'), ['previewToken', 'resolutions', 'workbook'],
+    )
+    if (typeof form.previewToken !== 'string') {
+      throw new AppError('VALIDATION_FAILED', { field: 'body' })
+    }
+    const file = await workbookFile(form.workbook)
+    try {
+      const resolutions = workbookResolutions(form.resolutions)
+      const config = runtimeConfig(c, deps)
+      const stateLoader = deps.loadWorkbookPanelState ?? loadWorkbookPanelState
+      const result = await (deps.createWorkbookImport ?? createWorkbookImport)({
+        db: c.get('coreWorkDb'),
+        bucket: c.env?.ARCHIVE ?? deps.bucket,
+        actor: c.get('actor'),
+        keyring: c.get('cryptoContext')?.keyring,
+        config,
+        centreId: 'centre_1',
+        nowMs: c.get('nowMs'),
+        correlationId: c.get('correlationId'),
+        idFactory: deps.idFactory ?? idFactory,
+        ...file,
+        previewToken: form.previewToken,
+        resolutions,
+        idempotencyKey: c.req.header('Idempotency-Key'),
+        loadPanelState: (input) => stateLoader({
+          db: c.get('coreWorkDb'),
+          keyring: c.get('cryptoContext')?.keyring,
+          ...input,
+        }),
+      })
+      return c.json(result.body, result.status)
+    } finally {
+      file.bytes.fill(0)
+    }
+  })
+  app.post('/api/v1/workbooks/imports/:importId/continue', async (c) => {
+    if (c.get('routeId') !== 'workbooks.continue') throw new AppError('NOT_FOUND')
+    const form = workbookForm(c.get('multipartBody'), ['expectedVersion'])
+    if (typeof form.expectedVersion !== 'string' || !/^[1-9]\d*$/.test(form.expectedVersion)) {
+      throw new AppError('VALIDATION_FAILED', { field: 'expectedVersion' })
+    }
+    const expectedVersion = Number(form.expectedVersion)
+    if (!Number.isSafeInteger(expectedVersion)) {
+      throw new AppError('VALIDATION_FAILED', { field: 'expectedVersion' })
+    }
+    const result = await (deps.continueWorkbookImport ?? continueWorkbookImport)({
+      db: c.get('coreWorkDb'),
+      actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring,
+      config: runtimeConfig(c, deps),
+      centreId: 'centre_1',
+      nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+      importId: c.req.param('importId'),
+      expectedVersion,
+      idempotencyKey: c.req.header('Idempotency-Key'),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/workbooks/imports/discovery', async (c) => {
+    if (c.get('routeId') !== 'workbooks.discovery') throw new AppError('NOT_FOUND')
+    const url = new URL(c.req.url)
+    const keys = [...url.searchParams.keys()]
+    const fingerprint = url.searchParams.get('fingerprint')
+    if (keys.length !== 1 || keys[0] !== 'fingerprint'
+      || typeof fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(fingerprint)
+      || url.search !== `?fingerprint=${fingerprint}`) {
+      throw new AppError('VALIDATION_FAILED', { field: 'fingerprint' })
+    }
+    const result = await (deps.discoverWorkbookImport ?? discoverWorkbookImport)({
+      db: c.get('coreWorkDb'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      fingerprint,
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/imports/:importId', async (c) => {
+    if (c.get('routeId') !== 'workbooks.status') throw new AppError('NOT_FOUND')
+    const result = await (deps.getWorkbookImport ?? getWorkbookImport)({
+      db: c.get('coreWorkDb'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      importId: c.req.param('importId'),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/operator-evidence', async (c) => {
+    if (c.get('routeId') !== 'workbooks.operator.evidence') throw new AppError('NOT_FOUND')
+    const result = await (deps.loadWorkbookOperatorEvidence ?? loadWorkbookOperatorEvidence)({
+      db: c.get('coreWorkDb'), bucket: c.env?.ARCHIVE ?? deps.bucket,
+      actor: c.get('actor'), nowMs: c.get('nowMs'),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/imports/:importId/artifact-verification', async (c) => {
+    if (c.get('routeId') !== 'workbooks.artifact.verification') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.verifyWorkbookImportArtifact ?? verifyWorkbookImportArtifact)({
+      db: c.get('coreWorkDb'), bucket: c.env?.ARCHIVE ?? deps.bucket,
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      config: runtimeConfig(c, deps), nowMs: c.get('nowMs'),
+      importId: c.req.param('importId'),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/imports/:importId/reconciliation', async (c) => {
+    if (c.get('routeId') !== 'workbooks.reconciliation.evidence') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.loadWorkbookReconciliationEvidence
+      ?? loadWorkbookReconciliationEvidence)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'), nowMs: c.get('nowMs'),
+      importId: c.req.param('importId'),
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/registry', async (c) => {
+    if (c.get('routeId') !== 'workbooks.registry') throw new AppError('NOT_FOUND')
+    const url = new URL(c.req.url)
+    const keys = [...url.searchParams.keys()]
+    if (keys.some((key) => !['cursor', 'section'].includes(key))
+      || new Set(keys).size !== keys.length || !url.searchParams.has('section')) {
+      throw new AppError('VALIDATION_FAILED', { field: 'registry' })
+    }
+    const section = url.searchParams.get('section')
+    const cursor = url.searchParams.get('cursor')
+    const canonical = `?section=${section}${cursor === null ? '' : `&cursor=${cursor}`}`
+    if (url.search !== canonical) {
+      throw new AppError('VALIDATION_FAILED', { field: 'registry' })
+    }
+    const result = await task11CoreBoundary(() => (
+      deps.loadWorkbookRegistry ?? loadWorkbookRegistry)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'), nowMs: c.get('nowMs'),
+      cursor, section,
+      }), 'registry')
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/workbooks/imports/:importId/resolutions', async (c) => {
+    if (c.get('routeId') !== 'workbooks.resolutions') throw new AppError('NOT_FOUND')
+    const body = c.get('jsonBody')
+    const result = await task11CoreBoundary(() => (
+      deps.recordWorkbookResolutions ?? recordWorkbookResolutions)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      importId: c.req.param('importId'), expectedVersion: body.expectedVersion,
+      planDigest: body.planDigest, resolutions: body.resolutions,
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      }), 'resolutions')
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/workbooks/registry/details', async (c) => {
+    if (c.get('routeId') !== 'workbooks.registry.detail') throw new AppError('NOT_FOUND')
+    const body = c.get('jsonBody')
+    const result = await task11CoreBoundary(() => (
+      deps.loadWorkbookRegistryDetail ?? loadWorkbookRegistryDetail)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, config: runtimeConfig(c, deps),
+      nowMs: c.get('nowMs'), importId: body.importId,
+      section: body.section, cursor: body.cursor,
+      }), 'registryDetail')
+    return c.json(result)
+  })
+  app.post('/api/v1/workbooks/exports', async (c) => {
+    if (c.get('routeId') !== 'workbooks.export.create') throw new AppError('NOT_FOUND')
+    const format = c.get('jsonBody')?.format
+    if (format !== 'legacy' && format !== 'panel-v2') {
+      throw new AppError('VALIDATION_FAILED', { field: 'body' })
+    }
+    const result = await (deps.exportWorkbook ?? exportWorkbook)({
+      db: c.get('coreWorkDb'),
+      bucket: c.env?.ARCHIVE ?? deps.bucket,
+      actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring,
+      config: runtimeConfig(c, deps),
+      centreId: 'centre_1',
+      nowMs: c.get('nowMs'),
+      format,
+    })
+    if (result?.bytes instanceof Uint8Array && result.bytes.byteLength > 10 * 1024 * 1024) {
+      result.bytes.fill(0)
+      throw new Error('WORKBOOK_EXPORT_LIMIT')
+    }
+    if (!(result?.bytes instanceof Uint8Array)
+      || result.bytes.byteLength < 1
+      || typeof result.filename !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.xlsx$/.test(result.filename)) {
+      if (result?.bytes instanceof Uint8Array) result.bytes.fill(0)
+      throw new Error('INTERNAL_ERROR')
+    }
+    let fingerprintBytes
+    try {
+      fingerprintBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', result.bytes))
+      await (deps.recordWorkbookExport ?? recordWorkbookExport)({
+        db: c.get('coreWorkDb'), actor: c.get('actor'), nowMs: c.get('nowMs'),
+        correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+        format, byteSize: result.bytes.byteLength, filename: result.filename,
+        fingerprint: [...fingerprintBytes]
+          .map((value) => value.toString(16).padStart(2, '0')).join(''),
+        idempotencyKey: c.req.header('Idempotency-Key'),
+      })
+    } catch (error) {
+      result.bytes.fill(0)
+      throw error
+    } finally {
+      fingerprintBytes?.fill(0)
+    }
+    const headers = {
+      'Cache-Control': 'private, no-store',
+      'Content-Length': String(result.bytes.byteLength),
+      'Content-Disposition': `attachment; filename="${result.filename}"`,
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'X-Content-Type-Options': 'nosniff',
+    }
+    return new Response(workbookStream(result.bytes), { status: 200, headers })
+  })
+  app.get('/api/v1/workbooks/imports/:importId/historical-projection', async (c) => {
+    if (c.get('routeId') !== 'historical.projection.status') throw new AppError('NOT_FOUND')
+    const result = await getHistoricalProjectionStatus({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, importId: c.req.param('importId'),
+      service: deps.getHistoricalProjectionStatus,
+    })
+    return readResponse(c, result)
+  })
+  app.get('/api/v1/workbooks/imports/:importId/historical-projection/review-catalog', async (c) => {
+    if (c.get('routeId') !== 'historical.projection.review') throw new AppError('NOT_FOUND')
+    const url = new URL(c.req.url)
+    const keys = [...url.searchParams.keys()]
+    const afterSourceRecordId = url.searchParams.get('afterSourceRecordId')
+    if (keys.length > 1 || (keys.length === 1 && (keys[0] !== 'afterSourceRecordId'
+      || typeof afterSourceRecordId !== 'string'
+      || !/^wbs_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(afterSourceRecordId)
+      || url.search !== `?afterSourceRecordId=${afterSourceRecordId}`))) {
+      throw new AppError('VALIDATION_FAILED', { field: 'afterSourceRecordId' })
+    }
+    const result = await getHistoricalProjectionReviewCatalog({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, config: runtimeConfig(c, deps),
+      centreId: 'centre_1', importId: c.req.param('importId'),
+      afterSourceRecordId: keys.length === 0 ? null : afterSourceRecordId,
+      service: deps.getHistoricalProjectionReviewCatalog,
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/workbooks/imports/:importId/historical-projection/continue', async (c) => {
+    if (c.get('routeId') !== 'historical.projection.continue') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await postHistoricalProjectionContinue({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, config: runtimeConfig(c, deps),
+      centreId: 'centre_1', importId: c.req.param('importId'),
+      body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      idFactory: deps.idFactory ?? idFactory, nowMs: c.get('nowMs'),
+      service: deps.postHistoricalProjectionContinue,
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/workbooks/imports/:importId/historical-projection/resolutions', async (c) => {
+    if (c.get('routeId') !== 'historical.projection.resolve') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await postHistoricalProjectionResolution({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, config: runtimeConfig(c, deps),
+      centreId: 'centre_1', importId: c.req.param('importId'),
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+      idFactory: deps.idFactory ?? idFactory, nowMs: c.get('nowMs'),
+      service: deps.postHistoricalProjectionResolution,
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/historical-clients/:historicalClientId/activation', async (c) => {
+    if (c.get('routeId') !== 'historical.clients.activate') throw new AppError('NOT_FOUND')
+    const result = await postHistoricalClientActivation({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring,
+      historicalClientId: c.req.param('historicalClientId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      nowMs: c.get('nowMs'),
+      service: deps.postHistoricalClientActivation,
+    })
+    return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/activities/workspace', async (c) => {
+    if (c.get('routeId') !== 'activities.workspace') throw new AppError('NOT_FOUND')
+    const result = await (deps.getActivityWorkspace ?? getActivityWorkspace)({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      url: c.req.url,
+    })
+    return readResponse(c, result)
+  })
+  const activityCommandInput = (c, target = {}) => ({
+    db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+    actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+    nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+    idFactory: deps.idFactory ?? idFactory, body: c.get('jsonBody'),
+    idempotencyKey: c.req.header('Idempotency-Key'), ...target,
+  })
+  app.post('/api/v1/activities/groups', async (c) => {
+    if (c.get('routeId') !== 'activities.groups.create') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityGroup ?? postActivityGroup)(
+      activityCommandInput(c),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/groups/:groupId/edits', async (c) => {
+    if (c.get('routeId') !== 'activities.groups.edit') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityGroupEdit ?? postActivityGroupEdit)(
+      activityCommandInput(c, { groupId: c.req.param('groupId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/participants', async (c) => {
+    if (c.get('routeId') !== 'activities.participants.create') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.postActivityParticipant ?? postActivityParticipant)(
+      activityCommandInput(c),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/participants/:participantId/edits', async (c) => {
+    if (c.get('routeId') !== 'activities.participants.edit') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.postActivityParticipantEdit ?? postActivityParticipantEdit)(
+      activityCommandInput(c, { participantId: c.req.param('participantId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/memberships', async (c) => {
+    if (c.get('routeId') !== 'activities.memberships.create') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.postActivityMembership ?? postActivityMembership)(
+      activityCommandInput(c),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/memberships/:membershipId/edits', async (c) => {
+    if (c.get('routeId') !== 'activities.memberships.edit') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await (deps.postActivityMembershipEdit ?? postActivityMembershipEdit)(
+      activityCommandInput(c, { membershipId: c.req.param('membershipId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/classes', async (c) => {
+    if (c.get('routeId') !== 'activities.classes.create') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityClass ?? postActivityClass)(
+      activityCommandInput(c),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/classes/:classId/edits', async (c) => {
+    if (c.get('routeId') !== 'activities.classes.edit') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityClassEdit ?? postActivityClassEdit)(
+      activityCommandInput(c, { classId: c.req.param('classId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/classes/:classId/attendance', async (c) => {
+    if (c.get('routeId') !== 'activities.attendance.set') throw new AppError('NOT_FOUND')
+    const result = await (deps.postActivityAttendance ?? postActivityAttendance)(
+      activityCommandInput(c, { classId: c.req.param('classId') }),
+    )
+    return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/workbooks/imports/:importId/activity-projection', async (c) => {
+    if (c.get('routeId') !== 'activities.projection.status') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await getActivityProjectionStatus({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      importId: c.req.param('importId'), service: deps.getActivityProjectionStatus,
+    })
+    return readResponse(c, result)
+  })
+  app.post('/api/v1/workbooks/imports/:importId/activity-projection/continue', async (c) => {
+    if (c.get('routeId') !== 'activities.projection.continue') {
+      throw new AppError('NOT_FOUND')
+    }
+    const result = await postActivityProjectionContinue({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      config: runtimeConfig(c, deps), centreId: 'centre_1',
+      importId: c.req.param('importId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      idFactory: deps.idFactory ?? idFactory, nowMs: c.get('nowMs'),
+      service: deps.postActivityProjectionContinue,
     })
     return c.json(result.body, result.status)
   })
@@ -668,6 +1478,21 @@ export function createApp(deps = {}) {
     })
     return c.json(result)
   })
+  app.post('/api/v1/operations/actions/:actionId/recovery-attempts', async (c) => {
+    if (c.get('routeId') !== 'operations.action-recovery') throw new AppError('NOT_FOUND')
+    const result = await c.get('operationService')({
+      db: c.env?.DB ?? deps.db,
+      cryptoContext: c.get('cryptoContext'),
+      actor: c.get('actor'),
+      nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+      actionId: c.get('routeActionId'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      body: c.get('jsonBody'),
+    })
+    return c.json(result, 202)
+  })
   app.get('/api/v1/security/audit', async (c) => {
     if (c.get('routeId') !== 'security.audit') throw new AppError('NOT_FOUND')
     const result = await c.get('operationService')({
@@ -695,6 +1520,10 @@ export function createApp(deps = {}) {
   }
   app.options('/api/v1/operations/actions/:actionId/resolution', (c) => {
     if (c.get('routeId') !== 'operations.action-resolution') throw new AppError('NOT_FOUND')
+    return new Response(null, { status: 204, headers: { Allow: OPERATIONS_MUTATION_ALLOW } })
+  })
+  app.options('/api/v1/operations/actions/:actionId/recovery-attempts', (c) => {
+    if (c.get('routeId') !== 'operations.action-recovery') throw new AppError('NOT_FOUND')
     return new Response(null, { status: 204, headers: { Allow: OPERATIONS_MUTATION_ALLOW } })
   })
   app.options('/api/v1/*', (c) => {

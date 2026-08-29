@@ -47,9 +47,17 @@ const baseConfig = () => ({
     ACTIVE_DATA_KEK_VERSION: '1',
     ACTIVE_LOOKUP_KEY_VERSION: '1',
     ACTIVE_BACKUP_KEK_VERSION: '1',
+    ACTIVE_WORKBOOK_KEK_VERSION: '1',
+    ACTIVE_WORKBOOK_HMAC_VERSION: '1',
   },
   secrets: {
-    required: ['BWM_BACKUP_KEK_V1', 'BWM_DATA_KEK_V1', 'BWM_LOOKUP_HMAC_V1'],
+    required: [
+      'BWM_BACKUP_KEK_V1',
+      'BWM_DATA_KEK_V1',
+      'BWM_LOOKUP_HMAC_V1',
+      'BWM_WORKBOOK_HMAC_V1',
+      'BWM_WORKBOOK_KEK_V1',
+    ],
   },
 })
 
@@ -68,8 +76,7 @@ const validDocument = () => ({
     accessGroupName: 'Bear with me - panel - staging',
     accessHealthServiceTokenId: '7d4e1f8a2b5c9d30e6f1a4b7c2d5e8f0.access',
     accessTeamDomain: 'https://example-team.cloudflareaccess.com',
-    scaleway: {
-      projectId: '9c6b3a80-5d2e-4f17-8b4a-0c3d6e9f2a51',
+    resend: {
       fromEmail: 'panel@example-domain.pl',
       fromName: 'Bear with me',
     },
@@ -88,8 +95,7 @@ const validDocument = () => ({
     accessGroupName: 'Bear with me - panel - production',
     accessHealthServiceTokenId: '2f9c6d3e0a7b4c1d8e5f2a9b6c3d0e7f.access',
     accessTeamDomain: 'https://example-team.cloudflareaccess.com',
-    scaleway: {
-      projectId: '9c6b3a80-5d2e-4f17-8b4a-0c3d6e9f2a51',
+    resend: {
       fromEmail: 'panel@example-domain.pl',
       fromName: 'Bear with me',
     },
@@ -106,16 +112,17 @@ const expectedEnvironmentBlock = (name, section) => {
     ACCESS_TEAM_DOMAIN: section.accessTeamDomain,
     ACTIVE_DATA_KEK_VERSION: '1',
     ACTIVE_LOOKUP_KEY_VERSION: '1',
-    ACTIVE_BACKUP_KEK_VERSION: '1',
+    ACTIVE_BACKUP_KEK_VERSION: name === 'staging' ? '2' : '1',
+    ACTIVE_WORKBOOK_KEK_VERSION: '1',
+    ACTIVE_WORKBOOK_HMAC_VERSION: '1',
     CF_ACCOUNT_ID: section.accountId,
     CF_D1_DATABASE_ID: section.d1.id,
     CF_ACCESS_GROUP_ID: section.accessGroupId,
     CF_ACCESS_GROUP_NAME: section.accessGroupName,
   }
-  if (section.scaleway) {
-    vars.SCW_PROJECT_ID = section.scaleway.projectId
-    vars.SCW_FROM_EMAIL = section.scaleway.fromEmail
-    vars.SCW_FROM_NAME = section.scaleway.fromName
+  if (section.resend) {
+    vars.RESEND_FROM_EMAIL = section.resend.fromEmail
+    vars.RESEND_FROM_NAME = section.resend.fromName
   }
   return {
     workers_dev: false,
@@ -125,11 +132,14 @@ const expectedEnvironmentBlock = (name, section) => {
     secrets: {
       required: [
         'BWM_BACKUP_KEK_V1',
+        ...(name === 'staging' ? ['BWM_BACKUP_KEK_V2'] : []),
         'BWM_DATA_KEK_V1',
         'BWM_LOOKUP_HMAC_V1',
+        'BWM_WORKBOOK_HMAC_V1',
+        'BWM_WORKBOOK_KEK_V1',
         'CF_ACCESS_GROUP_TOKEN',
         'CF_D1_EXPORT_TOKEN',
-        'SCW_SECRET_KEY',
+        'RESEND_API_KEY',
       ],
     },
     d1_databases: [{
@@ -176,9 +186,11 @@ test('CLI writes complete staging and production environments for a valid provid
     'BWM_BACKUP_KEK_V1',
     'BWM_DATA_KEK_V1',
     'BWM_LOOKUP_HMAC_V1',
+    'BWM_WORKBOOK_HMAC_V1',
+    'BWM_WORKBOOK_KEK_V1',
     'CF_ACCESS_GROUP_TOKEN',
     'CF_D1_EXPORT_TOKEN',
-    'SCW_SECRET_KEY',
+    'RESEND_API_KEY',
   ])
 
   const before = baseConfig()
@@ -197,20 +209,21 @@ test('CLI writes complete staging and production environments for a valid provid
     'ACTIVE_DATA_KEK_VERSION',
     'ACTIVE_LOOKUP_KEY_VERSION',
     'ACTIVE_BACKUP_KEK_VERSION',
+    'ACTIVE_WORKBOOK_KEK_VERSION',
+    'ACTIVE_WORKBOOK_HMAC_VERSION',
     'CF_ACCOUNT_ID',
     'CF_D1_DATABASE_ID',
     'CF_ACCESS_GROUP_ID',
     'CF_ACCESS_GROUP_NAME',
-    'SCW_PROJECT_ID',
-    'SCW_FROM_EMAIL',
-    'SCW_FROM_NAME',
+    'RESEND_FROM_EMAIL',
+    'RESEND_FROM_NAME',
   ])
 
   assert.equal(output, serializeWranglerConfig(written))
   assert.ok(output.endsWith('}\n'))
   assert.doesNotMatch(output, /CLOUDFLARE_INCLUDE_PROCESS_ENV/)
   for (const line of output.split('\n')) {
-    if (line.includes('@')) assert.match(line, /SCW_FROM_EMAIL/)
+    if (line.includes('@')) assert.match(line, /RESEND_FROM_EMAIL/)
   }
 })
 
@@ -247,9 +260,37 @@ test('the writer accepts the live repo wrangler.json shape', () => {
     'BWM_BACKUP_KEK_V1',
     'BWM_DATA_KEK_V1',
     'BWM_LOOKUP_HMAC_V1',
+    'BWM_WORKBOOK_HMAC_V1',
+    'BWM_WORKBOOK_KEK_V1',
     'CF_ACCESS_GROUP_TOKEN',
     'CF_D1_EXPORT_TOKEN',
-    'SCW_SECRET_KEY',
+    'RESEND_API_KEY',
+  ])
+  assert.equal(config.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
+  assert.equal(config.env.staging.vars.ACTIVE_BACKUP_KEK_VERSION, '2')
+  assert.deepEqual(config.env.staging.secrets.required.slice(0, 2), [
+    'BWM_BACKUP_KEK_V1',
+    'BWM_BACKUP_KEK_V2',
+  ])
+  assert.equal(config.env.production.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
+  assert.equal(config.env.production.secrets.required.includes('BWM_BACKUP_KEK_V2'), false)
+})
+
+test('backup KEK V2 is activated and retained only for staging', () => {
+  const { config } = applyProviderResults({ config: baseConfig(), document: validDocument() })
+
+  assert.equal(config.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
+  assert.deepEqual(config.secrets.required.filter((name) => name.startsWith('BWM_BACKUP_KEK_')), [
+    'BWM_BACKUP_KEK_V1',
+  ])
+  assert.equal(config.env.staging.vars.ACTIVE_BACKUP_KEK_VERSION, '2')
+  assert.deepEqual(config.env.staging.secrets.required.filter((name) => name.startsWith('BWM_BACKUP_KEK_')), [
+    'BWM_BACKUP_KEK_V1',
+    'BWM_BACKUP_KEK_V2',
+  ])
+  assert.equal(config.env.production.vars.ACTIVE_BACKUP_KEK_VERSION, '1')
+  assert.deepEqual(config.env.production.secrets.required.filter((name) => name.startsWith('BWM_BACKUP_KEK_')), [
+    'BWM_BACKUP_KEK_V1',
   ])
 })
 
@@ -270,15 +311,15 @@ test('emitted configuration inherits the two top-level crons and writes no per-e
   }
 })
 
-test('a missing scaleway section omits SCW_ vars for that environment and warns about dead-lettered invitation emails', (t) => {
+test('a missing resend section omits RESEND_ vars for that environment and warns about dead-lettered invitation emails', (t) => {
   const document = validDocument()
-  delete document.staging.scaleway
+  delete document.staging.resend
 
   const { config, warnings } = applyProviderResults({ config: baseConfig(), document })
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /staging/)
   assert.match(warnings[0], /dead-letter/)
-  for (const name of ['SCW_PROJECT_ID', 'SCW_FROM_EMAIL', 'SCW_FROM_NAME']) {
+  for (const name of ['RESEND_FROM_EMAIL', 'RESEND_FROM_NAME']) {
     assert.ok(!Object.hasOwn(config.env.staging.vars, name))
     assert.ok(Object.hasOwn(config.env.production.vars, name))
   }
@@ -434,17 +475,25 @@ test('malformed documents and unknown fields are rejected', () => {
   rejects((document) => { delete document.production.d1.id }, /production\.d1\.id is required/)
 })
 
-test('a present scaleway section is fully validated', () => {
-  rejects((document) => { document.staging.scaleway.projectId = 'not-a-uuid' }, /staging\.scaleway\.projectId must be a lowercase UUID/)
-  rejects((document) => { document.staging.scaleway.fromEmail = 'Panel@Example-Domain.pl' }, /staging\.scaleway\.fromEmail/)
-  rejects((document) => { document.staging.scaleway.fromEmail = 'no-at-sign' }, /staging\.scaleway\.fromEmail/)
-  rejects((document) => { document.production.scaleway.fromName = '' }, /production\.scaleway\.fromName must be a non-empty trimmed string/)
-  rejects((document) => { delete document.production.scaleway.fromName }, /production\.scaleway\.fromName is required/)
-  rejects((document) => { document.production.scaleway.secretKey = 'nope' }, /production\.scaleway\.secretKey is not a recognized field/)
+test('a present resend section is fully validated', () => {
+  rejects((document) => { document.staging.resend.fromEmail = 'Panel@Example-Domain.pl' }, /staging\.resend\.fromEmail/)
+  rejects((document) => { document.staging.resend.fromEmail = 'no-at-sign' }, /staging\.resend\.fromEmail/)
+  rejects((document) => { document.staging.resend.fromEmail = `${'a'.repeat(250)}@x.pl` }, /staging\.resend\.fromEmail/)
+  rejects((document) => { document.production.resend.fromName = '' }, /production\.resend\.fromName must be a safe non-empty trimmed string/)
+  rejects((document) => { document.production.resend.fromName = 'Bear <with me' }, /production\.resend\.fromName must be a safe non-empty trimmed string/)
+  rejects((document) => { document.production.resend.fromName = '\u0105'.repeat(61) }, /production\.resend\.fromName must be a safe non-empty trimmed string/)
+  rejects((document) => { delete document.production.resend.fromName }, /production\.resend\.fromName is required/)
+  rejects((document) => { document.production.resend.apiKey = 'nope' }, /production\.resend\.apiKey is not a recognized field/)
 })
 
 test('the wrangler config must provide the inherited key-version vars', () => {
-  for (const name of ['ACTIVE_DATA_KEK_VERSION', 'ACTIVE_LOOKUP_KEY_VERSION', 'ACTIVE_BACKUP_KEK_VERSION']) {
+  for (const name of [
+    'ACTIVE_DATA_KEK_VERSION',
+    'ACTIVE_LOOKUP_KEY_VERSION',
+    'ACTIVE_BACKUP_KEK_VERSION',
+    'ACTIVE_WORKBOOK_KEK_VERSION',
+    'ACTIVE_WORKBOOK_HMAC_VERSION',
+  ]) {
     const config = baseConfig()
     delete config.vars[name]
     assert.throws(

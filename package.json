@@ -38,9 +38,21 @@
     "migrate:core:stage-d": "APP_ENV=development DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-d --local",
     "migrate:core:stage-d:staging": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-d --remote --env staging",
     "migrate:core:stage-d:production": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-d --remote --env production",
+    "migrate:core:stage-e": "APP_ENV=development DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-e --local",
+    "migrate:core:stage-e:staging": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-e --remote --env staging",
+    "migrate:core:stage-e:production": "DATA_MODE=fictional node scripts/apply-core-migration-stage.js stage-e --remote --env production",
+    "migration:status:staging:pre-stage": "APP_ENV=staging DATA_MODE=fictional node scripts/migration-status-staging.mjs pre-stage",
+    "migration:status:staging:post-stage": "APP_ENV=staging DATA_MODE=fictional node scripts/migration-status-staging.mjs post-stage",
     "upgrade:core-directory": "APP_ENV=development DATA_MODE=fictional node scripts/upgrade-core-directory.js",
     "upgrade:core-directory:staging": "DATA_MODE=fictional node scripts/upgrade-core-directory.js --remote --env staging",
-    "upgrade:core-directory:production": "DATA_MODE=fictional node scripts/upgrade-core-directory.js --remote --env production"
+    "upgrade:core-directory:production": "DATA_MODE=fictional node scripts/upgrade-core-directory.js --remote --env production",
+    "backup:create:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs create",
+    "backup:status:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs status",
+    "backup:migrations:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs migrations",
+    "backup:restore": "APP_ENV=staging DATA_MODE=fictional node scripts/restore-backup.mjs",
+    "rollout:workbook:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/workbook-rollout-staging.mjs",
+    "smoke:staging": "APP_ENV=staging DATA_MODE=fictional node scripts/staging-smoke.mjs",
+    "audit:workbook": "node scripts/audit-workbook.mjs"
   },
   "dependencies": {
     "@fontsource-variable/fraunces": "5.3.0",

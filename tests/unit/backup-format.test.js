@@ -2,6 +2,12 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import fixture from '../fixtures/backup-format-v1.json' with { type: 'json' }
+import fixtureV2 from '../fixtures/backup-format-v2.json' with { type: 'json' }
+import {
+  BACKUP_SQL_IMPORT_MAX_BYTES,
+  BACKUP_SQL_MAX_BYTES,
+  nextBackupSqlByteCount,
+} from '../../worker/operations/backup-limits.js'
 import {
   backupObjectKeys, canonicalJson, createBackupManifest, expectedObjectMetadata, openBackupManifest, parseCanonicalManifest,
 } from '../../worker/operations/backup-format.js'
@@ -111,7 +117,7 @@ test('parseCanonicalManifest validates every schema field and relationship', () 
     (m) => delete m.format, (m) => { m.extra = true }, (m) => { m.format = 'other' },
     (m) => { m.createdAt = '2026-08-03T12:34:56Z' }, (m) => { m.createdAt = '2026-02-30T12:34:56.789Z' }, (m) => { m.localDay = '2026-02-30' },
     (m) => { m.localMonth = '2026-07' }, (m) => { m.objectKey = 'backups/v1/2026/08/other.sql' },
-    (m) => { m.retentionClass = 'yearly' }, (m) => { m.objectSize = -1 }, (m) => { m.objectSize = 1.5 },
+    (m) => { m.retentionClass = 'yearly' }, (m) => { m.objectSize = -1 }, (m) => { m.objectSize = 0 }, (m) => { m.objectSize = 1.5 },
     (m) => { m.objectSize = Number.MAX_SAFE_INTEGER + 1 }, (m) => { m.wrappedSsecKey = {} },
     (m) => { m.wrappedSsecKey.extra = true }, (m) => { m.wrappedSsecKey.algorithm = 'A128GCM' },
     (m) => { m.wrappedSsecKey.kekVersion = 0 }, (m) => { m.wrappedSsecKey.kekVersion = 1.5 }, (m) => { m.wrappedSsecKey.kekVersion = Number.MAX_SAFE_INTEGER + 1 },
@@ -119,6 +125,26 @@ test('parseCanonicalManifest validates every schema field and relationship', () 
     (m) => { m.wrappedSsecKey.ciphertext = `${fixture.publicEncoding.ciphertext}=` }, (m) => { m.wrappedSsecKey.ciphertext = fixture.publicEncoding.ciphertext.replace(/.$/, '+') },
   ]
   for (const change of changes) { const manifest = valid(); change(manifest); invalid(() => parseCanonicalManifest(bytes(canonical(manifest)))) }
+})
+
+test('backup manifests publish and enforce the bounded restore SQL contract', () => {
+  assert.equal(BACKUP_SQL_MAX_BYTES, 64 * 1024 * 1024)
+  assert.equal(BACKUP_SQL_IMPORT_MAX_BYTES, BACKUP_SQL_MAX_BYTES * 2)
+  assert.equal(nextBackupSqlByteCount(0, 1), 1)
+  assert.equal(nextBackupSqlByteCount(BACKUP_SQL_MAX_BYTES - 1, 1), BACKUP_SQL_MAX_BYTES)
+  for (const [current, chunk] of [
+    [BACKUP_SQL_MAX_BYTES, 1],
+    [BACKUP_SQL_MAX_BYTES - 1, 2],
+    [-1, 1],
+    [0, 0],
+    [0, 1.5],
+  ]) assert.equal(nextBackupSqlByteCount(current, chunk), null)
+  const maximum = valid()
+  maximum.objectSize = BACKUP_SQL_MAX_BYTES
+  assert.deepEqual(parseCanonicalManifest(bytes(canonical(maximum))), maximum)
+  const oversized = valid()
+  oversized.objectSize = BACKUP_SQL_MAX_BYTES + 1
+  invalid(() => parseCanonicalManifest(bytes(canonical(oversized))))
 })
 
 test('parseCanonicalManifest rejects every missing and wrong root or wrapped-key field', () => {
@@ -587,4 +613,105 @@ test('fixture and public outputs exclude raw key representations and private-dat
     assert.equal(pattern.test(publicText), false)
   }
   assert.deepEqual(errors, ['Error:BACKUP_CRYPTO_FAILED', 'Error:BACKUP_MANIFEST_INVALID'])
+})
+
+test('v2 shared vector binds source, ordered migrations, sentinel, paths, metadata, and AAD', async () => {
+  assert.deepEqual(backupObjectKeys({
+    backupId: fixtureV2.manifest.backupId,
+    localMonth: fixtureV2.manifest.localMonth,
+    version: 2,
+  }), fixtureV2.objectKeys)
+  assert.deepEqual(parseCanonicalManifest(raw(fixtureV2.canonicalManifestBase64Url)), fixtureV2.manifest)
+  assert.deepEqual(expectedObjectMetadata(fixtureV2.manifest), fixtureV2.metadata)
+
+  const callerKey = derive(fixtureV2.publicDerivationSeeds.rawSsecKey)
+  const result = await createBackupManifest({
+    facts: structuredClone(fixtureV2.facts),
+    rawSsecKey: callerKey,
+    keyring: await keyring(),
+    nonceFactory: () => raw(fixtureV2.publicEncoding.nonce),
+  })
+  assert.deepEqual(result.manifest, fixtureV2.manifest)
+  assert.equal(new TextDecoder().decode(result.bytes), fixtureV2.canonicalManifestJson)
+  assert.deepEqual(result.databaseFields, fixtureV2.databaseFields)
+  const opened = await openBackupManifest({ bytes: result.bytes, keyring: await keyring() })
+  assert.deepEqual(opened.manifest, fixtureV2.manifest)
+  assert.deepEqual([...opened.rawSsecKey], [...callerKey])
+
+  const kek = await importKek(fixtureV2.publicDerivationSeeds.backupKek)
+  const encrypted = new Uint8Array(await crypto.subtle.encrypt({
+    name: 'AES-GCM',
+    iv: raw(fixtureV2.publicEncoding.nonce),
+    additionalData: bytes(fixtureV2.aadText),
+    tagLength: 128,
+  }, kek, callerKey))
+  assert.equal(encode(encrypted), fixtureV2.publicEncoding.ciphertext)
+  assert.equal(fixtureV2.aadText, `bwm:backup-key:v2\n${canonical(fixtureV2.facts)}`)
+})
+
+test('v2 schema rejects malformed source, migration order and bounds, and non-intrinsic sentinels', () => {
+  const changes = [
+    (m) => { m.source.accountId = 'A'.repeat(32) },
+    (m) => { m.source.appEnv = 'development' },
+    (m) => { m.source.dataMode = 'real' },
+    (m) => { m.source.databaseId = '11111111-2222-4333-8444-55555555555A' },
+    (m) => { m.source.extra = true },
+    (m) => { m.appliedMigrations = [] },
+    (m) => { m.appliedMigrations[0].id = 0 },
+    (m) => { m.appliedMigrations[1].id = 1 },
+    (m) => { m.appliedMigrations[1].name = m.appliedMigrations[0].name },
+    (m) => { m.appliedMigrations[0].name = '1_bad.sql' },
+    (m) => { m.appliedMigrations[0].name = `0001_${'a'.repeat(247)}.sql` },
+    (m) => { m.appliedMigrations[0].extra = true },
+    (m) => { m.appliedMigrations = Array.from({ length: 257 }, (_, index) => ({ id: index + 1, name: `${String(index + 1).padStart(4, '0')}_migration.sql` })) },
+    (m) => { m.restoreSentinel.kind = 'system_state' },
+    (m) => { m.restoreSentinel.backupId = 'bkp_other' },
+    (m) => { m.restoreSentinel.createdAt = '2026-08-27T12:34:57.789Z' },
+    (m) => { m.restoreSentinel.localDay = '2026-08-26' },
+    (m) => { m.restoreSentinel.localMonth = '2026-07' },
+    (m) => { m.restoreSentinel.retentionClass = 'monthly' },
+    (m) => { m.restoreSentinel.status = 'stored' },
+    (m) => { m.restoreSentinel.version = 3 },
+    (m) => { m.restoreSentinel.extra = true },
+    (m) => { m.objectKey = m.objectKey.replace('/v2/', '/v1/') },
+  ]
+  for (const change of changes) {
+    const manifest = structuredClone(fixtureV2.manifest)
+    change(manifest)
+    invalid(() => parseCanonicalManifest(bytes(canonical(manifest))))
+  }
+  invalid(() => backupObjectKeys({ backupId: fixtureV2.manifest.backupId, localMonth: '2026-08', version: 1, extra: true }))
+})
+
+test('v2 manifest creation refuses generated canonical output above 64 KiB', async () => {
+  const facts = structuredClone(fixtureV2.facts)
+  const ring = await keyring()
+  facts.appliedMigrations = Array.from({ length: 256 }, (_, index) => ({
+    id: index + 1,
+    name: `${String(index + 1).padStart(4, '0')}_${'a'.repeat(230)}_${String(index + 1).padStart(3, '0')}.sql`,
+  }))
+  await cryptoFailed(() => createBackupManifest({
+    facts,
+    rawSsecKey: derive(fixtureV2.publicDerivationSeeds.rawSsecKey),
+    keyring: ring,
+    nonceFactory: () => raw(fixtureV2.publicEncoding.nonce),
+  }))
+})
+
+test('v2 authenticated evidence cannot be changed without the historical KEK', async () => {
+  const standardRing = await keyring()
+  for (const mutate of [
+    (m) => { m.source.appEnv = 'production' },
+    (m) => { m.source.databaseId = '22222222-2222-4222-8222-222222222222' },
+    (m) => { m.appliedMigrations[1].name = '0002_tampered.sql' },
+    (m) => { m.restoreSentinel.localDay = '2026-08-26'; m.localDay = '2026-08-26' },
+  ]) {
+    const manifest = structuredClone(fixtureV2.manifest)
+    mutate(manifest)
+    await manifestInvalid(() => openBackupManifest({ bytes: bytes(canonical(manifest)), keyring: standardRing }))
+  }
+})
+
+test('canonical manifest parsing enforces the 64 KiB allocation boundary', () => {
+  invalid(() => parseCanonicalManifest(new Uint8Array((64 * 1024) + 1)))
 })

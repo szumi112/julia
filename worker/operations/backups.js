@@ -1,5 +1,13 @@
 import { isD1OutboxOperationGuardFailure } from '../db/errors.js'
 import { decryptOutboxPayload } from '../jobs/outbox.js'
+import {
+  backupObjectKeys,
+  canonicalJson,
+  createBackupManifest,
+  expectedObjectMetadata,
+} from './backup-format.js'
+import { readBackupRecoverySnapshot } from './backup-recovery.js'
+import { BACKUP_SQL_MAX_BYTES, nextBackupSqlByteCount } from './backup-limits.js'
 
 const BACKUP_JOB_LIMIT = 1
 const BACKUP_LEASE_MS = 12 * 60 * 1000
@@ -47,6 +55,8 @@ const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const LOCAL_DAY = /^\d{4}-\d{2}-\d{2}$/
 const LOCAL_MONTH = /^\d{4}-\d{2}$/
+const SOURCE_ACCOUNT_ID = /^[0-9a-f]{32}$/
+const SOURCE_DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const invalid = () => { throw new Error('BACKUP_STATE_INVALID') }
 const ownRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -274,7 +284,7 @@ function validateInitial(row, common) {
     || row.max_attempt_number !== null
     || row.invalid_terminal_attempt_rows !== 0
     || ATTEMPT_COLUMNS.some((column) => row[`old_attempt_${column}`] !== null)) invalid()
-  return { ...common, oldAttempt: null, nextAttempt: 1 }
+  return { ...common, oldAttempt: null, nextAttempt: 1, exhausted: false }
 }
 
 function validateReclaim(row, common, claimNow) {
@@ -308,8 +318,13 @@ function validateReclaim(row, common, claimNow) {
     || oldAttempt.result !== null
     || oldAttempt.error_code !== null
     || oldAttempt.provider_reference !== null) invalid()
-  if (job.attempt_count >= job.max_attempts) invalid()
-  return { ...common, oldAttempt, nextAttempt: job.attempt_count + 1 }
+  const exhausted = job.attempt_count >= job.max_attempts
+  return {
+    ...common,
+    oldAttempt,
+    nextAttempt: exhausted ? null : job.attempt_count + 1,
+    exhausted,
+  }
 }
 
 async function validateCandidate(row, cryptoContext, claimNow) {
@@ -689,6 +704,7 @@ async function claimCandidate(input, candidate) {
     backupId: candidate.backup.id,
     attemptId,
     attemptNumber: candidate.nextAttempt,
+    claimedAt: input.claimNow,
     leaseOwner,
     leaseExpiresAt: input.leaseExpiresAt,
     recoveryOnly: candidate.nextAttempt === candidate.job.max_attempts,
@@ -706,6 +722,10 @@ async function processCaptured(input) {
   const row = await readCandidate(input.db, input.claimNow)
   if (row === null) return { claimed: false, schedulerRun: input.scheduler }
   const candidate = await validateCandidate(row, input.cryptoContext, input.claimNow)
+  if (candidate.exhausted) {
+    await terminalizeExhaustedClaim(input, candidate)
+    return { claimed: true, schedulerRun: input.scheduler }
+  }
   await claimCandidate(input, candidate)
   return { claimed: true, schedulerRun: input.scheduler }
 }
@@ -718,6 +738,712 @@ export async function processNextBackupCreate(input) {
     try { guardFailure = isD1OutboxOperationGuardFailure(error) === true } catch {}
     if (guardFailure) throw new Error('BACKUP_LEASE_LOST')
     throw new Error('BACKUP_STATE_INVALID')
+  }
+}
+
+const RUNNER_KEYS = Object.freeze([
+  'db', 'cryptoContext', 'keyring', 'archive', 'providerConfig', 'source', 'schedulerRun',
+  'now', 'wait', 'fetch', 'signal', 'idFactory', 'leaseOwnerFactory',
+  'nonceFactory', 'rawKeyFactory', 'pollExport', 'downloadExport',
+])
+
+function captureRunnerInput(input) {
+  const value = descriptorSnapshot(input, RUNNER_KEYS)
+  const providerConfig = descriptorSnapshot(value.providerConfig, [
+    'accountId', 'databaseId', 'token',
+  ])
+  const source = descriptorSnapshot(value.source, [
+    'accountId', 'appEnv', 'dataMode', 'databaseId',
+  ])
+  if (!value.archive || typeof value.archive.put !== 'function'
+    || !value.keyring || typeof value.keyring.getBackupKek !== 'function'
+    || typeof value.now !== 'function'
+    || typeof value.wait !== 'function'
+    || typeof value.fetch !== 'function'
+    || typeof value.idFactory !== 'function'
+    || typeof value.leaseOwnerFactory !== 'function'
+    || typeof value.nonceFactory !== 'function'
+    || typeof value.rawKeyFactory !== 'function'
+    || typeof value.pollExport !== 'function'
+    || typeof value.downloadExport !== 'function'
+    || !(value.signal instanceof AbortSignal)) invalid()
+  if (!SOURCE_ACCOUNT_ID.test(source.accountId)
+    || !SOURCE_DATABASE_ID.test(source.databaseId)
+    || !['staging', 'production'].includes(source.appEnv)
+    || source.dataMode !== 'fictional'
+    || source.accountId !== providerConfig.accountId
+    || source.databaseId !== providerConfig.databaseId) invalid()
+  return { ...value, providerConfig, source }
+}
+
+async function recoverySnapshot(db) {
+  try { return await readBackupRecoverySnapshot(db) } catch { invalid() }
+}
+
+function sha256Readable(body) {
+  if (!(body instanceof ReadableStream)) invalid()
+  let digestStream
+  let writer
+  try {
+    digestStream = new crypto.DigestStream('SHA-256')
+    writer = digestStream.getWriter()
+  } catch { invalid() }
+  let byteCount = 0
+  const readable = body.pipeThrough(new TransformStream({
+    async transform(chunk, controller) {
+      if (!(chunk instanceof Uint8Array)) invalid()
+      const nextByteCount = nextBackupSqlByteCount(byteCount, chunk.byteLength)
+      if (nextByteCount === null) invalid()
+      await writer.write(chunk)
+      byteCount = nextByteCount
+      controller.enqueue(chunk)
+    },
+    async flush() { await writer.close() },
+  }))
+  return {
+    body: readable,
+    async abort(reason) {
+      try { await readable.cancel(reason) } catch {}
+      try { await writer.abort(reason) } catch {}
+      try { await digestStream.digest } catch {}
+    },
+    async result() {
+      const bytes = new Uint8Array(await digestStream.digest)
+      try {
+        if (bytes.byteLength !== 32) invalid()
+        return {
+          byteCount,
+          plaintextSqlSha256: [...bytes]
+            .map((value) => value.toString(16).padStart(2, '0')).join(''),
+        }
+      } finally { bytes.fill(0) }
+    },
+  }
+}
+
+function restoreSentinelFor(backup) {
+  return {
+    kind: 'backup_run_v1',
+    backupId: backup.id,
+    createdAt: backup.created_at,
+    localDay: backup.local_day,
+    localMonth: backup.local_month,
+    retentionClass: backup.retention_class,
+    status: 'exporting',
+    version: 2,
+  }
+}
+
+function expiryFor(backup) {
+  const [year, month, day] = backup.local_day.split('-').map(Number)
+  const targetMonth = month - 1 + 12
+  const lastTargetDay = new Date(Date.UTC(year, targetMonth + 1, 0)).getUTCDate()
+  const expiry = backup.retention_class === 'monthly'
+    ? Date.UTC(year, targetMonth, Math.min(day, lastTargetDay))
+    : Date.UTC(year, month - 1, day + 35)
+  return instantFromMs(expiry)
+}
+
+async function renewClaim(input, claim) {
+  const nowMs = input.now()
+  const now = instantFromMs(nowMs)
+  const leaseExpiresAt = instantFromMs(nowMs + BACKUP_LEASE_MS)
+  try {
+    const renewed = await input.db.prepare(
+      `UPDATE outbox_jobs
+       SET lease_expires_at=?,updated_at=?
+       WHERE id=? AND type='backup.create' AND status='processing'
+         AND attempt_count=? AND lease_owner=? AND lease_expires_at>?
+         AND EXISTS (
+           SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+         )
+       RETURNING lease_expires_at,updated_at`
+    ).bind(
+      leaseExpiresAt,
+      now,
+      claim.jobId,
+      claim.attemptNumber,
+      claim.leaseOwner,
+      now,
+      ...schedulerBindings({ scheduler: input.scheduler, claimNow: now }),
+    ).first()
+    const exact = dataSnapshot(renewed, ['lease_expires_at', 'updated_at'])
+    if (exact.lease_expires_at !== leaseExpiresAt || exact.updated_at !== now) invalid()
+    return { now, leaseExpiresAt }
+  } catch (error) {
+    if (error?.message === 'BACKUP_STATE_INVALID'
+      || isD1OutboxOperationGuardFailure(error)) throw new Error('BACKUP_LEASE_LOST')
+    throw error
+  }
+}
+
+async function cleanupReclaimedArtifacts(input, candidate, claim) {
+  if (candidate.oldAttempt === null) return
+  if (typeof input.archive.delete !== 'function' || typeof input.archive.head !== 'function') invalid()
+  const keyPairs = [3, 2, 1].map((version) => backupObjectKeys({
+    backupId: candidate.backup.id,
+    localMonth: candidate.backup.local_month,
+    version,
+  }))
+  await renewClaim(input, claim)
+  for (const keys of keyPairs) {
+    await input.archive.delete(keys.manifestKey)
+    if (await input.archive.head(keys.manifestKey) !== null) invalid()
+    await input.archive.delete(keys.objectKey)
+    if (await input.archive.head(keys.objectKey) !== null) invalid()
+  }
+  await renewClaim(input, claim)
+}
+
+async function cleanupCurrentArtifacts(input, claim, keys) {
+  if (typeof input.archive.delete !== 'function' || typeof input.archive.head !== 'function') invalid()
+  await renewClaim(input, claim)
+  await input.archive.delete(keys.manifestKey)
+  if (await input.archive.head(keys.manifestKey) !== null) invalid()
+  await input.archive.delete(keys.objectKey)
+  if (await input.archive.head(keys.objectKey) !== null) invalid()
+  await renewClaim(input, claim)
+}
+
+async function completeClaim(input, candidate, claim, stored, manifestResult, keys, bookmark, final) {
+  const { completedAt, expiresAt } = final
+  const statements = [
+    input.db.prepare(
+      `UPDATE backup_runs
+       SET status='stored',version=version+1,export_bookmark=?,object_key=?,manifest_key=?,
+           ssec_key_version=?,wrapped_ssec_key_b64=?,wrap_nonce_b64=?,object_etag=?,
+           object_size=?,completed_at=?,expires_at=?,last_error_code=NULL,updated_at=?
+       WHERE id=? AND status='exporting' AND version=2
+         AND EXISTS (
+           SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_jobs AS j
+           WHERE j.id=? AND j.status='processing' AND j.attempt_count=?
+             AND j.lease_owner=? AND j.lease_expires_at>?
+         )`
+    ).bind(
+      bookmark,
+      keys.objectKey,
+      keys.manifestKey,
+      manifestResult.databaseFields.ssecKeyVersion,
+      manifestResult.databaseFields.wrappedSsecKeyB64,
+      manifestResult.databaseFields.wrapNonceB64,
+      stored.etag,
+      stored.size,
+      completedAt,
+      expiresAt,
+      completedAt,
+      candidate.backup.id,
+      ...schedulerBindings({ scheduler: input.scheduler, claimNow: completedAt }),
+      claim.jobId,
+      claim.attemptNumber,
+      claim.leaseOwner,
+      completedAt,
+    ),
+    input.db.prepare(
+      `UPDATE outbox_attempts
+       SET completed_at=?,result='succeeded',error_code=NULL,provider_reference=NULL
+       WHERE id=? AND job_id=? AND attempt_number=? AND completed_at IS NULL`
+    ).bind(completedAt, claim.attemptId, claim.jobId, claim.attemptNumber),
+    input.db.prepare(
+      `UPDATE outbox_jobs
+       SET status='succeeded',lease_owner=NULL,lease_expires_at=NULL,last_error_code=NULL,
+           updated_at=?
+       WHERE id=? AND status='processing' AND attempt_count=? AND lease_owner=?
+         AND changes()=1`
+    ).bind(completedAt, claim.jobId, claim.attemptNumber, claim.leaseOwner),
+    operationGuard(
+      input.db,
+      `backup_complete_${claim.jobId}_${claim.attemptNumber}`,
+      `changes()=1
+       AND EXISTS (SELECT 1 FROM backup_runs WHERE id=? AND status='stored' AND version=3)
+       AND EXISTS (SELECT 1 FROM outbox_attempts WHERE id=? AND result='succeeded')
+       AND EXISTS (SELECT 1 FROM outbox_jobs WHERE id=? AND status='succeeded')`,
+      [candidate.backup.id, claim.attemptId, claim.jobId],
+    ),
+  ]
+  try {
+    fixedArray(await input.db.batch(statements), 4)
+  } catch (error) {
+    if (isD1OutboxOperationGuardFailure(error)) throw new Error('BACKUP_LEASE_LOST')
+    throw error
+  }
+}
+
+const FINALIZATION_ROW_KEYS = Object.freeze([
+  ...BACKUP_COLUMNS.map((column) => `backup_${column}`),
+  ...JOB_COLUMNS.map((column) => `job_${column}`),
+  ...ATTEMPT_COLUMNS.map((column) => `attempt_${column}`),
+])
+
+const sameFields = (actual, expected, keys) => keys.every((key) => actual[key] === expected[key])
+
+async function readFinalizationState(input, candidate, claim) {
+  const response = await input.db.prepare(
+    `SELECT
+       ${BACKUP_COLUMNS.map((column) => `b.${column} AS backup_${column}`).join(',')},
+       ${JOB_COLUMNS.map((column) => `j.${column} AS job_${column}`).join(',')},
+       ${ATTEMPT_COLUMNS.map((column) => `a.${column} AS attempt_${column}`).join(',')}
+     FROM backup_runs AS b
+     JOIN outbox_jobs AS j ON j.id=? AND j.aggregate_id=b.id
+     JOIN outbox_attempts AS a ON a.id=? AND a.job_id=j.id
+     WHERE b.id=?
+     LIMIT 2`
+  ).bind(claim.jobId, claim.attemptId, candidate.backup.id).all()
+  const rows = fixedArray(dataProperty(response, 'results'))
+  if (rows.length !== 1) invalid()
+  const row = dataSnapshot(rows[0], FINALIZATION_ROW_KEYS)
+  return {
+    backup: recordFrom(row, 'backup', BACKUP_COLUMNS),
+    job: recordFrom(row, 'job', JOB_COLUMNS),
+    attempt: recordFrom(row, 'attempt', ATTEMPT_COLUMNS),
+  }
+}
+
+function exactStoredFinalization(state, candidate, claim, manifestResult, stored, keys, bookmark, final) {
+  const expectedBackup = {
+    ...candidate.backup,
+    status: 'stored',
+    version: 3,
+    export_bookmark: bookmark,
+    object_key: keys.objectKey,
+    manifest_key: keys.manifestKey,
+    ssec_key_version: manifestResult.databaseFields.ssecKeyVersion,
+    wrapped_ssec_key_b64: manifestResult.databaseFields.wrappedSsecKeyB64,
+    wrap_nonce_b64: manifestResult.databaseFields.wrapNonceB64,
+    object_etag: stored.etag,
+    object_size: stored.size,
+    started_at: candidate.backup.started_at ?? claim.claimedAt,
+    completed_at: final.completedAt,
+    expires_at: final.expiresAt,
+    restore_verified_at: null,
+    last_error_code: null,
+    updated_at: final.completedAt,
+  }
+  const expectedJob = {
+    ...candidate.job,
+    status: 'succeeded',
+    attempt_count: claim.attemptNumber,
+    lease_owner: null,
+    lease_expires_at: null,
+    last_error_code: null,
+    updated_at: final.completedAt,
+  }
+  const expectedAttempt = {
+    id: claim.attemptId,
+    job_id: claim.jobId,
+    attempt_number: claim.attemptNumber,
+    started_at: claim.claimedAt,
+    completed_at: final.completedAt,
+    result: 'succeeded',
+    error_code: null,
+    provider_reference: null,
+  }
+  return sameFields(state.backup, expectedBackup, BACKUP_COLUMNS)
+    && sameFields(state.job, expectedJob, JOB_COLUMNS)
+    && sameFields(state.attempt, expectedAttempt, ATTEMPT_COLUMNS)
+}
+
+function exactPendingFinalization(state, candidate, claim) {
+  const expectedBackup = {
+    ...candidate.backup,
+    status: 'exporting',
+    version: 2,
+    started_at: candidate.backup.started_at ?? claim.claimedAt,
+    updated_at: candidate.backup.started_at ?? claim.claimedAt,
+  }
+  const expectedJob = {
+    ...candidate.job,
+    status: 'processing',
+    attempt_count: claim.attemptNumber,
+    lease_owner: claim.leaseOwner,
+    last_error_code: candidate.oldAttempt === null ? null : 'OUTBOX_LEASE_EXPIRED',
+  }
+  const stableJobKeys = JOB_COLUMNS.filter((key) => !['lease_expires_at', 'updated_at'].includes(key))
+  const expectedAttempt = {
+    id: claim.attemptId,
+    job_id: claim.jobId,
+    attempt_number: claim.attemptNumber,
+    started_at: claim.claimedAt,
+    completed_at: null,
+    result: null,
+    error_code: null,
+    provider_reference: null,
+  }
+  return sameFields(state.backup, expectedBackup, BACKUP_COLUMNS)
+    && sameFields(state.job, expectedJob, stableJobKeys)
+    && validInstant(state.job.lease_expires_at) && validInstant(state.job.updated_at)
+    && state.job.lease_expires_at > state.job.updated_at
+    && sameFields(state.attempt, expectedAttempt, ATTEMPT_COLUMNS)
+}
+
+const stableFailureCode = (error) => {
+  const value = error?.message
+  return typeof value === 'string' && /^BACKUP_[A-Z0-9_]{1,55}$/.test(value)
+    ? value
+    : 'BACKUP_CREATE_FAILED'
+}
+
+async function failClaim(input, candidate, claim, error) {
+  const failedAt = instantFromMs(input.now())
+  const code = stableFailureCode(error)
+  try {
+    fixedArray(await input.db.batch([
+      input.db.prepare(
+        `UPDATE backup_runs
+         SET status='failed',version=version+1,completed_at=?,last_error_code=?,updated_at=?
+         WHERE id=? AND status='exporting' AND version=2
+           AND EXISTS (
+             SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+           )
+           AND EXISTS (
+             SELECT 1 FROM outbox_jobs AS j
+             WHERE j.id=? AND j.status='processing' AND j.attempt_count=?
+               AND j.lease_owner=? AND j.lease_expires_at>?
+           )`
+      ).bind(
+        failedAt,
+        code,
+        failedAt,
+        candidate.backup.id,
+        ...schedulerBindings({ scheduler: input.scheduler, claimNow: failedAt }),
+        claim.jobId,
+        claim.attemptNumber,
+        claim.leaseOwner,
+        failedAt,
+      ),
+      input.db.prepare(
+        `UPDATE outbox_attempts
+         SET completed_at=?,result='dead',error_code=?,provider_reference=NULL
+         WHERE id=? AND job_id=? AND attempt_number=? AND completed_at IS NULL`
+      ).bind(failedAt, code, claim.attemptId, claim.jobId, claim.attemptNumber),
+      input.db.prepare(
+        `UPDATE outbox_jobs
+         SET status='dead',lease_owner=NULL,lease_expires_at=NULL,last_error_code=?,updated_at=?
+         WHERE id=? AND status='processing' AND attempt_count=? AND lease_owner=?
+           AND changes()=1`
+      ).bind(code, failedAt, claim.jobId, claim.attemptNumber, claim.leaseOwner),
+      operationGuard(
+        input.db,
+        `backup_fail_${claim.jobId}_${claim.attemptNumber}`,
+        `changes()=1
+         AND EXISTS (SELECT 1 FROM backup_runs WHERE id=? AND status='failed' AND version=3)
+         AND EXISTS (SELECT 1 FROM outbox_attempts WHERE id=? AND result='dead' AND error_code=?)
+         AND EXISTS (SELECT 1 FROM outbox_jobs WHERE id=? AND status='dead' AND last_error_code=?)`,
+        [candidate.backup.id, claim.attemptId, code, claim.jobId, code],
+      ),
+    ]), 4)
+  } catch {
+    throw new Error('BACKUP_LEASE_LOST')
+  }
+  return code
+}
+
+async function terminalizeExhaustedClaim(input, candidate) {
+  const { job, backup, oldAttempt } = candidate
+  const failedAt = input.claimNow
+  const errorCode = 'OUTBOX_LEASE_EXPIRED'
+  const oldJobBindings = processingJobBindings(
+    job,
+    job.attempt_count,
+    job.lease_owner,
+    job.lease_expires_at,
+    job.updated_at,
+  )
+  try {
+    fixedArray(await input.db.batch([
+      input.db.prepare(
+        `UPDATE outbox_attempts
+         SET completed_at=?,result='dead',error_code=?,provider_reference=NULL
+         WHERE id=? AND job_id=? AND attempt_number=? AND started_at=?
+           AND completed_at IS NULL AND result IS NULL
+           AND error_code IS NULL AND provider_reference IS NULL`
+      ).bind(
+        failedAt,
+        errorCode,
+        oldAttempt.id,
+        job.id,
+        oldAttempt.attempt_number,
+        oldAttempt.started_at,
+      ),
+      input.db.prepare(
+        `UPDATE backup_runs
+         SET status='failed',version=version+1,completed_at=?,last_error_code=?,updated_at=?
+         WHERE changes()=1
+           AND ${exportingBackupPredicate('backup_runs')}
+           AND EXISTS (
+             SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+           )
+           AND EXISTS (
+             SELECT 1 FROM outbox_jobs AS j
+             WHERE ${oldProcessingJobPredicate('j')} AND j.lease_expires_at<?
+           )`
+      ).bind(
+        failedAt,
+        errorCode,
+        failedAt,
+        ...exportingBackupBindings(backup),
+        ...schedulerBindings(input),
+        ...oldJobBindings,
+        failedAt,
+      ),
+      input.db.prepare(
+        `UPDATE outbox_jobs
+         SET status='dead',lease_owner=NULL,lease_expires_at=NULL,
+             last_error_code=?,updated_at=?
+         WHERE changes()=1
+           AND ${oldProcessingJobPredicate('outbox_jobs')}
+           AND lease_expires_at<?`
+      ).bind(errorCode, failedAt, ...oldJobBindings, failedAt),
+      operationGuard(
+        input.db,
+        `backup_exhausted_${job.id}_${job.attempt_count}`,
+        `changes()=1
+         AND EXISTS (
+           SELECT 1 FROM scheduler_runs AS s WHERE ${schedulerFence('s')}
+         )
+         AND EXISTS (
+           SELECT 1 FROM backup_runs
+           WHERE id=? AND status='failed' AND version=3
+             AND last_error_code=? AND updated_at=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_jobs
+           WHERE id=? AND status='dead' AND attempt_count=8
+             AND lease_owner IS NULL AND lease_expires_at IS NULL
+             AND last_error_code=? AND updated_at=?
+         )
+         AND EXISTS (
+           SELECT 1 FROM outbox_attempts
+           WHERE id=? AND job_id=? AND attempt_number=8
+             AND completed_at=? AND result='dead' AND error_code=?
+             AND provider_reference IS NULL
+         )
+         AND (SELECT count(*) FROM outbox_attempts
+              WHERE job_id=? AND completed_at IS NULL)=0`,
+        [
+          ...schedulerBindings(input),
+          backup.id,
+          errorCode,
+          failedAt,
+          job.id,
+          errorCode,
+          failedAt,
+          oldAttempt.id,
+          job.id,
+          failedAt,
+          errorCode,
+          job.id,
+        ],
+      ),
+    ]), 4)
+  } catch (error) {
+    if (isD1OutboxOperationGuardFailure(error)) throw new Error('BACKUP_LEASE_LOST')
+    throw error
+  }
+}
+
+export async function runNextBackupCreate(input) {
+  const runner = captureRunnerInput(input)
+  const captured = captureInput({
+    db: runner.db,
+    cryptoContext: runner.cryptoContext,
+    config: runner.providerConfig,
+    bindings: runner.archive,
+    schedulerRun: runner.schedulerRun,
+    now: runner.now,
+    wait: runner.wait,
+    idFactory: runner.idFactory,
+    leaseOwnerFactory: runner.leaseOwnerFactory,
+    nonceFactory: runner.nonceFactory,
+    providers: {},
+  })
+  const row = await readCandidate(captured.db, captured.claimNow)
+  if (row === null) return { claimed: false, result: null, backupId: null }
+  const candidate = await validateCandidate(row, captured.cryptoContext, captured.claimNow)
+  if (candidate.exhausted) {
+    await terminalizeExhaustedClaim(captured, candidate)
+    return {
+      claimed: true,
+      result: 'dead',
+      backupId: candidate.backup.id,
+      errorCode: 'OUTBOX_LEASE_EXPIRED',
+    }
+  }
+  const claim = await claimCandidate(captured, candidate)
+  let rawSsecKey
+  let artifactWriteStarted = false
+  let finalizationUncertain = false
+  let finalizationPending = false
+  try {
+    await cleanupReclaimedArtifacts(
+      { ...runner, scheduler: captured.scheduler },
+      candidate,
+      claim,
+    )
+    const recoveryBefore = await recoverySnapshot(runner.db)
+    const restoreSentinel = restoreSentinelFor(candidate.backup)
+    await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
+    const exported = await Reflect.apply(runner.pollExport, undefined, [{
+      ...runner.providerConfig,
+      fetch: runner.fetch,
+      wait: runner.wait,
+      now: runner.now,
+      signal: runner.signal,
+    }])
+    const recoveryAfter = await recoverySnapshot(runner.db)
+    if (canonicalJson(recoveryBefore) !== canonicalJson(recoveryAfter)) {
+      throw new Error('BACKUP_MIGRATION_SET_CHANGED')
+    }
+    await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
+    const downloaded = await Reflect.apply(runner.downloadExport, undefined, [{
+      downloadUrl: exported.downloadUrl,
+      fetch: runner.fetch,
+      signal: runner.signal,
+    }])
+    rawSsecKey = runner.rawKeyFactory()
+    if (!(rawSsecKey instanceof Uint8Array)
+      || !(rawSsecKey.buffer instanceof ArrayBuffer)
+      || rawSsecKey.byteOffset !== 0
+      || rawSsecKey.byteLength !== 32
+      || rawSsecKey.buffer.byteLength !== 32) invalid()
+    const keys = backupObjectKeys({
+      backupId: candidate.backup.id,
+      localMonth: candidate.backup.local_month,
+      version: 3,
+    })
+    const metadata = {
+      backupId: candidate.backup.id,
+      format: 'bwm-d1-sql-v3',
+      retentionClass: candidate.backup.retention_class,
+      sourceAppEnv: runner.source.appEnv,
+      sourceDatabaseId: runner.source.databaseId,
+    }
+    await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
+    const streamed = sha256Readable(downloaded.body)
+    artifactWriteStarted = true
+    let stored
+    try {
+      stored = await runner.archive.put(keys.objectKey, streamed.body, {
+        ssecKey: rawSsecKey.buffer,
+        customMetadata: metadata,
+        onlyIf: { etagDoesNotMatch: '*' },
+      })
+    } catch (error) {
+      await streamed.abort(error)
+      throw error
+    }
+    if (!stored || typeof stored.etag !== 'string' || stored.etag.length === 0
+      || !Number.isSafeInteger(stored.size) || stored.size < 1
+      || stored.size > BACKUP_SQL_MAX_BYTES) invalid()
+    const digest = await streamed.result()
+    if (digest.byteCount !== stored.size) invalid()
+    const manifestResult = await createBackupManifest({
+      facts: {
+        format: 'bwm-d1-sql-v3',
+        backupId: candidate.backup.id,
+        createdAt: candidate.backup.created_at,
+        localDay: candidate.backup.local_day,
+        localMonth: candidate.backup.local_month,
+        retentionClass: candidate.backup.retention_class,
+        source: runner.source,
+        appliedMigrations: recoveryBefore.appliedMigrations,
+        restoreSentinel,
+        recoveryFacts: recoveryBefore.recoveryFacts,
+        plaintextSqlSha256: digest.plaintextSqlSha256,
+        objectKey: keys.objectKey,
+        objectEtag: stored.etag,
+        objectSize: stored.size,
+        atBookmark: exported.atBookmark,
+      },
+      rawSsecKey,
+      keyring: runner.keyring,
+      nonceFactory: runner.nonceFactory,
+    })
+    if (JSON.stringify(expectedObjectMetadata(manifestResult.manifest)) !== JSON.stringify(metadata)) invalid()
+    await renewClaim({ ...runner, scheduler: captured.scheduler }, claim)
+    const storedManifest = await runner.archive.put(keys.manifestKey, manifestResult.bytes, {
+      onlyIf: { etagDoesNotMatch: '*' },
+    })
+    if (!storedManifest || typeof storedManifest.etag !== 'string'
+      || storedManifest.etag.length === 0
+      || storedManifest.size !== manifestResult.bytes.byteLength) invalid()
+    const final = {
+      completedAt: instantFromMs(runner.now()),
+      expiresAt: expiryFor(candidate.backup),
+    }
+    try {
+      await completeClaim(
+        { ...runner, scheduler: captured.scheduler },
+        candidate,
+        claim,
+        stored,
+        manifestResult,
+        keys,
+        exported.atBookmark,
+        final,
+      )
+    } catch {
+      let state
+      try { state = await readFinalizationState(runner, candidate, claim) } catch {
+        finalizationUncertain = true
+        throw new Error('BACKUP_FINALIZE_UNCERTAIN')
+      }
+      if (!exactStoredFinalization(
+        state, candidate, claim, manifestResult, stored, keys, exported.atBookmark, final,
+      )) {
+        if (exactPendingFinalization(state, candidate, claim)) {
+          try {
+            await cleanupCurrentArtifacts(
+              { ...runner, scheduler: captured.scheduler }, claim, keys,
+            )
+          } catch {}
+          finalizationPending = true
+        } else {
+          finalizationUncertain = true
+        }
+        throw new Error('BACKUP_FINALIZE_UNCERTAIN')
+      }
+    }
+    return { claimed: true, result: 'succeeded', backupId: candidate.backup.id }
+  } catch (error) {
+    if (finalizationPending) throw new Error('BACKUP_FINALIZE_UNCERTAIN')
+    if (finalizationUncertain) {
+      return {
+        claimed: true,
+        result: 'dead',
+        backupId: candidate.backup.id,
+        errorCode: 'BACKUP_FINALIZE_UNCERTAIN',
+      }
+    }
+    let failure = error
+    if (artifactWriteStarted) {
+      try {
+        await cleanupCurrentArtifacts(
+          { ...runner, scheduler: captured.scheduler },
+          claim,
+          backupObjectKeys({
+            backupId: candidate.backup.id,
+            localMonth: candidate.backup.local_month,
+            version: 3,
+          }),
+        )
+      } catch (cleanupError) {
+        failure = cleanupError?.message === 'BACKUP_LEASE_LOST'
+          ? cleanupError
+          : new Error('BACKUP_ORPHAN_CLEANUP_FAILED')
+      }
+    }
+    const code = await failClaim(
+      { ...runner, scheduler: captured.scheduler },
+      candidate,
+      claim,
+      failure,
+    )
+    return { claimed: true, result: 'dead', backupId: candidate.backup.id, errorCode: code }
+  } finally {
+    if (rawSsecKey instanceof Uint8Array) rawSsecKey.fill(0)
   }
 }
 
@@ -1184,7 +1910,12 @@ function rejectDuplicateEnvelopeKeys(text) {
       skipSpace()
       if (text[index] !== ':') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
       index += 1
-      scanValue(watch === 'top' && key === 'result' ? 'result' : null, depth)
+      const childWatch = watch === 'top' && key === 'result'
+        ? 'result'
+        : watch === 'result' && key === 'result'
+          ? 'nestedResult'
+          : null
+      scanValue(childWatch, depth)
       skipSpace()
       if (text[index] === '}') { index += 1; return }
       if (text[index] !== ',') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
@@ -1300,6 +2031,37 @@ function exportEnvelope(value, firstBookmark) {
     || typeof envelope.success !== 'boolean') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
   if (envelope.success !== true) adapterFail('BACKUP_EXPORT_START_FAILED')
   const resultKeys = Reflect.ownKeys(envelope.result ?? {})
+  if (resultKeys.length === 5) {
+    const current = parsedExactObject(envelope.result, [
+      'at_bookmark', 'messages', 'status', 'success', 'type',
+    ])
+    if (!validBookmark(current.at_bookmark)
+      || (firstBookmark !== null && current.at_bookmark !== firstBookmark)
+      || !Array.isArray(current.messages)
+      || current.messages.some((message) => typeof message !== 'string')
+      || current.status !== 'active' || current.success !== true || current.type !== 'export') {
+      adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    }
+    return { complete: false, atBookmark: current.at_bookmark }
+  }
+  if (resultKeys.length === 6) {
+    const current = parsedExactObject(envelope.result, [
+      'at_bookmark', 'messages', 'result', 'status', 'success', 'type',
+    ])
+    const result = parsedExactObject(current.result, ['filename', 'signed_url'])
+    if (!validBookmark(current.at_bookmark)
+      || (firstBookmark !== null && current.at_bookmark !== firstBookmark)
+      || !Array.isArray(current.messages)
+      || current.messages.some((message) => typeof message !== 'string')
+      || current.status !== 'complete' || current.success !== true || current.type !== 'export'
+      || !validFilename(result.filename)
+      || !canonicalDownloadUrl(result.signed_url)) adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
+    return {
+      complete: true,
+      atBookmark: current.at_bookmark,
+      downloadUrl: result.signed_url,
+    }
+  }
   if (resultKeys.length === 1 && resultKeys[0] === 'at_bookmark') {
     const result = parsedExactObject(envelope.result, ['at_bookmark'])
     if (!validBookmark(result.at_bookmark)

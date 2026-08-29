@@ -31,6 +31,7 @@ test('workspace authority identity is deterministic and covers every authority f
     dataMode: 'fictional',
     actorId: 'stf_owner',
     actorVersion: 7,
+    authorityRevision: 3,
     role: 'owner',
     specialistId: null,
     capabilities,
@@ -40,12 +41,19 @@ test('workspace authority identity is deterministic and covers every authority f
   const key = createWorkspaceAuthorityKey(authority)
   capabilities.reverse()
   assert.equal(createWorkspaceAuthorityKey({ ...authority, capabilities }), key)
+  assert.notEqual(createWorkspaceAuthorityKey({
+    ...authority,
+    repositoryMode: 'demo',
+    authorityRevision: null,
+    demoRoleId: 'owner',
+    demoAuthGeneration: 1,
+  }), key, 'repositoryMode')
 
   for (const [field, replacement] of [
-    ['repositoryMode', 'demo'],
     ['dataMode', 'training'],
     ['actorId', 'stf_other'],
     ['actorVersion', 8],
+    ['authorityRevision', 4],
     ['role', 'coordinator'],
     ['specialistId', 'sp_retained'],
     ['capabilities', ['client.manage']],
@@ -59,6 +67,7 @@ test('workspace authority identity is deterministic and covers every authority f
 test('workspace authority identity rejects accessor-backed mutable session input', () => {
   const authority = {
     repositoryMode: 'api', dataMode: 'fictional', actorId: 'stf_owner', actorVersion: 1,
+    authorityRevision: 1,
     role: 'owner', specialistId: null, capabilities: [], demoRoleId: null,
     demoAuthGeneration: null,
   }
@@ -66,12 +75,35 @@ test('workspace authority identity rejects accessor-backed mutable session input
   assert.throws(() => createWorkspaceAuthorityKey(authority), TypeError)
 })
 
+test('protected specialist authority requires one canonical specialist profile', () => {
+  const authority = {
+    repositoryMode: 'api', dataMode: 'fictional', actorId: 'stf_specialist', actorVersion: 1,
+    authorityRevision: 1,
+    role: 'specialist', specialistId: 'sp_specialist', capabilities: [],
+    demoRoleId: null, demoAuthGeneration: null,
+  }
+  assert.doesNotThrow(() => createWorkspaceAuthorityKey(authority))
+  for (const specialistId of [null, '', 'staff_specialist', '../sp_specialist']) {
+    assert.throws(
+      () => createWorkspaceAuthorityKey({ ...authority, specialistId }),
+      TypeError,
+    )
+  }
+})
+
 test('protected app adapts the full API client to the exact bound workspace dependency', async () => {
   const calls = []
   const methodNames = [
     'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
+    'activateHistoricalClient',
     'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
-    'correctPayment', 'createIdempotencyKey',
+    'correctPayment',
+    'loadActivityWorkspace',
+    'createActivityGroup', 'editActivityGroup',
+    'createActivityParticipant', 'editActivityParticipant',
+    'createActivityMembership', 'editActivityMembership',
+    'createActivityClass', 'editActivityClass', 'setActivityAttendance',
+    'createIdempotencyKey',
   ]
   const source = { marker: 'trusted-api', unrelatedMethod() {} }
   for (const name of methodNames) {

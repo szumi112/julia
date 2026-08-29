@@ -7,9 +7,11 @@ import {
 import { warsawDateFromUtc } from '../../src/core-records.js'
 
 const METHODS = [
-  'archiveClient', 'cancelAppointment', 'correctPayment', 'createAppointment',
-  'createClient', 'editAppointment', 'editClient', 'loadWindow', 'recordPayment',
+  'activateHistoricalClient', 'archiveClient', 'cancelAppointment', 'correctPayment',
+  'createAppointment', 'createClient', 'editAppointment', 'editClient', 'loadWindow',
+  'recordPayment',
 ]
+const REPOSITORY_KEYS = [...METHODS, 'activities'].sort()
 
 const clientInput = (overrides = {}) => ({
   name: 'Ola Nowak', age: 12, status: 'active', specialistId: 'sp_anna', ...overrides,
@@ -29,11 +31,22 @@ const apiDouble = () => {
     createClient: async (...args) => (calls.push(['createClient', ...args]), Object.freeze({ kind: 'client' })),
     editClient: async (...args) => (calls.push(['editClient', ...args]), Object.freeze({ kind: 'client' })),
     archiveClient: async (...args) => (calls.push(['archiveClient', ...args]), Object.freeze({ kind: 'client' })),
+    activateHistoricalClient: async (...args) => (calls.push(['activateHistoricalClient', ...args]), Object.freeze({ kind: 'historical-activation' })),
     createAppointment: async (...args) => (calls.push(['createAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
     editAppointment: async (...args) => (calls.push(['editAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
     cancelAppointment: async (...args) => (calls.push(['cancelAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
     recordPayment: async (...args) => (calls.push(['recordPayment', ...args]), Object.freeze({ kind: 'appointment' })),
     correctPayment: async (...args) => (calls.push(['correctPayment', ...args]), Object.freeze({ kind: 'appointment' })),
+    loadActivityWorkspace: async (...args) => (calls.push(['loadActivityWorkspace', ...args]), Object.freeze({ kind: 'activity-workspace' })),
+    createActivityGroup: async (...args) => (calls.push(['createActivityGroup', ...args]), Object.freeze({ kind: 'activity-group' })),
+    editActivityGroup: async (...args) => (calls.push(['editActivityGroup', ...args]), Object.freeze({ kind: 'activity-group' })),
+    createActivityParticipant: async (...args) => (calls.push(['createActivityParticipant', ...args]), Object.freeze({ kind: 'activity-participant' })),
+    editActivityParticipant: async (...args) => (calls.push(['editActivityParticipant', ...args]), Object.freeze({ kind: 'activity-participant' })),
+    createActivityMembership: async (...args) => (calls.push(['createActivityMembership', ...args]), Object.freeze({ kind: 'activity-membership' })),
+    editActivityMembership: async (...args) => (calls.push(['editActivityMembership', ...args]), Object.freeze({ kind: 'activity-membership' })),
+    createActivityClass: async (...args) => (calls.push(['createActivityClass', ...args]), Object.freeze({ kind: 'activity-class' })),
+    editActivityClass: async (...args) => (calls.push(['editActivityClass', ...args]), Object.freeze({ kind: 'activity-class' })),
+    setActivityAttendance: async (...args) => (calls.push(['setActivityAttendance', ...args]), Object.freeze({ kind: 'activity-attendance' })),
     createIdempotencyKey: () => `repository-key-${String(++key).padStart(4, '0')}`,
   }
   return { api, calls }
@@ -44,10 +57,13 @@ test('constructors expose one exact frozen repository interface', () => {
   const apiRepository = createApiWorkspaceRepository({ api })
   const demoRepository = createDemoWorkspaceRepository({ dispatch() {}, getState: () => ({ psychologists: [], clients: [], sessions: [] }) })
   for (const repository of [apiRepository, demoRepository]) {
-    assert.deepEqual(Object.keys(repository).sort(), METHODS)
+    assert.deepEqual(Object.keys(repository).sort(), REPOSITORY_KEYS)
     assert.equal(Object.isFrozen(repository), true)
     for (const method of METHODS) assert.equal(typeof repository[method], 'function')
   }
+  assert.equal(Object.isFrozen(apiRepository.activities), true)
+  assert.equal(apiRepository.activities.loadWindow instanceof Function, true)
+  assert.equal(demoRepository.activities, null)
 })
 
 test('API repository delegates every command with exact captured arguments and fresh action keys', async () => {
@@ -64,6 +80,9 @@ test('API repository delegates every command with exact captured arguments and f
     repository.createClient(create),
     repository.editClient('cl_ola', 1, edit),
     repository.archiveClient('cl_ola', 2),
+    repository.activateHistoricalClient('hcl_ola', {
+      expectedVersion: 3, specialistId: 'sp_anna',
+    }),
     repository.createAppointment(appointment),
     repository.editAppointment('apt_visit', 3, appointmentEdit),
     repository.cancelAppointment('apt_visit', 4),
@@ -72,7 +91,7 @@ test('API repository delegates every command with exact captured arguments and f
   ])
 
   assert.deepEqual(results.map((value) => value.kind), [
-    'window', 'client', 'client', 'client', 'appointment', 'appointment',
+    'window', 'client', 'client', 'client', 'historical-activation', 'appointment', 'appointment',
     'appointment', 'appointment', 'appointment',
   ])
   assert.deepEqual(calls, [
@@ -80,11 +99,12 @@ test('API repository delegates every command with exact captured arguments and f
     ['createClient', create, { idempotencyKey: 'repository-key-0001' }],
     ['editClient', 'cl_ola', 1, edit, { idempotencyKey: 'repository-key-0002' }],
     ['archiveClient', 'cl_ola', 2, { idempotencyKey: 'repository-key-0003' }],
-    ['createAppointment', appointment, { idempotencyKey: 'repository-key-0004' }],
-    ['editAppointment', 'apt_visit', 3, appointmentEdit, { idempotencyKey: 'repository-key-0005' }],
-    ['cancelAppointment', 'apt_visit', 4, { idempotencyKey: 'repository-key-0006' }],
-    ['recordPayment', 'apt_visit', 5, { amountGrosze: 7_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }, { idempotencyKey: 'repository-key-0007' }],
-    ['correctPayment', 'pay_entry', 6, { reason: 'Zmiana metody', replacement: { amountGrosze: 6_000, method: 'transfer', receivedAt: '2026-01-04T11:00:00.000Z' } }, { idempotencyKey: 'repository-key-0008' }],
+    ['activateHistoricalClient', 'hcl_ola', 3, 'sp_anna', { idempotencyKey: 'repository-key-0004' }],
+    ['createAppointment', appointment, { idempotencyKey: 'repository-key-0005' }],
+    ['editAppointment', 'apt_visit', 3, appointmentEdit, { idempotencyKey: 'repository-key-0006' }],
+    ['cancelAppointment', 'apt_visit', 4, { idempotencyKey: 'repository-key-0007' }],
+    ['recordPayment', 'apt_visit', 5, { amountGrosze: 7_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }, { idempotencyKey: 'repository-key-0008' }],
+    ['correctPayment', 'pay_entry', 6, { reason: 'Zmiana metody', replacement: { amountGrosze: 6_000, method: 'transfer', receivedAt: '2026-01-04T11:00:00.000Z' } }, { idempotencyKey: 'repository-key-0009' }],
   ])
   assert.deepEqual(create, clientInput())
   assert.deepEqual(appointment, appointmentInput())
@@ -177,7 +197,12 @@ test('demo load projects a complete ordered canonical window without excluded fi
   const repository = createDemoWorkspaceRepository({ dispatch: harness.dispatch, getState: harness.getState })
   const result = await repository.loadWindow({ from: '2026-08-01', to: '2026-08-31' })
   assert.deepEqual(result.window, { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true })
-  assert.deepEqual(result.specialists.map(({ id, displayName }) => [id, displayName]), [['sp_demo_p1', 'Anna'], ['sp_demo_p2', 'Żaneta']])
+  assert.deepEqual(result.specialists.map(({ id, displayName, professionalTitle }) => (
+    [id, displayName, professionalTitle]
+  )), [
+    ['sp_demo_p1', 'Anna', 'Specjalistka'],
+    ['sp_demo_p2', 'Żaneta', 'Specjalistka'],
+  ])
   assert.deepEqual(result.clients.map(({ id, name }) => [id, name]), [['cl_demo_c1', 'Ada'], ['cl_demo_c2', 'Zenon']])
   assert.equal(result.appointments.length, 1)
   assert.equal(result.appointments[0].id, 'apt_demo_s1')
@@ -186,9 +211,42 @@ test('demo load projects a complete ordered canonical window without excluded fi
   assert.equal(result.appointments[0].location, 'Gabinet 1')
   assert.equal(result.appointments[0].payment.collectedGrosze, 7_000)
   assert.equal(result.appointments[0].paymentEntries[0].receivedAt, '2026-08-05T10:00:00.000Z')
+  assert.deepEqual(result.historicalClients, [])
+  assert.deepEqual(result.historicalOccurrences, [])
+  assert.equal(result.latestPopulatedMonth, null)
   assert.equal(JSON.stringify(result).includes('private@example.test'), false)
   assert.equal(JSON.stringify(result).includes('secret'), false)
   assert.equal(Object.isFrozen(result.appointments[0].paymentEntries[0]), true)
+  assert.equal(harness.actions.length, 0)
+})
+
+test('historical activation validates the exact API command while demo stays fixed read-only and API-free', async () => {
+  const { api, calls } = apiDouble()
+  const repository = createApiWorkspaceRepository({ api })
+  await repository.activateHistoricalClient('hcl_ola', {
+    expectedVersion: 2, specialistId: 'sp_anna',
+  })
+  assert.deepEqual(calls, [[
+    'activateHistoricalClient', 'hcl_ola', 2, 'sp_anna',
+    { idempotencyKey: 'repository-key-0001' },
+  ]])
+  for (const [id, command] of [
+    ['cl_ola', { expectedVersion: 2, specialistId: 'sp_anna' }],
+    ['hcl_ola', { expectedVersion: 0, specialistId: 'sp_anna' }],
+    ['hcl_ola', { expectedVersion: 2, specialistId: 'stf_anna' }],
+    ['hcl_ola', { expectedVersion: 2, specialistId: 'sp_anna', extra: true }],
+  ]) {
+    await assert.rejects(repository.activateHistoricalClient(id, command), /VALIDATION_FAILED/)
+  }
+  assert.equal(calls.length, 1)
+
+  const harness = demoHarness()
+  const demo = createDemoWorkspaceRepository({
+    dispatch: harness.dispatch, getState: harness.getState,
+  })
+  await assert.rejects(demo.activateHistoricalClient('hcl_ola', {
+    expectedVersion: 2, specialistId: 'sp_demo_p1',
+  }), (error) => error?.code === 'WORKSPACE_READ_ONLY')
   assert.equal(harness.actions.length, 0)
 })
 

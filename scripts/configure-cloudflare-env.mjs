@@ -32,9 +32,16 @@ const REQUIRED_SECRETS = [
   'BWM_BACKUP_KEK_V1',
   'BWM_DATA_KEK_V1',
   'BWM_LOOKUP_HMAC_V1',
+  'BWM_WORKBOOK_HMAC_V1',
+  'BWM_WORKBOOK_KEK_V1',
   'CF_ACCESS_GROUP_TOKEN',
   'CF_D1_EXPORT_TOKEN',
-  'SCW_SECRET_KEY',
+  'RESEND_API_KEY',
+]
+const STAGING_REQUIRED_SECRETS = [
+  'BWM_BACKUP_KEK_V1',
+  'BWM_BACKUP_KEK_V2',
+  ...REQUIRED_SECRETS.slice(1),
 ]
 // Canonical base64url encoding of 32 zero bytes: a shape-valid stand-in so the
 // runtime schema can validate emitted vars without any real key material.
@@ -45,6 +52,8 @@ const INHERITED_VAR_NAMES = [
   'ACTIVE_DATA_KEK_VERSION',
   'ACTIVE_LOOKUP_KEY_VERSION',
   'ACTIVE_BACKUP_KEK_VERSION',
+  'ACTIVE_WORKBOOK_KEK_VERSION',
+  'ACTIVE_WORKBOOK_HMAC_VERSION',
 ]
 // Environment-specific identifiers that staging and production must never share.
 const DISTINCT_FIELDS = [
@@ -64,6 +73,7 @@ const fail = (message) => {
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 const trimmedNonEmpty = (value) => typeof value === 'string' && value.length > 0 && value === value.trim()
+const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength
 
 const requireExactFields = (section, path, required, optional = []) => {
   if (!isPlainObject(section)) fail(`${path} must be an object`)
@@ -130,19 +140,23 @@ const inheritedVersionVars = (config) => {
   return values
 }
 
-const validateScalewaySection = (path, scaleway) => {
-  requireExactFields(scaleway, path, ['projectId', 'fromEmail', 'fromName'])
-  if (typeof scaleway.projectId !== 'string' || !PROVIDER_UUID.test(scaleway.projectId)) {
-    fail(`${path}.projectId must be a lowercase UUID`)
-  }
-  if (typeof scaleway.fromEmail !== 'string' || !SENDER_EMAIL.test(scaleway.fromEmail) || scaleway.fromEmail.includes('..')) {
+const validateResendSection = (path, resend) => {
+  requireExactFields(resend, path, ['fromEmail', 'fromName'])
+  if (typeof resend.fromEmail !== 'string'
+    || utf8Bytes(resend.fromEmail) > 254
+    || !SENDER_EMAIL.test(resend.fromEmail)
+    || resend.fromEmail.includes('..')) {
     fail(`${path}.fromEmail must be a lowercase public sender email address`)
   }
-  if (!trimmedNonEmpty(scaleway.fromName)) fail(`${path}.fromName must be a non-empty trimmed string`)
+  if (!trimmedNonEmpty(resend.fromName)
+    || utf8Bytes(resend.fromName) > 120
+    || /[<>\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(resend.fromName)) {
+    fail(`${path}.fromName must be a safe non-empty trimmed string`)
+  }
 }
 
 const validateEnvironmentSection = (name, section, local) => {
-  requireExactFields(section, name, ENVIRONMENT_FIELDS, ['scaleway'])
+  requireExactFields(section, name, ENVIRONMENT_FIELDS, ['resend'])
   if (typeof section.accountId !== 'string' || !ACCOUNT_ID.test(section.accountId)) {
     fail(`${name}.accountId must be exactly 32 lowercase hex characters`)
   }
@@ -182,7 +196,7 @@ const validateEnvironmentSection = (name, section, local) => {
     fail(`${name}.accessGroupId must be a lowercase UUID`)
   }
 
-  if (Object.hasOwn(section, 'scaleway')) validateScalewaySection(`${name}.scaleway`, section.scaleway)
+  if (Object.hasOwn(section, 'resend')) validateResendSection(`${name}.resend`, section.resend)
 }
 
 const buildEnvironmentBlock = (name, section, inheritedVars) => {
@@ -194,15 +208,15 @@ const buildEnvironmentBlock = (name, section, inheritedVars) => {
     ACCESS_HEALTH_SERVICE_TOKEN_ID: section.accessHealthServiceTokenId,
     ACCESS_TEAM_DOMAIN: section.accessTeamDomain,
     ...inheritedVars,
+    ACTIVE_BACKUP_KEK_VERSION: name === 'staging' ? '2' : '1',
     CF_ACCOUNT_ID: section.accountId,
     CF_D1_DATABASE_ID: section.d1.id,
     CF_ACCESS_GROUP_ID: section.accessGroupId,
     CF_ACCESS_GROUP_NAME: section.accessGroupName,
   }
-  if (section.scaleway) {
-    vars.SCW_PROJECT_ID = section.scaleway.projectId
-    vars.SCW_FROM_EMAIL = section.scaleway.fromEmail
-    vars.SCW_FROM_NAME = section.scaleway.fromName
+  if (section.resend) {
+    vars.RESEND_FROM_EMAIL = section.resend.fromEmail
+    vars.RESEND_FROM_NAME = section.resend.fromName
   }
   // No per-env triggers: both top-level crons are inherited deliberately, because
   // worker/index.js requires exactly the minute and five-minute patterns.
@@ -213,7 +227,7 @@ const buildEnvironmentBlock = (name, section, inheritedVars) => {
     vars,
     // Wrangler does not inherit the top-level secrets manifest per environment,
     // so each env block repeats the required list.
-    secrets: { required: [...REQUIRED_SECRETS] },
+    secrets: { required: [...(name === 'staging' ? STAGING_REQUIRED_SECRETS : REQUIRED_SECRETS)] },
     d1_databases: [{
       binding: 'DB',
       database_name: section.d1.name,
@@ -238,6 +252,8 @@ const assertRuntimeAcceptsVars = (name, vars) => {
       [`BWM_DATA_KEK_V${vars.ACTIVE_DATA_KEK_VERSION}`]: DUMMY_SECRET_KEY,
       [`BWM_LOOKUP_HMAC_V${vars.ACTIVE_LOOKUP_KEY_VERSION}`]: DUMMY_SECRET_KEY,
       [`BWM_BACKUP_KEK_V${vars.ACTIVE_BACKUP_KEK_VERSION}`]: DUMMY_SECRET_KEY,
+      [`BWM_WORKBOOK_KEK_V${vars.ACTIVE_WORKBOOK_KEK_VERSION}`]: DUMMY_SECRET_KEY,
+      [`BWM_WORKBOOK_HMAC_V${vars.ACTIVE_WORKBOOK_HMAC_VERSION}`]: DUMMY_SECRET_KEY,
     })
   } catch (error) {
     const detail = Array.isArray(error?.issues)
@@ -264,8 +280,8 @@ export const applyProviderResults = ({ config, document }) => {
   const warnings = []
   const env = {}
   for (const name of ENVIRONMENT_NAMES) {
-    if (!Object.hasOwn(document[name], 'scaleway')) {
-      warnings.push(`${name} has no scaleway section: SCW_* vars are omitted, so invitation emails will dead-letter until the email provider is configured`)
+    if (!Object.hasOwn(document[name], 'resend')) {
+      warnings.push(`${name} has no resend section: RESEND_* vars are omitted, so invitation emails will dead-letter until the email provider is configured`)
     }
     const block = buildEnvironmentBlock(name, document[name], inheritedVars)
     assertRuntimeAcceptsVars(name, block.vars)

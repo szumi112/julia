@@ -1,4 +1,5 @@
 import { auditEventStatement, encryptAuditReason } from '../audit/events.js'
+import { isCapability } from '../../src/capabilities.js'
 import {
   isD1CoreDirectoryInvariantFailure,
   isD1IdentityCollision,
@@ -15,11 +16,14 @@ import {
 import { blindEmailCandidates, blindEmailIndex, decryptForScope, encryptForScope } from '../security/envelope.js'
 import { enqueueOutboxStatement } from '../jobs/outbox.js'
 import { normalizeCanonicalEmail } from './canonical-email.js'
+import { captureAuthorityActor } from './authority-actor.js'
 import { authorize } from './policy.js'
+import { resolveCurrentAuthorityActor } from './staff.js'
 import {
   prepareSpecialistTransition,
   specialistGuardStatement,
   specialistIdFor,
+  specialistPostcondition,
 } from './specialists.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -43,20 +47,41 @@ const prefixedIdFrom = (prefix, factory) => {
 }
 const validation = (field) => { const error = new Error('VALIDATION_FAILED'); error.details = { field }; throw error }
 const plain = (row, keys) => Object.fromEntries(keys.map((key) => [key, row[key]]))
+const positive = (value) => Number.isSafeInteger(value) && value > 0
 
 export { specialistIdFor }
 
-export function validateInvitationInput(input, { dataMode } = {}) {
+export function validateInvitationInput(input, { appEnv, dataMode } = {}) {
   if (!exactObject(input, ['displayName', 'email', 'role'])) validation('displayName')
   if (typeof input.displayName !== 'string') validation('displayName')
   const displayName = input.displayName.normalize('NFC').trim()
   if (!displayName || new TextEncoder().encode(displayName).byteLength > 120) validation('displayName')
   if (typeof input.email !== 'string') validation('email')
-  const email = normalizeCanonicalEmail(input.email, { fictional: dataMode === 'fictional' })
+  const email = normalizeCanonicalEmail(input.email, {
+    fictional: !(appEnv === 'staging' && dataMode === 'fictional'),
+  })
   if (email === null) validation('email')
   if (!roles.has(input.role)) validation('role')
   return Object.freeze({ displayName, email, role: input.role })
 }
+
+const invitationRequestDigest = (request, targetSpecialist = null) => JSON.stringify({
+  displayName: request.displayName,
+  email: request.email,
+  role: request.role,
+  ...(targetSpecialist ? {
+    specialistId: targetSpecialist.id,
+    specialistVersion: targetSpecialist.version,
+  } : {}),
+})
+
+const invitationIdempotency = (owner, idempotencyKey, request, targetSpecialist, scope) => ({
+  actorId: owner.id,
+  operation: 'staff.invite',
+  idempotencyKey,
+  requestDigest: invitationRequestDigest(request, targetSpecialist),
+  expectedScope: scope,
+})
 
 function publicStaff(row) {
   return { id: row.id, displayName: row.displayName, email: row.email, role: row.role, status: row.status, version: row.version, specialistId: row.specialist_id ?? null }
@@ -154,46 +179,276 @@ async function retainedIdentity(db, context, email, now) {
 }
 
 async function activeOwner(db, actor, nowMs) {
-  if (!validId(actor?.id) || !Number.isSafeInteger(actor.version)
-    || !authorize(actor, 'staff.manage', CENTRE, { nowMs })) throw new Error('FORBIDDEN')
+  const captured = captureAuthorityActor(actor)
+  if (!captured || !authorize(captured, 'staff.manage', CENTRE, { nowMs })) {
+    throw new Error('FORBIDDEN')
+  }
   const row = await db.prepare(
     `SELECT id,role,specialist_id,version
      FROM staff_users
      WHERE id=? AND role='owner' AND status='active' AND version=?`
-  ).bind(actor.id, actor.version).first()
-  if (!row || !authorize({
-    id: row.id,
-    role: row.role,
-    specialistId: row.specialist_id,
-    version: row.version,
-  }, 'staff.manage', CENTRE, { nowMs })) throw new Error('FORBIDDEN')
-  return row
+  ).bind(captured.id, captured.version).first()
+  if (!row) throw new Error('FORBIDDEN')
+  const current = await resolveCurrentAuthorityActor(db, row)
+  if (current.id !== captured.id
+    || current.role !== captured.role
+    || current.specialistId !== captured.specialistId
+    || current.version !== captured.version
+    || current.authorityRevision !== captured.authorityRevision
+    || current.capabilities.length !== captured.capabilities.length
+    || current.capabilities.some((capability, index) => (
+      capability !== captured.capabilities[index]
+    ))
+    || !authorize(current, 'staff.manage', CENTRE, { nowMs })) {
+    throw new Error('FORBIDDEN')
+  }
+  return current
 }
 
-export async function inviteStaff({ db, cryptoContext, actor, input, idempotencyKey, correlationId, nowMs, dataMode, targetSpecialist = null, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
+async function authorityTransition(db, {
+  target,
+  actor,
+  reason,
+  now,
+  idFactory,
+}) {
+  if (!target || !STAFF_ID.test(target.id ?? '')
+    || !roles.has(target.role) || !positive(target.version)
+    || !captureAuthorityActor(actor)
+    || !['role_change', 'status_change'].includes(reason)) {
+    throw new Error('IDENTITY_FAILURE')
+  }
+  const result = await db.prepare(
+    `SELECT authority.revision AS authority_revision,
+            override.capability AS capability,override.decision AS decision,
+            override.version AS override_version,
+            override.changed_by_staff_id AS changed_by_staff_id,
+            override.created_at AS created_at,override.updated_at AS updated_at
+     FROM staff_authorities AS authority
+     LEFT JOIN staff_capability_overrides AS override
+       ON override.staff_id=authority.staff_id
+      AND override.decision IN ('allow','deny')
+     WHERE authority.staff_id=?
+     ORDER BY override.capability`,
+  ).bind(target.id).all()
+  const rows = result?.results
+  if (!Array.isArray(rows) || rows.length < 1) throw new Error('IDENTITY_FAILURE')
+  const targetAuthorityRevision = rows[0].authority_revision
+  if (!positive(targetAuthorityRevision)
+    || rows.some((row) => row.authority_revision !== targetAuthorityRevision)) {
+    throw new Error('IDENTITY_FAILURE')
+  }
+  if (actor.id === target.id && targetAuthorityRevision !== actor.authorityRevision) {
+    throw new Error('FORBIDDEN')
+  }
+  const active = []
+  const seen = new Set()
+  for (const row of rows) {
+    if (row.capability === null && row.decision === null
+      && row.override_version === null && row.changed_by_staff_id === null
+      && row.created_at === null && row.updated_at === null) {
+      if (rows.length !== 1) throw new Error('IDENTITY_FAILURE')
+      continue
+    }
+    if (!isCapability(row.capability)
+      || !['allow', 'deny'].includes(row.decision)
+      || !positive(row.override_version)
+      || !STAFF_ID.test(row.changed_by_staff_id ?? '')
+      || typeof row.created_at !== 'string'
+      || typeof row.updated_at !== 'string'
+      || seen.has(row.capability)) throw new Error('IDENTITY_FAILURE')
+    seen.add(row.capability)
+    active.push(Object.freeze({
+      capability: row.capability,
+      currentDecision: row.decision,
+      currentVersion: row.override_version,
+      nextVersion: row.override_version + 1,
+      createdAt: row.created_at,
+      historyId: prefixedIdFrom('cph', idFactory),
+    }))
+  }
+  const targetRevision = targetAuthorityRevision + 1
+  const actorRevision = actor.id === target.id
+    ? targetRevision
+    : actor.authorityRevision + 1
+  return Object.freeze({
+    actorId: actor.id,
+    actorPriorRevision: actor.authorityRevision,
+    actorRevision,
+    targetId: target.id,
+    targetPriorRevision: targetAuthorityRevision,
+    targetRevision,
+    roleAtChange: target.role,
+    reason,
+    now,
+    active: Object.freeze(active),
+  })
+}
+
+function appendAuthorityTransition(uow, db, transition) {
+  if (transition.actorId === transition.targetId) {
+    uow.domain(db.prepare(
+      `INSERT INTO core_directory_invariant_failures (failure_kind)
+       SELECT 'authority_lifecycle'
+       WHERE NOT EXISTS (
+         SELECT 1 FROM staff_authorities
+         WHERE staff_id=? AND revision=?
+       )`,
+    ).bind(
+      transition.targetId,
+      transition.actorPriorRevision,
+    ))
+  }
+  if (transition.actorId !== transition.targetId) {
+    uow.domain(db.prepare(
+      `UPDATE staff_authorities SET revision=revision+1,updated_at=?
+       WHERE staff_id=? AND revision=?`,
+    ).bind(
+      transition.now,
+      transition.actorId,
+      transition.actorPriorRevision,
+    ))
+  }
+  for (const change of transition.active) {
+    uow.domain(db.prepare(
+      `UPDATE staff_capability_overrides
+       SET decision='cleared',version=version+1,changed_by_staff_id=?,updated_at=?
+       WHERE staff_id=? AND capability=? AND decision=? AND version=?`,
+    ).bind(
+      transition.actorId,
+      transition.now,
+      transition.targetId,
+      change.capability,
+      change.currentDecision,
+      change.currentVersion,
+    ))
+    uow.version(db.prepare(
+      `INSERT INTO staff_capability_override_history
+       (id,staff_id,capability,role_at_change,decision,override_version,
+        authority_revision,changed_by_staff_id,reason,changed_at)
+       SELECT ?,?,?,?,'cleared',?,?,?,?,?
+       WHERE EXISTS (
+         SELECT 1 FROM staff_authorities
+         WHERE staff_id=? AND revision=?
+       )`,
+    ).bind(
+      change.historyId,
+      transition.targetId,
+      change.capability,
+      transition.roleAtChange,
+      change.nextVersion,
+      transition.targetRevision,
+      transition.actorId,
+      transition.reason,
+      transition.now,
+      transition.targetId,
+      transition.targetPriorRevision,
+    ))
+  }
+  uow.domain(db.prepare(
+    `UPDATE staff_authorities SET revision=revision+1,updated_at=?
+     WHERE staff_id=? AND revision=?`,
+  ).bind(
+    transition.now,
+    transition.targetId,
+    transition.targetPriorRevision,
+  ))
+}
+
+function authorityPostcondition(transition) {
+  const changeSql = transition.active.length
+    ? transition.active.map(() => `(
+        current.capability=? AND current.decision='cleared' AND current.version=?
+        AND current.changed_by_staff_id=? AND current.created_at=?
+        AND current.updated_at=?
+        AND EXISTS (
+          SELECT 1 FROM staff_capability_override_history AS history
+          WHERE history.id=? AND history.staff_id=current.staff_id
+            AND history.capability=current.capability
+            AND history.role_at_change=? AND history.decision='cleared'
+            AND history.override_version=current.version
+            AND history.authority_revision=?
+            AND history.changed_by_staff_id=? AND history.reason=?
+            AND history.changed_at=?
+        )
+      )`).join(' OR ')
+    : '0'
+  const actorSql = transition.actorId === transition.targetId
+    ? '1'
+    : `EXISTS (
+        SELECT 1 FROM staff_authorities
+        WHERE staff_id=? AND revision=? AND updated_at=?
+      )`
+  const actorBindings = transition.actorId === transition.targetId
+    ? []
+    : [transition.actorId, transition.actorRevision, transition.now]
+  return Object.freeze({
+    sql: `EXISTS (
+        SELECT 1 FROM staff_authorities
+        WHERE staff_id=? AND revision=? AND updated_at=?
+      )
+      AND ${actorSql}
+      AND NOT EXISTS (
+        SELECT 1 FROM staff_capability_overrides
+        WHERE staff_id=? AND decision IN ('allow','deny')
+      )
+      AND (SELECT count(*) FROM staff_capability_override_history
+        WHERE staff_id=? AND authority_revision=? AND reason=?)=?
+      AND (SELECT count(*) FROM staff_capability_overrides AS current
+        WHERE current.staff_id=? AND (${changeSql}))=?`,
+    bindings: Object.freeze([
+      transition.targetId,
+      transition.targetRevision,
+      transition.now,
+      ...actorBindings,
+      transition.targetId,
+      transition.targetId,
+      transition.targetRevision,
+      transition.reason,
+      transition.active.length,
+      transition.targetId,
+      ...transition.active.flatMap((change) => [
+        change.capability,
+        change.nextVersion,
+        transition.actorId,
+        change.createdAt,
+        transition.now,
+        change.historyId,
+        transition.roleAtChange,
+        transition.targetRevision,
+        transition.actorId,
+        transition.reason,
+        transition.now,
+      ]),
+      transition.active.length,
+    ]),
+  })
+}
+
+function lifecycleGuardStatement(db, staffId, transition) {
+  if (!transition) return specialistGuardStatement(db, staffId)
+  const specialist = specialistPostcondition(staffId)
+  const authority = authorityPostcondition(transition)
+  return db.prepare(
+    `INSERT INTO core_directory_invariant_failures (failure_kind)
+     SELECT 'authority_lifecycle' WHERE NOT (
+       (${specialist.sql}) AND (${authority.sql})
+     )`,
+  ).bind(...specialist.bindings, ...authority.bindings)
+}
+
+export async function inviteStaff({ db, cryptoContext, actor, input, idempotencyKey, correlationId, nowMs, appEnv, dataMode, targetSpecialist = null, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
   if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
     || !cryptoContext?.scope || !validId(correlationId) || !Number.isSafeInteger(nowMs)
     || nowMs < 0 || !IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) throw new Error('VALIDATION_FAILED')
   const owner = await activeOwner(db, actor, nowMs)
   const request = validateInvitationInput(input, {
-    dataMode: targetSpecialist ? 'staging-access' : dataMode,
+    appEnv,
+    dataMode,
   })
-  const requestDigest = JSON.stringify({
-    displayName: request.displayName,
-    email: request.email,
-    role: request.role,
-    ...(targetSpecialist ? {
-      specialistId: targetSpecialist.id,
-      specialistVersion: targetSpecialist.version,
-    } : {}),
-  })
-  const idem = {
-    actorId: owner.id,
-    operation: 'staff.invite',
-    idempotencyKey,
-    requestDigest,
-    expectedScope: cryptoContext.scope,
-  }
+  const idem = invitationIdempotency(
+    owner, idempotencyKey, request, targetSpecialist, cryptoContext.scope,
+  )
   const replay = await inspectIdempotency(db, cryptoContext, idem)
   if (replay) return replay.body
   const now = iso(nowMs)
@@ -243,6 +498,15 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
         version: retained.expiredOpen.version + 1,
         updated_at: now,
       }
+    : null
+  const authority = reused && (reused.status === 'disabled' || reused.role !== staff.role)
+    ? await authorityTransition(db, {
+        target: reused,
+        actor: owner,
+        reason: reused.status === 'disabled' ? 'status_change' : 'role_change',
+        now,
+        idFactory,
+      })
     : null
   const specialist = await prepareSpecialistTransition({
     db,
@@ -398,6 +662,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
        VALUES (?,?,?,'reserved',?,1,?)`
     ).bind(accountLinkId, targetSpecialist.id, staffId, owner.id, now))
   }
+  if (authority) appendAuthorityTransition(uow, db, authority)
   uow.version(staffVersion.statement)
   uow.version(invitationVersion.statement)
   uow.domain(desired.statement)
@@ -517,7 +782,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       ...expiredOpenBindings,
     ],
   }))
-  uow.guard(specialistGuardStatement(db, staffId))
+  uow.guard(lifecycleGuardStatement(db, staffId, authority))
   try {
     await commitRateLimitedMutation(db, uow, {
       actorId: owner.id,
@@ -558,6 +823,7 @@ export async function inviteSpecialistProfile({
   idempotencyKey,
   correlationId,
   nowMs,
+  appEnv,
   dataMode,
   idFactory,
 } = {}) {
@@ -567,12 +833,45 @@ export async function inviteSpecialistProfile({
     || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
     validation('specialistId')
   }
-  await activeOwner(db, actor, nowMs)
+  const owner = await activeOwner(db, actor, nowMs)
   const profile = await db.prepare(
     `SELECT id,staff_user_id,display_name_envelope,status,version
      FROM specialists WHERE id=?`
   ).bind(specialistId).first()
-  if (!profile || profile.status !== 'active' || profile.staff_user_id !== null) {
+  if (!profile) {
+    throw new Error('STAFF_INVITATION_CONFLICT')
+  }
+  let displayName
+  const replayEmail = normalizeCanonicalEmail(input.email, {
+    fictional: !(appEnv === 'staging' && dataMode === 'fictional'),
+  })
+  if (replayEmail === null) validation('email')
+  if (validId(correlationId) && Number.isSafeInteger(nowMs) && nowMs >= 0
+    && IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) {
+    try {
+      displayName = await decryptForScope(
+        cryptoContext.keyring,
+        cryptoContext.dataKey,
+        {
+          expectedScope: cryptoContext.scope,
+          recordId: profile.id,
+          field: 'display_name',
+          envelope: JSON.parse(profile.display_name_envelope),
+        },
+      )
+    } catch {
+      throw new Error('CRYPTO_FAILURE')
+    }
+    const replay = await inspectIdempotency(db, cryptoContext, invitationIdempotency(
+      owner,
+      idempotencyKey,
+      { displayName, email: replayEmail, role: 'specialist' },
+      { id: profile.id, version: input.expectedVersion },
+      cryptoContext.scope,
+    ))
+    if (replay) return replay.body
+  }
+  if (profile.status !== 'active' || profile.staff_user_id !== null) {
     throw new Error('STAFF_INVITATION_CONFLICT')
   }
   if (profile.version !== input.expectedVersion) {
@@ -580,20 +879,21 @@ export async function inviteSpecialistProfile({
     error.details = { currentVersion: profile.version }
     throw error
   }
-  let displayName
-  try {
-    displayName = await decryptForScope(
-      cryptoContext.keyring,
-      cryptoContext.dataKey,
-      {
-        expectedScope: cryptoContext.scope,
-        recordId: profile.id,
-        field: 'display_name',
-        envelope: JSON.parse(profile.display_name_envelope),
-      },
-    )
-  } catch {
-    throw new Error('CRYPTO_FAILURE')
+  if (displayName === undefined) {
+    try {
+      displayName = await decryptForScope(
+        cryptoContext.keyring,
+        cryptoContext.dataKey,
+        {
+          expectedScope: cryptoContext.scope,
+          recordId: profile.id,
+          field: 'display_name',
+          envelope: JSON.parse(profile.display_name_envelope),
+        },
+      )
+    } catch {
+      throw new Error('CRYPTO_FAILURE')
+    }
   }
   return inviteStaff({
     db,
@@ -603,6 +903,7 @@ export async function inviteSpecialistProfile({
     idempotencyKey,
     correlationId,
     nowMs,
+    appEnv,
     dataMode,
     targetSpecialist: Object.freeze(profile),
     idFactory,
@@ -634,7 +935,387 @@ export async function listStaff({ db, cryptoContext, actor, nowMs } = {}) {
   return { data: { staff } }
 }
 
-export async function deactivateStaff({ db, cryptoContext, actor, staffId, version, idempotencyKey, correlationId, nowMs, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
+function roleChangeInput(input) {
+  if (!exactObject(input, ['expectedVersion', 'role'])) validation('expectedVersion')
+  if (!positive(input.expectedVersion)) validation('expectedVersion')
+  if (!roles.has(input.role)) validation('role')
+  return Object.freeze({
+    expectedVersion: input.expectedVersion,
+    role: input.role,
+  })
+}
+
+function versionConflict(currentVersion) {
+  const error = new Error('VERSION_CONFLICT')
+  error.details = { currentVersion }
+  throw error
+}
+
+async function pendingInvitationRoleTransition(db, staff, role, now) {
+  if (staff.status !== 'pending') return null
+  const invitations = (await db.prepare(
+    `SELECT * FROM staff_invitations
+     WHERE staff_id=? AND status IN ('provisioning','pending')
+     ORDER BY created_at,id`,
+  ).bind(staff.id).all()).results
+  if (invitations.length !== 1) throw new Error('IDENTITY_FAILURE')
+  const current = invitations[0]
+  if (current.staff_id !== staff.id || current.role !== staff.role
+    || !['provisioning', 'pending'].includes(current.status)
+    || !positive(current.version)) throw new Error('IDENTITY_FAILURE')
+  return Object.freeze({
+    current: Object.freeze(current),
+    next: Object.freeze({
+      ...current,
+      role,
+      version: current.version + 1,
+      updated_at: now,
+    }),
+  })
+}
+
+function roleChangeGuardStatement(db, values) {
+  const specialist = specialistPostcondition(values.staff.id)
+  const authority = authorityPostcondition(values.authority)
+  const invitationSql = values.invitation
+    ? `AND EXISTS (
+         SELECT 1 FROM staff_invitations
+         WHERE id=? AND staff_id=? AND role=? AND status=?
+           AND version=? AND updated_at=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM record_versions
+         WHERE id=? AND entity_type='staff_invitation'
+           AND entity_id=? AND version=?
+       )`
+    : ''
+  const invitationBindings = values.invitation
+    ? [
+        values.invitation.next.id,
+        values.staff.id,
+        values.invitation.next.role,
+        values.invitation.next.status,
+        values.invitation.next.version,
+        values.now,
+        values.invitation.versionId,
+        values.invitation.next.id,
+        values.invitation.next.version,
+      ]
+    : []
+  return db.prepare(
+    `INSERT INTO core_directory_invariant_failures (failure_kind)
+     SELECT 'staff_role_postcondition' WHERE NOT (
+       EXISTS (
+         SELECT 1 FROM staff_users
+         WHERE id=? AND role=? AND status=? AND specialist_id IS ?
+           AND version=? AND updated_at=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM record_versions
+         WHERE id=? AND entity_type='staff_user' AND entity_id=? AND version=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM system_state
+         WHERE key='access.desired_generation' AND value_json=? AND version=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM outbox_jobs
+         WHERE id=? AND type='staff.access.reconcile' AND idempotency_key=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM audit_events
+         WHERE id=? AND occurred_at=? AND actor_staff_id=?
+           AND action='staff.role.updated' AND entity_type='staff_user'
+           AND entity_id=? AND result='success' AND reason_envelope IS NULL
+           AND correlation_id=? AND metadata_json=?
+       )
+       AND EXISTS (
+         SELECT 1 FROM idempotency_records
+         WHERE actor_id=? AND operation='staff.role.update'
+           AND idempotency_key=? AND resource_type='staff_user' AND resource_id=?
+       )
+       AND (${specialist.sql})
+       AND (${authority.sql})
+       ${invitationSql}
+     )`,
+  ).bind(
+    values.staff.id,
+    values.staff.role,
+    values.staff.status,
+    values.staff.specialist_id,
+    values.staff.version,
+    values.now,
+    values.staffVersionId,
+    values.staff.id,
+    values.staff.version,
+    JSON.stringify({ generation: values.desiredGeneration }),
+    values.desiredPriorVersion + 1,
+    values.reconcileId,
+    values.reconcileKey,
+    values.auditId,
+    values.now,
+    values.actorId,
+    values.staff.id,
+    values.correlationId,
+    values.metadataJson,
+    values.actorId,
+    values.idempotencyKey,
+    values.staff.id,
+    ...specialist.bindings,
+    ...authority.bindings,
+    ...invitationBindings,
+  )
+}
+
+export async function changeStaffRole({
+  db,
+  recoveryDb = db,
+  cryptoContext,
+  actor,
+  staffId,
+  input,
+  idempotencyKey,
+  correlationId,
+  nowMs,
+  idFactory = () => crypto.randomUUID().replaceAll('-', ''),
+} = {}) {
+  if (!db?.prepare || !db?.batch || !recoveryDb?.prepare
+    || !cryptoContext?.keyring || !cryptoContext?.dataKey || !cryptoContext?.scope
+    || !STAFF_ID.test(staffId ?? '') || !validId(correlationId)
+    || !Number.isSafeInteger(nowMs) || nowMs < 0
+    || !IDEMPOTENCY_KEY.test(idempotencyKey ?? '')
+    || typeof idFactory !== 'function') throw new Error('VALIDATION_FAILED')
+  const owner = await activeOwner(db, actor, nowMs)
+  const request = roleChangeInput(input)
+  const requestDigest = JSON.stringify({
+    staffId,
+    expectedVersion: request.expectedVersion,
+    role: request.role,
+  })
+  const idem = Object.freeze({
+    actorId: owner.id,
+    operation: 'staff.role.update',
+    idempotencyKey,
+    requestDigest,
+    expectedScope: cryptoContext.scope,
+  })
+  const replay = await inspectIdempotency(db, cryptoContext, idem)
+  if (replay) return replay.body
+  const row = await db.prepare('SELECT * FROM staff_users WHERE id=?').bind(staffId).first()
+  if (!row) throw new Error('NOT_FOUND')
+  if (row.version !== request.expectedVersion) versionConflict(row.version)
+  if (row.role === request.role) validation('role')
+  const [email, displayName] = await Promise.all([
+    decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: cryptoContext.scope,
+      recordId: row.id,
+      field: 'email',
+      envelope: JSON.parse(row.email_envelope),
+    }),
+    decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: cryptoContext.scope,
+      recordId: row.id,
+      field: 'display_name',
+      envelope: JSON.parse(row.display_name_envelope),
+    }),
+  ]).catch(() => { throw new Error('CRYPTO_FAILURE') })
+  const now = iso(nowMs)
+  const invitation = await pendingInvitationRoleTransition(
+    db,
+    row,
+    request.role,
+    now,
+  )
+  let staff = {
+    ...row,
+    role: request.role,
+    version: row.version + 1,
+    updated_at: now,
+  }
+  const authority = await authorityTransition(db, {
+    target: row,
+    actor: owner,
+    reason: 'role_change',
+    now,
+    idFactory,
+  })
+  const specialist = await prepareSpecialistTransition({
+    db,
+    cryptoContext,
+    currentStaff: row,
+    nextStaff: staff,
+    changedByStaffId: owner.id,
+    now,
+    correlationId,
+    idFactory,
+    displayName,
+  })
+  staff = specialist.staff
+  const desired = await desiredGenerationStatement(db, now, idFactory)
+  const body = Object.freeze({
+    data: Object.freeze({
+      staff: Object.freeze(publicStaff({ ...staff, displayName, email })),
+    }),
+  })
+  const staffVersion = await versionRecord(
+    db,
+    cryptoContext,
+    staff,
+    'staff_user',
+    owner.id,
+    now,
+    correlationId,
+    idFactory,
+  )
+  const invitationVersion = invitation
+    ? await versionRecord(
+        db,
+        cryptoContext,
+        invitation.next,
+        'staff_invitation',
+        owner.id,
+        now,
+        correlationId,
+        idFactory,
+      )
+    : null
+  const auditId = idFrom(idFactory)
+  const reconcileId = idFrom(idFactory)
+  const reconcileKey = `staff.access.reconcile:${desired.generation}`
+  const metadata = Object.freeze({
+    actorAuthorityRevision: authority.actorRevision,
+    desiredGeneration: desired.generation,
+    invitationVersion: invitation?.next.version ?? null,
+    specialistVersion: specialist.specialistVersion,
+    staffVersion: staff.version,
+    targetAuthorityRevision: authority.targetRevision,
+  })
+  const metadataJson = JSON.stringify(metadata)
+  const uow = createUnitOfWork(db, {
+    mode: 'mutation',
+    actorId: owner.id,
+    correlationId,
+  })
+  if (specialist.domainStatement) uow.domain(specialist.domainStatement)
+  if (specialist.versionStatement) uow.version(specialist.versionStatement)
+  uow.domain(db.prepare(
+    `UPDATE staff_users
+     SET role=?,specialist_id=?,version=version+1,updated_at=?
+     WHERE id=? AND role=? AND status=? AND specialist_id IS ? AND version=?`,
+  ).bind(
+    staff.role,
+    staff.specialist_id,
+    now,
+    row.id,
+    row.role,
+    row.status,
+    row.specialist_id,
+    row.version,
+  ))
+  if (invitation) {
+    uow.domain(db.prepare(
+      `UPDATE staff_invitations
+       SET role=?,version=version+1,updated_at=?
+       WHERE id=? AND staff_id=? AND role=? AND status=? AND version=?`,
+    ).bind(
+      invitation.next.role,
+      now,
+      invitation.current.id,
+      row.id,
+      invitation.current.role,
+      invitation.current.status,
+      invitation.current.version,
+    ))
+  }
+  appendAuthorityTransition(uow, db, authority)
+  uow.version(staffVersion.statement)
+  if (invitationVersion) uow.version(invitationVersion.statement)
+  uow.domain(desired.statement)
+  uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
+    id: reconcileId,
+    type: 'staff.access.reconcile',
+    aggregateType: 'access_group',
+    aggregateId: 'centre_1',
+    payload: { generation: desired.generation, actorId: owner.id },
+    idempotencyKey: reconcileKey,
+    scheduledAt: now,
+    nowMs,
+    onlyIfPreviousStatementChanged: true,
+  }))
+  uow.audit(auditEventStatement(db, {
+    id: auditId,
+    occurredAt: now,
+    actorStaffId: owner.id,
+    action: 'staff.role.updated',
+    entityType: 'staff_user',
+    entityId: staff.id,
+    result: 'success',
+    correlationId,
+    metadata,
+    reasonEnvelope: null,
+  }))
+  uow.idempotency(await createIdempotencyStatement(db, cryptoContext, {
+    ...idem,
+    resourceType: 'staff_user',
+    resourceId: staff.id,
+    response: { status: 200, body },
+    createdAt: now,
+    expiresAt: iso(nowMs + DAY_MS),
+  }))
+  uow.guard(roleChangeGuardStatement(db, {
+    staff,
+    authority,
+    invitation: invitation ? Object.freeze({
+      ...invitation,
+      versionId: invitationVersion.id,
+    }) : null,
+    now,
+    staffVersionId: staffVersion.id,
+    desiredGeneration: desired.generation,
+    desiredPriorVersion: desired.priorVersion,
+    reconcileId,
+    reconcileKey,
+    auditId,
+    actorId: owner.id,
+    correlationId,
+    metadataJson,
+    idempotencyKey,
+  }))
+  try {
+    await uow.commit()
+    return body
+  } catch (error) {
+    if (isD1LastActiveOwner(error)) throw new Error('LAST_ACTIVE_OWNER')
+    if (isD1IdentityCollision(error)) {
+      try {
+        const recovered = await recoverIdempotencyAfterCollision(
+          recoveryDb,
+          cryptoContext,
+          idem,
+          error,
+        )
+        return recovered.body
+      } catch (recoveryError) {
+        if (recoveryError !== error) throw recoveryError
+      }
+    }
+    let current
+    try {
+      current = await recoveryDb.prepare(
+        'SELECT version FROM staff_users WHERE id=?',
+      ).bind(staffId).first()
+    } catch {
+      throw error
+    }
+    if (positive(current?.version) && current.version !== row.version) {
+      versionConflict(current.version)
+    }
+    if (isD1CoreDirectoryInvariantFailure(error)) throw new Error('IDENTITY_FAILURE')
+    throw error
+  }
+}
+
+export async function deactivateStaff({ db, recoveryDb = db, cryptoContext, actor, staffId, version, idempotencyKey, correlationId, nowMs, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
   if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
     || !cryptoContext?.scope || !validId(correlationId) || !Number.isSafeInteger(nowMs)
     || nowMs < 0 || !IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) {
@@ -677,6 +1358,13 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
     version: row.version + 1,
     updated_at: now,
   }
+  const authority = await authorityTransition(db, {
+    target: row,
+    actor: owner,
+    reason: 'status_change',
+    now,
+    idFactory,
+  })
   const specialist = await prepareSpecialistTransition({
     db,
     cryptoContext,
@@ -766,6 +1454,7 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
       )
     )
   }
+  appendAuthorityTransition(uow, db, authority)
   uow.version(staffVersion.statement)
   if (invitationVersion) uow.version(invitationVersion.statement)
   uow.domain(desired.statement)
@@ -878,7 +1567,7 @@ export async function deactivateStaff({ db, cryptoContext, actor, staffId, versi
       ...invitationBindings,
     )
   )
-  uow.guard(specialistGuardStatement(db, staffId))
+  uow.guard(lifecycleGuardStatement(db, staffId, authority))
   try {
     await uow.commit()
     return body

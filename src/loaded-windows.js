@@ -1,4 +1,11 @@
+import {
+  captureHistoricalClient,
+  captureHistoricalOccurrence,
+} from './historical-records.js'
+import { isWellFormedUnicode } from './core-records.js'
+
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
+const CIVIL_MONTH = /^(\d{4})-(\d{2})$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const CLIENT_ID = /^cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
@@ -6,9 +13,13 @@ const ASSIGNMENT_ID = /^asg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const APPOINTMENT_ID = /^apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const CHARGE_ID = /^chg_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const PAYMENT_ID = /^pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const HISTORICAL_CLIENT_ID = /^hcl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const HISTORICAL_OCCURRENCE_ID = /^hoc_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+const INVALID_PRESENTATION_TEXT = /[\p{Cc}\p{Cf}]/u
 const STATE_KEYS = Object.freeze([
   'loadedRanges', 'specialistsById', 'clientsById', 'appointmentsById',
+  'historicalClientsById', 'historicalOccurrencesById', 'latestPopulatedMonth',
   'authorityGeneration', 'writeEpoch',
 ])
 
@@ -165,7 +176,14 @@ const captureEntityArray = (raw, label, idPattern, validate) => {
   return result
 }
 
-const validSpecialist = (value) => safeProperty(value, 'status') === 'active'
+const validProfessionalTitle = (value) => typeof value === 'string'
+  && value.length > 0 && value === value.trim() && value === value.normalize('NFC')
+  && isWellFormedUnicode(value) && !INVALID_PRESENTATION_TEXT.test(value)
+  && new TextEncoder().encode(value).byteLength <= 120
+
+const validSpecialist = (value) => ['active', 'archived'].includes(
+  safeProperty(value, 'status'),
+) && validProfessionalTitle(safeProperty(value, 'professionalTitle'))
 
 const validClient = (value) => {
   const status = safeProperty(value, 'status')
@@ -207,9 +225,26 @@ const validAppointment = (value) => {
       && PAYMENT_ID.test(safeProperty(entry, 'id')))
 }
 
+const validHistoricalClient = (value) => {
+  try { captureHistoricalClient(value); return true } catch { return false }
+}
+
+const validHistoricalOccurrence = (value) => {
+  try { captureHistoricalOccurrence(value); return true } catch { return false }
+}
+
 const mapFrom = (values) => {
   const result = Object.create(null)
   for (const value of values) result[safeProperty(value, 'id')] = value
+  return Object.freeze(result)
+}
+
+const historicalSpecialistSnapshot = (value) => {
+  const result = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (key !== 'accessStatus') result[key] = item
+  }
+  result.status = 'archived'
   return Object.freeze(result)
 }
 
@@ -218,6 +253,9 @@ const stateFrom = ({
   specialistsById,
   clientsById,
   appointmentsById,
+  historicalClientsById,
+  historicalOccurrencesById,
+  latestPopulatedMonth,
   authorityGeneration,
   writeEpoch,
 }) => Object.freeze({
@@ -225,6 +263,9 @@ const stateFrom = ({
   specialistsById,
   clientsById,
   appointmentsById,
+  historicalClientsById,
+  historicalOccurrencesById,
+  latestPopulatedMonth,
   authorityGeneration,
   writeEpoch,
 })
@@ -258,6 +299,46 @@ const warsawCivilDate = (instant) => {
 
 const inRange = (date, rangeValue) => date >= rangeValue.from && date <= rangeValue.to
 
+const validMonth = (value) => {
+  const match = typeof value === 'string' ? CIVIL_MONTH.exec(value) : null
+  return Boolean(match && Number(match[1]) >= 1
+    && Number(match[2]) >= 1 && Number(match[2]) <= 12)
+}
+
+const monthInRange = (month, rangeValue) => month >= rangeValue.from.slice(0, 7)
+  && month <= rangeValue.to.slice(0, 7)
+
+const historicalPeriod = (value) => safeProperty(value, 'period')
+
+const historicalCoveredBy = (value, rangeValue) => {
+  const period = historicalPeriod(value)
+  if (safeProperty(period, 'precision') === 'day') {
+    return inRange(safeProperty(period, 'day'), rangeValue)
+  }
+  if (safeProperty(period, 'precision') === 'month') {
+    return monthInRange(safeProperty(period, 'month'), rangeValue)
+  }
+  return true
+}
+
+const historicalCoveredByRanges = (value, ranges) => {
+  const period = historicalPeriod(value)
+  if (safeProperty(period, 'precision') === 'unknown') return true
+  return ranges.some((rangeValue) => historicalCoveredBy(value, rangeValue))
+}
+
+const recordedHistoricalMonth = (value) => {
+  if (safeProperty(value, 'status') !== 'recorded') return null
+  const period = historicalPeriod(value)
+  return safeProperty(period, 'precision') === 'unknown'
+    ? null : safeProperty(period, 'month')
+}
+
+const maxRecordedHistoricalMonth = (values) => values.reduce((latest, value) => {
+  const month = recordedHistoricalMonth(value)
+  return month !== null && (latest === null || month > latest) ? month : latest
+}, null)
+
 const structurallyEqual = (left, right) => {
   if (left === right) return true
   if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') {
@@ -272,7 +353,10 @@ const structurallyEqual = (left, right) => {
 
 const capturePayload = (payload, capture) => {
   const raw = captureExactObject(
-    payload, ['window', 'specialists', 'clients', 'appointments'], 'workspace payload',
+    payload, [
+      'window', 'specialists', 'clients', 'appointments', 'historicalClients',
+      'historicalOccurrences', 'latestPopulatedMonth',
+    ], 'workspace payload',
   )
   const windowValue = captureExactObject(
     raw.window, ['from', 'to', 'timeZone', 'complete'], 'workspace payload window',
@@ -289,12 +373,27 @@ const capturePayload = (payload, capture) => {
   const appointments = captureEntityArray(
     raw.appointments, 'workspace appointments', APPOINTMENT_ID, validAppointment,
   )
+  const historicalClients = captureEntityArray(
+    raw.historicalClients, 'workspace historical clients', HISTORICAL_CLIENT_ID,
+    validHistoricalClient,
+  )
+  const historicalOccurrences = captureEntityArray(
+    raw.historicalOccurrences, 'workspace historical occurrences', HISTORICAL_OCCURRENCE_ID,
+    validHistoricalOccurrence,
+  )
+  const latestPopulatedMonth = raw.latestPopulatedMonth
+  if (latestPopulatedMonth !== null && !validMonth(latestPopulatedMonth)) {
+    fail('Invalid workspace latest populated month')
+  }
   const allIds = new Set()
   const registerId = (id) => {
     if (allIds.has(id)) fail('Cross-type entity ID collision')
     allIds.add(id)
   }
-  for (const entity of [...specialists, ...clients, ...appointments]) {
+  for (const entity of [
+    ...specialists, ...clients, ...appointments, ...historicalClients,
+    ...historicalOccurrences,
+  ]) {
     registerId(safeProperty(entity, 'id'))
   }
   for (const value of clients) {
@@ -322,7 +421,56 @@ const capturePayload = (payload, capture) => {
       fail('Appointment relationship does not resolve')
     }
   }
-  return { windowRange, specialists, clients, appointments }
+  const historicalClientIds = new Set(historicalClients
+    .map((value) => safeProperty(value, 'id')))
+  const historicalSources = new Set()
+  const historicalCounterparties = new Map()
+  const referencedHistoricalClients = new Set()
+  const referencedHistoricalSpecialists = new Set()
+  for (const value of historicalOccurrences) {
+    if (!specialistIds.has(safeProperty(value, 'specialistId'))
+      || !historicalCoveredBy(value, windowRange)) {
+      fail('Historical occurrence relationship does not resolve')
+    }
+    referencedHistoricalSpecialists.add(safeProperty(value, 'specialistId'))
+    const sourceId = safeProperty(value, 'sourceRecordId')
+    if (historicalSources.has(sourceId)) fail('Historical source identity collision')
+    historicalSources.add(sourceId)
+    const historicalClientId = safeProperty(value, 'historicalClientId')
+    if (historicalClientId !== null) {
+      if (!historicalClientIds.has(historicalClientId)) {
+        fail('Historical occurrence subject does not resolve')
+      }
+      referencedHistoricalClients.add(historicalClientId)
+    } else {
+      const counterparty = safeProperty(value, 'counterparty')
+      const counterpartyId = safeProperty(counterparty, 'id')
+      const counterpartyName = safeProperty(counterparty, 'name')
+      const prior = historicalCounterparties.get(counterpartyId)
+      if (prior !== undefined && prior !== counterpartyName) {
+        fail('Historical counterparty identity changed')
+      }
+      historicalCounterparties.set(counterpartyId, counterpartyName)
+    }
+  }
+  if (specialists.some((value) => safeProperty(value, 'status') === 'archived'
+    && !referencedHistoricalSpecialists.has(safeProperty(value, 'id')))) {
+    fail('Unreferenced archived specialist')
+  }
+  if (historicalClients.some((value) => (
+    !referencedHistoricalClients.has(safeProperty(value, 'id'))
+    || (safeProperty(value, 'activeClientId') !== null
+      && !clientIds.has(safeProperty(value, 'activeClientId')))
+  ))) fail('Historical client relationship does not resolve')
+  const visibleLatest = maxRecordedHistoricalMonth(historicalOccurrences)
+  if (visibleLatest !== null
+    && (latestPopulatedMonth === null || latestPopulatedMonth < visibleLatest)) {
+    fail('Historical latest populated month is inconsistent')
+  }
+  return {
+    windowRange, specialists, clients, appointments, historicalClients,
+    historicalOccurrences, latestPopulatedMonth,
+  }
 }
 
 const captureLoad = (capture) => {
@@ -447,12 +595,26 @@ const authenticateState = (state) => {
   const appointments = captureFrozenMap(
     raw.appointmentsById, 'state appointments', APPOINTMENT_ID, validAppointment,
   )
+  const historicalClients = captureFrozenMap(
+    raw.historicalClientsById, 'state historical clients', HISTORICAL_CLIENT_ID,
+    validHistoricalClient,
+  )
+  const historicalOccurrences = captureFrozenMap(
+    raw.historicalOccurrencesById, 'state historical occurrences',
+    HISTORICAL_OCCURRENCE_ID, validHistoricalOccurrence,
+  )
+  if (raw.latestPopulatedMonth !== null && !validMonth(raw.latestPopulatedMonth)) {
+    fail('Invalid state latest populated month')
+  }
   const allIds = new Set()
   const registerId = (id) => {
     if (allIds.has(id)) fail('State entity ID collision')
     allIds.add(id)
   }
-  for (const value of [...specialists, ...clients, ...appointments]) {
+  for (const value of [
+    ...specialists, ...clients, ...appointments, ...historicalClients,
+    ...historicalOccurrences,
+  ]) {
     registerId(safeProperty(value, 'id'))
   }
   const specialistIds = new Set(specialists.map((value) => safeProperty(value, 'id')))
@@ -487,12 +649,60 @@ const authenticateState = (state) => {
       fail('State contains unreferenced archived client')
     }
   }
+  const historicalClientIds = new Set(historicalClients
+    .map((value) => safeProperty(value, 'id')))
+  const historicalReferences = new Set()
+  const historicalSpecialistReferences = new Set()
+  const historicalSources = new Set()
+  const historicalCounterparties = new Map()
+  for (const value of historicalOccurrences) {
+    if (!specialistIds.has(safeProperty(value, 'specialistId'))
+      || !historicalCoveredByRanges(value, loadedRanges)) {
+      fail('State historical occurrence is outside loaded coverage')
+    }
+    historicalSpecialistReferences.add(safeProperty(value, 'specialistId'))
+    const sourceId = safeProperty(value, 'sourceRecordId')
+    if (historicalSources.has(sourceId)) fail('State historical source collision')
+    historicalSources.add(sourceId)
+    const historicalClientId = safeProperty(value, 'historicalClientId')
+    if (historicalClientId !== null) {
+      if (!historicalClientIds.has(historicalClientId)) {
+        fail('State historical client does not resolve')
+      }
+      historicalReferences.add(historicalClientId)
+    } else {
+      const counterparty = safeProperty(value, 'counterparty')
+      const id = safeProperty(counterparty, 'id')
+      const name = safeProperty(counterparty, 'name')
+      const prior = historicalCounterparties.get(id)
+      if (prior !== undefined && prior !== name) fail('State counterparty identity changed')
+      historicalCounterparties.set(id, name)
+    }
+  }
+  if (specialists.some((value) => safeProperty(value, 'status') === 'archived'
+    && !historicalSpecialistReferences.has(safeProperty(value, 'id')))) {
+    fail('State contains unreferenced archived specialist')
+  }
+  if (historicalClients.some((value) => (
+    !historicalReferences.has(safeProperty(value, 'id'))
+    || (safeProperty(value, 'activeClientId') !== null
+      && !clientIds.has(safeProperty(value, 'activeClientId')))
+  ))) fail('State historical client relationship does not resolve')
+  const visibleHistoricalLatest = maxRecordedHistoricalMonth(historicalOccurrences)
+  if (visibleHistoricalLatest !== null
+    && (raw.latestPopulatedMonth === null
+      || raw.latestPopulatedMonth < visibleHistoricalLatest)) {
+    fail('State historical latest populated month is inconsistent')
+  }
   return Object.freeze({
     state,
     loadedRanges,
     specialistsById: raw.specialistsById,
     clientsById: raw.clientsById,
     appointmentsById: raw.appointmentsById,
+    historicalClientsById: raw.historicalClientsById,
+    historicalOccurrencesById: raw.historicalOccurrencesById,
+    latestPopulatedMonth: raw.latestPopulatedMonth,
     authorityGeneration: raw.authorityGeneration,
     writeEpoch: raw.writeEpoch,
   })
@@ -503,6 +713,9 @@ export const createLoadedWorkspaceState = () => stateFrom({
   specialistsById: Object.freeze(Object.create(null)),
   clientsById: Object.freeze(Object.create(null)),
   appointmentsById: Object.freeze(Object.create(null)),
+  historicalClientsById: Object.freeze(Object.create(null)),
+  historicalOccurrencesById: Object.freeze(Object.create(null)),
+  latestPopulatedMonth: null,
   authorityGeneration: 0,
   writeEpoch: 0,
 })
@@ -517,6 +730,9 @@ export const resetLoadedWorkspaceAuthority = (state) => {
     specialistsById: Object.freeze(Object.create(null)),
     clientsById: Object.freeze(Object.create(null)),
     appointmentsById: Object.freeze(Object.create(null)),
+    historicalClientsById: Object.freeze(Object.create(null)),
+    historicalOccurrencesById: Object.freeze(Object.create(null)),
+    latestPopulatedMonth: null,
     authorityGeneration: current.authorityGeneration + 1,
     writeEpoch: 0,
   })
@@ -540,6 +756,9 @@ export const recordLoadedWorkspaceWrite = (state) => {
     specialistsById: current.specialistsById,
     clientsById: current.clientsById,
     appointmentsById: current.appointmentsById,
+    historicalClientsById: current.historicalClientsById,
+    historicalOccurrencesById: current.historicalOccurrencesById,
+    latestPopulatedMonth: current.latestPopulatedMonth,
     authorityGeneration: current.authorityGeneration,
     writeEpoch: current.writeEpoch + 1,
   })
@@ -628,11 +847,85 @@ export const mergeLoadedWorkspaceLoad = (state, rawCapture, rawPayload) => {
     }
   }
 
+  const retainedHistoricalOccurrences = Object.values(current.historicalOccurrencesById)
+    .filter((value) => !historicalCoveredBy(value, payload.windowRange))
+  const historicalOccurrenceIds = new Set(retainedHistoricalOccurrences
+    .map((value) => safeProperty(value, 'id')))
+  const historicalSourceIds = new Set(retainedHistoricalOccurrences
+    .map((value) => safeProperty(value, 'sourceRecordId')))
+  for (const value of payload.historicalOccurrences) {
+    if (historicalOccurrenceIds.has(safeProperty(value, 'id'))) {
+      fail('Historical occurrence ID collides outside replaced coverage')
+    }
+    if (historicalSourceIds.has(safeProperty(value, 'sourceRecordId'))) {
+      fail('Historical source identity collides outside replaced coverage')
+    }
+    historicalOccurrenceIds.add(safeProperty(value, 'id'))
+    historicalSourceIds.add(safeProperty(value, 'sourceRecordId'))
+    retainedHistoricalOccurrences.push(value)
+  }
+  const historicalCounterparties = new Map()
+  const referencedHistoricalIds = new Set()
+  const referencedHistoricalSpecialistIds = new Set()
+  for (const value of retainedHistoricalOccurrences) {
+    referencedHistoricalSpecialistIds.add(safeProperty(value, 'specialistId'))
+    const historicalClientId = safeProperty(value, 'historicalClientId')
+    if (historicalClientId !== null) {
+      referencedHistoricalIds.add(historicalClientId)
+      continue
+    }
+    const counterparty = safeProperty(value, 'counterparty')
+    const id = safeProperty(counterparty, 'id')
+    const name = safeProperty(counterparty, 'name')
+    const prior = historicalCounterparties.get(id)
+    if (prior !== undefined && prior !== name) fail('Retained counterparty identity changed')
+    historicalCounterparties.set(id, name)
+  }
+  const payloadSpecialistsById = new Map(payload.specialists
+    .map((value) => [safeProperty(value, 'id'), value]))
+  const retainedSpecialists = payload.specialists.filter(
+    (value) => safeProperty(value, 'status') === 'active',
+  )
+  const retainedSpecialistIds = new Set(retainedSpecialists
+    .map((value) => safeProperty(value, 'id')))
+  for (const id of referencedHistoricalSpecialistIds) {
+    const payloadSource = payloadSpecialistsById.get(id)
+    const priorSource = current.specialistsById[id]
+    const source = payloadSource ?? (priorSource && safeProperty(priorSource, 'status') === 'active'
+      ? historicalSpecialistSnapshot(priorSource)
+      : priorSource)
+    if (!source) fail('Retained historical occurrence has no specialist')
+    if (!retainedSpecialistIds.has(id)) {
+      retainedSpecialistIds.add(id)
+      retainedSpecialists.push(source)
+    }
+  }
+  const payloadHistoricalClients = new Map(payload.historicalClients
+    .map((value) => [safeProperty(value, 'id'), value]))
+  const retainedHistoricalClients = []
+  for (const id of referencedHistoricalIds) {
+    const source = payloadHistoricalClients.get(id) ?? current.historicalClientsById[id]
+    if (!source) fail('Retained historical occurrence has no client')
+    const activeClientId = safeProperty(source, 'activeClientId')
+    retainedHistoricalClients.push(activeClientId === null || retainedClientIds.has(activeClientId)
+      ? source
+      : Object.freeze({ ...source, activeClientId: null }))
+  }
+  const visibleHistoricalLatest = maxRecordedHistoricalMonth(retainedHistoricalOccurrences)
+  if (visibleHistoricalLatest !== null
+    && (payload.latestPopulatedMonth === null
+      || payload.latestPopulatedMonth < visibleHistoricalLatest)) {
+    fail('Merged historical latest populated month is inconsistent')
+  }
+
   const nextState = stateFrom({
     loadedRanges: normalizeRanges(current.loadedRanges, payload.windowRange),
-    specialistsById: mapFrom(payload.specialists),
+    specialistsById: mapFrom(retainedSpecialists),
     clientsById: mapFrom(retainedClients),
     appointmentsById: mapFrom(retainedAppointments),
+    historicalClientsById: mapFrom(retainedHistoricalClients),
+    historicalOccurrencesById: mapFrom(retainedHistoricalOccurrences),
+    latestPopulatedMonth: payload.latestPopulatedMonth,
     authorityGeneration: current.authorityGeneration,
     writeEpoch: current.writeEpoch,
   })

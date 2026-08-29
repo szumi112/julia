@@ -3,10 +3,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import * as backupsModule from '../../worker/operations/backups.js'
 import { enqueueOutboxStatement } from '../../worker/jobs/outbox.js'
+import { openBackupManifest, parseCanonicalManifest } from '../../worker/operations/backup-format.js'
+import { BACKUP_SQL_MAX_BYTES } from '../../worker/operations/backup-limits.js'
 import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
+import recoveryRow from '../fixtures/backup-recovery-workbook-row.json'
 
-const { downloadD1Export, pollD1Export, processNextBackupCreate } = backupsModule
+const {
+  downloadD1Export,
+  pollD1Export,
+  processNextBackupCreate,
+  runNextBackupCreate,
+} = backupsModule
 
 const CLAIM_MS = Date.UTC(2044, 6, 29, 10, 0, 0)
 const CLAIM_NOW = new Date(CLAIM_MS).toISOString()
@@ -16,6 +24,12 @@ const SCHEDULER_EXPIRY = new Date(CLAIM_MS + 4 * 60 * 60 * 1000).toISOString()
 const EXPORT_ACCOUNT_ID = 'a'.repeat(32)
 const EXPORT_DATABASE_ID = '12345678-1234-4abc-8abc-123456789abc'
 const EXPORT_TOKEN = 'fictional-export-token'
+const BACKUP_SOURCE = Object.freeze({
+  accountId: EXPORT_ACCOUNT_ID,
+  appEnv: 'staging',
+  dataMode: 'fictional',
+  databaseId: EXPORT_DATABASE_ID,
+})
 const EXPORT_BOOKMARK = 'bookmark-fixture-1'
 const EXPORT_FILENAME = 'dump-fixture.sql'
 const EXPORT_URL = 'https://download.example.test/dump-fixture.sql?signature=fictional'
@@ -31,6 +45,7 @@ const BACKUP_COLUMNS = Object.freeze([
 let schedulerSerial = 0
 let backupSerial = 0
 let inputSerial = 0
+let finalizationSerial = 0
 
 const nonterminalResult = (bookmark = EXPORT_BOOKMARK) => ({ at_bookmark: bookmark })
 const completeResult = (overrides = {}) => ({
@@ -400,6 +415,93 @@ function trackedDb(real, hooks = {}) {
   }
 }
 
+function workbookRecoveryDb(real, hooks = {}) {
+  return trackedDb(real, {
+    ...hooks,
+    async all(context) {
+      if (/WITH migration_snapshot AS/i.test(context.sql)
+        && /JOIN workbook_imports AS imported/i.test(context.sql)) {
+        const replacement = hooks.recovery?.(context)
+        return replacement ?? { results: [structuredClone(recoveryRow)], success: true }
+      }
+      return hooks.all ? hooks.all(context) : context.execute()
+    },
+  })
+}
+
+async function finalizationScenario(suffix, hooks = {}) {
+  finalizationSerial += 1
+  const context = await cryptoContext()
+  const schedulerRun = await seedScheduler()
+  const seeded = await seedQueued(context, {
+    jobId: `job_backup_finalize_${suffix}`,
+    backupId: `bkp_backup_finalize_${suffix}`,
+    localDay: `2045-01-${String(finalizationSerial).padStart(2, '0')}`,
+  })
+  const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+  const objects = new Map()
+  const mutations = []
+  const archive = {
+    async put(key, value) {
+      let bytes
+      if (value instanceof ReadableStream) {
+        const chunks = []
+        const reader = value.getReader()
+        while (true) {
+          const part = await reader.read()
+          if (part.done) break
+          chunks.push(...part.value)
+        }
+        bytes = Uint8Array.from(chunks)
+      } else {
+        bytes = new Uint8Array(value)
+      }
+      objects.set(key, bytes)
+      mutations.push(`put:${key}`)
+      return { etag: `etag-${suffix}-${objects.size}`, size: bytes.byteLength }
+    },
+    async delete(key) { mutations.push(`delete:${key}`); objects.delete(key) },
+    async head(key) {
+      mutations.push(`head:${key}`)
+      return objects.has(key) ? { etag: `etag-${suffix}`, size: objects.get(key).byteLength } : null
+    },
+  }
+  const input = {
+    db: workbookRecoveryDb(env.DB, hooks),
+    cryptoContext: context,
+    keyring,
+    archive,
+    providerConfig: {
+      accountId: EXPORT_ACCOUNT_ID,
+      databaseId: EXPORT_DATABASE_ID,
+      token: EXPORT_TOKEN,
+    },
+    source: BACKUP_SOURCE,
+    schedulerRun,
+    now: () => CLAIM_MS,
+    wait: async () => {},
+    fetch: async () => { throw new Error('real fetch must stay outside this test') },
+    signal: new AbortController().signal,
+    idFactory: sequence(`attempt_backup_finalize_${suffix}`),
+    leaseOwnerFactory: sequence(`owner_backup_finalize_${suffix}`),
+    nonceFactory: () => new Uint8Array(12).fill(6),
+    rawKeyFactory: () => new Uint8Array(32).fill(8),
+    pollExport: async () => ({
+      atBookmark: `bookmark-finalize-${suffix}`,
+      downloadUrl: 'https://download.example.test/finalization-fixture',
+    }),
+    downloadExport: async () => ({
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3, 4]))
+          controller.close()
+        },
+      }),
+    }),
+  }
+  return { input, mutations, objects, seeded }
+}
+
 async function forceReclaims({ context, schedulerRun, count, startMs = CLAIM_MS }) {
   let nowMs = startMs
   for (let index = 0; index < count; index += 1) {
@@ -474,6 +576,7 @@ describe('special backup create claim', () => {
       'downloadD1Export',
       'pollD1Export',
       'processNextBackupCreate',
+      'runNextBackupCreate',
     ])
 
     const context = await cryptoContext()
@@ -639,6 +742,992 @@ describe('special backup create claim', () => {
   })
 })
 
+describe('operational backup create runner', () => {
+  it('stores the SSE-C SQL before its canonical manifest and atomically completes the claimed job', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_store',
+      backupId: 'bkp_backup_operational_store',
+      localDay: '2044-07-29',
+    })
+    const keyring = await createKeyring(env, {
+      activeBackupKekVersion: 1,
+    })
+    const sqlBytes = encoder.encode('PRAGMA foreign_keys=OFF;\n-- opaque-fixture\n')
+    const rawSsecKey = Uint8Array.from({ length: 32 }, (_, index) => index + 1)
+    const calls = []
+    const evidenceOrder = []
+    const db = workbookRecoveryDb(env.DB, {
+      recovery: () => { evidenceOrder.push('recovery') },
+      all: async ({ sql, execute }) => {
+        const response = await execute()
+        return response
+      },
+    })
+    let storedSql = null
+    let storedManifest = null
+    const archive = {
+      async put(key, value, options) {
+        calls.push({ key, options })
+        evidenceOrder.push(key.endsWith('.sql') ? 'sql' : 'manifest')
+        if (key.endsWith('.sql')) {
+          const reader = value.getReader()
+          const chunks = []
+          while (true) {
+            const part = await reader.read()
+            if (part.done) break
+            chunks.push(part.value)
+          }
+          storedSql = Uint8Array.from(chunks.flatMap((chunk) => [...chunk]))
+          return { etag: 'etag-operational-1', size: storedSql.byteLength }
+        }
+        storedManifest = value
+        return { etag: 'manifest-etag-ignored', size: value.byteLength }
+      },
+    }
+    const pollExport = vi.fn(async () => {
+      evidenceOrder.push('export')
+      return {
+        atBookmark: 'bookmark-operational-1',
+        downloadUrl: 'https://download.example.test/opaque?signature=secret',
+      }
+    })
+    const downloadExport = vi.fn(async () => ({
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(sqlBytes)
+          controller.close()
+        },
+      }),
+    }))
+
+    const result = await runNextBackupCreate({
+      db,
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => { throw new Error('real fetch must stay outside this test') },
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_operational'),
+      leaseOwnerFactory: sequence('owner_backup_operational'),
+      nonceFactory: () => new Uint8Array(12).fill(9),
+      rawKeyFactory: () => rawSsecKey,
+      pollExport,
+      downloadExport,
+    })
+
+    expect(result).toEqual({ claimed: true, result: 'succeeded', backupId: seeded.backupId })
+    expect(calls.map(({ key }) => key)).toEqual([
+      `backups/v3/2044/07/${seeded.backupId}.sql`,
+      `backups/v3/2044/07/${seeded.backupId}.manifest.json`,
+    ])
+    expect(calls[0].options.customMetadata).toEqual({
+      backupId: seeded.backupId,
+      format: 'bwm-d1-sql-v3',
+      retentionClass: 'daily',
+      sourceAppEnv: 'staging',
+      sourceDatabaseId: EXPORT_DATABASE_ID,
+    })
+    expect(calls[0].options.ssecKey).toBeInstanceOf(ArrayBuffer)
+    expect(calls[0].options.onlyIf).toEqual({ etagDoesNotMatch: '*' })
+    expect(calls[1].options).toEqual({ onlyIf: { etagDoesNotMatch: '*' } })
+    expect(storedSql).toEqual(sqlBytes)
+    const manifest = parseCanonicalManifest(storedManifest)
+    expect(manifest).toMatchObject({
+      format: 'bwm-d1-sql-v3',
+      backupId: seeded.backupId,
+      atBookmark: 'bookmark-operational-1',
+      objectEtag: 'etag-operational-1',
+      objectSize: sqlBytes.byteLength,
+      source: BACKUP_SOURCE,
+      restoreSentinel: {
+        kind: 'backup_run_v1',
+        backupId: seeded.backupId,
+        status: 'exporting',
+        version: 2,
+      },
+    })
+    expect(manifest.appliedMigrations.length).toBeGreaterThan(0)
+    expect(manifest.appliedMigrations.every(({ id, name }) => (
+      Number.isSafeInteger(id) && /^\d{4}_[a-z0-9_-]+\.sql$/.test(name)
+    ))).toBe(true)
+    expect(manifest.recoveryFacts).toMatchObject({ kind: 'workbook_roundtrip_v1' })
+    expect(manifest.plaintextSqlSha256).toBe(
+      '40b30d75e5fc82d2efb638990b7a275540ebd39f1bbacadfec3f136594d64342',
+    )
+    expect(evidenceOrder).toEqual(['recovery', 'export', 'recovery', 'sql', 'manifest'])
+    const opened = await openBackupManifest({ bytes: storedManifest, keyring })
+    expect(opened.rawSsecKey).toEqual(Uint8Array.from({ length: 32 }, (_, index) => index + 1))
+    opened.rawSsecKey.fill(0)
+    expect(rawSsecKey).toEqual(new Uint8Array(32))
+    expect(JSON.stringify(manifest)).not.toContain('signature=secret')
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'stored',
+      version: 3,
+      object_key: `backups/v3/2044/07/${seeded.backupId}.sql`,
+      manifest_key: `backups/v3/2044/07/${seeded.backupId}.manifest.json`,
+      object_etag: 'etag-operational-1',
+      object_size: sqlBytes.byteLength,
+      expires_at: '2044-09-02T00:00:00.000Z',
+      last_error_code: null,
+    })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'succeeded',
+      attempt_count: 1,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error_code: null,
+    })
+    expect(await attempts(seeded.jobId)).toMatchObject([{
+      result: 'succeeded',
+      error_code: null,
+      provider_reference: null,
+    }])
+    expect(pollExport).toHaveBeenCalledOnce()
+    expect(downloadExport).toHaveBeenCalledOnce()
+  })
+
+  it('rejects and removes a zero-byte SQL artifact before manifest finalization', async () => {
+    const scenario = await finalizationScenario('zero_byte_sql')
+    scenario.input.downloadExport = async () => ({
+      body: new ReadableStream({ start(controller) { controller.close() } }),
+    })
+
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: scenario.seeded.backupId,
+      errorCode: 'BACKUP_STATE_INVALID',
+    })
+    expect(scenario.objects.size).toBe(0)
+    expect(scenario.mutations.filter((entry) => entry.startsWith('put:'))).toHaveLength(1)
+    expect(scenario.mutations.filter((entry) => entry.startsWith('delete:'))).toHaveLength(2)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({
+      status: 'failed', version: 3, object_size: null,
+    })
+  })
+
+  it('stops the Worker upload stream at the shared SQL byte ceiling', async () => {
+    const scenario = await finalizationScenario('oversized_sql_stream')
+    const part = new Uint8Array(8 * 1024 * 1024).fill(23)
+    scenario.input.downloadExport = async () => ({
+      body: new ReadableStream({
+        start(controller) {
+          for (let index = 0; index < BACKUP_SQL_MAX_BYTES / part.byteLength; index += 1) {
+            controller.enqueue(part)
+          }
+          controller.enqueue(new Uint8Array([1]))
+          controller.close()
+        },
+      }),
+    })
+    let uploadedBytes = 0
+    const cleanup = []
+    scenario.input.archive = {
+      async put(_key, value) {
+        const reader = value.getReader()
+        while (true) {
+          const result = await reader.read()
+          if (result.done) break
+          uploadedBytes += result.value.byteLength
+        }
+        return { etag: 'oversized-sql-etag', size: uploadedBytes }
+      },
+      async delete(key) { cleanup.push(`delete:${key}`) },
+      async head(key) { cleanup.push(`head:${key}`); return null },
+    }
+
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: scenario.seeded.backupId,
+      errorCode: 'BACKUP_STATE_INVALID',
+    })
+    expect(uploadedBytes).toBe(BACKUP_SQL_MAX_BYTES)
+    expect(cleanup.filter((entry) => entry.startsWith('delete:'))).toHaveLength(2)
+  })
+
+  it('accepts an exact stored finalization when the committed batch response is lost', async () => {
+    let responseLost = false
+    const scenario = await finalizationScenario('committed_response_loss', {
+      async batch({ sql, execute }) {
+        if (sql.length === 4 && sql[0].includes("SET status='stored'")) {
+          const result = await execute()
+          responseLost = true
+          throw new Error('completion response lost marker')
+        }
+        return execute()
+      },
+    })
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'succeeded',
+      backupId: scenario.seeded.backupId,
+    })
+    expect(responseLost).toBe(true)
+    expect(scenario.mutations.some((entry) => entry.startsWith('delete:'))).toBe(false)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({ status: 'stored', version: 3 })
+    expect(await job(scenario.seeded.jobId)).toMatchObject({ status: 'succeeded' })
+  })
+
+  it('cleans exact pending artifacts after a pre-commit completion failure and leaves the claim for expiry', async () => {
+    const scenario = await finalizationScenario('precommit_failure', {
+      async batch({ sql, execute }) {
+        if (sql.length === 4 && sql[0].includes("SET status='stored'")) {
+          throw new Error('completion precommit marker')
+        }
+        return execute()
+      },
+    })
+    await expect(runNextBackupCreate(scenario.input)).rejects.toThrow(/^BACKUP_FINALIZE_UNCERTAIN$/)
+    expect(scenario.objects.size).toBe(0)
+    expect(scenario.mutations.filter((entry) => entry.startsWith('delete:'))).toHaveLength(2)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({
+      status: 'exporting', version: 2, last_error_code: null,
+    })
+    expect(await job(scenario.seeded.jobId)).toMatchObject({
+      status: 'processing', last_error_code: null,
+    })
+    expect(await attempts(scenario.seeded.jobId)).toMatchObject([{
+      result: null, error_code: null, completed_at: null,
+    }])
+  })
+
+  it('preserves both artifacts when completion readback is unavailable', async () => {
+    const scenario = await finalizationScenario('readback_unavailable', {
+      async batch({ sql, execute }) {
+        if (sql.length === 4 && sql[0].includes("SET status='stored'")) {
+          throw new Error('completion precommit marker')
+        }
+        return execute()
+      },
+      async all({ sql, execute }) {
+        if (/FROM backup_runs AS b\s+JOIN outbox_jobs AS j/.test(sql)) {
+          throw new Error('finalization readback unavailable marker')
+        }
+        return execute()
+      },
+    })
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: scenario.seeded.backupId,
+      errorCode: 'BACKUP_FINALIZE_UNCERTAIN',
+    })
+    expect(scenario.objects.size).toBe(2)
+    expect(scenario.mutations.some((entry) => entry.startsWith('delete:'))).toBe(false)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({ status: 'exporting', version: 2 })
+    expect(await job(scenario.seeded.jobId)).toMatchObject({ status: 'processing' })
+  })
+
+  it('preserves both artifacts when completion readback is parsed but not an exact terminal state', async () => {
+    const scenario = await finalizationScenario('readback_inexact', {
+      async batch({ sql, execute }) {
+        if (sql.length === 4 && sql[0].includes("SET status='stored'")) {
+          throw new Error('completion precommit marker')
+        }
+        return execute()
+      },
+      async all({ sql, execute }) {
+        const response = await execute()
+        if (/FROM backup_runs AS b\s+JOIN outbox_jobs AS j/.test(sql)) {
+          return {
+            ...response,
+            results: response.results.map((row) => ({
+              ...row,
+              backup_object_etag: 'partially-observed-public-etag',
+            })),
+          }
+        }
+        return response
+      },
+    })
+    await expect(runNextBackupCreate(scenario.input)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: scenario.seeded.backupId,
+      errorCode: 'BACKUP_FINALIZE_UNCERTAIN',
+    })
+    expect(scenario.objects.size).toBe(2)
+    expect(scenario.mutations.some((entry) => entry.startsWith('delete:'))).toBe(false)
+    expect(await backup(scenario.seeded.backupId)).toMatchObject({ status: 'exporting', version: 2 })
+    expect(await job(scenario.seeded.jobId)).toMatchObject({ status: 'processing' })
+  })
+
+  it('fails the backup and outbox attempt with a fixed code when manifest-last storage fails', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_failure',
+      backupId: 'bkp_backup_operational_failure',
+      localDay: '2044-07-30',
+    })
+    const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+    const rawSsecKey = new Uint8Array(32).fill(7)
+    const providerMarker = 'signed-url@example.test provider-secret-body'
+    let puts = 0
+    const cleanup = []
+    const archive = {
+      async delete(key) { cleanup.push(`delete:${key}`) },
+      async head(key) { cleanup.push(`head:${key}`); return null },
+      async put(_key, value) {
+        puts += 1
+        if (puts === 1) {
+          await value.pipeTo(new WritableStream({ write() {} }))
+          return { etag: 'etag-operational-failure', size: 4 }
+        }
+        throw new Error(providerMarker)
+      },
+    }
+
+    await expect(runNextBackupCreate({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_operational_failure'),
+      leaseOwnerFactory: sequence('owner_backup_operational_failure'),
+      nonceFactory: () => new Uint8Array(12).fill(5),
+      rawKeyFactory: () => rawSsecKey,
+      pollExport: async () => ({
+        atBookmark: 'bookmark-operational-failure',
+        downloadUrl: `https://download.example.test/dump?${providerMarker}`,
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3, 4]))
+            controller.close()
+          },
+        }),
+      }),
+    })).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_CREATE_FAILED',
+    })
+
+    expect(rawSsecKey).toEqual(new Uint8Array(32))
+    expect(cleanup).toEqual([
+      `delete:backups/v3/2044/07/${seeded.backupId}.manifest.json`,
+      `head:backups/v3/2044/07/${seeded.backupId}.manifest.json`,
+      `delete:backups/v3/2044/07/${seeded.backupId}.sql`,
+      `head:backups/v3/2044/07/${seeded.backupId}.sql`,
+    ])
+    expect(JSON.stringify(await backup(seeded.backupId))).not.toContain(providerMarker)
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'failed', version: 3, last_error_code: 'BACKUP_CREATE_FAILED',
+    })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'dead',
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error_code: 'BACKUP_CREATE_FAILED',
+    })
+    expect(await attempts(seeded.jobId)).toMatchObject([{
+      result: 'dead',
+      error_code: 'BACKUP_CREATE_FAILED',
+      provider_reference: null,
+    }])
+  })
+
+  it('rejects an offset SSE-C key view before sending any key material to R2', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_offset_ssec_key',
+      backupId: 'bkp_backup_offset_ssec_key',
+      localDay: '2044-08-14',
+    })
+    const backing = new Uint8Array(64).fill(9)
+    const offsetView = new Uint8Array(backing.buffer, 16, 32)
+    const archive = { put: vi.fn() }
+
+    await expect(runNextBackupCreate({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_offset_ssec_key'),
+      leaseOwnerFactory: sequence('owner_backup_offset_ssec_key'),
+      nonceFactory: () => new Uint8Array(12).fill(2),
+      rawKeyFactory: () => offsetView,
+      pollExport: async () => ({
+        atBookmark: 'bookmark-offset-ssec-key',
+        downloadUrl: 'https://download.example.test/offset-ssec-key',
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]))
+            controller.close()
+          },
+        }),
+      }),
+    })).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_STATE_INVALID',
+    })
+
+    expect(archive.put).not.toHaveBeenCalled()
+    expect([...backing.slice(0, 16)]).toEqual(new Array(16).fill(9))
+    expect([...backing.slice(16, 48)]).toEqual(new Array(32).fill(0))
+    expect([...backing.slice(48)]).toEqual(new Array(16).fill(9))
+  })
+
+  it('aborts the digest pipeline when R2 rejects after partially consuming SQL', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_partial_put_failure',
+      backupId: 'bkp_backup_partial_put_failure',
+      localDay: '2044-08-15',
+    })
+    const rawSsecKey = new Uint8Array(32).fill(6)
+    const putFailure = new Error('R2_PARTIAL_PUT_MARKER')
+    let sourceCancelReason = null
+    const archive = {
+      async put(_key, value) {
+        const reader = value.getReader()
+        const first = await reader.read()
+        expect(first).toEqual({ done: false, value: new Uint8Array([1, 2, 3]) })
+        reader.releaseLock()
+        throw putFailure
+      },
+      delete: vi.fn(async () => {}),
+      head: vi.fn(async () => null),
+    }
+
+    await expect(runNextBackupCreate({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_partial_put_failure'),
+      leaseOwnerFactory: sequence('owner_backup_partial_put_failure'),
+      nonceFactory: () => new Uint8Array(12).fill(3),
+      rawKeyFactory: () => rawSsecKey,
+      pollExport: async () => ({
+        atBookmark: 'bookmark-partial-put-failure',
+        downloadUrl: 'https://download.example.test/partial-put-failure',
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])) },
+          cancel(reason) { sourceCancelReason = reason },
+        }),
+      }),
+    })).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_CREATE_FAILED',
+    })
+
+    expect(sourceCancelReason).toBe(putFailure)
+    expect(rawSsecKey).toEqual(new Uint8Array(32))
+    expect(archive.delete).toHaveBeenCalledTimes(2)
+    expect(archive.head).toHaveBeenCalledTimes(2)
+  })
+
+  it('reclaim cleans deterministic artifacts before export and conditionally recreates both objects', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_reclaim_cleanup',
+      backupId: 'bkp_backup_operational_reclaim_cleanup',
+      localDay: '2099-12-30',
+    })
+    await processNextBackupCreate(processInput({
+      context,
+      schedulerRun,
+      idFactory: () => 'attempt_backup_operational_reclaim_cleanup_1',
+      leaseOwnerFactory: () => 'owner_backup_operational_reclaim_cleanup_1',
+    }))
+    const events = []
+    const writes = []
+    const archive = {
+      async delete(key) { events.push(`delete:${key}`) },
+      async head(key) { events.push(`head:${key}`); return null },
+      async put(key, value, options) {
+        events.push(`put:${key}`)
+        writes.push({ key, options })
+        if (key.endsWith('.sql')) await value.pipeTo(new WritableStream({ write() {} }))
+        return { etag: key.endsWith('.sql') ? 'etag-reclaim-public' : 'manifest-reclaim-public', size: key.endsWith('.sql') ? 1 : value.byteLength }
+      },
+    }
+    const result = await runNextBackupCreate({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS + LEASE_MS + 1,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: () => 'attempt_backup_operational_reclaim_cleanup_2',
+      leaseOwnerFactory: () => 'owner_backup_operational_reclaim_cleanup_2',
+      nonceFactory: () => new Uint8Array(12).fill(6),
+      rawKeyFactory: () => new Uint8Array(32).fill(8),
+      pollExport: async () => {
+        events.push('export')
+        return {
+          atBookmark: 'bookmark-operational-reclaim-cleanup',
+          downloadUrl: 'https://download.example.test/reclaim-cleanup',
+        }
+      },
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]))
+            controller.close()
+          },
+        }),
+      }),
+    })
+    expect(result).toEqual({ claimed: true, result: 'succeeded', backupId: seeded.backupId })
+    expect(events.slice(0, 13)).toEqual([
+      `delete:backups/v3/2099/12/${seeded.backupId}.manifest.json`,
+      `head:backups/v3/2099/12/${seeded.backupId}.manifest.json`,
+      `delete:backups/v3/2099/12/${seeded.backupId}.sql`,
+      `head:backups/v3/2099/12/${seeded.backupId}.sql`,
+      `delete:backups/v2/2099/12/${seeded.backupId}.manifest.json`,
+      `head:backups/v2/2099/12/${seeded.backupId}.manifest.json`,
+      `delete:backups/v2/2099/12/${seeded.backupId}.sql`,
+      `head:backups/v2/2099/12/${seeded.backupId}.sql`,
+      `delete:backups/v1/2099/12/${seeded.backupId}.manifest.json`,
+      `head:backups/v1/2099/12/${seeded.backupId}.manifest.json`,
+      `delete:backups/v1/2099/12/${seeded.backupId}.sql`,
+      `head:backups/v1/2099/12/${seeded.backupId}.sql`,
+      'export',
+    ])
+    expect(writes.map(({ options }) => options.onlyIf)).toEqual([
+      { etagDoesNotMatch: '*' },
+      { etagDoesNotMatch: '*' },
+    ])
+  })
+
+  it('a suspended prior claimant cannot overwrite or be overwritten after reclaim cleanup', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_reclaim_stale_put',
+      backupId: 'bkp_backup_operational_reclaim_stale_put',
+      localDay: '2099-12-29',
+    })
+    await processNextBackupCreate(processInput({
+      context,
+      schedulerRun,
+      idFactory: () => 'attempt_backup_operational_reclaim_stale_put_1',
+      leaseOwnerFactory: () => 'owner_backup_operational_reclaim_stale_put_1',
+    }))
+    const sqlKey = `backups/v3/2099/12/${seeded.backupId}.sql`
+    const manifestKey = `backups/v3/2099/12/${seeded.backupId}.manifest.json`
+    const objects = new Map([
+      [sqlKey, 'pre-reclaim-sql-public'],
+      [manifestKey, 'pre-reclaim-manifest-public'],
+    ])
+    const archive = {
+      async delete(key) { objects.delete(key) },
+      async head(key) { return objects.has(key) ? { key } : null },
+      async put(key, value, options) {
+        if (options?.onlyIf?.etagDoesNotMatch === '*' && objects.has(key)) return null
+        if (key.endsWith('.sql')) await value.pipeTo(new WritableStream({ write() {} }))
+        objects.set(key, 'new-claimant-public')
+        return { etag: 'new-claimant-etag-public', size: key.endsWith('.sql') ? 1 : value.byteLength }
+      },
+    }
+    const result = await runNextBackupCreate({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS + LEASE_MS + 1,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: () => 'attempt_backup_operational_reclaim_stale_put_2',
+      leaseOwnerFactory: () => 'owner_backup_operational_reclaim_stale_put_2',
+      nonceFactory: () => new Uint8Array(12).fill(7),
+      rawKeyFactory: () => new Uint8Array(32).fill(9),
+      pollExport: async () => {
+        expect(objects.has(sqlKey)).toBe(false)
+        expect(objects.has(manifestKey)).toBe(false)
+        objects.set(sqlKey, 'suspended-old-claimant-public')
+        return {
+          atBookmark: 'bookmark-operational-reclaim-stale-put',
+          downloadUrl: 'https://download.example.test/reclaim-stale-put',
+        }
+      },
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]))
+            controller.close()
+          },
+        }),
+      }),
+    })
+    expect(result).toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_STATE_INVALID',
+    })
+    expect(objects.has(sqlKey)).toBe(false)
+    expect(objects.has(manifestKey)).toBe(false)
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'failed',
+      version: 3,
+      last_error_code: 'BACKUP_STATE_INVALID',
+    })
+  })
+
+  it('does not finalize a claim after the scheduler owner lease is lost', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler({
+      leaseExpiresAt: new Date(CLAIM_MS + 1).toISOString(),
+    })
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_owner_lost',
+      backupId: 'bkp_backup_operational_owner_lost',
+      localDay: '2044-07-31',
+    })
+    const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+    let clockCalls = 0
+    const archive = { put: vi.fn(async () => ({ etag: 'unused', size: 0 })) }
+
+    await expect(runNextBackupCreate({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS + (clockCalls++ === 0 ? 0 : 2),
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_operational_owner_lost'),
+      leaseOwnerFactory: sequence('owner_backup_operational_owner_lost'),
+      nonceFactory: () => new Uint8Array(12).fill(4),
+      rawKeyFactory: () => new Uint8Array(32).fill(5),
+      pollExport: async () => ({
+        atBookmark: 'bookmark-operational-owner-lost',
+        downloadUrl: 'https://download.example.test/owner-lost',
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({ start(controller) { controller.close() } }),
+      }),
+    })).rejects.toThrow('BACKUP_LEASE_LOST')
+
+    expect(archive.put).not.toHaveBeenCalled()
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'exporting', version: 2, last_error_code: null,
+    })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'processing', attempt_count: 1, last_error_code: null,
+    })
+    expect(await attempts(seeded.jobId)).toMatchObject([{
+      completed_at: null, result: null, error_code: null,
+    }])
+  })
+
+  it.each([
+    ['SQL', 1],
+    ['manifest', 2],
+  ])('terminalizes an expired final claim after %s upload so retention can clean it', async (_stage, expireAfterPut) => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: `job_backup_exhausted_after_${expireAfterPut}`,
+      backupId: `bkp_backup_exhausted_after_${expireAfterPut}`,
+      localDay: `2044-08-0${expireAfterPut}`,
+    })
+    await processNextBackupCreate(processInput({
+      context,
+      schedulerRun,
+      idFactory: () => `attempt_backup_exhausted_${expireAfterPut}_1`,
+      leaseOwnerFactory: () => `owner_backup_exhausted_${expireAfterPut}_1`,
+    }))
+    const attemptSevenNow = await forceReclaims({ context, schedulerRun, count: 6 })
+    const attemptEightNow = attemptSevenNow + LEASE_MS + 1
+    let nowMs = attemptEightNow
+    let putCount = 0
+    const archive = {
+      async delete() {},
+      async head() { return null },
+      async put(key, value) {
+        putCount += 1
+        if (key.endsWith('.sql')) await value.pipeTo(new WritableStream({ write() {} }))
+        if (putCount === expireAfterPut) nowMs = attemptEightNow + LEASE_MS + 1
+        return {
+          etag: `etag-exhausted-${expireAfterPut}-${putCount}`,
+          size: key.endsWith('.sql') ? 1 : value.byteLength,
+        }
+      },
+    }
+    const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+    const runnerInput = () => ({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => nowMs,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence(`attempt_backup_exhausted_${expireAfterPut}_8`),
+      leaseOwnerFactory: sequence(`owner_backup_exhausted_${expireAfterPut}_8`),
+      nonceFactory: () => new Uint8Array(12).fill(expireAfterPut),
+      rawKeyFactory: () => new Uint8Array(32).fill(expireAfterPut + 1),
+      pollExport: async () => ({
+        atBookmark: `bookmark-exhausted-${expireAfterPut}`,
+        downloadUrl: `https://download.example.test/exhausted-${expireAfterPut}`,
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([expireAfterPut]))
+            controller.close()
+          },
+        }),
+      }),
+    })
+
+    if (expireAfterPut === 1) {
+      await expect(runNextBackupCreate(runnerInput())).rejects.toThrow('BACKUP_LEASE_LOST')
+    } else {
+      await expect(runNextBackupCreate(runnerInput()))
+        .rejects.toThrow('BACKUP_FINALIZE_UNCERTAIN')
+    }
+    expect(putCount).toBe(expireAfterPut)
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'processing', attempt_count: 8, last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'exporting', version: 2, last_error_code: null,
+    })
+
+    const terminalInput = runnerInput()
+    terminalInput.pollExport = async () => { throw new Error('PROVIDER_MUST_NOT_RUN') }
+    terminalInput.downloadExport = async () => { throw new Error('PROVIDER_MUST_NOT_RUN') }
+    await expect(runNextBackupCreate(terminalInput)).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'dead',
+      attempt_count: 8,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'failed', version: 3, last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect((await attempts(seeded.jobId)).at(-1)).toMatchObject({
+      attempt_number: 8,
+      result: 'dead',
+      error_code: 'OUTBOX_LEASE_EXPIRED',
+      provider_reference: null,
+    })
+  })
+
+  it('retains a monthly stored backup for 12 calendar months', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_operational_monthly',
+      backupId: 'bkp_backup_operational_monthly',
+      localDay: '2046-02-01',
+      backup: { retention_class: 'monthly' },
+    })
+    const keyring = await createKeyring(env, { activeBackupKekVersion: 1 })
+    let putCount = 0
+    const archive = {
+      async put(_key, value) {
+        putCount += 1
+        if (putCount === 1) {
+          await value.pipeTo(new WritableStream({ write() {} }))
+          return { etag: 'etag-operational-monthly', size: 1 }
+        }
+        return { etag: 'manifest-operational-monthly', size: value.byteLength }
+      },
+    }
+
+    await runNextBackupCreate({
+      db: workbookRecoveryDb(env.DB),
+      cryptoContext: context,
+      keyring,
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_operational_monthly'),
+      leaseOwnerFactory: sequence('owner_backup_operational_monthly'),
+      nonceFactory: () => new Uint8Array(12).fill(6),
+      rawKeyFactory: () => new Uint8Array(32).fill(8),
+      pollExport: async () => ({
+        atBookmark: 'bookmark-operational-monthly',
+        downloadUrl: 'https://download.example.test/monthly',
+      }),
+      downloadExport: async () => ({
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array([1]))
+            controller.close()
+          },
+        }),
+      }),
+    })
+
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'stored',
+      retention_class: 'monthly',
+      expires_at: '2047-02-01T00:00:00.000Z',
+    })
+  })
+
+  it('rejects a migration-set change after bookmark creation before downloading or storing artifacts', async () => {
+    const context = await cryptoContext()
+    const schedulerRun = await seedScheduler()
+    const seeded = await seedQueued(context, {
+      jobId: 'job_backup_migration_drift',
+      backupId: 'bkp_backup_migration_drift',
+      localDay: '2046-03-01',
+    })
+    let recoveryReads = 0
+    const db = workbookRecoveryDb(env.DB, {
+      recovery: () => {
+        recoveryReads += 1
+        const row = structuredClone(recoveryRow)
+        if (recoveryReads === 2) row.activity_version += 1
+        return { results: [row], success: true }
+      },
+    })
+    const archive = { put: vi.fn() }
+    const downloadExport = vi.fn()
+
+    await expect(runNextBackupCreate({
+      db,
+      cryptoContext: context,
+      keyring: await createKeyring(env, { activeBackupKekVersion: 1 }),
+      archive,
+      providerConfig: {
+        accountId: EXPORT_ACCOUNT_ID,
+        databaseId: EXPORT_DATABASE_ID,
+        token: EXPORT_TOKEN,
+      },
+      source: BACKUP_SOURCE,
+      schedulerRun,
+      now: () => CLAIM_MS,
+      wait: async () => {},
+      fetch: async () => {},
+      signal: new AbortController().signal,
+      idFactory: sequence('attempt_backup_migration_drift'),
+      leaseOwnerFactory: sequence('owner_backup_migration_drift'),
+      nonceFactory: () => new Uint8Array(12).fill(6),
+      rawKeyFactory: () => new Uint8Array(32).fill(8),
+      pollExport: async () => ({
+        atBookmark: 'bookmark-migration-drift',
+        downloadUrl: 'https://download.example.test/migration-drift',
+      }),
+      downloadExport,
+    })).resolves.toEqual({
+      claimed: true,
+      result: 'dead',
+      backupId: seeded.backupId,
+      errorCode: 'BACKUP_MIGRATION_SET_CHANGED',
+    })
+    expect(recoveryReads).toBe(2)
+    expect(downloadExport).not.toHaveBeenCalled()
+    expect(archive.put).not.toHaveBeenCalled()
+  })
+})
+
 describe('strict backup reclaim', () => {
   it.each([
     ['61 seconds', 61_000],
@@ -711,7 +1800,7 @@ describe('strict backup reclaim', () => {
     ))).toBe(true)
   })
 
-  it('allows attempt seven to become private recovery-only attempt eight then rejects exhaustion', async () => {
+  it('allows attempt seven to become private recovery-only attempt eight then terminalizes exhaustion', async () => {
     const { context, schedulerRun, seeded } = await initialClaim({
       idFactory: () => 'attempt_backup_recovery_1',
       leaseOwnerFactory: () => 'owner_backup_recovery_1',
@@ -733,17 +1822,22 @@ describe('strict backup reclaim', () => {
     expect((await attempts(seeded.jobId)).filter((row) => row.completed_at === null))
       .toEqual([expect.objectContaining({ attempt_number: 8 })])
 
-    const exhaustedJob = await job(seeded.jobId)
-    const exhaustedAttempts = await attempts(seeded.jobId)
     await expect(processNextBackupCreate(processInput({
       context,
       schedulerRun,
       nowMs: attemptEightNow + LEASE_MS + 1,
       idFactory: () => 'attempt_backup_recovery_9',
       leaseOwnerFactory: () => 'owner_backup_recovery_9',
-    }))).rejects.toThrow(/^BACKUP_STATE_INVALID$/)
-    expect(await job(seeded.jobId)).toEqual(exhaustedJob)
-    expect(await attempts(seeded.jobId)).toEqual(exhaustedAttempts)
+    }))).resolves.toEqual({ claimed: true, schedulerRun })
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'dead', attempt_count: 8, last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect(await backup(seeded.backupId)).toMatchObject({
+      status: 'failed', version: 3, last_error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
+    expect((await attempts(seeded.jobId)).at(-1)).toMatchObject({
+      attempt_number: 8, result: 'dead', error_code: 'OUTBOX_LEASE_EXPIRED',
+    })
   })
 
   it('uses the same exact five-statement budget for reclaim', async () => {
@@ -1270,6 +2364,7 @@ describe('strict D1 export adapter input boundary', () => {
       'downloadD1Export',
       'pollD1Export',
       'processNextBackupCreate',
+      'runNextBackupCreate',
     ])
     const poll = await pollD1Export(exportInput().input)
     expect(poll).toEqual({ downloadUrl: EXPORT_URL, atBookmark: EXPORT_BOOKMARK })
@@ -1502,6 +2597,145 @@ describe('D1 export REST request and response contract', () => {
     expect(input.wait).not.toHaveBeenCalled()
   })
 
+  it('accepts the current Cloudflare nested completed export response', async () => {
+    const fetch = vi.fn(async () => rawExportResponse(JSON.stringify({
+      errors: [],
+      messages: [],
+      result: {
+        at_bookmark: EXPORT_BOOKMARK,
+        messages: ['Export complete'],
+        result: {
+          filename: EXPORT_FILENAME,
+          signed_url: EXPORT_URL,
+        },
+        status: 'complete',
+        success: true,
+        type: 'export',
+      },
+      success: true,
+    })))
+    const { input } = exportInput({ fetch })
+
+    await expect(pollD1Export(input)).resolves.toEqual({
+      downloadUrl: EXPORT_URL,
+      atBookmark: EXPORT_BOOKMARK,
+    })
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(input.wait).not.toHaveBeenCalled()
+  })
+
+  it('polls the current Cloudflare nested active export response', async () => {
+    const fetch = sequenceFetch([
+      rawExportResponse(JSON.stringify({
+        errors: [],
+        messages: [],
+        result: {
+          at_bookmark: EXPORT_BOOKMARK,
+          messages: ['Export scheduled'],
+          status: 'active',
+          success: true,
+          type: 'export',
+        },
+        success: true,
+      })),
+      rawExportResponse(JSON.stringify({
+        errors: [],
+        messages: [],
+        result: {
+          at_bookmark: EXPORT_BOOKMARK,
+          messages: ['Export complete'],
+          result: {
+            filename: EXPORT_FILENAME,
+            signed_url: EXPORT_URL,
+          },
+          status: 'complete',
+          success: true,
+          type: 'export',
+        },
+        success: true,
+      })),
+    ])
+    const { input } = exportInput({ fetch })
+
+    await expect(pollD1Export(input)).resolves.toEqual({
+      downloadUrl: EXPORT_URL,
+      atBookmark: EXPORT_BOOKMARK,
+    })
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(input.wait).toHaveBeenCalledExactlyOnceWith(10_000)
+  })
+
+  it.each([
+    ['active with a terminal result', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [],
+      result: { filename: EXPORT_FILENAME, signed_url: EXPORT_URL },
+      status: 'active', success: true, type: 'export',
+    }],
+    ['complete without a terminal result', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [], status: 'complete',
+      success: true, type: 'export',
+    }],
+    ['unknown status', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [], status: 'pending',
+      success: true, type: 'export',
+    }],
+    ['wrong type', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [], status: 'active',
+      success: true, type: 'import',
+    }],
+    ['false nested success', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [], status: 'active',
+      success: false, type: 'export',
+    }],
+    ['non-array messages', {
+      at_bookmark: EXPORT_BOOKMARK, messages: {}, status: 'active',
+      success: true, type: 'export',
+    }],
+    ['non-string message', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [1], status: 'active',
+      success: true, type: 'export',
+    }],
+    ['terminal result with an extra field', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [],
+      result: { extra: true, filename: EXPORT_FILENAME, signed_url: EXPORT_URL },
+      status: 'complete', success: true, type: 'export',
+    }],
+    ['terminal result missing its URL', {
+      at_bookmark: EXPORT_BOOKMARK, messages: [],
+      result: { filename: EXPORT_FILENAME },
+      status: 'complete', success: true, type: 'export',
+    }],
+  ])('rejects current nested Cloudflare export drift: %s', async (_name, result) => {
+    const error = await exportError(exportInput({
+      fetch: vi.fn(async () => rawExportResponse(JSON.stringify({
+        errors: [], messages: [], result, success: true,
+      }))),
+    }).input)
+    expect(error).toEqual(new Error('BACKUP_EXPORT_RESPONSE_INVALID'))
+  })
+
+  it('requires current nested Cloudflare polls to preserve the first bookmark', async () => {
+    const current = (bookmark) => rawExportResponse(JSON.stringify({
+      errors: [],
+      messages: [],
+      result: {
+        at_bookmark: bookmark,
+        messages: [],
+        status: 'active',
+        success: true,
+        type: 'export',
+      },
+      success: true,
+    }))
+    const fetch = sequenceFetch([
+      current(EXPORT_BOOKMARK),
+      current('bookmark-fixture-changed'),
+    ])
+    await expect(pollD1Export(exportInput({ fetch }).input)).rejects
+      .toThrow(/^BACKUP_EXPORT_RESPONSE_INVALID$/)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
   it.each([
     ['false success', exportResponse(null, { success: false }), 'BACKUP_EXPORT_START_FAILED'],
     ['HTTP failure', rawExportResponse('{}', { status: 503 }), 'BACKUP_EXPORT_START_FAILED'],
@@ -1621,6 +2855,7 @@ describe('D1 export REST request and response contract', () => {
     '{"errors":[],"messages":[],"result":{"at_bookmark":"bookmark-fixture-1","at_bookmark":"bookmark-fixture-1"},"success":true}',
     `{"errors":[],"messages":[],"result":{"at_bookmark":"${EXPORT_BOOKMARK}","filename":"${EXPORT_FILENAME}","filename":"${EXPORT_FILENAME}","signed_url":"${EXPORT_URL}"},"success":true}`,
     `{"errors":[],"messages":[],"result":{"at_bookmark":"${EXPORT_BOOKMARK}","filename":"${EXPORT_FILENAME}","signed_url":"${EXPORT_URL}","signed_url":"${EXPORT_URL}"},"success":true}`,
+    `{"errors":[],"messages":[],"result":{"at_bookmark":"${EXPORT_BOOKMARK}","messages":[],"result":{"filename":"${EXPORT_FILENAME}","signed_url":"https://ignored.example.test/a","signed_url":"${EXPORT_URL}"},"status":"complete","success":true,"type":"export"},"success":true}`,
     '{"errors":[],"messages":[],"result":{"at_bookmark":"bookmark-fixture-1"},"\\u0073uccess":true,"success":true}',
   ])('rejects duplicate JSON keys before parsing: %s', async (raw) => {
     const error = await exportError(exportInput({

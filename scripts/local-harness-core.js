@@ -49,6 +49,8 @@ export function buildLocalHarnessWranglerConfig(
       ACTIVE_DATA_KEK_VERSION: '1',
       ACTIVE_LOOKUP_KEY_VERSION: '1',
       ACTIVE_BACKUP_KEK_VERSION: '1',
+      ACTIVE_WORKBOOK_KEK_VERSION: '1',
+      ACTIVE_WORKBOOK_HMAC_VERSION: '1',
     },
   }, null, 2)
 }

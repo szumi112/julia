@@ -15,6 +15,8 @@ import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
 import { rollingWorkspaceRange } from '../workspace-view.js'
 import { useAuth } from '../auth.jsx'
 import { SpecialistAccessForm, SpecialistProfileForm } from './SpecialistProfileForms.jsx'
+import { canPerformAction } from '../capability-access.js'
+import { sortProfessionalDirectory } from '../historical-workspace-view.js'
 
 const TEAM_FILTERS = [
   { value: 'all', label: 'Cały zespół' },
@@ -30,20 +32,28 @@ const ACCESS_LABELS = Object.freeze({
 const ACCESS_TONES = Object.freeze({ enabled: 'sage', invited: 'amber', unclaimed: 'ink' })
 
 function AppTeamDirectory({ onRefresh, psychologists }) {
-  const { session } = useAuth()
-  const owner = session.actor.role === 'owner'
+  const { refresh: refreshSession, session } = useAuth()
+  const { capabilities } = useShell()
+  const canCreate = canPerformAction(capabilities, 'specialist.create')
+  const canEdit = canPerformAction(capabilities, 'specialist.edit')
+  const canLink = canPerformAction(capabilities, 'specialist.link')
+  const canManageStaff = canCreate || canEdit || canLink
   const [surface, setSurface] = useState(null)
+  const refreshEditedProfile = async (profileId) => {
+    await onRefresh()
+    if (profileId === session.actor.specialistId) await refreshSession()
+  }
   return (
     <div>
       <div className="view-head">
         <div>
           <div className="eyebrow">Katalog specjalistek</div>
           <h1 className="display view-head__title">Zespół <em>centrum</em></h1>
-          <p className="view-head__sub">{owner
+          <p className="view-head__sub">{canManageStaff
             ? 'Twórz i edytuj profile oraz aktywuj dostęp do panelu.'
             : 'Lista aktywnych specjalistek jest dostępna tylko do odczytu.'}</p>
         </div>
-        {owner ? <div className="view-head__actions">
+        {canCreate ? <div className="view-head__actions">
           <Button icon="plus" onClick={() => setSurface({ kind: 'create' })}>Dodaj specjalistkę</Button>
         </div> : null}
       </div>
@@ -54,18 +64,18 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
               <Avatar name={psychologist.name} color={psychologist.color} size={52} />
               <div className="team-card__identity">
                 <h2 className="team-card__name">{psychologist.name}</h2>
-                <span className="team-card__spec">Specjalistka · {fmtMoney(psychologist.rate)} / sesja</span>
+                <span className="team-card__spec">{psychologist.professionalTitle} · {fmtMoney(psychologist.rate)} / sesja</span>
                 <Pill tone={ACCESS_TONES[psychologist.accessStatus ?? 'enabled']}>
                   {ACCESS_LABELS[psychologist.accessStatus ?? 'enabled']}
                 </Pill>
               </div>
             </div>
-            {owner ? (
+            {canEdit || canLink ? (
               <div className="team-card__footer">
-                <Button size="sm" variant="ghost" onClick={() => setSurface({
+                {canEdit ? <Button size="sm" variant="ghost" onClick={() => setSurface({
                   kind: 'edit', profile: psychologist,
-                })}>Edytuj profil</Button>
-                {psychologist.accessStatus === 'unclaimed' ? (
+                })}>Edytuj profil</Button> : null}
+                {canLink && psychologist.accessStatus === 'unclaimed' ? (
                   <Button size="sm" variant="soft" onClick={() => setSurface({
                     kind: 'access', profile: psychologist,
                   })}>Aktywuj dostęp</Button>
@@ -82,7 +92,7 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
         <SpecialistProfileForm
           profile={surface.profile}
           onClose={() => setSurface(null)}
-          onSaved={onRefresh}
+          onSaved={() => refreshEditedProfile(surface.profile.id)}
         />
       ) : null}
       {surface?.kind === 'access' ? (
@@ -220,7 +230,7 @@ export function Team() {
     return TEAM_FILTERS.some((option) => option.value === saved.filter) ? saved.filter : 'all'
   })
   const psychologists = useMemo(
-    () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
+    () => sortProfessionalDirectory(state.psychologists),
     [state.psychologists]
   )
   const loads = useMemo(

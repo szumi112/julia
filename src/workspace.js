@@ -41,6 +41,12 @@ export const normalizeSearchText = (value) =>
     .replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9]+/g, '')
 
+const compareCodeUnits = (left, right) => left < right ? -1 : left > right ? 1 : 0
+
+export const compareCalendarSessionOrder = (left, right) => (
+  compareCodeUnits(left.time, right.time) || compareCodeUnits(left.id, right.id)
+)
+
 export const clientMatchesQuery = (client, query) => {
   const normalizedQuery = normalizeSearchText(query)
   if (!normalizedQuery) return true

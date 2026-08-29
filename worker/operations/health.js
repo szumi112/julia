@@ -394,12 +394,54 @@ function validateOutboxFact(row, status) {
 }
 
 async function readOutboxFacts(db) {
+  const recoverySchema = await db.prepare(
+    `SELECT EXISTS (
+       SELECT 1 FROM sqlite_master
+       WHERE type='table' AND name='outbox_job_recoveries'
+     ) AS present`,
+  ).first()
+  if (!exactKeys(recoverySchema, ['present'])
+    || ![0, 1].includes(recoverySchema.present)) invalidState()
+  const provenRecoveryExclusion = recoverySchema.present === 1
+    ? `AND NOT EXISTS (
+         SELECT 1
+         FROM outbox_job_recoveries AS recovery
+         JOIN outbox_jobs AS replacement
+           ON replacement.id=recovery.replacement_job_id
+         JOIN operational_actions AS action
+           ON action.id=recovery.operational_action_id
+         JOIN audit_events AS resolution
+           ON resolution.action='operational_action.resolved'
+          AND resolution.entity_type='operational_action'
+          AND resolution.entity_id=action.id
+          AND resolution.result='success'
+          AND resolution.actor_staff_id IS NULL
+          AND resolution.reason_envelope IS NULL
+          AND resolution.correlation_id=recovery.correlation_id
+         WHERE recovery.source_job_id=job.id
+           AND replacement.status IN ('succeeded','dead')
+           AND action.fingerprint='outbox.dead:' || job.id
+           AND action.kind='outbox_job_failed'
+           AND action.severity='critical'
+           AND action.status='resolved'
+           AND action.entity_type='outbox_job'
+           AND action.entity_id=job.id
+           AND action.version=2
+           AND action.updated_at=action.resolved_at
+           AND action.resolved_at=replacement.updated_at
+           AND resolution.occurred_at=action.resolved_at
+           AND resolution.metadata_json=
+             '{"actionVersion":' || action.version || '}'
+       )`
+    : ''
   const dead = await db.prepare(
-    `SELECT id,type,status,updated_at
-     FROM outbox_jobs
-     WHERE type IN ('staff.access.reconcile','staff.invitation.email','staff.invitation.expire')
-       AND status='dead'
-     ORDER BY updated_at DESC,id DESC LIMIT 1`
+    `SELECT job.id AS id,job.type AS type,job.status AS status,
+            job.updated_at AS updated_at
+     FROM outbox_jobs AS job INDEXED BY outbox_jobs_ordinary_status_updated_id_idx
+     WHERE job.type IN ('staff.access.reconcile','staff.invitation.email','staff.invitation.expire')
+       AND job.status='dead'
+       ${provenRecoveryExclusion}
+     ORDER BY job.updated_at DESC,job.id DESC LIMIT 1`,
   ).first()
   const activity = await db.prepare(
     `WITH heartbeat AS (

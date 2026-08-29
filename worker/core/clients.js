@@ -19,6 +19,7 @@ import {
 } from './crypto.js'
 import { createRecordVersionBuilder } from './versions.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
+import { captureAuthorityActor } from '../identity/authority-actor.js'
 
 const BODY_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'])
 const EDIT_BODY_KEYS = Object.freeze(['expectedVersion', ...BODY_KEYS])
@@ -186,25 +187,9 @@ const captureCommand = (input) => {
 }
 
 const actorFact = (value) => {
-  try {
-    if (value === null || typeof value !== 'object' || Array.isArray(value)) forbidden()
-    const descriptors = Object.getOwnPropertyDescriptors(value)
-    const data = {}
-    for (const key of ['id', 'role', 'specialistId']) {
-      const descriptor = descriptors[key]
-      if (!descriptor || !Object.hasOwn(descriptor, 'value')) forbidden()
-      data[key] = descriptor.value
-    }
-    if (typeof data.id !== 'string' || !STAFF_ID.test(data.id)
-      || !['owner', 'coordinator', 'specialist'].includes(data.role)
-      || (data.specialistId !== null
-        && (typeof data.specialistId !== 'string' || !SPECIALIST_ID.test(data.specialistId)))
-      || (data.role === 'specialist' && data.specialistId === null)) forbidden()
-    return Object.freeze(data)
-  } catch (error) {
-    if (error instanceof Error && error.message === 'FORBIDDEN') throw error
-    forbidden()
-  }
+  const actor = captureAuthorityActor(value)
+  if (!actor) forbidden()
+  return actor
 }
 
 const practitionerFact = (value) => {
@@ -390,7 +375,7 @@ const guardStatement = (db, values) => {
   )
 }
 
-const loadActivePractitioner = async (db, specialistId, actor) => db.prepare(
+export const loadActivePractitioner = async (db, specialistId, actor) => db.prepare(
   `SELECT specialist.id, specialist.staff_user_id
    FROM specialists AS specialist
    JOIN staff_users AS staff

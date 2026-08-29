@@ -28,6 +28,7 @@ const appointmentStatuses = new Set(['scheduled', 'completed', 'cancelled', 'nos
 const editableAppointmentStatuses = new Set(['scheduled', 'completed', 'noshow'])
 const methods = new Set(['cash', 'card', 'transfer', 'monthly'])
 const durations = new Set([50, 60, 90, 120])
+const invalidPresentationText = /[\p{Cc}\p{Cf}]/u
 
 export const isWellFormedUnicode = (value, { forceFallback = false } = {}) => {
   if (!forceFallback && typeof value.isWellFormed === 'function') return value.isWellFormed()
@@ -83,6 +84,14 @@ export const assertNfcTrimmed = (value, { field = 'string', minBytes = 1, maxByt
   if (typeof value !== 'string' || !isWellFormedUnicode(value) || value !== value.trim() || value !== value.normalize('NFC')) fail(field)
   const bytes = encoder.encode(value).byteLength
   if (bytes < minBytes || bytes > maxBytes) fail(field)
+  return value
+}
+
+export const assertProfessionalTitle = (value) => {
+  assertNfcTrimmed(value, {
+    field: 'professionalTitle', minBytes: 1, maxBytes: 120,
+  })
+  if (invalidPresentationText.test(value)) fail('professionalTitle')
   return value
 }
 
@@ -471,14 +480,18 @@ export const clientDto = (client) => {
 }
 
 export const specialistDto = (specialist) => {
-  const legacyKeys = ['id', 'displayName', 'standardRateGrosze', 'status', 'version', 'staffVersion']
+  const keys = [
+    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
+    'version', 'staffVersion',
+  ]
   try {
-    assertExactObject(specialist, legacyKeys, 'specialist')
+    assertExactObject(specialist, keys, 'specialist')
   } catch {
-    assertExactObject(specialist, [...legacyKeys, 'accessStatus'], 'specialist')
+    assertExactObject(specialist, [...keys, 'accessStatus'], 'specialist')
   }
   assertId(specialist.id, 'specialist')
   assertNfcTrimmed(specialist.displayName, { field: 'displayName', minBytes: 1, maxBytes: 120 })
+  assertProfessionalTitle(specialist.professionalTitle)
   assertInteger(specialist.standardRateGrosze, 'standardRateGrosze', 1, MAX_GROSZE)
   if (specialist.status !== 'active') fail('specialist')
   assertInteger(specialist.version, 'version', 1, Number.MAX_SAFE_INTEGER)

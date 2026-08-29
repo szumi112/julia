@@ -1,30 +1,19 @@
 import { isAppointmentId, isClientId, isSpecialistId } from '../../src/core-records.js'
+import {
+  CAPABILITIES,
+  OWNER_ONLY_CAPABILITIES,
+  isCapability,
+} from '../../src/capabilities.js'
+import { captureAuthorityActor } from './authority-actor.js'
 
-export const CAPABILITIES = Object.freeze([
-  'appointment.charge.read', 'appointment.manage', 'centre.manage', 'chat.direct', 'chat.general',
-  'client.manage', 'client.operational.read', 'clinical.read', 'finance.centre.manage',
-  'finance.centre.read', 'operations.health.read', 'payment.manage', 'security.audit.read', 'specialist.directory.read',
-  'staff.manage', 'tus.manage',
-])
-
-const ROLE_CAPABILITIES = Object.freeze({
-  owner: Object.freeze([...CAPABILITIES]),
-  coordinator: Object.freeze([
-    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-    'client.manage', 'client.operational.read', 'finance.centre.read',
-    'operations.health.read', 'payment.manage', 'specialist.directory.read', 'tus.manage',
-  ]),
-  specialist: Object.freeze([
-    'appointment.charge.read', 'appointment.manage', 'chat.direct', 'chat.general',
-    'client.manage', 'client.operational.read', 'clinical.read', 'payment.manage',
-    'specialist.directory.read', 'tus.manage',
-  ]),
-})
+export { CAPABILITIES }
 
 const nonempty = (value) => typeof value === 'string'
   && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)
-const staffId = (value) => typeof value === 'string'
-  && /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value)
+const activityGroupId = (value) => typeof value === 'string'
+  && /^agr_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value)
+const activityId = (value) => typeof value === 'string'
+  && /^(?:agr|acp|amb|acl|aat)_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value)
 
 const captureFields = (value, keys) => {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
@@ -53,15 +42,7 @@ const captureExact = (value, keys) => {
   return captured
 }
 
-const knownActor = (value) => {
-  const actor = captureFields(value, ['id', 'role', 'specialistId'])
-  if (!actor || !staffId(actor.id)
-    || !['owner', 'coordinator', 'specialist'].includes(actor.role)
-    || (actor.role === 'specialist'
-      ? !isSpecialistId(actor.specialistId)
-      : actor.specialistId !== null && !isSpecialistId(actor.specialistId))) return null
-  return actor
-}
+const knownActor = captureAuthorityActor
 
 const ids = (values) => {
   if (!Array.isArray(values)) return null
@@ -77,6 +58,17 @@ const ids = (values) => {
 }
 
 const has = (values, value) => ids(values)?.includes(value) === true
+const activitySpecialistIds = (values) => {
+  if (!Array.isArray(values) || values.length > 1_000) return null
+  const captured = []
+  for (let index = 0; index < values.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(values, String(index))
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')
+      || !isSpecialistId(descriptor.value)) return null
+    captured.push(descriptor.value)
+  }
+  return captured
+}
 const ownSpecialist = (actor, value) => nonempty(actor.specialistId)
   && actor.specialistId === value
 
@@ -129,7 +121,7 @@ const activeAssignment = (actor, resource) => {
 export function capabilitiesForActor(value) {
   try {
     const actor = knownActor(value)
-    return actor ? ROLE_CAPABILITIES[actor.role] : Object.freeze([])
+    return actor ? actor.capabilities : Object.freeze([])
   } catch {
     return Object.freeze([])
   }
@@ -140,11 +132,19 @@ export function authorize(value, capability, resource, options = {}) {
     const actor = knownActor(value)
     const capturedOptions = captureFields(options, ['nowMs'])
     const nowMs = capturedOptions?.nowMs
-    if (!actor || !CAPABILITIES.includes(capability)
+    if (!actor || !isCapability(capability) || !actor.capabilities.includes(capability)
       || !Number.isSafeInteger(nowMs) || nowMs < 0) return false
 
-    if (['centre.manage', 'finance.centre.manage', 'staff.manage', 'security.audit.read'].includes(capability)) {
+    if (OWNER_ONLY_CAPABILITIES.includes(capability)) {
       return actor.role === 'owner' && exactCentre(resource)
+    }
+    if (capability === 'finance.import' || capability === 'workbook.centre.export') {
+      return ['owner', 'coordinator'].includes(actor.role) && exactCentre(resource)
+    }
+    if (capability === 'workbook.own.export') {
+      const fact = captureExact(resource, ['kind', 'specialistId'])
+      return actor.role === 'specialist' && fact?.kind === 'workbook_own'
+        && ownSpecialist(actor, fact.specialistId)
     }
     if (capability === 'finance.centre.read' || capability === 'operations.health.read') {
       return ['owner', 'coordinator'].includes(actor.role) && exactCentre(resource)
@@ -178,6 +178,29 @@ export function authorize(value, capability, resource, options = {}) {
         && (actor.role !== 'specialist' || ownSpecialist(actor, appointment.specialistId)))
     }
     if (capability === 'tus.manage') {
+      const activityCentre = captureExact(resource, ['kind', 'centreId'])
+      if (activityCentre?.kind === 'activity_centre') {
+        return activityCentre.centreId === 'centre_1' && actor.role !== 'specialist'
+      }
+      const activityGroup = captureExact(
+        resource, ['kind', 'groupId', 'leaderSpecialistIds'],
+      )
+      if (activityGroup?.kind === 'activity_group') {
+        const leaders = activitySpecialistIds(activityGroup.leaderSpecialistIds)
+        return Boolean(activityGroupId(activityGroup.groupId) && leaders
+          && (actor.role !== 'specialist' || leaders.includes(actor.specialistId)))
+      }
+      const activityRecord = captureExact(resource, [
+        'kind', 'activityId', 'leaderSpecialistIds', 'responsibleSpecialistId',
+      ])
+      if (activityRecord?.kind === 'activity_record') {
+        const leaders = activitySpecialistIds(activityRecord.leaderSpecialistIds)
+        const responsible = activityRecord.responsibleSpecialistId
+        if (!activityId(activityRecord.activityId) || !leaders
+          || !(responsible === null || isSpecialistId(responsible))) return false
+        return actor.role !== 'specialist' || leaders.includes(actor.specialistId)
+          || responsible === actor.specialistId
+      }
       const group = captureFields(resource, ['kind', 'groupId', 'leaderSpecialistIds'])
       if (group?.kind !== 'tus_group' || !nonempty(group.groupId)
         || !ids(group.leaderSpecialistIds)) return false

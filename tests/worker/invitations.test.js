@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { createKeyring } from '../../worker/security/keyring.js'
 import {
   blindEmailIndex,
@@ -15,13 +15,19 @@ import {
   specialistIdFor,
   validateInvitationInput,
 } from '../../worker/identity/invitations.js'
-import { NOW_MS } from './fixtures.js'
+import { resolveCurrentAuthorityActor } from '../../worker/identity/staff.js'
+import { NOW_MS, authorityActor } from './fixtures.js'
+import { applyCapabilityOverridesMigration } from './apply-migrations.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const WEEK_MS = 7 * DAY_MS
 const scope = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const now = new Date(NOW_MS).toISOString()
 let serial = 0
+
+beforeAll(async () => {
+  await applyCapabilityOverridesMigration()
+})
 
 const ids = (prefix) => {
   let count = 0
@@ -30,7 +36,7 @@ const ids = (prefix) => {
 
 async function cryptoContext(options = {}) {
   serial += 1
-  const owner = Object.freeze({
+  const owner = authorityActor({
     id: `stf_owner_invitation_${serial}`,
     role: 'owner',
     specialistId: null,
@@ -66,17 +72,29 @@ async function cryptoContext(options = {}) {
   return { keyring, dataKey, scope, owner }
 }
 
-const invite = (context, input, options = {}) => inviteStaff({
-  db: options.db ?? env.DB,
-  cryptoContext: context,
-  actor: options.actor ?? context.owner,
-  input,
-  idempotencyKey: options.idempotencyKey ?? `invite-key-${serial}-${input.role}`,
-  correlationId: options.correlationId ?? '11111111-1111-4111-8111-111111111111',
-  nowMs: options.nowMs ?? NOW_MS,
-  dataMode: options.dataMode ?? 'fictional',
-  idFactory: options.idFactory ?? ids(`opaque_${serial}`),
-})
+async function refreshOwner(context) {
+  const row = await env.DB.prepare(
+    'SELECT id,role,specialist_id,version FROM staff_users WHERE id=?',
+  ).bind(context.owner.id).first()
+  context.owner = await resolveCurrentAuthorityActor(env.DB, row)
+}
+
+const invite = async (context, input, options = {}) => {
+  const defaultActor = options.actor === undefined
+  const result = await inviteStaff({
+    db: options.db ?? env.DB,
+    cryptoContext: context,
+    actor: options.actor ?? context.owner,
+    input,
+    idempotencyKey: options.idempotencyKey ?? `invite-key-${serial}-${input.role}`,
+    correlationId: options.correlationId ?? '11111111-1111-4111-8111-111111111111',
+    nowMs: options.nowMs ?? NOW_MS,
+    dataMode: options.dataMode ?? 'fictional',
+    idFactory: options.idFactory ?? ids(`opaque_${serial}`),
+  })
+  if (defaultActor) await refreshOwner(context)
+  return result
+}
 
 const expire = (context, invitationId, options = {}) => expireInvitation({
   db: options.db ?? env.DB,
@@ -88,17 +106,23 @@ const expire = (context, invitationId, options = {}) => expireInvitation({
   idFactory: options.idFactory ?? ids(`expiry_${serial}`),
 })
 
-const deactivate = (context, staffId, version, options = {}) => deactivateStaff({
-  db: options.db ?? env.DB,
-  cryptoContext: context,
-  actor: options.actor ?? context.owner,
-  staffId,
-  version,
-  idempotencyKey: options.idempotencyKey ?? `deactivate-key-${serial}`,
-  correlationId: options.correlationId ?? '55555555-5555-4555-8555-555555555555',
-  nowMs: options.nowMs ?? NOW_MS,
-  idFactory: options.idFactory ?? ids(`deactivate_${serial}`),
-})
+const deactivate = async (context, staffId, version, options = {}) => {
+  const defaultActor = options.actor === undefined
+  const actingId = options.actor?.id ?? context.owner.id
+  const result = await deactivateStaff({
+    db: options.db ?? env.DB,
+    cryptoContext: context,
+    actor: options.actor ?? context.owner,
+    staffId,
+    version,
+    idempotencyKey: options.idempotencyKey ?? `deactivate-key-${serial}`,
+    correlationId: options.correlationId ?? '55555555-5555-4555-8555-555555555555',
+    nowMs: options.nowMs ?? NOW_MS,
+    idFactory: options.idFactory ?? ids(`deactivate_${serial}`),
+  })
+  if (defaultActor && actingId !== staffId) await refreshOwner(context)
+  return result
+}
 
 const list = (context, options = {}) => listStaff({
   db: options.db ?? env.DB,
@@ -320,6 +344,34 @@ describe('staff invitation input', () => {
     expect(specialistIdFor('stf_opaque-payload_1')).toBe('sp_opaque-payload_1')
   })
 
+  it('accepts a live team identity when fictional patient data runs in staging', () => {
+    expect(validateInvitationInput({
+      displayName: '  Z\u0307aneta Testowa  ',
+      email: '  TEAM.MEMBER@QA.INVALID  ',
+      role: 'coordinator',
+    }, { appEnv: 'staging', dataMode: 'fictional' })).toEqual({
+      displayName: '\u017baneta Testowa',
+      email: 'team.member@qa.invalid',
+      role: 'coordinator',
+    })
+  })
+
+  it('keeps live team identities disabled outside staging while data is fictional', () => {
+    expect(() => validateInvitationInput({
+      displayName: 'Production Team Member',
+      email: 'team.member@qa.invalid',
+      role: 'coordinator',
+    }, { appEnv: 'production', dataMode: 'fictional' })).toThrow('VALIDATION_FAILED')
+  })
+
+  it('does not let the legacy specialist data-mode marker bypass the environment boundary', () => {
+    expect(() => validateInvitationInput({
+      displayName: 'Production Specialist',
+      email: 'specialist@qa.invalid',
+      role: 'specialist',
+    }, { appEnv: 'production', dataMode: 'staging-access' })).toThrow('VALIDATION_FAILED')
+  })
+
   it.each([
     ['displayName', { displayName: '', email: 'anna@example.test', role: 'owner' }],
     ['displayName', { displayName: 'x'.repeat(121), email: 'anna@example.test', role: 'owner' }],
@@ -458,8 +510,12 @@ describe('staff invitation creation', () => {
     const context = await cryptoContext()
     const authorizedBaseline = await mutationFacts()
     for (const actor of [
-      { id: 'stf_coordinator', role: 'coordinator', specialistId: null, version: 1 },
-      { id: 'stf_specialist', role: 'specialist', specialistId: 'sp_specialist', version: 1 },
+      authorityActor({ id: 'stf_coordinator', role: 'coordinator' }),
+      authorityActor({
+        id: 'stf_specialist',
+        role: 'specialist',
+        specialistId: 'sp_specialist',
+      }),
     ]) {
       await expect(invite(context, {
         displayName: 'Nieuprawniona Osoba',
@@ -480,7 +536,7 @@ describe('staff invitation creation', () => {
       email: 'new-owner@example.test',
       role: 'owner',
     }, {
-      actor: { id: 'stf_inactive_owner', role: 'owner', specialistId: null, version: 1 },
+      actor: authorityActor({ id: 'stf_inactive_owner', role: 'owner' }),
       idempotencyKey: 'denied-inactive-owner',
     })).rejects.toThrow(/^FORBIDDEN$/)
     expect(await mutationFacts()).toEqual(inactiveBaseline)
@@ -1544,9 +1600,17 @@ describe('staff deactivation', () => {
     })
     const before = await mutationFacts()
     for (const actor of [
-      { id: 'stf_deactivate_coordinator', role: 'coordinator', specialistId: null, version: 1 },
-      { id: 'stf_deactivate_specialist', role: 'specialist', specialistId: 'sp_deactivate_specialist', version: 1 },
-      { id: disabledOwner.id, role: 'owner', specialistId: null, version: disabledOwner.version },
+      authorityActor({ id: 'stf_deactivate_coordinator', role: 'coordinator' }),
+      authorityActor({
+        id: 'stf_deactivate_specialist',
+        role: 'specialist',
+        specialistId: 'sp_deactivate_specialist',
+      }),
+      authorityActor({
+        id: disabledOwner.id,
+        role: 'owner',
+        version: disabledOwner.version,
+      }),
     ]) {
       await expect(deactivate(context, target.id, target.version, {
         actor,
@@ -1876,12 +1940,12 @@ describe('staff deactivation', () => {
       role: 'owner',
       status: 'active',
     })
-    const secondActor = {
+    const secondActor = authorityActor({
       id: second.id,
       role: 'owner',
       specialistId: null,
       version: second.version,
-    }
+    })
     await retainOnlyActiveOwners([context.owner.id, second.id])
     const before = await mutationFacts()
     const barrier = batchBarrier()
@@ -1974,9 +2038,17 @@ describe('staff lifecycle generation and listing', () => {
     })
     const before = await mutationFacts()
     for (const actor of [
-      { id: 'stf_list_coordinator', role: 'coordinator', specialistId: null, version: 1 },
-      { id: 'stf_list_specialist', role: 'specialist', specialistId: 'sp_list_specialist', version: 1 },
-      { id: disabledOwner.id, role: 'owner', specialistId: null, version: disabledOwner.version },
+      authorityActor({ id: 'stf_list_coordinator', role: 'coordinator' }),
+      authorityActor({
+        id: 'stf_list_specialist',
+        role: 'specialist',
+        specialistId: 'sp_list_specialist',
+      }),
+      authorityActor({
+        id: disabledOwner.id,
+        role: 'owner',
+        version: disabledOwner.version,
+      }),
     ]) {
       await expect(list(context, { actor })).rejects.toThrow(/^FORBIDDEN$/)
     }

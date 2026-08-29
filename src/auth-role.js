@@ -1,3 +1,5 @@
+import { isWellFormedUnicode } from './core-records.js'
+
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const INVALID_NAME = /[\p{Cc}\p{Cf}]/u
@@ -7,13 +9,16 @@ const denied = () => {
 }
 
 const acceptedName = (value) => {
-  if (typeof value !== 'string' || value !== value.normalize('NFC') || value !== value.trim()
+  if (typeof value !== 'string' || !isWellFormedUnicode(value)
+    || value !== value.normalize('NFC') || value !== value.trim()
     || !value || INVALID_NAME.test(value)
     || new TextEncoder().encode(value).byteLength > 120) {
     denied()
   }
   return value
 }
+
+const acceptedProfessionalTitle = (value) => value === null ? null : acceptedName(value)
 
 const acceptedSpecialistId = (value, required) => {
   if (value === null && !required) return null
@@ -24,7 +29,7 @@ const acceptedSpecialistId = (value, required) => {
 const acceptedShellRole = (sessionUser) => {
   if (!sessionUser || typeof sessionUser !== 'object' || Array.isArray(sessionUser)) denied()
   const descriptors = Object.getOwnPropertyDescriptors(sessionUser)
-  const keys = ['id', 'displayName', 'role', 'specialistId', 'version']
+  const keys = ['id', 'displayName', 'professionalTitle', 'role', 'specialistId', 'version']
   const actual = Reflect.ownKeys(descriptors)
   if (actual.length !== keys.length
     || actual.some((key) => typeof key !== 'string' || !keys.includes(key))) denied()
@@ -37,7 +42,13 @@ const acceptedShellRole = (sessionUser) => {
   if (typeof actor.id !== 'string' || !STAFF_ID.test(actor.id)
     || !Number.isSafeInteger(actor.version) || actor.version < 1) denied()
   const name = acceptedName(actor.displayName)
-  const shared = { authorityVersion: actor.version }
+  const professionalTitle = acceptedProfessionalTitle(actor.professionalTitle)
+  const specialistId = acceptedSpecialistId(
+    actor.specialistId,
+    actor.role === 'specialist',
+  )
+  if ((professionalTitle === null) !== (specialistId === null)) denied()
+  const shared = { authorityVersion: actor.version, professionalTitle }
 
   if (actor.role === 'owner') {
     return Object.freeze({
@@ -45,7 +56,7 @@ const acceptedShellRole = (sessionUser) => {
       id: 'owner',
       label: 'Właściciel',
       name,
-      psychId: acceptedSpecialistId(actor.specialistId, false),
+      psychId: specialistId,
       scope: 'centre',
     })
   }
@@ -55,7 +66,7 @@ const acceptedShellRole = (sessionUser) => {
       id: 'coordinator',
       label: 'Koordynator',
       name,
-      psychId: acceptedSpecialistId(actor.specialistId, false),
+      psychId: specialistId,
       scope: 'centre',
     })
   }
@@ -65,7 +76,7 @@ const acceptedShellRole = (sessionUser) => {
       id: 'therapist',
       label: 'Specjalista',
       name,
-      psychId: acceptedSpecialistId(actor.specialistId, true),
+      psychId: specialistId,
       scope: 'own',
     })
   }

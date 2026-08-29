@@ -14,6 +14,7 @@ import { join, relative } from 'node:path'
 import {
   assertCoreMigrationConfiguration,
   assertDirectDependencyPins,
+  assertRecoveryPackageScripts,
   assertRuntimeIndex,
   assertTrackedFiles,
   inspectDeployArtifact,
@@ -144,6 +145,36 @@ test('package keeps the complete script regression suite addressable', () => {
   )
 })
 
+test('recovery commands stay pinned to staging fictional mode with no production demand aliases', () => {
+  const packageJson = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
+  assert.doesNotThrow(() => assertRecoveryPackageScripts(packageJson))
+  const expected = {
+    'backup:create:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs create',
+    'backup:status:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs status',
+    'backup:migrations:staging': 'APP_ENV=staging DATA_MODE=fictional node scripts/backup-staging.mjs migrations',
+    'backup:restore': 'APP_ENV=staging DATA_MODE=fictional node scripts/restore-backup.mjs',
+  }
+  for (const [name, value] of Object.entries(expected)) assert.equal(packageJson.scripts[name], value)
+  assert.throws(() => assertRecoveryPackageScripts({
+    ...packageJson,
+    scripts: { ...packageJson.scripts, 'backup:create:production': 'node forbidden.mjs' },
+  }), /production demand backup/i)
+  for (const alias of [
+    'backup:create:prod',
+    'backup:status:staging:copy',
+    'backup:migrations',
+  ]) {
+    assert.throws(() => assertRecoveryPackageScripts({
+      ...packageJson,
+      scripts: { ...packageJson.scripts, [alias]: 'node forbidden.mjs' },
+    }), /demand backup alias/i)
+  }
+  assert.throws(() => assertRecoveryPackageScripts({
+    ...packageJson,
+    scripts: { ...packageJson.scripts, 'backup:create:staging': 'node scripts/backup-staging.mjs create' },
+  }), /recovery package command/i)
+})
+
 test('workspace repositories remain pure and exclude persistence, queues, logging, and backend bindings', () => {
   const source = readFileSync(new URL('../../src/workspace-repository.js', import.meta.url), 'utf8')
   for (const forbidden of [
@@ -174,6 +205,18 @@ const environmentWorkerConfig = (overrides = {}) => ({
   vars: {
     APP_ENV: 'staging',
     APP_ORIGIN: 'https://staging.bearwithme-panel.app',
+    CF_ACCOUNT_ID: 'a'.repeat(32),
+    CF_ACCESS_GROUP_ID: '11111111-1111-4111-8111-111111111111',
+    CF_ACCESS_GROUP_NAME: 'Bear with me - panel - staging',
+    RESEND_FROM_EMAIL: 'panel@qa.invalid',
+    RESEND_FROM_NAME: 'Bear with me',
+  },
+  secrets: {
+    required: [
+      'BWM_DATA_KEK_V1',
+      'CF_ACCESS_GROUP_TOKEN',
+      'RESEND_API_KEY',
+    ],
   },
   d1_databases: [{
     binding: 'DB',
@@ -187,6 +230,84 @@ test('deploy inspection accepts an artifact resolved for the requested environme
   const root = deployFixture(t, { workerConfig: environmentWorkerConfig() })
   assert.doesNotThrow(() => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }))
   assert.doesNotThrow(() => inspectDeployArtifact({ root, secretValues: {} }))
+})
+
+test('deploy inspection rejects a protected artifact without complete provider bindings', (t) => {
+  for (const name of [
+    'CF_ACCOUNT_ID',
+    'CF_ACCESS_GROUP_ID',
+    'CF_ACCESS_GROUP_NAME',
+    'RESEND_FROM_EMAIL',
+    'RESEND_FROM_NAME',
+  ]) {
+    const vars = { ...environmentWorkerConfig().vars }
+    delete vars[name]
+    const root = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({ vars }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }),
+      new RegExp(name),
+    )
+  }
+})
+
+test('deploy inspection rejects malformed protected-provider configuration', (t) => {
+  for (const [name, value] of [
+    ['CF_ACCOUNT_ID', 'not-an-account-id'],
+    ['CF_ACCESS_GROUP_ID', 'not-a-group-id'],
+    ['CF_ACCESS_GROUP_NAME', ' Bear with me'],
+    ['RESEND_FROM_EMAIL', 'Panel@qa.invalid'],
+    ['RESEND_FROM_NAME', 'Bear with me\u0000'],
+  ]) {
+    const root = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({
+        vars: { ...environmentWorkerConfig().vars, [name]: value },
+      }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }),
+      /provider configuration/i,
+      name,
+    )
+  }
+})
+
+test('deploy inspection rejects placeholder protected-provider configuration', (t) => {
+  for (const [name, value] of [
+    ['CF_ACCOUNT_ID', '0'.repeat(32)],
+    ['CF_ACCESS_GROUP_ID', '00000000-0000-0000-0000-000000000000'],
+    ['CF_ACCESS_GROUP_NAME', 'change-me'],
+    ['RESEND_FROM_NAME', 'placeholder'],
+  ]) {
+    const root = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({
+        vars: { ...environmentWorkerConfig().vars, [name]: value },
+      }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }),
+      /provider configuration/i,
+      name,
+    )
+  }
+})
+
+test('deploy inspection requires provider secrets in the generated worker contract', (t) => {
+  for (const name of ['CF_ACCESS_GROUP_TOKEN', 'RESEND_API_KEY']) {
+    const root = deployFixture(t, {
+      workerConfig: environmentWorkerConfig({
+        secrets: {
+          required: environmentWorkerConfig().secrets.required
+            .filter((candidate) => candidate !== name),
+        },
+      }),
+    })
+    assert.throws(
+      () => inspectDeployArtifact({ root, secretValues: {}, expectedEnvironment: 'staging' }),
+      new RegExp(name),
+    )
+  }
 })
 
 test('deploy inspection rejects an artifact that does not target the requested environment', (t) => {
@@ -348,14 +469,41 @@ test('backend binding names cannot appear in browser files but may appear in Wor
   assert.throws(() => inspectDeployArtifact({ root: rejectedRoot, secretValues: {} }), /backend binding/i)
 })
 
-test('backup provider account and database bindings stay out of browser artifacts', (t) => {
-  for (const binding of ['CF_ACCOUNT_ID', 'CF_D1_DATABASE_ID']) {
+test('staging backup and provider bindings stay out of browser artifacts', (t) => {
+  for (const binding of [
+    'BWM_BACKUP_KEK_V2',
+    'CF_ACCESS_GROUP_ID',
+    'CF_ACCESS_GROUP_NAME',
+    'CF_ACCOUNT_ID',
+    'CF_D1_DATABASE_ID',
+    'RESEND_FROM_EMAIL',
+    'RESEND_FROM_NAME',
+  ]) {
     const allowedRoot = deployFixture(t, { worker: `const value = env.${binding}` })
     assert.doesNotThrow(() => inspectDeployArtifact({ root: allowedRoot, secretValues: {} }))
 
     const rejectedRoot = deployFixture(t, { browser: `const value = '${binding}'` })
     assert.throws(() => inspectDeployArtifact({ root: rejectedRoot, secretValues: {} }), /backend binding/i)
   }
+})
+
+test('deploy inspection redacts the staging backup V2 secret without exposing its value', (t) => {
+  const secret = 'staging-backup-v2-secret-must-not-ship'
+  const root = deployFixture(t, { worker: `const accidental = '${secret}'` })
+  let error
+  try {
+    inspectDeployArtifact({
+      root,
+      secretValues: { BWM_BACKUP_KEK_V2: secret },
+    })
+  } catch (caught) {
+    error = caught
+  }
+
+  assert.ok(error)
+  assert.match(error.message, /BWM_BACKUP_KEK_V2/)
+  assert.match(error.message, /dist\/app\/worker\.js/)
+  assert.doesNotMatch(error.message, new RegExp(secret))
 })
 
 test('deploy inspection scans textual assets regardless of extension but ignores binary bytes', (t) => {

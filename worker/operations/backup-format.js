@@ -1,17 +1,48 @@
+import {
+  recoveryFactsMatchMigrations,
+  validateBackupRecoveryFacts,
+} from './backup-recovery.js'
+import { BACKUP_SQL_MAX_BYTES } from './backup-limits.js'
+
 const INVALID = 'BACKUP_MANIFEST_INVALID'
 const CRYPTO_FAILED = 'BACKUP_CRYPTO_FAILED'
 const POLLUTING_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
-const ROOT_KEYS = [
+const MANIFEST_MAX_BYTES = 64 * 1024
+const MIGRATION_NAME_MAX_BYTES = 255
+const V1_ROOT_KEYS = [
   'format', 'backupId', 'createdAt', 'localDay', 'localMonth', 'retentionClass',
   'objectKey', 'objectEtag', 'objectSize', 'atBookmark', 'wrappedSsecKey',
 ]
+const V2_ROOT_KEYS = [
+  'format', 'backupId', 'createdAt', 'localDay', 'localMonth', 'retentionClass',
+  'source', 'appliedMigrations', 'restoreSentinel',
+  'objectKey', 'objectEtag', 'objectSize', 'atBookmark', 'wrappedSsecKey',
+]
+const V3_ROOT_KEYS = [
+  'format', 'backupId', 'createdAt', 'localDay', 'localMonth', 'retentionClass',
+  'source', 'appliedMigrations', 'restoreSentinel', 'recoveryFacts',
+  'plaintextSqlSha256', 'objectKey', 'objectEtag', 'objectSize', 'atBookmark',
+  'wrappedSsecKey',
+]
 const WRAPPED_KEY_KEYS = ['algorithm', 'kekVersion', 'nonce', 'ciphertext']
-const FACT_KEYS = ROOT_KEYS.filter((key) => key !== 'wrappedSsecKey')
+const V1_FACT_KEYS = V1_ROOT_KEYS.filter((key) => key !== 'wrappedSsecKey')
+const V2_FACT_KEYS = V2_ROOT_KEYS.filter((key) => key !== 'wrappedSsecKey')
+const V3_FACT_KEYS = V3_ROOT_KEYS.filter((key) => key !== 'wrappedSsecKey')
+const SOURCE_KEYS = ['accountId', 'appEnv', 'dataMode', 'databaseId']
+const MIGRATION_KEYS = ['id', 'name']
+const SENTINEL_KEYS = [
+  'kind', 'backupId', 'createdAt', 'localDay', 'localMonth', 'retentionClass',
+  'status', 'version',
+]
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const ACCOUNT_ID = /^[0-9a-f]{32}$/
+const DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const MIGRATION_NAME = /^\d{4}_[a-z0-9_-]+\.sql$/
 const MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/
 const DAY = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const BASE64URL = /^[A-Za-z0-9_-]*$/
+const SHA256 = /^[0-9a-f]{64}$/
 const UNSAFE_OPAQUE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
 
 const invalid = () => { throw new Error(INVALID) }
@@ -89,6 +120,32 @@ function exactObject(value, fields) {
   return captured
 }
 
+function discriminatedObject(value, variants) {
+  const { keys, descriptors } = descriptorsFor(value, Object.prototype)
+  const formatDescriptor = descriptors.get('format')
+  if (!formatDescriptor || typeof formatDescriptor.value !== 'string') invalid()
+  const fields = variants[formatDescriptor.value]
+  if (!fields || keys.length !== fields.length || fields.some((field) => !descriptors.has(field))) invalid()
+  const captured = {}
+  for (const field of fields) captured[field] = descriptors.get(field).value
+  return captured
+}
+
+function exactArray(value, minimum, maximum) {
+  const { keys, descriptors } = descriptorsFor(value, Array.prototype, new Set(['length']))
+  const lengthDescriptor = descriptors.get('length')
+  if (!lengthDescriptor || !Number.isSafeInteger(lengthDescriptor.value)
+    || lengthDescriptor.value < minimum || lengthDescriptor.value > maximum
+    || keys.length !== lengthDescriptor.value + 1) invalid()
+  const captured = []
+  for (let index = 0; index < lengthDescriptor.value; index += 1) {
+    const descriptor = descriptors.get(String(index))
+    if (!descriptor || descriptor.enumerable !== true) invalid()
+    captured.push(descriptor.value)
+  }
+  return captured
+}
+
 function validMonth(value) {
   if (typeof value !== 'string' || !MONTH.test(value)) return false
   const date = new Date(`${value}-01T00:00:00.000Z`)
@@ -138,24 +195,101 @@ function validBase64Url(value, byteLength) {
   }
 }
 
-function factsValue(value) {
-  const facts = exactObject(value, FACT_KEYS)
-  if (facts.format !== 'bwm-d1-sql-v1'
-    || typeof facts.backupId !== 'string' || !BACKUP_ID.test(facts.backupId)
+function commonFactsValue(facts, version) {
+  if (typeof facts.backupId !== 'string' || !BACKUP_ID.test(facts.backupId)
     || !validInstant(facts.createdAt)
     || !validDay(facts.localDay) || !validMonth(facts.localMonth)
     || facts.localDay.slice(0, 7) !== facts.localMonth
     || !['daily', 'monthly'].includes(facts.retentionClass)
     || !validOpaque(facts.objectEtag) || !validOpaque(facts.atBookmark)
-    || !Number.isSafeInteger(facts.objectSize) || facts.objectSize < 0) invalid()
-  const keys = backupObjectKeys({ backupId: facts.backupId, localMonth: facts.localMonth })
+    || !Number.isSafeInteger(facts.objectSize) || facts.objectSize < 1
+    || facts.objectSize > BACKUP_SQL_MAX_BYTES) invalid()
+  const keys = backupObjectKeys({
+    backupId: facts.backupId,
+    localMonth: facts.localMonth,
+    version,
+  })
   if (facts.objectKey !== keys.objectKey) invalid()
   return facts
 }
 
+function sourceValue(value) {
+  const source = exactObject(value, SOURCE_KEYS)
+  if (typeof source.accountId !== 'string' || !ACCOUNT_ID.test(source.accountId)
+    || !['staging', 'production'].includes(source.appEnv)
+    || source.dataMode !== 'fictional'
+    || typeof source.databaseId !== 'string' || !DATABASE_ID.test(source.databaseId)) invalid()
+  return source
+}
+
+function migrationsValue(value) {
+  const rows = exactArray(value, 1, 256)
+  const captured = []
+  const names = new Set()
+  let previousId = 0
+  for (const row of rows) {
+    const migration = exactObject(row, MIGRATION_KEYS)
+    let encodedName
+    try {
+      if (!Number.isSafeInteger(migration.id) || migration.id <= previousId
+        || typeof migration.name !== 'string' || !MIGRATION_NAME.test(migration.name)
+        || names.has(migration.name)) invalid()
+      encodedName = new TextEncoder().encode(migration.name)
+      if (encodedName.byteLength > MIGRATION_NAME_MAX_BYTES) invalid()
+    } finally {
+      encodedName?.fill(0)
+    }
+    previousId = migration.id
+    names.add(migration.name)
+    captured.push(migration)
+  }
+  return captured
+}
+
+function sentinelValue(value, facts) {
+  const sentinel = exactObject(value, SENTINEL_KEYS)
+  if (sentinel.kind !== 'backup_run_v1'
+    || sentinel.backupId !== facts.backupId
+    || sentinel.createdAt !== facts.createdAt
+    || sentinel.localDay !== facts.localDay
+    || sentinel.localMonth !== facts.localMonth
+    || sentinel.retentionClass !== facts.retentionClass
+    || sentinel.status !== 'exporting'
+    || sentinel.version !== 2) invalid()
+  return sentinel
+}
+
+function factsValue(value) {
+  const facts = discriminatedObject(value, {
+    'bwm-d1-sql-v1': V1_FACT_KEYS,
+    'bwm-d1-sql-v2': V2_FACT_KEYS,
+    'bwm-d1-sql-v3': V3_FACT_KEYS,
+  })
+  if (facts.format === 'bwm-d1-sql-v1') return commonFactsValue(facts, 1)
+  commonFactsValue(facts, facts.format === 'bwm-d1-sql-v2' ? 2 : 3)
+  facts.source = sourceValue(facts.source)
+  facts.appliedMigrations = migrationsValue(facts.appliedMigrations)
+  facts.restoreSentinel = sentinelValue(facts.restoreSentinel, facts)
+  if (facts.format === 'bwm-d1-sql-v3') {
+    if (facts.objectSize < 1) invalid()
+    facts.recoveryFacts = validateBackupRecoveryFacts(facts.recoveryFacts)
+    if (typeof facts.plaintextSqlSha256 !== 'string'
+      || !SHA256.test(facts.plaintextSqlSha256)) invalid()
+    recoveryFactsMatchMigrations(facts.recoveryFacts, facts.appliedMigrations)
+  }
+  return facts
+}
+
 function manifestValue(value) {
-  const manifest = exactObject(value, ROOT_KEYS)
-  const facts = factsValue(Object.fromEntries(FACT_KEYS.map((key) => [key, manifest[key]])))
+  const manifest = discriminatedObject(value, {
+    'bwm-d1-sql-v1': V1_ROOT_KEYS,
+    'bwm-d1-sql-v2': V2_ROOT_KEYS,
+    'bwm-d1-sql-v3': V3_ROOT_KEYS,
+  })
+  const factKeys = manifest.format === 'bwm-d1-sql-v1'
+    ? V1_FACT_KEYS
+    : manifest.format === 'bwm-d1-sql-v2' ? V2_FACT_KEYS : V3_FACT_KEYS
+  const facts = factsValue(Object.fromEntries(factKeys.map((key) => [key, manifest[key]])))
   const wrapped = exactObject(manifest.wrappedSsecKey, WRAPPED_KEY_KEYS)
   if (wrapped.algorithm !== 'A256GCM'
     || !Number.isSafeInteger(wrapped.kekVersion) || wrapped.kekVersion <= 0
@@ -212,7 +346,10 @@ function decodeBase64Url(value, byteLength) {
 }
 
 function aadFor(facts) {
-  return new TextEncoder().encode(`bwm:backup-key:v1\n${canonicalJson(facts)}`)
+  const version = facts.format === 'bwm-d1-sql-v1'
+    ? 1
+    : facts.format === 'bwm-d1-sql-v2' ? 2 : 3
+  return new TextEncoder().encode(`bwm:backup-key:v${version}\n${canonicalJson(facts)}`)
 }
 
 function zero(bytes) {
@@ -229,19 +366,26 @@ export function canonicalJson(value) {
 
 export function backupObjectKeys(input) {
   return attempt(() => {
-    const value = exactObject(input, ['backupId', 'localMonth'])
+    const { keys, descriptors } = descriptorsFor(input, Object.prototype)
+    const fields = keys.length === 2
+      ? ['backupId', 'localMonth']
+      : ['backupId', 'localMonth', 'version']
+    if (keys.length !== fields.length || fields.some((field) => !descriptors.has(field))) invalid()
+    const value = Object.fromEntries(fields.map((field) => [field, descriptors.get(field).value]))
     if (typeof value.backupId !== 'string' || !BACKUP_ID.test(value.backupId) || !validMonth(value.localMonth)) invalid()
+    const version = fields.length === 2 ? 1 : value.version
+    if (![1, 2, 3].includes(version)) invalid()
     const [year, month] = value.localMonth.split('-')
     return {
-      objectKey: `backups/v1/${year}/${month}/${value.backupId}.sql`,
-      manifestKey: `backups/v1/${year}/${month}/${value.backupId}.manifest.json`,
+      objectKey: `backups/v${version}/${year}/${month}/${value.backupId}.sql`,
+      manifestKey: `backups/v${version}/${year}/${month}/${value.backupId}.manifest.json`,
     }
   })
 }
 
 export function parseCanonicalManifest(bytes) {
   return attempt(() => {
-    if (!(bytes instanceof Uint8Array)) invalid()
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength > MANIFEST_MAX_BYTES) invalid()
     if (bytes.byteLength >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) invalid()
     const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
     const parsed = JSON.parse(text)
@@ -260,10 +404,15 @@ export function parseCanonicalManifest(bytes) {
 export function expectedObjectMetadata(manifest) {
   return attempt(() => {
     const value = manifestValue(manifest)
-    return {
+    const common = {
       backupId: value.backupId,
       format: value.format,
       retentionClass: value.retentionClass,
+    }
+    return value.format === 'bwm-d1-sql-v1' ? common : {
+      ...common,
+      sourceAppEnv: value.source.appEnv,
+      sourceDatabaseId: value.source.databaseId,
     }
   })
 }
@@ -306,6 +455,10 @@ export async function createBackupManifest(input) {
     }
     const complete = manifestValue(manifest)
     const bytes = new TextEncoder().encode(canonicalJson(complete))
+    if (bytes.byteLength > MANIFEST_MAX_BYTES) {
+      bytes.fill(0)
+      invalid()
+    }
     return {
       manifest: complete,
       bytes,
@@ -338,7 +491,10 @@ export async function openBackupManifest(input) {
     ciphertext = decodeBase64Url(manifest.wrappedSsecKey.ciphertext, 48)
     const kek = await ring.getBackupKek(manifest.wrappedSsecKey.kekVersion)
     if (!validBackupKek(kek)) invalid()
-    aad = aadFor(factsValue(Object.fromEntries(FACT_KEYS.map((key) => [key, manifest[key]]))))
+    const factKeys = manifest.format === 'bwm-d1-sql-v1'
+      ? V1_FACT_KEYS
+      : manifest.format === 'bwm-d1-sql-v2' ? V2_FACT_KEYS : V3_FACT_KEYS
+    aad = aadFor(factsValue(Object.fromEntries(factKeys.map((key) => [key, manifest[key]]))))
     plaintext = new Uint8Array(await crypto.subtle.decrypt({
       name: 'AES-GCM', iv: nonce, additionalData: aad, tagLength: 128,
     }, kek, ciphertext))

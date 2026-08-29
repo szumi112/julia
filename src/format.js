@@ -186,6 +186,7 @@ export const METHOD_LABELS = {
   cash: 'Gotówka',
   card: 'Karta',
   transfer: 'Przelew',
+  monthly: 'Miesięcznie',
 }
 
 // index = Date.getDay()

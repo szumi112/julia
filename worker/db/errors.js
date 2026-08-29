@@ -16,6 +16,11 @@ const exactSignal = (error, signal) => new RegExp(
   `^(?:${signal}: SQLITE_CONSTRAINT(?: \\(extended: SQLITE_CONSTRAINT_TRIGGER\\))?|D1_ERROR: ${signal}: SQLITE_CONSTRAINT(?: \\(extended: SQLITE_CONSTRAINT_TRIGGER\\))?)$`
 ).test(messageOf(error))
 
+const MISSING_COLUMNS = new Set([
+  'specialist.display_name_envelope',
+  'specialist.professional_title_envelope',
+])
+
 export const isD1IdentityCollision = (error) => exactSignal(error, 'identity_collision')
 
 export const isD1FinanceSourceDuplicate = (error) => exactSignal(error, 'finance_source_duplicate')
@@ -27,6 +32,16 @@ export const isD1RateLimitGuardFailure = (error) => exactSignal(error, 'rate_lim
 export const isD1CoreDirectoryInvariantFailure = (error) => exactSignal(error, 'core_directory_invariant_failed')
 
 export const isD1OutboxOperationGuardFailure = (error) => exactSignal(error, 'outbox_operation_guard_failed')
+
+export const isD1InvalidOutboxRecoveryEdge = (error) => exactSignal(error, 'invalid_recovery_edge')
+
+export const isD1MissingColumn = (error, column) => {
+  if (!MISSING_COLUMNS.has(column)) return false
+  const escaped = column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(
+    `^(?:no such column: ${escaped}|D1_ERROR: no such column: ${escaped}(?: at offset \\d+)?: SQLITE_ERROR)$`,
+  ).test(messageOf(error))
+}
 
 export const classifyCoreConstraintError = (error) => exactSignal(error, 'invalid_payment_correction')
   ? 'PAYMENT_CORRECTION_CONFLICT'

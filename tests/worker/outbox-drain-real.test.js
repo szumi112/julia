@@ -299,7 +299,7 @@ describe('real-handler free-tier outbox drain', () => {
 
     expect(results.length).toBeGreaterThan(1)
     expect(results.every((result) => result.status === 'succeeded')).toBe(true)
-    expect(Math.max(...usages.map(({ statements }) => statements))).toBe(49)
+    expect(Math.max(...usages.map(({ statements }) => statements))).toBe(50)
     expect(Math.max(...usages.map(({ maxBindings }) => maxBindings))).toBe(45)
     expect(accessJobs.results.length).toBeGreaterThan(1)
     expect(accessJobs.results.every((job) => job.status === 'succeeded')).toBe(true)
@@ -394,7 +394,7 @@ describe('real-handler free-tier outbox drain', () => {
     expect(invitation).toEqual({ status: 'pending', email_sent_at: EMAIL_NOW, version: 2 })
     expect(completedJob).toEqual({ status: 'succeeded' })
     expect(delivery).toEqual({
-      provider: 'scaleway_tem',
+      provider: 'resend',
       provider_reference: EMAIL_PROVIDER_ID,
       status: 'accepted',
     })

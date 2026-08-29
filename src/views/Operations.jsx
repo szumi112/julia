@@ -3,6 +3,7 @@ import { ApiError, apiClient } from '../api.js'
 import { useShell } from '../shell-ctx.js'
 import { useApp } from '../store.jsx'
 import { Button, IconBtn, Pill } from '../ui.jsx'
+import { canPerformAction } from '../capability-access.js'
 
 const timeFormat = new Intl.DateTimeFormat('pl-PL', {
   dateStyle: 'medium',
@@ -61,6 +62,16 @@ const ACTION_COPY = Object.freeze({
 })
 
 const AUDIT_ACTIONS = Object.freeze({
+  'activity.attendance.set': 'Ustawienie obecności na zajęciach',
+  'activity.class.created': 'Utworzenie zajęć grupowych',
+  'activity.class.updated': 'Aktualizacja zajęć grupowych',
+  'activity.group.created': 'Utworzenie grupy zajęciowej',
+  'activity.group.updated': 'Aktualizacja grupy zajęciowej',
+  'activity.membership.created': 'Dodanie uczestnika do grupy',
+  'activity.membership.updated': 'Aktualizacja członkostwa w grupie',
+  'activity.participant.created': 'Utworzenie uczestnika zajęć',
+  'activity.participant.updated': 'Aktualizacja uczestnika zajęć',
+  'activity.projection.advanced': 'Postęp importu aktywności',
   'authorization.denied': 'Odmowa autoryzacji',
   'backup.pruned': 'Usunięcie wygasłej kopii zapasowej',
   'data_key.rewrapped': 'Ponowne zabezpieczenie klucza danych',
@@ -68,12 +79,14 @@ const AUDIT_ACTIONS = Object.freeze({
   'identity.denied': 'Odmowa aktywacji tożsamości',
   'identity.reindex': 'Aktualizacja indeksu tożsamości',
   'operational_action.resolved': 'Rozwiązanie działania operacyjnego',
+  'outbox.recovery.requested': 'Ponowienie zadania kolejki',
   'staff.access.reconciled': 'Synchronizacja dostępu personelu',
   'staff.bootstrap': 'Utworzenie konta właściciela',
   'staff.deactivated': 'Wyłączenie dostępu personelu',
   'staff.invitation.email_accepted': 'Przyjęcie wiadomości z zaproszeniem',
   'staff.invitation.expired': 'Wygaśnięcie zaproszenia',
   'staff.invited': 'Zaproszenie personelu',
+  'staff.profile.updated': 'Aktualizacja profilu personelu',
 })
 
 const AUDIT_RESULTS = Object.freeze({
@@ -157,7 +170,7 @@ function PanelHeader({ title, refreshLabel, refreshing, onRefresh, titleRef }) {
   )
 }
 
-function ResolutionConfirm({ action, fallbackRef, opener, onClose, onReconcile }) {
+function ActionConfirm({ action, fallbackRef, mode, opener, onClose, onReconcile }) {
   const titleId = useId()
   const dialogRef = useRef(null)
   const cardRef = useRef(null)
@@ -166,6 +179,7 @@ function ResolutionConfirm({ action, fallbackRef, opener, onClose, onReconcile }
   const [saveStatus, setSaveStatus] = useState('idle')
   const [saveError, setSaveError] = useState(null)
   const busy = saveStatus === 'submitting' || saveStatus === 'reconciling'
+  const recovering = mode === 'recover'
 
   useEffect(() => {
     activeRef.current = true
@@ -223,27 +237,40 @@ function ResolutionConfirm({ action, fallbackRef, opener, onClose, onReconcile }
     let key
     try {
       key = apiClient.createIdempotencyKey()
-      await apiClient.resolveOperationalAction(action.id, action.version, {
+      const command = recovering
+        ? apiClient.recoverOperationalAction
+        : apiClient.resolveOperationalAction
+      await command(action.id, action.version, {
         idempotencyKey: key,
       })
       if (!activeRef.current) return
       key = null
       setSaveStatus('reconciling')
-      const result = await onReconcile(action, 'success')
+      const result = await onReconcile(action, 'success', mode)
       if (activeRef.current && result.active) onClose()
     } catch (error) {
       if (!activeRef.current) return
-      const conflict = error instanceof ApiError && error.code === 'VERSION_CONFLICT'
+      const conflict = error instanceof ApiError
+        && (error.code === 'VERSION_CONFLICT'
+          || (recovering && error.code === 'OUTBOX_RECOVERY_CONFLICT'))
       const uncertain = error instanceof ApiError && error.idempotencyKey === key
       key = null
       if (conflict || uncertain) {
         setSaveStatus('reconciling')
-        const result = await onReconcile(action, conflict ? 'conflict' : 'uncertain')
+        const result = await onReconcile(
+          action,
+          conflict ? 'conflict' : 'uncertain',
+          mode,
+        )
         if (activeRef.current && result.active) onClose()
         return
       }
       setSaveStatus('error')
-      setSaveError('Nie udało się oznaczyć działania jako rozwiązanego.')
+      setSaveError(recovering
+        ? error instanceof ApiError && error.code === 'OUTBOX_RECOVERY_UNSAFE'
+          ? 'Tego zadania nie można bezpiecznie ponowić.'
+          : 'Nie udało się zlecić ponowienia zadania.'
+        : 'Nie udało się oznaczyć działania jako rozwiązanego.')
     } finally {
       submitLockRef.current = false
     }
@@ -263,8 +290,14 @@ function ResolutionConfirm({ action, fallbackRef, opener, onClose, onReconcile }
       <div className="leave-confirm operations-confirm">
         <div className="leave-confirm__backdrop" onClick={close} />
         <div className="leave-confirm__card" ref={cardRef} aria-busy={busy ? 'true' : undefined}>
-          <h2 className="display" id={titleId}>Oznacz działanie jako rozwiązane</h2>
-          <p>Potwierdź, że działanie zostało sprawdzone i nie wymaga dalszej interwencji.</p>
+          <h2 className="display" id={titleId}>
+            {recovering ? 'Ponów nieudane zadanie' : 'Oznacz działanie jako rozwiązane'}
+          </h2>
+          <p>
+            {recovering
+              ? 'System utworzy nowe, bezpieczne zadanie zastępcze i zachowa historię wcześniejszej próby.'
+              : 'Potwierdź, że działanie zostało sprawdzone i nie wymaga dalszej interwencji.'}
+          </p>
           {saveError ? (
             <div className="form-warn form-warn--error" role="alert">
               <span>{saveError}</span>
@@ -272,7 +305,9 @@ function ResolutionConfirm({ action, fallbackRef, opener, onClose, onReconcile }
           ) : null}
           <div className="leave-confirm__actions">
             <Button variant="ghost" disabled={busy} onClick={close}>Wróć</Button>
-            <Button disabled={busy} onClick={submit}>Oznacz jako rozwiązane</Button>
+            <Button disabled={busy} onClick={submit}>
+              {recovering ? 'Ponów zadanie' : 'Oznacz jako rozwiązane'}
+            </Button>
           </div>
         </div>
       </div>
@@ -282,8 +317,11 @@ function ResolutionConfirm({ action, fallbackRef, opener, onClose, onReconcile }
 
 export function OperationsPanel({ sectionRef }) {
   const { toast } = useApp()
-  const { appMode, capabilities } = useShell()
-  const canReadAudit = appMode === 'app' && capabilities.includes('security.audit.read')
+  const { actor, appMode, capabilities } = useShell()
+  const canRecover = appMode === 'app' && actor?.role === 'owner'
+    && canPerformAction(capabilities, 'staff.invite')
+  const canReadAudit = appMode === 'app'
+    && canPerformAction(capabilities, 'security.audit.read')
   const tabs = useMemo(() => [
     { id: 'health', label: 'Stan systemu' },
     { id: 'actions', label: 'Działania' },
@@ -468,7 +506,7 @@ export function OperationsPanel({ sectionRef }) {
     activateTab(tabs[nextIndex].id, true)
   }
 
-  const reconcileAction = useCallback(async (action, outcome) => {
+  const reconcileAction = useCallback(async (action, outcome, mode = 'resolve') => {
     if (!activeRef.current) return { active: false, ok: false }
     const result = await loadActions({
       blockResolutionOnFailure: outcome === 'uncertain',
@@ -478,7 +516,9 @@ export function OperationsPanel({ sectionRef }) {
     })
     if (!activeRef.current) return { active: false, ok: false }
     if (outcome === 'success') {
-      toast('Działanie zostało oznaczone jako rozwiązane.')
+      toast(mode === 'recover'
+        ? 'Ponowienie zadania zostało zlecone.'
+        : 'Działanie zostało oznaczone jako rozwiązane.')
       return { ...result, active: true }
     }
     if (result.ok) {
@@ -489,6 +529,10 @@ export function OperationsPanel({ sectionRef }) {
   }, [loadActions, toast])
 
   const closeConfirmation = useCallback(() => setConfirmation(null), [])
+
+  useEffect(() => {
+    if (confirmation?.mode === 'recover' && !canRecover) setConfirmation(null)
+  }, [canRecover, confirmation?.mode])
 
   return (
     <>
@@ -598,6 +642,9 @@ export function OperationsPanel({ sectionRef }) {
                 <ul className="operations-list" aria-label="Otwarte działania">
                   {actions.data.actions.map((action) => {
                     const copy = ACTION_COPY[action.kind]
+                    const recovery = action.recovery
+                    const recoveryPending = recovery?.status === 'queued'
+                      || recovery?.status === 'processing'
                     const severity = action.severity === 'warning'
                       ? { label: 'Ostrzeżenie', tone: 'amber' }
                       : { label: 'Krytyczne', tone: 'error' }
@@ -606,23 +653,53 @@ export function OperationsPanel({ sectionRef }) {
                         <div className="operations-row__content">
                           <strong className="operations-row__title">{copy.label}</strong>
                           <p>{copy.description}</p>
+                          {recovery?.status === 'unsafe' ? (
+                            <p>Ponowienie mogłoby wysłać zaproszenie drugi raz. Sprawdź stan ręcznie przed zamknięciem działania.</p>
+                          ) : null}
+                          {recovery?.status === 'available' && !canRecover ? (
+                            <p>{actor?.role === 'owner'
+                              ? 'Brakuje uprawnienia do zarządzania personelem.'
+                              : 'Wymaga działania właściciela'}</p>
+                          ) : null}
                           <p className="operations-row__meta">
                             Utworzono <time dateTime={action.createdAt}>{formatTime(action.createdAt)}</time>
                           </p>
                         </div>
                         <div className="operations-row__commands">
                           <Pill tone={severity.tone}>{severity.label}</Pill>
-                          <Button
-                            size="sm"
-                            variant="soft"
-                            disabled={actions.resolutionBlocked}
-                            onClick={(event) => setConfirmation({
-                              action,
-                              opener: event.currentTarget,
-                            })}
-                          >
-                            Oznacz jako rozwiązane
-                          </Button>
+                          {recoveryPending ? <Pill tone="amber">Ponawianie w toku</Pill> : null}
+                          {recovery?.status === 'unsafe' ? (
+                            <Pill tone="error">Nie można bezpiecznie ponowić</Pill>
+                          ) : null}
+                          {recovery?.status === 'available' && canRecover ? (
+                            <Button
+                              size="sm"
+                              variant="soft"
+                              disabled={actions.resolutionBlocked}
+                              onClick={(event) => setConfirmation({
+                                action,
+                                mode: 'recover',
+                                opener: event.currentTarget,
+                              })}
+                            >
+                              Ponów zadanie
+                            </Button>
+                          ) : null}
+                          {(recovery === null
+                            || (recovery?.status === 'unsafe' && canRecover)) ? (
+                            <Button
+                              size="sm"
+                              variant="soft"
+                              disabled={actions.resolutionBlocked}
+                              onClick={(event) => setConfirmation({
+                                action,
+                                mode: 'resolve',
+                                opener: event.currentTarget,
+                              })}
+                            >
+                              Oznacz jako rozwiązane
+                            </Button>
+                          ) : null}
                         </div>
                       </li>
                     )
@@ -736,9 +813,10 @@ export function OperationsPanel({ sectionRef }) {
         ) : null}
       </section>
       {confirmation ? (
-        <ResolutionConfirm
+        <ActionConfirm
           action={confirmation.action}
           fallbackRef={actionsTabRef}
+          mode={confirmation.mode}
           opener={confirmation.opener}
           onClose={closeConfirmation}
           onReconcile={reconcileAction}

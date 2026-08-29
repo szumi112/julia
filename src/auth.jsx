@@ -5,6 +5,9 @@ import { APP_MODE } from './app-mode.js'
 const AuthCtx = createContext(null)
 const DENIED_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'FORBIDDEN'])
 const EMPTY_CAPABILITIES = Object.freeze([])
+const REFRESH_LEAD_MS = 60_000
+const REFRESH_MIN_DELAY_MS = 5_000
+const REFRESH_MAX_DELAY_MS = 5 * 60_000
 
 const authStateFor = (error) => (
   error instanceof ApiError
@@ -93,6 +96,33 @@ export function AuthProvider({ children, client = apiClient }) {
     void requestSession('loading')
   }, [requestSession])
   const refresh = useCallback(() => requestSession('refreshing'), [requestSession])
+  useEffect(() => {
+    if (auth.status !== 'authenticated' || !auth.session) return undefined
+    const expiresAt = Date.parse(auth.session.csrfExpiresAt)
+    const untilRefresh = Number.isFinite(expiresAt)
+      ? expiresAt - Date.now() - REFRESH_LEAD_MS
+      : REFRESH_MIN_DELAY_MS
+    const delay = Math.max(
+      REFRESH_MIN_DELAY_MS,
+      Math.min(REFRESH_MAX_DELAY_MS, untilRefresh),
+    )
+    const timer = window.setTimeout(() => {
+      void refresh()
+    }, delay)
+    return () => window.clearTimeout(timer)
+  }, [auth.session, auth.status, refresh])
+  useEffect(() => {
+    if (auth.status !== 'authenticated') return undefined
+    const refreshVisibleAuthority = () => {
+      if (document.visibilityState === 'visible') void refresh()
+    }
+    window.addEventListener('focus', refreshVisibleAuthority)
+    document.addEventListener('visibilitychange', refreshVisibleAuthority)
+    return () => {
+      window.removeEventListener('focus', refreshVisibleAuthority)
+      document.removeEventListener('visibilitychange', refreshVisibleAuthority)
+    }
+  }, [auth.status, refresh])
   useEffect(() => {
     if (!import.meta.env.DEV || APP_MODE !== 'app') return undefined
     const onTestRefresh = () => {

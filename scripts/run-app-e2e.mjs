@@ -31,7 +31,7 @@ import {
   sep,
 } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { CAPABILITIES } from '../worker/identity/policy.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../src/capabilities.js'
 import {
   buildLocalHarnessWranglerConfig,
   LOCAL_HARNESS_ACTIVE_MIGRATIONS_NAME,
@@ -46,6 +46,7 @@ import {
   CORE_MIGRATION_STAGE_B_NAMES,
   CORE_MIGRATION_STAGE_C_NAMES,
   CORE_MIGRATION_STAGE_D_NAMES,
+  CORE_MIGRATION_STAGE_E_NAMES,
 } from './core-migration-stages.js'
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
@@ -108,6 +109,8 @@ const KEY_NAMES = Object.freeze([
   'BWM_BACKUP_KEK_V1',
   'BWM_DATA_KEK_V1',
   'BWM_LOOKUP_HMAC_V1',
+  'BWM_WORKBOOK_HMAC_V1',
+  'BWM_WORKBOOK_KEK_V1',
 ])
 const PHASE = Object.freeze({
   init: 0,
@@ -418,24 +421,32 @@ export async function assertReadySession(response, {
   if (!exactKeys(body, ['data'])
     || !exactKeys(data, [
       'actor',
+      'authorityRevision',
       'capabilities',
       'csrfToken',
       'csrfExpiresAt',
       'environment',
       'dataMode',
     ])
-    || !exactKeys(actor, ['id', 'displayName', 'role', 'specialistId', 'version'])
+    || !exactKeys(actor, [
+      'id', 'displayName', 'professionalTitle', 'role', 'specialistId', 'version',
+    ])
     || actor.id !== 'stf_local_owner'
     || actor.displayName !== 'Alicja Testowa'
+    || actor.professionalTitle !== null
     || actor.role !== 'owner'
     || actor.specialistId !== null
     || !Number.isSafeInteger(actor.version)
     || actor.version < 1
+    || !Number.isSafeInteger(data.authorityRevision)
+    || data.authorityRevision < 1
     || data.environment !== 'development'
     || data.dataMode !== 'fictional'
     || !Array.isArray(data.capabilities)
-    || data.capabilities.length !== CAPABILITIES.length
-    || data.capabilities.some((capability, index) => capability !== CAPABILITIES[index])
+    || data.capabilities.length !== ROLE_DEFAULT_CAPABILITIES.owner.length
+    || data.capabilities.some((capability, index) => (
+      capability !== ROLE_DEFAULT_CAPABILITIES.owner[index]
+    ))
     || !validCsrfProof(data.csrfToken, data.csrfExpiresAt, nowMs)
     || !ID.test(actor.id)) fail('APP_E2E_READINESS_INVALID')
   return Object.freeze({
@@ -1578,7 +1589,9 @@ const defaultAssertHarness = async (harness, migrationStage = 'stage-a') => {
         ? CORE_MIGRATION_STAGE_C_NAMES
         : migrationStage === 'stage-d'
           ? CORE_MIGRATION_STAGE_D_NAMES
-          : null
+          : migrationStage === 'stage-e'
+            ? CORE_MIGRATION_STAGE_E_NAMES
+            : null
   const migrationNames = readdirSync(activeMigrations).sort()
   if (!expectedMigrations
     || migrationNames.length !== expectedMigrations.length
@@ -2428,6 +2441,26 @@ export async function runAppE2E({
       shell: false,
     }, 'APP_E2E_MIGRATION_FAILED')
     migrationStage = 'stage-d'
+
+    await assertHarness(harness, migrationStage)
+    if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
+    await executeStage({
+      args: [
+        regularExecutable(APPLY_MIGRATION_STAGE_SCRIPT_PATH),
+        'stage-e',
+        '--local',
+      ],
+      command: regularExecutable(NODE_EXECUTABLE),
+      cwd: harness.path,
+      env: privateChildEnvironment(harness, {
+        APP_ENV: 'development',
+        BWM_LOCAL_PERSISTENCE_PATH: harness.state.path,
+        BWM_LOCAL_RUNNER_MODE: LOCAL_HARNESS_RUNNER_MODE,
+        DATA_MODE: 'fictional',
+      }),
+      shell: false,
+    }, 'APP_E2E_MIGRATION_FAILED')
+    migrationStage = 'stage-e'
 
     advance(PHASE.starting)
     await assertHarness(harness, migrationStage)
