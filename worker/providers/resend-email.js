@@ -319,7 +319,7 @@ export async function sendInvitationEmail(input = {}) {
       'Idempotency-Key': input.jobId,
     },
     body: JSON.stringify(body),
-    redirect: 'error',
+    redirect: 'manual',
   }
   const controller = new AbortController()
   let timeout

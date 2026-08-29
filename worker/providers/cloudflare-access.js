@@ -239,7 +239,7 @@ async function request(input, validated, method, body) {
               }
             : { Authorization: `Bearer ${input.token}` },
           ...(body === undefined ? {} : { body }),
-          redirect: 'error',
+          redirect: 'manual',
           signal: controller.signal,
         })),
         fetchAborted,

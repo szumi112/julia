@@ -91,7 +91,7 @@ describe('Cloudflare Access provider', () => {
     expect(JSON.parse(fetch.mock.calls[1][1].body).include).toEqual(sentinel)
   })
 
-  it('uses exact GET/PUT/GET requests and emits one deterministic controlled body', async () => {
+  it('uses exact GET/PUT/GET requests with a Workers-compatible manual redirect policy', async () => {
     const desired = [
       { email: { email: 'anna@example.test' } },
       { email: { email: 'zoe@example.test' } },
@@ -114,7 +114,7 @@ describe('Cloudflare Access provider', () => {
     ])
     for (const [, init] of fetch.mock.calls) {
       expect(init.headers.Authorization).toBe(`Bearer ${TOKEN}`)
-      expect(init.redirect).toBe('error')
+      expect(init.redirect).toBe('manual')
       expect(init.signal).toBeInstanceOf(AbortSignal)
     }
     expect(fetch.mock.calls[0][1].headers).toEqual({ Authorization: `Bearer ${TOKEN}` })
