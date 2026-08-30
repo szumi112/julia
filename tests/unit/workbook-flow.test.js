@@ -8,6 +8,7 @@ import {
   matchesWorkbookResolutionResult,
   shouldContinueWorkbookMaterialization,
   specialistOptionsForSelect,
+  workbookVisibleProgress,
   workbookFlowReducer,
 } from '../../src/workbook-flow.js'
 
@@ -299,4 +300,25 @@ test('workbook materialization refuses to auto-continue an unreadable import', (
   for (const value of [null, undefined, 'materializing', [], { status: 'materializing' }]) {
     assert.equal(shouldContinueWorkbookMaterialization(value), false)
   }
+})
+
+test('workbook progress prefers the running slice count and never regresses', () => {
+  const loaded = { processed: 64, total: 2234 }
+
+  assert.deepEqual(workbookVisibleProgress(loaded, null, 'wbi_flow_one'), loaded)
+  assert.deepEqual(
+    workbookVisibleProgress(loaded, { importId: 'wbi_other', processed: 512 }, 'wbi_flow_one'),
+    loaded,
+    'a run on another import must not bleed into this row',
+  )
+  assert.deepEqual(
+    workbookVisibleProgress(loaded, { importId: 'wbi_flow_one', processed: 512 }, 'wbi_flow_one'),
+    { processed: 512, total: 2234 },
+  )
+  assert.deepEqual(
+    workbookVisibleProgress({ processed: 640, total: 2234 }, { importId: 'wbi_flow_one', processed: 512 }, 'wbi_flow_one'),
+    { processed: 640, total: 2234 },
+    'a settled reload that is already ahead must win',
+  )
+  assert.equal(workbookVisibleProgress(null, { importId: 'wbi_flow_one', processed: 512 }, 'wbi_flow_one'), null)
 })

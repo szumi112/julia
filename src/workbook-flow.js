@@ -168,6 +168,11 @@ const captureImported = (raw) => {
   return Object.freeze({ id, status, version, createdByStaffId, resolutionVersion })
 }
 
+export const workbookVisibleProgress = (progress, live, importId) => {
+  if (!progress || !live || live.importId !== importId) return progress
+  return { ...progress, processed: Math.max(progress.processed, live.processed) }
+}
+
 export const shouldContinueWorkbookMaterialization = (rawImported) => {
   try {
     return phaseForStatus(captureImported(rawImported).status) === 'materializing'

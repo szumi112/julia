@@ -998,13 +998,23 @@ test('@owner drives every remaining materialization slice from one continuation 
     },
   )
 
+  let registryLoads = 0
+  page.on('request', (request) => {
+    if (request.url().includes('/workbooks/registry?')) registryLoads += 1
+  })
+
   await page.goto('./#/ledger')
-  await page.getByRole('button', { name: 'Kontynuuj import' }).click()
+  const continueButton = page.getByRole('button', { name: 'Kontynuuj import' })
+  await expect(continueButton).toBeVisible()
+  const settledLoads = registryLoads
+  await continueButton.click()
   await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
     .toBeFocused()
   await expect(page.getByRole('alert')).toHaveCount(0)
   expect(keys).toHaveLength(3)
   expect(new Set(keys).size).toBe(3)
+  // The run must reload the registry once when it settles, never per slice.
+  expect(registryLoads - settledLoads).toBe(1)
 })
 
 test('@coordinator @specialist keeps capability-scoped finance controls', async ({ page }, testInfo) => {
