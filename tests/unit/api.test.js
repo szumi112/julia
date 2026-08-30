@@ -6142,3 +6142,30 @@ test('activity projection continuation creates version one from expected version
     }), { code: 'INVALID_RESPONSE' })
   }
 })
+
+test('workbook continuation accepts a mid-materialization slice that only advances the job', async () => {
+  // The server bumps workbook_imports.version only on status transitions
+  // (ready -> materializing, -> complete). Every slice in between advances the
+  // job alone, so the import version legitimately repeats.
+  const materializing = workbookImportDto({
+    status: 'materializing', version: 2, updatedAt: '2026-08-27T10:02:00.000Z',
+  })
+  const { fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse({ data: {
+      import: materializing,
+      job: workbookJobDto({ cursor: 128, processedRecords: 128, version: 3 }),
+      evidence: { createdRecords: 128, voidedRecords: 0, converged: false },
+    } }),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  assert.deepEqual(await client.continueWorkbookImport('wbi_api_one', 2, {
+    idempotencyKey: 'workbook-continue-key-0002',
+  }), {
+    import: materializing,
+    job: workbookJobDto({ cursor: 128, processedRecords: 128, version: 3 }),
+    evidence: { createdRecords: 128, voidedRecords: 0, converged: false },
+  })
+})

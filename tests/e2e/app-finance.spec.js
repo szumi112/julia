@@ -953,16 +953,16 @@ test('@owner drives every remaining materialization slice from one continuation 
   await routeWorkspace(page)
   await routeOwnPayments(page)
   await routeRegistry(page, [registryImport({
-    status: 'materializing', version: 1, progress: { processed: 64, total: 192 },
+    status: 'materializing', version: 2, progress: { processed: 64, total: 192 },
   })])
   await page.route('**/api/v1/finance/window?*', (route) => (
     route.fulfill(json(financeWindow('2026-07')))
   ))
   await page.route('**/api/v1/workbooks/imports/wbi_finance_e2e', (route) => (
     route.fulfill(json({ data: {
-      import: importedDto({ status: 'materializing', version: 1 }),
-      job: jobDto({ status: 'running', cursor: 64, processedRecords: 64, totalRecords: 192 }),
-      evidence: { createdRecords: 0, voidedRecords: 0, converged: false },
+      import: importedDto({ status: 'materializing', version: 2 }),
+      job: jobDto({ status: 'running', cursor: 64, processedRecords: 64, totalRecords: 192, version: 2 }),
+      evidence: { createdRecords: 64, voidedRecords: 0, converged: false },
     } }))
   ))
   const keys = []
@@ -974,16 +974,18 @@ test('@owner drives every remaining materialization slice from one continuation 
       const done = attempt === 3
       const processed = Math.min(64 * (attempt + 1), 192)
       return route.fulfill(json({ data: {
+        // The server bumps the import version only on status transitions, so it
+        // repeats across every slice until the run completes.
         import: importedDto({
           status: done ? 'complete' : 'materializing',
-          version: attempt + 1,
+          version: done ? 3 : 2,
           completedAt: done ? NOW : null,
         }),
         job: jobDto({
           phase: done ? 'complete' : 'apply_finance',
           status: done ? 'complete' : 'running',
           cursor: processed, processedRecords: processed, totalRecords: 192,
-          version: attempt + 1, completedAt: done ? NOW : null,
+          version: attempt + 2, completedAt: done ? NOW : null,
         }),
         evidence: { createdRecords: processed, voidedRecords: 0, converged: done },
         ...(done ? { reconciliation: {
@@ -1000,6 +1002,7 @@ test('@owner drives every remaining materialization slice from one continuation 
   await page.getByRole('button', { name: 'Kontynuuj import' }).click()
   await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
     .toBeFocused()
+  await expect(page.getByRole('alert')).toHaveCount(0)
   expect(keys).toHaveLength(3)
   expect(new Set(keys).size).toBe(3)
 })

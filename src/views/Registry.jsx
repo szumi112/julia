@@ -558,6 +558,7 @@ export function Registry({ params = {} }) {
       // Each continuation materializes one server-side slice, so drive the
       // remaining slices here instead of asking the operator to click per slice.
       let pendingVersion = status.import.version
+      let jobVersion = status.job.version
       for (;;) {
         dispatchFlow({ type: WORKBOOK_FLOW_ACTIONS.CONTINUE_STARTED, generation })
         const keyId = `${item.id}:${pendingVersion}`
@@ -569,9 +570,15 @@ export function Registry({ params = {} }) {
             idempotencyKey: continuationKeysRef.current.get(keyId), signal: controller.signal,
           },
         )
-        if (!matchesWorkbookContinuationImport(continued.import, expected, {
-          requireNewer: true,
-        })) throw new Error('WORKBOOK_CONTINUATION_AUTHORITY_CHANGED')
+        if (!matchesWorkbookContinuationImport(continued.import, expected)) {
+          throw new Error('WORKBOOK_CONTINUATION_AUTHORITY_CHANGED')
+        }
+        // Only status transitions bump the import version, so the job is what
+        // proves a slice actually advanced and keeps this loop finite.
+        if (continued.job.version <= jobVersion) {
+          throw new Error('WORKBOOK_CONTINUATION_STALLED')
+        }
+        jobVersion = continued.job.version
         let continuedCatalog = null
         if (continued.import.status === 'conflicts') {
           continuedCatalog = await loadConflictCatalog(item.id, controller.signal)

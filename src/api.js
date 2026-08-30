@@ -2486,8 +2486,10 @@ const acceptedWorkbookStatus = (payload, status) => {
 
 const acceptedWorkbookStatusFor = (importId, minimumVersion = null) => (payload, status) => {
   const result = acceptedWorkbookStatus(payload, status)
+  // Only status transitions bump the import version, so a slice that advances
+  // the job alone legitimately repeats it. The version must never go backwards.
   if (!result || result.import.id !== importId
-    || (minimumVersion !== null && result.import.version <= minimumVersion)) return null
+    || (minimumVersion !== null && result.import.version < minimumVersion)) return null
   return result
 }
 
