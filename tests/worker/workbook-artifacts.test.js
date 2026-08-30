@@ -222,6 +222,45 @@ describe('workbook HMAC domain', () => {
     await expect(callbacks.verify(tampered, signature)).resolves.toBe(false)
   })
 
+  it('signs legacy raw cells that carry decimal amounts', async () => {
+    const keyring = await ring()
+    const payload = {
+      schema: 'workbook_source_payload.v1',
+      normalized: { sourceLabel: 'Fikcyjny koszt stały', amountGrosze: 30_750 },
+      raw: { Kwota: 307.5 },
+    }
+
+    await expect(digestWorkbookSourcePayload({
+      keyring,
+      config,
+      centreId: 'centre_1',
+      sourceKey: 'workbook:v1:24:4:10',
+      payload,
+    })).resolves.toEqual({
+      digest: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      hmacVersion: 1,
+    })
+  })
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    'refuses to sign a raw cell holding %p, which JSON renders as a colliding null',
+    async (unsignable) => {
+      const keyring = await ring()
+
+      await expect(digestWorkbookSourcePayload({
+        keyring,
+        config,
+        centreId: 'centre_1',
+        sourceKey: 'workbook:v1:24:4:10',
+        payload: {
+          schema: 'workbook_source_payload.v1',
+          normalized: { amountGrosze: 30_750 },
+          raw: { Kwota: unsignable },
+        },
+      })).rejects.toThrow(/^WORKBOOK_PANEL_SIGNATURE_INVALID$/)
+    },
+  )
+
   it('uses literal domain-separated keyed digests for source provenance and Panel field bases', async () => {
     const keyring = await ring()
     const payload = {

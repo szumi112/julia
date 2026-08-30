@@ -774,13 +774,15 @@ test('status, resolution and void commands use landed exact bodies and return ex
     '{"expectedVersion":1,"reason":"Błędna pozycja testowa"}')
 })
 
-test('workbook status and continuation bind the exact import identity and advancing version', async () => {
+test('workbook status and continuation bind the exact import identity and a version that never goes backwards', async () => {
   const wrongImport = {
     import: importDto({ id: 'wbi_task11_other' }), job: jobDto(),
     evidence: { createdRecords: 0, voidedRecords: 0, converged: false },
   }
+  // A repeated import version is normal mid-materialization, so only a version
+  // that regresses below the one sent proves the response is stale.
   const stale = {
-    import: importDto({ version: 2 }), job: jobDto({ version: 2 }),
+    import: importDto({ version: 1 }), job: jobDto({ version: 1 }),
     evidence: { createdRecords: 0, voidedRecords: 0, converged: false },
   }
   const { fetchImpl } = queuedFetch(

@@ -508,16 +508,22 @@ describe('protected workbook HTTP routes', () => {
     expect(createWorkbookImport).not.toHaveBeenCalled()
   })
 
-  it('requires a fresh Access assertion for creator-bound continuation and rejects stale reauth', async () => {
+  it('accepts any live Access assertion for creator-bound continuation and rejects dead or unasserted principals', async () => {
     const continueWorkbookImport = vi.fn(async (input) => ({
       status: 200,
       body: { data: { import: { id: input.importId, version: input.expectedVersion } } },
     }))
-    const fresh = await createApp(depsFor({ continueWorkbookImport })).request(
+    const agedPrincipal = {
+      ...principal, issuedAt: Math.floor(NOW_MS / 1_000) - (7 * 60 * 60),
+    }
+    const aged = await createApp(depsFor({
+      continueWorkbookImport,
+      resolveAccessPrincipal: vi.fn(async () => agedPrincipal),
+    })).request(
       '/api/v1/workbooks/imports/wbi_route_one/continue',
       multipart({ expectedVersion: '2' }, { idempotencyKey: 'workbook-route-continue-0001' }),
     )
-    expect(fresh.status).toBe(200)
+    expect(aged.status).toBe(200)
     expect(continueWorkbookImport).toHaveBeenCalledWith(expect.objectContaining({
       actor,
       expectedVersion: 2,
@@ -525,18 +531,22 @@ describe('protected workbook HTTP routes', () => {
       idempotencyKey: 'workbook-route-continue-0001',
     }))
 
-    const staleService = vi.fn()
-    const stalePrincipal = { ...principal, issuedAt: Math.floor(NOW_MS / 1_000) - 301 }
-    const stale = await createApp(depsFor({
-      continueWorkbookImport: staleService,
-      resolveAccessPrincipal: vi.fn(async () => stalePrincipal),
-    })).request(
-      '/api/v1/workbooks/imports/wbi_route_one/continue',
-      multipart({ expectedVersion: '2' }, { idempotencyKey: 'workbook-route-continue-0002' }),
-    )
-    expect(stale.status).toBe(401)
-    expect((await stale.json()).error.code).toBe('REAUTH_REQUIRED')
-    expect(staleService).not.toHaveBeenCalled()
+    for (const [label, deadPrincipal] of [
+      ['expired', { ...principal, expiresAt: Math.floor(NOW_MS / 1_000) }],
+      ['unasserted', { ...principal, issuedAt: null, expiresAt: null }],
+    ]) {
+      const deadService = vi.fn()
+      const dead = await createApp(depsFor({
+        continueWorkbookImport: deadService,
+        resolveAccessPrincipal: vi.fn(async () => Object.freeze(deadPrincipal)),
+      })).request(
+        '/api/v1/workbooks/imports/wbi_route_one/continue',
+        multipart({ expectedVersion: '2' }, { idempotencyKey: `workbook-route-continue-${label}` }),
+      )
+      expect(dead.status, label).toBe(401)
+      expect((await dead.json()).error.code, label).toBe('REAUTH_REQUIRED')
+      expect(deadService).not.toHaveBeenCalled()
+    }
   })
 
   it('returns count-only creator status and streams an audited reauthorized POST export with safe headers', async () => {

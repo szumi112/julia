@@ -14,8 +14,10 @@ import {
   createWorkbookFlowState,
   matchesWorkbookContinuationImport,
   matchesWorkbookResolutionResult,
+  shouldContinueWorkbookMaterialization,
   specialistOptionsForSelect,
   workbookFlowReducer,
+  workbookVisibleProgress,
 } from '../workbook-flow.js'
 import { WorkbookExport } from './WorkbookExport.jsx'
 import { WorkbookImport } from './WorkbookImport.jsx'
@@ -64,10 +66,12 @@ const dateTime = (value) => new Intl.DateTimeFormat('pl-PL', {
 
 function ImportList({
   values, onSelect, onContinue, continuing, canContinue, currentActorId, operationBusy,
+  liveProgress,
 }) {
   if (values.length === 0) return <EmptyState icon="ledger" title="Brak importów" />
-  return <div className="registry-list">{values.map((item) => (
-    <article
+  return <div className="registry-list">{values.map((item) => {
+    const progress = workbookVisibleProgress(item.progress, liveProgress, item.id)
+    return <article
       className={`registry-list__item registry-list__item--${statusClass(item.status)}`}
       key={item.id}
     >
@@ -97,14 +101,19 @@ function ImportList({
           <div><dt>Rozmiar artefaktu</dt><dd>{item.artifact.byteSize.toLocaleString('pl-PL')} bajtów</dd></div>
           <div><dt>Wersje</dt><dd>Parser {item.artifact.parserVersion} · materializator {item.artifact.materializerVersion}</dd></div>
         </dl>
-        {item.progress ? <div className="registry-progress">
+        {progress ? <div className="registry-progress">
           <progress
             aria-label={`Postęp importu z ${dateTime(item.createdAt)}`}
-            max={item.progress.total || 1}
-            value={item.progress.processed}
+            max={progress.total || 1}
+            value={progress.processed}
           />
-          <span aria-live="polite">{item.progress.processed} z {item.progress.total}</span>
+          <span aria-live="polite">{progress.processed} z {progress.total}</span>
         </div> : null}
+        {continuing === item.id ? <p className="muted" role="status">
+          Import trwa i dokańcza kolejne partie samodzielnie. Zostaw tę kartę otwartą
+          do końca — po przerwaniu wystarczy kliknąć „Kontynuuj import”, żeby wznowić
+          od ostatniej zapisanej partii.
+        </p> : null}
       </div>
       <div className="registry-list__actions">
         <Button variant="ghost" onClick={(event) => onSelect(item, event.currentTarget)}>
@@ -118,7 +127,7 @@ function ImportList({
             : item.status === 'conflicts' ? 'Rozstrzygnij konflikty' : 'Kontynuuj import'}</Button> : null}
       </div>
     </article>
-  ))}</div>
+  })}</div>
 }
 
 function ExportList({ values }) {
@@ -306,6 +315,7 @@ export function Registry({ params = {} }) {
   const [detail, setDetail] = useState({ status: 'idle', data: null, error: '' })
   const [detailReloadToken, setDetailReloadToken] = useState(0)
   const [continuing, setContinuing] = useState(null)
+  const [liveProgress, setLiveProgress] = useState(null)
   const [resolutionCatalog, setResolutionCatalog] = useState(null)
   const [resolutionSaving, setResolutionSaving] = useState(false)
   const [resolutionLocked, setResolutionLocked] = useState(false)
@@ -367,6 +377,7 @@ export function Registry({ params = {} }) {
     abortMutationControllers('continuation', 'resolution', 'void')
     selectedFileRef.current = null
     setContinuing(null)
+    setLiveProgress(null)
     setResolutionCatalog(null)
     setResolutionSaving(false)
     setResolutionLocked(false)
@@ -549,34 +560,54 @@ export function Registry({ params = {} }) {
         refresh()
         return
       }
-      dispatchFlow({ type: WORKBOOK_FLOW_ACTIONS.CONTINUE_STARTED, generation })
-      const keyId = `${item.id}:${status.import.version}`
-      if (!continuationKeysRef.current.has(keyId)) {
-        continuationKeysRef.current.set(keyId, continuationKey())
-      }
-      const continued = await financeRepository.continueWorkbookImport(
-        item.id, status.import.version, {
-          idempotencyKey: continuationKeysRef.current.get(keyId), signal: controller.signal,
-        },
-      )
-      if (!matchesWorkbookContinuationImport(continued.import, expected, {
-        requireNewer: true,
-      })) throw new Error('WORKBOOK_CONTINUATION_AUTHORITY_CHANGED')
-      let continuedCatalog = null
-      if (continued.import.status === 'conflicts') {
-        continuedCatalog = await loadConflictCatalog(item.id, controller.signal)
-      }
-      dispatchFlow({
-        type: WORKBOOK_FLOW_ACTIONS.STATUS_SUCCEEDED,
-        generation,
-        imported: continued.import,
-        ...(continuedCatalog ? { planDigest: continuedCatalog.planDigest } : {}),
-      })
-      continuationKeysRef.current.delete(keyId)
-      if (continuedCatalog) {
-        pendingResolutionFocusRef.current = true
-        setResolutionCatalog(continuedCatalog)
-        return
+      // Each continuation materializes one server-side slice, so drive the
+      // remaining slices here instead of asking the operator to click per slice.
+      let pendingVersion = status.import.version
+      let jobVersion = status.job.version
+      for (;;) {
+        dispatchFlow({ type: WORKBOOK_FLOW_ACTIONS.CONTINUE_STARTED, generation })
+        const keyId = `${item.id}:${pendingVersion}`
+        if (!continuationKeysRef.current.has(keyId)) {
+          continuationKeysRef.current.set(keyId, continuationKey())
+        }
+        const continued = await financeRepository.continueWorkbookImport(
+          item.id, pendingVersion, {
+            idempotencyKey: continuationKeysRef.current.get(keyId), signal: controller.signal,
+          },
+        )
+        if (!matchesWorkbookContinuationImport(continued.import, expected)) {
+          throw new Error('WORKBOOK_CONTINUATION_AUTHORITY_CHANGED')
+        }
+        // Only status transitions bump the import version, so the job is what
+        // proves a slice actually advanced and keeps this loop finite.
+        if (continued.job.version <= jobVersion) {
+          throw new Error('WORKBOOK_CONTINUATION_STALLED')
+        }
+        jobVersion = continued.job.version
+        let continuedCatalog = null
+        if (continued.import.status === 'conflicts') {
+          continuedCatalog = await loadConflictCatalog(item.id, controller.signal)
+        }
+        dispatchFlow({
+          type: WORKBOOK_FLOW_ACTIONS.STATUS_SUCCEEDED,
+          generation,
+          imported: continued.import,
+          ...(continuedCatalog ? { planDigest: continuedCatalog.planDigest } : {}),
+        })
+        continuationKeysRef.current.delete(keyId)
+        // Reloading the registry per slice resets pagination and the detail
+        // pane, so report progress from the response and reload once at the end.
+        setLiveProgress({
+          importId: item.id, processed: continued.job.processedRecords,
+        })
+        if (continuedCatalog) {
+          pendingResolutionFocusRef.current = true
+          setResolutionCatalog(continuedCatalog)
+          refresh()
+          return
+        }
+        if (!shouldContinueWorkbookMaterialization(continued.import)) break
+        pendingVersion = continued.import.version
       }
       queueResultFocus()
       refresh()
@@ -797,6 +828,7 @@ export function Registry({ params = {} }) {
                 setDetailCursorHistory([])
               }}
               onContinue={continueImport}
+              liveProgress={liveProgress}
               continuing={continuing}
               canContinue={canContinue}
               currentActorId={actor?.id}

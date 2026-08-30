@@ -2566,6 +2566,49 @@ test('clears authentication state on explicit clear and authentication denial', 
   ])
 })
 
+test('labels session clears with a reauth or denied reason', async () => {
+  const invite = {
+    displayName: 'Anna',
+    email: 'anna@example.test',
+    role: 'owner',
+  }
+  const { fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    errorResponse('REAUTH_REQUIRED', 401),
+    jsonResponse(sessionBody()),
+    errorResponse('ACCESS_ASSERTION_INVALID', 401),
+    jsonResponse(sessionBody()),
+    errorResponse('ACCESS_DENIED', 403),
+    jsonResponse(sessionBody()),
+  )
+  const client = createApiClient({
+    fetchImpl,
+    idempotencyKeyFactory: () => 'auth-reason-key-0001',
+  })
+  const observed = []
+  client.subscribeSession((session, reason) => observed.push([session, reason]))
+
+  await client.getSession()
+  await assert.rejects(client.inviteStaff(invite), { code: 'REAUTH_REQUIRED' })
+  await client.getSession()
+  await assert.rejects(client.inviteStaff(invite), { code: 'ACCESS_ASSERTION_INVALID' })
+  await client.getSession()
+  await assert.rejects(client.inviteStaff(invite), { code: 'ACCESS_DENIED' })
+  await client.getSession()
+  client.clearSession()
+
+  assert.deepEqual(observed, [
+    [publicSession(), undefined],
+    [null, 'reauth'],
+    [publicSession(), undefined],
+    [null, 'reauth'],
+    [publicSession(), undefined],
+    [null, 'denied'],
+    [publicSession(), undefined],
+    [null, 'denied'],
+  ])
+})
+
 test('isolates listener failures and honors unsubscribe', async () => {
   const { fetchImpl } = queuedFetch(
     jsonResponse(sessionBody()),
@@ -6098,4 +6141,31 @@ test('activity projection continuation creates version one from expected version
       idempotencyKey: `activity-projection-wrong-${expectedVersion}-${status}`,
     }), { code: 'INVALID_RESPONSE' })
   }
+})
+
+test('workbook continuation accepts a mid-materialization slice that only advances the job', async () => {
+  // The server bumps workbook_imports.version only on status transitions
+  // (ready -> materializing, -> complete). Every slice in between advances the
+  // job alone, so the import version legitimately repeats.
+  const materializing = workbookImportDto({
+    status: 'materializing', version: 2, updatedAt: '2026-08-27T10:02:00.000Z',
+  })
+  const { fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    jsonResponse({ data: {
+      import: materializing,
+      job: workbookJobDto({ cursor: 128, processedRecords: 128, version: 3 }),
+      evidence: { createdRecords: 128, voidedRecords: 0, converged: false },
+    } }),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  assert.deepEqual(await client.continueWorkbookImport('wbi_api_one', 2, {
+    idempotencyKey: 'workbook-continue-key-0002',
+  }), {
+    import: materializing,
+    job: workbookJobDto({ cursor: 128, processedRecords: 128, version: 3 }),
+    evidence: { createdRecords: 128, voidedRecords: 0, converged: false },
+  })
 })
