@@ -168,6 +168,12 @@ const captureImported = (raw) => {
   return Object.freeze({ id, status, version, createdByStaffId, resolutionVersion })
 }
 
+export const shouldContinueWorkbookMaterialization = (rawImported) => {
+  try {
+    return phaseForStatus(captureImported(rawImported).status) === 'materializing'
+  } catch { return false }
+}
+
 export const matchesWorkbookContinuationImport = (
   rawImported, continuation, { requireNewer = false } = {},
 ) => {

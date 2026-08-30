@@ -948,6 +948,62 @@ test('@owner can retry a failed continuation and cannot overlap it with a void',
   expect(keys[0]).toBe(keys[1])
 })
 
+test('@owner drives every remaining materialization slice from one continuation click', async ({ page }) => {
+  await freezeTime(page)
+  await routeWorkspace(page)
+  await routeOwnPayments(page)
+  await routeRegistry(page, [registryImport({
+    status: 'materializing', version: 1, progress: { processed: 64, total: 192 },
+  })])
+  await page.route('**/api/v1/finance/window?*', (route) => (
+    route.fulfill(json(financeWindow('2026-07')))
+  ))
+  await page.route('**/api/v1/workbooks/imports/wbi_finance_e2e', (route) => (
+    route.fulfill(json({ data: {
+      import: importedDto({ status: 'materializing', version: 1 }),
+      job: jobDto({ status: 'running', cursor: 64, processedRecords: 64, totalRecords: 192 }),
+      evidence: { createdRecords: 0, voidedRecords: 0, converged: false },
+    } }))
+  ))
+  const keys = []
+  await page.route(
+    '**/api/v1/workbooks/imports/wbi_finance_e2e/continue',
+    (route) => {
+      keys.push(route.request().headers()['idempotency-key'])
+      const attempt = keys.length
+      const done = attempt === 3
+      const processed = Math.min(64 * (attempt + 1), 192)
+      return route.fulfill(json({ data: {
+        import: importedDto({
+          status: done ? 'complete' : 'materializing',
+          version: attempt + 1,
+          completedAt: done ? NOW : null,
+        }),
+        job: jobDto({
+          phase: done ? 'complete' : 'apply_finance',
+          status: done ? 'complete' : 'running',
+          cursor: processed, processedRecords: processed, totalRecords: 192,
+          version: attempt + 1, completedAt: done ? NOW : null,
+        }),
+        evidence: { createdRecords: processed, voidedRecords: 0, converged: done },
+        ...(done ? { reconciliation: {
+          accepted: 192, quarantined: 0, linked: 192, voided: 0, inserted: 192,
+          accountingMonthsCorrected: 0, specialistAssignmentsCorrected: 0,
+          fixedRevenuesInserted: 0, formulaGhostsVoided: 0,
+          quarantinedVoided: 0, textAmountVisitsInserted: 0,
+        } } : {}),
+      } }))
+    },
+  )
+
+  await page.goto('./#/ledger')
+  await page.getByRole('button', { name: 'Kontynuuj import' }).click()
+  await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
+    .toBeFocused()
+  expect(keys).toHaveLength(3)
+  expect(new Set(keys).size).toBe(3)
+})
+
 test('@coordinator @specialist keeps capability-scoped finance controls', async ({ page }, testInfo) => {
   await freezeTime(page)
   await routeWorkspace(page)

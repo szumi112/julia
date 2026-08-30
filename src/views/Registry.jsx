@@ -14,6 +14,7 @@ import {
   createWorkbookFlowState,
   matchesWorkbookContinuationImport,
   matchesWorkbookResolutionResult,
+  shouldContinueWorkbookMaterialization,
   specialistOptionsForSelect,
   workbookFlowReducer,
 } from '../workbook-flow.js'
@@ -105,6 +106,11 @@ function ImportList({
           />
           <span aria-live="polite">{item.progress.processed} z {item.progress.total}</span>
         </div> : null}
+        {continuing === item.id ? <p className="muted" role="status">
+          Import trwa i dokańcza kolejne partie samodzielnie. Zostaw tę kartę otwartą
+          do końca — po przerwaniu wystarczy kliknąć „Kontynuuj import”, żeby wznowić
+          od ostatniej zapisanej partii.
+        </p> : null}
       </div>
       <div className="registry-list__actions">
         <Button variant="ghost" onClick={(event) => onSelect(item, event.currentTarget)}>
@@ -549,37 +555,44 @@ export function Registry({ params = {} }) {
         refresh()
         return
       }
-      dispatchFlow({ type: WORKBOOK_FLOW_ACTIONS.CONTINUE_STARTED, generation })
-      const keyId = `${item.id}:${status.import.version}`
-      if (!continuationKeysRef.current.has(keyId)) {
-        continuationKeysRef.current.set(keyId, continuationKey())
-      }
-      const continued = await financeRepository.continueWorkbookImport(
-        item.id, status.import.version, {
-          idempotencyKey: continuationKeysRef.current.get(keyId), signal: controller.signal,
-        },
-      )
-      if (!matchesWorkbookContinuationImport(continued.import, expected, {
-        requireNewer: true,
-      })) throw new Error('WORKBOOK_CONTINUATION_AUTHORITY_CHANGED')
-      let continuedCatalog = null
-      if (continued.import.status === 'conflicts') {
-        continuedCatalog = await loadConflictCatalog(item.id, controller.signal)
-      }
-      dispatchFlow({
-        type: WORKBOOK_FLOW_ACTIONS.STATUS_SUCCEEDED,
-        generation,
-        imported: continued.import,
-        ...(continuedCatalog ? { planDigest: continuedCatalog.planDigest } : {}),
-      })
-      continuationKeysRef.current.delete(keyId)
-      if (continuedCatalog) {
-        pendingResolutionFocusRef.current = true
-        setResolutionCatalog(continuedCatalog)
-        return
+      // Each continuation materializes one server-side slice, so drive the
+      // remaining slices here instead of asking the operator to click per slice.
+      let pendingVersion = status.import.version
+      for (;;) {
+        dispatchFlow({ type: WORKBOOK_FLOW_ACTIONS.CONTINUE_STARTED, generation })
+        const keyId = `${item.id}:${pendingVersion}`
+        if (!continuationKeysRef.current.has(keyId)) {
+          continuationKeysRef.current.set(keyId, continuationKey())
+        }
+        const continued = await financeRepository.continueWorkbookImport(
+          item.id, pendingVersion, {
+            idempotencyKey: continuationKeysRef.current.get(keyId), signal: controller.signal,
+          },
+        )
+        if (!matchesWorkbookContinuationImport(continued.import, expected, {
+          requireNewer: true,
+        })) throw new Error('WORKBOOK_CONTINUATION_AUTHORITY_CHANGED')
+        let continuedCatalog = null
+        if (continued.import.status === 'conflicts') {
+          continuedCatalog = await loadConflictCatalog(item.id, controller.signal)
+        }
+        dispatchFlow({
+          type: WORKBOOK_FLOW_ACTIONS.STATUS_SUCCEEDED,
+          generation,
+          imported: continued.import,
+          ...(continuedCatalog ? { planDigest: continuedCatalog.planDigest } : {}),
+        })
+        continuationKeysRef.current.delete(keyId)
+        refresh()
+        if (continuedCatalog) {
+          pendingResolutionFocusRef.current = true
+          setResolutionCatalog(continuedCatalog)
+          return
+        }
+        if (!shouldContinueWorkbookMaterialization(continued.import)) break
+        pendingVersion = continued.import.version
       }
       queueResultFocus()
-      refresh()
     } catch {
       if (!controller.signal.aborted) {
         if (transitionQueued) dispatchFlow({
