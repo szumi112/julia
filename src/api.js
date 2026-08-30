@@ -180,6 +180,7 @@ const CLIENT_CODES = new Set([
   'SESSION_REQUIRED',
 ])
 const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'REAUTH_REQUIRED'])
+const authDenialReason = (code) => (code === 'ACCESS_DENIED' ? 'denied' : 'reauth')
 const VALIDATION_FIELDS = new Set([
   'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
   'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes',
@@ -3227,10 +3228,10 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     Accept: 'application/json',
     ...(localIdentity ? { 'X-BWM-Local-Identity': localIdentity } : {}),
   })
-  const notifySession = (session) => {
+  const notifySession = (session, reason) => {
     for (const listener of [...listeners]) {
       try {
-        const result = listener(session)
+        const result = listener(session, reason)
         if (result && typeof result.then === 'function') {
           Promise.resolve(result).catch(() => {})
         }
@@ -3239,7 +3240,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       }
     }
   }
-  const clearSession = () => {
+  const clearSession = (reason = 'denied') => {
     sessionGeneration += 1
     requestAuthorityGeneration += 1
     installedAuthority = null
@@ -3247,7 +3248,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     newestSessionRequest = null
     csrfToken = null
     exportReplayKeys.clear()
-    notifySession(null)
+    notifySession(null, reason === 'reauth' ? 'reauth' : 'denied')
   }
   const authorityFingerprintFor = (session) => JSON.stringify([
     session.actor.id,
@@ -3310,7 +3311,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       if (error.code === 'FORBIDDEN') {
         const eventSequence = sessionRequestSequence
         void refreshSessionAfter(eventSequence).catch(() => {})
-      } else if (AUTH_DENIAL_CODES.has(error.code)) onAuthDenial()
+      } else if (AUTH_DENIAL_CODES.has(error.code)) onAuthDenial(authDenialReason(error.code))
       throw error
     }
     let result
@@ -3333,10 +3334,10 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       headers: baseHeaders(),
     }, {
       validate: acceptedSession,
-      onAuthDenial: () => {
+      onAuthDenial: (reason) => {
         if (sessionGeneration === generation
           && sessionRequest?.sequence === sequence
-          && newestSessionRequest?.sequence === sequence) clearSession()
+          && newestSessionRequest?.sequence === sequence) clearSession(reason)
       },
       authorityBound: false,
     }).then((accepted) => {
@@ -3778,7 +3779,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       if (error.code === 'FORBIDDEN') {
         const eventSequence = sessionRequestSequence
         void refreshSessionAfter(eventSequence).catch(() => {})
-      } else if (AUTH_DENIAL_CODES.has(error.code)) clearSession()
+      } else if (AUTH_DENIAL_CODES.has(error.code)) clearSession(authDenialReason(error.code))
       throw error
     }
     let filename

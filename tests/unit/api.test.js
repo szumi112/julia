@@ -2566,6 +2566,49 @@ test('clears authentication state on explicit clear and authentication denial', 
   ])
 })
 
+test('labels session clears with a reauth or denied reason', async () => {
+  const invite = {
+    displayName: 'Anna',
+    email: 'anna@example.test',
+    role: 'owner',
+  }
+  const { fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    errorResponse('REAUTH_REQUIRED', 401),
+    jsonResponse(sessionBody()),
+    errorResponse('ACCESS_ASSERTION_INVALID', 401),
+    jsonResponse(sessionBody()),
+    errorResponse('ACCESS_DENIED', 403),
+    jsonResponse(sessionBody()),
+  )
+  const client = createApiClient({
+    fetchImpl,
+    idempotencyKeyFactory: () => 'auth-reason-key-0001',
+  })
+  const observed = []
+  client.subscribeSession((session, reason) => observed.push([session, reason]))
+
+  await client.getSession()
+  await assert.rejects(client.inviteStaff(invite), { code: 'REAUTH_REQUIRED' })
+  await client.getSession()
+  await assert.rejects(client.inviteStaff(invite), { code: 'ACCESS_ASSERTION_INVALID' })
+  await client.getSession()
+  await assert.rejects(client.inviteStaff(invite), { code: 'ACCESS_DENIED' })
+  await client.getSession()
+  client.clearSession()
+
+  assert.deepEqual(observed, [
+    [publicSession(), undefined],
+    [null, 'reauth'],
+    [publicSession(), undefined],
+    [null, 'reauth'],
+    [publicSession(), undefined],
+    [null, 'denied'],
+    [publicSession(), undefined],
+    [null, 'denied'],
+  ])
+})
+
 test('isolates listener failures and honors unsubscribe', async () => {
   const { fetchImpl } = queuedFetch(
     jsonResponse(sessionBody()),

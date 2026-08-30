@@ -3,26 +3,28 @@ import { ApiError, apiClient } from './api.js'
 import { APP_MODE } from './app-mode.js'
 
 const AuthCtx = createContext(null)
-const DENIED_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'FORBIDDEN'])
+const DENIED_CODES = new Set(['ACCESS_DENIED', 'FORBIDDEN'])
+const REAUTH_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'REAUTH_REQUIRED'])
 const EMPTY_CAPABILITIES = Object.freeze([])
 const REFRESH_LEAD_MS = 60_000
 const REFRESH_MIN_DELAY_MS = 5_000
 const REFRESH_MAX_DELAY_MS = 5 * 60_000
 
-const authStateFor = (error) => (
-  error instanceof ApiError
-    && DENIED_CODES.has(error.code)
-    && (error.status === 401 || error.status === 403)
-    ? 'denied'
-    : 'unavailable'
-)
+const authStateFor = (error) => {
+  if (!(error instanceof ApiError)
+    || (error.status !== 401 && error.status !== 403)) return 'unavailable'
+  if (REAUTH_CODES.has(error.code)) return 'reauth'
+  return DENIED_CODES.has(error.code) ? 'denied' : 'unavailable'
+}
 
 function AuthScreen({ state, onLogout, onRetry }) {
   const title = state === 'loading'
     ? 'Sprawdzanie dostępu'
     : state === 'denied'
       ? 'Brak dostępu do panelu'
-      : 'Nie udało się połączyć z panelem'
+      : state === 'reauth'
+        ? 'Sesja wygasła'
+        : 'Nie udało się połączyć z panelem'
 
   return (
     <main className={`auth-screen auth-screen--${state}`} aria-labelledby="auth-screen-title">
@@ -35,6 +37,12 @@ function AuthScreen({ state, onLogout, onRetry }) {
         <>
           <p className="auth-screen__message">To konto nie ma aktywnego dostępu do panelu personelu.</p>
           <button type="button" className="btn btn--ghost" onClick={onLogout}>Wyloguj się</button>
+        </>
+      )}
+      {state === 'reauth' && (
+        <>
+          <p className="auth-screen__message">Sesja logowania wygasła. Zaloguj się ponownie, aby wrócić do panelu.</p>
+          <button type="button" className="btn btn--primary" onClick={onLogout}>Zaloguj się ponownie</button>
         </>
       )}
       {state === 'unavailable' && (
@@ -74,13 +82,13 @@ export function AuthProvider({ children, client = apiClient }) {
 
   useEffect(() => {
     mountedRef.current = true
-    const unsubscribe = client.subscribeSession((session) => {
+    const unsubscribe = client.subscribeSession((session, reason) => {
       if (!mountedRef.current) return
       requestRef.current += 1
       if (loggingOutRef.current) return
       setAuth(session
         ? { status: 'authenticated', session }
-        : { status: 'denied', session: null })
+        : { status: reason === 'reauth' ? 'reauth' : 'denied', session: null })
     })
     if (!bootstrapStartedRef.current) {
       bootstrapStartedRef.current = true
@@ -144,7 +152,8 @@ export function AuthProvider({ children, client = apiClient }) {
     status: auth.status,
   }), [auth.session, auth.status, logout, refresh])
 
-  if (auth.status === 'loading' || auth.status === 'denied' || auth.status === 'unavailable') {
+  if (auth.status === 'loading' || auth.status === 'denied'
+    || auth.status === 'reauth' || auth.status === 'unavailable') {
     return <AuthScreen state={auth.status} onLogout={logout} onRetry={retry} />
   }
 

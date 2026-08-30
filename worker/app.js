@@ -167,7 +167,7 @@ const descriptor = (value) => {
     auditActions: Object.freeze([...value.auditActions]),
     bodyKeys: value.bodyKeys ? Object.freeze([...value.bodyKeys]) : null,
     bodyMode: value.bodyMode ?? 'json',
-    freshAuth: value.freshAuth === true,
+    assertedAuth: value.assertedAuth === true,
     idempotency: value.idempotency !== false,
     queryMode: value.queryMode ?? (value.bodyKeys === null ? 'any' : 'none'),
     sharedBudget: value.sharedBudget ?? CORE_BUDGET,
@@ -200,13 +200,13 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'payments.own', path: '/api/v1/payments/own', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'appointment.charge.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'finance.list', path: '/api/v1/finance', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null }),
   descriptor({ id: 'finance.window', path: '/api/v1/finance/window', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
-  descriptor({ id: 'finance.entry.void', pathPattern: `^/api/v1/finance/entries/${'fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'}/voids$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.entry.voided'], bodyKeys: ['expectedVersion', 'reason'], freshAuth: true }),
+  descriptor({ id: 'finance.entry.void', pathPattern: `^/api/v1/finance/entries/${'fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'}/voids$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.entry.voided'], bodyKeys: ['expectedVersion', 'reason'], assertedAuth: true }),
   descriptor({ id: 'finance.import.start', path: '/api/v1/finance/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'] }),
   descriptor({ id: 'finance.import.chunk', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/chunks$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.chunk.accepted'], bodyKeys: ['sequence', 'entries'] }),
   descriptor({ id: 'finance.import.commit', pathPattern: `^/api/v1/finance/imports/${FINANCE_BATCH_PATH_ID}/commit$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.committed'], bodyKeys: ['expectedVersion'] }),
   descriptor({ id: 'workbooks.preview', path: '/api/v1/workbooks/preview', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, bodyMode: 'workbook-multipart', idempotency: false, queryMode: 'none' }),
-  descriptor({ id: 'workbooks.import', path: '/api/v1/workbooks/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.created', 'workbook.resolutions.recorded'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
-  descriptor({ id: 'workbooks.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.materialized'], bodyKeys: null, bodyMode: 'workbook-multipart', freshAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.import', path: '/api/v1/workbooks/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.created', 'workbook.resolutions.recorded'], bodyKeys: null, bodyMode: 'workbook-multipart', assertedAuth: true, queryMode: 'none' }),
+  descriptor({ id: 'workbooks.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.import.materialized'], bodyKeys: null, bodyMode: 'workbook-multipart', assertedAuth: true, queryMode: 'none' }),
   descriptor({ id: 'workbooks.discovery', path: '/api/v1/workbooks/imports/discovery', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'workbooks.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
   descriptor({ id: 'workbooks.operator.evidence', path: '/api/v1/workbooks/operator-evidence', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
@@ -214,12 +214,12 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'workbooks.reconciliation.evidence', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/reconciliation$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
   descriptor({ id: 'workbooks.registry', path: '/api/v1/workbooks/registry', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'workbooks.registry.detail', path: '/api/v1/workbooks/registry/details', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: ['importId', 'section', 'cursor'], idempotency: false }),
-  descriptor({ id: 'workbooks.resolutions', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.resolutions.recorded'], bodyKeys: ['expectedVersion', 'planDigest', 'resolutions'], freshAuth: true }),
-  descriptor({ id: 'workbooks.export.create', path: '/api/v1/workbooks/exports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'], auditActions: ['workbook.export.created'], bodyKeys: ['format'], freshAuth: true }),
+  descriptor({ id: 'workbooks.resolutions', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['workbook.resolutions.recorded'], bodyKeys: ['expectedVersion', 'planDigest', 'resolutions'], assertedAuth: true }),
+  descriptor({ id: 'workbooks.export.create', path: '/api/v1/workbooks/exports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'], auditActions: ['workbook.export.created'], bodyKeys: ['format'], assertedAuth: true }),
   descriptor({ id: 'historical.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
   descriptor({ id: 'historical.projection.review', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/review-catalog$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
-  descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], freshAuth: true }),
-  descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId', 'reviewContextDigest', 'directoryCount', 'directoryDigest'], freshAuth: true }),
+  descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], assertedAuth: true }),
+  descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId', 'reviewContextDigest', 'directoryCount', 'directoryDigest'], assertedAuth: true }),
   descriptor({ id: 'historical.clients.activate', pathPattern: `^/api/v1/historical-clients/${HISTORICAL_CLIENT_PATH_ID}/activation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'] }),
   descriptor({ id: 'activities.workspace', path: '/api/v1/activities/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'tus.manage', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'activities.groups.create', path: '/api/v1/activities/groups', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'] }),
@@ -232,7 +232,7 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'activities.classes.edit', pathPattern: `^/api/v1/activities/classes/${ACTIVITY_CLASS_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.class.updated'], bodyKeys: ['expectedVersion', 'date', 'time', 'durationMinutes', 'topic', 'status'] }),
   descriptor({ id: 'activities.attendance.set', pathPattern: `^/api/v1/activities/classes/${ACTIVITY_CLASS_PATH_ID}/attendance$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.attendance.set'], bodyKeys: ['participantId', 'status', 'expectedVersion'] }),
   descriptor({ id: 'activities.projection.status', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: null, queryMode: 'none' }),
-  descriptor({ id: 'activities.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], freshAuth: true }),
+  descriptor({ id: 'activities.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/activity-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['activity.projection.advanced'], bodyKeys: ['expectedVersion'], assertedAuth: true }),
 ])
 export const CORE_ROUTE_DESCRIPTORS = CORE_ROUTES
 if (CORE_ROUTES.some((route) => {
@@ -378,12 +378,11 @@ const validateResolutionIdempotency = (request) => {
   }
 }
 
-const requireRecentHumanPrincipal = (principal, requestNowMs) => {
+const requireLiveAssertedPrincipal = (principal, requestNowMs) => {
   const nowSeconds = Math.floor(requestNowMs / 1_000)
   if (!Number.isSafeInteger(principal?.issuedAt)
     || !Number.isSafeInteger(principal?.expiresAt)
     || principal.issuedAt > nowSeconds
-    || nowSeconds - principal.issuedAt > 300
     || principal.expiresAt <= nowSeconds) throw new AppError('REAUTH_REQUIRED')
 }
 
@@ -565,7 +564,7 @@ export function createApp(deps = {}) {
     })
     if (principal?.kind !== route.expected) throw new Error('ACCESS_ASSERTION_INVALID')
     c.set('principal', principal)
-    if (route.freshAuth) requireRecentHumanPrincipal(principal, requestNowMs)
+    if (route.assertedAuth) requireLiveAssertedPrincipal(principal, requestNowMs)
 
     let keyring
     if (isMutationMethod(method)) {
