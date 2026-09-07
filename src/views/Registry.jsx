@@ -4,6 +4,7 @@ import { canPerformAction } from '../capability-access.js'
 import { ApiError } from '../api.js'
 import { fmtMoney, fmtMonthYear, plural } from '../format.js'
 import { financeRepository } from '../finance-repository.js'
+import { WorkbookProjectionReview } from './WorkbookProjectionReview.jsx'
 import { serviceLabel } from '../services.js'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
@@ -21,6 +22,7 @@ import {
 } from '../workbook-flow.js'
 import { WorkbookExport } from './WorkbookExport.jsx'
 import { WorkbookImport } from './WorkbookImport.jsx'
+import { FinanceEntryActions } from './FinanceEntryActions.jsx'
 
 const MAIN_SECTIONS = Object.freeze([
   Object.freeze({ value: 'imports', label: 'Importy' }),
@@ -38,7 +40,7 @@ const DETAIL_SECTIONS = Object.freeze([
 ])
 const statusLabel = Object.freeze({
   uploading: 'Przesyłanie', ready: 'Gotowy', materializing: 'Przetwarzanie',
-  conflicts: 'Wymaga rozstrzygnięcia', complete: 'Zakończony', failed: 'Niepowodzenie',
+  conflicts: 'Wymaga rozstrzygnięcia', complete: 'Finanse zapisane', failed: 'Niepowodzenie',
 })
 const statusClass = (status) => (
   Object.hasOwn(statusLabel, status) ? status : 'unknown'
@@ -66,7 +68,7 @@ const dateTime = (value) => new Intl.DateTimeFormat('pl-PL', {
 
 function ImportList({
   values, onSelect, onContinue, continuing, canContinue, currentActorId, operationBusy,
-  liveProgress,
+  liveProgress, onProject,
 }) {
   if (values.length === 0) return <EmptyState icon="ledger" title="Brak importów" />
   return <div className="registry-list">{values.map((item) => {
@@ -116,6 +118,7 @@ function ImportList({
         </p> : null}
       </div>
       <div className="registry-list__actions">
+        {item.status === 'complete' ? <p className="muted">Sprawdź osobno ukończenie importu klientów i zajęć.</p> : null}
         <Button variant="ghost" onClick={(event) => onSelect(item, event.currentTarget)}>
           Przejrzyj import
         </Button>
@@ -125,6 +128,8 @@ function ImportList({
           onClick={() => onContinue(item)}
         >{continuing === item.id ? 'Wczytywanie…'
             : item.status === 'conflicts' ? 'Rozstrzygnij konflikty' : 'Kontynuuj import'}</Button> : null}
+        {canContinue && item.createdByStaffId === currentActorId && item.status === 'complete'
+          ? <Button disabled={operationBusy} onClick={() => onProject(item)}>Klienci i zajęcia</Button> : null}
       </div>
     </article>
   })}</div>
@@ -144,7 +149,7 @@ function ExportList({ values }) {
   </article>)}</div>
 }
 
-function EntryList({ values, canVoid, onVoid, operationBusy, restoreEntryId, restoreRef }) {
+function EntryList({ values, canVoid, onVoid, operationBusy, restoreEntryId, restoreRef, onChanged }) {
   if (values.length === 0) return <EmptyState icon="ledger" title="Brak pozycji rejestru" />
   return <TableScroll label="Przewijana tabela pozycji rejestru"><table className="table" aria-label="Pozycje rejestru finansowego">
     <thead><tr><th>Miesiąc</th><th>Rodzaj</th><th>Stan</th><th className="right">Kwota</th><th></th></tr></thead>
@@ -158,7 +163,9 @@ function EntryList({ values, canVoid, onVoid, operationBusy, restoreEntryId, res
         type="button" className="btn btn--ghost btn--sm"
         disabled={operationBusy}
         onClick={(event) => onVoid(item, event.currentTarget)}
-      ><span>Unieważnij pozycję</span></button> : null}</td>
+      ><span>Unieważnij pozycję</span></button> : null}
+        {!operationBusy && item.state === 'active' && <FinanceEntryActions row={item} onChanged={onChanged} />}
+      </td>
     </tr>)}</tbody>
   </table></TableScroll>
 }
@@ -309,6 +316,7 @@ export function Registry({ params = {} }) {
   const [page, setPage] = useState({ status: 'loading', data: null, error: '' })
   const [reloadToken, setReloadToken] = useState(0)
   const [selectedImport, setSelectedImport] = useState(null)
+  const [projectionImport, setProjectionImport] = useState(null)
   const [detailSection, setDetailSection] = useState('source')
   const [detailCursor, setDetailCursor] = useState(null)
   const [detailCursorHistory, setDetailCursorHistory] = useState([])
@@ -374,6 +382,7 @@ export function Registry({ params = {} }) {
 
   useEffect(() => {
     dispatchFlow({ type: WORKBOOK_FLOW_ACTIONS.AUTHORITY_RESET, generation })
+    setProjectionImport(null)
     abortMutationControllers('continuation', 'resolution', 'void')
     selectedFileRef.current = null
     setContinuing(null)
@@ -556,6 +565,7 @@ export function Registry({ params = {} }) {
         return
       }
       if (status.import.status === 'complete') {
+        setProjectionImport(item)
         queueResultFocus()
         refresh()
         return
@@ -606,7 +616,10 @@ export function Registry({ params = {} }) {
           refresh()
           return
         }
-        if (!shouldContinueWorkbookMaterialization(continued.import)) break
+        if (!shouldContinueWorkbookMaterialization(continued.import)) {
+          if (continued.import.status === 'complete') setProjectionImport(item)
+          break
+        }
         pendingVersion = continued.import.version
       }
       queueResultFocus()
@@ -799,6 +812,14 @@ export function Registry({ params = {} }) {
         />
         <WorkbookExport onComplete={refresh} />
       </div>
+      {projectionImport && canContinue && projectionImport.createdByStaffId === actor?.id
+        ? <WorkbookProjectionReview
+          key={`${generation}:${projectionImport.id}`}
+          importId={projectionImport.id}
+          creatorId={actor.id}
+          quarantineCount={projectionImport.summary.quarantineCount}
+          disabled={operationBusy}
+        /> : null}
       {flow.phase === 'needs-resolution' && resolutionCatalog ? <ResolutionPanel
         flow={flow}
         values={resolutionCatalog.items}
@@ -828,6 +849,7 @@ export function Registry({ params = {} }) {
                 setDetailCursorHistory([])
               }}
               onContinue={continueImport}
+              onProject={setProjectionImport}
               liveProgress={liveProgress}
               continuing={continuing}
               canContinue={canContinue}
@@ -835,7 +857,7 @@ export function Registry({ params = {} }) {
               operationBusy={operationBusy}
             />
               : section === 'exports' ? <ExportList values={values} />
-                : <EntryList values={values} canVoid={canVoid} operationBusy={operationBusy} onVoid={(item, opener) => {
+                : <EntryList values={values} canVoid={canVoid} operationBusy={operationBusy} onChanged={refresh} onVoid={(item, opener) => {
                   voidOpenerIdRef.current = item.id
                   voidOpenerRef.current = opener
                   setVoidTarget(item); setVoidReason(''); setVoidError(''); setVoiding(false)

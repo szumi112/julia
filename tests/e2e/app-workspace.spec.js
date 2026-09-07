@@ -213,7 +213,7 @@ const financeMonths = (selectedMonth) => {
 
 const zeroFinanceKpis = () => ({
   revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0,
-  expensesGrosze: 0, incomeGrosze: 0,
+  expensesGrosze: 0, incomeGrosze: 0, verificationGrosze: 0,
 })
 
 // This mirrors the complete GET /api/v1/finance/window DTO.  Finance owns the
@@ -228,6 +228,7 @@ const financeWindow = (selectedMonth, appointment = null, specialistLabels = [
       return totals
     }, new Map())
   paymentTotals.set('outstanding', appointment === null ? 0 : appointment.payment.outstandingGrosze)
+  paymentTotals.set('verification', 0)
   const paymentSplit = Object.fromEntries([...paymentTotals.entries()]
     .sort(([left], [right]) => left.localeCompare(right)))
   const row = appointment === null ? null : {
@@ -240,12 +241,13 @@ const financeWindow = (selectedMonth, appointment = null, specialistLabels = [
     specialistId: appointment.specialistId, serviceId: appointment.serviceId,
     program: null, paymentMethod: 'unknown', invoiceStatus: 'not_required',
     version: Math.max(appointment.version, appointment.charge.version),
+    settlementStatus: appointment.payment.status, counterparty: null, sourceLabel: null,
   }
   const revenueGrosze = row?.revenueGrosze ?? 0
   const collectedGrosze = row?.collectedGrosze ?? 0
   const selected = {
     revenueGrosze, collectedGrosze, outstandingGrosze: revenueGrosze - collectedGrosze,
-    expensesGrosze: 0, incomeGrosze: revenueGrosze,
+    expensesGrosze: 0, incomeGrosze: revenueGrosze, verificationGrosze: 0,
   }
   const months = financeMonths(selectedMonth)
   return {
@@ -257,7 +259,7 @@ const financeWindow = (selectedMonth, appointment = null, specialistLabels = [
     splits: {
       specialist: row ? { [row.specialistId]: revenueGrosze } : {},
       service: row ? { zajecia: revenueGrosze } : {},
-      payment: row ? paymentSplit : {},
+      payment: paymentSplit,
       invoice: row ? { not_required: { count: 1, revenueGrosze } } : {},
       program: {
         english: { count: 0, revenueGrosze: 0 },

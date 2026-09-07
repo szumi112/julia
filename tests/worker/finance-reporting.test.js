@@ -12,6 +12,8 @@ import {
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
 import { authorityActor } from './fixtures.js'
+import { FINANCE_SCOPE } from '../../worker/core/finance.js'
+import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 
 const NOW_MS = Date.parse('2027-06-15T10:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
@@ -21,11 +23,23 @@ const SPECIALIST = authorityActor({
   id: 'stf_finance_window_specialist', role: 'specialist',
   specialistId: 'sp_finance_window',
 })
-const run = (sql, ...bindings) => env.DB.prepare(sql).bind(...bindings).run()
+const run = async (sql, ...bindings) => {
+  if (/INSERT INTO finance_entries/.test(sql)) {
+    bindings[15] = await detailsEnvelope(bindings[0])
+  }
+  return env.DB.prepare(sql).bind(...bindings).run()
+}
 const IDENTITY_SCOPE = Object.freeze({
   type: 'staff_directory', id: 'centre_1', purpose: 'identity',
 })
 let keyring
+let financeKey
+const detailsEnvelope = (id) => encryptForScope(keyring, financeKey, {
+  expectedScope: FINANCE_SCOPE, recordId: id, field: 'details',
+  plaintext: JSON.stringify({ schema: 'finance_entry_details.v1',
+    counterparty: 'Klient fikcyjny', sourceLabel: 'Konsultacja testowa',
+    invoiceNote: null, lessonCount: null }),
+}).then(JSON.stringify)
 const loadFinanceWindow = (input) => loadFinanceWindowCore({ ...input, keyring })
 
 beforeAll(async () => {
@@ -36,6 +50,9 @@ beforeAll(async () => {
   await applyWorkbookRegistryStageE()
   keyring = await createKeyring(env, {
     activeDataKekVersion: 1, activeLookupKeyVersion: 1, activeBackupKekVersion: 1,
+  })
+  financeKey = await getOrCreateDataKey(env.DB, keyring, FINANCE_SCOPE, {
+    id: 'key_finance_window_finance', createdAt: NOW,
   })
   const identityKey = await getOrCreateDataKey(env.DB, keyring, IDENTITY_SCOPE, {
     id: 'key_finance_window_identity', createdAt: NOW,
@@ -120,6 +137,30 @@ beforeAll(async () => {
 })
 
 describe('server-owned FinanceWindow', () => {
+  it('shows authorized imported labels and separates unverified settlement from debt', async () => {
+    await run(`INSERT INTO finance_entries
+      (id,batch_id,source_key,kind,record_type,accounting_month,occurred_on,
+       amount_grosze,paid_amount_grosze,payment_method,settlement_status,
+       invoice_status,specialist_id,appointment_id,counterparty_lookup,
+       details_envelope,source_row_envelope,version,created_by_staff_id,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    'fin_finance_unknown', null, null, 'income', 'income', '2027-01',
+    null, 18_000, 0, 'unknown', 'unknown', 'unknown', null, null,
+    null, '{}', null, 1, OWNER.id, NOW, NOW)
+    const result = await loadFinanceWindow({
+      db: env.DB, actor: COORDINATOR, nowMs: NOW_MS, selectedMonth: '2027-01',
+    })
+    expect(result.data.kpis).toMatchObject({
+      revenueGrosze: 18_000, collectedGrosze: 0, outstandingGrosze: 0, verificationGrosze: 18_000,
+    })
+    expect(result.data.rows[0]).toMatchObject({ settlementStatus: 'unknown',
+      counterparty: 'Klient fikcyjny', sourceLabel: 'Konsultacja testowa' })
+    const later = await loadFinanceWindow({
+      db: env.DB, actor: COORDINATOR, nowMs: NOW_MS, selectedMonth: '2027-06',
+    })
+    expect(later.data.trend[0]).toMatchObject({ revenueGrosze: 18_000,
+      collectedGrosze: 0, outstandingGrosze: 0, verificationGrosze: 18_000 })
+  })
   it('does not expose a pre-floor row as the latest populated month', async () => {
     await run(`INSERT INTO appointments
       (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
@@ -151,6 +192,9 @@ describe('server-owned FinanceWindow', () => {
     expect(result.data.selectedMonth).toBe('2027-07')
     expect(result.data.rows).toEqual([])
     expect(result.data.latestPopulatedMonth).toBe('2027-06')
+    expect(result.data.trend.at(-2)).toMatchObject({ month: '2027-06',
+      revenueGrosze: 18_000, collectedGrosze: 12_000, outstandingGrosze: 6_000,
+      verificationGrosze: 0 })
   })
 
   it('returns an exact six-month complete DTO using effective payment events', async () => {
@@ -176,6 +220,7 @@ describe('server-owned FinanceWindow', () => {
       revenueGrosze: 18_000,
       collectedGrosze: 12_000,
       outstandingGrosze: 6_000,
+      verificationGrosze: 0,
       expensesGrosze: 0,
       incomeGrosze: 18_000,
     })
@@ -183,6 +228,7 @@ describe('server-owned FinanceWindow', () => {
       cash: 5_000,
       outstanding: 6_000,
       transfer: 7_000,
+      verification: 0,
     })
     expect(result.data.latestPopulatedMonth).toBe('2027-06')
     expect(result.data.coverage).toEqual({
@@ -193,7 +239,7 @@ describe('server-owned FinanceWindow', () => {
       'id', 'sourceKind', 'appointmentId', 'accountingMonth', 'occurredOn', 'kind',
       'recordType', 'revenueGrosze', 'receivableGrosze', 'collectedGrosze',
       'expenseGrosze', 'specialistId', 'serviceId', 'program', 'paymentMethod',
-      'invoiceStatus', 'version',
+      'invoiceStatus', 'version', 'settlementStatus', 'counterparty', 'sourceLabel',
     ])
     expect(JSON.stringify(result)).not.toMatch(/"(?:raw|source|sourceKey|filename)"/)
   })
@@ -262,9 +308,9 @@ describe('server-owned FinanceWindow', () => {
     })
     expect(result.data.kpis).toEqual({
       revenueGrosze: 18_000, collectedGrosze: 0, outstandingGrosze: 18_000,
-      expensesGrosze: 0, incomeGrosze: 18_000,
+      expensesGrosze: 0, incomeGrosze: 18_000, verificationGrosze: 0,
     })
-    expect(result.data.splits.payment).toEqual({ outstanding: 18_000 })
+    expect(result.data.splits.payment).toEqual({ outstanding: 18_000, verification: 0 })
   })
 
   it('keeps a paid expense out of revenue collection and payment-method splits', async () => {
@@ -283,14 +329,52 @@ describe('server-owned FinanceWindow', () => {
     })
     expect(result.data.kpis).toEqual({
       revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0,
-      expensesGrosze: 4_000, incomeGrosze: -4_000,
+      expensesGrosze: 4_000, incomeGrosze: -4_000, verificationGrosze: 0,
     })
-    expect(result.data.splits.payment).toEqual({ outstanding: 0 })
+    expect(result.data.splits.payment).toEqual({ outstanding: 0, verification: 0 })
     expect(result.data.coverage).toEqual({
       dateOnlyCount: 1, monthOnlyCount: 0, timedCount: 0, unknownCount: 0,
     })
     expect(Object.values(result.data.coverage).reduce((sum, value) => sum + value, 0))
       .toBe(result.data.rows.length)
+  })
+
+  it('counts only the newest cumulative settlement across invoice edits, payments and downward corrections', async () => {
+    const entryId = 'fin_finance_adjustment_reporting'
+    await run(`INSERT INTO finance_entries
+      (id,batch_id,source_key,kind,record_type,accounting_month,occurred_on,
+       amount_grosze,paid_amount_grosze,payment_method,settlement_status,
+       invoice_status,specialist_id,appointment_id,counterparty_lookup,
+       details_envelope,source_row_envelope,version,created_by_staff_id,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    entryId, null, null, 'income', 'income', '2026-12', '2026-12-03',
+    18_000, 5_000, 'cash', 'partial', 'not_required', null, null,
+    null, '{}', null, 1, OWNER.id, NOW, NOW)
+    const load = () => loadFinanceWindow({ db: env.DB, actor: OWNER,
+      nowMs: NOW_MS, selectedMonth: '2026-12' })
+    expect((await load()).data.kpis).toMatchObject({ collectedGrosze: 5_000,
+      outstandingGrosze: 13_000, verificationGrosze: 0 })
+
+    await run(`UPDATE finance_entries SET invoice_status='issued',version=version+1,
+      updated_at=? WHERE id=?`, NOW, entryId)
+    expect((await load()).data.kpis).toMatchObject({ collectedGrosze: 5_000,
+      outstandingGrosze: 13_000, revenueGrosze: 18_000 })
+
+    await run(`UPDATE finance_entries SET paid_amount_grosze=12000,payment_method='transfer',
+      version=version+1,updated_at=? WHERE id=?`, NOW, entryId)
+    expect((await load()).data.splits.payment).toEqual({ outstanding: 6_000,
+      transfer: 12_000, verification: 0 })
+
+    await run(`UPDATE finance_entries SET paid_amount_grosze=2000,payment_method='cash',
+      version=version+1,updated_at=? WHERE id=?`, NOW, entryId)
+    expect((await load()).data.splits.payment).toEqual({ cash: 2_000,
+      outstanding: 16_000, verification: 0 })
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM finance_collection_events WHERE finance_entry_id=?')
+      .bind(entryId).first('count')).toBe(4)
+    const later = await loadFinanceWindow({ db: env.DB, actor: OWNER,
+      nowMs: NOW_MS, selectedMonth: '2027-05' })
+    expect(later.data.trend[0]).toMatchObject({ month: '2026-12', collectedGrosze: 2_000,
+      outstandingGrosze: 16_000, revenueGrosze: 18_000, verificationGrosze: 0 })
   })
 
   it('uses durable historical service classification while appointment authority wins precedence', async () => {
@@ -385,7 +469,11 @@ describe('server-owned FinanceWindow', () => {
     })
   })
 
-  it('uses cap+1 and refuses an incomplete aggregate instead of truncating', async () => {
+  it('aggregates more than 1000 prior-month rows without loading or truncating them', async () => {
+    const before = await loadFinanceWindow({
+      db: env.DB, actor: OWNER, nowMs: NOW_MS, selectedMonth: '2027-06',
+    })
+    const priorRevenue = before.data.trend.find(({ month }) => month === '2027-05').revenueGrosze
     const statements = []
     for (let index = 0; index < 1_001; index += 1) {
       statements.push(env.DB.prepare(`INSERT INTO finance_entries
@@ -403,8 +491,13 @@ describe('server-owned FinanceWindow', () => {
       }
     }
 
-    await expect(loadFinanceWindow({
-      db: env.DB, actor: OWNER, nowMs: NOW_MS, selectedMonth: '2027-06',
-    })).rejects.toThrow(/^FINANCE_WINDOW_LIMIT$/)
+    const budget = createD1QueryBudget(env.DB)
+    const result = await loadFinanceWindow({
+      db: budget.work, actor: OWNER, nowMs: NOW_MS, selectedMonth: '2027-06',
+    })
+    expect(budget.usage().used).toBeLessThanOrEqual(45)
+    expect(result.data.trend.find(({ month }) => month === '2027-05').revenueGrosze).toBe(priorRevenue + 1_001)
+    expect(result.data.rows).toEqual(before.data.rows)
+    expect(result.data.complete).toBe(true)
   })
 })

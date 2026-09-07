@@ -6,6 +6,7 @@ import { Button, EmptyState, Pager } from '../ui.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { pageCount, pageSlice } from '../pagination.js'
 import { fmtMonthYear } from '../format.js'
+import { ActivityBillingAction } from './FinanceEntryActions.jsx'
 import {
   activityActionAvailability,
   activityCurrentMonth,
@@ -20,8 +21,7 @@ import {
 } from './ActivityUi.jsx'
 
 const PAGE_SIZE = 30
-const validMonth = (month, current) => /^\d{4}-(0[1-9]|1[0-2])$/.test(month ?? '')
-  && month <= current
+const validMonth = (month) => /^(?!0000)\d{4}-(0[1-9]|1[0-2])$/.test(month ?? '')
 
 export function English({ params = {} }) {
   const { workspace } = useApp()
@@ -32,8 +32,8 @@ export function English({ params = {} }) {
   const currentMonth = activityCurrentMonth()
   const [month, setMonth] = useState(() => {
     const saved = getViewState('english', { ym: currentMonth })
-    if (validMonth(params.ym, currentMonth)) return params.ym
-    if (validMonth(saved.ym, currentMonth)) return saved.ym
+    if (validMonth(params.ym)) return params.ym
+    if (validMonth(saved.ym)) return saved.ym
     return currentMonth
   })
   const [page, setPage] = useState(1)
@@ -142,9 +142,10 @@ export function English({ params = {} }) {
 
       <section className="card card--pad activity-monthly-table" aria-labelledby="english-month-title">
         <h2 className="card-title" id="english-month-title">Uczestnicy i rozliczenia</h2>
+        <ActivityBillingAction month={month} programId="apg_english" participants={overview.participants} />
         {visibleRows.length > 0 ? (
           <>
-            <ActivityChargeTable rows={visibleRows} english titleId="english-month-title" />
+            <ActivityChargeTable rows={visibleRows} month={month} english titleId="english-month-title" />
             <Pager page={page} pages={pages} onPage={setPage} />
           </>
         ) : (

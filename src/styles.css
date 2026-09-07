@@ -3820,7 +3820,7 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
 .registry-view { min-width: 0; }
 .finance-window__kpis {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin-bottom: 22px;
 }

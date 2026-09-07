@@ -5,7 +5,7 @@ import { createUnitOfWork } from '../db/unit-of-work.js'
 import { authorize } from '../identity/policy.js'
 import { resolveCurrentAuthorityActor } from '../identity/staff.js'
 import { partsInWarsaw } from '../operations/clock.js'
-import { encryptForScope } from '../security/envelope.js'
+import { decryptForScope, encryptForScope } from '../security/envelope.js'
 import { encodeBase64Url } from '../security/encoding.js'
 import { loadWorkbookSpecialistLabels } from './workbook-specialist-options.js'
 
@@ -67,9 +67,13 @@ const localMonth = (instant) => {
 }
 
 const dateBounds = (months) => {
-  const from = Date.parse(`${months[0]}-01T00:00:00.000Z`) - (2 * 86_400_000)
-  const to = Date.parse(`${shiftMonth(months.at(-1), 1)}-01T00:00:00.000Z`)
-    + (2 * 86_400_000)
+  const midnight = (month) => {
+    const utc = Date.parse(`${month}-01T00:00:00.000Z`)
+    const local = partsInWarsaw(utc)
+    return utc - ((local.hour * 60 + local.minute) * 60_000)
+  }
+  const from = midnight(months[0])
+  const to = midnight(shiftMonth(months.at(-1), 1))
   return Object.freeze({ from: new Date(from).toISOString(), to: new Date(to).toISOString() })
 }
 
@@ -89,9 +93,10 @@ export async function syntheticPanelLedgerId(appointmentId) {
 }
 
 const queryImported = (db, fromMonth, toMonth) => rows(db.prepare(
-   `SELECT entry.id,entry.accounting_month,entry.occurred_on,entry.kind,
+   `SELECT entry.id,entry.batch_id,entry.accounting_month,entry.occurred_on,entry.kind,
           entry.record_type,entry.amount_grosze,entry.specialist_id,
-          entry.appointment_id,entry.invoice_status,entry.version,
+          entry.appointment_id,entry.invoice_status,entry.version,entry.settlement_status,
+          entry.details_envelope,
           classification.service_id,
           (SELECT source.period_precision
            FROM finance_source_links AS source_link
@@ -107,7 +112,7 @@ const queryImported = (db, fromMonth, toMonth) => rows(db.prepare(
    LEFT JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
    WHERE workbook_void.id IS NULL AND manual_void.id IS NULL
      AND (entry.batch_id IS NULL OR batch.status='committed')
-     AND (entry.accounting_month BETWEEN ? AND ? OR entry.accounting_month IS NULL)
+     AND entry.accounting_month BETWEEN ? AND ?
    ORDER BY entry.accounting_month,entry.id LIMIT ?`,
 ).bind(fromMonth, toMonth, RESULT_CAP + 1), 'ledgerEntries')
 
@@ -194,7 +199,7 @@ const queryHistoricalLinks = (db, fromMonth, toMonth) => rows(db.prepare(
    LEFT JOIN finance_manual_voids AS manual_void
      ON manual_void.finance_entry_id=entry.id
    WHERE occurrence.status='recorded' AND workbook_void.id IS NULL AND manual_void.id IS NULL
-     AND (entry.accounting_month BETWEEN ? AND ? OR entry.accounting_month IS NULL)
+     AND entry.accounting_month BETWEEN ? AND ?
    ORDER BY occurrence.id LIMIT ?`,
 ).bind(fromMonth, toMonth, RESULT_CAP + 1), 'occurrenceLinks')
 
@@ -227,6 +232,73 @@ const queryLatestImported = async (db, currentMonth) => {
      ORDER BY entry.accounting_month DESC,entry.id DESC LIMIT 1`,
   ).bind(currentMonth).first()
   return row?.accounting_month ?? null
+}
+
+// Aggregate the five previous months inside D1: only five rows cross the
+// database boundary regardless of the number of entries or payment events.
+const queryPriorTrend = async (db, months) => {
+  const bindings = months.flatMap((month) => {
+    const bounds = dateBounds([month])
+    return [month, bounds.from, bounds.to]
+  })
+  const result = await rows(db.prepare(`
+    WITH windows(month,starts_at,ends_at) AS (VALUES ${months.map(() => '(?,?,?)').join(',')}),
+    facts AS (
+      SELECT windows.month,entry.kind,entry.amount_grosze AS amount,
+        CASE WHEN entry.appointment_id IS NULL THEN entry.settlement_status ELSE 'known' END AS settlement,
+        CASE WHEN entry.kind='expense' THEN 0
+          WHEN entry.appointment_id IS NOT NULL THEN (
+            SELECT COALESCE(SUM(payment.amount_grosze),0) FROM payment_entries AS payment
+            WHERE payment.appointment_id=entry.appointment_id AND NOT EXISTS (
+              SELECT 1 FROM payment_corrections WHERE reversed_entry_id=payment.id))
+          ELSE (SELECT COALESCE(SUM(event.amount_grosze),0) FROM finance_collection_events AS event
+            WHERE event.finance_entry_id=entry.id AND event.entry_version=entry.version)
+        END AS collected
+      FROM windows JOIN finance_entries AS entry ON entry.accounting_month=windows.month
+      JOIN finance_reporting_classifications AS classification ON classification.finance_entry_id=entry.id
+      LEFT JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
+      WHERE (entry.batch_id IS NULL OR batch.status='committed')
+        AND NOT EXISTS (SELECT 1 FROM finance_entry_voids WHERE finance_entry_id=entry.id)
+        AND NOT EXISTS (SELECT 1 FROM finance_manual_voids WHERE finance_entry_id=entry.id)
+      UNION ALL
+      SELECT windows.month,'income',charge.expected_amount_grosze,'known',
+        (SELECT COALESCE(SUM(payment.amount_grosze),0) FROM payment_entries AS payment
+          WHERE payment.appointment_id=appointment.id AND NOT EXISTS (
+            SELECT 1 FROM payment_corrections WHERE reversed_entry_id=payment.id))
+      FROM windows JOIN appointments AS appointment
+        ON appointment.starts_at>=windows.starts_at AND appointment.starts_at<windows.ends_at
+      JOIN session_charges AS charge ON charge.appointment_id=appointment.id
+      WHERE appointment.status IN ('completed','noshow')
+        AND NOT EXISTS (SELECT 1 FROM finance_appointment_authority_claims
+          WHERE appointment_id=appointment.id)
+    )
+    SELECT windows.month,
+      COALESCE(SUM(CASE WHEN facts.kind='income' THEN amount ELSE 0 END),0) AS revenueGrosze,
+      COALESCE(SUM(collected),0) AS collectedGrosze,
+      COALESCE(SUM(CASE WHEN facts.kind='income' AND settlement!='unknown' THEN amount-collected ELSE 0 END),0) AS outstandingGrosze,
+      COALESCE(SUM(CASE WHEN facts.kind='income' AND settlement='unknown' THEN amount-collected ELSE 0 END),0) AS verificationGrosze,
+      COALESCE(SUM(CASE WHEN facts.kind='expense' THEN amount ELSE 0 END),0) AS expensesGrosze,
+      COALESCE(SUM(CASE WHEN collected<0 OR collected>amount THEN 1 ELSE 0 END),0) AS invalidCount
+    FROM windows LEFT JOIN facts ON facts.month=windows.month GROUP BY windows.month ORDER BY windows.month
+  `).bind(...bindings), 'trend')
+  if (result.length !== months.length) fail('INTERNAL_ERROR')
+  return result.map(({ invalidCount, ...point }) => {
+    if (invalidCount !== 0 || Object.entries(point).some(([key, value]) => key !== 'month'
+      && (!Number.isSafeInteger(value) || value < 0))) fail('INTERNAL_ERROR')
+    return Object.freeze({ ...point, incomeGrosze: point.revenueGrosze - point.expensesGrosze })
+  })
+}
+
+const queryUnknownPeriodCount = async (db) => {
+  const value = await db.prepare(`SELECT COUNT(*) AS count FROM finance_entries AS entry
+    JOIN finance_reporting_classifications AS classification ON classification.finance_entry_id=entry.id
+    LEFT JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
+    WHERE entry.accounting_month IS NULL AND (entry.batch_id IS NULL OR batch.status='committed')
+      AND NOT EXISTS (SELECT 1 FROM finance_entry_voids WHERE finance_entry_id=entry.id)
+      AND NOT EXISTS (SELECT 1 FROM finance_manual_voids WHERE finance_entry_id=entry.id)
+  `).first('count')
+  if (!Number.isSafeInteger(value) || value < 0) fail('INTERNAL_ERROR')
+  return value
 }
 
 const queryLatestAppointment = async (db, nowMs, currentMonth) => {
@@ -266,6 +338,9 @@ const rowDto = (entry) => Object.freeze({
   paymentMethod: entry.paymentMethod,
   invoiceStatus: entry.invoiceStatus,
   version: entry.version,
+  settlementStatus: entry.settlementStatus,
+  counterparty: entry.counterparty,
+  sourceLabel: entry.sourceLabel,
 })
 
 const reportingRevision = async (db) => {
@@ -294,13 +369,13 @@ export async function loadFinanceWindow(input) {
     || input.selectedMonth < '2000-06'
     || input.selectedMonth > currentMonth) invalidSelectedMonth()
   const months = monthWindow(input.selectedMonth)
-  const bounds = dateBounds(months)
+  const bounds = dateBounds([input.selectedMonth])
   const initialRevision = await reportingRevision(input.db)
   const [importedRows, appointmentRows, historicalRows, activityRows] = await Promise.all([
-    queryImported(input.db, months[0], input.selectedMonth),
+    queryImported(input.db, input.selectedMonth, input.selectedMonth),
     queryAppointments(input.db, bounds),
-    queryHistoricalLinks(input.db, months[0], input.selectedMonth),
-    queryActivityLinks(input.db, months[0], input.selectedMonth),
+    queryHistoricalLinks(input.db, input.selectedMonth, input.selectedMonth),
+    queryActivityLinks(input.db, input.selectedMonth, input.selectedMonth),
   ])
   if (importedRows.length + appointmentRows.length > RESULT_CAP) fail('FINANCE_WINDOW_LIMIT')
 
@@ -321,7 +396,18 @@ export async function loadFinanceWindow(input) {
     paymentByAppointment.set(row.appointment_id, values)
   }
   const collectionByFinance = new Map(collectionRows.map((row) => [row.finance_entry_id, row]))
-  const imported = importedRows.map((row) => {
+  const dataKey = importedRows.length ? await loadFinanceDataKey(input.db) : null
+  const imported = await Promise.all(importedRows.map(async (row) => {
+    let details
+    try {
+      details = JSON.parse(await decryptForScope(input.keyring, dataKey, {
+        expectedScope: FINANCE_SCOPE, recordId: row.id, field: 'details',
+        envelope: JSON.parse(row.details_envelope),
+      }))
+      if (details.schema !== 'finance_entry_details.v1'
+        || ![details.counterparty, details.sourceLabel].every((value) => value === null
+          || (typeof value === 'string' && value.length <= 500))) fail('CRYPTO_FAILURE')
+    } catch { fail('CRYPTO_FAILURE') }
     const effective = row.appointment_id
       ? paymentByAppointment.get(row.appointment_id) ?? []
       : collectionByFinance.has(row.id) ? [collectionByFinance.get(row.id)] : []
@@ -329,7 +415,7 @@ export async function loadFinanceWindow(input) {
     return Object.freeze({
       id: row.id,
       state: 'active',
-      sourceKind: 'workbook',
+      sourceKind: row.batch_id === null ? 'panel' : 'workbook',
       appointmentId: row.appointment_id,
       accountingMonth: row.accounting_month,
       occurredOn: row.occurred_on,
@@ -345,8 +431,13 @@ export async function loadFinanceWindow(input) {
       paymentMethod: 'unknown',
       invoiceStatus: row.invoice_status,
       version: row.version,
+      settlementStatus: row.appointment_id
+        ? collectedGrosze === row.amount_grosze ? 'paid' : collectedGrosze > 0 ? 'partial' : 'unpaid'
+        : row.settlement_status,
+      counterparty: details.counterparty,
+      sourceLabel: details.sourceLabel,
     })
-  })
+  }))
   const panelIds = await Promise.all(appointments.map(({ id }) => syntheticPanelLedgerId(id)))
   const panel = appointments.map((row, index) => {
     const effective = paymentByAppointment.get(row.id) ?? []
@@ -370,6 +461,10 @@ export async function loadFinanceWindow(input) {
       paymentMethod: 'unknown',
       invoiceStatus: 'not_required',
       version: Math.max(row.version, row.charge_version),
+      settlementStatus: collectedGrosze === row.expected_amount_grosze
+        ? 'paid' : collectedGrosze > 0 ? 'partial' : 'unpaid',
+      counterparty: null,
+      sourceLabel: null,
     })
   })
   const ledgerEntries = [...imported, ...panel]
@@ -422,9 +517,11 @@ export async function loadFinanceWindow(input) {
     trendMonths: months,
     specialistId: null,
   })
-  const [latestImported, latestAppointment] = await Promise.all([
+  const [latestImported, latestAppointment, priorTrend, unknownPeriodCount] = await Promise.all([
     queryLatestImported(input.db, currentMonth),
     queryLatestAppointment(input.db, input.nowMs, currentMonth),
+    queryPriorTrend(input.db, months.slice(0, -1)),
+    queryUnknownPeriodCount(input.db),
   ])
   const latestPopulatedMonth = [latestImported, latestAppointment]
     .filter(Boolean).sort().at(-1) ?? null
@@ -433,7 +530,9 @@ export async function loadFinanceWindow(input) {
     row.id, row.source_period_precision,
   ]))
   for (const entry of model.rows) {
-    if (entry.sourceKind === 'panel') coverage.timedCount += 1
+    // Only synthetic operational appointments carry a clock time. Stored ledger
+    // rows retain their source precision, even when they have panel provenance.
+    if (!sourcePrecisionById.has(entry.id)) coverage.timedCount += 1
     else if (sourcePrecisionById.get(entry.id) === 'unknown') coverage.unknownCount += 1
     else if (sourcePrecisionById.get(entry.id) === 'day' || entry.occurredOn !== null) {
       coverage.dateOnlyCount += 1
@@ -455,12 +554,12 @@ export async function loadFinanceWindow(input) {
     months,
     latestPopulatedMonth,
     kpis: model.kpis,
-    trend: model.trend,
+    trend: Object.freeze([...priorTrend, model.trend.at(-1)]),
     splits: model.splits,
     specialistLabels,
     rows: Object.freeze(model.rows.map(rowDto)),
     coverage: Object.freeze(coverage),
-    unknownPeriodCount: model.unknownPeriod.length,
+    unknownPeriodCount,
     complete: true,
   }) })
 }

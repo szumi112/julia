@@ -10,11 +10,21 @@ import {
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
 import { authorityActor } from './fixtures.js'
+import { FINANCE_SCOPE } from '../../worker/core/finance.js'
+import { createKeyring } from '../../worker/security/keyring.js'
+import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 
 const NOW_MS = Date.parse('2027-06-15T10:00:00.000Z')
 const NOW = new Date(NOW_MS).toISOString()
 const OWNER = authorityActor({ id: 'stf_finance_snapshot_owner', role: 'owner' })
-const loadFinanceWindow = (input) => loadFinanceWindowCore({ ...input, keyring: {} })
+let keyring
+let financeKey
+const loadFinanceWindow = (input) => loadFinanceWindowCore({ ...input, keyring })
+const detailsFor = async (id) => JSON.stringify(await encryptForScope(keyring, financeKey, {
+  expectedScope: FINANCE_SCOPE, recordId: id, field: 'details',
+  plaintext: JSON.stringify({ schema: 'finance_entry_details.v1', counterparty: null,
+    sourceLabel: null, invoiceNote: null, lessonCount: null }),
+}))
 
 beforeAll(async () => {
   await completeCoreDirectoryStageA()
@@ -22,6 +32,12 @@ beforeAll(async () => {
   await applyFinanceStageC()
   await applySpecialistProfilesStageD()
   await applyWorkbookRegistryStageE()
+  keyring = await createKeyring(env, {
+    activeDataKekVersion: 1, activeLookupKeyVersion: 1, activeBackupKekVersion: 1,
+  })
+  financeKey = await getOrCreateDataKey(env.DB, keyring, FINANCE_SCOPE, {
+    id: 'key_finance_snapshot', createdAt: NOW,
+  })
   await env.DB.prepare(`INSERT INTO staff_users
     (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
      specialist_id,version,activated_at,disabled_at,created_at,updated_at)
@@ -37,7 +53,7 @@ describe('FinanceWindow revision bracket', () => {
     const db = {
       prepare(sql) {
         const statement = env.DB.prepare(sql)
-        if (!sql.includes('JOIN finance_reporting_classifications AS classification')) {
+        if (!sql.includes('entry.details_envelope')) {
           return statement
         }
         return {
@@ -56,7 +72,8 @@ describe('FinanceWindow revision bracket', () => {
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
                     'fin_finance_snapshot_interleaved', null, null, 'income', 'income',
                     '2027-06', '2027-06-15', 1, 0, 'unknown', 'unpaid',
-                    'not_required', null, null, null, '{}', null, 1, OWNER.id, NOW, NOW,
+                    'not_required', null, null, null,
+                    await detailsFor('fin_finance_snapshot_interleaved'), null, 1, OWNER.id, NOW, NOW,
                   ).run()
                 }
                 return bound.all()
@@ -113,14 +130,14 @@ describe('FinanceWindow revision bracket', () => {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
         'fin_finance_snapshot_link', null, null, 'income', 'income', '2027-06',
         '2027-06-15', 18_000, 0, 'unknown', 'unpaid', 'not_required', null, null,
-        null, '{}', null, 1, OWNER.id, NOW, NOW,
+        null, await detailsFor('fin_finance_snapshot_link'), null, 1, OWNER.id, NOW, NOW,
       ),
     ])
     let interleaved = false
     const db = {
       prepare(sql) {
         const statement = env.DB.prepare(sql)
-        if (!sql.includes('JOIN finance_reporting_classifications AS classification')) {
+        if (!sql.includes('entry.details_envelope')) {
           return statement
         }
         return {

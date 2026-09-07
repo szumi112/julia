@@ -66,6 +66,7 @@ import {
   postActivityParticipantEdit,
   postActivityProjectionContinue,
 } from './routes/activities.js'
+import { postActivityCharge } from './routes/activity-billing.js'
 import { postClient, postClientArchive, postClientEdit } from './routes/clients.js'
 import {
   postAppointment,
@@ -89,6 +90,7 @@ import {
   getFinanceWindow,
   postFinanceEntryVoid,
 } from './routes/finance-reporting.js'
+import { postFinanceEntry, postFinanceAdjustment, getFinanceEntry } from './routes/finance-entry-commands.js'
 import {
   loadWorkbookRegistry,
   loadWorkbookRegistryDetail,
@@ -199,6 +201,9 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'payments.correct', pathPattern: `^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
   descriptor({ id: 'payments.own', path: '/api/v1/payments/own', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'appointment.charge.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'finance.list', path: '/api/v1/finance', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null }),
+  descriptor({ id: 'finance.entry.detail', pathPattern: '^/api/v1/finance/entries/fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.manage', auditActions: [], bodyKeys: null, queryMode: 'none' }),
+  descriptor({ id: 'finance.entry.create', path: '/api/v1/finance/entries', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.entry.created'], bodyKeys: ['kind', 'recordType', 'accountingMonth', 'occurredOn', 'amountGrosze', 'paidAmountGrosze', 'paymentMethod', 'settlementStatus', 'invoiceStatus', 'counterparty', 'sourceLabel', 'invoiceNote', 'specialistId', 'lessonCount', 'source'], assertedAuth: true }),
+  descriptor({ id: 'finance.entry.adjust', pathPattern: '^/api/v1/finance/entries/fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}/adjustments$', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.entry.adjusted'], bodyKeys: ['expectedVersion', 'reason', 'accountingMonth', 'paidAmountGrosze', 'paymentMethod', 'settlementStatus', 'invoiceStatus'], assertedAuth: true }),
   descriptor({ id: 'finance.window', path: '/api/v1/finance/window', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'finance.entry.void', pathPattern: `^/api/v1/finance/entries/${'fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'}/voids$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['finance.entry.voided'], bodyKeys: ['expectedVersion', 'reason'], assertedAuth: true }),
   descriptor({ id: 'finance.import.start', path: '/api/v1/finance/imports', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: ['finance.import.started'], bodyKeys: ['filename', 'fingerprint', 'formatVersion', 'totalRows'] }),
@@ -222,6 +227,7 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId', 'reviewContextDigest', 'directoryCount', 'directoryDigest'], assertedAuth: true }),
   descriptor({ id: 'historical.clients.activate', pathPattern: `^/api/v1/historical-clients/${HISTORICAL_CLIENT_PATH_ID}/activation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'] }),
   descriptor({ id: 'activities.workspace', path: '/api/v1/activities/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'tus.manage', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'activities.charges.create', path: '/api/v1/activities/charges', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['activity.charge.created'], bodyKeys: ['participantId', 'groupId', 'membershipId', 'responsibleSpecialistId', 'accountingMonth', 'amountGrosze', 'lessonCount', 'paidAmountGrosze', 'paymentMethod', 'settlementStatus', 'invoiceStatus'], assertedAuth: true }),
   descriptor({ id: 'activities.groups.create', path: '/api/v1/activities/groups', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'] }),
   descriptor({ id: 'activities.groups.edit', pathPattern: `^/api/v1/activities/groups/${ACTIVITY_GROUP_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.updated'], bodyKeys: ['expectedVersion', 'label', 'details', 'status', 'leaderSpecialistIds'] }),
   descriptor({ id: 'activities.participants.create', path: '/api/v1/activities/participants', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.participant.created'], bodyKeys: ['programId', 'name', 'clientId', 'historicalClientId'] }),
@@ -926,6 +932,36 @@ export function createApp(deps = {}) {
     })
     return c.json(result.body, result.status)
   })
+  app.post('/api/v1/finance/entries', async (c) => {
+    if (c.get('routeId') !== 'finance.entry.create') throw new AppError('NOT_FOUND')
+    const result = await postFinanceEntry({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.get('/api/v1/finance/entries/:entryId', async (c) => {
+    if (c.get('routeId') !== 'finance.entry.detail') throw new AppError('NOT_FOUND')
+    const result = await getFinanceEntry({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      entryId: c.req.param('entryId'),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/finance/entries/:entryId/adjustments', async (c) => {
+    if (c.get('routeId') !== 'finance.entry.adjust') throw new AppError('NOT_FOUND')
+    const result = await postFinanceAdjustment({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      entryId: c.req.param('entryId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+    })
+    return c.json(result.body, result.status)
+  })
   app.post('/api/v1/finance/imports', async (c) => {
     if (c.get('routeId') !== 'finance.import.start') throw new AppError('NOT_FOUND')
     const result = await (deps.postFinanceImport ?? postFinanceImport)({
@@ -1301,6 +1337,16 @@ export function createApp(deps = {}) {
     const result = await (deps.postActivityGroup ?? postActivityGroup)(
       activityCommandInput(c),
     )
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/activities/charges', async (c) => {
+    if (c.get('routeId') !== 'activities.charges.create') throw new AppError('NOT_FOUND')
+    const result = await postActivityCharge({
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+    })
     return c.json(result.body, result.status)
   })
   app.post('/api/v1/activities/groups/:groupId/edits', async (c) => {

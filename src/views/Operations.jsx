@@ -63,6 +63,7 @@ const ACTION_COPY = Object.freeze({
 
 const AUDIT_ACTIONS = Object.freeze({
   'activity.attendance.set': 'Ustawienie obecności na zajęciach',
+  'activity.charge.created': 'Utworzenie miesięcznego rozliczenia zajęć',
   'activity.class.created': 'Utworzenie zajęć grupowych',
   'activity.class.updated': 'Aktualizacja zajęć grupowych',
   'activity.group.created': 'Utworzenie grupy zajęciowej',
@@ -75,6 +76,9 @@ const AUDIT_ACTIONS = Object.freeze({
   'authorization.denied': 'Odmowa autoryzacji',
   'backup.pruned': 'Usunięcie wygasłej kopii zapasowej',
   'data_key.rewrapped': 'Ponowne zabezpieczenie klucza danych',
+  'finance.entry.created': 'Dodanie pozycji finansowej',
+  'finance.entry.adjusted': 'Korekta rozliczenia finansowego',
+  'finance.entry.voided': 'Unieważnienie pozycji finansowej',
   'identity.activation': 'Aktywacja tożsamości',
   'identity.denied': 'Odmowa aktywacji tożsamości',
   'identity.reindex': 'Aktualizacja indeksu tożsamości',

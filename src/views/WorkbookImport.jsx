@@ -341,7 +341,7 @@ export function WorkbookImport({
         </p> : null}
       </section> : null}
       {flow.phase === 'materializing' ? <p role="status">Import zapisany. Możesz kontynuować przetwarzanie poniżej.</p> : null}
-      {flow.phase === 'complete' ? <p role="status">Import został zakończony.</p> : null}
+      {flow.phase === 'complete' ? <p role="status">Finanse zostały zapisane. W rejestrze sprawdź import klientów i zajęć.</p> : null}
       {flow.phase === 'review' && flow.errorCode === 'WORKBOOK_COMMIT_FAILED'
         ? <p className="form-error" role="alert">
           Nie udało się potwierdzić zapisu. Ten sam plik i klucz operacji zostały zachowane do bezpiecznej ponownej próby.

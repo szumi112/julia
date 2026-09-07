@@ -107,7 +107,7 @@ const keyRow = async (db) => db.prepare(
    WHERE scope_type=? AND scope_id=? AND purpose=? AND dek_version=1`
 ).bind(FINANCE_SCOPE.type, FINANCE_SCOPE.id, FINANCE_SCOPE.purpose).first()
 
-const createFinanceContext = async (db, keyring, idFactory, now) => {
+export const createFinanceContext = async (db, keyring, idFactory, now) => {
   const current = await keyRow(db)
   if (current) return Object.freeze({ keyring, dataKey: current, scope: FINANCE_SCOPE, statement: null })
   const dataKey = await createWrappedDataKey(keyring, {
@@ -127,7 +127,7 @@ const createFinanceContext = async (db, keyring, idFactory, now) => {
   return Object.freeze({ keyring, dataKey, scope: FINANCE_SCOPE, statement })
 }
 
-const loadFinanceContext = async (db, keyring) => {
+export const loadFinanceContext = async (db, keyring) => {
   const dataKey = await keyRow(db)
   if (!dataKey) fail('CRYPTO_FAILURE')
   return Object.freeze({ keyring, dataKey, scope: FINANCE_SCOPE })
@@ -597,6 +597,14 @@ export async function listFinanceEntries(input) {
       WHERE void.finance_entry_id=entry.id
     )`)
   }
+  const hasManualVoids = await command.db.prepare(
+    `SELECT 1 AS present FROM sqlite_master
+     WHERE type='table' AND name='finance_manual_voids'`,
+  ).first()
+  if (hasManualVoids) predicates.push(`NOT EXISTS (
+    SELECT 1 FROM finance_manual_voids AS manual_void
+    WHERE manual_void.finance_entry_id=entry.id
+  )`)
   const rows = (await command.db.prepare(
     `SELECT entry.id,entry.batch_id,entry.source_key,entry.kind,entry.record_type,
             entry.accounting_month,entry.occurred_on,entry.amount_grosze,
@@ -605,9 +613,9 @@ export async function listFinanceEntries(input) {
             entry.details_envelope,entry.source_row_envelope,entry.version,
             entry.created_by_staff_id,entry.created_at,entry.updated_at
      FROM finance_entries AS entry
-     JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
+     LEFT JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
      WHERE ${predicates.join(' AND ')}
-       AND batch.status='committed'
+       AND (entry.batch_id IS NULL OR batch.status='committed')
      ORDER BY entry.occurred_on DESC,entry.id ASC LIMIT 5000`
   ).bind(...bindings).all()).results
   if (!Array.isArray(rows)) fail()

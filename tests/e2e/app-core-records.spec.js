@@ -75,6 +75,7 @@ const financeWindow = (selectedMonth, visit = null) => {
       return totals
     }, new Map())
   paymentTotals.set('outstanding', visit === null ? 0 : visit.payment.outstandingGrosze)
+  paymentTotals.set('verification', 0)
   const paymentSplit = Object.fromEntries([...paymentTotals.entries()]
     .sort(([left], [right]) => left.localeCompare(right)))
   const row = visit === null ? null : {
@@ -86,17 +87,18 @@ const financeWindow = (selectedMonth, visit = null) => {
     collectedGrosze: visit.payment.collectedGrosze, expenseGrosze: 0,
     specialistId: visit.specialistId, serviceId: visit.serviceId, program: null,
     paymentMethod: 'unknown', invoiceStatus: 'not_required',
+    settlementStatus: visit.payment.status, counterparty: null, sourceLabel: null,
     version: Math.max(visit.version, visit.charge.version),
   }
   const revenueGrosze = row?.revenueGrosze ?? 0
   const collectedGrosze = row?.collectedGrosze ?? 0
   const kpis = {
     revenueGrosze, collectedGrosze, outstandingGrosze: revenueGrosze - collectedGrosze,
-    expensesGrosze: 0, incomeGrosze: revenueGrosze,
+    expensesGrosze: 0, incomeGrosze: revenueGrosze, verificationGrosze: 0,
   }
   const empty = {
     revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0,
-    expensesGrosze: 0, incomeGrosze: 0,
+    expensesGrosze: 0, incomeGrosze: 0, verificationGrosze: 0,
   }
   return {
     currentMonth: '2026-08', selectedMonth, fromMonth: months[0], toMonth: selectedMonth,
@@ -105,7 +107,7 @@ const financeWindow = (selectedMonth, visit = null) => {
     splits: {
       specialist: row ? { sp_anna: revenueGrosze } : {},
       service: row ? { zajecia: revenueGrosze } : {},
-      payment: row ? paymentSplit : {},
+      payment: paymentSplit,
       invoice: row ? { not_required: { count: 1, revenueGrosze } } : {},
       program: {
         english: { count: 0, revenueGrosze: 0 },

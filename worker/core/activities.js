@@ -304,7 +304,8 @@ const chargesSql = (scoped) => `SELECT charge.id,charge.participant_id,charge.pr
   charge.accounting_month,charge.lesson_count,charge.responsible_specialist_id,
   charge.finance_entry_id,charge.status,charge.version,charge.created_at,charge.updated_at,
   finance.amount_grosze,finance.paid_amount_grosze,finance.payment_method,
-  finance.settlement_status
+  finance.settlement_status,finance.version AS finance_version,
+  finance.updated_at AS finance_updated_at
   FROM activity_charges AS charge
   JOIN finance_entries AS finance ON finance.id=charge.finance_entry_id
   LEFT JOIN finance_entry_voids AS void ON void.finance_entry_id=finance.id
@@ -498,12 +499,16 @@ export async function readActivityWorkspace(input) {
       },
       lessonCount: row.lesson_count,
       responsibleSpecialistId: row.responsible_specialist_id,
-      financeEntryId: row.finance_entry_id, status: row.status, version: row.version,
+      financeEntryId: row.finance_entry_id, status: row.status,
+      // The read DTO includes finance facts. Either stored revision must advance
+      // its cache revision; charge provenance itself remains append-only.
+      version: row.version + (row.finance_version - 1),
       finance: {
         amountGrosze: row.amount_grosze, paidAmountGrosze: row.paid_amount_grosze,
         paymentMethod: row.payment_method, settlementStatus: row.settlement_status,
       },
-      createdAt: row.created_at, updatedAt: row.updated_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at > row.finance_updated_at ? row.updated_at : row.finance_updated_at,
     })),
     payments: [],
   }

@@ -39,6 +39,7 @@ import {
 } from './workbook-specialist-options.js'
 import { parseWorkbookMaterializationProgress } from './workbook-materialization-progress.js'
 import { isD1CoreDirectoryInvariantFailure } from '../db/errors.js'
+import { FINANCE_SCOPE, loadFinanceContext } from './finance.js'
 
 export const APPROVED_WORKBOOK_FINGERPRINT = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 
@@ -114,6 +115,15 @@ const PANEL_FINANCE_COLUMNS = Object.freeze([
   Object.freeze({ key: 'invoiceStatus', label: 'Faktura', type: 'enum', values: PANEL_FINANCE_FIELDS.invoiceStatus.values, width: 18 }),
   Object.freeze({ key: 'specialistId', label: 'ID specjalisty', type: 'text', width: 28 }),
 ])
+const PANEL_DESCRIPTION_COLUMNS = Object.freeze([
+  { key: 'notice', label: 'Informacja — zmiany tego arkusza nie są importowane', type: 'text', width: 45 },
+  { key: 'kind', label: 'Rodzaj wpisu', type: 'text', width: 16 },
+  { key: 'recordType', label: 'Typ pozycji', type: 'text', width: 16 },
+  { key: 'counterparty', label: 'Osoba / kontrahent', type: 'text', width: 32 },
+  { key: 'sourceLabel', label: 'Opis pozycji', type: 'text', width: 40 },
+  { key: 'invoiceNote', label: 'Uwagi do faktury', type: 'text', width: 40 },
+  { key: 'lessonCount', label: 'Liczba lekcji', type: 'integer', width: 16 },
+].map(Object.freeze))
 const WARSAW_DAY = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Europe/Warsaw', year: 'numeric', month: '2-digit', day: '2-digit',
 })
@@ -149,9 +159,9 @@ export async function loadWorkbookPanelState({
                 WHERE source_link.finance_entry_id=entry.id
               ) THEN 1 ELSE 0 END AS mutation_blocked
        FROM finance_entries AS entry
-       JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
+       LEFT JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
        WHERE entry.id IN (${ids.map(() => '?').join(',')})
-         AND batch.status='committed'
+         AND (entry.batch_id IS NULL OR batch.status='committed')
          AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
            WHERE void.finance_entry_id=entry.id)
          AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
@@ -247,13 +257,14 @@ const artifactExportStatement = (db, centreId, format) => db.prepare(
 
 const activeFinanceRowsExportStatement = (db, centreId, format) => db.prepare(
   `${latestExportCte}
-   SELECT entry.id,entry.accounting_month,entry.occurred_on,entry.amount_grosze,
+   SELECT entry.id,entry.batch_id,entry.kind,entry.record_type,entry.details_envelope,
+            entry.accounting_month,entry.occurred_on,entry.amount_grosze,
             entry.paid_amount_grosze,entry.payment_method,entry.settlement_status,
             entry.invoice_status,entry.specialist_id,entry.version
      FROM finance_entries AS entry
-     JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
+     LEFT JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
      JOIN latest_export ON 1=1
-     WHERE batch.status='committed'
+     WHERE (entry.batch_id IS NULL OR batch.status='committed')
        AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
          WHERE void.finance_entry_id=entry.id)
        AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
@@ -263,13 +274,14 @@ const activeFinanceRowsExportStatement = (db, centreId, format) => db.prepare(
 
 const ownFinanceRowsExportStatement = (db, centreId, format, specialistId) => db.prepare(
   `${latestExportCte}
-   SELECT entry.id,entry.accounting_month,entry.occurred_on,entry.amount_grosze,
+   SELECT entry.id,entry.batch_id,entry.kind,entry.record_type,entry.details_envelope,
+            entry.accounting_month,entry.occurred_on,entry.amount_grosze,
             entry.paid_amount_grosze,entry.payment_method,entry.settlement_status,
             entry.invoice_status,entry.specialist_id,entry.version
      FROM finance_entries AS entry
-     JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
+     LEFT JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
      JOIN latest_export ON 1=1
-     WHERE batch.status='committed'
+     WHERE (entry.batch_id IS NULL OR batch.status='committed')
        AND entry.specialist_id=?
        AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
          WHERE void.finance_entry_id=entry.id)
@@ -289,7 +301,7 @@ const panelValues = (row) => Object.freeze({
   specialistId: row.specialist_id,
 })
 
-const panelExportDocument = async ({ rows, callbacks, scope }) => {
+const panelExportDocument = async ({ rows, callbacks, scope, descriptions = new Map() }) => {
   const sheetRows = rows.map((row) => Object.freeze({ id: row.id, values: panelValues(row) }))
   const metadataRows = []
   for (let offset = 0; offset < rows.length; offset += 64) {
@@ -319,15 +331,22 @@ const panelExportDocument = async ({ rows, callbacks, scope }) => {
     }),
     sheets: Object.freeze([Object.freeze({
       name: 'Panel — Wizyty', columns: PANEL_FINANCE_COLUMNS, rows: sheetRows,
-    })]),
+    }), ...(descriptions.size ? [Object.freeze({
+      // The reader expressly excludes this summary sheet from import edits.
+      name: 'Panel — Podsumowanie', columns: PANEL_DESCRIPTION_COLUMNS,
+      rows: rows.filter(({ id }) => descriptions.has(id)).map(({ id }) => ({
+        id, values: { notice: 'Opis informacyjny; edytuj finanse w arkuszu Panel — Wizyty', ...descriptions.get(id) },
+      })),
+    })] : [])]),
   })
 }
 
-const panelExportFor = async ({ source, rows, callbacks, centreId }) => {
+const panelExportFor = async ({ source, rows, callbacks, centreId, descriptions }) => {
   const document = await panelExportDocument({
     rows,
     callbacks,
     scope: Object.freeze({ id: centreId, type: 'centre' }),
+    descriptions,
   })
   return patchPanelWorkbook(source, {
     includePermissions: false,
@@ -336,18 +355,47 @@ const panelExportFor = async ({ source, rows, callbacks, centreId }) => {
   }, { sign: callbacks.sign })
 }
 
-const specialistPanelExportFor = async ({ rows, callbacks, specialistId }) => {
+const specialistPanelExportFor = async ({ rows, callbacks, specialistId, descriptions }) => {
   const document = await panelExportDocument({
     rows,
     callbacks,
     scope: Object.freeze({ id: specialistId, type: 'specialist' }),
   })
-  return createScopedPanelWorkbook({
+  const source = await createScopedPanelWorkbook({
     allowedRowIds: rows.map(({ id }) => id),
     allowedSheets: [{ name: 'Panel — Wizyty', columns: PANEL_FINANCE_COLUMNS }],
     metadata: document.metadata,
     sheets: document.sheets,
   }, { sign: callbacks.sign })
+  if (!descriptions?.size) return source
+  try {
+    const described = await panelExportDocument({ rows, callbacks,
+      scope: Object.freeze({ id: specialistId, type: 'specialist' }), descriptions })
+    return await patchPanelWorkbook(source, { includePermissions: false,
+      metadata: described.metadata, sheets: described.sheets }, { sign: callbacks.sign })
+  } finally { source.fill(0) }
+}
+
+const manualExportDescriptions = async ({ db, keyring, rows }) => {
+  const manual = rows.filter((row) => row.batch_id === null)
+  if (!manual.length) return new Map()
+  const context = await loadFinanceContext(db, keyring)
+  const result = new Map()
+  for (const row of manual) {
+    const id = row.id ?? row.finance_entry_id
+    const details = parseExportEnvelope(await decryptForScope(keyring, context.dataKey, {
+      expectedScope: FINANCE_SCOPE, recordId: id, field: 'details',
+      envelope: parseExportEnvelope(row.details_envelope),
+    }))
+    if (details.schema !== 'finance_entry_details.v1' || Object.keys(details).length !== 5
+      || !['counterparty', 'sourceLabel', 'invoiceNote'].every((key) => typeof details[key] === 'string')
+      || !(details.lessonCount === null || (Number.isSafeInteger(details.lessonCount)
+        && details.lessonCount >= 0 && details.lessonCount <= 1000))) throw new Error('CRYPTO_FAILURE')
+    result.set(id, Object.freeze({ kind: row.kind, recordType: row.record_type,
+      counterparty: details.counterparty, sourceLabel: details.sourceLabel,
+      invoiceNote: details.invoiceNote, lessonCount: details.lessonCount }))
+  }
+  return result
 }
 
 const parseExportEnvelope = (value) => {
@@ -441,13 +489,14 @@ const legacySourceRowsExportStatement = (db, centreId, format) => db.prepare(
 
 const unlinkedFinanceRowsExportStatement = (db, centreId, format) => db.prepare(
   `${latestExportCte}
-   SELECT entry.id AS finance_entry_id,entry.accounting_month,entry.occurred_on,
+   SELECT entry.id AS finance_entry_id,entry.batch_id,entry.kind,entry.record_type,entry.details_envelope,
+            entry.accounting_month,entry.occurred_on,
             entry.amount_grosze,entry.paid_amount_grosze,entry.payment_method,
             entry.settlement_status,entry.invoice_status,entry.specialist_id
      FROM finance_entries AS entry
-     JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
+     LEFT JOIN finance_import_batches AS batch ON batch.id=entry.batch_id
      JOIN latest_export ON 1=1
-     WHERE batch.status='committed'
+     WHERE (entry.batch_id IS NULL OR batch.status='committed')
        AND NOT EXISTS (SELECT 1 FROM finance_entry_voids AS void
          WHERE void.finance_entry_id=entry.id)
        AND NOT EXISTS (SELECT 1 FROM finance_manual_voids AS manual_void
@@ -489,6 +538,7 @@ const signedVoidRowsExportStatement = (db, centreId, format) => db.prepare(
 ).bind(centreId, format)
 
 const legacyExportFor = async ({ db, source, keyring, baseRows, unlinkedRows, voidRows }) => {
+  const descriptions = await manualExportDescriptions({ db, keyring, rows: unlinkedRows })
   const paymentLabels = {
     blik: 'BLIK', card: 'karta', cash: 'gotówka', monthly: 'miesięcznie',
     other: 'inne', transfer: 'przelew', unknown: 'nieznana',
@@ -577,6 +627,12 @@ const legacyExportFor = async ({ db, source, keyring, baseRows, unlinkedRows, vo
       field: 'record',
       id: row.finance_entry_id,
       value: [
+        ...(descriptions.has(row.finance_entry_id) ? (() => {
+          const details = descriptions.get(row.finance_entry_id)
+          return [`rodzaj ${details.kind}`, `typ ${details.recordType}`,
+            `kontrahent ${details.counterparty}`, `opis ${details.sourceLabel}`,
+            `uwagi do faktury ${details.invoiceNote}`, `liczba lekcji ${details.lessonCount ?? 'nie dotyczy'}`]
+        })() : []),
         `miesiąc ${row.accounting_month ?? 'brak'}`,
         `data ${row.occurred_on ?? 'brak'}`,
         `kwota ${(row.amount_grosze / 100).toFixed(2)} zł`,
@@ -779,6 +835,7 @@ export async function exportWorkbook({
         rows: snapshot.rows,
         callbacks,
         specialistId: access.specialistId,
+        descriptions: await manualExportDescriptions({ db, keyring, rows: snapshot.rows }),
       }))
       await requireCurrentAuthority(db, access.actor)
       await requireExportRevision(db, snapshot.revision)
@@ -812,6 +869,7 @@ export async function exportWorkbook({
         rows: snapshot.rows,
         callbacks,
         centreId,
+        descriptions: await manualExportDescriptions({ db, keyring, rows: snapshot.rows }),
       })
     validExportBytes(bytes)
     await requireCurrentAuthority(db, access.actor)
