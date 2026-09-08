@@ -54,14 +54,15 @@ test('@owner completes clients and activities after financial import and resumes
   expect(calls).toHaveLength(4)
 })
 
-test('@owner explicitly classifies a source and preserves the identical decision after an uncertain save', async ({ page }) => {
+test('@owner continues a job paused on a legacy conflict without any manual decision', async ({ page }) => {
   const context = { counterparty: 'Fikcyjny Podmiot', serviceLabel: 'Opis ze skoroszytu',
     proposedClassification: 'review', proposedServiceId: null, nearSubjectIds: [] }
   const conflict = { id: 'hcf_browser', sourceRecordId: 'wbs_browser', kind: 'classification', context }
   let historical = { ...projection('historical', 2, 'running'), status: 'conflicts',
     projectedRecords: 0, conflictCount: 1 }
   let unresolved = true
-  const submissions = []
+  const calls = []
+  const catalogReads = []
   await page.route('**/api/v1/workbooks/registry?*', (route) => route.fulfill(json({
     cursor: null, nextCursor: null, imports: [imported], exports: [], entries: [], complete: true,
   })))
@@ -71,43 +72,28 @@ test('@owner explicitly classifies a source and preserves the identical decision
   await page.route(`**/api/v1/workbooks/imports/${imported.id}/activity-projection`, (route) => (
     route.fulfill(json({ job: projection('activity', 2) }))
   ))
-  await page.route(`**/api/v1/workbooks/imports/${imported.id}/historical-projection/review-catalog`, (route) => (
-    route.fulfill(json({ binding: { environment: 'staging', centreId: 'centre_1', fingerprint: 'a'.repeat(64),
-      artifactId: imported.artifact.id, importId: imported.id, creatorId: imported.createdByStaffId,
-      planDigest: `v1_${'A'.repeat(43)}` }, afterSourceRecordId: null, nextAfterSourceRecordId: null,
-    directoryCount: 0, directoryDigest: 'b'.repeat(64), profiles: [], items: [{
-      sourceRecordId: 'wbs_browser', kind: 'classification', conflictId: conflict.id,
-      resolution: null, reviewContextDigest: 'c'.repeat(64), context,
-    }] }))
-  ))
-  await page.route(`**/api/v1/workbooks/imports/${imported.id}/historical-projection/resolutions`, (route) => {
-    submissions.push({ body: route.request().postDataJSON(), key: route.request().headers()['idempotency-key'] })
-    if (submissions.length === 1) return route.abort('failed')
-    unresolved = false
-    historical = { ...projection('historical', 3, 'running'), conflictCount: 1 }
-    return route.fulfill(json({ projection: historical }, 201))
+  await page.route(`**/api/v1/workbooks/imports/${imported.id}/historical-projection/review-catalog`, (route) => {
+    catalogReads.push(route.request().url())
+    return route.fulfill(json({ items: [] }))
   })
   await page.route(`**/api/v1/workbooks/imports/${imported.id}/historical-projection/continue`, (route) => {
-    historical = { ...projection('historical', 4), conflictCount: 1 }
+    const { expectedVersion } = route.request().postDataJSON()
+    calls.push(expectedVersion)
+    if (expectedVersion === 2) {
+      unresolved = false
+      historical = { ...projection('historical', 3, 'running'), conflictCount: 1 }
+    } else {
+      historical = { ...projection('historical', expectedVersion + 1), conflictCount: 1 }
+    }
     return route.fulfill(json({ projection: historical }))
   })
   await page.goto('./#/ledger')
   await page.getByRole('button', { name: 'Klienci i zajęcia', exact: true }).click()
   const review = page.getByRole('region', { name: 'Import klientów i zajęć' })
+  await expect(review.getByText('W trakcie', { exact: true })).toHaveCount(1)
   await review.getByRole('button', { name: 'Kontynuuj import klientów i zajęć' }).click()
-  await expect(review.getByRole('button', { name: 'Zapisz decyzję i kontynuuj' })).toBeDisabled()
-  await review.getByLabel('Rodzaj podmiotu').selectOption('person')
-  await review.getByLabel('Dopasowanie tożsamości').selectOption('new')
-  await review.getByLabel('Usługa').selectOption('zajecia')
-  await review.getByRole('button', { name: 'Zapisz decyzję i kontynuuj' }).click()
-  await expect(review.getByRole('alert')).toContainText('Zachowano Twoje decyzje')
-  await expect(review.getByLabel('Usługa')).toHaveValue('zajecia')
-  await expect(review.getByLabel('Usługa')).toBeDisabled()
-  await review.getByRole('button', { name: 'Ponów zapis tej samej decyzji' }).click()
   await expect(review.getByText('Finanse, historia klientów i zajęcia zostały zaimportowane.')).toBeVisible()
-  expect(submissions).toHaveLength(2)
-  expect(submissions[0]).toEqual(submissions[1])
-  expect(submissions[0].body).toEqual({ expectedJobVersion: 2, conflictId: 'hcf_browser',
-    classification: 'person', existingSubjectId: null, serviceId: 'zajecia',
-    reviewContextDigest: 'c'.repeat(64), directoryCount: 0, directoryDigest: 'b'.repeat(64) })
+  expect(calls).toEqual([2, 3])
+  expect(catalogReads).toEqual([])
+  await expect(review.getByLabel('Rodzaj podmiotu')).toHaveCount(0)
 })
