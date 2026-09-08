@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createUnitOfWork } from '../../worker/db/unit-of-work.js'
 import { dispatchOutboxJob } from '../../worker/jobs/handlers.js'
 import * as outbox from '../../worker/jobs/outbox.js'
@@ -1687,6 +1687,47 @@ describe('generic outbox processor', () => {
     ).all()).results
     for (const { id } of remaining) await park(id)
     await park('job_processor_10')
+  })
+
+  it.each([
+    ['a runtime TypeError', new TypeError('Illegal invocation'), 'OUTBOX_HANDLER_EXCEPTION'],
+    ['a fixed provider code', new Error('ACCESS_PROVIDER_HTTP'), 'ACCESS_PROVIDER_HTTP'],
+    ['a private message', new Error('recipient secret parent@example.test'), 'OUTBOX_HANDLER_EXCEPTION'],
+  ])('logs the thrown handler failure as %s without persisting it', async (label, thrown, expectedCode) => {
+    const cryptoContext = await context()
+    const suffix = label.replaceAll(/[^A-Za-z0-9]/g, '_')
+    const id = `job_processor_thrown_${suffix}`
+    await enqueue(cryptoContext, {
+      id,
+      invitationId: `inv_processor_thrown_${suffix}`,
+      idempotencyKey: `staff.invitation.expire:processor-thrown-${suffix}`,
+    })
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const completed = await outbox.processOutboxBatch({
+        db: env.DB,
+        cryptoContext,
+        config: Object.freeze({ marker: 'injected' }),
+        nowMs: NOW_MS + 60_000,
+        idFactory: sequence(`processor_thrown_${suffix}`),
+        leaseOwnerFactory: sequence(`processor_thrown_lease_${suffix}`),
+        dispatch: async () => { throw thrown },
+      })
+      expect(completed).toEqual([{ id, result: 'dead' }])
+      expect(consoleError).toHaveBeenCalledTimes(1)
+      expect(consoleError).toHaveBeenCalledWith(JSON.stringify({
+        attemptCount: 1,
+        errorCode: expectedCode,
+        event: 'outbox.handler.failed',
+        jobId: id,
+        result: 'failure',
+      }))
+      expect(JSON.stringify(consoleError.mock.calls)).not.toContain('recipient secret')
+      expect(await env.DB.prepare('SELECT status,last_error_code FROM outbox_jobs WHERE id=?').bind(id).first())
+        .toEqual({ status: 'dead', last_error_code: 'OUTBOX_HANDLER_FAILURE' })
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 
   it('retries a fixed D1 query-budget exhaustion instead of dead-lettering the job', async () => {
