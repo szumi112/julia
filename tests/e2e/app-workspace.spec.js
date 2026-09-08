@@ -382,6 +382,63 @@ test('@owner keeps untimed workbook history outside Calendar sessions', async ({
   expect(pageErrors).toEqual([])
 })
 
+test('@owner lands on a populated dashboard before visiting any other view', async ({ page }) => {
+  const pageErrors = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await freezeTime(page, '2026-07-15T08:00:00.000Z')
+  const windows = []
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const url = new URL(route.request().url())
+    const from = url.searchParams.get('from')
+    const to = url.searchParams.get('to')
+    windows.push([from, to])
+    await route.fulfill(workspaceEnvelope(from, to, scheduledAppointment))
+  })
+
+  await page.goto('./#/dashboard')
+  const dashboard = page.getByRole('region', { name: 'Pulpit dnia' })
+  await expect(dashboard.getByText('Ola Aktywna', { exact: true }).first()).toBeVisible()
+  await expect(dashboard.getByText('Wolny dzień', { exact: true })).toHaveCount(0)
+  await expect(page.locator('.today-card')).toContainText('1 sesja w grafiku')
+  expect(windows).toEqual([['2026-07-13', '2026-07-19']])
+  expect(pageErrors).toEqual([])
+})
+
+for (const [label, status, code] of [
+  ['an infrastructure failure', 500, 'INTERNAL_ERROR'],
+  ['a rejected request', 400, 'VALIDATION_FAILED'],
+]) {
+  test(`@owner recovers the client directory with one retry after ${label}`, async ({ page }) => {
+    const pageErrors = []
+    page.on('pageerror', (error) => pageErrors.push(error.message))
+    await freezeTime(page, '2026-07-15T08:00:00.000Z')
+    let reads = 0
+    await page.route('**/api/v1/workspace?*', async (route) => {
+      reads += 1
+      const url = new URL(route.request().url())
+      if (reads === 1) {
+        await route.fulfill(json(status, {
+          error: { code, correlationId: '11111111-1111-4111-8111-111111111111' },
+        }))
+        return
+      }
+      await route.fulfill(workspaceEnvelope(
+        url.searchParams.get('from'),
+        url.searchParams.get('to'),
+      ))
+    })
+
+    await page.goto('./#/clients')
+    const directoryState = page.getByRole('status', { name: 'Stan kartoteki' })
+    await expect(directoryState).toContainText('Kartoteka jest teraz niedostępna')
+    await directoryState.getByRole('button', { name: 'Spróbuj ponownie' }).click()
+
+    await expect(page.getByText('Ola Aktywna', { exact: true })).toBeVisible()
+    expect(reads).toBe(2)
+    expect(pageErrors).toEqual([])
+  })
+}
+
 test('@owner renders only complete canonical workspace windows as read-only history', async ({ page }) => {
   const pageErrors = []
   let workspaceReads = 0

@@ -10,7 +10,7 @@ const { createWorkspaceAuthorityKey, createWorkspaceProviderController } = works
 const WORKSPACE_KEYS = [
   'activateHistoricalClient', 'activities', 'archiveClient', 'cancelAppointment', 'correctPayment',
   'createAppointment', 'createClient', 'editAppointment', 'editClient', 'loadWindow',
-  'loadedRanges', 'recordPayment', 'status',
+  'loadedRanges', 'recordPayment', 'recoverFromInfrastructureError', 'status',
 ]
 const ACTIVITY_KEYS = [
   'createClass', 'createGroup', 'createMembership', 'createParticipant',
@@ -1335,6 +1335,30 @@ test('infrastructure failure preserves caller input and disables later mutations
   controller.resetAuthority('authority-recovered')
   assert.equal(controller.getSnapshot().workspace.status, 'ready')
   assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [])
+})
+
+test('recovering from an infrastructure error re-enables loads under the same authority', async () => {
+  let calls = 0
+  const outage = Object.assign(new Error('offline'), { code: 'NETWORK_ERROR', status: 0 })
+  const controller = makeController(() => repositoryWith({
+    loadWindow: async ({ from, to }) => {
+      calls += 1
+      if (calls === 1) throw outage
+      return payload(from, to)
+    },
+  }))
+  const generation = controller.getSnapshot().loadedState.authorityGeneration
+  assert.equal(controller.getSnapshot().workspace.recoverFromInfrastructureError(), false)
+  await assert.rejects(controller.getSnapshot().workspace.loadWindow(range('2026-08-01')), outage)
+  assert.equal(controller.getSnapshot().workspace.status, 'read-only-error')
+
+  assert.equal(controller.getSnapshot().workspace.recoverFromInfrastructureError(), true)
+  assert.equal(controller.getSnapshot().workspace.status, 'ready')
+  await controller.getSnapshot().workspace.loadWindow(range('2026-08-01'))
+  assert.deepEqual(controller.getSnapshot().workspace.loadedRanges, [range('2026-08-01')])
+  assert.equal(controller.getSnapshot().loadedState.authorityGeneration, generation)
+  assert.equal(calls, 2)
+  assert.equal(controller.getSnapshot().workspace.recoverFromInfrastructureError(), false)
 })
 
 test('a stale API authority completion fails the current workspace closed', async () => {

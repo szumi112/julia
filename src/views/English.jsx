@@ -156,7 +156,10 @@ export function English({ params = {} }) {
       {overview.ungroupedRows.length > 0 && (
         <section className="card card--pad" aria-labelledby="english-ungrouped-title">
           <h2 className="card-title" id="english-ungrouped-title">Bez przypisanej grupy</h2>
-          <p className="muted">Te wiersze nie zawierają potwierdzonego przypisania do grupy ani członkostwa.</p>
+          <p className="muted">
+            {overview.ungroupedRows.length} {overview.ungroupedRows.length === 1 ? 'rozliczenie' : 'rozliczenia'} w tabeli powyżej
+            ma oznaczenie „Bez przypisanej grupy” - bez potwierdzonego przypisania do grupy ani członkostwa.
+          </p>
         </section>
       )}
     </div>

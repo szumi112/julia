@@ -834,6 +834,7 @@ export const createWorkspaceProviderController = (options) => {
         loadedRanges: loadedState.loadedRanges,
         activities,
         loadWindow,
+        recoverFromInfrastructureError,
         createClient: commands.createClient,
         editClient: commands.editClient,
         archiveClient: commands.archiveClient,
@@ -853,6 +854,16 @@ export const createWorkspaceProviderController = (options) => {
     readOnly = true
     infrastructureError = error
     publish()
+  }
+
+  // Lifts the read-only latch after an infrastructure error under the same
+  // authority: loaded history stays valid, only new loads and mutations resume.
+  const recoverFromInfrastructureError = () => {
+    if (!readOnly || repository === null) return false
+    readOnly = false
+    infrastructureError = null
+    publish()
+    return true
   }
 
   async function loadWindow(requested) {
