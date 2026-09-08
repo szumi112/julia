@@ -161,8 +161,11 @@ export function WorkbookImport({
       dispatchFlow({
         type: WORKBOOK_FLOW_ACTIONS.PREVIEW_SUCCEEDED, generation, preview,
       })
-    } catch {
-      if (!controller.signal.aborted) fail('WORKBOOK_PREVIEW_FAILED')
+    } catch (error) {
+      if (controller.signal.aborted) return
+      let code = null
+      try { code = error?.code } catch { code = null }
+      fail(code === 'WORKBOOK_FINGERPRINT_REJECTED' ? code : 'WORKBOOK_PREVIEW_FAILED')
     }
   }
 
@@ -349,6 +352,10 @@ export function WorkbookImport({
       {flow.phase === 'failed' && flow.errorCode === 'WORKBOOK_IMPORT_CONFLICT'
         ? <p className="form-error" role="alert">
           Nie można zapisać tego podglądu. Plik mógł zostać już zaimportowany albo lista specjalistek się zmieniła. Wybierz plik ponownie.
+        </p> : null}
+      {flow.phase === 'failed' && flow.errorCode === 'WORKBOOK_FINGERPRINT_REJECTED'
+        ? <p className="form-error" role="alert">
+          To nie jest zatwierdzony skoroszyt historyczny. Historia została zaimportowana jednorazowo, a bieżące dane wpisuje się w panelu. Plik został usunięty z pamięci przeglądarki.
         </p> : null}
       {flow.phase === 'failed' && ['WORKBOOK_COMMIT_REJECTED', 'WORKBOOK_PREVIEW_FAILED']
         .includes(flow.errorCode) ? <p className="form-error" role="alert">
