@@ -115,8 +115,7 @@ function validateInput(input) {
     || !saneName(input.fromName)
     || appEnv === null
     || !ID.test(input.jobId ?? '')
-    || !acceptPhaseOneAccessEmail(input.recipient, { appEnv })
-    || !canonicalInstant(input.expiresAt)) fail('EMAIL_PROVIDER_CONFIG_INVALID')
+    || !acceptPhaseOneAccessEmail(input.recipient, { appEnv })) fail('EMAIL_PROVIDER_CONFIG_INVALID')
 }
 
 async function cancelReader(reader) {
@@ -303,7 +302,32 @@ async function sendAndValidate(input, request, signal) {
 
 export async function sendInvitationEmail(input = {}) {
   validateInput(input)
-  const content = invitationContent(input.appOrigin, input.expiresAt)
+  if (!canonicalInstant(input.expiresAt)) fail('EMAIL_PROVIDER_CONFIG_INVALID')
+  return sendEmail(input, invitationContent(input.appOrigin, input.expiresAt))
+}
+
+export async function sendAuthenticationEmail(input = {}) {
+  validateInput(input)
+  let text
+  if (input.purpose === 'otp' && /^[0-9]{6}$/.test(input.otp ?? '')) {
+    text = `Kod logowania do panelu Bear with me: ${input.otp}. Kod jest ważny przez 5 minut.`
+  } else if (input.purpose === 'reset') {
+    let url
+    try { url = new URL(input.url) } catch { fail('EMAIL_PROVIDER_CONFIG_INVALID') }
+    if (url.origin !== input.appOrigin || url.username || url.password
+      || !url.pathname.startsWith('/api/auth/reset-password/')) fail('EMAIL_PROVIDER_CONFIG_INVALID')
+    text = `Aby ustawić nowe hasło do panelu Bear with me, otwórz: ${url.href}`
+  } else {
+    fail('EMAIL_PROVIDER_CONFIG_INVALID')
+  }
+  return sendEmail(input, {
+    subject: input.purpose === 'otp' ? 'Kod logowania do Bear with me' : 'Zmiana hasła do Bear with me',
+    text,
+    html: `<p>${escapeInvitationHtml(text)}</p>`,
+  })
+}
+
+async function sendEmail(input, content) {
   const body = {
     from: `${input.fromName} <${input.fromEmail}>`,
     to: [input.recipient],

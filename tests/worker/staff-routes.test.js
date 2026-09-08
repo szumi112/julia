@@ -525,7 +525,7 @@ describe('staff owner HTTP operations', () => {
         },
         invitation: {
           id: 'inv_success_2',
-          status: 'provisioning',
+          status: 'pending',
           expiresAt: new Date(NOW_MS + 7 * DAY_MS).toISOString(),
           emailSentAt: null,
           version: 1,

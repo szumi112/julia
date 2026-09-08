@@ -200,7 +200,9 @@ function captureEvaluationInput(input) {
   return normalizeInput(() => {
     const value = snapshotExact(input, [
       'db', 'cryptoContext', 'nowMs', 'prospectiveSchedulerRun',
+      ...(Object.hasOwn(input, 'appEnv') ? ['appEnv'] : []),
     ])
+    if (value.appEnv !== undefined && !['development', 'staging', 'production'].includes(value.appEnv)) invalid()
     const db = captureDb(value.db)
     const cryptoContext = captureCryptoContext(value.cryptoContext)
     const nowMs = value.nowMs
@@ -216,6 +218,7 @@ function captureEvaluationInput(input) {
     return Object.freeze({
       db,
       cryptoContext,
+      appEnv: value.appEnv,
       nowMs,
       prospectiveSchedulerRun,
       generatedAt,
@@ -393,7 +396,7 @@ function validateOutboxFact(row, status) {
   return row
 }
 
-async function readOutboxFacts(db) {
+async function readOutboxFacts(db, nativeAuth = false) {
   const recoverySchema = await db.prepare(
     `SELECT EXISTS (
        SELECT 1 FROM sqlite_master
@@ -440,6 +443,7 @@ async function readOutboxFacts(db) {
      FROM outbox_jobs AS job INDEXED BY outbox_jobs_ordinary_status_updated_id_idx
      WHERE job.type IN ('staff.access.reconcile','staff.invitation.email','staff.invitation.expire')
        AND job.status='dead'
+       ${nativeAuth ? "AND job.type!='staff.access.reconcile'" : ''}
        ${provenRecoveryExclusion}
      ORDER BY job.updated_at DESC,job.id DESC LIMIT 1`,
   ).first()
@@ -883,10 +887,12 @@ const makeCheck = (id, label, health) => ({
 async function evaluateCaptured(input) {
   const generatedAt = input.generatedAt
   const [access, earliest, backups, outbox, scheduler] = await Promise.all([
-    readAccess(input.db),
+    ['development', 'staging'].includes(input.appEnv)
+      ? Promise.resolve({ appliedGeneration: 0, desiredGeneration: 0, updatedAt: null })
+      : readAccess(input.db),
     readEarliestScheduler(input.db),
     readBackupFacts(input.db),
-    readOutboxFacts(input.db),
+    readOutboxFacts(input.db, ['development', 'staging'].includes(input.appEnv)),
     readLatestSchedulerSuccess(input.db),
   ])
   const anchor = earliest?.scheduled_for ?? input.prospectiveSchedulerRun?.completedAt ?? null
@@ -989,7 +995,10 @@ async function readSnapshot(db) {
 
 function capturePublisherInput(input) {
   return normalizeInput(() => {
-    const value = snapshotExact(input, ['db', 'cryptoContext', 'run', 'idFactory', 'now'])
+    const value = snapshotExact(input, ['db', 'cryptoContext', 'run', 'idFactory', 'now',
+      ...(Object.hasOwn(input, 'appEnv') ? ['appEnv'] : []),
+    ])
+    if (value.appEnv !== undefined && !['development', 'staging', 'production'].includes(value.appEnv)) invalid()
     const db = captureDb(value.db)
     const cryptoContext = captureCryptoContext(value.cryptoContext)
     const run = snapshotExact(value.run, [
@@ -1009,6 +1018,7 @@ function capturePublisherInput(input) {
     return Object.freeze({
       db,
       cryptoContext,
+      appEnv: value.appEnv,
       run,
       idFactory: value.idFactory,
       now: value.now,
@@ -1223,6 +1233,7 @@ export async function publishScheduledOperationalState(input) {
   const evaluated = await evaluateCaptured({
     db: validated.db,
     cryptoContext: validated.cryptoContext,
+    appEnv: validated.appEnv,
     nowMs: current.nowMs,
     prospectiveSchedulerRun: {
       id: validated.run.id,

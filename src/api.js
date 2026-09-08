@@ -1,3 +1,4 @@
+import { isBackupFailureCode } from './operations-diagnostics.js'
 import { APP_MODE } from './app-mode.js'
 import {
   captureCreateFinanceEntry, captureFinanceAdjustment, captureFinanceCommandResult,
@@ -134,6 +135,7 @@ const SERVER_STATUS = Object.freeze({
   WORKBOOK_PREVIEW_TOKEN_INVALID: 400,
   WORKBOOK_SCOPE_MISMATCH: 400,
   ACCESS_ASSERTION_INVALID: 401,
+  AUTH_REQUIRED: 401,
   REAUTH_REQUIRED: 401,
   ACCESS_DENIED: 403,
   FORBIDDEN: 403,
@@ -189,7 +191,7 @@ const CLIENT_CODES = new Set([
   'SESSION_AUTHORITY_STALE',
   'SESSION_REQUIRED',
 ])
-const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'REAUTH_REQUIRED'])
+const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'AUTH_REQUIRED', 'REAUTH_REQUIRED'])
 const authDenialReason = (code) => (code === 'ACCESS_DENIED' ? 'denied' : 'reauth')
 const VALIDATION_FIELDS = new Set([
   'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
@@ -1631,7 +1633,9 @@ const acceptedActionDetails = (action) => {
       ? ['errorCode', 'minimumCount', 'threshold', 'windowMinutes']
       : ['actorId', 'capability', 'count', 'errorCode', 'threshold']
   } else if (action.kind === 'backup_failed') {
-    keys = ['backupId', 'errorCode']
+    keys = Object.hasOwn(action.details ?? {}, 'backupErrorCode')
+      ? ['backupId', 'errorCode', 'backupErrorCode']
+      : ['backupId', 'errorCode']
   } else if (action.kind === 'backup_stale') {
     keys = ['errorCode', 'thresholdHours']
   } else if (action.kind === 'outbox_job_failed') {
@@ -1661,7 +1665,8 @@ const acceptedActionDetails = (action) => {
   } else if (action.kind === 'backup_failed') {
     if (action.severity !== 'critical' || action.entityType !== 'backup_run'
       || !BACKUP_ID.test(action.entityId)
-      || details.backupId !== action.entityId || details.errorCode !== 'BACKUP_FAILED') return null
+      || details.backupId !== action.entityId || details.errorCode !== 'BACKUP_FAILED'
+      || (Object.hasOwn(details, 'backupErrorCode') && !isBackupFailureCode(details.backupErrorCode))) return null
   } else if (action.kind === 'backup_stale') {
     if (action.severity !== 'critical' || action.entityType !== 'centre'
       || action.entityId !== 'centre_1'

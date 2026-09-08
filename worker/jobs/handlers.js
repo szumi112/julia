@@ -218,6 +218,13 @@ export async function handleInvitationEmail({
     return { result: 'succeeded' }
   }
   if (job.idempotency_key !== emailJobKey(invitation.id, invitation.version)) {
+    const previousVersion = Number(job.idempotency_key.split(':').at(-1))
+    if (['development', 'staging'].includes(config?.appEnv)
+      && Number.isSafeInteger(previousVersion) && previousVersion > 0
+      && previousVersion < invitation.version
+      && job.idempotency_key === emailJobKey(invitation.id, previousVersion)) {
+      return { result: 'succeeded' }
+    }
     return { result: 'dead' }
   }
   let invitationEmail
@@ -289,6 +296,7 @@ export async function handleInvitationEmail({
 }
 
 export async function handleInvitationExpiry({
+  config,
   db,
   cryptoContext,
   payload,
@@ -297,6 +305,7 @@ export async function handleInvitationExpiry({
   correlationIdFactory = randomCorrelationId,
 }) {
   await expireInvitation({
+    appEnv: config?.appEnv,
     db,
     cryptoContext,
     actorId: payload.actorId,

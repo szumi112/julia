@@ -2573,6 +2573,7 @@ test('labels session clears with a reauth or denied reason', async () => {
     role: 'owner',
   }
   const { fetchImpl } = queuedFetch(
+    errorResponse('AUTH_REQUIRED', 401),
     jsonResponse(sessionBody()),
     errorResponse('REAUTH_REQUIRED', 401),
     jsonResponse(sessionBody()),
@@ -2588,6 +2589,7 @@ test('labels session clears with a reauth or denied reason', async () => {
   const observed = []
   client.subscribeSession((session, reason) => observed.push([session, reason]))
 
+  await assert.rejects(client.getSession(), { code: 'AUTH_REQUIRED' })
   await client.getSession()
   await assert.rejects(client.inviteStaff(invite), { code: 'REAUTH_REQUIRED' })
   await client.getSession()
@@ -2598,6 +2600,7 @@ test('labels session clears with a reauth or denied reason', async () => {
   client.clearSession()
 
   assert.deepEqual(observed, [
+    [null, 'reauth'],
     [publicSession(), undefined],
     [null, 'reauth'],
     [publicSession(), undefined],
@@ -6183,4 +6186,15 @@ test('workbook continuation accepts a mid-materialization slice that only advanc
     job: workbookJobDto({ cursor: 128, processedRecords: 128, version: 3 }),
     evidence: { createdRecords: 128, voidedRecords: 0, converged: false },
   })
+})
+
+test('operational backup details accept a safe diagnostic code and reject arbitrary text', async () => {
+  const body = actionsBody([ACTION_FACTS.find((action) => action.kind === 'backup_failed')])
+  body.data.actions[0].details.backupErrorCode = 'BACKUP_EXPORT_START_FAILED'
+  const { fetchImpl } = queuedFetch(jsonResponse(body))
+  const result = await createApiClient({ fetchImpl }).getOperationalActions()
+  assert.equal(result.actions[0].details.backupErrorCode, 'BACKUP_EXPORT_START_FAILED')
+  body.data.actions[0].details.backupErrorCode = 'BACKUP_SECRET_VALUE'
+  const rejected = queuedFetch(jsonResponse(body))
+  await assert.rejects(createApiClient({ fetchImpl: rejected.fetchImpl }).getOperationalActions(), assertInvalidResponse)
 })

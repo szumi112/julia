@@ -134,6 +134,24 @@ export function loadConfig(env) {
   })
 }
 
+const DEVELOPMENT_AUTH_SECRET = 'fictional-development-auth-secret-0001'
+export function loadAuthConfig(env, config) {
+  if (config?.appEnv === 'production') throw new Error('AUTH_CONFIG_DISABLED')
+  if (!config || !['development', 'staging'].includes(config.appEnv)
+    || typeof config.appOrigin !== 'string') throw new Error('AUTH_CONFIG_INVALID')
+  try {
+    const secret = config.appEnv === 'development' && env?.BETTER_AUTH_SECRET == null
+      ? DEVELOPMENT_AUTH_SECRET
+      : z.string().min(32).max(4096).refine(saneName).parse(env?.BETTER_AUTH_SECRET)
+    return Object.freeze({
+      secret,
+      methods: Object.freeze(['password', 'email-otp']),
+    })
+  } catch {
+    throw new Error('AUTH_CONFIG_INVALID')
+  }
+}
+
 const strictConfigSnapshot = (config) => {
   if (config == null || typeof config !== 'object' || Object.getPrototypeOf(config) !== Object.prototype) throw new Error()
   const values = new Map()

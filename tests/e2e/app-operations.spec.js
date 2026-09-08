@@ -1371,6 +1371,9 @@ test('@owner refreshes audit back to a fresh first page without touching other r
 })
 
 test('@owner operation privacy and browser persistence stay empty after tabs and reload', async ({ page }) => {
+  await page.route('**/api/auth/list-accounts', (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify([{ providerId: 'credential' }]),
+  }))
   const logs = []
   const requests = []
   page.on('console', (message) => {
@@ -1535,4 +1538,56 @@ test('@coordinator captures requested filtered actions visual evidence', async (
   await expect(page.getByText('Wzrost odmów dostępu', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('tab', { name: 'Bezpieczeństwo' })).toHaveCount(0)
   await page.screenshot({ path: `${VISUAL_DIR}/coordinator-actions-768x1024.png` })
+})
+
+test('@owner explains grouped backup failures and keeps resolution scoped to one report', async ({ page }) => {
+  const backup = ACTION_SPECS.find((action) => action.kind === 'backup_failed')
+  let actions = makeActions([
+    { ...backup, id: 'act_backup_new', entityId: 'bkp_new', details: { backupId: 'bkp_new', errorCode: 'BACKUP_FAILED', backupErrorCode: 'BACKUP_EXPORT_START_FAILED' } },
+    { ...backup, id: 'act_backup_old', entityId: 'bkp_old', details: { backupId: 'bkp_old', errorCode: 'BACKUP_FAILED' } },
+  ])
+  await installOperationsRoutes(page, {
+    actions: (route) => route.fulfill(actionsEnvelope(actions)),
+    resolution: async (route) => {
+      expect(route.request().url()).toContain('/act_backup_new/resolution')
+      actions = actions.filter((action) => action.id !== 'act_backup_new')
+      await route.fulfill(resolvedEnvelope('act_backup_new'))
+    },
+  })
+  await openActions(page)
+  await expect(page.getByText('Liczba otwartych zgłoszeń: 2', { exact: false })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Oznacz jako rozwiązane', exact: true })).toHaveCount(0)
+  await page.getByText('Pokaż zgłoszenia (2)', { exact: true }).click()
+  const first = page.locator('.operations-action-row').first()
+  await first.getByRole('button', { name: 'Szczegóły', exact: true }).click()
+  const details = page.getByRole('region', { name: 'Szczegóły: Nieudana kopia zapasowa' })
+  await expect(details).toContainText('Nie udało się rozpocząć eksportu bazy danych.')
+  await expect(details).toContainText('Zamknięcie zgłoszenia nie naprawia przyczyny')
+  await page.keyboard.press('Escape')
+  await expect(details).toHaveCount(0)
+  await expect(first.getByRole('button', { name: 'Szczegóły', exact: true })).toBeFocused()
+  await first.getByRole('button', { name: 'Oznacz jako rozwiązane', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Oznacz jako rozwiązane', exact: true }).click()
+  await expect(page.locator('.operations-action-row')).toHaveCount(1)
+  await expect(page.getByText('Pokaż zgłoszenia (2)', { exact: true })).toHaveCount(0)
+})
+
+test('@owner operation explanations fit a phone and distinguish audit success from delivery', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await installOperationsRoutes(page)
+  await openOperations(page)
+  const row = page.locator('.operations-row').filter({ has: page.getByText('Kopie zapasowe', { exact: true }) })
+  await row.getByRole('button', { name: 'Szczegóły', exact: true }).click()
+  const details = page.getByRole('region', { name: 'Szczegóły: Kopie zapasowe' })
+  await expect(details).toContainText('36 godzin')
+  const box = await details.boundingBox()
+  expect(box.x).toBeGreaterThanOrEqual(0)
+  expect(box.x + box.width).toBeLessThanOrEqual(390)
+  await page.screenshot({ path: '.superpowers/visual/operations-help-phone.png' })
+  await page.keyboard.press('Escape')
+  await page.getByRole('tab', { name: 'Bezpieczeństwo' }).click()
+  const email = page.locator('.operations-audit-row').filter({ hasText: 'Przyjęcie wiadomości z zaproszeniem' })
+  await email.getByRole('button', { name: 'Szczegóły', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Szczegóły: Przyjęcie wiadomości z zaproszeniem' }))
+    .toContainText('Nie oznacza to potwierdzenia dostarczenia ani odczytania wiadomości.')
 })

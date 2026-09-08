@@ -47,6 +47,7 @@ import {
   CORE_MIGRATION_STAGE_C_NAMES,
   CORE_MIGRATION_STAGE_D_NAMES,
   CORE_MIGRATION_STAGE_E_NAMES,
+  CORE_MIGRATION_STAGE_F_NAMES,
 } from './core-migration-stages.js'
 
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
@@ -55,6 +56,7 @@ const NODE_EXECUTABLE = realpathSync(process.execPath)
 const WRANGLER_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/wrangler/bin/wrangler.js'))
 const VITE_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'node_modules/vite/bin/vite.js'))
 const SEED_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'scripts/seed-local.mjs'))
+const AUTH_SEED_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'scripts/seed-local-auth.mjs'))
 const UPGRADE_SCRIPT_PATH = realpathSync(join(PROJECT_ROOT, 'scripts/upgrade-core-directory.js'))
 const APPLY_MIGRATION_STAGE_SCRIPT_PATH = realpathSync(
   join(PROJECT_ROOT, 'scripts/apply-core-migration-stage.js'),
@@ -1591,6 +1593,8 @@ const defaultAssertHarness = async (harness, migrationStage = 'stage-a') => {
           ? CORE_MIGRATION_STAGE_D_NAMES
           : migrationStage === 'stage-e'
             ? CORE_MIGRATION_STAGE_E_NAMES
+            : migrationStage === 'stage-f'
+              ? CORE_MIGRATION_STAGE_F_NAMES
             : null
   const migrationNames = readdirSync(activeMigrations).sort()
   if (!expectedMigrations
@@ -2461,6 +2465,38 @@ export async function runAppE2E({
       shell: false,
     }, 'APP_E2E_MIGRATION_FAILED')
     migrationStage = 'stage-e'
+
+    await assertHarness(harness, migrationStage)
+    if (forwardedSignal) outcome('APP_E2E_INTERRUPTED')
+    await executeStage({
+      args: [regularExecutable(APPLY_MIGRATION_STAGE_SCRIPT_PATH), 'stage-f', '--local'],
+      command: regularExecutable(NODE_EXECUTABLE),
+      cwd: harness.path,
+      env: privateChildEnvironment(harness, {
+        APP_ENV: 'development',
+        BWM_LOCAL_PERSISTENCE_PATH: harness.state.path,
+        BWM_LOCAL_RUNNER_MODE: LOCAL_HARNESS_RUNNER_MODE,
+        DATA_MODE: 'fictional',
+      }),
+      shell: false,
+    }, 'APP_E2E_MIGRATION_FAILED')
+    migrationStage = 'stage-f'
+
+    const authSeedResult = await executeStage({
+      args: [regularExecutable(AUTH_SEED_SCRIPT_PATH)],
+      command: regularExecutable(NODE_EXECUTABLE),
+      cwd: harness.path,
+      env: privateChildEnvironment(harness, {
+        APP_ENV: 'development',
+        BWM_LOCAL_PERSISTENCE_PATH: harness.state.path,
+        BWM_LOCAL_RUNNER_MODE: LOCAL_HARNESS_RUNNER_MODE,
+        DATA_MODE: 'fictional',
+      }),
+      shell: false,
+    }, 'APP_E2E_SEED_FAILED')
+    if (authSeedResult.stderr !== '' || authSeedResult.stdout !== 'SEED_LOCAL_AUTH_COMPLETE\n') {
+      outcome('APP_E2E_SEED_FAILED')
+    }
 
     advance(PHASE.starting)
     await assertHarness(harness, migrationStage)

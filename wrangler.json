@@ -3,6 +3,7 @@
   "name": "bearwithme-panel",
   "main": "./worker/index.js",
   "compatibility_date": "2026-07-29",
+  "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
   "assets": {
@@ -96,6 +97,7 @@
           "BWM_LOOKUP_HMAC_V1",
           "BWM_WORKBOOK_HMAC_V1",
           "BWM_WORKBOOK_KEK_V1",
+          "BETTER_AUTH_SECRET",
           "CF_ACCESS_GROUP_TOKEN",
           "CF_D1_EXPORT_TOKEN",
           "RESEND_API_KEY"

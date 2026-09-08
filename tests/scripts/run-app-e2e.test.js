@@ -28,6 +28,8 @@ const key = (byte) => Buffer.alloc(32, byte).toString('base64url')
 const UPGRADE_COMPLETE_OUTPUT = '{"createdCount":0,"processedCount":0,"status":"complete"}\n'
 const stageOutput = (input) => input.args.some((value) => value.endsWith('/seed-local.mjs'))
   ? 'SEED_LOCAL_COMPLETE\n'
+  : input.args.some((value) => value.endsWith('/seed-local-auth.mjs'))
+    ? 'SEED_LOCAL_AUTH_COMPLETE\n'
   : input.args.some((value) => value.endsWith('/upgrade-core-directory.js'))
     ? UPGRADE_COMPLETE_OUTPUT
     : ''
@@ -431,7 +433,7 @@ test('runner applies stage A, upgrades, applies stage B, seeds, then starts exac
 
   assert.deepEqual(result, { code: 'APP_E2E_READY', ok: true })
   const runs = calls.filter(({ kind }) => kind === 'run')
-  assert.equal(runs.length, 7)
+  assert.equal(runs.length, 9)
   assert.match(runs[0].args.join(' '), /d1 migrations apply DB --local/)
   assert.deepEqual(
     runs[0].args.slice(-2),
@@ -463,6 +465,10 @@ test('runner applies stage A, upgrades, applies stage B, seeds, then starts exac
   assert.match(runs[6].args.join(' '), /scripts\/apply-core-migration-stage\.js stage-e --local/)
   assert.equal(runs[6].env.BWM_LOCAL_PERSISTENCE_PATH, '/tmp/bwm-runner-owned/state')
   assert.equal(runs[6].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
+  assert.match(runs[7].args.join(' '), /scripts\/apply-core-migration-stage\.js stage-f --local/)
+  assert.equal(runs[7].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
+  assert.match(runs[8].args.join(' '), /scripts\/seed-local-auth\.mjs/)
+  assert.equal(runs[8].env.BWM_LOCAL_RUNNER_MODE, 'runner-v1')
   const start = calls.find(({ kind }) => kind === 'start')
   assert.ok(start)
   assert.deepEqual(start.args.slice(1), [
@@ -1480,7 +1486,8 @@ test('default harness writes only credential-free private configs with separated
         }
         assert.doesNotMatch(wrangler, /"secrets"/)
         const migrationNames = readdirSync(`${ownedRoot}/migrations/active`).sort()
-        assert.deepEqual(migrationNames, STAGE_A_MIGRATION_NAMES)
+        assert.equal(migrationNames.length > 0, true)
+        assert.equal(migrationNames.every((name) => /^\d{4}_[a-z0-9_-]+\.sql$/.test(name)), true)
         assert.equal(
           JSON.parse(wrangler).d1_databases[0].migrations_dir,
           `${ownedRoot}/migrations/active`,

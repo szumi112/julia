@@ -45,6 +45,7 @@ const STAGE_E_NAMES = Object.freeze([
   '0021_finance_reporting_registry.sql',
   '0022_outbox_job_recoveries.sql',
 ])
+const STAGE_F_NAMES = Object.freeze(['0023_better_auth.sql'])
 
 const migration = (name) => Object.freeze({
   name,
@@ -159,6 +160,14 @@ test('stage E selects the ordered workbook workspace migrations', async () => {
   assert.deepEqual(selected.map(({ name }) => name), STAGE_E_NAMES)
   assert.equal(selected.at(-1), source.at(-1))
   assert.equal(Object.isFrozen(selected), true)
+})
+
+test('stage F selects only the Better Auth migration', async () => {
+  const module = await loadStageModule()
+  const source = [...STAGE_A_NAMES, ...STAGE_B_NAMES, ...STAGE_C_NAMES,
+    ...STAGE_D_NAMES, ...STAGE_E_NAMES, ...STAGE_F_NAMES].map(migration)
+  assert.deepEqual(module.CORE_MIGRATION_STAGE_F_NAMES, STAGE_F_NAMES)
+  assert.deepEqual(module.selectCoreMigrationStage(source, 'stage-f').map(({ name }) => name), STAGE_F_NAMES)
 })
 
 test('stage selection fails closed on missing, duplicate, unordered, or unknown source names', async () => {

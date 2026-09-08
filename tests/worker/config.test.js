@@ -2,9 +2,30 @@ import { describe, expect, it } from 'vitest'
 import * as configModule from '../../worker/config.js'
 import {
   loadAccessProviderConfig,
+  loadAuthConfig,
   loadConfig,
   loadEmailProviderConfig,
 } from '../../worker/config.js'
+
+describe('loadAuthConfig', () => {
+  it('loads the staging Better Auth secret with password and email OTP methods', () => {
+    const result = loadAuthConfig({ BETTER_AUTH_SECRET: 'a'.repeat(32) }, {
+      appEnv: 'staging', appOrigin: 'https://staging.bearwithme-panel.app',
+    })
+    expect(result).toEqual({ secret: 'a'.repeat(32), methods: ['password', 'email-otp'] })
+    expect(Object.isFrozen(result)).toBe(true)
+    expect(Object.isFrozen(result.methods)).toBe(true)
+  })
+
+  it('rejects production', () => {
+    expect(loadAuthConfig({ BETTER_AUTH_SECRET: 'b'.repeat(32) }, {
+      appEnv: 'staging', appOrigin: 'https://staging.bearwithme-panel.app',
+    })).toEqual({ secret: 'b'.repeat(32), methods: ['password', 'email-otp'] })
+    expect(() => loadAuthConfig({ BETTER_AUTH_SECRET: 'c'.repeat(32) }, {
+      appEnv: 'production', appOrigin: 'https://bearwithme-panel.app',
+    })).toThrow('AUTH_CONFIG_DISABLED')
+  })
+})
 
 describe('loadBackupProviderConfig', () => {
   it('exposes the isolated backup provider loader', () => {

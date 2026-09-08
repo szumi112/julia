@@ -14,6 +14,7 @@ import {
   openBackupManifest,
 } from '../worker/operations/backup-format.js'
 import { readBackupRecoverySnapshotWithQuery } from '../worker/operations/backup-recovery.js'
+import { authenticationRollbackStatements } from './staging-auth-preflight.mjs'
 
 const TARGET = /^bearwithme-restore-[a-z0-9][a-z0-9-]{0,62}$/
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -25,6 +26,13 @@ const MIGRATION_NAME_MAX_BYTES = 255
 const MANIFEST_KEY = /^backups\/(v1|v2|v3)\/\d{4}\/(?:0[1-9]|1[0-2])\/(bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123})\.manifest\.json$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const RESTORE_BINDING = 'RESTORE_TARGET'
+export const requiresAuthenticationCleanup = (migrations) => Array.isArray(migrations)
+  && migrations.some((migration) => migration?.name === '0023_better_auth.sql')
+export const authenticationCleanupOperation = (migrations, target, targetId) => (
+  requiresAuthenticationCleanup(migrations)
+    ? Object.freeze({ operation: 'auth-cleanup', target, targetId })
+    : null
+)
 const WRANGLER_OUTPUT_MAX_BYTES = 1024 * 1024
 const MANIFEST_MAX_BYTES = 64 * 1024
 const FRESH_TARGET_SQL = `SELECT count(*) AS application_object_count
@@ -370,7 +378,7 @@ export function createPinnedWranglerRunner(input) {
         ? ['operation', 'target', 'targetId', 'backupId']
         : ['operation', 'target', 'targetId']
     if (!exactObject(command, keys)
-      || !['freshness', 'import', 'integrity', 'migrations', 'recovery', 'sentinel'].includes(operation)
+    || !['auth-cleanup', 'freshness', 'import', 'integrity', 'migrations', 'recovery', 'sentinel'].includes(operation)
       || (operation === 'import'
         && (typeof command.filePath !== 'string' || command.filePath.length === 0))
       || (operation === 'sentinel'
@@ -395,6 +403,14 @@ export function createPinnedWranglerRunner(input) {
       const foreignKeyCheck = await executeSql(command, operation, FOREIGN_KEY_CHECK_SQL)
       if (!Array.isArray(foreignKeyCheck) || foreignKeyCheck.length !== 0) failed()
       return { valid: true }
+    }
+    if (operation === 'auth-cleanup') {
+      const tables = await executeSql(command, operation,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('auth_session','auth_verification') ORDER BY name")
+      const statements = authenticationRollbackStatements(tables.map(({ name }) => name))
+      if (statements.length !== 2) failed()
+      for (const statement of statements) await executeSql(command, operation, statement)
+      return { cleaned: true }
     }
     if (operation === 'migrations') {
       const rows = await executeSql(
@@ -878,6 +894,13 @@ export async function restoreBackup(input) {
     const imported = await input.runCommand({ operation: 'import', target: restoredTarget.name, targetId: restoredTarget.id, filePath })
     checkpoint()
     if (!exactObject(imported, ['imported', 'finalBookmark']) || imported.imported !== true || !validOpaque(imported.finalBookmark)) failed()
+    const authCleanup = version >= 2
+      ? authenticationCleanupOperation(manifest.appliedMigrations, restoredTarget.name, restoredTarget.id)
+      : null
+    if (authCleanup) {
+      const cleanup = await input.runCommand(authCleanup)
+      if (!exactObject(cleanup, ['cleaned']) || cleanup.cleaned !== true) failed()
+    }
     const integrity = await input.runCommand({
       operation: 'integrity', target: restoredTarget.name, targetId: restoredTarget.id,
     })

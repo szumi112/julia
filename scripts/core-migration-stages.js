@@ -35,6 +35,8 @@ export const CORE_MIGRATION_STAGE_E_NAMES = Object.freeze([
   '0022_outbox_job_recoveries.sql',
 ])
 
+export const CORE_MIGRATION_STAGE_F_NAMES = Object.freeze(['0023_better_auth.sql'])
+
 export const CORE_MIGRATION_REMOTE_ENV_NAMES = Object.freeze(['production', 'staging'])
 
 export const CORE_MIGRATION_PRODUCTION_ACK_VARIABLE = 'BWM_CONFIRM_PRODUCTION_DATABASE'
@@ -157,6 +159,7 @@ const STAGES = Object.freeze({
   'stage-c': CORE_MIGRATION_STAGE_C_NAMES,
   'stage-d': CORE_MIGRATION_STAGE_D_NAMES,
   'stage-e': CORE_MIGRATION_STAGE_E_NAMES,
+  'stage-f': CORE_MIGRATION_STAGE_F_NAMES,
 })
 const KNOWN_NAMES = Object.freeze([
   ...CORE_MIGRATION_STAGE_A_NAMES,
@@ -164,6 +167,7 @@ const KNOWN_NAMES = Object.freeze([
   ...CORE_MIGRATION_STAGE_C_NAMES,
   ...CORE_MIGRATION_STAGE_D_NAMES,
   ...CORE_MIGRATION_STAGE_E_NAMES,
+  ...CORE_MIGRATION_STAGE_F_NAMES,
 ])
 
 const invalid = () => {

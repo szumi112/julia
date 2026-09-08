@@ -529,7 +529,7 @@ describe('target-only Access outbox processing', () => {
         provider: vi.fn(),
       }),
       bindings,
-      config: { appEnv: 'staging' },
+      config: { appEnv: 'production' },
       dispatch,
     })
 

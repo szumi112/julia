@@ -1009,15 +1009,18 @@ export async function handleAccessReconcile(input) {
   const providers = ownObject(input.providers) ? input.providers : {}
   const reconcile = providers.reconcileAccessGroup ?? reconcileAccessGroup
   try {
-    const providerConfig = providers.reconcileAccessGroup
-      ? {}
-      : loadAccessProviderConfig(input.bindings, input.config)
-    await reconcile({
-      ...providerConfig,
-      emails: membership.emails,
-      timeoutMs: PROVIDER_TIMEOUT_MS,
-      fetch: providers.fetch ?? runtimeFetch,
-    })
+    // Legacy queued jobs still publish invitation readiness after the auth cutover.
+    if (!['development', 'staging'].includes(input.config?.appEnv)) {
+      const providerConfig = providers.reconcileAccessGroup
+        ? {}
+        : loadAccessProviderConfig(input.bindings, input.config)
+      await reconcile({
+        ...providerConfig,
+        emails: membership.emails,
+        timeoutMs: PROVIDER_TIMEOUT_MS,
+        fetch: providers.fetch ?? runtimeFetch,
+      })
+    }
   } catch (error) {
     await releaseLease(input.db, lease, observedNowMs())
     try {

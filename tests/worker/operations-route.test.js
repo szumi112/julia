@@ -3070,3 +3070,22 @@ describe('operations route services', () => {
     }))).rejects.toThrow(/^OPERATIONS_STATE_INVALID$/)
   })
 })
+
+describe('backup action diagnostics', () => {
+  it('adds only recognized backup failure codes from the referenced backup run', async () => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({ id: 'stf_backup_diagnostics', role: 'owner' })
+    const rows = (await actionRows(context)).filter((row) => row.kind === 'backup_failed')
+    for (const code of ['BACKUP_EXPORT_START_FAILED', 'BACKUP_SECRET_VALUE']) {
+      const db = facade(env.DB, {
+        all: (sql) => {
+          if (sql.includes('FROM operational_actions')) return { results: rows }
+          if (sql.includes('FROM backup_runs')) return { results: [{ id: 'bkp_failed_1', last_error_code: code }] }
+        },
+      })
+      const result = await listOpenOperationalActions(commonInput(actor, context, { db }))
+      expect(result.data.actions[0].details.backupErrorCode)
+        .toBe(code === 'BACKUP_EXPORT_START_FAILED' ? code : undefined)
+    }
+  })
+})

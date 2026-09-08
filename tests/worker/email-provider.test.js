@@ -3,6 +3,7 @@ import {
   escapeInvitationHtml,
   escapeInvitationText,
   sendInvitationEmail,
+  sendAuthenticationEmail,
 } from '../../worker/providers/resend-email.js'
 
 const ENDPOINT = 'https://api.resend.com/emails'
@@ -303,5 +304,23 @@ describe('Resend invitation email provider response', () => {
     }, { code: 'EMAIL_DELIVERY_AMBIGUOUS', retryable: false, ambiguous: true })
     expect(pulls).toBeLessThanOrEqual(3)
     expect(cancellations).toBe(1)
+  })
+})
+
+describe('authentication mail', () => {
+  it('sends OTP and same-origin reset links through the bounded provider transport', async () => {
+    for (const fields of [{ purpose: 'otp', otp: '123456' }, { purpose: 'reset', url: 'https://staging.bearwithme-panel.app/api/auth/reset-password/token?callbackURL=%2F' }]) {
+      const fetch = vi.fn(async () => response(acceptedBody()))
+      await expect(sendAuthenticationEmail({ ...valid, appOrigin: 'https://staging.bearwithme-panel.app', ...fields, fetch })).resolves.toEqual({ providerId: PROVIDER_ID })
+      const body = JSON.parse(fetch.mock.calls[0][1].body)
+      expect(body.text).toContain(fields.otp ?? fields.url)
+      expect(fetch.mock.calls[0][1].redirect).toBe('manual')
+    }
+  })
+  it('rejects foreign reset links and masks transport failures', async () => {
+    const fetch = vi.fn(async () => { throw new Error('private token') })
+    await expect(sendAuthenticationEmail({ ...valid, purpose: 'reset', url: 'https://foreign.example/reset', fetch })).rejects.toMatchObject({ code: 'EMAIL_PROVIDER_CONFIG_INVALID' })
+    expect(fetch).not.toHaveBeenCalled()
+    await expect(sendAuthenticationEmail({ ...valid, purpose: 'otp', otp: '123456', fetch })).rejects.toMatchObject({ message: 'EMAIL_DELIVERY_AMBIGUOUS' })
   })
 })

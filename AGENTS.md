@@ -22,8 +22,9 @@ The repo ships one React UI in **two runtime modes**, selected by the Vite `mode
 - **Protected app** — `npm run dev:app` / `npm run build:app` (plus `build:staging` /
   `build:production`), served same-origin at `/`. The real panel: a Cloudflare Worker
   (Hono) under `worker/` serves both the static app bundle (via the `ASSETS` binding)
-  and a JSON API backed by D1 + R2, behind a Cloudflare Access authentication
-  boundary, with envelope-encrypted data at rest. See "Backend architecture" and
+  and a JSON API backed by D1 + R2. Development and staging authenticate through
+  Better Auth; production retains Cloudflare Access. Data at rest is
+  envelope-encrypted. See "Backend architecture" and
   "Security considerations" below.
 
 **Phase 1 status:** the app mode is fictional-data only — `DATA_MODE` is code-locked
@@ -43,8 +44,9 @@ Key facts:
   serves both modes, switching data source through `src/workspace-repository.js` /
   `src/api.js` / `src/auth.jsx`.
 - The entire UI, and all user-facing strings, are in **Polish** (`<html lang="pl">`).
-- Demo login is fake: any non-empty e-mail and password works. App-mode
-  authentication goes through Cloudflare Access — see Security considerations.
+- Demo login is fake: any non-empty e-mail and password works. Development and
+  staging support Better Auth e-mail/password and one-time e-mail codes;
+  production authentication goes through Cloudflare Access.
 - Demo data is deterministic — seeded PRNG generates ~190 sessions, 21 clients,
   4 specialists and 3 TUS groups relative to "today", so the demo always looks live.
 - GSAP, three.js and the app's webfonts are bundled locally (`src/runtime-vendors.js`,
@@ -65,7 +67,7 @@ npm run build            # = npm run build:demo → dist/demo/
 npm run preview          # serve dist/demo
 npm run deploy            # = npm run deploy:demo → gh-pages -d dist/demo
 
-# Protected app — Worker + D1 + R2, served at /, Cloudflare Access
+# Protected app — Worker + D1 + R2, served at /, environment-specific authentication
 npm run dev:app           # Vite dev server, app mode, port 5174 — /
 npm run build:app         # dist/app/, local/dev bindings
 npm run build:staging     # CLOUDFLARE_ENV=staging build → dist/app/
@@ -88,10 +90,12 @@ npm run configure:cloudflare    # scripts/configure-cloudflare-env.mjs — write
 npm run seed:local              # scripts/seed-local.mjs — writes fictional seed data into local D1
 npm run migrate:core:stage-a    # scripts/apply-core-migration-stage.js stage-a --local
 npm run migrate:core:stage-b    # scripts/apply-core-migration-stage.js stage-b --local
+npm run migrate:core:stage-f    # Better Auth schema --local
 npm run migrate:core:stage-a:staging      # stage-a --remote --env staging
 npm run migrate:core:stage-a:production   # stage-a --remote --env production
 npm run migrate:core:stage-b:staging      # stage-b --remote --env staging
 npm run migrate:core:stage-b:production   # stage-b --remote --env production
+npm run migrate:core:stage-f:staging      # stage-f --remote --env staging
 npm run upgrade:core-directory  # scripts/upgrade-core-directory.js — local core-directory backfill
 npm run upgrade:core-directory:staging     # core-directory backfill --remote --env staging
 npm run upgrade:core-directory:production  # core-directory backfill --remote --env production
@@ -176,7 +180,7 @@ src/
                        (SessionForm, ClientForm, PsychForm, TusForms, TusMemberPicker)
                        + session-bits.jsx (inline status/payment pills)
 worker/                Cloudflare Worker backend (Hono) — see "Backend architecture"
-migrations/            tracked, numbered D1 SQL migrations (0001…0011, append-only)
+migrations/            tracked, numbered D1 SQL migrations (0001…0023, append-only)
 scripts/               Node scripts run outside the Worker runtime — see
                        "Backend architecture" for the migration/deploy scripts
 tests/
@@ -269,8 +273,9 @@ budget in one place.
   rejection of obvious placeholder secret values.
 - `worker/routes/` — one HTTP handler module per resource: `workspace`, `clients`,
   `appointments`, `payments`, `staff`, `session`, `operations`.
-- `worker/identity/` — Cloudflare Access JWT verification and principal resolution
-  (`access-jwt.js`), the staff/specialist directory, canonical-email rules
+- `worker/identity/` — Better Auth session resolution (`better-auth.js`) for
+  development/staging, Cloudflare Access JWT verification (`access-jwt.js`) for
+  production, the staff/specialist directory, canonical-email rules
   (`canonical-email.js`), and invitation/capability policy (`invitations.js`,
   `policy.js`).
 - `worker/security/` — the data-at-rest crypto boundary: envelope encryption
@@ -298,13 +303,16 @@ budget in one place.
 - `worker/http/` — shared HTTP error shaping (`errors.js`) and security-header/CSRF/
   body-size/CORS helpers (`security.js`) used by every route.
 
-**Access boundary**: every route except `GET /api/v1/health/live` expects a *human*
-Cloudflare Access identity (`principal.kind === 'human'`, verified JWT against
-`worker/identity/access-jwt.js`, checked against the `ACCESS_TEAM_DOMAIN`/
-`ACCESS_AUD` config); the health endpoint instead expects a *service* token
+**Authentication boundary**: every route except `GET /api/v1/health/live` expects a
+human identity. Development and staging use an eight-hour Better Auth session with
+e-mail/password or a one-time e-mail code; registration remains invite-only. A
+`staff_auth_identities` row binds the Better Auth user to exactly one existing staff
+record while preserving the staff record's existing Access subject. Production
+continues to verify a Cloudflare Access JWT against `ACCESS_TEAM_DOMAIN` and
+`ACCESS_AUD`. The health endpoint continues to expect an Access *service* token
 (`principal.kind === 'service'`, keyed off `ACCESS_HEALTH_SERVICE_TOKEN_ID`) so
-uptime checks don't need a human Access session. `GET /api/v1/session` resolves the
-current Access principal against the staff directory and issues a CSRF token that
+uptime checks don't need a human session. `GET /api/v1/session` resolves the current
+principal against the staff directory and issues a CSRF token that
 mutation routes then verify. The one carve-out is a local-dev identity header
 (`X-BWM-Local-Identity`, `worker/identity/access-jwt.js`) that `test:e2e:app` uses
 instead of a real Access login; it only activates when `config.appEnv ===
@@ -313,11 +321,12 @@ instead of a real Access login; it only activates when `config.appEnv ===
 address — structurally unreachable once `APP_ENV` is `staging`/`production`.
 
 **Migration model**: `migrations/` holds tracked, numbered, append-only D1 SQL files
-(currently `0001`…`0011`). They are never applied directly by hand — the local
+(currently `0001`…`0023`). They are never applied directly by hand — the local
 workflow stages a fixed subset into the gitignored `.core-migrations/active/`
 directory (the `migrations_dir` `wrangler.json` points D1 at) via
 `scripts/apply-core-migration-stage.js`, run as `npm run migrate:core:stage-a` /
-`stage-b` (stage boundaries are defined in `scripts/core-migration-stages.js`). The
+`stage-b`, with Better Auth tables added by `stage-f` (stage boundaries are defined
+in `scripts/core-migration-stages.js`). The
 local mode refuses whenever `APP_ENV`/`CLOUDFLARE_ENV` is `'production'` or
 `DATA_MODE` isn't `'fictional'`, and enforces private (`0700`)/non-symlinked
 directories before touching anything. Both the stage script and
@@ -412,10 +421,11 @@ tool, not part of the local staged migration path.
   credentials to the repo (`.env` is gitignored). This is a fixed property of the
   demo build, not something to "fix" — do not add real auth or persistence to
   `npm run dev` / `build:demo`.
-- **Protected app**: authentication is a real Cloudflare Access boundary — every
-  route except the service-token health check requires a verified human Access JWT
-  (see "Backend architecture" for the human/service split and its one local-dev-only
-  identity carve-out). Client data at rest is envelope-encrypted
+- **Protected app**: development and staging use invite-only Better Auth with
+  e-mail/password and one-time e-mail codes; production uses Cloudflare Access.
+  The health check remains protected by an Access service token. Every human
+  identity is resolved against the current staff directory before panel access.
+  Client data at rest is envelope-encrypted
   (`worker/security/envelope.js`) with versioned KEKs supplied only as Wrangler
   secrets, never committed. Even so, **Phase 1 uses fictional data only** —
   `DATA_MODE` is code-locked to `'fictional'` (`worker/config.js`); do not attempt to

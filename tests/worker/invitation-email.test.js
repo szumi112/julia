@@ -1667,3 +1667,10 @@ describe('accepted-but-unresolved processing and reaping', () => {
     expect((await row('outbox_attempts', 'job_id', value.jobId)).completed_at).toBeNull()
   })
 })
+
+it('retires a superseded native-auth invitation email without a delivery incident', async () => {
+  const value = await fixture({ invitationVersion: 2, jobInvitationVersion: 1 })
+  const provider = vi.fn()
+  await expect(dispatch(value, { providers: { sendInvitationEmail: provider } })).resolves.toEqual({ result: 'succeeded' })
+  expect(provider).not.toHaveBeenCalled()
+})

@@ -75,7 +75,7 @@ it('rereads exact state after an ambiguous committed creation and never resends 
     ok: true,
   })
   expect(creationCalls).toBe(1)
-  expect(provider).toHaveBeenCalledOnce()
+  expect(provider).not.toHaveBeenCalled()
   expect(await env.DB.prepare('SELECT count(*) AS count FROM staff_users').first())
     .toEqual({ count: 1 })
 })
