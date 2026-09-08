@@ -313,7 +313,7 @@ function validateReclaim(row, common, claimNow) {
     || oldAttempt.job_id !== job.id
     || oldAttempt.attempt_number !== job.attempt_count
     || !validInstant(oldAttempt.started_at)
-    || oldAttempt.started_at !== job.updated_at
+    || oldAttempt.started_at > job.updated_at
     || oldAttempt.completed_at !== null
     || oldAttempt.result !== null
     || oldAttempt.error_code !== null

@@ -72,6 +72,8 @@ const ACTOR_ROW_KEYS = Object.freeze([
   'id', 'role', 'status', 'specialist_id', 'version',
 ])
 const HEALTH_ROW_KEYS = Object.freeze(['key', 'value_json', 'version', 'updated_at'])
+// Returned until the first scheduler run stores a health snapshot.
+const PENDING_HEALTH_SNAPSHOT = Object.freeze({ generatedAt: null, checks: Object.freeze([]) })
 const CHECK_KEYS = Object.freeze(['id', 'label', 'status', 'lastSuccessAt', 'detailCode'])
 const ACTION_ROW_KEYS = Object.freeze([
   'id', 'fingerprint', 'kind', 'severity', 'status', 'entity_type', 'entity_id',
@@ -467,6 +469,7 @@ async function readHealthSnapshot(input) {
      FROM system_state WHERE key='health.snapshot'`
   ).all()
   const rows = captureAllRows(result, 1)
+  if (rows.length === 0) return PENDING_HEALTH_SNAPSHOT
   if (rows.length !== 1) invalidState()
   return validateHealthSnapshot(rows[0])
 }

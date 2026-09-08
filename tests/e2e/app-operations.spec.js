@@ -321,6 +321,18 @@ test('@owner mounts operations once and loads audit only on first selection', as
   expect(operationRequests(requests, 'GET', '/api/v1/operations/actions')).toHaveLength(1)
 })
 
+test('@owner shows the pending health state before the first scheduler run', async ({ page }) => {
+  await installOperationsRoutes(page, {
+    health: (route) => route.fulfill(json(200, { data: { generatedAt: null, checks: [] } })),
+  })
+
+  await openOperations(page)
+
+  await expect(page.getByText('Stan systemu nie został jeszcze wygenerowany', { exact: false })).toBeVisible()
+  await expect(page.getByText('Kolejka zadań', { exact: true })).toHaveCount(0)
+  await expect(page.getByText(/^Stan z /)).toHaveCount(0)
+})
+
 test('@owner correction retains concurrent resource announcements and repeats health mutations', async ({ page }) => {
   let releaseHealth
   let releaseActions

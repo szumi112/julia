@@ -1294,8 +1294,26 @@ describe('operations route services', () => {
     },
   )
 
+  it.each(['owner', 'coordinator'])('returns the explicit pending payload for %s when no snapshot exists', async (role) => {
+    const context = await cryptoContext()
+    const actor = await seedActiveActor({ id: `stf_health_pending_${role}`, role })
+    await seedHealthSnapshot()
+    const db = facade(env.DB, {
+      all: (sql) => (
+        sql.includes("FROM system_state WHERE key='health.snapshot'") ? { results: [] } : undefined
+      ),
+    })
+
+    const result = await getOperationalHealth(commonInput(actor, context, { db }))
+
+    expect(result).toEqual({ data: { generatedAt: null, checks: [] } })
+    expect(Object.keys(result)).toEqual(['data'])
+    expect(Object.keys(result.data)).toEqual(['generatedAt', 'checks'])
+    expect(Object.isFrozen(result.data)).toBe(true)
+    expect(Object.isFrozen(result.data.checks)).toBe(true)
+  })
+
   it.each([
-    ['missing row', null],
     ['duplicate rows', 'duplicate'],
     ['extra row field', { extra: true }],
     ['zero state version', { version: 0 }],
@@ -1307,7 +1325,6 @@ describe('operations route services', () => {
     const db = facade(env.DB, {
       all: (sql) => {
         if (!sql.includes("FROM system_state WHERE key='health.snapshot'")) return undefined
-        if (mutation === null) return { results: [] }
         if (mutation === 'duplicate') return { results: [row, row] }
         return { results: [{ ...row, ...mutation }] }
       },

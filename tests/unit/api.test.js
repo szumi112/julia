@@ -3354,6 +3354,21 @@ test('operations health projects and deeply freezes the exact four-check snapsho
   assertDeepFrozen(result)
 })
 
+test('operations health accepts the explicit pending snapshot before the first scheduler run', async () => {
+  const { fetchImpl } = queuedFetch(jsonResponse({ data: { generatedAt: null, checks: [] } }))
+  const result = await createApiClient({ fetchImpl }).getOperationsHealth()
+
+  assert.deepEqual(result, { generatedAt: null, checks: [] })
+  assertDeepFrozen(result)
+})
+
+test('operations health rejects a pending snapshot that still carries checks', async () => {
+  const body = healthBody()
+  body.data.generatedAt = null
+  const { fetchImpl } = queuedFetch(parsedResponse(body))
+  await assert.rejects(createApiClient({ fetchImpl }).getOperationsHealth(), assertInvalidResponse)
+})
+
 test('operations health accepts the exact critical outbox drain states', async () => {
   for (const detailCode of ['OUTBOX_DRAIN_FAILED', 'OUTBOX_DRAIN_STALE']) {
     const body = healthBody()
