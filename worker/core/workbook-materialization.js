@@ -343,20 +343,21 @@ const loadFinanceKey = async (db) => {
   return row
 }
 
-const exactApprovedProgress = (progress) => (
-  progress.accepted === 2_232
-  && progress.quarantined === 3
-  && progress.candidateCount === 2_234
-  && progress.linked === 2_232
-  && progress.voided === 7
-  && progress.inserted === 5
-  && progress.accountingMonthsCorrected === 45
-  && progress.specialistAssignmentsCorrected === 2_227
-  && progress.fixedRevenuesInserted === 3
-  && progress.formulaGhostsVoided === 5
-  && progress.quarantinedVoided === 2
-  && progress.textAmountVisitsInserted === 2
-)
+// The approved workbook is fixed, but the legacy finance batch it reconciles
+// against is not: one batch lacks the fixed revenues and text-amount visits and
+// carries formula-cache ghosts, another (the staging import) already stores
+// every accepted row. Only the bookkeeping has to balance, not one batch shape.
+const consistentProgress = (progress) => {
+  const matched = progress.linked - progress.inserted + progress.quarantinedVoided
+  return progress.accepted === 2_232
+    && progress.quarantined === 3
+    && progress.candidateCount === 2_234
+    && progress.linked === progress.accepted
+    && progress.quarantinedVoided <= progress.quarantined
+    && progress.inserted >= progress.fixedRevenuesInserted + progress.textAmountVisitsInserted
+    && progress.formulaGhostsVoided === progress.candidateCount - matched
+    && progress.voided === progress.quarantinedVoided + progress.formulaGhostsVoided
+}
 
 const summaryFrom = (progress) => Object.freeze({
   accepted: progress.accepted,
@@ -778,11 +779,14 @@ const reconcileUnmatchedSlice = async (command, state, progress, requestHash, no
     requestHash,
     now,
   })
-  if (!exactApprovedProgress(progress)) fail('WORKBOOK_RECONCILIATION_CONFLICT')
+  if (!consistentProgress(progress)) fail('WORKBOOK_RECONCILIATION_CONFLICT')
   const decisionCount = (await command.db.prepare(
     'SELECT count(*) AS count FROM workbook_finance_decisions WHERE import_id=?',
   ).bind(command.importId).first()).count + decisions.length
-  if (decisionCount !== 2_239) fail('WORKBOOK_RECONCILIATION_CONFLICT')
+  // One decision per candidate (link, quarantine void or ghost void) plus one per insert.
+  if (decisionCount !== progress.candidateCount + progress.inserted) {
+    fail('WORKBOOK_RECONCILIATION_CONFLICT')
+  }
   return persistSlice({
     command,
     state,
