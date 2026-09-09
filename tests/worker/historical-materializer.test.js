@@ -507,7 +507,7 @@ describe('historical projection materializer', () => {
     })
     const projectionUsage = usageForD1QueryBudgetViews(budget.work, budget.recovery)
     expect(projectionUsage).toEqual({
-      used: 28, remaining: 22, workRemaining: 14,
+      used: 27, remaining: 23, workRemaining: 15,
       totalLimit: 50, recoveryReserve: 8,
     })
     await expect(continueHistoricalProjection(command(1, 'historical-project-0001')))

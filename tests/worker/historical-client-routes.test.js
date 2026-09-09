@@ -109,8 +109,8 @@ describe('historical workspace HTTP routes', () => {
       mutation({ expectedVersion: 1 }, 'historical-route-continue-0001'),
     )).status).toBe(200)
     expect(routeUsage).toEqual({
-      used: 27, remaining: 23, workRemaining: 15,
-      totalLimit: 50, recoveryReserve: 8,
+      used: 27, remaining: 133, workRemaining: 125,
+      totalLimit: 160, recoveryReserve: 8,
     })
     expect((await app.request(
       '/api/v1/workbooks/imports/wbi_route_one/historical-projection/resolutions',
