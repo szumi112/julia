@@ -1,6 +1,7 @@
 import { auditEventStatement } from '../audit/events.js'
 import { isD1OutboxOperationGuardFailure } from '../db/errors.js'
 import { D1_QUERY_BUDGET_EXCEEDED } from '../db/query-budget.js'
+import { safeLog } from '../logging/safe-log.js'
 import { decodeBase64Url, encodeBase64Url } from '../security/encoding.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
 
@@ -1633,6 +1634,28 @@ function normalizedOutcome(outcome) {
   return { result: 'dead', errorCode: 'OUTBOX_HANDLER_FAILURE', providerReference: null }
 }
 
+const THROWN_CODE = /^[A-Z][A-Z0-9_]{0,63}$/
+
+// Dead-letter rows keep the fixed OUTBOX_HANDLER_FAILURE code; the thrown code
+// is only logged so operators can tell provider failures from runtime errors.
+function logThrownHandlerFailure(claim, error) {
+  let message
+  try { message = error?.message } catch { message = null }
+  try {
+    safeLog('error', {
+      attemptCount: claim.attemptNumber,
+      errorCode: typeof message === 'string' && THROWN_CODE.test(message)
+        ? message
+        : 'OUTBOX_HANDLER_EXCEPTION',
+      event: 'outbox.handler.failed',
+      jobId: claim.id,
+      result: 'failure',
+    })
+  } catch {
+    // Logging never owns the outbox outcome.
+  }
+}
+
 function thrownOutcome(error) {
   if (error?.message === D1_QUERY_BUDGET_EXCEEDED) {
     return { result: 'retry', errorCode: 'OUTBOX_HANDLER_RETRY', providerReference: null }
@@ -1739,6 +1762,7 @@ export async function processOutboxBatch(input = {}) {
         }))
       } catch (error) {
         outcome = thrownOutcome(error)
+        logThrownHandlerFailure(claim, error)
       }
     }
     if (outcome.result === 'email-accepted'

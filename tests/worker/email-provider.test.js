@@ -53,7 +53,7 @@ async function rejected(input, expected) {
 }
 
 describe('Resend invitation email provider request', () => {
-  it('sends the exact deterministic one-recipient request without identity-bearing content', async () => {
+  it('sends one deterministic request with a Workers-compatible manual redirect policy', async () => {
     const fetch = vi.fn(async () => response(acceptedBody()))
 
     await expect(sendInvitationEmail({ ...valid, fetch }))
@@ -63,7 +63,7 @@ describe('Resend invitation email provider request', () => {
     const init = fetch.mock.calls[0][1]
     expect(Object.keys(init)).toEqual(['method', 'headers', 'body', 'redirect', 'signal'])
     expect(init.method).toBe('POST')
-    expect(init.redirect).toBe('error')
+    expect(init.redirect).toBe('manual')
     expect(init.signal).toBeInstanceOf(AbortSignal)
     expect(init.headers).toEqual({
       Authorization: `Bearer ${valid.apiKey}`,
@@ -88,6 +88,16 @@ describe('Resend invitation email provider request', () => {
       expect(content).toMatch(/11:05:09/)
     }
     expect(init.body).toBe(JSON.stringify(body))
+  })
+
+  it('calls the fetch implementation without a receiver', async () => {
+    const fetch = function () {
+      if (this !== undefined) throw new TypeError('Illegal invocation')
+      return Promise.resolve(response(acceptedBody()))
+    }
+
+    await expect(sendInvitationEmail({ ...valid, fetch }))
+      .resolves.toEqual({ providerId: PROVIDER_ID })
   })
 
   it('uses dedicated text and HTML escaping for every interpolated value', () => {

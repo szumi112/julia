@@ -218,8 +218,11 @@ async function responseBodyJson(response, controller) {
 
 async function request(input, validated, method, body) {
   const controller = new validated.AbortControllerImpl()
-  const timer = validated.setTimeoutImpl(() => controller.abort(), validated.timeoutMs)
+  const setTimeoutImpl = validated.setTimeoutImpl
+  const clearTimeoutImpl = validated.clearTimeoutImpl
+  const timer = setTimeoutImpl(() => controller.abort(), validated.timeoutMs)
   const requestEndpoint = endpoint(input)
+  const fetchImpl = input.fetch
   let fetchAbortListener
   const fetchAborted = new Promise((_, reject) => {
     fetchAbortListener = () => reject(new Error('ACCESS_PROVIDER_FETCH_ABORTED'))
@@ -230,7 +233,7 @@ async function request(input, validated, method, body) {
   try {
     try {
       response = await Promise.race([
-        Promise.resolve().then(() => input.fetch(requestEndpoint, {
+        Promise.resolve().then(() => fetchImpl(requestEndpoint, {
           method,
           headers: method === 'PUT'
             ? {
@@ -239,7 +242,7 @@ async function request(input, validated, method, body) {
               }
             : { Authorization: `Bearer ${input.token}` },
           ...(body === undefined ? {} : { body }),
-          redirect: 'error',
+          redirect: 'manual',
           signal: controller.signal,
         })),
         fetchAborted,
@@ -272,7 +275,7 @@ async function request(input, validated, method, body) {
     if (response === undefined) fail('ACCESS_PROVIDER_NETWORK', true)
     fail('ACCESS_PROVIDER_RESPONSE_INVALID')
   } finally {
-    validated.clearTimeoutImpl(timer)
+    clearTimeoutImpl(timer)
   }
 }
 

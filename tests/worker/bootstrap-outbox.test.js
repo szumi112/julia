@@ -516,7 +516,7 @@ describe('target-only Access outbox processing', () => {
     }
     const fetch = vi.fn(async (url, request) => {
       methods.push(request.method)
-      expect(request.redirect).toBe('error')
+      expect(request.redirect).toBe('manual')
       return providerResponse(url)
     })
     const dispatch = (input) => handlers.dispatchOutboxJob({
