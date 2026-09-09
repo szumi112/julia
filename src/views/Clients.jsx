@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, useClientMutationLock, useWorkspaceWindow, clientOutstanding, lastSessionOf } from '../store.jsx'
+import { useApp, useClientMutationLock, useWorkspaceRetry, useWorkspaceWindow, clientOutstanding, lastSessionOf } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
 import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, Segmented, usePagination, Pager } from '../ui.jsx'
@@ -301,6 +301,7 @@ export function Clients({ params = {} }) {
     [catalog, historyYm, isApp, today],
   )
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const retryWorkspace = useWorkspaceRetry()
   const { locked: clientMutationLocked } = useClientMutationLock()
   const canManageClients = !isApp || canPerformAction(capabilities, 'client.create')
   const clientActionsLocked = isApp && clientMutationLocked
@@ -417,7 +418,10 @@ export function Clients({ params = {} }) {
           title={workspaceState === 'loading' ? 'Wczytywanie kartoteki…' : 'Kartoteka jest teraz niedostępna'}
           hint={workspaceState === 'loading'
             ? 'Pobieramy uprawniony zakres klientów i historii spotkań.'
-            : 'Dane pozostają tylko do odczytu. Spróbuj ponownie po odświeżeniu strony.'}
+            : 'Dane pozostają tylko do odczytu.'}
+          action={workspaceState === 'unavailable'
+            ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
+            : undefined}
         />
       </section>
     )
@@ -630,6 +634,7 @@ export function ClientDetail({ params }) {
     [detailYm, todayIso, usesHistoricalWindow],
   )
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const retryWorkspace = useWorkspaceRetry()
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
   const [clientForm, setClientForm] = useState(null)
@@ -664,6 +669,9 @@ export function ClientDetail({ params }) {
           icon="clients"
           title={workspaceState === 'loading' ? 'Wczytywanie karty klienta…' : 'Karta klienta jest teraz niedostępna'}
           hint="Wyświetlimy wyłącznie dane z uprawnionego, kompletnego zakresu."
+          action={workspaceState === 'unavailable'
+            ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
+            : undefined}
         />
       </section>
     )

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useApp, useWorkspaceRefresh, useWorkspaceWindow, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
+import { useApp, useWorkspaceRefresh, useWorkspaceRetry, useWorkspaceWindow, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
 import { useMinuteNow } from '../clock.js'
@@ -229,6 +229,7 @@ export function Team() {
   const today = toISODate(now)
   const workspaceRange = useMemo(() => rollingWorkspaceRange(today), [today])
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const retryWorkspace = useWorkspaceRetry()
   const refreshWorkspace = useWorkspaceRefresh()
   const [filter, setFilter] = useState(() => {
     const saved = getViewState('team', { filter: 'all' })
@@ -280,7 +281,10 @@ export function Team() {
           title={workspaceState === 'loading' ? 'Wczytywanie zespołu…' : 'Zespół jest teraz niedostępny'}
           hint={workspaceState === 'loading'
             ? 'Pobieramy uprawniony zakres aktywnych specjalistek.'
-            : 'Dane pozostają tylko do odczytu. Spróbuj ponownie po odświeżeniu strony.'}
+            : 'Dane pozostają tylko do odczytu.'}
+          action={workspaceState === 'unavailable'
+            ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
+            : undefined}
         />
       </section>
     )

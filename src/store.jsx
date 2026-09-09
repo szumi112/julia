@@ -359,9 +359,38 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
 
   const dismissToast = useCallback((id) => leave(id, 0), [leave])
 
+  // Windows whose load was rejected, keyed by range. A failed window renders as
+  // unavailable (never as endless loading) until the same range is retried.
+  const [workspaceFailures, setWorkspaceFailures] = useState(() => new Set())
+  useEffect(() => {
+    setWorkspaceFailures((current) => (current.size === 0 ? current : new Set()))
+  }, [effectiveAuthorityKey])
+  const markWorkspaceFailure = useCallback((key) => {
+    setWorkspaceFailures((current) => (current.has(key) ? current : new Set([...current, key])))
+  }, [])
+  const clearWorkspaceFailure = useCallback((key) => {
+    setWorkspaceFailures((current) => {
+      if (!current.has(key)) return current
+      const next = new Set(current)
+      next.delete(key)
+      return next
+    })
+  }, [])
+
   const value = useMemo(
-    () => ({ state: viewState, dispatch: authorityDispatch, toast, workspace: workspaceSnapshot.workspace }),
-    [authorityDispatch, toast, viewState, workspaceSnapshot.workspace]
+    () => ({
+      state: viewState,
+      dispatch: authorityDispatch,
+      toast,
+      workspace: workspaceSnapshot.workspace,
+      workspaceFailures,
+      markWorkspaceFailure,
+      clearWorkspaceFailure,
+    }),
+    [
+      authorityDispatch, clearWorkspaceFailure, markWorkspaceFailure, toast, viewState,
+      workspaceFailures, workspaceSnapshot.workspace,
+    ]
   )
   const toastValue = useMemo(
     () => ({ toasts, dismissToast, clearToasts }),
@@ -407,10 +436,12 @@ export const useAppointmentMutationLock = () => useContext(AppointmentMutationCt
 export const usePaymentMutationLock = () => useContext(PaymentMutationCtx)
 export const useCanonicalAppointments = () => useContext(CanonicalAppointmentsCtx)
 
+const workspaceWindowKey = (range) => `${range.from}|${range.to}`
+
 export const useWorkspaceWindow = (range, enabled = true) => {
-  const { workspace } = useApp()
+  const { workspace, workspaceFailures, markWorkspaceFailure } = useApp()
   const requested = useRef(new Set())
-  const key = range ? `${range.from}|${range.to}` : ''
+  const key = range ? workspaceWindowKey(range) : ''
   const covered = range
     ? isWorkspaceRangeCovered(workspace.loadedRanges, range)
     : false
@@ -419,11 +450,24 @@ export const useWorkspaceWindow = (range, enabled = true) => {
     if (!enabled || !range || covered || workspace.status === 'read-only-error'
       || requested.current.has(key)) return
     requested.current.add(key)
-    Promise.resolve(workspace.loadWindow(range)).catch(() => {})
-  }, [covered, enabled, key, range, workspace])
+    Promise.resolve(workspace.loadWindow(range)).catch(() => markWorkspaceFailure(key))
+  }, [covered, enabled, key, markWorkspaceFailure, range, workspace])
 
   if (!enabled || !range) return 'ready'
+  if (!covered && workspaceFailures.has(key)) return 'unavailable'
   return workspaceRangeState(workspace.status, workspace.loadedRanges, range)
+}
+
+// Retries one window after a rejected load, lifting the read-only latch that an
+// infrastructure error leaves behind. Views pass the range they render.
+export const useWorkspaceRetry = () => {
+  const { workspace, markWorkspaceFailure, clearWorkspaceFailure } = useApp()
+  return useCallback((range) => {
+    const key = workspaceWindowKey(range)
+    clearWorkspaceFailure(key)
+    if (workspace.status === 'read-only-error') workspace.recoverFromInfrastructureError()
+    return Promise.resolve(workspace.loadWindow(range)).catch(() => markWorkspaceFailure(key))
+  }, [clearWorkspaceFailure, markWorkspaceFailure, workspace])
 }
 
 // Mutations invalidate no directory rows locally. Callers refresh the same bounded

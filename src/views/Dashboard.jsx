@@ -1,10 +1,11 @@
-import { Fragment, useRef, useState } from 'react'
-import { useApp } from '../store.jsx'
+import { Fragment, useMemo, useRef, useState } from 'react'
+import { useApp, useWorkspaceRetry, useWorkspaceWindow } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useDrawerFX } from '../anim.js'
 import { useMinuteNow } from '../clock.js'
 import { Button, Avatar, IconBtn, EmptyState, Figure } from '../ui.jsx'
 import { todayWorkspace } from '../workspace.js'
+import { weekWorkspaceRange } from '../workspace-view.js'
 import {
   fmtMoney, fmtWeekday, fmtFullDate, toISODate, pad2,
   cap, plural, timeToMin, relDayLabel,
@@ -176,6 +177,12 @@ export function Dashboard() {
   // minute-aligned shared clock — "Trwa teraz" / "Następna sesja" never go stale
   const now = useMinuteNow()
   const today = toISODate(now)
+  // The protected pulpit is usually the first screen after login, so it loads
+  // its own week instead of waiting for the calendar to load one.
+  const workspaceRange = useMemo(() => weekWorkspaceRange(today), [today])
+  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const retryWorkspace = useWorkspaceRetry()
+  const windowPending = isApp && workspaceState !== 'ready'
   const nowMin = now.getHours() * 60 + now.getMinutes()
   const workspace = todayWorkspace(state, role, now)
   const heroSession = workspace.current || workspace.next
@@ -189,14 +196,20 @@ export function Dashboard() {
   const heroPsych = heroSession ? psychOf(heroSession.psychId) : null
   const heroClient = heroSession ? clientOf(heroSession.clientId) : null
   const heroState = workspace.current ? 'Trwa teraz' : workspace.next ? 'Następna sesja' : null
-  const terminalHeading = daySummary.unresolvedPast > 0
-    ? `${daySummary.unresolvedPast} sesji wymaga statusu`
-    : daySummary.total > 0 ? 'Dzień zakończony' : 'Wolny dzień'
-  const terminalSupport = daySummary.unresolvedPast > 0
-    ? 'Zaktualizuj status zakończonych sesji, aby domknąć plan dnia.'
-    : daySummary.total > 0
-      ? 'Wszystkie dzisiejsze sesje mają uzupełniony status.'
-      : 'Kalendarz jest dziś pusty — czas na oddech.'
+  const terminalHeading = windowPending
+    ? (workspaceState === 'loading' ? 'Wczytywanie planu dnia…' : 'Plan dnia jest teraz niedostępny')
+    : daySummary.unresolvedPast > 0
+      ? `${daySummary.unresolvedPast} sesji wymaga statusu`
+      : daySummary.total > 0 ? 'Dzień zakończony' : 'Wolny dzień'
+  const terminalSupport = windowPending
+    ? (workspaceState === 'loading'
+      ? 'Pobieramy dzisiejszy grafik.'
+      : 'Dane pozostają tylko do odczytu.')
+    : daySummary.unresolvedPast > 0
+      ? 'Zaktualizuj status zakończonych sesji, aby domknąć plan dnia.'
+      : daySummary.total > 0
+        ? 'Wszystkie dzisiejsze sesje mają uzupełniony status.'
+        : 'Kalendarz jest dziś pusty — czas na oddech.'
 
   // The masthead is just the cover date; the nearest session follows as the lede.
   const canOpenPayments = isApp ? canAccess('payments') : role.scope !== 'own'
@@ -220,6 +233,11 @@ export function Dashboard() {
           <>
             <h2 className="display today-hero__title">{terminalHeading}</h2>
             <p className="today-hero__meta">{terminalSupport}</p>
+            {isApp && workspaceState === 'unavailable' && (
+              <div className="today-hero__actions">
+                <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
+              </div>
+            )}
           </>
         )}
         {!isApp && <div className="today-hero__actions">

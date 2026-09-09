@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, useAppointmentMutationLock, useWorkspaceRefresh, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
+import { useApp, useAppointmentMutationLock, useWorkspaceRefresh, useWorkspaceRetry, useWorkspaceWindow, sessionsInMonth, availableMonths } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip, motionOK } from '../anim.js'
 import { useIsPhone, useMediaQuery, desktopMQ } from '../responsive.js'
@@ -602,6 +602,7 @@ export function CalendarView({ params = {} }) {
     [agendaSel, mode, ym]
   )
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const retryWorkspace = useWorkspaceRetry()
   const canonicalMonthAppointmentCount = useMemo(
     () => sessionsInMonth(roleSessions, ym).length,
     [roleSessions, ym],
@@ -722,6 +723,9 @@ export function CalendarView({ params = {} }) {
           hint={workspaceState === 'loading'
             ? 'Pobieramy kompletny widoczny zakres kalendarza.'
             : 'Nie pokazujemy niepełnych ani demonstracyjnych danych.'}
+          action={workspaceState === 'unavailable'
+            ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
+            : undefined}
         />
       </section>
     )

@@ -496,6 +496,29 @@ test('@owner clears a definitively rejected create and requires a fresh preview'
     .evaluate((input) => input.files.length)).toBe(0)
 })
 
+test('@owner explains a rejected workbook fingerprint instead of a generic failure', async ({ page }) => {
+  await freezeTime(page)
+  await routeWorkspace(page)
+  await routeRegistry(page)
+  await page.route('**/api/v1/workbooks/preview', (route) => route.fulfill(json({
+    error: {
+      code: 'WORKBOOK_FINGERPRINT_REJECTED',
+      correlationId: '77777777-7777-4777-8777-777777777778',
+    },
+  }, 400)))
+
+  await page.goto('./#/ledger')
+  await page.getByLabel('Wybierz plik XLSX').setInputFiles({
+    name: 'edytowany.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
+  })
+  await expect(page.getByRole('alert')).toContainText(
+    'To nie jest zatwierdzony skoroszyt historyczny',
+  )
+  await expect(page.getByRole('alert')).not.toContainText('Nie udało się zakończyć operacji')
+  expect(await page.getByLabel('Wybierz plik XLSX')
+    .evaluate((input) => input.files.length)).toBe(0)
+})
+
 test('@owner reviews exact signed Panel-v2 updates, voids and blocking conflicts', async ({ page }) => {
   await freezeTime(page)
   await routeWorkspace(page)
