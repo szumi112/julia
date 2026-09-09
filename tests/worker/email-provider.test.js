@@ -84,9 +84,8 @@ describe('Resend invitation email provider request', () => {
     }
     for (const content of [body.text, body.html]) {
       expect(content).toContain(valid.appOrigin)
-      expect(content).toContain(valid.expiresAt)
-      expect(content).toContain('Europe/Warsaw')
-      expect(content).toMatch(/11:05:09/)
+      expect(content).toContain('15 stycznia 2027, 11:05 CET')
+      expect(content).not.toContain(valid.expiresAt)
     }
     expect(init.body).toBe(JSON.stringify(body))
   })
