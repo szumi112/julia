@@ -74,16 +74,109 @@ export function escapeInvitationHtml(value) {
     .replaceAll("'", '&#39;')
 }
 
+const BRAND = Object.freeze({
+  paper: '#f8f5f0',
+  surface: '#fdfbf8',
+  line: '#ece5db',
+  ink: '#2b1f4a',
+  inkSoft: '#5b4f75',
+  inkFaint: '#6d6188',
+  pink: '#e88aac',
+  coral: '#ed5a39',
+  coralDeep: '#b03a1c',
+  coralGhost: '#fce8e2',
+  amber: '#ed9936',
+  sky: '#b2d9ea',
+  serif: "Georgia, 'Times New Roman', serif",
+  sans: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+})
+const LOGO = 'https://bearwithme.pl/wp-content/uploads/2024/03/logo_kolor_new.png'
+
+const paragraph = (inner) => `<p style="margin:0 0 14px;font-family:${BRAND.sans};`
+  + `font-size:15px;line-height:1.65;color:${BRAND.inkSoft};text-align:center;">${inner}</p>`
+
+const codePanel = (code) => '<table role="presentation" width="100%" cellpadding="0" '
+  + 'cellspacing="0" border="0" style="margin:4px 0 18px;"><tr><td align="center" '
+  + `style="background:${BRAND.coralGhost};border-radius:12px;padding:26px 16px;">`
+  + `<div style="font-family:${BRAND.serif};font-size:34px;font-weight:700;`
+  + `letter-spacing:0.22em;color:${BRAND.ink};">${code}</div>`
+  + '</td></tr></table>'
+
+const actionButton = (href, label) => '<table role="presentation" cellpadding="0" '
+  + 'cellspacing="0" border="0" align="center" style="margin:4px auto 18px;"><tr><td '
+  + `align="center" style="background:${BRAND.coral};border-radius:10px;">`
+  + `<a href="${href}" style="display:inline-block;padding:13px 26px;font-family:${BRAND.sans};`
+  + 'font-size:15px;font-weight:700;color:#ffffff;text-decoration:none;">'
+  + `${label}</a></td></tr></table>`
+
+const metaRow = (label, value) => `<tr><td align="center" style="padding:6px 0;`
+  + `font-family:${BRAND.sans};font-size:13px;line-height:1.5;color:${BRAND.inkFaint};">`
+  + `<span style="color:${BRAND.ink};">${label}</span> ${value}</td></tr>`
+
+const metaTable = (rows) => '<table role="presentation" width="100%" cellpadding="0" '
+  + `cellspacing="0" border="0" style="border-top:1px solid ${BRAND.line};margin-top:6px;">`
+  + `${rows.join('')}</table>`
+
+const linkChip = (href) => '<table role="presentation" width="100%" cellpadding="0" '
+  + 'cellspacing="0" border="0" style="margin:2px 0 6px;"><tr><td align="center" '
+  + `style="background:${BRAND.paper};border:1px solid ${BRAND.line};border-radius:10px;`
+  + 'padding:14px 18px;">'
+  + `<a class="bwm-link" href="${href}" style="font-family:${BRAND.sans};font-size:13px;`
+  + `line-height:1.6;color:${BRAND.ink};text-decoration:none;word-break:break-all;">`
+  + `${href}</a></td></tr></table>`
+
+const brandStripe = () => '<tr><td style="padding:0;"><table role="presentation" width="100%" '
+  + 'cellpadding="0" cellspacing="0" border="0"><tr>'
+  + [BRAND.pink, BRAND.coral, BRAND.amber, BRAND.sky].map((color) => (
+    `<td width="25%" style="height:5px;background:${color};font-size:0;line-height:0;">&nbsp;</td>`
+  )).join('')
+  + '</tr></table></td></tr>'
+
+function emailDocument({ title, heading, body, footnote }) {
+  return [
+    '<!doctype html><html lang="pl"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width,initial-scale=1">',
+    '<meta name="color-scheme" content="light only">',
+    `<title>${title}</title>`,
+    `<style>.bwm-link:hover{text-decoration:underline !important;color:${BRAND.inkSoft} !important}`,
+    '</style></head>',
+    `<body style="margin:0;padding:0;background:${BRAND.paper};">`,
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" ',
+    `style="background:${BRAND.paper};"><tr><td align="center" style="padding:32px 16px;">`,
+    '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" ',
+    `style="width:100%;max-width:600px;background:${BRAND.surface};`,
+    `border:1px solid ${BRAND.line};border-radius:16px;overflow:hidden;">`,
+    `<tr><td align="center" style="background:${BRAND.ink};padding:30px 24px 26px;">`,
+    `<img src="${LOGO}" width="132" alt="Bear with me" `,
+    'style="display:block;width:132px;max-width:132px;height:auto;border:0;',
+    `color:#ffffff;font-family:${BRAND.sans};font-size:15px;font-weight:700;">`,
+    '</td></tr>',
+    brandStripe(),
+    '<tr><td align="center" style="padding:32px 32px 28px;">',
+    `<h1 style="margin:0 0 14px;font-family:${BRAND.serif};font-size:21px;font-weight:700;`,
+    `line-height:1.3;color:${BRAND.ink};text-align:center;">${heading}</h1>`,
+    body,
+    '</td></tr>',
+    `<tr><td align="center" style="background:${BRAND.paper};padding:18px 32px 20px;`,
+    `border-top:1px solid ${BRAND.line};font-family:${BRAND.sans};font-size:12px;`,
+    `line-height:1.6;color:${BRAND.inkFaint};text-align:center;">${footnote}</td></tr>`,
+    '</table></td></tr></table></body></html>',
+  ].join('')
+}
+
 function invitationContent(appOrigin, expiresAt) {
-  const humanExpiry = new Intl.DateTimeFormat('pl-PL', {
-    year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit',
-    second: '2-digit', timeZone: 'Europe/Warsaw', timeZoneName: 'short', hour12: false,
-  }).format(new Date(expiresAt))
+  const moment = new Date(expiresAt)
+  const expiryDate = new Intl.DateTimeFormat('pl-PL', {
+    day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Europe/Warsaw',
+  }).format(moment)
+  const expiryTime = new Intl.DateTimeFormat('pl-PL', {
+    hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Warsaw',
+    timeZoneName: 'short', hour12: false,
+  }).format(moment)
+  const humanExpiry = `${expiryDate}, ${expiryTime}`
   const textOrigin = escapeInvitationText(appOrigin)
-  const textExpiry = escapeInvitationText(expiresAt)
   const textHumanExpiry = escapeInvitationText(humanExpiry)
   const htmlOrigin = escapeInvitationHtml(appOrigin)
-  const htmlExpiry = escapeInvitationHtml(expiresAt)
   const htmlHumanExpiry = escapeInvitationHtml(humanExpiry)
   return Object.freeze({
     subject: 'Zaproszenie do panelu Bear with me',
@@ -91,16 +184,65 @@ function invitationContent(appOrigin, expiresAt) {
       'Bear with me - Centrum Psychologiczno-Edukacyjne', '',
       'Otrzymujesz zaproszenie do panelu centrum.',
       `Panel: ${textOrigin}`,
-      `Ważne do (ISO UTC): ${textExpiry}`,
-      `Ważne do (Europe/Warsaw): ${textHumanExpiry}`,
+      `Ważne do: ${textHumanExpiry}`,
     ].join('\n'),
-    html: [
-      '<p><strong>Bear with me - Centrum Psychologiczno-Edukacyjne</strong></p>',
-      '<p>Otrzymujesz zaproszenie do panelu centrum.</p>',
-      `<p><a href="${htmlOrigin}">Otwórz panel</a></p>`,
-      `<p>Ważne do (ISO UTC): ${htmlExpiry}<br>`,
-      `Ważne do (Europe/Warsaw): ${htmlHumanExpiry}</p>`,
-    ].join(''),
+    html: emailDocument({
+      title: 'Zaproszenie do panelu Bear with me',
+      heading: 'Zaproszenie do panelu centrum',
+      body: [
+        paragraph('Otrzymujesz dostęp do panelu Bear with me. Otwórz panel i dokończ '
+          + 'zakładanie konta na swój adres e-mail.'),
+        actionButton(htmlOrigin, 'Otwórz panel'),
+        metaTable([
+          metaRow('Adres panelu:', htmlOrigin),
+          metaRow('Ważne do:', htmlHumanExpiry),
+        ]),
+      ].join(''),
+      footnote: 'Zaproszenie jest jednorazowe i wygasa w podanym terminie. '
+        + 'Jeśli nie spodziewasz się tej wiadomości, po prostu ją zignoruj.',
+    }),
+  })
+}
+
+function otpContent(otp) {
+  const textOtp = escapeInvitationText(otp)
+  const htmlOtp = escapeInvitationHtml(otp)
+  return Object.freeze({
+    subject: 'Kod logowania do Bear with me',
+    text: `Kod logowania do panelu Bear with me: ${textOtp}. Kod jest ważny przez 5 minut.`,
+    html: emailDocument({
+      title: 'Kod logowania do Bear with me',
+      heading: 'Twój kod logowania',
+      body: [
+        paragraph('Wpisz ten kod w panelu Bear with me, aby dokończyć logowanie.'),
+        codePanel(htmlOtp),
+        paragraph('Kod jest ważny przez 5 minut i można go użyć tylko raz.'),
+      ].join(''),
+      footnote: 'Nie przekazuj tego kodu nikomu. Jeśli to nie Ty próbujesz się zalogować, '
+        + 'zignoruj tę wiadomość - bez kodu nikt nie wejdzie do panelu.',
+    }),
+  })
+}
+
+function resetContent(href) {
+  const textHref = escapeInvitationText(href)
+  const htmlHref = escapeInvitationHtml(href)
+  return Object.freeze({
+    subject: 'Zmiana hasła do Bear with me',
+    text: `Aby ustawić nowe hasło do panelu Bear with me, otwórz: ${textHref}`,
+    html: emailDocument({
+      title: 'Zmiana hasła do Bear with me',
+      heading: 'Zmiana hasła do panelu',
+      body: [
+        paragraph('Otrzymaliśmy prośbę o zmianę hasła do panelu Bear with me. '
+          + 'Kliknij przycisk, aby ustawić nowe hasło.'),
+        actionButton(htmlHref, 'Ustaw nowe hasło'),
+        paragraph('Jeśli przycisk nie działa, skopiuj ten adres do przeglądarki:'),
+        linkChip(htmlHref),
+      ].join(''),
+      footnote: 'Link jest jednorazowy i wkrótce wygaśnie. Jeśli to nie Ty prosiłaś o zmianę, '
+        + 'zignoruj tę wiadomość - dotychczasowe hasło pozostaje aktywne.',
+    }),
   })
 }
 
@@ -115,8 +257,7 @@ function validateInput(input) {
     || !saneName(input.fromName)
     || appEnv === null
     || !ID.test(input.jobId ?? '')
-    || !acceptPhaseOneAccessEmail(input.recipient, { appEnv })
-    || !canonicalInstant(input.expiresAt)) fail('EMAIL_PROVIDER_CONFIG_INVALID')
+    || !acceptPhaseOneAccessEmail(input.recipient, { appEnv })) fail('EMAIL_PROVIDER_CONFIG_INVALID')
 }
 
 async function cancelReader(reader) {
@@ -303,7 +444,28 @@ async function sendAndValidate(input, request, signal) {
 
 export async function sendInvitationEmail(input = {}) {
   validateInput(input)
-  const content = invitationContent(input.appOrigin, input.expiresAt)
+  if (!canonicalInstant(input.expiresAt)) fail('EMAIL_PROVIDER_CONFIG_INVALID')
+  return sendEmail(input, invitationContent(input.appOrigin, input.expiresAt))
+}
+
+export async function sendAuthenticationEmail(input = {}) {
+  validateInput(input)
+  let content
+  if (input.purpose === 'otp' && /^[0-9]{6}$/.test(input.otp ?? '')) {
+    content = otpContent(input.otp)
+  } else if (input.purpose === 'reset') {
+    let url
+    try { url = new URL(input.url) } catch { fail('EMAIL_PROVIDER_CONFIG_INVALID') }
+    if (url.origin !== input.appOrigin || url.username || url.password
+      || !url.pathname.startsWith('/api/auth/reset-password/')) fail('EMAIL_PROVIDER_CONFIG_INVALID')
+    content = resetContent(url.href)
+  } else {
+    fail('EMAIL_PROVIDER_CONFIG_INVALID')
+  }
+  return sendEmail(input, content)
+}
+
+async function sendEmail(input, content) {
   const body = {
     from: `${input.fromName} <${input.fromEmail}>`,
     to: [input.recipient],

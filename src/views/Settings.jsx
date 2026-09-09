@@ -8,6 +8,8 @@ import { EntityLink, useRouteParamsSync } from '../ux-patterns.jsx'
 import { canPerformAction } from '../capability-access.js'
 import { OperationsPanel } from './Operations.jsx'
 import { PermissionsAccess, StaffAccess } from './StaffAccess.jsx'
+import { useAuth } from '../auth.jsx'
+import { authClient, authStrategyFor, passwordValidationError } from '../auth-client.js'
 
 const SECTIONS = [
   { id: 'account', label: 'Konto' },
@@ -21,6 +23,7 @@ const PERMISSIONS_SECTION = Object.freeze({ id: 'permissions', label: 'Uprawnien
 const OPERATIONS_SECTION = Object.freeze({ id: 'operations', label: 'Stan i bezpieczeństwo' })
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const USES_BETTER_AUTH = authStrategyFor(import.meta.env?.MODE) === 'better-auth'
 
 const teamDraftOf = (psychologists, current = {}) => Object.fromEntries(
   psychologists.map((psychologist) => [
@@ -63,6 +66,78 @@ function PreferenceSwitch({ title, description, on, disabled, onChange }) {
       </span>
       <span className={`toggle ${on ? 'is-on' : ''}`} aria-hidden="true" />
     </button>
+  )
+}
+
+function AccountAuthentication({ client = authClient }) {
+  const { session } = useAuth()
+  const [methods, setMethods] = useState([])
+  const [accounts, setAccounts] = useState([])
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [status, setStatus] = useState('loading')
+  const [message, setMessage] = useState('')
+
+  useEffect(() => {
+    let active = true
+    Promise.all([client.getConfig(), client.listAccounts()])
+      .then(([config, nextAccounts]) => {
+        if (!active) return
+        setMethods(Array.isArray(config?.methods) ? config.methods : [])
+        setAccounts(Array.isArray(nextAccounts) ? nextAccounts : [])
+        setStatus('idle')
+      })
+      .catch(() => {
+        if (!active) return
+        setStatus('error')
+        setMessage('Nie udało się pobrać metod logowania.')
+      })
+    return () => { active = false }
+  }, [client])
+
+  const providers = new Set(accounts.map((account) => account.providerId))
+  const hasPassword = providers.has('credential')
+  const setFirstPassword = async (event) => {
+    event.preventDefault()
+    const validation = passwordValidationError(password)
+    if (validation) return setMessage(validation)
+    if (password !== confirmPassword) return setMessage('Hasła nie są takie same')
+    setStatus('saving')
+    setMessage('')
+    try {
+      await client.setFirstPassword(password, session.csrfToken)
+      setAccounts((current) => [...current, { providerId: 'credential' }])
+      setPassword('')
+      setConfirmPassword('')
+      setStatus('idle')
+      setMessage('Hasło zostało ustawione.')
+    } catch (error) {
+      setStatus('idle')
+      setMessage(error?.status === 401 ? 'Zaloguj się ponownie, aby ustawić hasło.' : 'Nie udało się ustawić hasła.')
+    }
+  }
+
+  return (
+    <div className="card card--pad settings-authentication" aria-label="Metody logowania">
+      <h3 className="card-title">Logowanie do panelu</h3>
+      <p className="pref-row__desc">Kod e-mail jest zawsze dostępny. Możesz też ustawić hasło.</p>
+      {status === 'loading' ? <p role="status">Pobieranie metod logowania…</p> : null}
+      {!hasPassword && methods.includes('password') && status !== 'loading' ? (
+        <form className="settings-authentication__password" onSubmit={setFirstPassword}>
+          <Field label="Nowe hasło">
+            <input className="input" type="password" autoComplete="new-password" minLength={12} maxLength={128}
+              value={password} onChange={(event) => { setPassword(event.target.value); setMessage('') }} />
+          </Field>
+          <Field label="Powtórz hasło">
+            <input className="input" type="password" autoComplete="new-password" minLength={12} maxLength={128}
+              value={confirmPassword} onChange={(event) => { setConfirmPassword(event.target.value); setMessage('') }} />
+          </Field>
+          <Button type="submit" size="sm" disabled={status === 'saving'}>Ustaw hasło</Button>
+        </form>
+      ) : null}
+      {hasPassword ? <div className="pref-row settings-authentication__method"><span><span className="pref-row__title">Hasło</span><span className="pref-row__desc">Ustawione</span></span></div> : null}
+      {message ? <p className={status === 'error' ? 'field__error' : 'settings-authentication__message'} role="status">{message}</p> : null}
+    </div>
   )
 }
 
@@ -329,10 +404,9 @@ export function Settings({ params = {} }) {
                   <span className="settings-account-identity__label">Profil w panelu</span>
                   <strong>{role.professionalTitle ?? 'Konto centrum'}</strong>
                 </div>
-                <p>
-                  Logujesz się jednorazowym kodem e-mail — panel nie przechowuje hasła.
-                  Aby otrzymać nowy kod, wyloguj się i rozpocznij logowanie ponownie.
-                </p>
+                <p>{USES_BETTER_AUTH
+                  ? 'Adres e-mail i dostęp do panelu są przypisane przez administrację centrum.'
+                  : 'Tożsamość i dostęp do panelu są zarządzane przez Cloudflare Access.'}</p>
               </div>
             ) : (
               <form className="card card--pad stack" aria-label="Twoje konto" onSubmit={saveProfile} noValidate>
@@ -372,6 +446,7 @@ export function Settings({ params = {} }) {
                 />
               </form>
             )}
+            {isApp && USES_BETTER_AUTH ? <AccountAuthentication /> : null}
               </section>
 
               {!isApp && <section

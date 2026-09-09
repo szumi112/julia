@@ -7,10 +7,12 @@ import test from 'node:test'
 import * as restoreModule from '../../scripts/restore-backup-lib.mjs'
 import { BACKUP_SQL_IMPORT_MAX_BYTES } from '../../worker/operations/backup-limits.js'
 import {
+  authenticationCleanupOperation,
   createPinnedWranglerRunner,
   createRestoreSourceStore,
   prepareD1RestoreImportFile,
   removeRestoreTemporaryDirectory,
+  requiresAuthenticationCleanup,
   restoreBackup,
   validateRestoreRequest,
   writeRestoreStream,
@@ -21,6 +23,37 @@ const fixtureV1 = JSON.parse(readFileSync(new URL('../fixtures/backup-format-v1.
 const fixtureV2 = JSON.parse(readFileSync(new URL('../fixtures/backup-format-v2.json', import.meta.url), 'utf8'))
 const fixtureV3Public = JSON.parse(readFileSync(new URL('../fixtures/backup-format-v3.json', import.meta.url), 'utf8'))
 const bytesFor = (fixture) => Uint8Array.from(Buffer.from(fixture.canonicalManifestBase64Url, 'base64url'))
+
+test('restored migration manifests trigger auth cleanup only from stage F', () => {
+  assert.equal(requiresAuthenticationCleanup([{ id: 22, name: '0022_outbox_job_recoveries.sql' }]), false)
+  assert.equal(requiresAuthenticationCleanup([{ id: 23, name: '0023_better_auth.sql' }]), true)
+  assert.deepEqual(authenticationCleanupOperation([{ id: 23, name: '0023_better_auth.sql' }], target.name, target.id), {
+    operation: 'auth-cleanup', target: target.name, targetId: target.id,
+  })
+  assert.equal(authenticationCleanupOperation([], target.name, target.id), null)
+})
+
+test('Wrangler auth cleanup clears both transient tables and fails when either is missing', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'bwm-restore-auth-cleanup-'))
+  const commands = []
+  const runner = createPinnedWranglerRunner({ tempRoot, wranglerPath: '/opaque/wrangler.js', async execute(args) {
+    const command = args[args.indexOf('--command') + 1]
+    commands.push(command)
+    const results = command.includes('sqlite_master') ? [{ name: 'auth_session' }, { name: 'auth_verification' }] : []
+    return { stdout: JSON.stringify([{ results, success: true, meta: {} }]) }
+  } })
+  try {
+    assert.deepEqual(await runner.runCommand({ operation: 'auth-cleanup', target: target.name, targetId: target.id }), { cleaned: true })
+    assert.deepEqual(commands.slice(1), ['DELETE FROM auth_session', 'DELETE FROM auth_verification'])
+  } finally { await runner.cleanup(); rmSync(tempRoot, { recursive: true, force: true }) }
+
+  const missingRoot = mkdtempSync(join(tmpdir(), 'bwm-restore-auth-missing-'))
+  const missing = createPinnedWranglerRunner({ tempRoot: missingRoot, wranglerPath: '/opaque/wrangler.js',
+    execute: async () => ({ stdout: JSON.stringify([{ results: [{ name: 'auth_session' }], success: true, meta: {} }]) }) })
+  try {
+    await assert.rejects(missing.runCommand({ operation: 'auth-cleanup', target: target.name, targetId: target.id }), /RESTORE_FAILED/)
+  } finally { await missing.cleanup(); rmSync(missingRoot, { recursive: true, force: true }) }
+})
 const restoreFixtureV3 = (variant) => ({
   canonicalManifestBase64Url: variant.canonicalManifestBase64Url,
   manifest: JSON.parse(Buffer.from(variant.canonicalManifestBase64Url, 'base64url')),

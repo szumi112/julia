@@ -66,7 +66,7 @@ export async function postDeactivation(input) {
   const key = input.idempotencyKey
   if (!key) throw new Error('VALIDATION_FAILED')
   const body = deactivationBody(input.body)
-  return deactivateStaff({ ...input, staffId: input.staffId, version: body.version, idempotencyKey: key })
+  return deactivateStaff({ ...input, appEnv: input.config?.appEnv, staffId: input.staffId, version: body.version, idempotencyKey: key })
 }
 export async function postRoleChange(input) {
   if (!allowed(input.actor, input.nowMs)) return deny(input)
@@ -74,6 +74,7 @@ export async function postRoleChange(input) {
   if (!key) throw new Error('VALIDATION_FAILED')
   return changeStaffRole({
     ...input,
+    appEnv: input.config?.appEnv,
     recoveryDb: input.recoveryDb ?? input.db,
     staffId: input.staffId,
     input: input.body,

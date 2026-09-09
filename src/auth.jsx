@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, apiClient } from './api.js'
 import { APP_MODE } from './app-mode.js'
+import { AppLogin } from './views/Login.jsx'
+import { authClient, authStrategyFor } from './auth-client.js'
 
 const AuthCtx = createContext(null)
 const DENIED_CODES = new Set(['ACCESS_DENIED', 'FORBIDDEN'])
@@ -10,10 +12,13 @@ const REFRESH_LEAD_MS = 60_000
 const REFRESH_MIN_DELAY_MS = 5_000
 const REFRESH_MAX_DELAY_MS = 5 * 60_000
 
+const AUTH_STRATEGY = authStrategyFor(import.meta.env?.MODE)
+
 const authStateFor = (error) => {
   if (!(error instanceof ApiError)
     || (error.status !== 401 && error.status !== 403)) return 'unavailable'
   if (REAUTH_CODES.has(error.code)) return 'reauth'
+  if (AUTH_STRATEGY === 'better-auth' && error.status === 401) return 'login'
   return DENIED_CODES.has(error.code) ? 'denied' : 'unavailable'
 }
 
@@ -55,7 +60,7 @@ function AuthScreen({ state, onLogout, onRetry }) {
   )
 }
 
-export function AuthProvider({ children, client = apiClient }) {
+export function AuthProvider({ children, client = apiClient, loginClient = authClient }) {
   const [auth, setAuth] = useState({ status: 'loading', session: null })
   const mountedRef = useRef(false)
   const bootstrapStartedRef = useRef(false)
@@ -139,11 +144,20 @@ export function AuthProvider({ children, client = apiClient }) {
     window.addEventListener('bwm:test-auth-refresh', onTestRefresh)
     return () => window.removeEventListener('bwm:test-auth-refresh', onTestRefresh)
   }, [refresh])
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
     loggingOutRef.current = true
+    if (AUTH_STRATEGY === 'better-auth') {
+      try {
+        await loginClient.signOut()
+      } catch {
+        loggingOutRef.current = false
+        setAuth({ status: 'unavailable', session: null })
+        return
+      }
+    }
     client.clearSession()
-    window.location.assign('/cdn-cgi/access/logout')
-  }, [client])
+    window.location.assign(AUTH_STRATEGY === 'better-auth' ? '/' : '/cdn-cgi/access/logout')
+  }, [client, loginClient])
   const value = useMemo(() => ({
     capabilities: auth.session?.capabilities || EMPTY_CAPABILITIES,
     logout,
@@ -152,8 +166,11 @@ export function AuthProvider({ children, client = apiClient }) {
     status: auth.status,
   }), [auth.session, auth.status, logout, refresh])
 
-  if (auth.status === 'loading' || auth.status === 'denied'
-    || auth.status === 'reauth' || auth.status === 'unavailable') {
+  if (AUTH_STRATEGY === 'better-auth' && (auth.status === 'login' || auth.status === 'reauth')) {
+    return <AppLogin client={loginClient} onAuthenticated={() => requestSession('loading')} />
+  }
+
+  if (auth.status === 'loading' || auth.status === 'denied' || auth.status === 'reauth' || auth.status === 'unavailable') {
     return <AuthScreen state={auth.status} onLogout={logout} onRetry={retry} />
   }
 

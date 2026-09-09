@@ -20,6 +20,7 @@ export function buildLocalHarnessWranglerConfig(
     name: 'bearwithme-panel-local-harness',
     main: `${projectRoot}/worker/index.js`,
     compatibility_date: '2026-07-29',
+    compatibility_flags: ['nodejs_compat'],
     workers_dev: false,
     preview_urls: false,
     assets: {

@@ -9,6 +9,7 @@ import {
 } from '../../worker/security/envelope.js'
 import {
   deactivateStaff,
+  changeStaffRole,
   expireInvitation,
   inviteStaff,
   listStaff,
@@ -17,7 +18,7 @@ import {
 } from '../../worker/identity/invitations.js'
 import { resolveCurrentAuthorityActor } from '../../worker/identity/staff.js'
 import { NOW_MS, authorityActor } from './fixtures.js'
-import { applyCapabilityOverridesMigration } from './apply-migrations.js'
+import { applyCapabilityOverridesMigration, applyAuthenticationStageF } from './apply-migrations.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const WEEK_MS = 7 * DAY_MS
@@ -90,6 +91,7 @@ const invite = async (context, input, options = {}) => {
     correlationId: options.correlationId ?? '11111111-1111-4111-8111-111111111111',
     nowMs: options.nowMs ?? NOW_MS,
     dataMode: options.dataMode ?? 'fictional',
+    appEnv: options.appEnv,
     idFactory: options.idFactory ?? ids(`opaque_${serial}`),
   })
   if (defaultActor) await refreshOwner(context)
@@ -104,6 +106,7 @@ const expire = (context, invitationId, options = {}) => expireInvitation({
   correlationId: options.correlationId ?? '22222222-2222-4222-8222-222222222222',
   nowMs: options.nowMs ?? NOW_MS + WEEK_MS,
   idFactory: options.idFactory ?? ids(`expiry_${serial}`),
+  appEnv: options.appEnv,
 })
 
 const deactivate = async (context, staffId, version, options = {}) => {
@@ -119,6 +122,7 @@ const deactivate = async (context, staffId, version, options = {}) => {
     correlationId: options.correlationId ?? '55555555-5555-4555-8555-555555555555',
     nowMs: options.nowMs ?? NOW_MS,
     idFactory: options.idFactory ?? ids(`deactivate_${serial}`),
+    appEnv: options.appEnv,
   })
   if (defaultActor && actingId !== staffId) await refreshOwner(context)
   return result
@@ -2169,4 +2173,50 @@ describe('staff lifecycle generation and listing', () => {
       'Stara Tajna Nazwa',
     ]) expect(serialized).not.toContain(secret)
   })
+})
+
+it('makes native-auth invitations ready without Access reconciliation', async () => {
+  const context = await cryptoContext()
+  const result = await invite(context, { displayName: 'Nowa Osoba', email: `native-${serial}@example.test`, role: 'coordinator' }, { appEnv: 'staging' })
+  expect(result.data.invitation.status).toBe('pending')
+  const invitation = await env.DB.prepare('SELECT access_allowed_at FROM staff_invitations WHERE id=?').bind(result.data.invitation.id).first()
+  expect(invitation.access_allowed_at).toBe(now)
+  const jobs = (await env.DB.prepare('SELECT type FROM outbox_jobs WHERE aggregate_id=? ORDER BY type').bind(result.data.invitation.id).all()).results
+  expect(jobs.map(row => row.type)).toEqual(['staff.invitation.email', 'staff.invitation.expire'])
+})
+
+it('deactivates native-auth staff without scheduling Access synchronization', async () => {
+  const context = await cryptoContext()
+  const created = await invite(context, { displayName: 'Nowa Osoba', email: `native-${serial}@example.test`, role: 'coordinator' }, { appEnv: 'staging' })
+  const before = await env.DB.prepare("SELECT count(*) AS total FROM outbox_jobs WHERE type='staff.access.reconcile'").first()
+  await deactivate(context, created.data.staff.id, 1, { appEnv: 'staging' })
+  expect(await env.DB.prepare("SELECT count(*) AS total FROM outbox_jobs WHERE type='staff.access.reconcile'").first()).toEqual(before)
+})
+
+it('revokes native-auth sessions atomically when disabling staff', async () => {
+  await applyAuthenticationStageF()
+  const context = await cryptoContext()
+  const created = await invite(context, { displayName: 'Nowa Osoba', email: `native-${serial}@example.test`, role: 'coordinator' }, { appEnv: 'staging' })
+  await env.DB.prepare('INSERT INTO auth_user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,1,?,?)').bind('auth_disable_test','Test',`native-${serial}@example.test`,NOW_MS,NOW_MS).run()
+  await env.DB.prepare('INSERT INTO staff_auth_identities (auth_user_id,staff_id,created_at) VALUES (?,?,?)').bind('auth_disable_test',created.data.staff.id,now).run()
+  await env.DB.prepare('INSERT INTO auth_session (id,expiresAt,token,createdAt,updatedAt,userId) VALUES (?,?,?,?,?,?)').bind('session_disable_test',NOW_MS+DAY_MS,'token_disable_test',NOW_MS,NOW_MS,'auth_disable_test').run()
+  await deactivate(context, created.data.staff.id, 1, { appEnv: 'staging' })
+  expect(await env.DB.prepare('SELECT id FROM auth_session WHERE userId=?').bind('auth_disable_test').first()).toBe(null)
+})
+
+it('keeps native invitation email deliverable after a pending staff role changes', async () => {
+  const context = await cryptoContext()
+  const created = await invite(context, { displayName: 'Nowa Osoba', email: `native-${serial}@example.test`, role: 'coordinator' }, { appEnv: 'staging' })
+  await changeStaffRole({ db: env.DB, cryptoContext: context, actor: context.owner, staffId: created.data.staff.id, input: { expectedVersion: 1, role: 'owner' }, idempotencyKey: `native-role-${serial}`, correlationId: '11111111-1111-4111-8111-111111111111', nowMs: NOW_MS, appEnv: 'staging' })
+  const invitation = await env.DB.prepare('SELECT version FROM staff_invitations WHERE id=?').bind(created.data.invitation.id).first()
+  const job = await env.DB.prepare('SELECT id FROM outbox_jobs WHERE idempotency_key=?').bind(`staff.invitation.email:${created.data.invitation.id}:${invitation.version}`).first()
+  expect(job).not.toBe(null)
+})
+
+it('expires a native invitation without scheduling Access synchronization', async () => {
+  const context = await cryptoContext()
+  const created = await invite(context, { displayName: 'Nowa Osoba', email: `native-${serial}@example.test`, role: 'coordinator' }, { appEnv: 'development' })
+  const before = await env.DB.prepare("SELECT count(*) AS total FROM outbox_jobs WHERE type='staff.access.reconcile'").first()
+  await expect(expire(context, created.data.invitation.id, { appEnv: 'development' })).resolves.toEqual({ expired: true })
+  expect(await env.DB.prepare("SELECT count(*) AS total FROM outbox_jobs WHERE type='staff.access.reconcile'").first()).toEqual(before)
 })

@@ -315,6 +315,10 @@ input, select, textarea { font-family: inherit; color: inherit; }
   letter-spacing: 0.04em;
 }
 
+.login-auth__notice,
+.login-auth__error { margin: 0 0 var(--s3); font-size: 13px; }
+.login-auth__notice { color: var(--ink-soft); }
+.login-auth__switches { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 18px; margin-top: var(--s3); }
 .login__veil {
   position: fixed;
   inset: 0;
@@ -2905,6 +2909,11 @@ span.historical-row__subject { color: var(--ink); }
   color: var(--ink-soft);
   font-size: 12.5px;
 }
+.settings-authentication { margin-top: 16px; }
+.settings-authentication > .pref-row__desc { display: block; margin: 4px 0 16px; }
+.settings-authentication__password { align-items: end; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; margin: 14px 0; }
+.settings-authentication__method { border-top: 1px solid var(--line-soft); }
+.settings-authentication__message { color: var(--sage-deep); font-size: 13px; margin: 12px 0 0; }
 .settings-save {
   display: flex;
   align-items: center;
@@ -3276,6 +3285,7 @@ span.historical-row__subject { color: var(--ink); }
   .settings-section__title { font-size: 21px; }
   .settings-account-identity { grid-template-columns: minmax(0, 1fr); }
   .settings-account-identity p { grid-column: auto; }
+  .settings-authentication__password { align-items: stretch; grid-template-columns: minmax(0, 1fr); }
   .pref-row { flex-wrap: wrap; gap: 10px 20px; }
   .pref-row--switch { flex-wrap: nowrap; }
   .settings-save { justify-content: space-between; flex-wrap: wrap; }
@@ -4538,4 +4548,34 @@ html.rm *, html.rm *::before, html.rm *::after {
   .activity-month-controls button,
   .activity-participant-row button,
   .activity-attendance button { min-height: 44px; }
+}
+
+/* Operations explanations share the existing keyboard-accessible popover. */
+.operations-details {
+  width: min(360px, calc(100vw - 48px));
+  max-height: min(480px, calc(100dvh - 80px));
+  overflow-y: auto;
+  padding: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.operations-details p { margin: 10px 0 0; color: var(--ink-soft); }
+.operations-backup-group {
+  padding: 17px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.operations-backup-group > p { margin: 6px 0; }
+.operations-backup-group summary {
+  width: fit-content;
+  padding: 12px 0;
+  color: var(--coral-deep);
+  cursor: pointer;
+}
+.operations-backup-group summary:focus-visible {
+  outline: 2px solid var(--coral);
+  outline-offset: 3px;
 }

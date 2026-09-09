@@ -12,6 +12,8 @@ const EVENT = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const RESULTS = new Set(['success', 'failure', 'skipped', 'started', 'completed'])
 const METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE', 'TRACE', 'CONNECT'])
 const ROUTES = new Set([
+  'authentication',
+  'account.password',
   'health.live',
   'operations.action-resolution',
   'operations.action-recovery',

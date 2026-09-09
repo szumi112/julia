@@ -995,6 +995,7 @@ export async function runScheduled(input) {
 
     await ownershipCheckpoint(validated.db, validated.scheduledFor, owned, deps.now)
     await publishScheduledOperationalState({
+      appEnv: validated.config.appEnv,
       db: validated.db,
       cryptoContext,
       run: {

@@ -1,3 +1,4 @@
+import { isBackupFailureCode } from '../../src/operations-diagnostics.js'
 import {
   auditEventStatement,
   encryptAuditReason,
@@ -771,11 +772,27 @@ async function readOpenActions(input, canReadSecurity) {
   const validated = []
   for (const row of identities) validated.push(await validateCapturedAction(input, row))
   await revalidate()
+  const backupIds = validated.slice(0, 100)
+    .filter(({ row }) => row.kind === 'backup_failed').map(({ row }) => row.entity_id)
+  const backupErrors = new Map()
+  if (backupIds.length) {
+    const backups = await input.db.prepare(
+      `SELECT id,last_error_code FROM backup_runs WHERE id IN (${backupIds.map(() => '?').join(',')})`
+    ).bind(...backupIds).all()
+    for (const backup of captureAllRows(backups, backupIds.length)) {
+      if (backupIds.includes(backup.id) && isBackupFailureCode(backup.last_error_code)) {
+        backupErrors.set(backup.id, backup.last_error_code)
+      }
+    }
+  }
   const recoveryStates = await readRecoveryStates(input, validated)
   await revalidate()
   return Object.freeze({
     actions: validated.slice(0, 100).map((action) => publicAction({
       ...action,
+      details: backupErrors.has(action.row.entity_id) && action.row.kind === 'backup_failed'
+        ? { ...action.details, backupErrorCode: backupErrors.get(action.row.entity_id) }
+        : action.details,
       recovery: recoveryStates.get(action.row.id) ?? null,
     })),
     truncated: validated.length === 101,

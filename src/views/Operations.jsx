@@ -2,7 +2,9 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { ApiError, apiClient } from '../api.js'
 import { useShell } from '../shell-ctx.js'
 import { useApp } from '../store.jsx'
-import { Button, IconBtn, Pill } from '../ui.jsx'
+import { Button, IconBtn, Pill, Popover } from '../ui.jsx'
+import { groupOperationalActions, ACTION_GUIDANCE, HEALTH_GUIDANCE, AUDIT_ENTITY_LABELS } from '../operations-view.js'
+import { BACKUP_FAILURE_COPY } from '../operations-diagnostics.js'
 import { canPerformAction } from '../capability-access.js'
 
 const timeFormat = new Intl.DateTimeFormat('pl-PL', {
@@ -62,6 +64,30 @@ const ACTION_COPY = Object.freeze({
 })
 
 const AUDIT_ACTIONS = Object.freeze({
+  'appointment.cancelled': 'Odwołanie wizyty',
+  'appointment.created': 'Dodanie wizyty',
+  'appointment.updated': 'Zmiana wizyty',
+  'client.archived': 'Archiwizacja klienta',
+  'client.assignment.changed': 'Zmiana specjalisty prowadzącego',
+  'client.created': 'Dodanie klienta',
+  'client.updated': 'Zmiana danych klienta',
+  'finance.import.chunk.accepted': 'Przyjęcie części importu finansowego',
+  'finance.import.committed': 'Zatwierdzenie importu finansowego',
+  'finance.import.started': 'Rozpoczęcie importu finansowego',
+  'payment.corrected': 'Korekta płatności',
+  'payment.recorded': 'Zapisanie płatności',
+  'specialist.account.linked': 'Powiązanie specjalisty z kontem',
+  'specialist.profile.created': 'Dodanie profilu specjalisty',
+  'specialist.profile.updated': 'Zmiana profilu specjalisty',
+  'staff.capabilities.updated': 'Zmiana uprawnień personelu',
+  'staff.role.updated': 'Zmiana roli w personelu',
+  'workbook.import.created': 'Rozpoczęcie importu arkusza',
+  'workbook.import.materialized': 'Zapisanie danych z importu arkusza',
+  'workbook.export.created': 'Utworzenie eksportu arkusza',
+  'workbook.resolutions.recorded': 'Zapisanie rozstrzygnięć importu',
+  'historical_client.activated': 'Aktywacja klienta z danych historycznych',
+  'specialist.backfilled': 'Uzupełnienie katalogu specjalistów',
+  'core_directory.upgrade.advanced': 'Postęp aktualizacji katalogu personelu',
   'activity.attendance.set': 'Ustawienie obecności na zajęciach',
   'activity.charge.created': 'Utworzenie miesięcznego rozliczenia zajęć',
   'activity.class.created': 'Utworzenie zajęć grupowych',
@@ -172,6 +198,61 @@ function PanelHeader({ title, refreshLabel, refreshing, onRefresh, titleRef }) {
         onClick={onRefresh}
       />
     </div>
+  )
+}
+
+function OperationDetails({ label, children }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <Popover
+      open={open}
+      setOpen={setOpen}
+      contentRole="region"
+      ariaLabel={`Szczegóły: ${label}`}
+      trigger={<Button size="sm" variant="ghost" onClick={() => setOpen(!open)}>Szczegóły</Button>}
+    >
+      <div className="operations-details">
+        <strong>{label}</strong>
+        {children}
+      </div>
+    </Popover>
+  )
+}
+
+function BackupStatus({ health }) {
+  const backup = health.data?.checks.find((check) => check.id === 'backup.freshness')
+  return (
+    <p>
+      {backup?.lastSuccessAt
+        ? <>Ostatnia udana kopia: <time dateTime={backup.lastSuccessAt}>{formatTime(backup.lastSuccessAt)}</time>.</>
+        : backup ? 'Brak zapisanej udanej kopii.' : 'Nie udało się jeszcze ustalić daty ostatniej udanej kopii.'}
+      {health.data?.generatedAt ? <> Stan z {formatTime(health.data.generatedAt)}.</> : null}
+      {health.staleMessage ? ' Dane mogą być nieaktualne.' : null}
+    </p>
+  )
+}
+
+function ActionDetails({ action, health }) {
+  const { details, kind } = action
+  return (
+    <OperationDetails label={ACTION_COPY[kind].label}>
+      <p>Zgłoszenie z {formatTime(action.createdAt)}.</p>
+      <p>{ACTION_GUIDANCE[kind]}</p>
+      {kind === 'backup_failed' ? <p><b>Przyczyna: </b>{BACKUP_FAILURE_COPY[details.backupErrorCode]
+        || 'Dla tej próby nie zapisano dokładniejszej przyczyny. Administrator może sprawdzić dziennik zadania.'}</p> : null}
+      {kind === 'backup_failed' || kind === 'backup_stale' ? <BackupStatus health={health} /> : null}
+      {kind === 'backup_stale' ? <p>Próg aktualności kopii: {details.thresholdHours} godzin.</p> : null}
+      {kind === 'scheduler_stale' ? <p>Próg braku zakończenia zadania: {details.thresholdMinutes} minut.</p> : null}
+      {kind === 'authorization_denial_spike' ? <p>{details.count
+        ? `Zarejestrowano ${details.count} odmów. Próg alarmu: ${details.threshold}.`
+        : `Zarejestrowano co najmniej ${details.minimumCount} odmów w ciągu ${details.windowMinutes} minut.`}</p> : null}
+      {kind === 'outbox_job_failed' ? <p>Dotyczy: {details.outboxType === 'staff.access.reconcile'
+        ? 'synchronizacji dostępu personelu' : details.outboxType === 'staff.invitation.email'
+          ? 'wysłania zaproszenia' : details.outboxType === 'staff.invitation.expire'
+            ? 'wygaszenia zaproszenia' : 'zadania w tle'}.</p> : null}
+      <p>Zamknięcie zgłoszenia nie naprawia przyczyny ani nie ponawia zadania.</p>
+      <p className="operations-row__meta">Dla administratora: {details.backupErrorCode || details.errorCode}<br />Numer zgłoszenia: {action.id}</p>
+    </OperationDetails>
   )
 }
 
@@ -301,7 +382,7 @@ function ActionConfirm({ action, fallbackRef, mode, opener, onClose, onReconcile
           <p>
             {recovering
               ? 'System utworzy nowe, bezpieczne zadanie zastępcze i zachowa historię wcześniejszej próby.'
-              : 'Potwierdź, że działanie zostało sprawdzone i nie wymaga dalszej interwencji.'}
+              : 'Potwierdź, że działanie zostało sprawdzone i nie wymaga dalszej interwencji. Zamknięcie zgłoszenia nie naprawia przyczyny ani nie ponawia zadania. Jeśli problem trwa, system może zgłosić go ponownie.'}
           </p>
           {saveError ? (
             <div className="form-warn form-warn--error" role="alert">
@@ -609,6 +690,14 @@ export function OperationsPanel({ sectionRef }) {
                       <div className="operations-row__content">
                         <strong className="operations-row__title">{check.label}</strong>
                         <p>{HEALTH_DETAILS[check.detailCode]}</p>
+                        <OperationDetails label={check.label}>
+                          <p>{HEALTH_GUIDANCE[check.id]}</p>
+                          <p>{check.status === 'ok' ? 'Ta kontrola nie wymaga teraz interwencji.'
+                            : check.detailCode === 'BACKUP_PENDING' || check.detailCode === 'SCHEDULER_STARTING'
+                              ? 'Poczekaj na zakończenie zadania i odśwież stan. Jeśli oczekiwanie się przedłuża, skontaktuj się z administratorem.'
+                              : 'Sprawdź zakładkę Działania. Jeśli problem się utrzymuje, skontaktuj się z administratorem.'}</p>
+                          <p>Odświeżenie pobiera ostatni wynik kontroli. Nie uruchamia naprawy ani nowej kopii.</p>
+                        </OperationDetails>
                         <p className="operations-row__meta">
                           {check.lastSuccessAt ? (
                             <>Ostatnie powodzenie: <time dateTime={check.lastSuccessAt}>{formatTime(check.lastSuccessAt)}</time></>
@@ -637,6 +726,7 @@ export function OperationsPanel({ sectionRef }) {
             refreshing={actions.refreshing}
             onRefresh={() => loadActions()}
           />
+          <p className="operations-snapshot">Otwarte zgłoszenia wymagające sprawdzenia. Mogą pozostać na liście po ustąpieniu problemu. Bieżącą sytuację sprawdzisz w zakładce Stan systemu.</p>
           {actions.status === 'loading' ? (
             <p className="operations-state" role="status" aria-live="polite">Pobieranie działań…</p>
           ) : null}
@@ -648,67 +738,85 @@ export function OperationsPanel({ sectionRef }) {
                 <p className="operations-state">Brak otwartych działań.</p>
               ) : (
                 <ul className="operations-list" aria-label="Otwarte działania">
-                  {actions.data.actions.map((action) => {
-                    const copy = ACTION_COPY[action.kind]
-                    const recovery = action.recovery
-                    const recoveryPending = recovery?.status === 'queued'
-                      || recovery?.status === 'processing'
-                    const severity = action.severity === 'warning'
-                      ? { label: 'Ostrzeżenie', tone: 'amber' }
-                      : { label: 'Krytyczne', tone: 'error' }
+                  {groupOperationalActions(actions.data.actions).map((group) => {
+                    const rows = group.map((action) => {
+                      const copy = ACTION_COPY[action.kind]
+                      const recovery = action.recovery
+                      const recoveryPending = recovery?.status === 'queued'
+                        || recovery?.status === 'processing'
+                      const severity = action.severity === 'warning'
+                        ? { label: 'Ostrzeżenie', tone: 'amber' }
+                        : { label: 'Krytyczne', tone: 'error' }
+                      return (
+                        <li className="operations-row operations-action-row" key={action.id}>
+                          <div className="operations-row__content">
+                            <strong className="operations-row__title">{copy.label}</strong>
+                            <p>{action.kind === 'backup_failed' ? 'Ta próba utworzenia kopii nie powiodła się.' : copy.description}</p>
+                            <ActionDetails action={action} health={health} />
+                            {recovery?.status === 'unsafe' ? (
+                              <p>Ponowienie mogłoby wysłać zaproszenie drugi raz. Sprawdź stan ręcznie przed zamknięciem działania.</p>
+                            ) : null}
+                            {recovery?.status === 'available' && !canRecover ? (
+                              <p>{actor?.role === 'owner'
+                                ? 'Brakuje uprawnienia do zarządzania personelem.'
+                                : 'Wymaga działania właściciela'}</p>
+                            ) : null}
+                            <p className="operations-row__meta">
+                              Utworzono <time dateTime={action.createdAt}>{formatTime(action.createdAt)}</time>
+                            </p>
+                          </div>
+                          <div className="operations-row__commands">
+                            <Pill tone={severity.tone}>{severity.label}</Pill>
+                            {recoveryPending ? <Pill tone="amber">Ponawianie w toku</Pill> : null}
+                            {recovery?.status === 'unsafe' ? (
+                              <Pill tone="error">Nie można bezpiecznie ponowić</Pill>
+                            ) : null}
+                            {recovery?.status === 'available' && canRecover ? (
+                              <Button
+                                size="sm"
+                                variant="soft"
+                                disabled={actions.resolutionBlocked}
+                                onClick={(event) => setConfirmation({
+                                  action,
+                                  mode: 'recover',
+                                  opener: event.currentTarget,
+                                })}
+                              >
+                                Ponów zadanie
+                              </Button>
+                            ) : null}
+                            {(recovery === null
+                              || (recovery?.status === 'unsafe' && canRecover)) ? (
+                              <Button
+                                size="sm"
+                                variant="soft"
+                                disabled={actions.resolutionBlocked}
+                                onClick={(event) => setConfirmation({
+                                  action,
+                                  mode: 'resolve',
+                                  opener: event.currentTarget,
+                                })}
+                              >
+                                Oznacz jako rozwiązane
+                              </Button>
+                            ) : null}
+                          </div>
+                        </li>
+                      )
+                    })
+                    if (group.length === 1) return rows[0]
                     return (
-                      <li className="operations-row operations-action-row" key={action.id}>
-                        <div className="operations-row__content">
-                          <strong className="operations-row__title">{copy.label}</strong>
-                          <p>{copy.description}</p>
-                          {recovery?.status === 'unsafe' ? (
-                            <p>Ponowienie mogłoby wysłać zaproszenie drugi raz. Sprawdź stan ręcznie przed zamknięciem działania.</p>
-                          ) : null}
-                          {recovery?.status === 'available' && !canRecover ? (
-                            <p>{actor?.role === 'owner'
-                              ? 'Brakuje uprawnienia do zarządzania personelem.'
-                              : 'Wymaga działania właściciela'}</p>
-                          ) : null}
-                          <p className="operations-row__meta">
-                            Utworzono <time dateTime={action.createdAt}>{formatTime(action.createdAt)}</time>
-                          </p>
-                        </div>
-                        <div className="operations-row__commands">
-                          <Pill tone={severity.tone}>{severity.label}</Pill>
-                          {recoveryPending ? <Pill tone="amber">Ponawianie w toku</Pill> : null}
-                          {recovery?.status === 'unsafe' ? (
-                            <Pill tone="error">Nie można bezpiecznie ponowić</Pill>
-                          ) : null}
-                          {recovery?.status === 'available' && canRecover ? (
-                            <Button
-                              size="sm"
-                              variant="soft"
-                              disabled={actions.resolutionBlocked}
-                              onClick={(event) => setConfirmation({
-                                action,
-                                mode: 'recover',
-                                opener: event.currentTarget,
-                              })}
-                            >
-                              Ponów zadanie
-                            </Button>
-                          ) : null}
-                          {(recovery === null
-                            || (recovery?.status === 'unsafe' && canRecover)) ? (
-                            <Button
-                              size="sm"
-                              variant="soft"
-                              disabled={actions.resolutionBlocked}
-                              onClick={(event) => setConfirmation({
-                                action,
-                                mode: 'resolve',
-                                opener: event.currentTarget,
-                              })}
-                            >
-                              Oznacz jako rozwiązane
-                            </Button>
-                          ) : null}
-                        </div>
+                      <li className="operations-backup-group" key="backup-failures">
+                        <strong className="operations-row__title">Nieudana kopia zapasowa</strong>
+                        <Pill tone="error">Krytyczne</Pill>
+                        <p>Liczba otwartych zgłoszeń: {group.length}{actions.data.truncated ? ' (w pobranej części listy)' : ''}. Nieudane próby mogą dotyczyć tego samego problemu.</p>
+                        <p>Najstarsze na liście: {formatTime(group.at(-1).createdAt)}. Najnowsze: {formatTime(group[0].createdAt)}.</p>
+                        <BackupStatus health={health} />
+                        <ActionDetails action={group[0]} health={health} />
+                        <details>
+                          <summary>Pokaż zgłoszenia ({group.length})</summary>
+                          <ul className="operations-list" aria-label="Nieudane próby kopii zapasowej">{rows}</ul>
+                        </details>
                       </li>
                     )
                   })}
@@ -735,6 +843,7 @@ export function OperationsPanel({ sectionRef }) {
               refreshing={audit.refreshing}
               onRefresh={() => loadAudit({ mode: 'refresh' })}
             />
+            <p className="operations-snapshot">Historia czynności i decyzji o dostępie. Zawiera również prawidłowe operacje. Odmowa oznacza zablokowanie danej próby, a nie potwierdzenie włamania.</p>
             {audit.status === 'loading' ? (
               <p className="operations-state" role="status" aria-live="polite">Pobieranie zdarzeń bezpieczeństwa…</p>
             ) : null}
@@ -758,8 +867,19 @@ export function OperationsPanel({ sectionRef }) {
                       return (
                         <li className="operations-row operations-audit-row" key={event.id}>
                           <div className="operations-row__content">
-                            <strong className="operations-row__title">{AUDIT_ACTIONS[event.action]}</strong>
+                            <strong className="operations-row__title">{AUDIT_ACTIONS[event.action] || 'Zdarzenie w panelu'}</strong>
                             <p>{event.actorStaffId === null ? 'Zdarzenie systemowe' : 'Działanie personelu'}</p>
+                            <OperationDetails label={AUDIT_ACTIONS[event.action] || 'Zdarzenie w panelu'}>
+                              <p>Dotyczy: {AUDIT_ENTITY_LABELS[event.entityType] || 'rekordu w panelu'}.</p>
+                              <p>{event.result === 'denied'
+                                ? 'Ta próba została odrzucona. Jeśli odmowy się powtarzają, właściciel powinien sprawdzić uprawnienia personelu i kontekst zdarzeń.'
+                                : event.action === 'staff.invitation.email_accepted'
+                                  ? 'Usługa pocztowa przyjęła zaproszenie do wysłania. Nie oznacza to potwierdzenia dostarczenia ani odczytania wiadomości.'
+                                  : event.action === 'operational_action.resolved'
+                                    ? 'Zgłoszenie oznaczono jako rozwiązane. Ten wpis nie potwierdza naprawy przyczyny.'
+                                    : 'System zarejestrował pomyślne wykonanie tej czynności. Sam wpis nie wymaga działania.'}</p>
+                              <p className="operations-row__meta">Dla administratora: {event.action}<br />Numer zdarzenia: {event.id}<br />Numer powiązanej operacji: {event.correlationId}</p>
+                            </OperationDetails>
                             <p className="operations-row__meta">
                               <time dateTime={event.occurredAt}>{formatTime(event.occurredAt)}</time>
                             </p>

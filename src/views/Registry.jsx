@@ -118,7 +118,7 @@ function ImportList({
         </p> : null}
       </div>
       <div className="registry-list__actions">
-        {item.status === 'complete' ? <p className="muted">Sprawdź osobno ukończenie importu klientów i zajęć.</p> : null}
+        {item.status === 'complete' ? <p className="muted">Finanse zostały zapisane. Import klientów i zajęć wymaga osobnego potwierdzenia.</p> : null}
         <Button variant="ghost" onClick={(event) => onSelect(item, event.currentTarget)}>
           Przejrzyj import
         </Button>
@@ -129,7 +129,7 @@ function ImportList({
         >{continuing === item.id ? 'Wczytywanie…'
             : item.status === 'conflicts' ? 'Rozstrzygnij konflikty' : 'Kontynuuj import'}</Button> : null}
         {canContinue && item.createdByStaffId === currentActorId && item.status === 'complete'
-          ? <Button disabled={operationBusy} onClick={() => onProject(item)}>Klienci i zajęcia</Button> : null}
+          ? <Button disabled={operationBusy} onClick={() => onProject(item)}>Dokończ import klientów i zajęć</Button> : null}
       </div>
     </article>
   })}</div>

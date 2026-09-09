@@ -216,7 +216,7 @@ const reconcileInput = (cryptoContext, payload, overrides = {}) => {
   return {
     db: overrides.db ?? env.DB,
     cryptoContext,
-    config: overrides.config ?? { appEnv: 'development' },
+    config: overrides.config ?? { appEnv: 'production' },
     bindings: overrides.bindings,
     payload,
     nowMs: overrides.nowMs ?? NOW_MS,
@@ -1633,7 +1633,7 @@ describe('guarded Access reconciliation publication', () => {
         { actorId: fixture.owner.id, generation: 1 },
         {
           bindings,
-          config: { appEnv: 'staging' },
+          config: { appEnv: 'production' },
           providers: { fetch },
         },
       ))
@@ -1671,7 +1671,7 @@ describe('guarded Access reconciliation publication', () => {
         { actorId: fixture.owner.id, generation: 2 },
         {
           bindings,
-          config: { appEnv: 'staging' },
+          config: { appEnv: 'production' },
           providers: { fetch },
         },
       ))).resolves.toEqual({ result: 'succeeded' })
@@ -1787,6 +1787,18 @@ describe('guarded Access reconciliation publication', () => {
       consoleError.mockRestore()
     }
   })
+
+  it('readies legacy provisioning invitations locally after native-auth cutover', async () => {
+    const fixture = await provisioningFixture()
+    const provider = vi.fn(async () => { throw new Error('Access must not be contacted') })
+    await expect(handlers.handleAccessReconcile(reconcileInput(
+      fixture.cryptoContext,
+      { actorId: fixture.owner.id, generation: 1 },
+      { nowMs: NOW_MS + 1, config: { appEnv: 'staging' }, providers: { reconcileAccessGroup: provider } },
+    ))).resolves.toEqual({ result: 'succeeded' })
+    expect(provider).not.toHaveBeenCalled()
+    expect(await env.DB.prepare('SELECT status,access_allowed_at FROM staff_invitations WHERE id=?').bind(fixture.invitation.id).first()).toEqual({ status: 'pending', access_allowed_at: new Date(NOW_MS + 1).toISOString() })
+  })
 })
 
 describe('authoritative outbox handler dispatch', () => {
@@ -1811,7 +1823,7 @@ describe('authoritative outbox handler dispatch', () => {
     await expect(handlers.dispatchOutboxJob({
       db: env.DB,
       cryptoContext: poisonedContext,
-      config: { appEnv: 'development' },
+      config: { appEnv: 'production' },
       job: { ...claim, aggregate_id: 'other_group' },
       nowMs: NOW_MS,
       providers: { reconcileAccessGroup: provider },
@@ -1884,7 +1896,7 @@ describe('authoritative outbox handler dispatch', () => {
         ...cryptoContext,
         dataKey: Object.freeze({}),
       },
-      config: { appEnv: 'development' },
+      config: { appEnv: 'production' },
       job: { ...claim, ...patches.claimPatch },
       nowMs: NOW_MS,
       providers: { reconcileAccessGroup: provider },
@@ -1927,7 +1939,7 @@ describe('authoritative outbox handler dispatch', () => {
     await expect(handlers.dispatchOutboxJob({
       db: env.DB,
       cryptoContext,
-      config: { appEnv: 'development' },
+      config: { appEnv: 'production' },
       job: claim,
       nowMs: NOW_MS,
       idFactory: sequence(`expiry_dispatch_${serial}`),
@@ -1987,7 +1999,7 @@ describe('authoritative outbox handler dispatch', () => {
     await expect(handlers.dispatchOutboxJob({
       db: env.DB,
       cryptoContext,
-      config: { appEnv: 'development' },
+      config: { appEnv: 'production' },
       job: claim,
       nowMs: NOW_MS,
       idFactory: sequence(`terminal_dispatch_${serial}`),

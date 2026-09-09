@@ -63,6 +63,11 @@ export const applyWorkbookRegistryStageE = () => {
   )
 }
 
+export const applyAuthenticationStageF = () => applyD1Migrations(
+  env.DB,
+  selectCoreMigrationStage(env.TEST_STAGE_F_MIGRATIONS, 'stage-f'),
+)
+
 export const applyCapabilityOverridesMigration = () => {
   if (env.CORE_DIRECTORY_STAGE !== 'stage-a-complete-before-fixtures') {
     throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')

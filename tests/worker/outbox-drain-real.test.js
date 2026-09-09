@@ -10,8 +10,8 @@ import {
 import { createKeyring } from '../../worker/security/keyring.js'
 
 const VALID_ENV = Object.freeze({
-  APP_ENV: 'development',
-  APP_ORIGIN: 'http://127.0.0.1:5174',
+  APP_ENV: 'production',
+  APP_ORIGIN: 'https://bearwithme-panel.app',
   DATA_MODE: 'fictional',
   ACCESS_AUD: 'outbox-drain-real-audience',
   ACCESS_HEALTH_SERVICE_TOKEN_ID: 'outbox-drain-real-health-token',

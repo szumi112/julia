@@ -34,6 +34,7 @@ const CENTRE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
 const INVITATION_RATE_LIMIT = 5
 const HOUR_MS = 60 * 60 * 1000
 const DAY_MS = 24 * 60 * 60 * 1000
+const nativeAuth = (appEnv) => appEnv === 'staging' || appEnv === 'development'
 const roles = new Set(['owner', 'coordinator', 'specialist'])
 const exactObject = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
@@ -480,10 +481,11 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
     email_envelope: await envelope(cryptoContext, invitationId, 'email', request.email),
     display_name_envelope: await envelope(cryptoContext, invitationId, 'display_name', request.displayName),
     role: request.role,
-    status: 'provisioning',
+    status: nativeAuth(appEnv) ? 'pending' : 'provisioning',
     inviter_id: owner.id,
     expires_at: expiresAt,
-    access_allowed_at: null,
+    // Historical column: readiness timestamp for native authentication.
+    access_allowed_at: nativeAuth(appEnv) ? now : null,
     email_sent_at: null,
     activated_at: null,
     revoked_at: null,
@@ -550,7 +552,10 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
   const expiryJobId = idFrom(idFactory)
   const denialAuditId = idFrom(idFactory)
   const accountLinkId = targetSpecialist ? prefixedIdFrom('spl', idFactory) : null
-  const reconcileKey = `staff.access.reconcile:${desired.generation}`
+  const reconcileType = nativeAuth(appEnv) ? 'staff.invitation.email' : 'staff.access.reconcile'
+  const reconcileKey = nativeAuth(appEnv)
+    ? `staff.invitation.email:${invitationId}:1`
+    : `staff.access.reconcile:${desired.generation}`
   const expiryKey = `staff.invitation.expire:${invitationId}`
   const primaryAudit = auditEventStatement(db, {
     id: auditId,
@@ -668,14 +673,14 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
   uow.domain(desired.statement)
   uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
     id: reconcileId,
-    type: 'staff.access.reconcile',
-    aggregateType: 'access_group',
-    aggregateId: 'centre_1',
-    payload: { generation: desired.generation, actorId: owner.id },
+    type: reconcileType,
+    aggregateType: nativeAuth(appEnv) ? 'staff_invitation' : 'access_group',
+    aggregateId: nativeAuth(appEnv) ? invitationId : 'centre_1',
+    payload: nativeAuth(appEnv) ? { invitationId, actorId: owner.id } : { generation: desired.generation, actorId: owner.id },
     idempotencyKey: reconcileKey,
     scheduledAt: now,
     nowMs,
-    onlyIfPreviousStatementChanged: true,
+    onlyIfPreviousStatementChanged: !nativeAuth(appEnv),
   }))
   uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
     id: expiryJobId,
@@ -729,7 +734,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       )
       AND EXISTS (
         SELECT 1 FROM staff_invitations
-        WHERE id=? AND staff_id=? AND status='provisioning' AND version=1 AND expires_at=?
+        WHERE id=? AND staff_id=? AND status=? AND version=1 AND expires_at=?
       )
       AND EXISTS (
         SELECT 1 FROM record_versions
@@ -745,7 +750,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       )
       AND EXISTS (
         SELECT 1 FROM outbox_jobs
-        WHERE id=? AND type='staff.access.reconcile' AND idempotency_key=?
+        WHERE id=? AND type=? AND idempotency_key=?
       )
       AND EXISTS (
         SELECT 1 FROM outbox_jobs
@@ -763,6 +768,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       staff.version,
       invitationId,
       staffId,
+      invitation.status,
       expiresAt,
       staffVersion.id,
       staffId,
@@ -772,6 +778,7 @@ export async function inviteStaff({ db, cryptoContext, actor, input, idempotency
       JSON.stringify({ generation: desired.generation }),
       desired.priorVersion + 1,
       reconcileId,
+      reconcileType,
       reconcileKey,
       expiryJobId,
       expiryKey,
@@ -1018,10 +1025,10 @@ function roleChangeGuardStatement(db, values) {
          SELECT 1 FROM system_state
          WHERE key='access.desired_generation' AND value_json=? AND version=?
        )
-       AND EXISTS (
+       AND (${nativeAuth(values.appEnv) ? 1 : 0}=1 OR EXISTS (
          SELECT 1 FROM outbox_jobs
          WHERE id=? AND type='staff.access.reconcile' AND idempotency_key=?
-       )
+       ))
        AND EXISTS (
          SELECT 1 FROM audit_events
          WHERE id=? AND occurred_at=? AND actor_staff_id=?
@@ -1068,6 +1075,7 @@ function roleChangeGuardStatement(db, values) {
 }
 
 export async function changeStaffRole({
+  appEnv,
   db,
   recoveryDb = db,
   cryptoContext,
@@ -1231,7 +1239,7 @@ export async function changeStaffRole({
   uow.version(staffVersion.statement)
   if (invitationVersion) uow.version(invitationVersion.statement)
   uow.domain(desired.statement)
-  uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
+  if (!nativeAuth(appEnv)) uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
     id: reconcileId,
     type: 'staff.access.reconcile',
     aggregateType: 'access_group',
@@ -1242,6 +1250,19 @@ export async function changeStaffRole({
     nowMs,
     onlyIfPreviousStatementChanged: true,
   }))
+  if (nativeAuth(appEnv) && invitation?.next.status === 'pending'
+    && invitation.next.email_sent_at === null && invitation.next.expires_at > now) {
+    uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
+      id: idFrom(idFactory),
+      type: 'staff.invitation.email',
+      aggregateType: 'staff_invitation',
+      aggregateId: invitation.next.id,
+      payload: { invitationId: invitation.next.id, actorId: owner.id },
+      idempotencyKey: `staff.invitation.email:${invitation.next.id}:${invitation.next.version}`,
+      scheduledAt: now,
+      nowMs,
+    }))
+  }
   uow.audit(auditEventStatement(db, {
     id: auditId,
     occurredAt: now,
@@ -1263,6 +1284,7 @@ export async function changeStaffRole({
     expiresAt: iso(nowMs + DAY_MS),
   }))
   uow.guard(roleChangeGuardStatement(db, {
+    appEnv,
     staff,
     authority,
     invitation: invitation ? Object.freeze({
@@ -1315,7 +1337,7 @@ export async function changeStaffRole({
   }
 }
 
-export async function deactivateStaff({ db, recoveryDb = db, cryptoContext, actor, staffId, version, idempotencyKey, correlationId, nowMs, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
+export async function deactivateStaff({ appEnv, db, recoveryDb = db, cryptoContext, actor, staffId, version, idempotencyKey, correlationId, nowMs, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
   if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
     || !cryptoContext?.scope || !validId(correlationId) || !Number.isSafeInteger(nowMs)
     || nowMs < 0 || !IDEMPOTENCY_KEY.test(idempotencyKey ?? '')) {
@@ -1454,11 +1476,19 @@ export async function deactivateStaff({ db, recoveryDb = db, cryptoContext, acto
       )
     )
   }
+  if (nativeAuth(appEnv)) {
+    const schema = await db.prepare(
+      "SELECT count(*) AS total FROM sqlite_master WHERE type='table' AND name IN ('auth_session','staff_auth_identities')",
+    ).first()
+    if (schema.total === 2) uow.domain(db.prepare(
+      'DELETE FROM auth_session WHERE userId IN (SELECT auth_user_id FROM staff_auth_identities WHERE staff_id=?)',
+    ).bind(staffId))
+  }
   appendAuthorityTransition(uow, db, authority)
   uow.version(staffVersion.statement)
   if (invitationVersion) uow.version(invitationVersion.statement)
   uow.domain(desired.statement)
-  uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
+  if (!nativeAuth(appEnv)) uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
     id: reconcileId,
     type: 'staff.access.reconcile',
     aggregateType: 'access_group',
@@ -1537,10 +1567,10 @@ export async function deactivateStaff({ db, recoveryDb = db, cryptoContext, acto
            SELECT 1 FROM system_state
            WHERE key='access.desired_generation' AND value_json=? AND version=?
          )
-         AND EXISTS (
+         AND (${nativeAuth(appEnv) ? 1 : 0}=1 OR EXISTS (
            SELECT 1 FROM outbox_jobs
            WHERE id=? AND type='staff.access.reconcile' AND idempotency_key=?
-         )
+         ))
          AND EXISTS (
            SELECT 1 FROM idempotency_records
            WHERE actor_id=? AND operation='staff.deactivate' AND idempotency_key=?
@@ -1587,7 +1617,7 @@ export async function deactivateStaff({ db, recoveryDb = db, cryptoContext, acto
   }
 }
 
-export async function expireInvitation({ db, cryptoContext, actorId, invitationId, correlationId, nowMs, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
+export async function expireInvitation({ appEnv, db, cryptoContext, actorId, invitationId, correlationId, nowMs, idFactory = () => crypto.randomUUID().replaceAll('-', '') } = {}) {
   if (!db?.prepare || !db?.batch || !cryptoContext?.keyring || !cryptoContext?.dataKey
     || !cryptoContext?.scope || !validId(actorId) || !validId(invitationId)
     || !validId(correlationId) || !Number.isSafeInteger(nowMs) || nowMs < 0) {
@@ -1645,7 +1675,7 @@ export async function expireInvitation({ db, cryptoContext, actorId, invitationI
   )
   uow.version(invitationVersion.statement)
   uow.domain(desired.statement)
-  uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
+  if (!nativeAuth(appEnv)) uow.outbox(await enqueueOutboxStatement(db, cryptoContext, {
     id: reconcileId,
     type: 'staff.access.reconcile',
     aggregateType: 'access_group',
@@ -1694,10 +1724,10 @@ export async function expireInvitation({ db, cryptoContext, actorId, invitationI
            SELECT 1 FROM system_state
            WHERE key='access.desired_generation' AND value_json=? AND version=?
          )
-         AND EXISTS (
+         AND (${nativeAuth(appEnv) ? 1 : 0}=1 OR EXISTS (
            SELECT 1 FROM outbox_jobs
            WHERE id=? AND type='staff.access.reconcile' AND idempotency_key=?
-         )
+         ))
        )`
     ).bind(
       auditId,

@@ -235,17 +235,41 @@ for (const [status, code] of [
   })
 }
 
+test('@owner resets a password from a Better Auth link under StrictMode', async ({ page }) => {
+  let resetBody
+  await page.route('**/api/v1/session', (route) => route.fulfill(errorEnvelope(401, 'AUTH_REQUIRED')))
+  await page.route('**/api/auth/config', (route) => route.fulfill(json(200, {
+    methods: ['password', 'email-otp'],
+  })))
+  await page.route('**/api/auth/reset-password', async (route) => {
+    resetBody = route.request().postDataJSON()
+    await route.fulfill(json(200, { status: true }))
+  })
+
+  await page.goto('./?token=reset-token-123#/reset-password')
+
+  await expect(page).toHaveURL('http://127.0.0.1:5174/#/reset-password')
+  await page.getByLabel('Nowe hasło').fill('bezpieczne-haslo-2026')
+  await page.getByRole('button', { name: 'Zmień hasło' }).click()
+  await expect(page.getByText('Hasło zostało zmienione. Możesz się zalogować.')).toBeVisible()
+  expect(resetBody).toEqual({ token: 'reset-token-123', newPassword: 'bezpieczne-haslo-2026' })
+})
+
 for (const [status, code] of [
   [401, 'ACCESS_ASSERTION_INVALID'],
   [401, 'REAUTH_REQUIRED'],
 ]) {
   test(`@owner classifies a stale session as reauth for ${code}`, async ({ page }) => {
     await page.route('**/api/v1/session', (route) => route.fulfill(errorEnvelope(status, code)))
+    await page.route('**/api/auth/config', (route) => route.fulfill(json(200, {
+      methods: ['password', 'email-otp'],
+    })))
 
     await page.goto('.')
 
-    await expect(page.getByRole('heading', { name: 'Sesja wygasła' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Zaloguj się ponownie' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Witaj z powrotem' })).toBeVisible()
+    await expect(page.getByLabel('Adres e-mail')).toBeVisible()
+    await expect(page.getByLabel('Hasło')).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Brak dostępu do panelu' })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Spróbuj ponownie' })).toHaveCount(0)
     await expect(page.getByRole('navigation', { name: 'Nawigacja główna' })).toHaveCount(0)
@@ -472,6 +496,7 @@ test('@owner constrains a max-length authenticated identity at shell breakpoints
 })
 
 test('@owner renders immutable identity and keeps browser application storage empty', async ({ page }) => {
+  await page.route('**/api/auth/list-accounts', (route) => route.fulfill(json(200, [{ providerId: 'credential' }])))
   const clientErrors = []
   const requests = []
   page.on('console', (message) => {
@@ -533,8 +558,7 @@ test('@owner renders immutable identity and keeps browser application storage em
   await expect(account).toContainText('Alicja Testowa')
   await expect(account).toContainText('Konto centrum')
   await expect(account).not.toContainText('Właściciel')
-  await expect(account).toContainText('jednorazowym kodem e-mail')
-  await expect(account).toContainText('panel nie przechowuje hasła')
+  await expect(account).toContainText('Adres e-mail i dostęp do panelu są przypisane przez administrację centrum.')
   await expect(account.getByRole('textbox')).toHaveCount(0)
   await expect(account).not.toContainText('@')
   await expect(page.getByRole('button', { name: 'Zapisz konto' })).toHaveCount(0)
@@ -1218,7 +1242,7 @@ test('@owner keeps max-length staff content contained at 320px', async ({ page }
   expect(geometry.right).toBeLessThanOrEqual(0)
 })
 
-test('@owner sends one fictional invitation and renders provisioning', async ({ page }) => {
+test('@owner sends one fictional invitation and renders pending mail', async ({ page }) => {
   let releaseRequest
   const requestReleased = new Promise((resolve) => { releaseRequest = resolve })
   let requests = 0
@@ -1253,7 +1277,8 @@ test('@owner sends one fictional invitation and renders provisioning', async ({ 
   await expect(drawer).toHaveCount(0)
   const row = page.locator('.staff-access-row').filter({ hasText: 'Beata Bramowa' })
   await expect(row).toContainText('gate-c-invite@example.test')
-  await expect(row).toContainText('Konfiguracja dostępu w toku')
+  await expect(row).toContainText('Oczekuje na aktywację')
+  await expect(row).toContainText('Oczekuje na wysłanie')
   await expect(page.getByText('Zaproszenie zostało utworzone.', { exact: true })).toBeVisible()
 })
 
@@ -1517,9 +1542,9 @@ test('@owner sees a fixed last-active-owner deactivation error', async ({ page }
   await expect(confirm).not.toContainText('LAST_ACTIVE_OWNER')
 })
 
-test('@owner logs out through an Access document navigation', async ({ page }) => {
+test('@owner revokes the Better Auth session before leaving the app', async ({ page }) => {
   const logoutRequests = []
-  await page.route('**/cdn-cgi/access/logout', async (route) => {
+  await page.route('**/api/auth/sign-out', async (route) => {
     logoutRequests.push({
       method: route.request().method(),
       resourceType: route.request().resourceType(),
@@ -1527,20 +1552,20 @@ test('@owner logs out through an Access document navigation', async ({ page }) =
     })
     await route.fulfill({
       status: 200,
-      contentType: 'text/html',
-      body: '<!doctype html><title>Access logout</title>',
+      contentType: 'application/json',
+      body: JSON.stringify({ success: true }),
     })
   })
   await page.goto('.')
   await expectAuthenticated(page, 'owner')
 
   await page.getByRole('button', { name: 'Wyloguj się' }).click()
-  await expect(page).toHaveURL('http://127.0.0.1:5174/cdn-cgi/access/logout')
+  await expect.poll(() => logoutRequests.length).toBe(1)
 
   expect(logoutRequests).toEqual([{
-    method: 'GET',
-    resourceType: 'document',
-    url: 'http://127.0.0.1:5174/cdn-cgi/access/logout',
+    method: 'POST',
+    resourceType: 'fetch',
+    url: 'http://127.0.0.1:5174/api/auth/sign-out',
   }])
 })
 

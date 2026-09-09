@@ -2289,3 +2289,16 @@ describe('atomic scheduled operational publication', () => {
     })).rejects.toThrow(/^HEALTH_INVALID$/)
   })
 })
+
+it('ignores obsolete Access synchronization lag in native-auth environments', async () => {
+  await setState('access.desired_generation', JSON.stringify({ generation: 999 }))
+  const result = await evaluate(NOW_MS, { appEnv: 'staging' })
+  expect(checkFor(result, 'access.reconciliation').status).toBe('ok')
+  expect(result.actionCandidates.some(candidate => candidate.kind === 'access_reconciliation_lag')).toBe(false)
+})
+
+it('does not create incidents for obsolete dead Access jobs after native-auth cutover', async () => {
+  await seedOutbox({ id: 'obsolete_access_job', status: 'dead', updatedAt: nowIso(NOW_MS + 1000) })
+  const result = await evaluate(NOW_MS + 1000, { appEnv: 'staging' })
+  expect(result.actionCandidates.some(candidate => candidate.entityId === 'obsolete_access_job')).toBe(false)
+})

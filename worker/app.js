@@ -2,7 +2,8 @@ import { Hono } from 'hono'
 import { isCapability } from '../src/capabilities.js'
 import { isCoreAuditAction } from '../src/core-audit-contract.js'
 import { auditEventStatement } from './audit/events.js'
-import { loadConfig } from './config.js'
+import { loadAuthConfig, loadConfig } from './config.js'
+import { resolveBetterAuthPrincipal, runtimeBetterAuth, setInitialPassword, usesBetterAuth } from './identity/better-auth.js'
 import { createD1QueryBudget } from './db/query-budget.js'
 import { apiError, AppError, publicError } from './http/errors.js'
 import {
@@ -269,6 +270,9 @@ const OPERATION_SERVICES = Object.freeze({
 
 const routeFor = (request) => {
   const url = new URL(request.url)
+  if (url.pathname === '/api/v1/account/password' && url.search === '') {
+    return { id: 'account.password', expected: 'human', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, assertedAuth: true }
+  }
   if (url.pathname === HEALTH_PATH && url.search === '') {
     return { id: 'health.live', expected: 'service', methods: ['GET', 'HEAD'] }
   }
@@ -516,6 +520,23 @@ export function createApp(deps = {}) {
     })
   })
 
+  app.all('/api/auth/*', async c => {
+    const config = runtimeConfig(c, deps)
+    if (!usesBetterAuth(config) || new URL(c.req.url).origin !== config.appOrigin) throw new AppError('NOT_FOUND')
+    const request = c.req.raw
+    const path = new URL(request.url).pathname.slice('/api/auth'.length)
+    c.set('routeId', 'authentication')
+    if (path === '/config' && request.method === 'GET') return c.json({ methods: loadAuthConfig(c.env, config).methods })
+    const reads = new Set(['/get-session', '/list-accounts', '/reset-password'])
+    const writes = new Set(['/sign-in/email', '/sign-in/email-otp', '/email-otp/send-verification-otp', '/request-password-reset', '/reset-password', '/change-password', '/sign-out'])
+    if (request.method === 'GET' ? !reads.has(path) && !/^\/reset-password\/[^/]+$/.test(path) : request.method !== 'POST' || !writes.has(path)) throw new AppError('NOT_FOUND')
+    if (request.method === 'POST') {
+      validateMutationMetadata(request, config)
+      await readJsonBodyOnce(request.clone())
+    }
+    return runtimeBetterAuth(c.env, config).handler(request)
+  })
+
   app.use('/api/v1/*', async (c, next) => {
     const request = c.req.raw
     const method = request.method
@@ -562,12 +583,16 @@ export function createApp(deps = {}) {
     }
     else if (method === 'OPTIONS') validateOptionsOrigin(request, config)
 
-    const verifier = deps.accessVerifier ?? (deps.resolveAccessPrincipal ? null : runtimeVerifier(config, deps))
-    const principal = await (deps.resolveAccessPrincipal ?? resolvePrincipal)(request, {
-      config,
-      verifier,
-      expected: route.expected,
-    })
+    const applicationAuth = route.expected === 'human' && usesBetterAuth(config)
+      && !deps.resolveAccessPrincipal && !deps.accessVerifier
+      && !(config.appEnv === 'development' && request.headers.has('X-BWM-Local-Identity'))
+    const principal = applicationAuth
+      ? await resolveBetterAuthPrincipal(request, { env: c.env, config, nowMs: requestNowMs })
+      : await (deps.resolveAccessPrincipal ?? resolvePrincipal)(request, {
+        config,
+        verifier: deps.accessVerifier ?? (deps.resolveAccessPrincipal ? null : runtimeVerifier(config, deps)),
+        expected: route.expected,
+      })
     if (principal?.kind !== route.expected) throw new Error('ACCESS_ASSERTION_INVALID')
     c.set('principal', principal)
     if (route.assertedAuth) requireLiveAssertedPrincipal(principal, requestNowMs)
@@ -648,6 +673,14 @@ export function createApp(deps = {}) {
   app.get('/api/v1/health/live', (c) => {
     if (c.get('routeId') !== 'health.live') throw new AppError('NOT_FOUND')
     return c.json({ data: { status: 'ok' } })
+  })
+  app.post('/api/v1/account/password', async c => {
+    const config = runtimeConfig(c, deps)
+    if (!usesBetterAuth(config)) throw new AppError('NOT_FOUND')
+    const body = c.get('jsonBody')
+    if (Object.keys(body).length !== 1 || !Object.hasOwn(body, 'newPassword')) throw new AppError('VALIDATION_FAILED', { field: 'body' })
+    return c.json(await setInitialPassword(runtimeBetterAuth(c.env, config), c.req.raw,
+      c.get('principal'), body.newPassword, c.get('nowMs')))
   })
   app.get('/api/v1/session', async (c) => {
     const config = runtimeConfig(c, deps)
