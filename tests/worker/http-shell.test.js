@@ -217,7 +217,7 @@ describe('closed core route descriptors', () => {
       { id: 'workbooks.export.create', capability: null, auditActions: ['workbook.export.created'], bodyKeys: ['format'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'historical.projection.status', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'historical.projection.review', capability: 'finance.import', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'historical.projection.continue', capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'historical.projection.continue', capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 160, recoveryReserve: 8 } },
       { id: 'historical.projection.resolve', capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId', 'reviewContextDigest', 'directoryCount', 'directoryDigest'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'historical.clients.activate', capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'activities.workspace', capability: 'tus.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },

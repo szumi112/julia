@@ -11,6 +11,8 @@ import {
   buildHistoricalIdentity,
   decryptHistoricalIdentityWithDataKey,
   historicalIdentityLookupCandidates,
+  HISTORICAL_COUNTERPARTY_LOOKUP_DOMAIN,
+  HISTORICAL_PERSON_LOOKUP_DOMAIN,
 } from './historical-crypto.js'
 import {
   loadWorkbookSourceDataKey,
@@ -21,7 +23,10 @@ import {
 } from './workbook-source-registry.js'
 import { authorize } from '../identity/policy.js'
 
-export const HISTORICAL_PROJECTION_SLICE_SIZE = 2
+// Ten rows cost about a hundred D1 statements and stay well inside the free
+// plan's CPU budget now that a slice no longer loads the whole directory.
+// HISTORICAL_PROJECTION_BUDGET in worker/app.js has to hold that many.
+export const HISTORICAL_PROJECTION_SLICE_SIZE = 10
 
 const APPROVED_WORKBOOK_FINGERPRINT = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 const IMPORT_ID = /^wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -511,6 +516,148 @@ const exactRecord = async (identities, keyring, kind, name) => {
   return [...matches.values()][0] ?? null
 }
 
+const IDENTITY_TABLES = Object.freeze({
+  person: Object.freeze({
+    subjects: 'historical_clients', aliases: 'historical_client_lookup_aliases',
+    subjectColumn: 'historical_client_id', domain: HISTORICAL_PERSON_LOOKUP_DOMAIN,
+  }),
+  counterparty: Object.freeze({
+    subjects: 'historical_counterparties', aliases: 'historical_counterparty_lookup_aliases',
+    subjectColumn: 'counterparty_id', domain: HISTORICAL_COUNTERPARTY_LOOKUP_DOMAIN,
+  }),
+})
+
+const IDENTITY_COLUMNS = `subject.id,subject.identity_envelope,
+  key.id AS key_id,key.scope_type AS key_scope_type,key.scope_id AS key_scope_id,
+  key.purpose AS key_purpose,key.dek_version AS key_dek_version,
+  key.wrapped_key_b64 AS key_wrapped_key_b64,
+  key.wrap_nonce_b64 AS key_wrap_nonce_b64,key.kek_version AS key_kek_version,
+  key.created_at AS key_created_at,key.retired_at AS key_retired_at`
+
+const IDENTITY_KEY_JOIN = `JOIN data_keys AS key
+  ON key.id=json_extract(subject.identity_envelope,'$.dataKeyId')
+ AND key.dek_version=json_extract(subject.identity_envelope,'$.dataKeyVersion')`
+
+const identityFrom = (row) => Object.freeze({
+  id: row.id, identityEnvelope: row.identity_envelope, dataKey: dataKeyFrom(row),
+})
+
+// Projection resolves one name at a time against the blind lookup aliases, so a
+// slice costs the same whether the directory holds ten identities or a thousand.
+// Nothing is decrypted: matching reads the HMAC digests the aliases already hold,
+// and sealing an occurrence needs the subject's data key, not its name.
+const lazyDirectory = (db, keyring, now) => {
+  const cache = new Map()
+  const pendingAliases = new Map()
+  const remember = (kind, record, lookups) => {
+    cache.set(`${kind}:id:${record.id}`, record)
+    for (const lookup of lookups) {
+      cache.set(`${kind}:digest:${lookup.version}:${lookup.digest}`, record)
+    }
+  }
+  // A rotated lookup key leaves older identities without an alias under the new
+  // version. Only the identity this row matched is repaired, so the repair costs
+  // the same whatever the directory holds, and a stored digest that disagrees
+  // with the recomputed one still fails the way the full catalogue load did.
+  const backfill = async (kind, record, candidates, matchedVersions) => {
+    const missing = candidates.filter(({ version }) => !matchedVersions.has(version))
+    if (!missing.length) return
+    const tables = IDENTITY_TABLES[kind]
+    const stored = new Map(((await db.prepare(
+      `SELECT hmac_version,lookup_digest FROM ${tables.aliases} WHERE ${tables.subjectColumn}=?`,
+    ).bind(record.id).all()).results ?? []).map(
+      ({ hmac_version: version, lookup_digest: digest }) => [version, digest],
+    ))
+    const statements = []
+    for (const candidate of missing) {
+      const storedDigest = stored.get(candidate.version)
+      if (storedDigest !== undefined && storedDigest !== candidate.digest) fail('CRYPTO_FAILURE')
+      if (storedDigest !== undefined) continue
+      statements.push(db.prepare(`INSERT OR IGNORE INTO ${tables.aliases}
+        (${tables.subjectColumn},domain,hmac_version,lookup_digest,created_at)
+        VALUES (?,?,?,?,?)`).bind(
+        record.id, candidate.domain, candidate.version, candidate.digest, now,
+      ))
+      statements.push(db.prepare(`INSERT INTO core_directory_invariant_failures
+        (failure_kind) SELECT 'historical_lookup_alias_collision'
+        WHERE NOT EXISTS (SELECT 1 FROM ${tables.aliases}
+          WHERE ${tables.subjectColumn}=? AND domain=? AND hmac_version=?
+            AND lookup_digest=?)`).bind(
+        record.id, candidate.domain, candidate.version, candidate.digest,
+      ))
+    }
+    if (statements.length) pendingAliases.set(`${kind}:${record.id}`, statements)
+  }
+  return Object.freeze({
+    remember,
+    takePendingAliasStatements: (kind, id) => {
+      const key = `${kind}:${id}`
+      const statements = pendingAliases.get(key) ?? []
+      pendingAliases.delete(key)
+      return statements
+    },
+    byId: async (kind, id) => {
+      const cached = cache.get(`${kind}:id:${id}`)
+      if (cached !== undefined) return cached
+      const tables = IDENTITY_TABLES[kind] ?? fail()
+      const row = await db.prepare(
+        `SELECT ${IDENTITY_COLUMNS} FROM ${tables.subjects} AS subject
+         ${IDENTITY_KEY_JOIN} WHERE subject.id=?`,
+      ).bind(id).first()
+      const record = row ? identityFrom(row) : null
+      cache.set(`${kind}:id:${id}`, record)
+      return record
+    },
+    find: async (kind, name) => {
+      const tables = IDENTITY_TABLES[kind] ?? fail()
+      const candidates = await historicalIdentityLookupCandidates(keyring, kind, name)
+      const keys = candidates.map(
+        (candidate) => `${kind}:digest:${candidate.version}:${candidate.digest}`,
+      )
+      if (keys.some((key) => cache.has(key))) {
+        const cached = keys.map((key) => cache.get(key)).filter((entry) => entry)
+        if (new Set(cached.map(({ id }) => id)).size > 1) fail('HISTORICAL_IDENTITY_AMBIGUOUS')
+        if (cached.length || keys.every((key) => cache.has(key))) return cached[0] ?? null
+      }
+      const rows = (await db.prepare(
+        `SELECT alias.hmac_version,${IDENTITY_COLUMNS} FROM ${tables.aliases} AS alias
+         JOIN ${tables.subjects} AS subject ON subject.id=alias.${tables.subjectColumn}
+         ${IDENTITY_KEY_JOIN}
+         WHERE alias.domain=? AND (alias.hmac_version,alias.lookup_digest)
+           IN (VALUES ${candidates.map(() => '(?,?)').join(',')})
+         LIMIT ?`,
+      ).bind(
+        tables.domain,
+        ...candidates.flatMap(({ version, digest }) => [version, digest]),
+        candidates.length + 1,
+      ).all()).results
+      if (!Array.isArray(rows) || rows.length > candidates.length) fail('CRYPTO_FAILURE')
+      if (new Set(rows.map(({ id }) => id)).size > 1) fail('HISTORICAL_IDENTITY_AMBIGUOUS')
+      const record = rows.length ? identityFrom(rows[0]) : null
+      for (const key of keys) cache.set(key, record)
+      if (record) {
+        cache.set(`${kind}:id:${record.id}`, record)
+        await backfill(kind, record, candidates, new Set(rows.map((row) => row.hmac_version)))
+      }
+      return record
+    },
+  })
+}
+
+// The review endpoints still need every plaintext name to compare them, so they
+// keep loading the whole directory and expose it through the same interface.
+const eagerDirectory = (identities, keyring) => Object.freeze({
+  find: (kind, name) => exactRecord(identities, keyring, kind, name),
+  byId: async (kind, id) => identities.records[kind].get(id) ?? null,
+  takePendingAliasStatements: (kind, id) => takePendingAliasStatements(identities, kind, id),
+  remember: (kind, record, lookups) => {
+    identities.records[kind].set(record.id, record)
+    for (const lookup of lookups) {
+      identities.exact[kind].set(`${lookup.version}:${lookup.digest}`, record)
+    }
+  },
+})
+
 const nearRecords = (records, name) => [...records.values()].filter(
   (record) => historicalNamesRequireReview(record.name, name),
 ).sort((left, right) => compareUtf16CodeUnits(left.id, right.id))
@@ -559,8 +706,8 @@ const liveReviewContext = async ({ identities, keyring, decision, payload }) => 
   return Object.freeze({ context, digest: await sha256Hex(JSON.stringify(context)) })
 }
 
-const preparedIdentity = async ({ command, identities, kind, name, correlationId, now }) => {
-  const existing = await exactRecord(identities, command.keyring, kind, name)
+const preparedIdentity = async ({ command, directory, kind, name, correlationId, now }) => {
+  const existing = await directory.find(kind, name)
   if (existing) return Object.freeze({ ...existing, isNew: false, statements: [] })
   const prefix = kind === 'person' ? 'hcl' : 'hcp'
   const id = made(command.idFactory, prefix, kind === 'person'
@@ -595,7 +742,6 @@ const preparedIdentity = async ({ command, identities, kind, name, correlationId
       : command.db.prepare(`INSERT INTO historical_counterparty_lookup_aliases
         (counterparty_id,domain,hmac_version,lookup_digest,created_at)
         VALUES (?,?,?,?,?)`).bind(id, lookup.domain, lookup.version, lookup.digest, now))
-    identities.exact[kind].set(`${lookup.version}:${lookup.digest}`, null)
   }
   statements.push(recordVersionStatement(command.db, {
     id: made(command.idFactory, 'ver', /^ver_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/),
@@ -608,10 +754,7 @@ const preparedIdentity = async ({ command, identities, kind, name, correlationId
     id, name, canonical: canonicalHistoricalName(name),
     identityEnvelope: built.identityEnvelope, dataKey: built.dataKey,
   })
-  identities.records[kind].set(id, record)
-  for (const lookup of built.lookups) {
-    identities.exact[kind].set(`${lookup.version}:${lookup.digest}`, record)
-  }
+  directory.remember(kind, record, built.lookups)
   return Object.freeze({ ...record, isNew: true, statements })
 }
 
@@ -626,7 +769,7 @@ const automaticDecision = (decision) => Object.freeze({
 })
 
 const materializeRow = async ({
-  command, state, row, payload, identities, specialistMappings, now,
+  command, state, row, payload, directory, specialistMappings, now,
 }) => {
   const value = payload.normalized
   if (await resolveAuthenticatedWorkbookSpecialist({
@@ -656,20 +799,18 @@ const materializeRow = async ({
     const explicitId = targetKind === 'person'
       ? resolution.existingHistoricalClientId : resolution.existingCounterpartyId
     if (explicitId) {
-      chosen = identities.records[targetKind].get(explicitId)
+      chosen = await directory.byId(targetKind, explicitId)
       if (!chosen) fail('NOT_FOUND')
     }
   }
-  if (!chosen) chosen = await exactRecord(
-    identities, command.keyring, targetKind, value.counterparty,
-  )
+  if (!chosen) chosen = await directory.find(targetKind, value.counterparty)
   const subject = chosen ?? await preparedIdentity({
-    command, identities, kind: targetKind, name: value.counterparty,
+    command, directory, kind: targetKind, name: value.counterparty,
     correlationId: state.correlation_id, now,
   })
   const statements = [
     ...(subject.statements ?? []),
-    ...takePendingAliasStatements(identities, targetKind, subject.id),
+    ...directory.takePendingAliasStatements(targetKind, subject.id),
   ]
   statements.push(targetKind === 'person'
     ? command.db.prepare(`INSERT INTO historical_client_source_links
@@ -737,7 +878,7 @@ const resolvePendingConflicts = async (command, state, requestHash, now) => {
     db: command.db, keyring: command.keyring, dataKey: sourceKey,
     importId: command.importId, config: command.config, centreId: command.centreId,
   })
-  const identities = await loadIdentities(command.db, command.keyring, now)
+  const directory = lazyDirectory(command.db, command.keyring, now)
   const statements = []
   let projected = 0
   for (const conflict of conflicts) {
@@ -774,7 +915,7 @@ const resolvePendingConflicts = async (command, state, requestHash, now) => {
         is_new: 0,
       }),
       payload,
-      identities,
+      directory,
       specialistMappings: mappings,
       now,
     })
@@ -845,8 +986,7 @@ export async function continueHistoricalProjection(input) {
   })
   state = Object.freeze({ ...state, sourceKey })
   const rows = await sourceRows(command.db, state)
-  const identities = rows.length
-    ? await loadIdentities(command.db, command.keyring, now) : null
+  const directory = lazyDirectory(command.db, command.keyring, now)
   const statements = []
   let projected = 0
   let conflicts = 0
@@ -858,7 +998,7 @@ export async function continueHistoricalProjection(input) {
       centreId: command.centreId,
     })
     const result = await materializeRow({
-      command, state, row, payload, identities, specialistMappings, now,
+      command, state, row, payload, directory, specialistMappings, now,
     })
     statements.push(...result.statements)
     projected += result.projected
@@ -1216,7 +1356,7 @@ export async function resolveHistoricalConflict(input) {
       is_new: 0,
     }),
     payload,
-    identities,
+    directory: eagerDirectory(identities, command.keyring),
     specialistMappings: mappings,
     now,
   })
