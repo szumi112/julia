@@ -615,17 +615,15 @@ const preparedIdentity = async ({ command, identities, kind, name, correlationId
   return Object.freeze({ ...record, isNew: true, statements })
 }
 
-const conflictStatement = async ({ command, sourceKey, state, row, kind, context, now }) => {
-  const id = made(command.idFactory, 'hcf', /^hcf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/)
-  return command.db.prepare(`INSERT INTO historical_projection_conflicts
-    (id,job_id,source_record_id,kind,context_envelope,created_by_staff_id,
-     correlation_id,created_at) VALUES (?,?,?,?,?,?,?,?)`).bind(
-    id, state.job_id, row.source_record_id, kind,
-    await seal(command.keyring, sourceKey, WORKBOOK_SOURCE_SCOPE, id, 'conflict_context', {
-      schema: 'historical_projection_conflict.v1', ...context,
-    }), command.actor.id, state.correlation_id, now,
-  )
-}
+// The workbook is imported without manual review: an ambiguous name is treated
+// as a person, an unknown service label keeps the label with no catalogue entry,
+// and a near-duplicate name becomes its own identity rather than a merge.
+const automaticDecision = (decision) => Object.freeze({
+  classification: decision.classification === 'review' ? 'person' : decision.classification,
+  existingHistoricalClientId: null,
+  existingCounterpartyId: null,
+  serviceId: decision.serviceId,
+})
 
 const materializeRow = async ({
   command, state, row, payload, identities, specialistMappings, now,
@@ -648,14 +646,13 @@ const materializeRow = async ({
     serviceId: row.resolution_service_id,
   } : null
   if (row.conflict_id && !resolution.classification) fail()
-  const classification = resolution?.classification ?? decision.classification
-  const serviceId = resolution ? resolution.serviceId : decision.serviceId
+  const automatic = resolution ?? automaticDecision(decision)
+  const classification = automatic.classification
+  const serviceId = automatic.serviceId
   if (classification === 'exclude') return { statements: [], projected: 0, conflict: 0 }
-  const targetKind = classification === 'person' ? 'person'
-    : classification === 'counterparty' ? 'counterparty' : null
-  let conflictKind = resolution ? null : decision.conflictKind
+  const targetKind = classification === 'person' ? 'person' : 'counterparty'
   let chosen = null
-  if (targetKind && resolution) {
+  if (resolution) {
     const explicitId = targetKind === 'person'
       ? resolution.existingHistoricalClientId : resolution.existingCounterpartyId
     if (explicitId) {
@@ -663,26 +660,9 @@ const materializeRow = async ({
       if (!chosen) fail('NOT_FOUND')
     }
   }
-  if (targetKind && !chosen) chosen = await exactRecord(
+  if (!chosen) chosen = await exactRecord(
     identities, command.keyring, targetKind, value.counterparty,
   )
-  const near = targetKind && !chosen
-    ? nearRecords(identities.records[targetKind], value.counterparty) : []
-  if (!resolution && !conflictKind && near.length) conflictKind = 'near_match'
-  if (!targetKind || conflictKind) {
-    return {
-      statements: [await conflictStatement({
-        command, sourceKey: state.sourceKey, state, row, kind: conflictKind ?? 'classification',
-        context: {
-          counterparty: value.counterparty, serviceLabel: value.sourceLabel,
-          proposedClassification: decision.classification,
-          proposedServiceId: decision.serviceId,
-          nearSubjectIds: near.map(({ id }) => id),
-        }, now,
-      })],
-      projected: 0, conflict: 1,
-    }
-  }
   const subject = chosen ?? await preparedIdentity({
     command, identities, kind: targetKind, name: value.counterparty,
     correlationId: state.correlation_id, now,
@@ -740,6 +720,104 @@ const materializeRow = async ({
   return { statements, projected: 1, conflict: 0 }
 }
 
+// Conflicts recorded by the former manual review are resolved with the same
+// automatic decision new rows get, so a paused job continues without input.
+const resolvePendingConflicts = async (command, state, requestHash, now) => {
+  const conflicts = (await command.db.prepare(
+    `SELECT conflict.id,conflict.source_record_id,conflict.kind
+     FROM historical_projection_conflicts AS conflict
+     WHERE conflict.job_id=? AND NOT EXISTS (
+       SELECT 1 FROM historical_conflict_resolutions AS resolution
+       WHERE resolution.conflict_id=conflict.id)
+     ORDER BY conflict.id LIMIT 101`,
+  ).bind(state.job_id).all()).results
+  if (!Array.isArray(conflicts) || conflicts.length > 100) fail()
+  const sourceKey = await loadWorkbookSourceDataKey(command.db, state.plan_envelope)
+  const mappings = await loadAuthenticatedWorkbookSpecialistMappings({
+    db: command.db, keyring: command.keyring, dataKey: sourceKey,
+    importId: command.importId, config: command.config, centreId: command.centreId,
+  })
+  const identities = await loadIdentities(command.db, command.keyring, now)
+  const statements = []
+  let projected = 0
+  for (const conflict of conflicts) {
+    const row = await reviewSourceRow({
+      db: command.db, importId: command.importId, jobId: state.job_id,
+      sourceRecordId: conflict.source_record_id,
+    })
+    if (row.conflict_id !== conflict.id) fail()
+    const payload = await openAuthenticatedWorkbookSource({
+      keyring: command.keyring, dataKey: sourceKey, row,
+      config: command.config, centreId: command.centreId,
+    })
+    if (await resolveAuthenticatedWorkbookSpecialist({
+      keyring: command.keyring, config: command.config, centreId: command.centreId,
+      mappings, row, payload,
+    }) !== row.specialist_id) fail('CRYPTO_FAILURE')
+    const decision = historicalProjectionDecision({
+      ...payload.normalized, specialistId: row.specialist_id,
+      financeLinked: true, voided: false,
+    })
+    if (!decision.eligible) fail()
+    const automatic = automaticDecision(decision)
+    const materialized = await materializeRow({
+      command,
+      state: Object.freeze({ ...state, sourceKey }),
+      row: Object.freeze({
+        ...row,
+        conflict_id: conflict.id,
+        conflict_kind: conflict.kind,
+        resolution_classification: automatic.classification,
+        existing_historical_client_id: null,
+        existing_counterparty_id: null,
+        resolution_service_id: automatic.serviceId,
+        is_new: 0,
+      }),
+      payload,
+      identities,
+      specialistMappings: mappings,
+      now,
+    })
+    if (materialized.conflict !== 0 || ![0, 1].includes(materialized.projected)) fail()
+    statements.push(command.db.prepare(`INSERT INTO historical_conflict_resolutions
+      (id,conflict_id,classification,existing_historical_client_id,
+       existing_counterparty_id,service_id,resolved_by_staff_id,created_at)
+      VALUES (?,?,?,NULL,NULL,?,?,?)`).bind(
+      made(command.idFactory, 'hcr', /^hcr_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/),
+      conflict.id, automatic.classification, automatic.serviceId, command.actor.id, now,
+    ), ...materialized.statements)
+    projected += materialized.projected
+  }
+  const nextVersion = state.job_version + 1
+  statements.push(command.db.prepare(`UPDATE historical_projection_jobs SET status='running',
+    projected_records=projected_records+?,version=?,updated_at=?
+    WHERE id=? AND version=? AND status='conflicts'`).bind(
+    projected, nextVersion, now, state.job_id, state.job_version,
+  ))
+  statements.push(command.db.prepare(`INSERT INTO core_directory_invariant_failures (failure_kind)
+    SELECT 'historical_resolution_cas' WHERE changes()!=1`))
+  statements.push(replayStatement(command.db, {
+    actorId: command.actor.id, operation: 'historical.continue',
+    key: command.idempotencyKey, hash: requestHash, importId: command.importId, now,
+  }))
+  statements.push(authorityInvariant(command.db, command.actor))
+  try {
+    await command.db.batch(statements)
+  } catch (error) {
+    const winner = await replayRow(
+      command.db, command.actor.id, 'historical.continue', command.idempotencyKey,
+    )
+    if (winner) {
+      if (winner.request_hash !== requestHash) fail('IDEMPOTENCY_CONFLICT')
+    } else {
+      const current = await loadState(command.db, command.actor.id, command.importId)
+      if (current.job_version !== state.job_version) fail('VERSION_CONFLICT')
+      throw error
+    }
+  }
+  return response(await loadState(command.db, command.actor.id, command.importId))
+}
+
 export async function continueHistoricalProjection(input) {
   const command = validateCommand(input, { allowZero: true })
   const now = nowAt(command.nowMs)
@@ -757,7 +835,9 @@ export async function continueHistoricalProjection(input) {
   if (state.job_id === null) return createJob(command, state, requestHash, now)
   if (state.job_version !== command.expectedVersion) fail('VERSION_CONFLICT')
   if (state.job_status === 'complete') return response(state)
-  if (state.job_status === 'conflicts') fail('VERSION_CONFLICT')
+  if (state.job_status === 'conflicts') {
+    return resolvePendingConflicts(command, state, requestHash, now)
+  }
   const sourceKey = await loadWorkbookSourceDataKey(command.db, state.plan_envelope)
   const specialistMappings = await loadAuthenticatedWorkbookSpecialistMappings({
     db: command.db, keyring: command.keyring, dataKey: sourceKey,
