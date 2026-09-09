@@ -9,7 +9,7 @@ const program = (code) => ({
 
 const activityWorkspace = ({
   from, to, attendanceStatus = 'present', createdClass = null,
-  createdGroupLabel = null, createdMembership = null, createdParticipantName = null,
+  createdGroupLabel = null, createdLeaders = [], createdMembership = null, createdParticipantName = null,
   emptyTusMonth = null, englishCount = 1, englishGroupCount = 1, includeClass = false,
   latestTus = '2026-08', specialistScope = false, tusCount = 1,
   tusGroupLabel = 'Fikcyjna grupa TUS', tusGroupVersion = 1,
@@ -36,11 +36,11 @@ const activityWorkspace = ({
       details: null, status: 'active', version: tusGroupVersion, createdAt: NOW, updatedAt: NOW,
       },
     ].sort((left, right) => left.id.localeCompare(right.id)),
-    groupLeaders: specialistScope ? [{
+    groupLeaders: [...createdLeaders, ...(specialistScope ? [{
       id: 'agl_fikcyjna', groupId: 'agr_fikcyjna', specialistId: 'sp_local_specialist',
       startsOn: '2026-01-01', endsOn: null, status: 'active', version: 1,
       createdAt: NOW, updatedAt: NOW,
-    }] : [],
+    }] : [])].sort((left, right) => left.id.localeCompare(right.id)),
     participants: [
       ...(createdParticipantName ? [{
         id: 'acp_created', programId: 'apg_english', name: createdParticipantName,
@@ -162,6 +162,8 @@ const installActivityFixture = async (page, {
   let attendanceStatus = 'present'
   let createdClass = null
   let createdGroupLabel = null
+  let createdLeaders = []
+  let editedLeaders = null
   let createdMembership = null
   let createdParticipantName = null
   let failNextReload = false
@@ -186,21 +188,34 @@ const installActivityFixture = async (page, {
     const url = new URL(route.request().url())
     const from = url.searchParams.get('from')
     const to = url.searchParams.get('to')
+    const payload = activityWorkspace({
+      from, to, attendanceStatus, createdClass, createdGroupLabel,
+      createdLeaders: [...createdLeaders, ...(editedLeaders ?? [])],
+      createdMembership, createdParticipantName, includeClass,
+      emptyTusMonth, englishCount, englishGroupCount, latestTus,
+      specialistScope: specialistScope && editedLeaders === null, tusCount,
+      tusGroupLabel, tusGroupVersion,
+    })
+    if (from > '2026-08') {
+      // Seeded observations/charges belong to August, not each requested month.
+      payload.data.memberships = []
+      payload.data.charges = []
+    }
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(activityWorkspace({
-        from, to, attendanceStatus, createdClass, createdGroupLabel,
-        createdMembership, createdParticipantName, includeClass,
-        emptyTusMonth, englishCount, englishGroupCount, latestTus, specialistScope, tusCount,
-        tusGroupLabel, tusGroupVersion,
-      })),
+      body: JSON.stringify(payload),
     })
   })
   await page.route('**/api/v1/activities/groups', async (route) => {
     const input = route.request().postDataJSON()
     commands.push({ kind: 'group', body: input, headers: route.request().headers() })
     createdGroupLabel = input.label
+    createdLeaders = input.leaderSpecialistIds.map((specialistId, index) => ({
+      id: `agl_created_${index}`, groupId: 'agr_created', specialistId,
+      startsOn: '2026-08-28', endsOn: null, status: 'active', version: 1,
+      createdAt: NOW, updatedAt: NOW,
+    }))
     if (acceptedReloadFailure) failNextReload = true
     return route.fulfill({
       status: 201,
@@ -211,7 +226,7 @@ const installActivityFixture = async (page, {
           details: input.details, status: 'active', version: 1,
           createdAt: NOW, updatedAt: NOW,
         },
-        groupLeaders: [],
+        groupLeaders: createdLeaders,
       } }),
     })
   })
@@ -241,6 +256,11 @@ const installActivityFixture = async (page, {
     }
     tusGroupLabel = input.label
     tusGroupVersion = input.expectedVersion + 1
+    editedLeaders = input.leaderSpecialistIds.map((specialistId, index) => ({
+      id: `agl_edited_${index}`, groupId: 'agr_fikcyjna', specialistId,
+      startsOn: '2026-08-28', endsOn: null, status: 'active', version: 1,
+      createdAt: NOW, updatedAt: NOW,
+    }))
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -248,7 +268,7 @@ const installActivityFixture = async (page, {
         id: 'agr_fikcyjna', programId: 'apg_tus', label: input.label,
         details: input.details, status: input.status, version: tusGroupVersion,
         createdAt: NOW, updatedAt: NOW,
-      }, groupLeaders: [] } }),
+      }, groupLeaders: editedLeaders } }),
     })
   })
   await page.route('**/api/v1/activities/participants', async (route) => {
@@ -525,6 +545,65 @@ test('@owner class create posts nullable optional facts and renders the refreshe
   expect(fixture.loads()).toBeGreaterThanOrEqual(2)
 })
 
+test('@owner future activity months remain navigable and survive reload', async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-08-28T10:00:00Z'))
+  await installActivityFixture(page)
+  for (const route of ['tus', 'english']) {
+    await page.goto(`./#/${route}?ym=2026-08`)
+    const next = page.getByRole('button', { name: 'Następny miesiąc' })
+    await expect(next).toBeEnabled()
+    await next.click()
+    await expect(page.locator('time[datetime="2026-09"]')).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`#/${route}\\?ym=2026-09$`))
+    await page.reload()
+    await expect(page.locator('time[datetime="2026-09"]')).toBeVisible()
+  }
+})
+
+test('@owner saving a class in another month selects its reconciled month', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.clock.setFixedTime(new Date('2026-08-28T10:00:00Z'))
+  await installActivityFixture(page)
+  await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
+  await page.getByRole('button', { name: 'Dodaj zajęcia' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowe zajęcia TUS' })
+  await drawer.getByLabel('Data zajęć').fill('2026-09-21')
+  await drawer.getByRole('button', { name: 'Dodaj zajęcia' }).click()
+  await expect(drawer).toHaveCount(0)
+  await expect(page.locator('time[datetime="2026-09"]')).toBeVisible()
+  await expect(page.getByRole('heading', { level: 3, name: '2026-09-21' })).toBeVisible()
+  await expect(page).toHaveURL(/#\/tusGroup\?id=agr_fikcyjna&ym=2026-09$/)
+  await page.reload()
+  await expect(page.getByRole('heading', { level: 3, name: '2026-09-21' })).toBeVisible()
+})
+
+test('@owner group forms assign leaders from the specialist directory', async ({ page }) => {
+  const fixture = await installActivityFixture(page)
+  await page.goto('./#/tus?ym=2026-08')
+  await page.getByRole('button', { name: 'Nowa grupa', exact: true }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
+  await drawer.getByLabel('Nazwa grupy').fill('Fikcyjna grupa z prowadzącą')
+  await drawer.getByText('Zofia Fikcyjna', { exact: true }).click()
+  await drawer.getByRole('button', { name: 'Utwórz grupę' }).click()
+  await expect(drawer).toHaveCount(0)
+  expect(fixture.commands.find(({ kind }) => kind === 'group').body.leaderSpecialistIds)
+    .toEqual(['sp_local_specialist'])
+
+  await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
+  await page.getByRole('button', { name: 'Edytuj grupę' }).click()
+  const editDrawer = page.getByRole('dialog', { name: 'Edytuj grupę TUS' })
+  await editDrawer.getByText('Zofia Fikcyjna', { exact: true }).click()
+  await editDrawer.getByRole('button', { name: 'Zapisz grupę' }).click()
+  await expect(editDrawer).toHaveCount(0)
+  await page.getByRole('button', { name: 'Edytuj grupę' }).click()
+  await expect(editDrawer.getByRole('checkbox', { name: 'Zofia Fikcyjna' })).toBeChecked()
+  await editDrawer.getByText('Zofia Fikcyjna', { exact: true }).click()
+  await editDrawer.getByRole('button', { name: 'Zapisz grupę' }).click()
+  await expect(editDrawer).toHaveCount(0)
+  expect(fixture.commands.filter(({ kind }) => kind === 'group-edit')
+    .map(({ body }) => body.leaderSpecialistIds)).toEqual([['sp_local_specialist'], []])
+})
+
 test('@specialist renders only the D1-scoped DTO and conceals a direct other-group ID', async ({ page }) => {
   await installActivityFixture(page, { includeClass: true, specialistScope: true })
   await page.goto('./#/tus?ym=2026-08')
@@ -538,6 +617,10 @@ test('@specialist renders only the D1-scoped DTO and conceals a direct other-gro
   await expect(page.getByRole('button', { name: 'Edytuj grupę' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Edytuj zajęcia' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Dodaj przypisanie' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Edytuj grupę', exact: true }).click()
+  const drawer = page.getByRole('dialog', { name: 'Edytuj grupę TUS' })
+  await expect(drawer.getByRole('region', { name: 'Prowadzący' })).toHaveCount(0)
+  await drawer.getByRole('button', { name: 'Anuluj' }).click()
 
   await page.goto('./#/tusGroup?id=agr_innego_specjalisty&ym=2026-08')
   await expect(page.getByText('Nie znaleziono grupy', { exact: true })).toBeVisible()

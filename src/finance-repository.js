@@ -315,3 +315,11 @@ export const createFinanceRepository = (rawDependencies) => {
 }
 
 export const financeRepository = createFinanceRepository(apiClient)
+
+// Projection commands keep the API's strict DTO/input validation and cancellation
+// contract; snapshots prevent a consumer from mutating a response in flight.
+export const projectionRepository = Object.freeze(Object.fromEntries([
+  'getHistoricalProjection', 'getHistoricalProjectionReviewCatalog',
+  'continueHistoricalProjection', 'resolveHistoricalProjection',
+  'getActivityProjection', 'continueActivityProjection',
+].map((name) => [name, async (...args) => captureResult(await apiClient[name](...args))])))

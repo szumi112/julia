@@ -6,6 +6,7 @@ import { EmptyState } from '../ui.jsx'
 import { Button } from '../ui.jsx'
 import { EntityLink, useRouteParamsSync } from '../ux-patterns.jsx'
 import { fmtMonthYear } from '../format.js'
+import { ActivityBillingAction } from './FinanceEntryActions.jsx'
 import {
   activityCurrentMonth,
   activityActionAvailability,
@@ -22,16 +23,15 @@ import {
   activityMoney,
 } from './ActivityUi.jsx'
 
-const validMonth = (month, current) => /^\d{4}-(0[1-9]|1[0-2])$/.test(month ?? '')
-  && month <= current
+const validMonth = (month) => /^(?!0000)\d{4}-(0[1-9]|1[0-2])$/.test(month ?? '')
 
 const useSelectedActivityMonth = (routeName, params) => {
   const { getViewState, patchViewState } = useShell()
   const currentMonth = activityCurrentMonth()
   const [month, setMonth] = useState(() => {
     const saved = getViewState(routeName, { ym: currentMonth })
-    if (validMonth(params.ym, currentMonth)) return params.ym
-    if (validMonth(saved.ym, currentMonth)) return saved.ym
+    if (validMonth(params.ym)) return params.ym
+    if (validMonth(saved.ym)) return saved.ym
     return currentMonth
   })
   useEffect(() => {
@@ -238,7 +238,7 @@ export function ProtectedTusGroup({ params }) {
           )}
           {actions.createClass && (
             <Button icon="plus" onClick={() => openActivityClassForm({
-              groupId: view.group.id, month,
+              groupId: view.group.id, month, onSavedMonth: setMonth,
             })}>Dodaj zajęcia</Button>
           )}
           <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
@@ -287,8 +287,9 @@ export function ProtectedTusGroup({ params }) {
       </section>
       <section className="card card--pad" aria-labelledby="protected-tus-charges">
         <h2 className="card-title" id="protected-tus-charges">Rozliczenia uczestników</h2>
+        <ActivityBillingAction month={month} programId="apg_tus" groupId={view.group.id} participants={participants} />
         {view.chargeRows.length > 0
-          ? <ActivityChargeTable rows={view.chargeRows} titleId="protected-tus-charges" />
+          ? <ActivityChargeTable rows={view.chargeRows} month={month} titleId="protected-tus-charges" />
           : <p className="muted">Brak rozliczeń w tym miesiącu.</p>}
       </section>
       <section className="card card--pad" aria-labelledby="protected-tus-classes">
@@ -301,7 +302,7 @@ export function ProtectedTusGroup({ params }) {
               <h3><time dateTime={activityClass.date}>{activityClass.date}</time>{activityClass.time ? ` · ${activityClass.time}` : ''}</h3>
               {actions.editClass && (
                 <Button size="sm" variant="ghost" onClick={() => openActivityClassForm({
-                  activityClass, groupId: view.group.id, month,
+                  activityClass, groupId: view.group.id, month, onSavedMonth: setMonth,
                 })}>Edytuj zajęcia</Button>
               )}
             </div>

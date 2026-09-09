@@ -23,6 +23,7 @@ import {
   useProtectedPaymentContext,
 } from './PaymentActions.jsx'
 import { useFinanceWindow } from './use-finance-window.js'
+import { FinanceEntryActions, FinanceEntryToolbar } from './FinanceEntryActions.jsx'
 
 const TABS = Object.freeze([
   Object.freeze({ value: 'income', label: 'Przychody' }),
@@ -43,6 +44,7 @@ function Kpis({ values }) {
     ['Przychody', values.revenueGrosze, 'coral'],
     ['Wpłacono', values.collectedGrosze, 'sage'],
     ['Pozostało do zapłaty', values.outstandingGrosze, 'amber'],
+    ['Do sprawdzenia', values.verificationGrosze, 'ink'],
     ['Wydatki', values.expensesGrosze, 'pink'],
     ['Dochód', values.incomeGrosze, 'sky'],
   ]
@@ -58,7 +60,8 @@ function Kpis({ values }) {
 function MonthlySettlement({ values }) {
   const collected = Math.max(values.collectedGrosze, 0)
   const outstanding = Math.max(values.outstandingGrosze, 0)
-  const due = collected + outstanding
+  const verification = Math.max(values.verificationGrosze, 0)
+  const due = collected + outstanding + verification
   const collectedShare = due > 0 ? Math.round((collected / due) * 100) : 0
   const settlementSummary = due > 0 ? `${collectedShare}% wpłacone` : 'Brak należności'
 
@@ -73,6 +76,7 @@ function MonthlySettlement({ values }) {
           segments={[
             { value: collected, color: 'var(--sage)', label: 'wpłacono' },
             { value: outstanding, color: 'var(--amber-mid)', label: 'pozostało do zapłaty' },
+            { value: verification, color: 'var(--ink-faint)', label: 'do sprawdzenia' },
           ]}
           totalMax={Math.max(due, 1)}
         />
@@ -86,6 +90,7 @@ function MonthlySettlement({ values }) {
           <dt><span className="finance-window__balance-swatch finance-window__balance-swatch--due" />Pozostało do zapłaty</dt>
           <dd>{money(outstanding)}</dd>
         </div>
+        <div><dt>Do sprawdzenia</dt><dd>{money(verification)}</dd></div>
       </dl>
     </section>
   )
@@ -103,7 +108,8 @@ function LedgerTable({
         : row.kind === 'income' && row.invoiceStatus !== 'not_required'
   ))
   const visible = kind === 'payments' && unpaidOnly
-    ? rowsForKind.filter((row) => row.receivableGrosze - row.collectedGrosze > 0)
+    ? rowsForKind.filter((row) => row.settlementStatus !== 'unknown'
+      && row.receivableGrosze - row.collectedGrosze > 0)
     : rowsForKind
   const title = kind === 'income' ? 'Przychody miesiąca'
     : kind === 'payments' ? 'Płatności i zaległości miesiąca'
@@ -136,18 +142,22 @@ function LedgerTable({
           const outstandingGrosze = row.receivableGrosze - row.collectedGrosze
           return <tr key={row.id}>
             <td>{row.occurredOn ? fmtShortDate(row.occurredOn) : 'Dzień nieustalony'}</td>
-            <td>{appointmentLabels.get(row.appointmentId)
-              ?? (row.sourceKind === 'panel' ? 'Panel' : 'Arkusz źródłowy')}</td>
+            <td>{row.counterparty ?? appointmentLabels.get(row.appointmentId)
+              ?? (row.sourceKind === 'panel' ? 'Panel' : 'Arkusz źródłowy')}
+              {row.sourceLabel ? <div className="muted">{row.sourceLabel}</div> : null}</td>
             <td className="right num-cell">{money(row.receivableGrosze)}</td>
-            <td className="right num-cell">{money(row.collectedGrosze)}</td>
-            <td className="right num-cell">{money(outstandingGrosze)}</td>
-            <td className="right"><ProtectedPaymentAction
+            <td className="right num-cell">{row.settlementStatus === 'unknown'
+              ? 'Nie ustalono' : money(row.collectedGrosze)}</td>
+            <td className="right num-cell">{row.settlementStatus === 'unknown'
+              ? <span>Do sprawdzenia · {money(outstandingGrosze)}</span>
+              : money(outstandingGrosze)}</td>
+            <td className="right">{row.appointmentId ? <ProtectedPaymentAction
               appointmentId={row.appointmentId}
               outstandingGrosze={outstandingGrosze}
               fallbackFocusRef={headingRef}
               onReconciled={onReconciled}
               paymentContext={paymentContext}
-            /></td>
+            /> : <FinanceEntryActions row={row} onChanged={onReconciled} />}</td>
           </tr>
         })}</tbody>
       </table></TableScroll>
@@ -161,16 +171,17 @@ function LedgerTable({
           <caption className="sr-only">{title}</caption>
           <thead><tr>
             <th>Data</th><th>Źródło</th><th>Specjalistka</th><th>Klasyfikacja</th>
-            <th className="right">Kwota</th>{kind === 'invoices' ? <th>Stan faktury</th> : null}
+            <th className="right">Kwota</th>{kind === 'invoices' ? <th>Stan faktury</th> : null}<th></th>
           </tr></thead>
           <tbody>
-            {visible.length === 0 ? <tr><td colSpan={kind === 'invoices' ? 6 : 5}>
+            {visible.length === 0 ? <tr><td colSpan={kind === 'invoices' ? 7 : 6}>
               <EmptyState icon="payments" title="Brak pozycji w tym miesiącu" />
             </td></tr> : visible.map((row) => (
               <tr key={row.id}>
                 <td>{row.occurredOn ? fmtShortDate(row.occurredOn) : 'Dzień nieustalony'}</td>
-                <td>{appointmentLabels.get(row.appointmentId)
-                  ?? (row.sourceKind === 'panel' ? 'Panel' : 'Arkusz źródłowy')}</td>
+                <td>{row.counterparty ?? appointmentLabels.get(row.appointmentId)
+                  ?? (row.sourceKind === 'panel' ? 'Panel' : 'Arkusz źródłowy')}
+                  {row.sourceLabel ? <div className="muted">{row.sourceLabel}</div> : null}</td>
                 <td>{specialistNames.get(row.specialistId) ?? 'Nie ustalono'}</td>
                 <td>{row.program === 'tus' ? 'TUS' : row.program === 'english'
                   ? 'Angielski' : SERVICE_BY_ID[row.serviceId]?.label ?? 'Nie ustalono'}</td>
@@ -180,6 +191,7 @@ function LedgerTable({
                 {kind === 'invoices' ? <td><Pill tone={row.invoiceStatus === 'action_required' ? 'amber' : 'ink'}>
                   {invoiceLabel[row.invoiceStatus] || 'Do sprawdzenia'}
                 </Pill></td> : null}
+                <td><FinanceEntryActions row={row} onChanged={onReconciled} /></td>
               </tr>
             ))}
           </tbody>
@@ -305,6 +317,7 @@ export function ProtectedFinance({ params = {} }) {
           <p className="view-head__sub">Jedno autorytatywne podsumowanie rejestru centrum.</p>
         </div>
         <div className="view-head__actions">
+          <FinanceEntryToolbar selectedMonth={selectedMonth} onChanged={finance.reload} />
           <div className="month-nav">
             <IconBtn
               name="chevL"

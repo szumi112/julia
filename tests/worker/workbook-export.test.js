@@ -2,6 +2,8 @@ import { env } from 'cloudflare:workers'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { exportWorkbook, loadWorkbookPanelState } from '../../worker/core/workbooks.js'
+import { createFinanceEntry } from '../../worker/core/finance-entry-commands.js'
+import { listFinanceEntries } from '../../worker/core/finance.js'
 import { recordWorkbookExport } from '../../worker/core/workbook-registry.js'
 import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import { createKeyring } from '../../worker/security/keyring.js'
@@ -47,6 +49,54 @@ const FINANCE_SCOPE = Object.freeze({ type: 'centre_finance', id: 'centre_1', pu
 const IDENTITY_SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const key = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
 const createdObjects = []
+
+it('includes manually created expenses in exports and signed row authority', async () => {
+  const sourceFiles = unzipSync(workbookBytes())
+  sourceFiles['xl/worksheets/sheet1.xml'] = strToU8(strFromU8(sourceFiles['xl/worksheets/sheet1.xml'])
+    .replace('Suma dowodowa', 'Fikcyjna suma kontrolna'))
+  await insertArtifact({ bytes: zipSync(sourceFiles), id: 'wba_manual_export',
+    objectKey: 'workbook-objects/wbo_manual_export_fixture_000001', format: 'legacy',
+    sourceKind: 'approved_import', importId: 'wbi_manual_export', createdAt: '2027-01-14T10:00:00.000Z' })
+  const created = await createFinanceEntry({ db: env.DB, actor, keyring, nowMs: NOW_MS,
+    correlationId: '11111111-1111-4111-8111-111111111111', idFactory: () => crypto.randomUUID(),
+    idempotencyKey: 'export_manual_expense', body: {
+      kind: 'expense', recordType: 'expense', accountingMonth: '2027-01', occurredOn: '2027-01-15',
+      amountGrosze: 12345, paidAmountGrosze: 12345, paymentMethod: 'transfer',
+      settlementStatus: 'paid', invoiceStatus: 'issued', counterparty: 'Fikcyjny dostawca',
+      sourceLabel: 'Materiały', invoiceNote: 'Fikcyjna faktura za materiały', specialistId: null, lessonCount: null, source: null,
+    },
+  })
+  const entryId = created.body.data.entryId
+  const exported = await exportWorkbook({ db: env.DB, bucket: env.ARCHIVE, actor, keyring, config,
+    centreId: 'centre_1', nowMs: NOW_MS, format: 'panel-v2' })
+  const callbacks = createWorkbookPanelMetadataCallbacks({ keyring, config, centreId: 'centre_1' })
+  const panel = await readPanelWorkbook(exported.bytes, { verify: callbacks.verify, digestField: callbacks.digestField })
+  expect(panel.metadata.rows.map(({ id }) => id)).toContain(entryId)
+  const panelText = Object.values(unzipSync(exported.bytes)).map((bytes) => strFromU8(bytes)).join('\n')
+  for (const description of ['Fikcyjny dostawca', 'Materiały', 'Fikcyjna faktura za materiały', 'expense']) {
+    expect(panelText).toContain(description)
+  }
+  expect(Object.keys(panel.metadata.rows.find(({ id }) => id === entryId).fieldDigests)).toHaveLength(8)
+  expect(panel.edits.find(({ id }) => id === entryId).values).not.toHaveProperty('counterparty')
+  const authority = await loadWorkbookPanelState({ db: env.DB, keyring, centreId: 'centre_1',
+    rows: [{ id: entryId, type: 'finance_entry' }], specialistIds: [] })
+  expect(authority.rows.map(({ id }) => id)).toContain(entryId)
+  const legacy = await exportWorkbook({ db: env.DB, bucket: env.ARCHIVE, actor, keyring, config,
+    centreId: 'centre_1', nowMs: NOW_MS, format: 'legacy' })
+  const legacyText = Object.values(unzipSync(legacy.bytes)).map((bytes) => strFromU8(bytes)).join('\n')
+  for (const description of [entryId, 'Fikcyjny dostawca', 'Materiały', 'Fikcyjna faktura za materiały', 'expense']) {
+    expect(legacyText).toContain(description)
+  }
+  const listed = await listFinanceEntries({ db: env.DB, actor, keyring, nowMs: NOW_MS,
+    month: '2027-01', kind: 'expense' })
+  expect(listed.data.entries.map(({ id }) => id)).toContain(entryId)
+  await env.DB.prepare(`INSERT INTO finance_manual_voids
+    (id,finance_entry_id,expected_entry_version,reason_envelope,voided_by_staff_id,created_at)
+    VALUES (?,?,1,'{}',?,?)`).bind('fmv_manual_export', entryId, OWNER_ID, NOW).run()
+  const afterVoid = await listFinanceEntries({ db: env.DB, actor, keyring, nowMs: NOW_MS,
+    month: '2027-01', kind: 'expense' })
+  expect(afterVoid.data.entries.map(({ id }) => id)).not.toContain(entryId)
+})
 
 const workbookBytes = () => zipSync({
   '[Content_Types].xml': strToU8('<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/calcChain.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml"/></Types>'),
@@ -96,7 +146,7 @@ const insertArtifact = async ({ bytes, id, objectKey, format, sourceKind, import
     (id,artifact_id,preview_token_digest,status,accepted_records,quarantined_records,
      correlation_id,created_by_staff_id,version,created_at,updated_at,completed_at)
     VALUES (?,?,?,'complete',?,?,?,?,1,?,?,?)`).bind(
-    importId, id, format === 'legacy' ? 'L'.repeat(43) : 'P'.repeat(43),
+    importId, id, id === 'wba_manual_export' ? 'M'.repeat(43) : format === 'legacy' ? 'L'.repeat(43) : 'P'.repeat(43),
     format === 'legacy' ? 2 : 0, format === 'legacy' ? 1 : 0,
     `corr_${importId}`, OWNER_ID,
     createdAt, createdAt, createdAt,
@@ -573,6 +623,7 @@ describe('legacy workbook export', () => {
         }
       },
       async first() {
+        if (sql.includes('FROM data_keys')) return env.DB.prepare(sql).bind(...this.args).first()
         if (!sql.includes('FROM finance_reporting_state')) throw new Error('UNEXPECTED_QUERY')
         return { revision: 9 }
       },
@@ -586,6 +637,11 @@ describe('legacy workbook export', () => {
     }
     const ownRow = {
       id: 'fin_specialist_own', accounting_month: '2027-01', occurred_on: '2027-01-15',
+      batch_id: null, kind: 'income', record_type: 'income',
+      details_envelope: await sealFinance('fin_specialist_own', 'details', {
+        schema: 'finance_entry_details.v1', counterparty: 'Fikcyjny własny klient',
+        sourceLabel: 'Własny opis specjalisty', invoiceNote: '', lessonCount: null,
+      }),
       amount_grosze: 18_000, paid_amount_grosze: 18_000, payment_method: 'cash',
       settlement_status: 'paid', invoice_status: 'not_required',
       specialist_id: SPECIALIST_ID, version: 2,
@@ -625,6 +681,10 @@ describe('legacy workbook export', () => {
       }).verify,
     })
     expect(panel.metadata.scope).toEqual({ id: SPECIALIST_ID, type: 'specialist' })
+    const text = Object.values(unzipSync(exported.bytes)).map((bytes) => strFromU8(bytes)).join('\n')
+    expect(text).toContain('Fikcyjny własny klient')
+    expect(text).toContain('Własny opis specjalisty')
+    expect(text).not.toContain('Fikcyjny dostawca')
     expect(panel.metadata.rows.map(({ id }) => id)).toEqual(['fin_specialist_own'])
     expect(panel.edits).toEqual([expect.objectContaining({ id: 'fin_specialist_own' })])
   })

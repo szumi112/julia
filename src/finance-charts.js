@@ -36,7 +36,7 @@ export function paymentMixParts(paymentSplit) {
   assertSplit(paymentSplit, 'paymentSplit')
   const parts = []
   for (const [method, value] of Object.entries(paymentSplit)) {
-    if (method === 'outstanding') continue
+    if (method === 'outstanding' || method === 'verification') continue
     const mix = PAYMENT_MIX[method]
     if (mix === undefined) throw new TypeError(`unknown payment method: ${method}`)
     assertAmount(value, 'paymentSplit')

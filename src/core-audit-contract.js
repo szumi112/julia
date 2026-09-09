@@ -13,6 +13,7 @@ const ACTIVITY_GROUP_ID = /^agr_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ACTIVITY_PARTICIPANT_ID = /^acp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ACTIVITY_MEMBERSHIP_ID = /^amb_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ACTIVITY_CLASS_ID = /^acl_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const ACTIVITY_CHARGE_ID = /^ach_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ACTIVITY_ATTENDANCE_ID = /^aat_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ACTIVITY_PROJECTION_JOB_ID = /^apj_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const WORKBOOK_EXPORT_ID = /^wbe_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -25,6 +26,7 @@ const schema = (entityType, entityIdKind, metadata) => Object.freeze({
 
 export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'activity.attendance.set': schema('activity_attendance', 'activityAttendanceId', { attendanceVersion: 'version' }),
+  'activity.charge.created': schema('activity_charge', 'activityChargeId', { chargeVersion: 'version', entryVersion: 'version' }),
   'activity.class.created': schema('activity_class', 'activityClassId', { classVersion: 'version' }),
   'activity.class.updated': schema('activity_class', 'activityClassId', { classVersion: 'version' }),
   'activity.group.created': schema('activity_group', 'activityGroupId', { groupVersion: 'version', leaderCount: 'count' }),
@@ -45,6 +47,8 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'finance.import.committed': schema('finance_import', 'financeBatchId', { batchVersion: 'version', rowCount: 'count' }),
   'finance.import.started': schema('finance_import', 'financeBatchId', { batchVersion: 'version', rowCount: 'count' }),
   'finance.entry.voided': schema('finance_entry', 'financeEntryId', { entryVersion: 'version' }),
+  'finance.entry.created': schema('finance_entry', 'financeEntryId', { entryVersion: 'version' }),
+  'finance.entry.adjusted': schema('finance_entry', 'financeEntryId', { entryVersion: 'version' }),
   'payment.corrected': schema('payment_entry', 'paymentId', { appointmentVersion: 'version', correctionId: 'correctionId', replacementEntryId: 'nullablePaymentId', reversedEntryId: 'paymentId' }),
   'payment.recorded': schema('appointment', 'appointmentId', { appointmentVersion: 'version', paymentEntryId: 'paymentId' }),
   'specialist.account.linked': schema('specialist', 'specialistId', { specialistVersion: 'version', staffVersion: 'version' }),
@@ -123,6 +127,7 @@ const acceptsEntityId = (kind, value) => typeof value === 'string' && ({
   activityParticipantId: ACTIVITY_PARTICIPANT_ID,
   activityMembershipId: ACTIVITY_MEMBERSHIP_ID,
   activityClassId: ACTIVITY_CLASS_ID,
+  activityChargeId: ACTIVITY_CHARGE_ID,
   activityAttendanceId: ACTIVITY_ATTENDANCE_ID,
   activityProjectionJobId: ACTIVITY_PROJECTION_JOB_ID,
 })[kind].test(value)

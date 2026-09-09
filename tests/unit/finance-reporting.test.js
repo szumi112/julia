@@ -21,7 +21,28 @@ const entry = (id, patch = {}) => ({
   program: null,
   paymentMethod: 'card',
   invoiceStatus: 'issued',
+  settlementStatus: 'paid',
   ...patch,
+})
+
+test('keeps uncertain imported settlement out of confirmed debt without losing revenue', () => {
+  const result = model({ ledgerEntries: [
+    entry('fin_unknown', { settlementStatus: 'unknown', collectedGrosze: 0 }),
+    entry('fin_debt', { settlementStatus: 'unpaid', collectedGrosze: 0 }),
+  ] })
+  assert.equal(result.kpis.revenueGrosze, 36_000)
+  assert.equal(result.kpis.outstandingGrosze, 18_000)
+  assert.equal(result.kpis.verificationGrosze, 18_000)
+  assert.equal(result.splits.payment.verification, 18_000)
+  assert.equal(result.trend.at(-1).verificationGrosze, 18_000)
+})
+
+test('rejects missing or unrecognized settlement authority instead of assuming debt', () => {
+  for (const settlementStatus of [undefined, null, 'pending']) {
+    assert.throws(() => model({ ledgerEntries: [
+      entry('fin_invalid_settlement', { settlementStatus, collectedGrosze: 0 }),
+    ] }), /FINANCE_REPORT_INVALID/)
+  }
 })
 
 const model = (patch = {}) => {
@@ -77,6 +98,7 @@ test('computes canonical integer-grosze KPIs once when several facts share one l
     revenueGrosze: 52_000,
     collectedGrosze: 12_000,
     outstandingGrosze: 40_000,
+    verificationGrosze: 0,
     expensesGrosze: 9_500,
     incomeGrosze: 42_500,
   })
@@ -120,6 +142,7 @@ test('ignores fact-side amounts and reconciles canonical reporting splits', () =
     card: 18_000,
     cash: 5_000,
     outstanding: 49_000,
+    verification: 0,
   })
   assert.deepEqual(first.splits.invoice, {
     action_required: { count: 1, revenueGrosze: 20_000 },
@@ -146,6 +169,7 @@ test('derives payment-method splits from canonical payment events and rejects dr
     card: 7_000,
     cash: 5_000,
     outstanding: 6_000,
+    verification: 0,
   })
   assert.throws(() => model({
     ledgerEntries,
@@ -167,7 +191,7 @@ test('excludes void and unknown-period money from months and scoped latest month
   })
 
   assert.deepEqual(result.kpis, {
-    revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0,
+    revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0, verificationGrosze: 0,
     expensesGrosze: 0, incomeGrosze: 0,
   })
   assert.equal(result.latestPopulatedMonth, '2026-03')
@@ -214,7 +238,7 @@ test('zero-fills exactly the supplied six-month window in chronological order', 
     ],
   })
 
-  assert.deepEqual(result.trend, [
+  assert.deepEqual(result.trend.map(({ verificationGrosze, ...point }) => point), [
     { month: '2026-01', revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0, expensesGrosze: 0, incomeGrosze: 0 },
     { month: '2026-02', revenueGrosze: 11_000, collectedGrosze: 4_000, outstandingGrosze: 7_000, expensesGrosze: 0, incomeGrosze: 11_000 },
     { month: '2026-03', revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0, expensesGrosze: 0, incomeGrosze: 0 },

@@ -19,6 +19,7 @@ const PAYMENT_LABELS = Object.freeze({
   blik: 'BLIK', card: 'Karta', cash: 'Gotówka', monthly: 'Miesięcznie',
   other: 'Inna', outstanding: 'Pozostało do zapłaty', transfer: 'Przelew',
   unknown: 'Nie ustalono',
+  verification: 'Rozliczenie do sprawdzenia',
 })
 const INVOICE_LABELS = Object.freeze({
   action_required: 'Wymaga wystawienia', issued: 'Wystawiona',
@@ -162,12 +163,13 @@ export function ProtectedReports({ params = {} }) {
         <TableScroll label="Przewijana tabela trendu sześciu miesięcy"><table className="table">
           <caption className="sr-only">Przychody, wpłaty i wydatki w sześciu miesiącach</caption>
           <thead><tr><th>Miesiąc</th><th className="right">Przychody</th>
-            <th className="right">Wpłacono</th><th className="right">Wydatki</th>
+            <th className="right">Wpłacono</th><th className="right">Do sprawdzenia</th><th className="right">Wydatki</th>
             <th className="right">Dochód</th></tr></thead>
           <tbody>{window.trend.map((point) => <tr key={point.month}>
             <th scope="row">{fmtMonthYear(point.month)}</th>
             <td className="right">{money(point.revenueGrosze)}</td>
             <td className="right">{money(point.collectedGrosze)}</td>
+            <td className="right">{money(point.verificationGrosze)}</td>
             <td className="right">{money(point.expensesGrosze)}</td>
             <td className="right">{money(point.incomeGrosze)}</td>
           </tr>)}</tbody>

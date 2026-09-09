@@ -27,6 +27,7 @@ describe('paymentMixParts', () => {
 
   it('returns an empty list when nothing was collected', () => {
     assert.deepEqual(paymentMixParts({ outstanding: 12300 }), [])
+    assert.deepEqual(paymentMixParts({ outstanding: 0, verification: 12300 }), [])
     assert.deepEqual(paymentMixParts({}), [])
   })
 

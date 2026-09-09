@@ -86,7 +86,7 @@ const monthKeys = (end) => {
   })
 }
 const zeroKpis = () => ({
-  revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0,
+  revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0, verificationGrosze: 0,
   expensesGrosze: 0, incomeGrosze: 0,
 })
 const financeRows = appointments.map((value, index) => ({
@@ -96,6 +96,7 @@ const financeRows = appointments.map((value, index) => ({
   collectedGrosze: 0, expenseGrosze: 0, specialistId: specialist.id,
   serviceId: 'zajecia', program: null, paymentMethod: 'unknown',
   invoiceStatus: 'not_required', version: 1,
+  settlementStatus: 'unpaid', counterparty: null, sourceLabel: null,
 }))
 const financeWindow = (selectedMonth) => {
   const populated = selectedMonth === '2026-07'
@@ -113,7 +114,7 @@ const financeWindow = (selectedMonth) => {
     splits: {
       specialist: populated ? { [specialist.id]: total } : {},
       service: populated ? { zajecia: total } : {},
-      payment: { outstanding: total },
+      payment: { outstanding: total, verification: 0 },
       invoice: populated
         ? { not_required: { count: financeRows.length, revenueGrosze: total } } : {},
       program: {
@@ -259,6 +260,29 @@ const routeRegistry = async (page, imports = []) => page.route(
   },
 )
 
+test('@owner sees imported labels and keeps unverified settlement outside confirmed arrears', async ({ page }) => {
+  await freezeTime(page)
+  await routeWorkspace(page)
+  const response = financeWindow('2026-07')
+  response.data.rows[0] = { ...response.data.rows[0], sourceKind: 'workbook', appointmentId: null,
+    settlementStatus: 'unknown', counterparty: 'Fikcyjna rodzina Leśna', sourceLabel: 'Zajęcia z arkusza' }
+  response.data.kpis.outstandingGrosze = 342_000
+  response.data.kpis.verificationGrosze = 18_000
+  response.data.trend[5] = { month: '2026-07', ...response.data.kpis }
+  response.data.splits.payment = { outstanding: 342_000, verification: 18_000 }
+  response.data.coverage.timedCount -= 1
+  response.data.coverage.dateOnlyCount += 1
+  await page.route('**/api/v1/finance/window?*', (route) => route.fulfill(json(response)))
+  await page.goto('./#/payments?ym=2026-07')
+  const table = page.getByRole('table', { name: 'Lista rozliczeń' })
+  const row = table.getByRole('row').filter({ hasText: 'Fikcyjna rodzina Leśna' })
+  await expect(row).toContainText('Zajęcia z arkusza')
+  await expect(row).toContainText('Do sprawdzenia')
+  await page.getByRole('group', { name: 'Widok rozliczeń' }).getByRole('button', { name: 'Zaległości' }).click()
+  await expect(table).not.toContainText('Fikcyjna rodzina Leśna')
+  await expect(table.getByRole('row')).toHaveCount(20)
+})
+
 test('@owner filters protected settlements to outstanding balances and restores the filter from the route', async ({ page }) => {
   await freezeTime(page)
   await routeWorkspace(page)
@@ -269,7 +293,7 @@ test('@owner filters protected settlements to outstanding balances and restores 
   response.data.kpis.outstandingGrosze = 342_000
   response.data.trend[5].collectedGrosze = 18_000
   response.data.trend[5].outstandingGrosze = 342_000
-  response.data.splits.payment = { cash: 18_000, outstanding: 342_000 }
+  response.data.splits.payment = { cash: 18_000, outstanding: 342_000, verification: 0 }
   await page.route('**/api/v1/finance/window?*', (route) => (
     route.fulfill(json(response))
   ))
@@ -948,6 +972,81 @@ test('@owner can retry a failed continuation and cannot overlap it with a void',
   expect(keys[0]).toBe(keys[1])
 })
 
+test('@owner drives every remaining materialization slice from one continuation click', async ({ page }) => {
+  await freezeTime(page)
+  await routeWorkspace(page)
+  await routeOwnPayments(page)
+  await routeRegistry(page, [registryImport({
+    status: 'materializing', version: 2, progress: { processed: 64, total: 192 },
+  })])
+  await page.route('**/api/v1/workbooks/imports/wbi_finance_e2e/historical-projection', (route) => (
+    route.fulfill(json({ data: { projection: null, conflicts: [] } }))
+  ))
+  await page.route('**/api/v1/workbooks/imports/wbi_finance_e2e/activity-projection', (route) => (
+    route.fulfill(json({ data: { job: null } }))
+  ))
+  await page.route('**/api/v1/finance/window?*', (route) => (
+    route.fulfill(json(financeWindow('2026-07')))
+  ))
+  await page.route('**/api/v1/workbooks/imports/wbi_finance_e2e', (route) => (
+    route.fulfill(json({ data: {
+      import: importedDto({ status: 'materializing', version: 2 }),
+      job: jobDto({ status: 'running', cursor: 64, processedRecords: 64, totalRecords: 192, version: 2 }),
+      evidence: { createdRecords: 64, voidedRecords: 0, converged: false },
+    } }))
+  ))
+  const keys = []
+  await page.route(
+    '**/api/v1/workbooks/imports/wbi_finance_e2e/continue',
+    (route) => {
+      keys.push(route.request().headers()['idempotency-key'])
+      const attempt = keys.length
+      const done = attempt === 3
+      const processed = Math.min(64 * (attempt + 1), 192)
+      return route.fulfill(json({ data: {
+        // The server bumps the import version only on status transitions, so it
+        // repeats across every slice until the run completes.
+        import: importedDto({
+          status: done ? 'complete' : 'materializing',
+          version: done ? 3 : 2,
+          completedAt: done ? NOW : null,
+        }),
+        job: jobDto({
+          phase: done ? 'complete' : 'apply_finance',
+          status: done ? 'complete' : 'running',
+          cursor: processed, processedRecords: processed, totalRecords: 192,
+          version: attempt + 2, completedAt: done ? NOW : null,
+        }),
+        evidence: { createdRecords: processed, voidedRecords: 0, converged: done },
+        ...(done ? { reconciliation: {
+          accepted: 192, quarantined: 0, linked: 192, voided: 0, inserted: 192,
+          accountingMonthsCorrected: 0, specialistAssignmentsCorrected: 0,
+          fixedRevenuesInserted: 0, formulaGhostsVoided: 0,
+          quarantinedVoided: 0, textAmountVisitsInserted: 0,
+        } } : {}),
+      } }))
+    },
+  )
+
+  let registryLoads = 0
+  page.on('request', (request) => {
+    if (request.url().includes('/workbooks/registry?')) registryLoads += 1
+  })
+
+  await page.goto('./#/ledger')
+  const continueButton = page.getByRole('button', { name: 'Kontynuuj import' })
+  await expect(continueButton).toBeVisible()
+  const settledLoads = registryLoads
+  await continueButton.click()
+  await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
+    .toBeFocused()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(keys).toHaveLength(3)
+  expect(new Set(keys).size).toBe(3)
+  // The run must reload the registry once when it settles, never per slice.
+  expect(registryLoads - settledLoads).toBe(1)
+})
+
 test('@coordinator @specialist keeps capability-scoped finance controls', async ({ page }, testInfo) => {
   await freezeTime(page)
   await routeWorkspace(page)
@@ -1164,7 +1263,7 @@ test('@owner keeps Task 11 grids bounded and the ledger icon distinct at every b
   ))
 
   for (const width of [320, 390, 639, 640, 641, 768, 800, 1023, 1024, 1025, 1280]) {
-    const columns = width <= 1024 ? 2 : 5
+    const columns = width <= 1024 ? 2 : 3
     await page.setViewportSize({ width, height: 900 })
     await page.goto('./#/payments?ym=2026-07')
     await expect(page.getByRole('heading', { name: /Finanse/ })).toBeVisible()

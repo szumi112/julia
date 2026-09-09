@@ -34,6 +34,7 @@ const zeroKpis = () => ({
   revenueGrosze: 0,
   collectedGrosze: 0,
   outstandingGrosze: 0,
+  verificationGrosze: 0,
   expensesGrosze: 0,
   incomeGrosze: 0,
 })
@@ -53,8 +54,9 @@ const safeSubtract = (left, right) => {
 const addKpis = (target, entry) => {
   target.revenueGrosze = safeAdd(target.revenueGrosze, entry.revenueGrosze)
   target.collectedGrosze = safeAdd(target.collectedGrosze, entry.collectedGrosze)
-  target.outstandingGrosze = safeAdd(
-    target.outstandingGrosze,
+  const balanceField = entry.settlementStatus === 'unknown' ? 'verificationGrosze' : 'outstandingGrosze'
+  target[balanceField] = safeAdd(
+    target[balanceField],
     safeSubtract(entry.receivableGrosze, entry.collectedGrosze),
   )
   target.expensesGrosze = safeAdd(target.expensesGrosze, entry.expenseGrosze)
@@ -64,6 +66,7 @@ const addKpis = (target, entry) => {
 const acceptedLedgerEntry = (value) => {
   if (!plain(value) || typeof value.id !== 'string' || !LEDGER_ID.test(value.id)
     || !STATES.has(value.state) || !KINDS.has(value.kind)
+    || !['paid', 'partial', 'unpaid', 'unknown'].includes(value.settlementStatus)
     || !(value.accountingMonth === null
       || isMonth(value.accountingMonth))
     || !integer(value.revenueGrosze) || !integer(value.receivableGrosze)
@@ -239,6 +242,7 @@ export function createFinanceReadModel(input) {
     if (entry.program !== null) increment(programRevenue, entry.program, entry.revenueGrosze)
   }
   payment.set('outstanding', kpisFor(selected).outstandingGrosze)
+  payment.set('verification', kpisFor(selected).verificationGrosze)
   for (const link of activityLinks) {
     const entry = byId.get(link.ledgerId)
     if (entry.state === 'active' && entry.accountingMonth === input.selectedMonth

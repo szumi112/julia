@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
-import { useApp } from '../store.jsx'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useApp, useWorkspaceWindow } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useDrawerFX } from '../anim.js'
-import { Button, DiscardConfirm, Field, IconBtn, useDiscardGuard } from '../ui.jsx'
+import { Button, Check, DiscardConfirm, Field, IconBtn, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 
 const staleAuthority = (error) => ['SESSION_AUTHORITY_STALE', 'WORKSPACE_AUTHORITY_STALE']
@@ -15,8 +15,10 @@ const useCloseOnReadOnly = (readOnly, forceClose) => {
 }
 
 export function ActivityGroupDrawer({ opts, onClose }) {
-  const { toast, workspace } = useApp()
-  const { registerLeaveGuard } = useShell()
+  const { state, toast, workspace } = useApp()
+  const { registerLeaveGuard, role } = useShell()
+  const directoryRange = useMemo(() => ({ from: `${opts.month}-01`, to: `${opts.month}-01` }), [opts.month])
+  const directoryState = useWorkspaceWindow(directoryRange, role.scope === 'centre')
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const editing = opts.group ?? null
@@ -25,11 +27,16 @@ export function ActivityGroupDrawer({ opts, onClose }) {
     : null
   const [label, setLabel] = useState(editing?.label ?? '')
   const [details, setDetails] = useState(editing?.details ?? '')
+  const [leaderSpecialistIds, setLeaderSpecialistIds] = useState(() => [...(opts.leaderSpecialistIds ?? [])].sort())
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
   const english = (editing?.programId ?? opts.programId) === 'apg_english'
-  const initial = JSON.stringify({ label: editing?.label ?? '', details: editing?.details ?? '' })
-  const dirty = JSON.stringify({ label, details }) !== initial
+  const initial = JSON.stringify({ label: editing?.label ?? '', details: editing?.details ?? '',
+    leaderSpecialistIds: [...(opts.leaderSpecialistIds ?? [])].sort() })
+  const dirty = JSON.stringify({ label, details, leaderSpecialistIds }) !== initial
+  const specialistOptions = state.psychologists.toSorted((left, right) => (
+    left.name.localeCompare(right.name, 'pl') || left.id.localeCompare(right.id)
+  ))
   const discard = useDiscardGuard(dirty)
   const { close, forceClose, shake } = useDrawerFX(
     drawerRef, backRef, onClose, discard.guard,
@@ -58,14 +65,14 @@ export function ActivityGroupDrawer({ opts, onClose }) {
           label: cleanLabel,
           details: cleanDetails || null,
           status: canonical.status,
-          leaderSpecialistIds: opts.leaderSpecialistIds ?? [],
+          leaderSpecialistIds,
         }, reconciliation)
       } else {
         await workspace.activities.createGroup({
           programId: opts.programId,
           label: cleanLabel,
           details: cleanDetails || null,
-          leaderSpecialistIds: opts.leaderSpecialistIds ?? [],
+          leaderSpecialistIds,
         }, reconciliation)
       }
     } catch (submitError) {
@@ -98,7 +105,7 @@ export function ActivityGroupDrawer({ opts, onClose }) {
         <div className="drawer__head">
           <div>
             <h2 className="drawer__title">{editing ? 'Edytuj grupę' : 'Nowa grupa'}</h2>
-            <p className="drawer__sub">Zapisujemy wyłącznie potwierdzoną nazwę i opis.</p>
+            <p className="drawer__sub">Nazwa, opis i osoby prowadzące grupę.</p>
           </div>
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
@@ -112,6 +119,24 @@ export function ActivityGroupDrawer({ opts, onClose }) {
           <Field label="Opis" hint="Opcjonalny; bez harmonogramu, wieku i opłat domyślnych.">
             <textarea className="textarea" value={details} maxLength={2000} onChange={(event) => setDetails(event.target.value)} />
           </Field>
+          {role.scope === 'centre' && (
+            <section aria-label="Prowadzący">
+              <h3>Prowadzący</h3>
+              <div className="activity-participant-list">
+                {specialistOptions.map((specialist) => (
+                  <Check key={specialist.id} checked={leaderSpecialistIds.includes(specialist.id)}
+                    onChange={(checked) => setLeaderSpecialistIds((current) => checked
+                      ? [...current, specialist.id].sort()
+                      : current.filter((id) => id !== specialist.id))}>
+                    {specialist.name}
+                  </Check>
+                ))}
+              </div>
+              {directoryState !== 'ready' && <p role="status" className="muted">{directoryState === 'loading'
+                ? 'Wczytywanie specjalistów…' : 'Lista specjalistów jest teraz niedostępna.'}</p>}
+              {directoryState === 'ready' && specialistOptions.length === 0 && <p className="muted">Brak specjalistów do przypisania.</p>}
+            </section>
+          )}
           {error && label.trim() && (
             <div className="form-warn form-warn--error" role="alert">
               <Icon name="alert" size={15} /> <span>{error}</span>
@@ -387,7 +412,8 @@ export function ActivityClassDrawer({ opts, onClose }) {
       topic: topic.trim().replace(/\s+/gu, ' ') || null,
       status,
     }
-    const reconciliation = { from: opts.month, to: opts.month }
+    const savedMonth = date.slice(0, 7)
+    const reconciliation = { from: savedMonth, to: savedMonth }
     try {
       if (editing) {
         await workspace.activities.editClass(editing.id, {
@@ -408,6 +434,7 @@ export function ActivityClassDrawer({ opts, onClose }) {
       return
     }
     toast(editing ? 'Zajęcia zostały zapisane' : 'Zajęcia zostały dodane')
+    opts.onSavedMonth?.(savedMonth)
     forceClose()
   }
 

@@ -9,10 +9,17 @@ test('operations audit copy labels every activity action in Polish', async () =>
   const actions = Object.keys(CORE_AUDIT_SCHEMAS)
     .filter((action) => action.startsWith('activity.'))
     .sort((left, right) => left.localeCompare(right))
-  assert.equal(actions.length, 10)
+  assert.equal(actions.length, 11)
   for (const action of actions) {
     const escaped = action.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     assert.match(source, new RegExp(`'${escaped}': '[^']+'`))
+  }
+})
+
+test('operations audit labels manual finance mutations in Polish', async () => {
+  const source = await readFile(new URL('../../src/views/Operations.jsx', import.meta.url), 'utf8')
+  for (const action of ['created', 'adjusted']) {
+    assert.match(source, new RegExp(`'finance\\.entry\\.${action}': '[^']+'`))
   }
 })
 

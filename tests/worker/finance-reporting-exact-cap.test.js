@@ -2,8 +2,13 @@ import { env } from 'cloudflare:workers'
 import { beforeAll, describe, expect, it } from 'vitest'
 
 import { loadFinanceWindow as loadFinanceWindowCore } from '../../worker/core/finance-reporting.js'
+import { FINANCE_SCOPE } from '../../worker/core/finance.js'
+import { createKeyring } from '../../worker/security/keyring.js'
+import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
+import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 
-const loadFinanceWindow = (input) => loadFinanceWindowCore({ ...input, keyring: {} })
+let keyring
+const loadFinanceWindow = (input) => loadFinanceWindowCore({ ...input, keyring })
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
@@ -23,6 +28,12 @@ beforeAll(async () => {
   await applyFinanceStageC()
   await applySpecialistProfilesStageD()
   await applyWorkbookRegistryStageE()
+  keyring = await createKeyring(env, {
+    activeDataKekVersion: 1, activeLookupKeyVersion: 1, activeBackupKekVersion: 1,
+  })
+  const financeKey = await getOrCreateDataKey(env.DB, keyring, FINANCE_SCOPE, {
+    id: 'key_finance_cap', createdAt: NOW,
+  })
   await env.DB.prepare(`INSERT INTO staff_users
     (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
      specialist_id,version,activated_at,disabled_at,created_at,updated_at)
@@ -32,15 +43,21 @@ beforeAll(async () => {
   ).run()
   const statements = []
   for (let index = 0; index < 1_000; index += 1) {
+    const id = `fin_exact_cap_${String(index).padStart(4, '0')}`
+    const details = JSON.stringify(await encryptForScope(keyring, financeKey, {
+      expectedScope: FINANCE_SCOPE, recordId: id, field: 'details',
+      plaintext: JSON.stringify({ schema: 'finance_entry_details.v1',
+        counterparty: 'Klient fikcyjny', sourceLabel: null, invoiceNote: null, lessonCount: null }),
+    }))
     statements.push(env.DB.prepare(`INSERT INTO finance_entries
       (id,batch_id,source_key,kind,record_type,accounting_month,occurred_on,
        amount_grosze,paid_amount_grosze,payment_method,settlement_status,
        invoice_status,specialist_id,appointment_id,counterparty_lookup,
        details_envelope,source_row_envelope,version,created_by_staff_id,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(
-      `fin_exact_cap_${String(index).padStart(4, '0')}`, null, null, 'income',
+      id, null, null, 'income',
       'income', '2027-06', '2027-06-15', 2, 1, 'cash', 'partial',
-      'not_required', null, null, null, '{}', null, 1, OWNER.id, NOW, NOW,
+      'not_required', null, null, null, details, null, 1, OWNER.id, NOW, NOW,
     ))
     if (statements.length === 40 || index === 999) await env.DB.batch(statements.splice(0))
   }
@@ -48,14 +65,16 @@ beforeAll(async () => {
 
 describe('FinanceWindow exact cap and chunked collection reads', () => {
   it('accepts exactly 1000 ledger and effective collection rows without truncation', async () => {
+    const budget = createD1QueryBudget(env.DB)
     const result = await loadFinanceWindow({
-      db: env.DB, actor: OWNER, nowMs: NOW_MS, selectedMonth: '2027-06',
+      db: budget.work, actor: OWNER, nowMs: NOW_MS, selectedMonth: '2027-06',
     })
     expect(result.data.rows).toHaveLength(1_000)
     expect(result.data.kpis).toEqual({
       revenueGrosze: 2_000, collectedGrosze: 1_000, outstandingGrosze: 1_000,
-      expensesGrosze: 0, incomeGrosze: 2_000,
+      expensesGrosze: 0, incomeGrosze: 2_000, verificationGrosze: 0,
     })
-    expect(result.data.splits.payment).toEqual({ cash: 1_000, outstanding: 1_000 })
+    expect(result.data.splits.payment).toEqual({ cash: 1_000, outstanding: 1_000, verification: 0 })
+    expect(budget.usage().used).toBeLessThanOrEqual(45)
   })
 })

@@ -221,7 +221,6 @@ test('@owner presents a linked owner as an ordinary specialist without losing ow
 })
 
 for (const [status, code] of [
-  [401, 'ACCESS_ASSERTION_INVALID'],
   [403, 'ACCESS_DENIED'],
   [403, 'FORBIDDEN'],
 ]) {
@@ -231,6 +230,23 @@ for (const [status, code] of [
     await page.goto('.')
 
     await expect(page.getByRole('heading', { name: 'Brak dostępu do panelu' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Spróbuj ponownie' })).toHaveCount(0)
+    await expect(page.getByRole('navigation', { name: 'Nawigacja główna' })).toHaveCount(0)
+  })
+}
+
+for (const [status, code] of [
+  [401, 'ACCESS_ASSERTION_INVALID'],
+  [401, 'REAUTH_REQUIRED'],
+]) {
+  test(`@owner classifies a stale session as reauth for ${code}`, async ({ page }) => {
+    await page.route('**/api/v1/session', (route) => route.fulfill(errorEnvelope(status, code)))
+
+    await page.goto('.')
+
+    await expect(page.getByRole('heading', { name: 'Sesja wygasła' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Zaloguj się ponownie' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Brak dostępu do panelu' })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Spróbuj ponownie' })).toHaveCount(0)
     await expect(page.getByRole('navigation', { name: 'Nawigacja główna' })).toHaveCount(0)
   })

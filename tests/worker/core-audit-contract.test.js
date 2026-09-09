@@ -50,7 +50,8 @@ const eventFor = (action) => {
     action,
     actorStaffId: 'stf_one',
     entityType: schema.entityType,
-    entityId: schema.entityIdKind === 'clientId' ? 'cl_one'
+    entityId: schema.entityIdKind === 'activityChargeId' ? 'ach_one'
+      : schema.entityIdKind === 'clientId' ? 'cl_one'
       : schema.entityIdKind === 'activityGroupId' ? 'agr_one'
         : schema.entityIdKind === 'activityParticipantId' ? 'acp_one'
           : schema.entityIdKind === 'activityMembershipId' ? 'amb_one'

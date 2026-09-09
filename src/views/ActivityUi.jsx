@@ -2,6 +2,8 @@ import { Button, EmptyState, Figure, IconBtn, Pill } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { addMonths, fmtMonthYear, fmtMoney, METHOD_LABELS } from '../format.js'
 import { routeHref } from '../routing.js'
+import { useApp } from '../store.jsx'
+import { FinanceEntryActions } from './FinanceEntryActions.jsx'
 
 const SETTLEMENT_LABELS = Object.freeze({
   paid: 'Opłacona', partial: 'Częściowo opłacona', unpaid: 'Nieopłacona', unknown: 'Status nieznany',
@@ -41,12 +43,8 @@ export function ActivityMonthNav({ currentMonth, month, onChange }) {
         <IconBtn
           name="chevR"
           label="Następny miesiąc"
-          disabled={month >= currentMonth}
           onClick={() => onChange(addMonths(month, 1))}
         />
-        {month >= currentMonth && (
-          <span className="sr-only">Nie można przejść do przyszłego miesiąca.</span>
-        )}
       </div>
     </div>
   )
@@ -79,7 +77,8 @@ export function ActivityFigures({ summary, english = false }) {
   )
 }
 
-export function ActivityChargeTable({ rows, english = false, titleId }) {
+export function ActivityChargeTable({ rows, english = false, month, titleId }) {
+  const { workspace } = useApp()
   return (
     <div className="table-scroll activity-table-scroll">
       <table className="table activity-table" aria-labelledby={titleId}>
@@ -91,6 +90,7 @@ export function ActivityChargeTable({ rows, english = false, titleId }) {
             <th className="right">Kwota</th>
             <th>Płatność</th>
             <th>Forma</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -106,6 +106,8 @@ export function ActivityChargeTable({ rows, english = false, titleId }) {
                 </Pill>
               </td>
               <td>{METHOD_LABELS[row.paymentMethod] ?? 'Nieoznaczona'}</td>
+              <td>{row.charge?.financeEntryId && <FinanceEntryActions row={{ id: row.charge.financeEntryId }}
+                onChanged={() => { workspace.activities.loadWindow({ from: month, to: month }).catch(() => {}) }} />}</td>
             </tr>
           ))}
         </tbody>

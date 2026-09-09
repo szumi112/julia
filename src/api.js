@@ -1,4 +1,13 @@
 import { APP_MODE } from './app-mode.js'
+import {
+  captureCreateFinanceEntry, captureFinanceAdjustment, captureFinanceCommandResult,
+  captureFinanceEntryDetail, isFinanceEntryId,
+  captureCreateActivityCharge, captureActivityChargeResult,
+} from './finance-entry-browser.js'
+import {
+  captureProjectionJob, captureProjectionStatus, captureProjectionCatalog,
+  captureProjectionResolution,
+} from './workbook-projection-review.js'
 import { compareUtf16CodeUnits } from './code-unit-order.js'
 import {
   CAPABILITIES,
@@ -138,6 +147,7 @@ const SERVER_STATUS = Object.freeze({
   WORKSPACE_RESULT_LIMIT: 409,
   ACTIVITY_RESULT_LIMIT: 409,
   ACTIVITY_CONFLICT: 409,
+  ACTIVITY_CHARGE_EXISTS: 409,
   CLIENT_STATUS_CONFLICT: 409,
   CLIENT_ASSIGNMENT_CONFLICT: 409,
   CLIENT_ARCHIVE_CONFLICT: 409,
@@ -180,6 +190,7 @@ const CLIENT_CODES = new Set([
   'SESSION_REQUIRED',
 ])
 const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'REAUTH_REQUIRED'])
+const authDenialReason = (code) => (code === 'ACCESS_DENIED' ? 'denied' : 'reauth')
 const VALIDATION_FIELDS = new Set([
   'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
   'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes',
@@ -1999,12 +2010,14 @@ const supportedFinanceWindowMonth = (month) => FINANCE_MONTH.test(month) && mont
 const captureMoneyKpis = (raw) => {
   const value = captureDataObject(raw, [
     'revenueGrosze', 'collectedGrosze', 'outstandingGrosze', 'expensesGrosze',
-    'incomeGrosze',
+    'incomeGrosze', 'verificationGrosze',
   ])
   if (!value || !safeCount(value.revenueGrosze) || !safeCount(value.collectedGrosze)
     || !safeCount(value.outstandingGrosze) || !safeCount(value.expensesGrosze)
+    || !safeCount(value.verificationGrosze)
     || !Number.isSafeInteger(value.incomeGrosze)
-    || checkedAdd(value.collectedGrosze, value.outstandingGrosze) !== value.revenueGrosze
+    || checkedAdd(value.collectedGrosze, value.outstandingGrosze) === null
+    || checkedAdd(checkedAdd(value.collectedGrosze, value.outstandingGrosze), value.verificationGrosze) !== value.revenueGrosze
     || value.incomeGrosze !== value.revenueGrosze - value.expensesGrosze) return null
   return Object.freeze({ ...value })
 }
@@ -2014,7 +2027,7 @@ const captureFinanceWindowRow = (raw, selectedMonth) => {
     'id', 'sourceKind', 'appointmentId', 'accountingMonth', 'occurredOn', 'kind',
     'recordType', 'revenueGrosze', 'receivableGrosze', 'collectedGrosze',
     'expenseGrosze', 'specialistId', 'serviceId', 'program', 'paymentMethod',
-    'invoiceStatus', 'version',
+    'invoiceStatus', 'version', 'settlementStatus', 'counterparty', 'sourceLabel',
   ])
   if (!value || typeof value.id !== 'string' || !/^fin_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(value.id)
     || !['panel', 'workbook'].includes(value.sourceKind)
@@ -2040,7 +2053,10 @@ const captureFinanceWindowRow = (raw, selectedMonth) => {
     || ![null, 'english', 'tus'].includes(value.program)
     || (value.program !== null && value.recordType !== value.program)
     || !FINANCE_METHOD_SET.has(value.paymentMethod)
-    || !INVOICE_STATE_SET.has(value.invoiceStatus) || !positive(value.version)) return null
+    || !INVOICE_STATE_SET.has(value.invoiceStatus) || !positive(value.version)
+    || !['unknown', 'paid', 'partial', 'unpaid'].includes(value.settlementStatus)
+    || ![value.counterparty, value.sourceLabel].every((label) => label === null
+      || (typeof label === 'string' && label.length <= 500))) return null
   return Object.freeze({ ...value })
 }
 
@@ -2055,7 +2071,7 @@ const captureMoneyMap = (raw, { domain, invoice = false } = {}) => {
     const acceptedKeyForDomain = (key) => {
       if (domain === 'specialist') return key === 'Nie ustalono' || SPECIALIST_ID.test(key)
       if (domain === 'service') return key === 'Nie ustalono' || WORKSPACE_SERVICE_IDS.has(key)
-      if (domain === 'payment') return key === 'outstanding' || FINANCE_METHOD_SET.has(key)
+      if (domain === 'payment') return key === 'outstanding' || key === 'verification' || FINANCE_METHOD_SET.has(key)
       return INVOICE_STATE_SET.has(key)
     }
     if (keys.some((key) => !acceptedKeyForDomain(key))) return null
@@ -2108,19 +2124,20 @@ const acceptedFinanceWindow = (payload, status, selectedMonth) => {
       || (supportedFinanceWindowMonth(data.latestPopulatedMonth)
         && data.latestPopulatedMonth <= data.currentMonth))
     || data.complete !== true || !trendValues || trendValues.length !== 6 || !rowValues
-    || !safeCount(data.unknownPeriodCount) || data.unknownPeriodCount > FINANCE_WINDOW_CAP) return null
+    || !safeCount(data.unknownPeriodCount)) return null
   const kpis = captureMoneyKpis(data.kpis)
   const rows = rowValues.map((row) => captureFinanceWindowRow(row, selectedMonth))
   if (!kpis || rows.some((row) => !row)
     || new Set(rows.map(({ id }) => id)).size !== rows.length) return null
   const rowKpis = {
-    revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0, expensesGrosze: 0,
+    revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0, verificationGrosze: 0, expensesGrosze: 0,
   }
   for (const row of rows) {
     rowKpis.revenueGrosze = checkedAdd(rowKpis.revenueGrosze, row.revenueGrosze)
     rowKpis.collectedGrosze = checkedAdd(rowKpis.collectedGrosze, row.collectedGrosze)
-    rowKpis.outstandingGrosze = checkedAdd(
-      rowKpis.outstandingGrosze, row.receivableGrosze - row.collectedGrosze,
+    const balanceField = row.settlementStatus === 'unknown' ? 'verificationGrosze' : 'outstandingGrosze'
+    rowKpis[balanceField] = checkedAdd(
+      rowKpis[balanceField], row.receivableGrosze - row.collectedGrosze,
     )
     rowKpis.expensesGrosze = checkedAdd(rowKpis.expensesGrosze, row.expenseGrosze)
     if (Object.values(rowKpis).includes(null)) return null
@@ -2131,12 +2148,13 @@ const acceptedFinanceWindow = (payload, status, selectedMonth) => {
   for (let index = 0; index < trendValues.length; index += 1) {
     const item = captureDataObject(trendValues[index], [
       'month', 'revenueGrosze', 'collectedGrosze', 'outstandingGrosze',
-      'expensesGrosze', 'incomeGrosze',
+      'expensesGrosze', 'incomeGrosze', 'verificationGrosze',
     ])
     const values = item && captureMoneyKpis({
       revenueGrosze: item.revenueGrosze,
       collectedGrosze: item.collectedGrosze,
       outstandingGrosze: item.outstandingGrosze,
+      verificationGrosze: item.verificationGrosze,
       expensesGrosze: item.expensesGrosze,
       incomeGrosze: item.incomeGrosze,
     })
@@ -2166,7 +2184,9 @@ const acceptedFinanceWindow = (payload, status, selectedMonth) => {
     || !safeCount(tus.count) || !safeCount(tus.revenueGrosze)
     || moneyMapTotal(specialist) !== kpis.revenueGrosze
     || moneyMapTotal(service) !== kpis.revenueGrosze
-    || moneyMapTotal(payment) !== kpis.collectedGrosze + kpis.outstandingGrosze
+    || moneyMapTotal(payment) !== kpis.revenueGrosze
+    || payment.outstanding !== kpis.outstandingGrosze
+    || payment.verification !== kpis.verificationGrosze
     || moneyMapTotal(invoice, 'revenueGrosze') !== kpis.revenueGrosze
     || moneyMapTotal(invoice, 'count') !== rows.filter(({ kind }) => kind === 'income').length
     || checkedAdd(english.revenueGrosze, tus.revenueGrosze) === null
@@ -2485,8 +2505,10 @@ const acceptedWorkbookStatus = (payload, status) => {
 
 const acceptedWorkbookStatusFor = (importId, minimumVersion = null) => (payload, status) => {
   const result = acceptedWorkbookStatus(payload, status)
+  // Only status transitions bump the import version, so a slice that advances
+  // the job alone legitimately repeats it. The version must never go backwards.
   if (!result || result.import.id !== importId
-    || (minimumVersion !== null && result.import.version <= minimumVersion)) return null
+    || (minimumVersion !== null && result.import.version < minimumVersion)) return null
   return result
 }
 
@@ -3227,10 +3249,10 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     Accept: 'application/json',
     ...(localIdentity ? { 'X-BWM-Local-Identity': localIdentity } : {}),
   })
-  const notifySession = (session) => {
+  const notifySession = (session, reason) => {
     for (const listener of [...listeners]) {
       try {
-        const result = listener(session)
+        const result = listener(session, reason)
         if (result && typeof result.then === 'function') {
           Promise.resolve(result).catch(() => {})
         }
@@ -3239,7 +3261,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       }
     }
   }
-  const clearSession = () => {
+  const clearSession = (reason = 'denied') => {
     sessionGeneration += 1
     requestAuthorityGeneration += 1
     installedAuthority = null
@@ -3247,7 +3269,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     newestSessionRequest = null
     csrfToken = null
     exportReplayKeys.clear()
-    notifySession(null)
+    notifySession(null, reason === 'reauth' ? 'reauth' : 'denied')
   }
   const authorityFingerprintFor = (session) => JSON.stringify([
     session.actor.id,
@@ -3310,7 +3332,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       if (error.code === 'FORBIDDEN') {
         const eventSequence = sessionRequestSequence
         void refreshSessionAfter(eventSequence).catch(() => {})
-      } else if (AUTH_DENIAL_CODES.has(error.code)) onAuthDenial()
+      } else if (AUTH_DENIAL_CODES.has(error.code)) onAuthDenial(authDenialReason(error.code))
       throw error
     }
     let result
@@ -3333,10 +3355,10 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       headers: baseHeaders(),
     }, {
       validate: acceptedSession,
-      onAuthDenial: () => {
+      onAuthDenial: (reason) => {
         if (sessionGeneration === generation
           && sessionRequest?.sequence === sequence
-          && newestSessionRequest?.sequence === sequence) clearSession()
+          && newestSessionRequest?.sequence === sequence) clearSession(reason)
       },
       authorityBound: false,
     }).then((accepted) => {
@@ -3778,7 +3800,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       if (error.code === 'FORBIDDEN') {
         const eventSequence = sessionRequestSequence
         void refreshSessionAfter(eventSequence).catch(() => {})
-      } else if (AUTH_DENIAL_CODES.has(error.code)) clearSession()
+      } else if (AUTH_DENIAL_CODES.has(error.code)) clearSession(authDenialReason(error.code))
       throw error
     }
     let filename
@@ -4102,6 +4124,47 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
+  const financeEntryEnvelope = (payload, status, expectedStatus, capture) => {
+    if (status !== expectedStatus) return null
+    const outer = captureDataObject(payload, ['data'])
+    try { return outer ? capture(outer.data) : null } catch { return null }
+  }
+  const createFinanceEntry = (input, options) => {
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
+    let body
+    try { body = captureCreateFinanceEntry(input) } catch { body = null }
+    if (!body || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    return mutation(`${API_ROOT}/finance/entries`, JSON.stringify(body),
+      (payload, status) => financeEntryEnvelope(payload, status, 201, captureFinanceCommandResult),
+      acceptedOptions.idempotencyKey, acceptedOptions.signal)
+  }
+  const createActivityCharge = (input, options) => {
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
+    let body
+    try { body = captureCreateActivityCharge(input) } catch { body = null }
+    if (!body || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    return mutation(`${API_ROOT}/activities/charges`, JSON.stringify(body),
+      (payload, status) => financeEntryEnvelope(payload, status, 201, captureActivityChargeResult),
+      acceptedOptions.idempotencyKey, acceptedOptions.signal)
+  }
+  const adjustFinanceEntry = (entryId, input, options) => {
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
+    let body
+    try { body = captureFinanceAdjustment(input) } catch { body = null }
+    if (!isFinanceEntryId(entryId) || !body || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    return mutation(`${API_ROOT}/finance/entries/${entryId}/adjustments`, JSON.stringify(body),
+      (payload, status) => financeEntryEnvelope(payload, status, 200,
+        (data) => captureFinanceCommandResult(data, entryId, body.expectedVersion)),
+      acceptedOptions.idempotencyKey, acceptedOptions.signal)
+  }
+  const loadFinanceEntry = (entryId, options) => {
+    const acceptedOptions = captureSignalOptions(options)
+    if (!isFinanceEntryId(entryId) || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    return requestJson(`${API_ROOT}/finance/entries/${entryId}`, {
+      method: 'GET', credentials: 'same-origin', headers: baseHeaders(), signal: acceptedOptions.signal,
+    }, { validate: (payload, status) => financeEntryEnvelope(payload, status, 200,
+      (data) => captureFinanceEntryDetail(data, entryId)) })
+  }
   const startFinanceImport = (input, options) => {
     const acceptedOptions = captureClientOptions(options)
     let requested
@@ -4215,18 +4278,72 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       signal: acceptedOptions.signal,
     }, { validate: acceptedWorkbookStatusFor(importId) })
   }
-  const getActivityProjection = (importId) => {
-    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)) {
+  const historicalEnvelope = (payload, status, expectedStatus, capture) => {
+    if (status !== expectedStatus) return null
+    const outer = captureDataObject(payload, ['data'])
+    try { return outer ? capture(outer.data) : null } catch { return null }
+  }
+  const getHistoricalProjection = (importId, options) => {
+    const acceptedOptions = captureSignalOptions(options)
+    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId) || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    return requestJson(`${API_ROOT}/workbooks/imports/${importId}/historical-projection`, {
+      method: 'GET', credentials: 'same-origin', headers: baseHeaders(), signal: acceptedOptions.signal,
+    }, { validate: (payload, status) => historicalEnvelope(payload, status, 200,
+      (data) => captureProjectionStatus(data, importId)) })
+  }
+  const getHistoricalProjectionReviewCatalog = (importId, afterSourceRecordId = null, options) => {
+    const acceptedOptions = captureSignalOptions(options)
+    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId) || !acceptedOptions
+      || !(afterSourceRecordId === null || (typeof afterSourceRecordId === 'string'
+        && /^wbs_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/.test(afterSourceRecordId)))) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    const query = afterSourceRecordId === null ? '' : `?afterSourceRecordId=${afterSourceRecordId}`
+    return requestJson(`${API_ROOT}/workbooks/imports/${importId}/historical-projection/review-catalog${query}`, {
+      method: 'GET', credentials: 'same-origin', headers: baseHeaders(), signal: acceptedOptions.signal,
+    }, { validate: (payload, status) => historicalEnvelope(payload, status, 200,
+      (data) => captureProjectionCatalog(data, importId, afterSourceRecordId)) })
+  }
+  const historicalMutation = (importId, operation, body, expectedVersion, options) => {
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
+    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId) || !acceptedOptions
+      || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0
+      || expectedVersion >= Number.MAX_SAFE_INTEGER) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    return mutation(`${API_ROOT}/workbooks/imports/${importId}/historical-projection/${operation}`,
+      JSON.stringify(body), (payload, status) => historicalEnvelope(payload, status,
+        operation === 'resolutions' && status === 200 ? 200
+          : operation === 'resolutions' || expectedVersion === 0 ? 201 : 200, (data) => {
+          const value = captureDataObject(data, ['projection'])
+          if (!value) return null
+          const job = captureProjectionJob(value.projection, importId)
+          return job.version === expectedVersion + 1 ? job : null
+        }), acceptedOptions.idempotencyKey, acceptedOptions.signal)
+  }
+  const continueHistoricalProjection = (importId, expectedVersion, options) => historicalMutation(
+    importId, 'continue', { expectedVersion }, expectedVersion, options,
+  )
+  const resolveHistoricalProjection = (importId, input, options) => {
+    let body
+    try { body = captureProjectionResolution(input) } catch {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    return historicalMutation(importId, 'resolutions', body, body.expectedJobVersion, options)
+  }
+  const getActivityProjection = (importId, options) => {
+    const acceptedOptions = captureSignalOptions(options)
+    if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId) || !acceptedOptions) {
       return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
     }
     return requestJson(
       `${API_ROOT}/workbooks/imports/${importId}/activity-projection`,
-      { method: 'GET', credentials: 'same-origin', headers: baseHeaders() },
+      { method: 'GET', credentials: 'same-origin', headers: baseHeaders(), signal: acceptedOptions.signal },
       { validate: (payload, status) => acceptedActivityProjection(payload, status, importId) },
     ).then((result) => result === NO_ACTIVITY_PROJECTION ? null : result)
   }
   const continueActivityProjection = (importId, expectedVersion, options) => {
-    const acceptedOptions = captureClientOptions(options)
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
     if (typeof importId !== 'string' || !WORKBOOK_IMPORT_ID.test(importId)
       || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0
       || expectedVersion >= Number.MAX_SAFE_INTEGER
@@ -4239,6 +4356,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
         payload, status, importId, expectedVersion,
       ),
       acceptedOptions.idempotencyKey,
+      acceptedOptions.signal,
     )
   }
   const recordWorkbookResolutions = (importId, input, options) => {
@@ -4648,6 +4766,10 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     editClient,
     archiveClient,
     startFinanceImport,
+    createFinanceEntry,
+    createActivityCharge,
+    adjustFinanceEntry,
+    loadFinanceEntry,
     appendFinanceImportChunk,
     commitFinanceImport,
     previewWorkbook,
@@ -4657,6 +4779,10 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     recordWorkbookResolutions,
     getActivityProjection,
     continueActivityProjection,
+    getHistoricalProjection,
+    getHistoricalProjectionReviewCatalog,
+    continueHistoricalProjection,
+    resolveHistoricalProjection,
     exportWorkbook,
     voidLedgerEntry,
     createAppointment,

@@ -55,10 +55,11 @@ const financeRow = Object.freeze({
   collectedGrosze: 5_000, expenseGrosze: 0, specialistId: 'sp_anna',
   serviceId: 'zajecia', program: null, paymentMethod: 'unknown',
   invoiceStatus: 'not_required', version: 1,
+  settlementStatus: 'partial', counterparty: 'Klient fikcyjny', sourceLabel: 'Konsultacja',
 })
 
 const kpis = (overrides = {}) => ({
-  revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0,
+  revenueGrosze: 0, collectedGrosze: 0, outstandingGrosze: 0, verificationGrosze: 0,
   expensesGrosze: 0, incomeGrosze: 0, ...overrides,
 })
 
@@ -82,7 +83,7 @@ const financeWindow = () => ({
   ],
   splits: {
     specialist: { sp_anna: 18_000 }, service: { zajecia: 18_000 },
-    payment: { cash: 5_000, outstanding: 13_000 },
+    payment: { cash: 5_000, outstanding: 13_000, verification: 0 },
     invoice: { not_required: { count: 1, revenueGrosze: 18_000 } },
     program: {
       english: { count: 0, revenueGrosze: 0 },
@@ -131,6 +132,27 @@ const sourceDetailResponse = (display) => jsonResponse({ data: {
   importId: 'wbi_task11_import', section: 'source', cursor: null,
   nextCursor: null, items: [registrySource(display)], complete: true,
 } })
+
+test('finance API preserves unverified settlement and rejects it being counted as confirmed debt', async () => {
+  const data = financeWindow()
+  data.rows[0] = { ...data.rows[0], collectedGrosze: 0, settlementStatus: 'unknown' }
+  data.kpis = kpis({ revenueGrosze: 18_000, verificationGrosze: 18_000, incomeGrosze: 18_000 })
+  data.trend[5] = { month: '2026-08', ...data.kpis }
+  data.splits.payment = { outstanding: 0, verification: 18_000 }
+  const invalid = structuredClone(data)
+  invalid.rows[0].settlementStatus = 'unpaid'
+  const { fetchImpl } = queuedFetch(jsonResponse(sessionBody()),
+    jsonResponse({ data }), jsonResponse({ data: invalid }))
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+  const result = await client.loadFinanceWindow({ selectedMonth: '2026-08' })
+  assert.equal(result.kpis.verificationGrosze, 18_000)
+  assert.equal(result.kpis.outstandingGrosze, 0)
+  assert.equal(result.rows[0].counterparty, 'Klient fikcyjny')
+  await assert.rejects(client.loadFinanceWindow({ selectedMonth: '2026-08' }), {
+    code: 'INVALID_RESPONSE',
+  })
+})
 
 test('Task 11 API accepts only exact internally coherent finance and registry DTOs', async () => {
   const controller = new AbortController()
@@ -774,13 +796,15 @@ test('status, resolution and void commands use landed exact bodies and return ex
     '{"expectedVersion":1,"reason":"Błędna pozycja testowa"}')
 })
 
-test('workbook status and continuation bind the exact import identity and advancing version', async () => {
+test('workbook status and continuation bind the exact import identity and a version that never goes backwards', async () => {
   const wrongImport = {
     import: importDto({ id: 'wbi_task11_other' }), job: jobDto(),
     evidence: { createdRecords: 0, voidedRecords: 0, converged: false },
   }
+  // A repeated import version is normal mid-materialization, so only a version
+  // that regresses below the one sent proves the response is stale.
   const stale = {
-    import: importDto({ version: 2 }), job: jobDto({ version: 2 }),
+    import: importDto({ version: 1 }), job: jobDto({ version: 1 }),
     evidence: { createdRecords: 0, voidedRecords: 0, converged: false },
   }
   const { fetchImpl } = queuedFetch(

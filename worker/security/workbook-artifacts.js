@@ -109,7 +109,9 @@ const randomBytes = (size) => crypto.getRandomValues(new Uint8Array(size))
 const canonicalDigestValue = (value) => {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
   if (typeof value === 'number') {
-    if (!Number.isSafeInteger(value)) panelInvalid()
+    // Raw legacy cells carry ordinary decimal amounts; only non-finite numbers
+    // lack a stable JSON representation and cannot be signed.
+    if (!Number.isFinite(value)) panelInvalid()
     return value
   }
   if (Array.isArray(value)) return value.map(canonicalDigestValue)
