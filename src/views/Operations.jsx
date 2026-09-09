@@ -99,6 +99,7 @@ const AUDIT_RESULTS = Object.freeze({
 })
 
 const GENERIC_ERROR = 'Nie udało się pobrać danych.'
+const HEALTH_PENDING = 'Stan systemu nie został jeszcze wygenerowany. Pierwsze zadanie cykliczne zakończy się w ciągu kilku minut.'
 const FORBIDDEN_ERROR = 'Uprawnienia do tych danych uległy zmianie.'
 const STALE_ERROR = 'Nie udało się odświeżyć. Wyświetlane dane mogą być nieaktualne.'
 const UNCERTAIN_RECONCILIATION_ERROR = 'Nie udało się potwierdzić wyniku. Odśwież listę działań przed ponowieniem.'
@@ -591,7 +592,10 @@ export function OperationsPanel({ sectionRef }) {
             <p className="operations-state" role="status" aria-live="polite">Pobieranie stanu systemu…</p>
           ) : null}
           {health.status === 'error' ? <ResourceError copy={health.error} onRetry={() => loadHealth()} /> : null}
-          {health.data ? (
+          {health.data && health.data.generatedAt === null ? (
+            <p className="operations-state" role="status">{HEALTH_PENDING}</p>
+          ) : null}
+          {health.data && health.data.generatedAt !== null ? (
             <>
               {health.staleMessage ? <StaleNotice copy={health.staleMessage} onRetry={() => loadHealth()} /> : null}
               <p className="operations-snapshot">

@@ -28,6 +28,7 @@ const BACKUP_MAX_ATTEMPTS = 8
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const BACKUP_ID = /^bkp_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const INTERNAL_CODE = /^[A-Z][A-Z0-9_]{0,63}$/
 const SCHEDULER_ROW_KEYS = Object.freeze([
   'id',
   'scheduled_for',
@@ -760,13 +761,19 @@ async function failScheduler(db, scheduledFor, owned, counts, now) {
   await db.batch(statements)
 }
 
-const logFields = (event, result, owned, counts, error = false) => ({
+const logFields = (event, result, owned, counts, errorCode = null) => ({
   event,
   result,
   ...(owned ? { runId: owned.runId, attemptCount: owned.attemptCount } : {}),
   ...counts,
-  ...(error ? { errorCode: 'SCHEDULER_COORDINATOR_FAILED' } : {}),
+  ...(errorCode ? { errorCode } : {}),
 })
+
+const processorFailureCode = (error, fallback) => {
+  let value
+  try { value = error?.message } catch { value = null }
+  return typeof value === 'string' && INTERNAL_CODE.test(value) ? value : fallback
+}
 
 const emitLog = async (log, level, fields) => {
   try { await log(level, fields) } catch { /* Logging never owns coordinator state. */ }
@@ -828,6 +835,7 @@ export async function runScheduled(input) {
     }
 
     let backupProcessed = false
+    let processorFailed = false
     const injectedBackupProcessor = captured.deps.processBackupCreate !== undefined
     if (injectedBackupProcessor || validated.config.appEnv !== 'development') {
       const processorCheckpoint = () => ownershipCheckpoint(
@@ -837,62 +845,77 @@ export async function runScheduled(input) {
         deps.now,
       )
       await processorCheckpoint()
-      let backupResult
-      if (injectedBackupProcessor) {
-        backupResult = await deps.processBackupCreate({
-          db: validated.db,
-          cryptoContext,
-          schedulerRun: { ...owned },
-          checkpoint: processorCheckpoint,
-          env: validated.env,
-          config: validated.config,
-          now: deps.now,
-        })
-      } else {
-        const providerConfig = loadBackupProviderConfig(validated.env, validated.config)
-        const controller = deps.abortControllerFactory()
-        if (!(controller instanceof AbortController)) invalidState()
-        backupResult = await deps.processBackupCreate({
-          db: validated.db,
-          cryptoContext,
-          keyring: cryptoContext.keyring,
-          archive: validated.env.ARCHIVE,
-          providerConfig,
-          source: {
-            accountId: providerConfig.accountId,
-            appEnv: validated.config.appEnv,
-            dataMode: validated.config.dataMode,
-            databaseId: providerConfig.databaseId,
-          },
-          schedulerRun: { ...owned },
-          now: deps.now,
-          wait: deps.wait,
-          fetch: deps.fetch,
-          signal: controller.signal,
-          idFactory: deps.idFactory,
-          leaseOwnerFactory: deps.leaseOwnerFactory,
-          nonceFactory: deps.backupNonceFactory,
-          rawKeyFactory: deps.rawKeyFactory,
-          pollExport: pollD1Export,
-          downloadExport: downloadD1Export,
-        })
+      let backupResult = null
+      try {
+        if (injectedBackupProcessor) {
+          backupResult = await deps.processBackupCreate({
+            db: validated.db,
+            cryptoContext,
+            schedulerRun: { ...owned },
+            checkpoint: processorCheckpoint,
+            env: validated.env,
+            config: validated.config,
+            now: deps.now,
+          })
+        } else {
+          const providerConfig = loadBackupProviderConfig(validated.env, validated.config)
+          const controller = deps.abortControllerFactory()
+          if (!(controller instanceof AbortController)) invalidState()
+          backupResult = await deps.processBackupCreate({
+            db: validated.db,
+            cryptoContext,
+            keyring: cryptoContext.keyring,
+            archive: validated.env.ARCHIVE,
+            providerConfig,
+            source: {
+              accountId: providerConfig.accountId,
+              appEnv: validated.config.appEnv,
+              dataMode: validated.config.dataMode,
+              databaseId: providerConfig.databaseId,
+            },
+            schedulerRun: { ...owned },
+            now: deps.now,
+            wait: deps.wait,
+            fetch: deps.fetch,
+            signal: controller.signal,
+            idFactory: deps.idFactory,
+            leaseOwnerFactory: deps.leaseOwnerFactory,
+            nonceFactory: deps.backupNonceFactory,
+            rawKeyFactory: deps.rawKeyFactory,
+            pollExport: pollD1Export,
+            downloadExport: downloadD1Export,
+          })
+        }
+      } catch (error) {
+        // A backup failure must not stop health publication; the next checkpoint
+        // still fails closed if the scheduler fence was lost.
+        processorFailed = true
+        await emitLog(deps.safeLog, 'error', logFields(
+          'scheduler.backup.failed',
+          'failure',
+          owned,
+          counts,
+          processorFailureCode(error, 'BACKUP_PROCESSOR_FAILED'),
+        ))
       }
-      if (!exactKeys(backupResult, backupResult?.claimed
-        ? (backupResult.result === 'dead'
-          ? ['claimed', 'result', 'backupId', 'errorCode']
+      if (!processorFailed) {
+        if (!exactKeys(backupResult, backupResult?.claimed
+          ? (backupResult.result === 'dead'
+            ? ['claimed', 'result', 'backupId', 'errorCode']
+            : ['claimed', 'result', 'backupId'])
           : ['claimed', 'result', 'backupId'])
-        : ['claimed', 'result', 'backupId'])
-        || typeof backupResult.claimed !== 'boolean'
-        || ![null, 'succeeded', 'dead'].includes(backupResult.result)
-        || (backupResult.claimed && !BACKUP_ID.test(backupResult.backupId ?? ''))
-        || (!backupResult.claimed && (backupResult.result !== null || backupResult.backupId !== null))) {
-        invalidState()
+          || typeof backupResult.claimed !== 'boolean'
+          || ![null, 'succeeded', 'dead'].includes(backupResult.result)
+          || (backupResult.claimed && !BACKUP_ID.test(backupResult.backupId ?? ''))
+          || (!backupResult.claimed && (backupResult.result !== null || backupResult.backupId !== null))) {
+          invalidState()
+        }
+        backupProcessed = backupResult.claimed
       }
-      backupProcessed = backupResult.claimed
     }
 
     const injectedRetentionProcessor = captured.deps.processBackupRetention !== undefined
-    if (!backupProcessed
+    if (!backupProcessed && !processorFailed
       && (injectedRetentionProcessor || validated.config.appEnv !== 'development')) {
       const retentionCheckpoint = await ownershipCheckpoint(
         validated.db,
@@ -900,23 +923,35 @@ export async function runScheduled(input) {
         owned,
         deps.now,
       )
-      const retentionResult = await deps.processBackupRetention({
-        db: validated.db,
-        archive: validated.env.ARCHIVE,
-        nowMs: retentionCheckpoint.ms,
-        limit: RETENTION_LIMIT,
-        idFactory: deps.idFactory,
-        correlationIdFactory: deps.correlationIdFactory,
-      })
-      if (!exactKeys(retentionResult, ['selected', 'pruned'])
+      let retentionResult = null
+      try {
+        retentionResult = await deps.processBackupRetention({
+          db: validated.db,
+          archive: validated.env.ARCHIVE,
+          nowMs: retentionCheckpoint.ms,
+          limit: RETENTION_LIMIT,
+          idFactory: deps.idFactory,
+          correlationIdFactory: deps.correlationIdFactory,
+        })
+      } catch (error) {
+        processorFailed = true
+        await emitLog(deps.safeLog, 'error', logFields(
+          'scheduler.retention.failed',
+          'failure',
+          owned,
+          counts,
+          processorFailureCode(error, 'BACKUP_RETENTION_FAILED'),
+        ))
+      }
+      if (!processorFailed && (!exactKeys(retentionResult, ['selected', 'pruned'])
         || !validCount(retentionResult.selected)
         || !validCount(retentionResult.pruned)
         || retentionResult.selected > RETENTION_LIMIT
-        || retentionResult.pruned > retentionResult.selected) invalidState()
+        || retentionResult.pruned > retentionResult.selected)) invalidState()
     }
 
     let outcomes = []
-    if (!backupProcessed && deps.processOutboxBatch) {
+    if (!backupProcessed && !processorFailed && deps.processOutboxBatch) {
       const processorCheckpoint = await ownershipCheckpoint(
         validated.db,
         validated.scheduledFor,
@@ -990,7 +1025,11 @@ export async function runScheduled(input) {
         // A stale or expired owner cannot mutate the current scheduler row.
       }
     }
-    await emitLog(deps.safeLog, 'error', logFields('scheduler.failed', 'failure', owned, counts, true))
+    await emitLog(
+      deps.safeLog,
+      'error',
+      logFields('scheduler.failed', 'failure', owned, counts, 'SCHEDULER_COORDINATOR_FAILED'),
+    )
     return {
       status: 'failed',
       reason: 'coordinator_failed',

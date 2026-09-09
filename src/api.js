@@ -1586,11 +1586,16 @@ const acceptedRoleChangeResult = (
   })
 }
 
+// Served until the first scheduler run stores a health snapshot.
+const PENDING_HEALTH = Object.freeze({ generatedAt: null, checks: Object.freeze([]) })
+
 const acceptedHealth = (payload) => {
   const outer = captureExactObject(payload, ['data'])
   const data = outer && captureExactObject(outer.data, ['generatedAt', 'checks'])
-  const values = data && captureArray(data.checks, HEALTH_CHECKS.length)
-  if (!data || !validInstant(data.generatedAt)
+  if (!data) return null
+  if (data.generatedAt === null) return captureArray(data.checks, 0) ? PENDING_HEALTH : null
+  const values = captureArray(data.checks, HEALTH_CHECKS.length)
+  if (!validInstant(data.generatedAt)
     || !values || values.length !== HEALTH_CHECKS.length) return null
   const checks = []
   for (let index = 0; index < HEALTH_CHECKS.length; index += 1) {

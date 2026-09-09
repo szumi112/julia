@@ -1583,6 +1583,97 @@ describe('ordinary outbox integration and privacy', () => {
     })
   })
 
+  it.each([
+    ['a fixed backup code', 'BACKUP_STATE_INVALID', 'BACKUP_STATE_INVALID'],
+    ['a private message', 'backup id bkp_secret parent@example.test', 'BACKUP_PROCESSOR_FAILED'],
+  ])('publishes the health snapshot and completes when the backup processor throws %s', async (
+    _label, thrown, expectedCode,
+  ) => {
+    const context = await cryptoContext()
+    const scheduledTime = schedule(++serial)
+    const safeLog = vi.fn()
+    const ordinary = vi.fn(async () => [])
+    const processBackupRetention = vi.fn(async () => ({ selected: 0, pruned: 0 }))
+
+    const result = await runScheduled({
+      scheduledTime,
+      env: runtimeEnv(),
+      deps: schedulerDeps(`backup_processor_throws_${serial}`, context, scheduledTime, {
+        processBackupCreate: vi.fn(async () => { throw new Error(thrown) }),
+        processBackupRetention,
+        processOutboxBatch: ordinary,
+        safeLog,
+      }),
+    })
+
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      reason: null,
+      claimedJobs: 0,
+      succeededJobs: 0,
+      failedJobs: 0,
+    })
+    expect(await schedulerRow(scheduledTime)).toMatchObject({
+      status: 'succeeded',
+      error_code: null,
+    })
+    const health = await env.DB.prepare(
+      "SELECT value_json,updated_at FROM system_state WHERE key='health.snapshot'"
+    ).first()
+    expect(health.updated_at).toBe(nowIso(scheduledTime))
+    expect(JSON.parse(health.value_json).generatedAt).toBe(nowIso(scheduledTime))
+    expect(processBackupRetention).not.toHaveBeenCalled()
+    expect(ordinary).not.toHaveBeenCalled()
+    expect(safeLog.mock.calls.map(([level, fields]) => [level, fields.event])).toEqual([
+      ['info', 'scheduler.started'],
+      ['error', 'scheduler.backup.failed'],
+      ['info', 'scheduler.completed'],
+    ])
+    expect(safeLog.mock.calls[1]).toEqual(['error', {
+      event: 'scheduler.backup.failed',
+      result: 'failure',
+      runId: `id_backup_processor_throws_${serial}_1`,
+      attemptCount: 1,
+      claimedJobs: 0,
+      succeededJobs: 0,
+      failedJobs: 0,
+      errorCode: expectedCode,
+    }])
+    expect(JSON.stringify(safeLog.mock.calls)).not.toContain('bkp_secret')
+    expect(JSON.stringify(safeLog.mock.calls)).not.toContain('parent@example.test')
+  })
+
+  it('publishes the health snapshot and completes when the retention processor throws', async () => {
+    const context = await cryptoContext()
+    const scheduledTime = schedule(++serial)
+    const safeLog = vi.fn()
+    const ordinary = vi.fn(async () => [])
+
+    const result = await runScheduled({
+      scheduledTime,
+      env: runtimeEnv(),
+      deps: schedulerDeps(`retention_processor_throws_${serial}`, context, scheduledTime, {
+        processBackupCreate: vi.fn(async () => ({ claimed: false, result: null, backupId: null })),
+        processBackupRetention: vi.fn(async () => { throw new Error('r2 prefix secret@example.test') }),
+        processOutboxBatch: ordinary,
+        safeLog,
+      }),
+    })
+
+    expect(result).toMatchObject({ status: 'succeeded', reason: null })
+    expect(await schedulerRow(scheduledTime)).toMatchObject({ status: 'succeeded', error_code: null })
+    expect((await env.DB.prepare(
+      "SELECT updated_at FROM system_state WHERE key='health.snapshot'"
+    ).first()).updated_at).toBe(nowIso(scheduledTime))
+    expect(ordinary).not.toHaveBeenCalled()
+    expect(safeLog.mock.calls.map(([, fields]) => [fields.event, fields.errorCode ?? null])).toEqual([
+      ['scheduler.started', null],
+      ['scheduler.retention.failed', 'BACKUP_RETENTION_FAILED'],
+      ['scheduler.completed', null],
+    ])
+    expect(JSON.stringify(safeLog.mock.calls)).not.toContain('secret@example.test')
+  })
+
   it('runs one dedicated backup before ordinary work and leaves provider jobs queued', async () => {
     const context = await cryptoContext()
     const scheduledTime = schedule(++serial)

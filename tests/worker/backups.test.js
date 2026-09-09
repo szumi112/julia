@@ -1852,6 +1852,59 @@ describe('strict backup reclaim', () => {
     }))).resolves.toEqual({ claimed: true, schedulerRun })
     expect(budget.usage()).toMatchObject({ used: 5, workRemaining: 0 })
   })
+
+  it('reclaims a claim whose lease was renewed before its owner died', async () => {
+    const { context, schedulerRun, seeded } = await initialClaim({
+      idFactory: () => 'attempt_backup_renewed_1',
+      leaseOwnerFactory: () => 'owner_backup_renewed_1',
+    })
+    const reclaimNowMs = CLAIM_MS + LEASE_MS + 1
+    await processNextBackupCreate(processInput({
+      context,
+      schedulerRun,
+      nowMs: reclaimNowMs,
+      idFactory: () => 'attempt_backup_renewed_2',
+      leaseOwnerFactory: () => 'owner_backup_renewed_2',
+    }))
+    const renewMs = reclaimNowMs + 5_000
+    const renewedLease = new Date(renewMs + LEASE_MS).toISOString()
+    await env.DB.prepare(
+      `UPDATE outbox_jobs SET lease_expires_at=?,updated_at=? WHERE id=?`
+    ).bind(renewedLease, new Date(renewMs).toISOString(), seeded.jobId).run()
+    const backupBefore = await backup(seeded.backupId)
+    const thirdNowMs = renewMs + LEASE_MS + 1
+
+    await expect(processNextBackupCreate(processInput({
+      context,
+      schedulerRun,
+      nowMs: thirdNowMs,
+      idFactory: () => 'attempt_backup_renewed_3',
+      leaseOwnerFactory: () => 'owner_backup_renewed_3',
+    }))).resolves.toEqual({ claimed: true, schedulerRun })
+
+    expect(await job(seeded.jobId)).toMatchObject({
+      status: 'processing',
+      attempt_count: 3,
+      lease_owner: 'owner_backup_renewed_3',
+      lease_expires_at: new Date(thirdNowMs + LEASE_MS).toISOString(),
+      last_error_code: 'OUTBOX_LEASE_EXPIRED',
+      updated_at: new Date(thirdNowMs).toISOString(),
+    })
+    expect((await attempts(seeded.jobId)).slice(1)).toEqual([
+      {
+        id: 'attempt_backup_renewed_2', job_id: seeded.jobId, attempt_number: 2,
+        started_at: new Date(reclaimNowMs).toISOString(),
+        completed_at: new Date(thirdNowMs).toISOString(),
+        result: 'retry', error_code: 'OUTBOX_LEASE_EXPIRED', provider_reference: null,
+      },
+      {
+        id: 'attempt_backup_renewed_3', job_id: seeded.jobId, attempt_number: 3,
+        started_at: new Date(thirdNowMs).toISOString(), completed_at: null,
+        result: null, error_code: null, provider_reference: null,
+      },
+    ])
+    expect(await backup(seeded.backupId)).toEqual(backupBefore)
+  })
 })
 
 describe('backup validation and closed errors', () => {
