@@ -490,7 +490,7 @@ SELECT
                    AND membership.participant_id=charge.participant_id
                    AND membership.group_id=charge.group_id
                    AND membership.program_id=charge.program_id
-                   AND membership.membership_kind='observation')))))
+                   AND membership.membership_kind='observation'))))))
     AS activity_graph_bad_count,
   CASE WHEN activity_job.after_source_record_id IS (
     SELECT max(source.id) FROM workbook_source_records AS source
