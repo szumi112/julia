@@ -302,16 +302,13 @@ export function Stat({ label, value, fmt = fmtNumber, sub, tone }) {
   )
 }
 
-// Money KPI card for the protected finance surfaces — the boxed, toned
-// cousin of Figure/Stat with the same count-up. `grosze` keeps the API's
-// integer money; the card formats złote.
-export function MoneyKpi({ label, grosze, tone }) {
+// Money KPI card for the protected finance surfaces — the boxed cousin of
+// Figure/Stat with the same count-up. `grosze` keeps the API's integer
+// money; the card formats złote.
+export function MoneyKpi({ label, grosze }) {
   const ref = useCountUp(grosze / 100, fmtMoney)
   return (
-    <article
-      className={`finance-window__kpi ${tone ? `finance-window__kpi--${tone}` : ''}`}
-      data-reveal
-    >
+    <article className="finance-window__kpi" data-reveal>
       <span>{label}</span>
       <strong ref={ref}>{fmtMoney(grosze / 100)}</strong>
     </article>
