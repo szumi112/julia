@@ -125,11 +125,11 @@ export function OwnPayments() {
         <>
           <section className="finance-window__kpis" aria-label="Podsumowanie własnych rozliczeń">
             {[
-              ['Należne', summary.due, 'coral'],
-              ['Wpłacono', summary.collected, 'sage'],
-              ['Pozostało do zapłaty', summary.outstanding, 'amber'],
-            ].map(([label, value, tone]) => (
-              <MoneyKpi key={label} label={label} grosze={value} tone={tone} />
+              ['Należne', summary.due],
+              ['Wpłacono', summary.collected],
+              ['Pozostało do zapłaty', summary.outstanding],
+            ].map(([label, value]) => (
+              <MoneyKpi key={label} label={label} grosze={value} />
             ))}
           </section>
           <section className="card finance-window__table" data-reveal aria-labelledby="own-payments-title">

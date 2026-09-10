@@ -41,17 +41,17 @@ const invoiceLabel = Object.freeze({
 
 function Kpis({ values }) {
   const items = [
-    ['Przychody', values.revenueGrosze, 'coral'],
-    ['Wpłacono', values.collectedGrosze, 'sage'],
-    ['Pozostało do zapłaty', values.outstandingGrosze, 'amber'],
-    ['Do sprawdzenia', values.verificationGrosze, 'ink'],
-    ['Wydatki', values.expensesGrosze, 'pink'],
-    ['Dochód', values.incomeGrosze, 'sky'],
+    ['Przychody', values.revenueGrosze],
+    ['Wpłacono', values.collectedGrosze],
+    ['Pozostało do zapłaty', values.outstandingGrosze],
+    ['Do sprawdzenia', values.verificationGrosze],
+    ['Wydatki', values.expensesGrosze],
+    ['Dochód', values.incomeGrosze],
   ]
   return (
     <section className="finance-window__kpis" aria-label="Podsumowanie finansowe">
-      {items.map(([label, value, tone]) => (
-        <MoneyKpi key={label} label={label} grosze={value} tone={tone} />
+      {items.map(([label, value]) => (
+        <MoneyKpi key={label} label={label} grosze={value} />
       ))}
     </section>
   )

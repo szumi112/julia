@@ -25,15 +25,13 @@ const INVOICE_LABELS = Object.freeze({
   action_required: 'Wymaga wystawienia', issued: 'Wystawiona',
   not_issued: 'Niewystawiona', not_required: 'Nie wymaga', unknown: 'Do sprawdzenia',
 })
-const paymentTone = (id) => id === 'outstanding' ? 'amber' : 'sage'
-
-function MoneySplit({ title, rows, tone, toneFor }) {
+function MoneySplit({ title, rows }) {
   const maxValue = Math.max(...rows.map(({ value }) => Math.max(value, 0)), 1)
   return (
     <section className="card card--pad report-window__split" data-reveal>
       <h2 className="card-title">{title}</h2>
       {rows.length === 0 ? <p className="muted">Brak danych</p> : (
-        <dl>{rows.map(({ id, label, value }) => <div key={id}>
+        <dl className="report-window__rows">{rows.map(({ id, label, value }) => <div key={id}>
           <dt>{label}</dt>
           <dd>
             <span>{money(value)}</span>
@@ -41,7 +39,7 @@ function MoneySplit({ title, rows, tone, toneFor }) {
               <BarFill
                 segments={[{
                   value: Math.max(value, 0),
-                  color: `var(--${toneFor?.(id) ?? tone})`,
+                  color: 'var(--coral)',
                   label,
                 }]}
                 totalMax={maxValue}
@@ -180,22 +178,18 @@ export function ProtectedReports({ params = {} }) {
         <MoneySplit
           title="Przychody według specjalistki"
           rows={moneyRows(window.splits.specialist, (id) => specialistNames.get(id) ?? 'Nie ustalono')}
-          tone="coral"
         />
         <MoneySplit
           title="Przychody według usługi"
           rows={moneyRows(window.splits.service, (id) => SERVICE_BY_ID[id]?.label ?? 'Nie ustalono')}
-          tone="sky-deep"
         />
         <MoneySplit
           title="Płatności i zaległości"
           rows={moneyRows(window.splits.payment, (id) => PAYMENT_LABELS[id] ?? 'Nie ustalono')}
-          tone="sage"
-          toneFor={paymentTone}
         />
         <section className="card card--pad report-window__split" data-reveal>
           <h2 className="card-title">Faktury</h2>
-          <dl>{Object.entries(window.splits.invoice)
+          <dl className="activity-card-facts">{Object.entries(window.splits.invoice)
             .map(([id, value]) => ({ id, label: INVOICE_LABELS[id] ?? 'Do sprawdzenia', value }))
             .sort((left, right) => left.label.localeCompare(right.label, 'pl'))
             .map(({ id, label, value }) => <div key={id}>
@@ -205,7 +199,7 @@ export function ProtectedReports({ params = {} }) {
         </section>
         <section className="card card--pad report-window__split" data-reveal>
           <h2 className="card-title">TUS i angielski</h2>
-          <dl>{Object.entries(window.splits.program).map(([program, value]) => <div key={program}>
+          <dl className="activity-card-facts">{Object.entries(window.splits.program).map(([program, value]) => <div key={program}>
             <dt>{program === 'tus' ? 'TUS' : 'Angielski'}</dt>
             <dd>{money(value.revenueGrosze)} · {value.count} {plural(
               value.count, 'aktywność', 'aktywności', 'aktywności',
@@ -216,7 +210,7 @@ export function ProtectedReports({ params = {} }) {
 
       <section className="card card--pad report-window__coverage" data-reveal aria-labelledby="coverage-title">
         <h2 className="card-title" id="coverage-title">Pokrycie czasu i dat</h2>
-        <dl>
+        <dl className="activity-card-facts">
           <div><dt>Dokładna godzina</dt><dd>{window.coverage.timedCount}</dd></div>
           <div><dt>Godzina nieustalona</dt><dd>{window.coverage.dateOnlyCount}</dd></div>
           <div><dt>Dzień nieustalony</dt><dd>{window.coverage.monthOnlyCount}</dd></div>

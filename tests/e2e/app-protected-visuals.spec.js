@@ -47,7 +47,7 @@ test('@owner enriches protected Finanse without replacing its summary, tabs or l
   const backgrounds = await page.locator('.finance-window__kpi').evaluateAll((items) => (
     items.map((item) => getComputedStyle(item).backgroundColor)
   ))
-  expect(new Set(backgrounds).size).toBeGreaterThanOrEqual(4)
+  expect(new Set(backgrounds).size).toBe(1)
   await expect(page.locator('.finance-window__kpi strong').first()).toHaveText(/zł/)
   await expect(page.locator('.finance-window__table')).toBeVisible()
 })
@@ -66,6 +66,13 @@ test('@owner adds a chart to protected Raporty while retaining its trend table a
   await expect(page.getByRole('heading', { name: 'Przychody według specjalistki' }))
     .toBeVisible()
   await expect(page.getByRole('heading', { name: 'Pokrycie czasu i dat' })).toBeVisible()
+  const surfaces = await page.locator('.report-window .card').evaluateAll((cards) => (
+    cards.map((card) => {
+      const style = getComputedStyle(card)
+      return `${style.backgroundColor} ${style.borderTopColor} ${style.borderTopWidth}`
+    })
+  ))
+  expect(new Set(surfaces).size).toBe(1)
 })
 
 test('@owner aligns Registry header, navigation and cards with protected finance surfaces', async ({ page }) => {
@@ -260,7 +267,7 @@ test('@owner gives protected Team avatars a visible surface and readable initial
   expect(colors.shadow).toBe('none')
 })
 
-test('@specialist own payments render toned, readable KPI cards', async ({ page }) => {
+test('@specialist own payments render readable KPI cards on one neutral surface', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto('./#/payments')
 
@@ -271,5 +278,5 @@ test('@specialist own payments render toned, readable KPI cards', async ({ page 
   const backgrounds = await kpis.evaluateAll((items) => (
     items.map((item) => getComputedStyle(item).backgroundColor)
   ))
-  expect(new Set(backgrounds).size).toBe(3)
+  expect(new Set(backgrounds).size).toBe(1)
 })
