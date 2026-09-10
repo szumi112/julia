@@ -73,6 +73,12 @@ test('@owner adds a chart to protected Raporty while retaining its trend table a
     })
   ))
   expect(new Set(surfaces).size).toBe(1)
+  expect(await page.locator('.report-window .chart-frame').evaluate((element) => (
+    getComputedStyle(element).backgroundImage
+  ))).toBe('none')
+  await expect(page.locator('.report-window__split', {
+    has: page.getByRole('heading', { name: 'Faktury' }),
+  })).toContainText('Brak danych')
 })
 
 test('@owner aligns Registry header, navigation and cards with protected finance surfaces', async ({ page }) => {

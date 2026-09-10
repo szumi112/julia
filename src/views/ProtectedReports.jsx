@@ -189,13 +189,15 @@ export function ProtectedReports({ params = {} }) {
         />
         <section className="card card--pad report-window__split" data-reveal>
           <h2 className="card-title">Faktury</h2>
-          <dl className="activity-card-facts">{Object.entries(window.splits.invoice)
-            .map(([id, value]) => ({ id, label: INVOICE_LABELS[id] ?? 'Do sprawdzenia', value }))
-            .sort((left, right) => left.label.localeCompare(right.label, 'pl'))
-            .map(({ id, label, value }) => <div key={id}>
-            <dt>{label}</dt>
-            <dd>{value.count} · {money(value.revenueGrosze)}</dd>
-          </div>)}</dl>
+          {Object.keys(window.splits.invoice).length === 0 ? <p className="muted">Brak danych</p> : (
+            <dl className="activity-card-facts">{Object.entries(window.splits.invoice)
+              .map(([id, value]) => ({ id, label: INVOICE_LABELS[id] ?? 'Do sprawdzenia', value }))
+              .sort((left, right) => left.label.localeCompare(right.label, 'pl'))
+              .map(({ id, label, value }) => <div key={id}>
+              <dt>{label}</dt>
+              <dd>{value.count} · {money(value.revenueGrosze)}</dd>
+            </div>)}</dl>
+          )}
         </section>
         <section className="card card--pad report-window__split" data-reveal>
           <h2 className="card-title">TUS i angielski</h2>
