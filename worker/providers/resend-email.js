@@ -96,8 +96,8 @@ const paragraph = (inner) => `<p style="margin:0 0 14px;font-family:${BRAND.sans
   + `font-size:15px;line-height:1.65;color:${BRAND.inkSoft};text-align:center;">${inner}</p>`
 
 const codePanel = (code) => '<table role="presentation" width="100%" cellpadding="0" '
-  + 'cellspacing="0" border="0" style="margin:4px 0 18px;"><tr><td align="center" '
-  + `style="background:${BRAND.coralGhost};border-radius:12px;padding:26px 16px;">`
+  + 'cellspacing="0" border="0" style="margin:2px 0 14px;"><tr><td align="center" '
+  + `style="background:${BRAND.coralGhost};border-radius:12px;padding:22px 16px;">`
   + `<div style="font-family:${BRAND.serif};font-size:34px;font-weight:700;`
   + `letter-spacing:0.22em;color:${BRAND.ink};">${code}</div>`
   + '</td></tr></table>'
@@ -132,7 +132,29 @@ const brandStripe = () => '<tr><td style="padding:0;"><table role="presentation"
   )).join('')
   + '</tr></table></td></tr>'
 
-function emailDocument({ title, heading, body, footnote }) {
+const preheaderBlock = (text) => '<div style="display:none;max-height:0;overflow:hidden;'
+  + `mso-hide:all;font-size:1px;line-height:1px;color:${BRAND.paper};opacity:0;">`
+  + `${text}</div>`
+
+const logoHeader = () => `<tr><td align="center" style="background:${BRAND.ink};`
+  + 'padding:30px 24px 26px;">'
+  + `<img src="${LOGO}" width="132" alt="Bear with me" `
+  + 'style="display:block;width:132px;max-width:132px;height:auto;border:0;'
+  + `color:#ffffff;font-family:${BRAND.sans};font-size:15px;font-weight:700;"></td></tr>`
+
+const darkFooter = (footnote) => `<tr><td align="center" style="background:${BRAND.ink};`
+  + `padding:24px 32px 26px;font-family:${BRAND.sans};font-size:12px;line-height:1.6;`
+  + 'color:#ccc3e2;text-align:center;">'
+  + `<img src="${LOGO}" width="116" alt="Bear with me" `
+  + 'style="display:block;margin:0 auto 12px;width:116px;max-width:116px;height:auto;border:0;'
+  + `color:#ffffff;font-family:${BRAND.sans};font-size:14px;font-weight:700;">`
+  + `${footnote}</td></tr>`
+
+const paperFooter = (footnote) => `<tr><td align="center" style="background:${BRAND.paper};`
+  + `padding:18px 32px 20px;border-top:1px solid ${BRAND.line};font-family:${BRAND.sans};`
+  + `font-size:12px;line-height:1.6;color:${BRAND.inkFaint};text-align:center;">${footnote}</td></tr>`
+
+function emailDocument({ title, heading, body, footnote, preheader = '', compact = false }) {
   return [
     '<!doctype html><html lang="pl"><head><meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width,initial-scale=1">',
@@ -141,25 +163,20 @@ function emailDocument({ title, heading, body, footnote }) {
     `<style>.bwm-link:hover{text-decoration:underline !important;color:${BRAND.inkSoft} !important}`,
     '</style></head>',
     `<body style="margin:0;padding:0;background:${BRAND.paper};">`,
+    preheader ? preheaderBlock(preheader) : '',
     '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" ',
     `style="background:${BRAND.paper};"><tr><td align="center" style="padding:32px 16px;">`,
     '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" ',
     `style="width:100%;max-width:600px;background:${BRAND.surface};`,
     `border:1px solid ${BRAND.line};border-radius:16px;overflow:hidden;">`,
-    `<tr><td align="center" style="background:${BRAND.ink};padding:30px 24px 26px;">`,
-    `<img src="${LOGO}" width="132" alt="Bear with me" `,
-    'style="display:block;width:132px;max-width:132px;height:auto;border:0;',
-    `color:#ffffff;font-family:${BRAND.sans};font-size:15px;font-weight:700;">`,
-    '</td></tr>',
+    compact ? '' : logoHeader(),
     brandStripe(),
-    '<tr><td align="center" style="padding:32px 32px 28px;">',
+    `<tr><td align="center" style="padding:${compact ? '24px 32px 22px' : '32px 32px 28px'};">`,
     `<h1 style="margin:0 0 14px;font-family:${BRAND.serif};font-size:21px;font-weight:700;`,
     `line-height:1.3;color:${BRAND.ink};text-align:center;">${heading}</h1>`,
     body,
     '</td></tr>',
-    `<tr><td align="center" style="background:${BRAND.paper};padding:18px 32px 20px;`,
-    `border-top:1px solid ${BRAND.line};font-family:${BRAND.sans};font-size:12px;`,
-    `line-height:1.6;color:${BRAND.inkFaint};text-align:center;">${footnote}</td></tr>`,
+    compact ? darkFooter(footnote) : paperFooter(footnote),
     '</table></td></tr></table></body></html>',
   ].join('')
 }
@@ -213,10 +230,12 @@ function otpContent(otp) {
     html: emailDocument({
       title: 'Kod logowania do Bear with me',
       heading: 'Twój kod logowania',
+      preheader: `Kod logowania: ${htmlOtp} - ważny 5 minut, do jednorazowego użycia.`,
+      compact: true,
       body: [
-        paragraph('Wpisz ten kod w panelu Bear with me, aby dokończyć logowanie.'),
         codePanel(htmlOtp),
-        paragraph('Kod jest ważny przez 5 minut i można go użyć tylko raz.'),
+        paragraph('Wpisz ten kod w panelu Bear with me, aby dokończyć logowanie. '
+          + 'Kod jest ważny przez 5 minut i można go użyć tylko raz.'),
       ].join(''),
       footnote: 'Nie przekazuj tego kodu nikomu. Jeśli to nie Ty próbujesz się zalogować, '
         + 'zignoruj tę wiadomość - bez kodu nikt nie wejdzie do panelu.',
