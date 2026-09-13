@@ -9,25 +9,25 @@ test('exposes one pure shell route authority contract', () => {
 })
 
 const demoContext = (roleId) => ({ appMode: 'demo', roleId, capabilities: [] })
-const appContext = (capabilities) => ({ appMode: 'app', roleId: 'owner', capabilities })
+const appContext = (capabilities, roleId = 'owner') => ({ appMode: 'app', roleId, capabilities })
 
 test('preserves the exact demo role navigation including detail routes', () => {
   const expectations = {
     owner: [
       'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'team',
-      'psych', 'payments', 'reports', 'settings',
+      'psych', 'payments', 'reports', 'settings', 'profile',
     ],
     coordinator: [
       'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup',
-      'payments', 'settings',
+      'payments', 'settings', 'profile',
     ],
     therapist: [
-      'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'settings',
+      'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'settings', 'profile',
     ],
   }
   const routes = [
     'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'team',
-    'psych', 'payments', 'ledger', 'reports', 'settings', 'unknown',
+    'psych', 'payments', 'ledger', 'reports', 'settings', 'profile', 'unknown',
   ]
 
   for (const [roleId, accessible] of Object.entries(expectations)) {
@@ -50,32 +50,39 @@ test('maps every rendered protected route to capabilities instead of role labels
         'client.operational.read',
         'specialist.directory.read',
       ],
-      accessible: ['dashboard', 'calendar', 'clients', 'client', 'payments', 'settings'],
+      accessible: [
+        'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'english',
+        'payments', 'profile',
+      ],
     },
     {
       capabilities: ['tus.manage'],
-      accessible: ['tus', 'tusGroup', 'english', 'settings'],
+      accessible: ['profile'],
     },
     {
       capabilities: ['staff.manage'],
-      accessible: ['team', 'psych', 'settings'],
+      accessible: ['team', 'psych', 'profile'],
+    },
+    {
+      capabilities: ['permissions.manage'],
+      accessible: ['team', 'profile'],
     },
     {
       capabilities: ['appointment.charge.read'],
-      accessible: ['payments', 'settings'],
+      accessible: ['payments', 'profile'],
     },
     {
       capabilities: ['finance.centre.read'],
-      accessible: ['payments', 'ledger', 'reports', 'settings'],
+      accessible: ['payments', 'ledger', 'reports', 'profile'],
     },
     {
       capabilities: [],
-      accessible: ['settings'],
+    accessible: ['profile'],
     },
   ]
   const routes = [
     'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'team',
-    'psych', 'payments', 'ledger', 'reports', 'settings', 'english', 'unknown',
+    'psych', 'payments', 'ledger', 'reports', 'settings', 'profile', 'english', 'unknown',
   ]
 
   for (const { capabilities, accessible } of cases) {
@@ -91,6 +98,13 @@ test('maps every rendered protected route to capabilities instead of role labels
   assert.equal(
     shellRouting.canAccessShellRoute(
       { appMode: 'app', roleId: 'coordinator', capabilities: ['staff.manage'] },
+      'team',
+    ),
+    true,
+  )
+  assert.equal(
+    shellRouting.canAccessShellRoute(
+      { appMode: 'app', roleId: 'owner', capabilities: ['permissions.manage'] },
       'team',
     ),
     true,
@@ -115,13 +129,13 @@ test('selects the first accessible top-level route in product navigation order',
   )
   assert.equal(
     shellRouting.firstAccessibleShellRoute(appContext(['tus.manage'])),
-    'tus',
+    'profile',
   )
   assert.equal(
     shellRouting.firstAccessibleShellRoute(appContext(['finance.centre.read'])),
     'payments',
   )
-  assert.equal(shellRouting.firstAccessibleShellRoute(appContext([])), 'settings')
+  assert.equal(shellRouting.firstAccessibleShellRoute(appContext([])), 'profile')
 })
 
 test('keeps an accessible requested route and rejects direct or programmatic unknown routes', () => {
@@ -138,6 +152,32 @@ test('keeps an accessible requested route and rejects direct or programmatic unk
     { name: 'payments' },
   )
   assert.equal(shellRouting.canAccessShellRoute(context, 'unknown'), false)
+})
+
+test('falls back from protected settings to the profile when no settings section is available', () => {
+  assert.deepEqual(
+    shellRouting.resolveShellRoute(appContext(['tus.manage']), { name: 'settings' }),
+    { name: 'profile' },
+  )
+  assert.deepEqual(
+    shellRouting.resolveShellRoute(appContext(['staff.manage']), { name: 'settings' }),
+    { name: 'profile' },
+  )
+})
+
+test('protected data security settings belong only to an owner with health access', () => {
+  assert.equal(
+    shellRouting.canAccessShellRoute(appContext(['operations.health.read'], 'owner'), 'settings'),
+    true,
+  )
+  for (const roleId of ['coordinator', 'specialist']) {
+    const context = appContext(['operations.health.read'], roleId)
+    assert.equal(shellRouting.canAccessShellRoute(context, 'settings'), false)
+    assert.deepEqual(
+      shellRouting.resolveShellRoute(context, { name: 'settings', params: { section: 'security' } }),
+      { name: 'profile' },
+    )
+  }
 })
 
 test('fails closed when the mode, demo role, or capability set is malformed', () => {

@@ -599,7 +599,8 @@ describe('core record version encryption', () => {
     id: 'apt_version_appointment', clientId: client.id, specialistId: 'sp_version_specialist',
     serviceId: 'zajecia', startsAt: now, endsAt: '2026-08-04T10:50:00.000Z',
     timeZone: 'Europe/Warsaw', location: null, status: 'completed', source: 'panel',
-    version: 2, cancelledAt: null, createdAt: now, updatedAt: now,
+    version: 2, cancelledAt: null, cancellationReason: null,
+    createdAt: now, updatedAt: now,
     paymentAggregate: { status: 'partial', collectedGrosze: 5000, outstandingGrosze: 13000 },
   }
   const charge = {
@@ -622,10 +623,10 @@ describe('core record version encryption', () => {
         startsAt: now, updatedAt: now, version: 1,
       }],
       ['appointment', appointment, 'ver_version_appointment', {
-        cancelledAt: null, clientId: client.id, createdAt: now,
+        cancelledAt: null, cancellationReason: null, clientId: client.id, createdAt: now,
         endsAt: '2026-08-04T10:50:00.000Z', id: appointment.id, location: null,
         paymentAggregate: { collectedGrosze: 5000, outstandingGrosze: 13000, status: 'partial' },
-        schema: 'appointment.v1', serviceId: 'zajecia', source: 'panel',
+        schema: 'appointment.v2', serviceId: 'zajecia', source: 'panel',
         specialistId: 'sp_version_specialist', startsAt: now, status: 'completed',
         timeZone: 'Europe/Warsaw', updatedAt: now, version: 2,
       }],

@@ -2,6 +2,7 @@
 // or environment dependencies so route and repository code share one contract.
 import { SERVICE_BY_ID } from './services.js'
 import { isBillable } from './format.js'
+import { specialistAvatarKeyOrDefault } from './specialist-avatars.js'
 
 export const WARSAW_TIME_ZONE = 'Europe/Warsaw'
 export const MAX_GROSZE = 1_000_000
@@ -25,6 +26,7 @@ const timeIso = /^(\d{2}):(\d{2})$/
 const paymentAmount = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/
 const clientStatuses = new Set(['active', 'paused', 'archived'])
 const appointmentStatuses = new Set(['scheduled', 'completed', 'cancelled', 'noshow'])
+const appointmentCancellationReasons = new Set(['client', 'centre', 'late_paid'])
 const editableAppointmentStatuses = new Set(['scheduled', 'completed', 'noshow'])
 const methods = new Set(['cash', 'card', 'transfer', 'monthly'])
 const durations = new Set([50, 60, 90, 120])
@@ -118,11 +120,21 @@ export const assertServiceSnapshot = (value) => {
 }
 
 export const validateClientInput = (value) => {
-  assertExactObject(value, ['name', 'age', 'status', 'specialistId'])
+  if (!isExactObject(value, ['name', 'age', 'status', 'specialistId'])
+    && !isExactObject(value, [
+      'name', 'age', 'status', 'specialistId', 'assignmentStartsAt',
+    ])) fail('object')
   const identity = assertClientIdentity({ name: value.name, age: value.age })
   assertClientStatus(value.status)
   assertId(value.specialistId, 'specialist')
-  return { ...identity, status: value.status, specialistId: value.specialistId }
+  const assignmentStartsAt = value.assignmentStartsAt === undefined
+    || value.assignmentStartsAt === null
+    ? null
+    : assertCanonicalUtc(value.assignmentStartsAt, 'assignmentStartsAt')
+  return {
+    ...identity, status: value.status, specialistId: value.specialistId,
+    assignmentStartsAt,
+  }
 }
 
 export const assertClientStatus = (value, { archivable = false } = {}) => {
@@ -140,6 +152,11 @@ export const assertClientStatusTransition = (from, to) => {
 
 export const assertAppointmentStatus = (value, { cancellation = false } = {}) => {
   if (!appointmentStatuses.has(value) || (value === 'cancelled' && !cancellation)) fail('status')
+  return value
+}
+
+export const assertAppointmentCancellationReason = (value) => {
+  if (!appointmentCancellationReasons.has(value)) fail('cancellationReason')
   return value
 }
 
@@ -407,7 +424,10 @@ export const assertCorrection = (value) => {
   return { reason, reversedEntry, replacement }
 }
 
-export const paymentAggregate = ({ appointmentId, status, expectedAmountGrosze, paymentEntries, corrections }) => {
+export const paymentAggregate = ({
+  appointmentId, status, cancellationReason = null, expectedAmountGrosze,
+  paymentEntries, corrections,
+}) => {
   assertId(appointmentId, 'appointment')
   if (!appointmentStatuses.has(status)) fail('status')
   assertInteger(expectedAmountGrosze, 'expectedAmountGrosze', 1, MAX_GROSZE)
@@ -441,7 +461,7 @@ export const paymentAggregate = ({ appointmentId, status, expectedAmountGrosze, 
   const collectedGrosze = effective.reduce((total, entry) => total + entry.amountGrosze, 0)
   if (collectedGrosze > expectedAmountGrosze) fail('amountGrosze', 'PAYMENT_AMOUNT_CONFLICT')
   const latest = effective.toSorted((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.id.localeCompare(b.id)).at(-1) ?? null
-  if (!isBillable({ status })) {
+  if (!isBillable({ status, cancellationReason })) {
     if (collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
     return { status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 0, latestMethod: null, latestReceivedAt: null }
   }
@@ -484,11 +504,9 @@ export const specialistDto = (specialist) => {
     'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
     'version', 'staffVersion',
   ]
-  try {
-    assertExactObject(specialist, keys, 'specialist')
-  } catch {
-    assertExactObject(specialist, [...keys, 'accessStatus'], 'specialist')
-  }
+  if (![keys, [...keys, 'avatarKey'], [...keys, 'accessStatus'],
+    [...keys, 'avatarKey', 'accessStatus']]
+    .some((expected) => isExactObject(specialist, expected))) fail('specialist')
   assertId(specialist.id, 'specialist')
   assertNfcTrimmed(specialist.displayName, { field: 'displayName', minBytes: 1, maxBytes: 120 })
   assertProfessionalTitle(specialist.professionalTitle)
@@ -500,11 +518,14 @@ export const specialistDto = (specialist) => {
   }
   if (Object.hasOwn(specialist, 'accessStatus')
     && !['unclaimed', 'invited', 'enabled'].includes(specialist.accessStatus)) fail('specialist')
-  return { ...specialist }
+  let avatarKey
+  try { avatarKey = specialistAvatarKeyOrDefault(specialist.avatarKey) }
+  catch { fail('avatarKey') }
+  return { ...specialist, avatarKey }
 }
 
 export const appointmentDto = (appointment) => {
-  assertExactObject(appointment, ['id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone', 'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt', 'charge', 'paymentEntries', 'corrections'], 'appointment')
+  assertExactObject(appointment, ['id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone', 'location', 'status', 'source', 'version', 'cancelledAt', 'cancellationReason', 'createdAt', 'updatedAt', 'charge', 'paymentEntries', 'corrections'], 'appointment')
   assertId(appointment.id, 'appointment')
   assertId(appointment.clientId, 'client')
   assertId(appointment.specialistId, 'specialist')
@@ -516,6 +537,10 @@ export const appointmentDto = (appointment) => {
   assertAppointmentStatus(appointment.status, { cancellation: true })
   if ((appointment.status === 'cancelled') !== (appointment.cancelledAt !== null)) fail('appointment')
   if (appointment.cancelledAt !== null) assertCanonicalUtc(appointment.cancelledAt, 'cancelledAt')
+  if (appointment.status !== 'cancelled' && appointment.cancellationReason !== null) fail('appointment')
+  if (appointment.cancellationReason !== null) {
+    assertAppointmentCancellationReason(appointment.cancellationReason)
+  }
   assertInteger(appointment.version, 'version', 1, Number.MAX_SAFE_INTEGER)
   assertCanonicalUtc(appointment.createdAt, 'createdAt')
   assertCanonicalUtc(appointment.updatedAt, 'updatedAt')
@@ -524,12 +549,12 @@ export const appointmentDto = (appointment) => {
   if (appointment.charge.serviceId !== appointment.serviceId || appointment.charge.currency !== 'PLN') fail('charge')
   assertInteger(appointment.charge.expectedAmountGrosze, 'expectedAmountGrosze', 1, MAX_GROSZE)
   assertInteger(appointment.charge.version, 'version', 1, Number.MAX_SAFE_INTEGER)
-  const payment = paymentAggregate({ appointmentId: appointment.id, status: appointment.status, expectedAmountGrosze: appointment.charge.expectedAmountGrosze, paymentEntries: appointment.paymentEntries, corrections: appointment.corrections })
+  const payment = paymentAggregate({ appointmentId: appointment.id, status: appointment.status, cancellationReason: appointment.cancellationReason, expectedAmountGrosze: appointment.charge.expectedAmountGrosze, paymentEntries: appointment.paymentEntries, corrections: appointment.corrections })
   const correctionsByEntry = new Map(appointment.corrections.map((correction) => [correction.reversedEntryId, correction]))
   const paymentEntries = appointment.paymentEntries
     .toSorted((a, b) => a.receivedAt.localeCompare(b.receivedAt) || a.id.localeCompare(b.id))
     .map((entry) => ({ id: entry.id, amountGrosze: entry.amountGrosze, method: entry.method, receivedAt: entry.receivedAt, correctedAt: correctionsByEntry.get(entry.id)?.createdAt ?? null, replacementEntryId: correctionsByEntry.get(entry.id)?.replacementEntryId ?? null }))
-  return { id: appointment.id, clientId: appointment.clientId, specialistId: appointment.specialistId, serviceId: appointment.serviceId, startsAt: appointment.startsAt, endsAt: appointment.endsAt, timeZone: appointment.timeZone, location: appointment.location, status: appointment.status, source: appointment.source, version: appointment.version, cancelledAt: appointment.cancelledAt, createdAt: appointment.createdAt, updatedAt: appointment.updatedAt, charge: { ...appointment.charge }, payment, paymentEntries }
+  return { id: appointment.id, clientId: appointment.clientId, specialistId: appointment.specialistId, serviceId: appointment.serviceId, startsAt: appointment.startsAt, endsAt: appointment.endsAt, timeZone: appointment.timeZone, location: appointment.location, status: appointment.status, source: appointment.source, version: appointment.version, cancelledAt: appointment.cancelledAt, cancellationReason: appointment.cancellationReason, createdAt: appointment.createdAt, updatedAt: appointment.updatedAt, charge: { ...appointment.charge }, payment, paymentEntries }
 }
 
 export const legacyClientProjection = (client) => ({ ...clientDto(client), email: '', phone: '', notes: [], familyId: null, familyRole: null, psychId: client.assignment?.specialistId ?? null })
@@ -544,7 +569,7 @@ export const safeValidationDetails = (run) => {
   try { run() } catch (error) {
     const [code, field] = String(error?.message ?? '').split('/')
     if (code !== 'VALIDATION_FAILED') return null
-    const allowed = new Set(['body', 'name', 'age', 'status', 'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes', 'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt', 'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to', 'specialists', 'clients', 'appointments', 'paymentEntries'])
+    const allowed = new Set(['body', 'name', 'age', 'status', 'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes', 'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt', 'paidDate', 'reason', 'cancellationReason', 'replacement', 'expectedVersion', 'from', 'to', 'specialists', 'clients', 'appointments', 'paymentEntries'])
     return allowed.has(field) ? { field } : null
   }
   return null

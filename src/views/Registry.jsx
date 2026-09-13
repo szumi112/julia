@@ -62,6 +62,16 @@ const decisionLabel = Object.freeze({
 })
 const continuationKey = () => `workbook-continue-${crypto.randomUUID()}`
 const voidKey = () => `finance-void-${crypto.randomUUID()}`
+const conciseSpecialistOptions = (options) => {
+  const totals = new Map()
+  const seen = new Map()
+  options.forEach(({ label }) => totals.set(label, (totals.get(label) ?? 0) + 1))
+  return options.map(({ id, label }) => {
+    const index = (seen.get(label) ?? 0) + 1
+    seen.set(label, index)
+    return { id, selectLabel: totals.get(label) > 1 ? `${label} (${index})` : label }
+  })
+}
 const dateTime = (value) => new Intl.DateTimeFormat('pl-PL', {
   dateStyle: 'medium', timeStyle: 'short', timeZone: 'Europe/Warsaw',
 }).format(new Date(value))
@@ -96,13 +106,6 @@ function ImportList({
               item.summary.duplicateCount, 'duplikat', 'duplikaty', 'duplikatów',
             )}
         </p>
-        <dl className="registry-provenance">
-          <div><dt>Id importu</dt><dd>{item.id}</dd></div>
-          <div><dt>Id artefaktu</dt><dd>{item.artifact.id}</dd></div>
-          <div><dt>Odcisk SHA-256</dt><dd>{item.artifact.fingerprint}</dd></div>
-          <div><dt>Rozmiar artefaktu</dt><dd>{item.artifact.byteSize.toLocaleString('pl-PL')} bajtów</dd></div>
-          <div><dt>Wersje</dt><dd>Parser {item.artifact.parserVersion} · materializator {item.artifact.materializerVersion}</dd></div>
-        </dl>
         {progress ? <div className="registry-progress">
           <progress
             aria-label={`Postęp importu z ${dateTime(item.createdAt)}`}
@@ -133,6 +136,32 @@ function ImportList({
       </div>
     </article>
   })}</div>
+}
+
+function ImportResume({
+  values, onContinue, continuing, canContinue, currentActorId, operationBusy, liveProgress, onProject,
+}) {
+  const active = values.find((item) => ['ready', 'materializing', 'conflicts'].includes(item.status))
+  const latest = active ?? values.find((item) => item.status === 'complete')
+  if (!latest) return null
+  const progress = workbookVisibleProgress(latest.progress, liveProgress, latest.id)
+  const mayOperate = canContinue && latest.createdByStaffId === currentActorId
+  return <section className="finance-workbook-tools__resume" aria-label="Bieżący import arkusza">
+    <div>
+      <h3>{active ? 'Import wymaga dokończenia' : 'Ostatnio wgrany arkusz'}</h3>
+      <p className="muted">{statusLabel[latest.status] ?? 'Stan nieustalony'}</p>
+      {progress ? <p className="muted" role="status">Przetworzono {progress.processed} z {progress.total} pozycji.</p> : null}
+    </div>
+    {mayOperate && active ? <Button
+      disabled={operationBusy}
+      onClick={() => onContinue(latest)}
+    >{continuing === latest.id ? 'Wczytywanie…'
+        : latest.status === 'conflicts' ? 'Rozstrzygnij przypisania' : 'Kontynuuj import'}</Button> : null}
+    {mayOperate && latest.status === 'complete' ? <Button
+      disabled={operationBusy}
+      onClick={() => onProject(latest)}
+    >Dokończ import klientów i zajęć</Button> : null}
+  </section>
 }
 
 function ExportList({ values }) {
@@ -227,7 +256,7 @@ function DetailItems({ detail, specialistNames }) {
   })}</div>
 }
 
-function ResolutionPanel({ flow, values, specialists, onChange, onSubmit, saving, locked, headingRef }) {
+function ResolutionPanel({ concise = false, flow, values, specialists, onChange, onSubmit, saving, locked, headingRef }) {
   const conflicts = values.filter(({ kind }) => (
     kind === 'specialist_mapping'
   ))
@@ -236,7 +265,8 @@ function ResolutionPanel({ flow, values, specialists, onChange, onSubmit, saving
   ]))
   const complete = conflicts.length > 0
     && conflicts.every(({ id }) => selected.has(id))
-  const specialistSelectOptions = specialistOptionsForSelect(specialists)
+  const specialistSelectOptions = concise
+    ? conciseSpecialistOptions(specialists) : specialistOptionsForSelect(specialists)
   return <section className="card card--pad registry-resolutions" aria-labelledby="registry-resolutions-title">
     <h2 className="card-title" id="registry-resolutions-title" ref={headingRef} tabIndex={-1}>Rozstrzygnij przypisania</h2>
     <p className="muted">Każdy konflikt wymaga jawnego przypisania aktywnej specjalistki.</p>
@@ -247,7 +277,7 @@ function ResolutionPanel({ flow, values, specialists, onChange, onSubmit, saving
       <p className="registry-resolutions__source">
         Wartość źródłowa: <strong>{conflict.sourceValue || 'brak nazwy'}</strong>
       </p>
-      <p>Identyfikator konfliktu: {conflict.id}</p>
+      {!concise ? <p>Identyfikator konfliktu: {conflict.id}</p> : null}
       <Field label={`Konflikt przypisania ${index + 1}`}>
         <select
           className="select"
@@ -301,10 +331,12 @@ function VoidDialog({ error, onConfirm, onClose, reason, setReason, saving, lock
   </dialog>
 }
 
-export function Registry({ params = {} }) {
+export function Registry({ embedded = false, params = {} }) {
   const { actor, authorityGeneration, capabilities } = useShell()
   const generation = authorityGeneration ?? 0
   const canContinue = canPerformAction(capabilities, 'finance.import.continue')
+  const canStartImport = canPerformAction(capabilities, 'finance.import.preview')
+    && canPerformAction(capabilities, 'finance.import.create')
   const [flow, dispatchFlow] = useReducer(
     workbookFlowReducer, generation, createWorkbookFlowState,
   )
@@ -463,7 +495,12 @@ export function Registry({ params = {} }) {
     setPage({ status: 'loading', data: null, error: '' })
     financeRepository.loadRegistryPage({ cursor, section }, { signal: controller.signal })
       .then((data) => { if (!controller.signal.aborted) setPage({ status: 'ready', data, error: '' }) })
-      .catch(() => { if (!controller.signal.aborted) setPage({ status: 'error', data: null, error: 'Nie udało się wczytać rejestru.' }) })
+      .catch((error) => {
+        if (controller.signal.aborted) return
+        if (error instanceof ApiError && error.code === 'NOT_FOUND') {
+          setPage({ status: 'unavailable', data: null, error: '' })
+        } else setPage({ status: 'error', data: null, error: 'Nie udało się wczytać rejestru.' })
+      })
     return () => controller.abort()
   }, [cursor, reloadToken, section])
 
@@ -522,6 +559,7 @@ export function Registry({ params = {} }) {
     mutationControllersRef.current.continuation = controller
     setContinuing(item.id)
     setPage((current) => ({ ...current, error: '' }))
+    setWorkflowError('')
     let transitionQueued = false
     try {
       const status = await financeRepository.getWorkbookImport(item.id, {
@@ -631,7 +669,7 @@ export function Registry({ params = {} }) {
           generation,
           errorCode: 'WORKBOOK_CONTINUE_FAILED',
         })
-        setPage((current) => ({ ...current, error: 'Nie udało się kontynuować importu.' }))
+        setWorkflowError('Nie udało się kontynuować importu. Spróbuj ponownie.')
       }
     } finally {
       if (mutationControllersRef.current.continuation === controller) {
@@ -795,8 +833,68 @@ export function Registry({ params = {} }) {
     refresh()
   }
 
+  if (embedded) return (
+    <details className="card card--pad finance-workbook-tools" data-reveal>
+      <summary>
+        <span>
+          <strong>Wgraj arkusz</strong>
+          <small>Wczytaj nowy lub poprawiony skoroszyt XLSX / Panel-v2.</small>
+        </span>
+      </summary>
+      <div className="finance-workbook-tools__body">
+        <p className="muted">Najpierw sprawdzimy plik. Dane zapiszą się dopiero po potwierdzeniu podglądu.</p>
+        {canStartImport ? <WorkbookImport
+          concise
+          flow={flow}
+          dispatchFlow={dispatchFlow}
+          generation={generation}
+          selectedFileRef={selectedFileRef}
+          onCommitted={handleCommitted}
+        /> : null}
+        {projectionImport && canContinue && projectionImport.createdByStaffId === actor?.id
+          ? <WorkbookProjectionReview
+            key={`${generation}:${projectionImport.id}`}
+            importId={projectionImport.id}
+            creatorId={actor.id}
+            quarantineCount={projectionImport.summary.quarantineCount}
+            disabled={operationBusy}
+          /> : null}
+        {flow.phase === 'needs-resolution' && resolutionCatalog ? <ResolutionPanel
+          concise
+          flow={flow}
+          values={resolutionCatalog.items}
+          specialists={resolutionCatalog.specialistOptions}
+          onChange={changeRecordedResolution}
+          onSubmit={recordResolutions}
+          saving={resolutionSaving}
+          locked={resolutionLocked}
+          headingRef={resolutionRef}
+        /> : null}
+        {page.status === 'loading' ? <p role="status">Sprawdzanie niedokończonych importów…</p> : null}
+        {page.status === 'ready' ? <ImportResume
+          values={page.data?.imports ?? []}
+          onContinue={continueImport}
+          onProject={setProjectionImport}
+          liveProgress={liveProgress}
+          continuing={continuing}
+          canContinue={canContinue}
+          currentActorId={actor?.id}
+          operationBusy={operationBusy}
+        /> : null}
+        {page.status === 'unavailable' ? <p className="muted" role="status">Import arkusza jest teraz niedostępny.</p> : null}
+        {page.status === 'error' ? <p className="form-error" role="alert">Nie udało się sprawdzić niedokończonych importów. <Button size="sm" variant="ghost" onClick={refresh}>Spróbuj ponownie</Button></p> : null}
+        {workflowError ? <p className="form-error" role="alert">{workflowError}</p> : null}
+      </div>
+    </details>
+  )
+
   return (
     <div className="registry-view" ref={revealRef}>
+      {page.status === 'unavailable' ? <EmptyState
+        icon="ledger"
+        title="Narzędzia arkusza są niedostępne"
+        hint="Import i eksport arkusza są dostępne tylko w środowisku testowym."
+      /> : <>
       <div className="view-head" data-reveal><div>
         <div className="eyebrow">Pochodzenie danych</div>
         <h1 className="display view-head__title" ref={resultRef} tabIndex={-1}>Rejestr <em>skoroszytów</em></h1>
@@ -932,6 +1030,7 @@ export function Registry({ params = {} }) {
         saving={voiding}
         locked={voidLocked}
       /> : null}
+      </>}
     </div>
   )
 }

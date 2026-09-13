@@ -37,6 +37,7 @@ export const PSYCHOLOGISTS = [
     room: 'Gabinet 1',
     rate: 180,
     weeklyCapacity: 20,
+    avatarKey: 'bloom',
   },
   {
     id: 'p2',
@@ -50,6 +51,7 @@ export const PSYCHOLOGISTS = [
     room: 'Gabinet 2',
     rate: 180,
     weeklyCapacity: 20,
+    avatarKey: 'cross',
   },
   {
     id: 'p3',
@@ -63,6 +65,7 @@ export const PSYCHOLOGISTS = [
     room: 'Gabinet 3',
     rate: 180,
     weeklyCapacity: 18,
+    avatarKey: 'orbit',
   },
   {
     id: 'p4',
@@ -76,13 +79,23 @@ export const PSYCHOLOGISTS = [
     room: 'Sala TUS',
     rate: 160,
     weeklyCapacity: 16,
+    avatarKey: 'wave',
   },
 ]
 
 export const DEMO_ROLES = [
-  { id: 'owner', label: 'Główna psycholożka', name: 'Anna Maria Janowska', psychId: 'p1', scope: 'centre' },
-  { id: 'coordinator', label: 'Koordynatorka', name: 'Julia Wolanin', psychId: null, scope: 'centre' },
-  { id: 'therapist', label: 'Specjalistka', name: 'Justyna Jarosz-Jarszewska', psychId: 'p2', scope: 'own' },
+  {
+    id: 'owner', label: 'Zarządzanie / Właścicielka', name: 'Anna Maria Janowska',
+    professionalTitle: 'Psycholożka', psychId: 'p1', scope: 'centre',
+  },
+  {
+    id: 'coordinator', label: 'Koordynacja i recepcja', name: 'Julia Wolanin',
+    professionalTitle: 'Koordynacja recepcji', psychId: null, scope: 'centre',
+  },
+  {
+    id: 'therapist', label: 'Prowadzenie terapii / Zespół terapeutyczny', name: 'Justyna Jarosz-Jarszewska',
+    professionalTitle: 'Psycholożka', psychId: 'p2', scope: 'own',
+  },
 ]
 
 const NOTE_POOL = [

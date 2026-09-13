@@ -14,6 +14,7 @@ import {
   resolveActor,
   resolveCurrentAuthorityActor,
 } from '../../worker/identity/staff.js'
+import { specialistSnapshotMatches } from '../../worker/identity/specialists.js'
 import { readWorkspace } from '../../worker/core/workspace.js'
 import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import {
@@ -25,6 +26,7 @@ import { createKeyring } from '../../worker/security/keyring.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
+  applyAuthenticationStageF,
   applySpecialistProfilesStageD,
   applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
@@ -70,6 +72,13 @@ describe('specialist profile creation', () => {
     await applyFinanceStageC()
     await applySpecialistProfilesStageD()
     await applyWorkbookRegistryStageE()
+    await env.DB.prepare(
+      `INSERT INTO specialists
+       (id,staff_user_id,display_name_envelope,professional_title_envelope,
+        standard_rate_grosze,status,version,archived_at,created_at,updated_at)
+       VALUES ('sp_legacy_avatar',NULL,'{}',NULL,18000,'archived',1,?,?,?)`,
+    ).bind(NOW, NOW, NOW).run()
+    await applyAuthenticationStageF()
     const keyring = await createKeyring(env, {
       activeDataKekVersion: 1,
       activeLookupKeyVersion: 1,
@@ -91,14 +100,73 @@ describe('specialist profile creation', () => {
     ).run()
   })
 
-  it('strictly validates the name, professional title and standard rate', () => {
+  it('adds a constrained plaintext avatar key with a bloom default', async () => {
+    const column = await env.DB.prepare(
+      "SELECT * FROM pragma_table_info('specialists') WHERE name='avatar_key'",
+    ).first()
+    expect(column).toMatchObject({
+      name: 'avatar_key', type: 'TEXT', notnull: 1, dflt_value: "'bloom'",
+    })
+    expect(await env.DB.prepare(
+      "SELECT avatar_key FROM specialists WHERE id='sp_legacy_avatar'",
+    ).first()).toEqual({ avatar_key: 'bloom' })
+    await expect(env.DB.prepare(
+      `INSERT INTO specialists
+       (id,staff_user_id,display_name_envelope,professional_title_envelope,
+        standard_rate_grosze,status,version,archived_at,created_at,updated_at,avatar_key)
+       VALUES ('sp_invalid_avatar',NULL,'{}',NULL,18000,'active',1,NULL,?,?,?)`,
+    ).bind(NOW, NOW, 'photo').run()).rejects.toThrow(/CHECK constraint failed/)
+  })
+
+  it('accepts a legacy specialist snapshot only while the migrated avatar is bloom', async () => {
+    const profile = await env.DB.prepare(
+      `SELECT id,staff_user_id,standard_rate_grosze,status,version,archived_at,
+              created_at,updated_at,avatar_key
+       FROM specialists WHERE id='sp_legacy_avatar'`,
+    ).first()
+    const snapshot = {
+      archivedAt: profile.archived_at,
+      createdAt: profile.created_at,
+      displayName: 'Archiwalna Fikcyjna',
+      id: profile.id,
+      professionalTitle: 'Specjalistka',
+      schema: 'specialist.v3',
+      staffUserId: profile.staff_user_id,
+      standardRateGrosze: profile.standard_rate_grosze,
+      status: profile.status,
+      updatedAt: profile.updated_at,
+      version: profile.version,
+    }
+    const record = {
+      id: 'ver_legacy_avatar',
+      entity_type: 'specialist',
+      entity_id: profile.id,
+      version: profile.version,
+      snapshot_envelope: await encrypted(
+        profile.id, 'record_version', JSON.stringify(snapshot),
+      ),
+      changed_by_staff_id: null,
+      changed_at: NOW,
+      correlation_id: CORRELATION_ID,
+    }
+    await expect(specialistSnapshotMatches(cryptoContext, record, profile)).resolves.toBe(true)
+    await expect(specialistSnapshotMatches(
+      cryptoContext, record, { ...profile, avatar_key: 'wave' },
+    )).resolves.toBe(false)
+  })
+
+  it('strictly validates the name, professional title, standard rate and avatar key', () => {
     expect(validateSpecialistProfileBody({
       displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
       standardRateGrosze: 18000,
     })).toEqual({
       displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
-      standardRateGrosze: 18000,
+      standardRateGrosze: 18000, avatarKey: 'bloom',
     })
+    expect(validateSpecialistProfileBody({
+      displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
+      standardRateGrosze: 18000, avatarKey: 'orbit',
+    }).avatarKey).toBe('orbit')
     for (const value of [
       { displayName: '', professionalTitle: 'Specjalistka', standardRateGrosze: 18000 },
       { displayName: ' Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000 },
@@ -106,6 +174,7 @@ describe('specialist profile creation', () => {
       { displayName: 'Anna Janowska', professionalTitle: ' Specjalistka', standardRateGrosze: 18000 },
       { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka\u0000', standardRateGrosze: 18000 },
       { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 0 },
+      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, avatarKey: 'photo' },
       { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, email: 'x@example.test' },
     ]) expect(() => validateSpecialistProfileBody(value)).toThrow('VALIDATION_FAILED')
   })
@@ -122,7 +191,7 @@ describe('specialist profile creation', () => {
       nowMs: NOW_MS, correlationId: CORRELATION_ID, idFactory: () => generated.shift(),
       body: {
         displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18000,
+        standardRateGrosze: 18000, avatarKey: 'orbit',
       },
       idempotencyKey: 'profile-create-one',
     })
@@ -130,6 +199,7 @@ describe('specialist profile creation', () => {
     expect(result).toEqual({ status: 201, body: { data: { specialist: {
       id: 'sp_profile_one', displayName: 'Anna Janowska',
       professionalTitle: 'Specjalistka', standardRateGrosze: 18000,
+      avatarKey: 'orbit',
       status: 'active', version: 1, accessStatus: 'unclaimed',
       createdAt: NOW, updatedAt: NOW,
     } } } })
@@ -137,6 +207,7 @@ describe('specialist profile creation', () => {
       'SELECT * FROM specialists WHERE id=?',
     ).bind('sp_profile_one').first()
     expect(profile.staff_user_id).toBeNull()
+    expect(profile.avatar_key).toBe('orbit')
     expect(profile.display_name_envelope).not.toContain('Anna Janowska')
     expect(profile.professional_title_envelope).not.toContain('Specjalistka')
     expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
@@ -152,8 +223,8 @@ describe('specialist profile creation', () => {
       envelope: JSON.parse(profile.professional_title_envelope),
     })).rejects.toThrow()
     expect(await specialistSnapshotAt(profile.id, 1)).toMatchObject({
-      schema: 'specialist.v3', displayName: 'Anna Janowska',
-      professionalTitle: 'Specjalistka', version: 1,
+      schema: 'specialist.v4', displayName: 'Anna Janowska',
+      professionalTitle: 'Specjalistka', avatarKey: 'orbit', version: 1,
     })
     expect({
       staff: (await env.DB.prepare('SELECT count(*) AS count FROM staff_users').first()).count,
@@ -167,6 +238,26 @@ describe('specialist profile creation', () => {
       action: 'specialist.profile.created', entity_type: 'specialist',
       entity_id: 'sp_profile_one', metadata_json: '{"specialistVersion":1}',
     })
+  })
+
+  it('replays the normalized avatar selection and rejects a changed selection', async () => {
+    const command = {
+      db: env.DB, recoveryDb: env.DB, actor, keyring: cryptoContext.keyring,
+      nowMs: NOW_MS, correlationId: CORRELATION_ID,
+      idFactory: () => { throw new Error('id factory must not run on replay') },
+      body: {
+        displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
+        standardRateGrosze: 18000, avatarKey: 'orbit',
+      },
+      idempotencyKey: 'profile-create-one',
+    }
+    const replay = await createSpecialistProfile(command)
+    expect(replay.body.data.specialist).toMatchObject({
+      id: 'sp_profile_one', avatarKey: 'orbit', version: 1,
+    })
+    await expect(createSpecialistProfile({
+      ...command, body: { ...command.body, avatarKey: 'wave' },
+    })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
   })
 
   it('preserves an accepted display-name format character through v3 lifecycle reads', async () => {
@@ -235,6 +326,7 @@ describe('specialist profile creation', () => {
     expect(workspace.data.specialists).toContainEqual({
       id: 'sp_profile_one', displayName: 'Anna Janowska',
       professionalTitle: 'Specjalistka', standardRateGrosze: 18000,
+      avatarKey: 'orbit',
       status: 'active', version: 1,
       staffVersion: null, accessStatus: 'unclaimed',
     })
@@ -259,8 +351,8 @@ describe('specialist profile creation', () => {
       staff_user_id: result.data.staff.id, status: 'pending', version: 2,
     })
     expect(await specialistSnapshotAt('sp_profile_one', 2)).toMatchObject({
-      schema: 'specialist.v3', displayName: 'Anna Janowska',
-      professionalTitle: 'Specjalistka', status: 'pending', version: 2,
+      schema: 'specialist.v4', displayName: 'Anna Janowska',
+      professionalTitle: 'Specjalistka', avatarKey: 'orbit', status: 'pending', version: 2,
     })
     expect(await env.DB.prepare(
       `SELECT specialist_id,staff_user_id,lifecycle,changed_by_staff_id
@@ -384,28 +476,55 @@ describe('specialist profile creation', () => {
         displayName: 'Anna Janowska-Kowalska',
         professionalTitle: 'Psycholożka',
         standardRateGrosze: 19000,
+        avatarKey: 'wave',
       },
       idempotencyKey: 'profile-edit-one',
     })
     expect(result.body.data.specialist).toMatchObject({
       id: 'sp_profile_one', displayName: 'Anna Janowska-Kowalska',
       professionalTitle: 'Psycholożka', standardRateGrosze: 19000,
+      avatarKey: 'wave',
       version: 3, accessStatus: 'invited',
     })
     const encryptedProfile = await env.DB.prepare(
-      'SELECT professional_title_envelope FROM specialists WHERE id=?',
+      'SELECT professional_title_envelope,avatar_key FROM specialists WHERE id=?',
     ).bind('sp_profile_one').first()
     expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
       expectedScope: SCOPE, recordId: 'sp_profile_one', field: 'professional_title',
       envelope: JSON.parse(encryptedProfile.professional_title_envelope),
     })).toBe('Psycholożka')
+    expect(encryptedProfile.avatar_key).toBe('wave')
     expect(await specialistSnapshotAt('sp_profile_one', 3)).toMatchObject({
-      schema: 'specialist.v3', displayName: 'Anna Janowska-Kowalska',
-      professionalTitle: 'Psycholożka', status: 'pending', version: 3,
+      schema: 'specialist.v4', displayName: 'Anna Janowska-Kowalska',
+      professionalTitle: 'Psycholożka', avatarKey: 'wave', status: 'pending', version: 3,
     })
     expect(await env.DB.prepare(
       'SELECT staff_user_id FROM specialists WHERE id=?',
     ).bind('sp_profile_one').first()).toEqual(before)
+  })
+
+  it('replays an avatar edit after the specialist version advances', async () => {
+    const command = {
+      db: env.DB, recoveryDb: env.DB, actor, keyring: cryptoContext.keyring,
+      nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: () => { throw new Error('id factory must not run on replay') },
+      specialistId: 'sp_profile_one',
+      body: {
+        expectedVersion: 2,
+        displayName: 'Anna Janowska-Kowalska',
+        professionalTitle: 'Psycholożka',
+        standardRateGrosze: 19000,
+        avatarKey: 'wave',
+      },
+      idempotencyKey: 'profile-edit-one',
+    }
+    const replay = await updateSpecialistProfile(command)
+    expect(replay.body.data.specialist).toMatchObject({
+      id: 'sp_profile_one', avatarKey: 'wave', version: 3,
+    })
+    await expect(updateSpecialistProfile({
+      ...command, body: { ...command.body, avatarKey: 'cross' },
+    })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
   })
 
   it('activates the invited account against the same edited profile', async () => {
@@ -440,8 +559,8 @@ describe('specialist profile creation', () => {
       version: 4,
     })
     expect(await specialistSnapshotAt('sp_profile_one', 4)).toMatchObject({
-      schema: 'specialist.v3', professionalTitle: 'Psycholożka',
-      status: 'active', version: 4,
+      schema: 'specialist.v4', professionalTitle: 'Psycholożka',
+      avatarKey: 'wave', status: 'active', version: 4,
     })
     expect((await env.DB.prepare(
       `SELECT lifecycle FROM specialist_account_links
@@ -473,7 +592,7 @@ describe('specialist profile creation', () => {
       version: 5,
     })
     expect(await specialistSnapshotAt('sp_profile_one', 5)).toMatchObject({
-      schema: 'specialist.v3', professionalTitle: 'Psycholożka',
+      schema: 'specialist.v4', professionalTitle: 'Psycholożka', avatarKey: 'wave',
       staffUserId: null, status: 'active', version: 5,
     })
     expect((await env.DB.prepare(
@@ -528,7 +647,7 @@ describe('specialist profile creation', () => {
     ])
   })
 
-  it('keeps the legacy generic specialist invitation compatible after stage D', async () => {
+  it('keeps the generic specialist invitation compatible with the avatar default', async () => {
     const result = await inviteStaff({
       db: env.DB, cryptoContext, actor,
       input: {
@@ -558,8 +677,8 @@ describe('specialist profile creation', () => {
       envelope: JSON.parse(profile.professional_title_envelope),
     })).toBe('Specjalistka')
     expect(await specialistSnapshotAt(profile.id, 1)).toMatchObject({
-      schema: 'specialist.v3', displayName: 'Maria Testowa',
-      professionalTitle: 'Specjalistka', version: 1,
+      schema: 'specialist.v4', displayName: 'Maria Testowa',
+      professionalTitle: 'Specjalistka', avatarKey: 'bloom', version: 1,
     })
   })
 

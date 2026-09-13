@@ -69,6 +69,24 @@ test('uses Better Auth reset and account-list contracts', async () => {
   ])
 })
 
+test('changes the current Better Auth password without requesting session revocation', async () => {
+  let request
+  const client = createAuthClient(async (url, init) => {
+    request = { url, init }
+    return jsonResponse({ success: true })
+  })
+
+  await client.changePassword('obecne-bardzo-dlugie', 'nowe-bardzo-dlugie')
+
+  assert.equal(request.url, '/api/auth/change-password')
+  assert.equal(request.init.method, 'POST')
+  assert.equal(request.init.credentials, 'same-origin')
+  assert.deepEqual(JSON.parse(request.init.body), {
+    currentPassword: 'obecne-bardzo-dlugie',
+    newPassword: 'nowe-bardzo-dlugie',
+  })
+})
+
 test('sends first password through the application CSRF boundary', async () => {
   let request
   const client = createAuthClient(async (url, init) => {

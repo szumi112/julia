@@ -3,6 +3,7 @@ import { Icon } from '../icons.jsx'
 import { addMonths, fmtMonthYear, fmtMoney, METHOD_LABELS } from '../format.js'
 import { routeHref } from '../routing.js'
 import { useApp } from '../store.jsx'
+import { ViewState } from '../ux-patterns.jsx'
 import { FinanceEntryActions } from './FinanceEntryActions.jsx'
 
 const SETTLEMENT_LABELS = Object.freeze({
@@ -11,23 +12,35 @@ const SETTLEMENT_LABELS = Object.freeze({
 
 export const activityMoney = (grosze) => grosze === null ? '—' : fmtMoney(grosze / 100)
 
-export function ActivityLoadState({ state, title }) {
+const activityUnavailableTitle = (title) => (
+  title === 'Angielski' ? 'Angielski jest teraz niedostępny' : `${title} są teraz niedostępne`
+)
+
+export function ActivityLoadState({ state, title, onRetry }) {
   if (state === 'ready') return null
   return (
-    <div>
-      <div className="view-head">
-        <h1 className="display view-head__title">{title}</h1>
-      </div>
-      <section role="status" aria-label="Stan danych zajęć">
-        <EmptyState
-          icon="group"
-          title={state === 'loading' ? 'Wczytywanie danych…' : 'Dane są teraz niedostępne'}
-          hint={state === 'loading'
-            ? 'Pobieramy kompletny wybrany miesiąc.'
-            : 'Nie pokazujemy ani nie edytujemy niepełnych danych.'}
-        />
-      </section>
-    </div>
+    <ViewState
+      tone={state === 'loading' ? 'loading' : 'error'}
+      icon="group"
+      title={state === 'loading' ? 'Wczytuję zajęcia…' : activityUnavailableTitle(title)}
+      hint={state === 'loading'
+        ? 'Pobieramy dane za wybrany miesiąc.'
+        : 'Nie udało się pobrać danych. Spróbuj ponownie.'}
+      action={state === 'unavailable' && onRetry ? <Button onClick={onRetry}>Spróbuj ponownie</Button> : null}
+    />
+  )
+}
+
+export function ActivityModuleEmpty({ program }) {
+  const english = program === 'english'
+  return (
+    <EmptyState
+      icon="group"
+      title={english ? 'Angielski nie jest teraz w Twoim zakresie' : 'Zajęcia TUS nie są teraz w Twoim zakresie'}
+      hint={english
+        ? 'Nie prowadzisz obecnie grupy angielskiego. Gdy dostaniesz przypisanie, zajęcia pojawią się tutaj.'
+        : 'Nie prowadzisz obecnie grupy TUS. Gdy dostaniesz przypisanie, zajęcia pojawią się tutaj.'}
+    />
   )
 }
 
@@ -46,6 +59,9 @@ export function ActivityMonthNav({ currentMonth, month, onChange }) {
           onClick={() => onChange(addMonths(month, 1))}
         />
       </div>
+      <span className="sr-only" aria-live="polite" aria-atomic="true">
+        Wybrano miesiąc: {fmtMonthYear(month)}
+      </span>
     </div>
   )
 }
@@ -101,7 +117,7 @@ export function ActivityChargeTable({ rows, english = false, month, titleId }) {
               {english && <td className="right num-cell">{row.lessonCount}</td>}
               <td className="right num-cell">{activityMoney(row.amountGrosze)}</td>
               <td>
-                <Pill tone={row.settlementStatus === 'paid' ? 'sage' : row.settlementStatus === 'partial' ? 'amber' : 'error'}>
+                <Pill tone={row.settlementStatus === 'paid' ? 'sage' : ['partial', 'unpaid'].includes(row.settlementStatus) ? 'amber' : 'ink'}>
                   {SETTLEMENT_LABELS[row.settlementStatus]}
                 </Pill>
               </td>

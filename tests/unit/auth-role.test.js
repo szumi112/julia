@@ -1,13 +1,41 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { shellRoleFor } from '../../src/auth-role.js'
+import {
+  accessPresentationFor,
+  ROLE_LABELS,
+  roleLabelFor,
+  rolePresentationFor,
+  shellRoleFor,
+} from '../../src/auth-role.js'
 
 const AUTHORIZATION_ERROR = 'AUTHORIZATION_INVALID'
+
+test('presents staff and team access states with matching labels and actions', () => {
+  assert.deepEqual(accessPresentationFor({ status: 'active' }), {
+    action: 'deactivate', label: 'Ma dostęp', tone: 'sage',
+  })
+  assert.deepEqual(accessPresentationFor({ status: 'pending' }), {
+    action: 'cancel', label: 'Zaproszenie wysłane', tone: 'amber',
+  })
+  assert.deepEqual(accessPresentationFor({ status: 'disabled' }), {
+    action: 'reinvite', label: 'Dostęp wyłączony', tone: 'ink',
+  })
+  assert.deepEqual(accessPresentationFor({ accessStatus: 'enabled' }), {
+    action: 'deactivate', label: 'Ma dostęp', tone: 'sage',
+  })
+  assert.deepEqual(accessPresentationFor({ accessStatus: 'invited' }), {
+    action: 'cancel', label: 'Zaproszenie wysłane', tone: 'amber',
+  })
+  assert.deepEqual(accessPresentationFor({ accessStatus: 'unclaimed' }), {
+    action: 'invite', label: 'Brak dostępu do panelu', tone: 'ink',
+  })
+})
 
 test('maps each accepted backend role to the exact shell role', () => {
   assert.deepEqual(shellRoleFor({
     id: 'stf_owner',
     displayName: 'Ola Właścicielka',
+    email: 'ola@example.test',
     professionalTitle: 'Psycholożka',
     role: 'owner',
     specialistId: 'sp_owner',
@@ -15,7 +43,7 @@ test('maps each accepted backend role to the exact shell role', () => {
   }), {
     authorityVersion: 7,
     id: 'owner',
-    label: 'Właściciel',
+    label: 'Zarządzanie / Właścicielka',
     name: 'Ola Właścicielka',
     professionalTitle: 'Psycholożka',
     psychId: 'sp_owner',
@@ -24,6 +52,7 @@ test('maps each accepted backend role to the exact shell role', () => {
   assert.deepEqual(shellRoleFor({
     id: 'stf_coordinator',
     displayName: 'Ela Koordynatorka',
+    email: 'ela@example.test',
     professionalTitle: null,
     role: 'coordinator',
     specialistId: null,
@@ -31,7 +60,7 @@ test('maps each accepted backend role to the exact shell role', () => {
   }), {
     authorityVersion: 4,
     id: 'coordinator',
-    label: 'Koordynator',
+    label: 'Koordynacja i recepcja',
     name: 'Ela Koordynatorka',
     professionalTitle: null,
     psychId: null,
@@ -40,6 +69,7 @@ test('maps each accepted backend role to the exact shell role', () => {
   assert.deepEqual(shellRoleFor({
     id: 'stf_specialist',
     displayName: 'Anna Specjalistka',
+    email: 'anna@example.test',
     professionalTitle: 'Specjalistka',
     role: 'specialist',
     specialistId: 'sp_specialist',
@@ -47,7 +77,7 @@ test('maps each accepted backend role to the exact shell role', () => {
   }), {
     authorityVersion: 9,
     id: 'therapist',
-    label: 'Specjalista',
+    label: 'Prowadzenie terapii / Zespół terapeutyczny',
     name: 'Anna Specjalistka',
     professionalTitle: 'Specjalistka',
     psychId: 'sp_specialist',
@@ -56,6 +86,7 @@ test('maps each accepted backend role to the exact shell role', () => {
   assert.deepEqual(shellRoleFor({
     id: `stf_${'a'.repeat(124)}`,
     displayName: 'Anna Graniczna',
+    email: `${'a'.repeat(241)}@example.test`,
     professionalTitle: 'x'.repeat(120),
     role: 'specialist',
     specialistId: `sp_${'a'.repeat(125)}`,
@@ -63,7 +94,7 @@ test('maps each accepted backend role to the exact shell role', () => {
   }), {
     authorityVersion: 1,
     id: 'therapist',
-    label: 'Specjalista',
+    label: 'Prowadzenie terapii / Zespół terapeutyczny',
     name: 'Anna Graniczna',
     professionalTitle: 'x'.repeat(120),
     psychId: `sp_${'a'.repeat(125)}`,
@@ -71,8 +102,26 @@ test('maps each accepted backend role to the exact shell role', () => {
   })
 })
 
+test('formats neutral role labels and prefers a person professional title', () => {
+  assert.deepEqual(ROLE_LABELS, {
+    owner: 'Zarządzanie / Właścicielka',
+    coordinator: 'Koordynacja i recepcja',
+    specialist: 'Prowadzenie terapii / Zespół terapeutyczny',
+  })
+  assert.equal(roleLabelFor('therapist'), 'Prowadzenie terapii / Zespół terapeutyczny')
+  assert.equal(roleLabelFor('unknown'), 'Rola niedostępna')
+  assert.equal(
+    rolePresentationFor({ role: 'specialist', professionalTitle: 'Psycholożka' }),
+    'Psycholożka',
+  )
+  assert.equal(
+    rolePresentationFor({ id: 'coordinator', professionalTitle: null }),
+    'Koordynacja i recepcja',
+  )
+})
+
 test('fails closed with one fixed authorization error for malformed actors', () => {
-  const valid = { id: 'stf_owner', displayName: 'Anna Nowak', professionalTitle: null, role: 'owner', specialistId: null, version: 1 }
+  const valid = { id: 'stf_owner', displayName: 'Anna Nowak', email: 'anna@example.test', professionalTitle: null, role: 'owner', specialistId: null, version: 1 }
   const invalidActors = [
     null,
     [],
@@ -92,6 +141,10 @@ test('fails closed with one fixed authorization error for malformed actors', () 
     { ...valid, professionalTitle: 'x'.repeat(121) },
     { ...valid, professionalTitle: 'Specjalistka' },
     { ...valid, specialistId: 'sp_owner_profile' },
+    { ...valid, email: 'Anna@Example.test' },
+    { ...valid, email: ' anna@example.test' },
+    { ...valid, email: 'anna..nowak@example.test' },
+    { ...valid, email: `${'a'.repeat(242)}@example.test` },
     { ...valid, version: 0 },
     { ...valid, version: 1.5 },
     { ...valid, extra: true },
@@ -112,6 +165,7 @@ test('contains throwing actor accessors and proxies as the same authorization er
   const rawSecret = 'actor-getter anna@example.test'
   const actorWithGetter = {
     id: 'stf_owner',
+    email: 'anna@example.test',
     professionalTitle: null,
     role: 'owner',
     specialistId: null,
@@ -139,7 +193,7 @@ test('contains throwing actor accessors and proxies as the same authorization er
 })
 
 test('freezes the exact shell projection and exposes authority revision changes', () => {
-  const actor = { id: 'stf_owner', displayName: 'Ola', professionalTitle: null, role: 'owner', specialistId: null, version: 2 }
+  const actor = { id: 'stf_owner', displayName: 'Ola', email: 'ola@example.test', professionalTitle: null, role: 'owner', specialistId: null, version: 2 }
   const first = shellRoleFor(actor)
   const second = shellRoleFor({ ...actor, version: 3 })
   assert.equal(Object.isFrozen(first), true)
@@ -152,6 +206,7 @@ test('keeps an owner with a professional profile centre-scoped and presents the 
   const role = shellRoleFor({
     id: 'stf_julia',
     displayName: 'Julia Wolanin',
+    email: 'julia@example.test',
     professionalTitle: 'Specjalistka',
     role: 'owner',
     specialistId: 'sp_julia',
@@ -162,6 +217,6 @@ test('keeps an owner with a professional profile centre-scoped and presents the 
   assert.equal(role.scope, 'centre')
   assert.equal(role.psychId, 'sp_julia')
   assert.equal(role.professionalTitle, 'Specjalistka')
-  assert.equal(role.label, 'Właściciel')
+  assert.equal(role.label, 'Zarządzanie / Właścicielka')
   assert.equal(Object.isFrozen(role), true)
 })

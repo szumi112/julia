@@ -41,49 +41,85 @@ test('@owner orders protected Team by professional name and presents Julia witho
   expect(names).toContain('Julia Wolanin')
   await expect(julia).toContainText('Specjalistka')
   await expect(julia).toContainText(/180\s*zł \/ sesja/)
-  await expect(julia).toContainText('Dostęp aktywny')
+  await expect(julia).toContainText('Ma dostęp')
   await expect(julia).not.toContainText('Właściciel')
 })
 
 test('@owner creates, edits, and invites one stable specialist profile', async ({ page }) => {
+  const profilePayloads = []
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && /^\/api\/v1\/specialists(?:\/[^/]+\/edits)?$/.test(new URL(request.url()).pathname)) {
+      profilePayloads.push(JSON.parse(request.postData()))
+    }
+  })
   await page.goto('.')
   await page.getByRole('navigation', { name: 'Nawigacja główna' })
     .getByRole('link', { name: 'Zespół' })
     .click()
+  await expect(page.getByText(
+    'Profil specjalistki i dostęp do panelu tworzysz osobno.',
+    { exact: true },
+  )).toBeVisible()
 
   await page.getByRole('button', { name: 'Dodaj specjalistkę' }).click()
   const createDialog = page.getByRole('dialog', { name: 'Dodaj profil specjalistki' })
-  await createDialog.getByLabel('Imię i nazwisko').fill('Anna Janowska')
+  await expect(createDialog).toContainText('Klientów i sesje przypiszesz jej, gdy przyjmie zaproszenie do panelu.')
+  await expect(createDialog.getByRole('button', { name: 'Dodaj specjalistkę' })).toBeVisible()
+  await expect(createDialog.getByRole('button', { name: 'Zamknij' })).toHaveCount(2)
   await expect(createDialog.getByLabel('Tytuł zawodowy')).toHaveValue('Specjalistka')
+  await expect(createDialog.getByLabel('Stawka za sesję (zł)')).toHaveValue('180')
+  await createDialog.getByLabel('Tytuł zawodowy').fill('')
+  await createDialog.getByLabel('Stawka za sesję (zł)').fill('')
+  await createDialog.getByRole('button', { name: 'Dodaj specjalistkę' }).click()
+  await expect(createDialog.getByText('Wpisz imię i nazwisko.', { exact: true })).toBeVisible()
+  await expect(createDialog.getByText('Wpisz tytuł, np. psycholożka.', { exact: true })).toBeVisible()
+  await expect(createDialog.getByText('Wpisz stawkę, np. 180.', { exact: true })).toBeVisible()
+  await createDialog.getByLabel('Imię i nazwisko').fill('Anna Janowska')
   await createDialog.getByLabel('Tytuł zawodowy').fill('Psycholożka')
   await createDialog.getByLabel('Stawka za sesję (zł)').fill('185,50')
-  await createDialog.getByRole('button', { name: 'Dodaj profil' }).click()
+  await createDialog.getByRole('radio', { name: 'Orbita' }).check()
+  await createDialog.getByRole('button', { name: 'Dodaj specjalistkę' }).click()
 
   let profile = page.locator('article').filter({ hasText: 'Anna Janowska' })
+  await expect(page.getByText('Anna Janowska dodana do zespołu', { exact: true })).toBeVisible()
   await expect(profile).toContainText('Brak dostępu do panelu')
   await expect(profile).toContainText('Psycholożka')
   await expect(profile).toContainText('185,50 zł')
+  await expect(profile.locator('.avatar__art--orbit')).toBeVisible()
+  expect(profilePayloads[0]).toMatchObject({ avatarKey: 'orbit' })
 
   await profile.getByRole('button', { name: 'Edytuj profil' }).click()
   const editDialog = page.getByRole('dialog', { name: 'Edytuj profil specjalistki' })
+  await expect(editDialog).toContainText('Klienci i dostęp do panelu pozostaną bez zmian.')
   await editDialog.getByLabel('Imię i nazwisko').fill('Anna Janowska-Kowalska')
   await expect(editDialog.getByLabel('Tytuł zawodowy')).toHaveValue('Psycholożka')
   await editDialog.getByLabel('Tytuł zawodowy').fill('Psychoterapeutka')
+  await editDialog.getByRole('radio', { name: 'Kropki' }).check()
   await editDialog.getByRole('button', { name: 'Zapisz zmiany' }).click()
 
   profile = page.locator('article').filter({ hasText: 'Anna Janowska-Kowalska' })
+  await expect(page.getByText('Dane specjalistki zostały zapisane: Anna Janowska-Kowalska', { exact: true })).toBeVisible()
   await expect(profile).toContainText('Brak dostępu do panelu')
   await expect(profile).toContainText('Psychoterapeutka')
   await expect(profile).not.toContainText('Właściciel')
-  let sessionRefreshes = 0
+  await expect(profile.locator('.avatar__art--cross')).toBeVisible()
+  expect(profilePayloads[1]).toMatchObject({ avatarKey: 'cross' })
+  await page.reload()
+  profile = page.locator('article').filter({ hasText: 'Anna Janowska-Kowalska' })
+  await expect(profile.locator('.avatar__art--cross')).toBeVisible()
   const invitationAttempts = []
-  await page.route('**/api/v1/session', async (route) => {
-    sessionRefreshes += 1
-    if (sessionRefreshes === 1) {
-      await route.abort('connectionfailed')
+  let invitedSpecialistId = null
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    if (!invitedSpecialistId) {
+      await route.continue()
       return
     }
-    await route.continue()
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.specialists = body.data.specialists.map((specialist) => specialist.id === invitedSpecialistId
+      ? { ...specialist, version: 3, staffVersion: 1, accessStatus: 'invited' }
+      : specialist)
+    await route.fulfill({ response, json: body })
   })
   await page.route('**/api/v1/specialists/*/invitations', async (route) => {
     invitationAttempts.push({
@@ -91,22 +127,57 @@ test('@owner creates, edits, and invites one stable specialist profile', async (
       key: route.request().headers()['idempotency-key'],
       url: route.request().url(),
     })
-    await route.continue()
+    if (invitationAttempts.length === 1) {
+      await route.abort('connectionfailed')
+      return
+    }
+    invitedSpecialistId = new URL(route.request().url()).pathname.split('/').at(-2)
+    await route.fulfill({
+      status: 201,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        data: {
+          staff: {
+            id: 'stf_specialist_profile_invite',
+            displayName: 'Anna Janowska-Kowalska',
+            email: 'anna-j@example.test',
+            role: 'specialist',
+            status: 'pending',
+            version: 1,
+            specialistId: invitedSpecialistId,
+          },
+          invitation: {
+            id: 'inv_specialist_profile_invite',
+            status: 'provisioning',
+            expiresAt: '2030-01-08T00:00:00.000Z',
+            emailSentAt: null,
+            version: 1,
+          },
+        },
+      }),
+    })
   })
-  await profile.getByRole('button', { name: 'Aktywuj dostęp' }).click()
+  await profile.getByRole('button', { name: 'Zaproś do panelu' }).click()
   const accessDialog = page.getByRole('dialog', {
-    name: 'Aktywuj dostęp — Anna Janowska-Kowalska',
+    name: 'Zaproś do panelu — Anna Janowska-Kowalska',
   })
+  await expect(accessDialog.getByRole('heading', { name: 'Zaproś do panelu' })).toBeVisible()
+  await expect(accessDialog).toContainText('Anna Janowska-Kowalska')
+  await expect(accessDialog).toContainText('Psychoterapeutka')
+  await expect(accessDialog.getByText('Na ten adres wyślemy link do panelu.', { exact: true })).toBeVisible()
+  await accessDialog.getByRole('button', { name: 'Zaproś do panelu' }).click()
+  await expect(accessDialog.getByText('Podaj poprawny adres e-mail.', { exact: true })).toBeVisible()
   await accessDialog.getByLabel('Adres e-mail').fill('anna-j@example.test')
-  await accessDialog.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
+  await accessDialog.getByRole('button', { name: 'Zaproś do panelu' }).click()
   await expect(accessDialog.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
   await expect(accessDialog).toContainText(
     'Nie wiadomo, czy zaproszenie zostało utworzone. Spróbuj ponownie bez zmiany adresu e-mail.',
   )
   await accessDialog.getByRole('button', { name: 'Spróbuj ponownie' }).click()
 
-  await expect(profile).toContainText('Zaproszenie oczekuje')
-  await expect(profile.getByRole('button', { name: 'Aktywuj dostęp' })).toHaveCount(0)
+  await expect(profile).toContainText('Zaproszenie wysłane')
+  await expect(profile.getByRole('button', { name: 'Zaproś do panelu' })).toHaveCount(0)
+  await expect(page.getByText('Zaproszenie wysłane na anna-j@example.test', { exact: true })).toBeVisible()
   expect(invitationAttempts).toHaveLength(2)
   expect(invitationAttempts[1]).toEqual(invitationAttempts[0])
   expect(JSON.parse(invitationAttempts[0].body)).toEqual({

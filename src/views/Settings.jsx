@@ -1,26 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp } from '../store.jsx'
+import { useApp, useToasts } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
+import { rolePresentationFor } from '../auth-role.js'
 import { motionOK, setReduceMotion, useReveal } from '../anim.js'
 import { useIsPhone, useMediaQuery } from '../responsive.js'
 import { Button, Field, Avatar, IconBtn } from '../ui.jsx'
 import { EntityLink, useRouteParamsSync } from '../ux-patterns.jsx'
 import { canPerformAction } from '../capability-access.js'
 import { OperationsPanel } from './Operations.jsx'
-import { PermissionsAccess, StaffAccess } from './StaffAccess.jsx'
 import { useAuth } from '../auth.jsx'
 import { authClient, authStrategyFor, passwordValidationError } from '../auth-client.js'
 
 const SECTIONS = [
-  { id: 'account', label: 'Konto' },
   { id: 'center', label: 'Centrum' },
-  { id: 'calendar', label: 'Kalendarz i integracje' },
+  { id: 'calendar', label: 'Grafik i integracje' },
   { id: 'team', label: 'Zespół i stawki' },
 ]
 const PERSONAL_SECTIONS = SECTIONS.filter((section) => section.id === 'calendar')
-const STAFF_SECTION = Object.freeze({ id: 'staff', label: 'Dostęp personelu' })
-const PERMISSIONS_SECTION = Object.freeze({ id: 'permissions', label: 'Uprawnienia personelu' })
-const OPERATIONS_SECTION = Object.freeze({ id: 'operations', label: 'Stan i bezpieczeństwo' })
+const OPERATIONS_SECTION = Object.freeze({ id: 'security', label: 'Bezpieczeństwo danych' })
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const USES_BETTER_AUTH = authStrategyFor(import.meta.env?.MODE) === 'better-auth'
@@ -70,11 +67,15 @@ function PreferenceSwitch({ title, description, on, disabled, onChange }) {
 }
 
 function AccountAuthentication({ client = authClient }) {
-  const { session } = useAuth()
+  const { logout, session } = useAuth()
+  const { toast } = useToasts()
   const [methods, setMethods] = useState([])
   const [accounts, setAccounts] = useState([])
+  const [currentPassword, setCurrentPassword] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
+  const [changeOpen, setChangeOpen] = useState(false)
+  const [reauthRequired, setReauthRequired] = useState(false)
   const [status, setStatus] = useState('loading')
   const [message, setMessage] = useState('')
 
@@ -117,6 +118,38 @@ function AccountAuthentication({ client = authClient }) {
     }
   }
 
+  const clearPasswordFields = () => {
+    setCurrentPassword('')
+    setPassword('')
+    setConfirmPassword('')
+  }
+
+  const changePassword = async (event) => {
+    event.preventDefault()
+    if (!currentPassword) return setMessage('Podaj obecne hasło')
+    const validation = passwordValidationError(password)
+    if (validation) return setMessage(validation)
+    if (password !== confirmPassword) return setMessage('Hasła nie są takie same')
+    setStatus('saving')
+    setMessage('')
+    setReauthRequired(false)
+    try {
+      await client.changePassword(currentPassword, password)
+      clearPasswordFields()
+      setChangeOpen(false)
+      setStatus('idle')
+      toast('Hasło zostało zmienione', 'check')
+    } catch (error) {
+      setStatus('idle')
+      if (error?.status === 401 && error?.code === 'REAUTH_REQUIRED') {
+        setReauthRequired(true)
+        setMessage('Ze względów bezpieczeństwa zaloguj się ponownie, aby zmienić hasło.')
+      } else {
+        setMessage('Nie udało się zmienić hasła. Sprawdź obecne hasło.')
+      }
+    }
+  }
+
   return (
     <div className="card card--pad settings-authentication" aria-label="Metody logowania">
       <h3 className="card-title">Logowanie do panelu</h3>
@@ -135,8 +168,91 @@ function AccountAuthentication({ client = authClient }) {
           <Button type="submit" size="sm" disabled={status === 'saving'}>Ustaw hasło</Button>
         </form>
       ) : null}
-      {hasPassword ? <div className="pref-row settings-authentication__method"><span><span className="pref-row__title">Hasło</span><span className="pref-row__desc">Ustawione</span></span></div> : null}
-      {message ? <p className={status === 'error' ? 'field__error' : 'settings-authentication__message'} role="status">{message}</p> : null}
+      {hasPassword ? (
+        <div className="pref-row settings-authentication__method">
+          <span><span className="pref-row__title">Hasło</span><span className="pref-row__desc">Ustawione</span></span>
+          <Button type="button" size="sm" variant="soft" onClick={() => {
+            clearPasswordFields()
+            setMessage('')
+            setReauthRequired(false)
+            setChangeOpen((open) => !open)
+          }}>{changeOpen ? 'Anuluj' : 'Zmień hasło'}</Button>
+        </div>
+      ) : null}
+      {hasPassword && changeOpen ? (
+        <form className="settings-authentication__password" aria-label="Zmiana hasła" onSubmit={changePassword} noValidate>
+          <Field label="Obecne hasło">
+            <input className="input" type="password" autoComplete="current-password" required maxLength={128}
+              value={currentPassword} onChange={(event) => { setCurrentPassword(event.target.value); setMessage(''); setReauthRequired(false) }} />
+          </Field>
+          <Field label="Nowe hasło">
+            <input className="input" type="password" autoComplete="new-password" required minLength={12} maxLength={128}
+              value={password} onChange={(event) => { setPassword(event.target.value); setMessage(''); setReauthRequired(false) }} />
+          </Field>
+          <Field label="Powtórz hasło">
+            <input className="input" type="password" autoComplete="new-password" required minLength={12} maxLength={128}
+              value={confirmPassword} onChange={(event) => { setConfirmPassword(event.target.value); setMessage(''); setReauthRequired(false) }} />
+          </Field>
+          <Button type="submit" size="sm" disabled={status === 'saving'}>Zmień hasło</Button>
+          {message ? <p className="field__error settings-authentication__form-message" role="alert">{message}</p> : null}
+          {reauthRequired ? <Button type="button" size="sm" variant="soft" onClick={() => { void logout() }}>Zaloguj się ponownie</Button> : null}
+        </form>
+      ) : null}
+      {!hasPassword && message ? <p className={status === 'error' ? 'field__error' : 'settings-authentication__message'} role="status">{message}</p> : null}
+    </div>
+  )
+}
+
+export function Profile() {
+  const { actor, appMode, capabilities, role } = useShell()
+  const ref = useReveal()
+  const isApp = appMode === 'app'
+  const canManageStaff = isApp && canPerformAction(capabilities, 'staff.invite')
+  const identity = isApp ? actor : {
+    displayName: role.name,
+    email: null,
+    professionalTitle: role.professionalTitle,
+  }
+
+  return (
+    <div ref={ref}>
+      <div className="view-head" data-reveal>
+        <div>
+          <div className="eyebrow">Konto</div>
+          <h1 className="display view-head__title">Mój profil</h1>
+          <p className="view-head__sub">Twoje dane i sposób logowania do panelu.</p>
+        </div>
+      </div>
+      <section className="settings-section" aria-labelledby="profile-account-title">
+        <h2 className="settings-section__title" id="profile-account-title">Twoje konto</h2>
+        <div className="card card--pad settings-account-identity" aria-label="Tożsamość konta">
+          <div>
+            <span className="settings-account-identity__label">Imię i nazwisko</span>
+            <strong>{identity.displayName}</strong>
+          </div>
+          {identity.email && (
+            <div>
+              <span className="settings-account-identity__label">E-mail do logowania</span>
+              <strong>{identity.email}</strong>
+            </div>
+          )}
+          <div>
+            <span className="settings-account-identity__label">Rola w panelu</span>
+            <strong>{role.label}</strong>
+          </div>
+          {identity.professionalTitle && (
+            <div>
+              <span className="settings-account-identity__label">Tytuł zawodowy</span>
+              <strong>{identity.professionalTitle}</strong>
+            </div>
+          )}
+          <p>Imienia i adresu e-mail nie da się zmienić w panelu.</p>
+          {canManageStaff && (
+            <p>Aby wyłączyć dostęp danej osoby, wyłącz go w Dostępie personelu i wyślij nowe zaproszenie.</p>
+          )}
+        </div>
+        {isApp && USES_BETTER_AUTH ? <AccountAuthentication /> : null}
+      </section>
     </div>
   )
 }
@@ -144,10 +260,9 @@ function AccountAuthentication({ client = authClient }) {
 export function Settings({ params = {} }) {
   const { state, dispatch, toast } = useApp()
   const {
-    actor,
     appMode,
     capabilities,
-    getViewState,
+    navigate,
     openPsychForm,
     patchViewState,
     registerLeaveGuard,
@@ -157,52 +272,53 @@ export function Settings({ params = {} }) {
   const isPhone = useIsPhone()
   const osReduce = useMediaQuery('(prefers-reduced-motion: reduce)')
   const sectionRefs = useRef({})
+  const teamFormRef = useRef(null)
   const isApp = appMode === 'app'
   const isOwner = role.id === 'owner'
-  const canManageStaff = isApp && canPerformAction(capabilities, 'staff.invite')
-  const canManagePermissions = isApp && canPerformAction(capabilities, 'permissions.read')
-  const canReadOperations = isApp && canPerformAction(capabilities, 'operations.health.read')
+  const canReadOperations = isApp && isOwner
+    && canPerformAction(capabilities, 'operations.health.read')
   const availableSections = useMemo(() => {
     const sections = isApp
-      ? SECTIONS.filter((section) => section.id === 'account')
+      ? []
       : isOwner ? SECTIONS : PERSONAL_SECTIONS
     return [
       ...sections,
-      ...(canManageStaff ? [STAFF_SECTION] : []),
-      ...(canManagePermissions ? [PERMISSIONS_SECTION] : []),
       ...(canReadOperations ? [OPERATIONS_SECTION] : []),
     ]
-  }, [canManagePermissions, canManageStaff, canReadOperations, isApp, isOwner])
-  const defaultSection = isApp || isOwner ? 'account' : 'calendar'
+  }, [canReadOperations, isApp, isOwner])
+  const defaultSection = availableSections[0]?.id || 'calendar'
+  const hasExplicitSection = availableSections.some((section) => section.id === params.section)
   const psychologists = useMemo(
     () => state.psychologists.toSorted((a, b) => a.name.localeCompare(b.name, 'pl')),
     [state.psychologists]
   )
   const [initialSection] = useState(() => {
-    // URL params win over the registry — a shared link must reproduce its scope
+    // A valid URL section is authoritative; a clean URL starts at the default.
     if (availableSections.some((section) => section.id === params.section)) return params.section
-    const saved = getViewState('settings', { section: defaultSection })
-    return availableSections.some((section) => section.id === saved.section)
-      ? saved.section
-      : defaultSection
+    return defaultSection
   })
   const [activeSection, setActiveSection] = useState(initialSection)
-  const [profile, setProfile] = useState(() => (
-    isApp ? { name: '', email: '' } : { name: state.user.name, email: state.user.email }
-  ))
   const [center, setCenter] = useState({ ...state.center })
   const [team, setTeam] = useState(() => teamDraftOf(psychologists))
   const teamSourceRef = useRef(teamDraftOf(psychologists))
-  const [profileStatus, setProfileStatus] = useState('idle')
   const [centerStatus, setCenterStatus] = useState('idle')
   const [teamStatus, setTeamStatus] = useState('idle')
+  const [teamSaveAttempted, setTeamSaveAttempted] = useState(false)
+
+  useEffect(() => {
+    if (!availableSections.some((section) => section.id === activeSection)) {
+      setActiveSection(defaultSection)
+    }
+  }, [activeSection, availableSections, defaultSection])
 
   useEffect(() => {
     patchViewState('settings', { section: activeSection })
   }, [activeSection, patchViewState])
 
   // the active section lives in the URL, so a settings view can be shared
-  useRouteParamsSync('settings', { section: activeSection !== defaultSection ? activeSection : undefined })
+  useRouteParamsSync('settings', {
+    section: hasExplicitSection || activeSection !== defaultSection ? activeSection : undefined,
+  })
 
   useEffect(() => {
     const previousSource = teamSourceRef.current
@@ -221,30 +337,20 @@ export function Settings({ params = {} }) {
     teamSourceRef.current = nextSource
   }, [psychologists])
 
-  const profileErrors = isApp
-    ? { name: null, email: null }
-    : {
-        name: profile.name.trim() ? null : 'Podaj imię i nazwisko',
-        email: !profile.email.trim()
-          ? 'Podaj adres e-mail'
-          : EMAIL.test(profile.email.trim()) ? null : 'Podaj poprawny adres e-mail',
-      }
   const centerErrors = {
     name: center.name.trim() ? null : 'Podaj nazwę centrum',
     email: center.email.trim() && !EMAIL.test(center.email.trim()) ? 'Podaj poprawny adres e-mail' : null,
   }
-  const profileDirty = !isApp
-    && (profile.name !== state.user.name || profile.email !== state.user.email)
   const centerDirty = Object.keys(center).some((key) => center[key] !== state.center[key])
   const teamErrors = Object.fromEntries(psychologists.map((psychologist) => {
     const draft = team[psychologist.id] || { rate: '', weeklyCapacity: '' }
     const rate = Number(draft.rate)
     const weeklyCapacity = Number(draft.weeklyCapacity)
     return [psychologist.id, {
-      rate: Number.isFinite(rate) && rate > 0 ? null : 'Stawka musi być większa od zera',
+      rate: Number.isFinite(rate) && rate > 0 ? null : 'Wpisz stawkę większą niż 0 zł',
       weeklyCapacity: Number.isInteger(weeklyCapacity) && weeklyCapacity > 0
         ? null
-        : 'Limit musi być dodatnią liczbą całkowitą',
+        : 'Wpisz liczbę sesji, np. 20',
     }]
   }))
   const teamDirty = psychologists.some((psychologist) => {
@@ -257,7 +363,7 @@ export function Settings({ params = {} }) {
   const teamInvalid = Object.values(teamErrors).some((errors) => errors.rate || errors.weeklyCapacity)
 
   // route commits (sidebar, back/forward, role switch) ask before discarding drafts
-  const settingsDirty = profileDirty || centerDirty || teamDirty
+  const settingsDirty = centerDirty || teamDirty
   useEffect(() => registerLeaveGuard(() => settingsDirty), [registerLeaveGuard, settingsDirty])
 
   const markDraftChanged = (setStatus) => setStatus((current) => current === 'saving' ? current : 'idle')
@@ -270,23 +376,17 @@ export function Settings({ params = {} }) {
   }
 
   const selectSection = (sectionId) => {
-    setActiveSection(sectionId)
-    requestAnimationFrame(() => {
-      const section = sectionRefs.current[sectionId]
-      const heading = section?.querySelector('h2')
-      heading?.focus({ preventScroll: true })
-      section?.scrollIntoView({ behavior: motionOK() ? 'smooth' : 'auto', block: 'start' })
+    if (sectionId === activeSection) return
+    navigate('settings', {
+      section: sectionId,
+    }, () => {
+      requestAnimationFrame(() => {
+        const section = document.querySelector('.view .settings-sections > .settings-section')
+        const heading = section?.querySelector('h2')
+        heading?.focus({ preventScroll: true })
+        section?.scrollIntoView({ behavior: motionOK() ? 'smooth' : 'auto', block: 'start' })
+      })
     })
-  }
-
-  const saveProfile = (event) => {
-    event?.preventDefault()
-    if (isApp || !profileDirty || profileErrors.name || profileErrors.email || profileStatus === 'saving') return
-    const patch = { name: profile.name.trim(), email: profile.email.trim() }
-    completeSave(() => {
-      dispatch({ type: 'UPDATE_USER', patch })
-      setProfile(patch)
-    }, setProfileStatus)
   }
 
   const saveCenter = (event) => {
@@ -301,7 +401,14 @@ export function Settings({ params = {} }) {
 
   const saveTeam = (event) => {
     event?.preventDefault()
-    if (!teamDirty || teamInvalid || teamStatus === 'saving') return
+    setTeamSaveAttempted(true)
+    if (!teamDirty || teamStatus === 'saving') return
+    if (teamInvalid) {
+      requestAnimationFrame(() =>
+        teamFormRef.current?.querySelector('.has-error input, .has-error select, .has-error textarea')?.focus()
+      )
+      return
+    }
     const nextDraft = teamDraftOf(psychologists, team)
     completeSave(() => {
       for (const psychologist of psychologists) {
@@ -338,26 +445,23 @@ export function Settings({ params = {} }) {
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">{isApp ? 'Konto' : isOwner ? 'Konfiguracja' : 'Twoje preferencje'}</div>
-          <h1 className="display view-head__title">
-            Ustawienia <em>{isApp ? 'konta' : isOwner ? 'centrum' : 'osobiste'}</em>
-          </h1>
+          <h1 className="display view-head__title">Ustawienia</h1>
           <p className="view-head__sub">
-            {isApp
-              ? 'Tożsamość i dostęp do panelu są zarządzane przez chroniony dostęp.'
-              : isOwner
-              ? 'Konto, dane centrum, integracje oraz stawki i limity zespołu.'
-              : `Kalendarz, integracje i preferencje dla: ${role.name} · ${role.label}.`}
+            {isOwner && !isApp
+              ? 'Dane centrum, integracje oraz stawki i limity zespołu.'
+              : !isApp
+                ? `Grafik i preferencje dla: ${role.name} · ${role.label}${role.professionalTitle ? ` · ${rolePresentationFor(role)}` : ''}.`
+                : 'Sprawdź, czy kopie zapasowe i automatyczne kontrole działają.'}
           </p>
         </div>
       </div>
 
-      {isPhone ? (
+      {isPhone && availableSections.length > 1 ? (
         <label className="settings-mobile-nav">
-          <span>Przejdź do sekcji</span>
+          <span>Sekcja</span>
           <select
             className="select"
-            aria-label="Sekcja ustawień"
+            aria-label="Sekcja"
             value={activeSection}
             onChange={(event) => selectSection(event.target.value)}
           >
@@ -368,8 +472,8 @@ export function Settings({ params = {} }) {
         </label>
       ) : null}
 
-      <div className="settings-grid">
-        {!isPhone && (
+      <div className={`settings-grid ${availableSections.length === 1 ? 'settings-grid--single' : ''}`}>
+        {!isPhone && availableSections.length > 1 && (
           <nav className="settings-local-nav" aria-label="Sekcje ustawień">
             {availableSections.map((section) => (
               <button
@@ -386,70 +490,7 @@ export function Settings({ params = {} }) {
         )}
 
         <div className="settings-sections">
-          {(isApp || isOwner) && (
-            <>
-              <section
-                className="settings-section"
-                ref={(element) => { sectionRefs.current.account = element }}
-                aria-labelledby="settings-account-title"
-              >
-            <h2 className="settings-section__title" id="settings-account-title" tabIndex={-1}>Twoje konto</h2>
-            {isApp ? (
-              <div className="card card--pad settings-account-identity" aria-label="Tożsamość konta">
-                <div>
-                  <span className="settings-account-identity__label">Imię i nazwisko</span>
-                  <strong>{actor.displayName}</strong>
-                </div>
-                <div>
-                  <span className="settings-account-identity__label">Profil w panelu</span>
-                  <strong>{role.professionalTitle ?? 'Konto centrum'}</strong>
-                </div>
-                <p>{USES_BETTER_AUTH
-                  ? 'Adres e-mail i dostęp do panelu są przypisane przez administrację centrum.'
-                  : 'Tożsamość i dostęp do panelu są zarządzane przez Cloudflare Access.'}</p>
-              </div>
-            ) : (
-              <form className="card card--pad stack" aria-label="Twoje konto" onSubmit={saveProfile} noValidate>
-                <Field label="Imię i nazwisko" error={profileErrors.name}>
-                  <input
-                    className="input"
-                    name="name"
-                    autoComplete="name"
-                    disabled={profileStatus === 'saving'}
-                    value={profile.name}
-                    onChange={(event) => {
-                      setProfile((current) => ({ ...current, name: event.target.value }))
-                      markDraftChanged(setProfileStatus)
-                    }}
-                  />
-                </Field>
-                <Field label="Adres e-mail" error={profileErrors.email}>
-                  <input
-                    className="input"
-                    type="email"
-                    name="email"
-                    autoComplete="email"
-                    spellCheck={false}
-                    disabled={profileStatus === 'saving'}
-                    value={profile.email}
-                    onChange={(event) => {
-                      setProfile((current) => ({ ...current, email: event.target.value }))
-                      markDraftChanged(setProfileStatus)
-                    }}
-                  />
-                </Field>
-                <SaveControls
-                  status={profileStatus}
-                  dirty={profileDirty}
-                  disabled={!profileDirty || Boolean(profileErrors.name || profileErrors.email) || profileStatus === 'saving'}
-                  label="Zapisz konto"
-                />
-              </form>
-            )}
-            {isApp && USES_BETTER_AUTH ? <AccountAuthentication /> : null}
-              </section>
-
-              {!isApp && <section
+          {!isApp && activeSection === 'center' && <section
                 className="settings-section"
                 ref={(element) => { sectionRefs.current.center = element }}
                 aria-labelledby="settings-center-title"
@@ -521,17 +562,15 @@ export function Settings({ params = {} }) {
               />
             </form>
               </section>}
-            </>
-          )}
 
-          {!isApp && <section
+          {!isApp && activeSection === 'calendar' && <section
             className="settings-section"
             ref={(element) => { sectionRefs.current.calendar = element }}
             aria-labelledby="settings-calendar-title"
           >
-            <h2 className="settings-section__title" id="settings-calendar-title" tabIndex={-1}>Kalendarz i integracje</h2>
+            <h2 className="settings-section__title" id="settings-calendar-title" tabIndex={-1}>Grafik i integracje</h2>
             <div className="card card--pad">
-              <h3 className="card-title">Preferencje kalendarza</h3>
+              <h3 className="card-title">Wygląd i preferencje</h3>
               <div className="settings-pref-list">
                 <PreferenceSwitch
                   title="Ogranicz animacje"
@@ -547,69 +586,44 @@ export function Settings({ params = {} }) {
                     setReduceMotion
                   )}
                 />
-                <PreferenceSwitch
-                  title="Weekendy w kalendarzu"
-                  description="Pokazuj soboty i niedziele w widoku miesiąca."
-                  on={state.prefs.weekendsInCalendar}
-                  onChange={(value) => setPreference(
-                    'weekendsInCalendar',
-                    value,
-                    `Weekendy w kalendarzu — ${value ? 'włączone' : 'wyłączone'}`
-                  )}
-                />
               </div>
             </div>
 
             <div className="card card--pad settings-integration">
-              <h3 className="card-title">Integracje</h3>
+              <h3 className="card-title">Grafik Google</h3>
               <div className="pref-row">
                 <div>
-                  <div className="pref-row__title">Google Calendar</div>
                   <div className="pref-row__desc">
-                    Synchronizacja wizyt z kalendarzem Google (demo) — pełne połączenie wymaga wersji z kontami.
+                    W tym demo nie łączymy kont Google ani nie synchronizujemy sesji.
                   </div>
                 </div>
-                <Button
-                  size="sm"
-                  variant={state.prefs.gcalConnected ? 'ghost' : 'soft'}
-                  onClick={() => {
-                    const connected = !state.prefs.gcalConnected
-                    setPreference(
-                      'gcalConnected',
-                      connected,
-                      connected ? 'Połączono z Google Calendar (demo)' : 'Rozłączono z Google Calendar'
-                    )
-                  }}
-                >
-                  {state.prefs.gcalConnected ? 'Rozłącz' : 'Połącz (demo)'}
-                </Button>
               </div>
             </div>
           </section>}
 
-          {!isApp && isOwner && (
+          {!isApp && isOwner && activeSection === 'team' && (
             <section
               className="settings-section"
               ref={(element) => { sectionRefs.current.team = element }}
               aria-labelledby="settings-team-title"
             >
             <h2 className="settings-section__title" id="settings-team-title" tabIndex={-1}>Zespół i stawki</h2>
-            <form className="card card--pad" aria-label="Zespół i stawki" onSubmit={saveTeam} noValidate>
+            <form ref={teamFormRef} className="card card--pad" aria-label="Zespół i stawki" onSubmit={saveTeam} noValidate>
               <div className="stack team-settings-list">
                 {psychologists.map((psychologist) => {
                   const draft = team[psychologist.id] || { rate: '', weeklyCapacity: '' }
-                  const errors = teamErrors[psychologist.id]
+                  const errors = teamSaveAttempted ? teamErrors[psychologist.id] : null
                   return (
                     <div className="team-settings-row" key={psychologist.id}>
                       <span className="team-settings-row__person">
-                        <Avatar name={psychologist.name} color={psychologist.color} size={38} />
+                        <Avatar name={psychologist.name} color={psychologist.color} avatarKey={psychologist.avatarKey} size={38} />
                         <span>
                           <span className="pref-row__title">{psychologist.title} {psychologist.name}</span>
                           <span className="pref-row__desc">{psychologist.spec}</span>
                         </span>
                       </span>
                       <div className="team-settings-row__fields">
-                        <Field label="Stawka (zł)" error={errors?.rate}>
+                        <Field label="Stawka za sesję (zł)" error={errors?.rate}>
                           <input
                             className="input input--rate"
                             type="number"
@@ -619,7 +633,7 @@ export function Settings({ params = {} }) {
                             inputMode="decimal"
                             name={`rate-${psychologist.id}`}
                             autoComplete="off"
-                            aria-label={`Stawka — ${psychologist.name}`}
+                            aria-label={`Stawka za sesję — ${psychologist.name}`}
                             value={draft.rate}
                             onChange={(event) => {
                               setTeam((current) => ({
@@ -627,10 +641,11 @@ export function Settings({ params = {} }) {
                                 [psychologist.id]: { ...current[psychologist.id], rate: event.target.value },
                               }))
                               markDraftChanged(setTeamStatus)
+                              setTeamSaveAttempted(false)
                             }}
                           />
                         </Field>
-                        <Field label="Limit tygodniowy" error={errors?.weeklyCapacity}>
+                        <Field label="Wizyt w tygodniu (maks.)" error={errors?.weeklyCapacity}>
                           <input
                             className="input input--capacity"
                             type="number"
@@ -640,7 +655,7 @@ export function Settings({ params = {} }) {
                             inputMode="numeric"
                             name={`capacity-${psychologist.id}`}
                             autoComplete="off"
-                            aria-label={`Limit tygodniowy — ${psychologist.name}`}
+                            aria-label={`Wizyt w tygodniu (maks.) — ${psychologist.name}`}
                             value={draft.weeklyCapacity}
                             onChange={(event) => {
                               setTeam((current) => ({
@@ -648,6 +663,7 @@ export function Settings({ params = {} }) {
                                 [psychologist.id]: { ...current[psychologist.id], weeklyCapacity: event.target.value },
                               }))
                               markDraftChanged(setTeamStatus)
+                              setTeamSaveAttempted(false)
                             }}
                           />
                         </Field>
@@ -669,7 +685,7 @@ export function Settings({ params = {} }) {
                 <SaveControls
                   status={teamStatus}
                   dirty={teamDirty}
-                  disabled={!teamDirty || teamInvalid || teamStatus === 'saving'}
+                  disabled={!teamDirty || teamStatus === 'saving'}
                   label="Zapisz zespół"
                 />
                 <EntityLink
@@ -686,16 +702,8 @@ export function Settings({ params = {} }) {
             </section>
           )}
 
-          {canManageStaff && (
-            <StaffAccess sectionRef={(element) => { sectionRefs.current.staff = element }} />
-          )}
-          {canManagePermissions && (
-            <PermissionsAccess
-              sectionRef={(element) => { sectionRefs.current.permissions = element }}
-            />
-          )}
-          {canReadOperations && (
-            <OperationsPanel sectionRef={(element) => { sectionRefs.current.operations = element }} />
+          {activeSection === 'security' && canReadOperations && (
+            <OperationsPanel sectionRef={(element) => { sectionRefs.current.security = element }} />
           )}
         </div>
       </div>

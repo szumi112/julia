@@ -1,44 +1,182 @@
-// The API orders open actions newest first. Only backup failures share a display group.
-export function groupOperationalActions(actions) {
-  const groups = []
-  let backups
-  for (const action of actions) {
-    if (action.kind !== 'backup_failed') groups.push([action])
-    else if (backups) backups.push(action)
-    else {
-      backups = [action]
-      groups.push(backups)
-    }
-  }
-  return groups
+export const BACKUP_STALE_HOURS = 36
+
+const STATUS_RANK = Object.freeze({ ok: 0, pending: 0, warning: 1, critical: 2 })
+const SOURCE_PRIORITY = Object.freeze({
+  'backup.freshness': 0,
+  'access.reconciliation': 1,
+  'outbox.processing': 2,
+  'scheduler.runs': 3,
+})
+
+const checkFor = (health, id) => health?.checks?.find((check) => check.id === id) ?? null
+
+export function backupFreshnessState(health) {
+  const check = checkFor(health, 'backup.freshness')
+  const generatedMs = Date.parse(health?.generatedAt ?? '')
+  const lastSuccessMs = Date.parse(check?.lastSuccessAt ?? '')
+  const hasAge = Number.isFinite(generatedMs) && Number.isFinite(lastSuccessMs)
+    && lastSuccessMs <= generatedMs
+  const ageHours = hasAge ? (generatedMs - lastSuccessMs) / 3_600_000 : null
+  const overdue = check?.detailCode === 'BACKUP_STALE'
+    || (ageHours !== null && ageHours > BACKUP_STALE_HOURS)
+  const status = check?.detailCode === 'BACKUP_FAILED' && !overdue && ageHours !== null
+    ? 'warning'
+    : check?.status ?? 'pending'
+  return Object.freeze({
+    ageHours,
+    detailCode: check?.detailCode ?? null,
+    lastSuccessAt: check?.lastSuccessAt ?? null,
+    overdue,
+    status,
+  })
 }
 
-export const ACTION_GUIDANCE = Object.freeze({
-  backup_failed: 'Nie powstała nowa kopia z tej próby. To nie oznacza utraty danych w panelu, ale może ograniczyć możliwość ich odtworzenia po awarii. Administrator powinien sprawdzić przyczynę i potwierdzić utworzenie nowej kopii.',
-  backup_stale: 'Bez aktualnej kopii po awarii można odtworzyć jedynie starszy stan danych. Poproś administratora o sprawdzenie tworzenia kopii i potwierdzenie nowej, udanej kopii.',
-  access_reconciliation_lag: 'Zmiany dostępu personelu mogły nie zostać jeszcze zastosowane. Właściciel powinien sprawdzić konta w sekcji Personel oraz nieudane zadania synchronizacji na tej liście.',
-  authorization_denial_spike: 'System zablokował próby wykonania czynności bez wymaganych uprawnień. Sam alarm nie potwierdza włamania. Właściciel powinien sprawdzić zdarzenia w zakładce Bezpieczeństwo i uprawnienia personelu.',
-  outbox_job_failed: 'Automatyczne zadanie nie zostało zakończone. Jeśli dostępne jest ponowienie, właściciel może je zlecić. Gdy błąd wraca lub ponowienie nie jest dostępne, potrzebna jest pomoc administratora.',
-  scheduler_stale: 'Automatyczne kontrole i tworzenie kopii mogą być opóźnione. Poproś administratora o sprawdzenie działania zadań cyklicznych.',
-})
+// The Dashboard only surfaces a backup problem once it needs a decision. It
+// deliberately reads the server timestamp from the health snapshot instead of
+// the browser clock, so a stale tab cannot manufacture an alarm.
+export function dashboardBackupAlert(health) {
+  const backup = backupFreshnessState(health)
+  // `BACKUP_STALE` is useful in the detailed health card, but the Dashboard
+  // promise is deliberately stricter: exactly 36 hours remains quiet.
+  const serverConfirmsStaleWithoutSuccess = backup.lastSuccessAt === null
+    && backup.detailCode === 'BACKUP_STALE'
+  if (!(backup.ageHours > BACKUP_STALE_HOURS) && !serverConfirmsStaleWithoutSuccess) return null
+  return Object.freeze({
+    title: 'Kopia zapasowa wymaga sprawdzenia',
+    description: 'Od ponad 36 godzin nie powstała nowa kopia zapasowa.',
+  })
+}
 
-export const HEALTH_GUIDANCE = Object.freeze({
-  'backup.freshness': 'Sprawdzamy, czy kopia danych została zapisana i czy nie jest starsza niż 36 godzin. Udany zapis nie jest potwierdzeniem testu odtworzenia danych.',
-  'outbox.processing': 'Kolejka wykonuje zadania w tle, m.in. wysyłkę zaproszeń i aktualizację dostępu. Błąd może opóźnić te czynności. Nieudane zadania znajdziesz w zakładce Działania.',
-  'access.reconciliation': 'Sprawdzamy, czy zmiany dostępu personelu zostały zastosowane. Opóźnienie może oznaczać, że przyznanie lub odebranie dostępu jeszcze się nie zakończyło.',
-  'scheduler.runs': 'Sprawdzamy, czy uruchamiają się automatyczne kontrole i obsługa kopii. Brak zakończenia przez ponad 15 minut wymaga sprawdzenia przez administratora.',
-})
+function effectiveCheckStatus(health, check) {
+  return check.id === 'backup.freshness'
+    ? backupFreshnessState(health).status
+    : check.status
+}
 
-export const AUDIT_ENTITY_LABELS = Object.freeze({
-  staff_user: 'konto personelu', staff_invitation: 'zaproszenie personelu',
-  access_group: 'dostęp do centrum', backup_run: 'kopia zapasowa',
-  data_key: 'zabezpieczenie danych', operational_action: 'zgłoszenie operacyjne',
-  outbox_job: 'zadanie w tle', client: 'klient', appointment: 'wizyta',
-  payment_entry: 'płatność', finance_import: 'import finansowy',
-  activity_attendance: 'obecność na zajęciach', activity_projection_job: 'import aktywności',
-  workbook_import: 'import arkusza', workbook_export: 'eksport arkusza',
-  payment: 'płatność', specialist: 'specjalista', activity_group: 'grupa zajęciowa',
-  activity_participant: 'uczestnik zajęć', activity_class: 'zajęcia grupowe',
-  activity_membership: 'członkostwo w grupie', activity_charge: 'rozliczenie zajęć',
-  finance_entry: 'pozycja finansowa',
-})
+export function currentOperationalActions(health, actions) {
+  const backup = backupFreshnessState(health)
+  const scheduler = checkFor(health, 'scheduler.runs')
+  const access = checkFor(health, 'access.reconciliation')
+  return actions.filter((action) => {
+    if (action.kind === 'backup_failed') return false
+    if (action.kind === 'backup_stale') {
+      return backup.status === 'critical' && backup.overdue
+    }
+    if (action.kind === 'scheduler_stale') {
+      return scheduler?.status === 'critical' && scheduler.detailCode === 'SCHEDULER_STALE'
+    }
+    if (action.kind === 'access_reconciliation_lag') {
+      return access?.status === 'critical'
+        && access.detailCode === 'ACCESS_RECONCILIATION_LAG'
+    }
+    return true
+  })
+}
+
+export function operationalActionCommand(action, canManageStaff) {
+  const recovery = action?.recovery
+  if (recovery === null) return 'resolve'
+  if (!recovery || typeof recovery !== 'object') return null
+  if (recovery.status === 'available') return canManageStaff === true ? 'recover' : null
+  if (recovery.status === 'unsafe') return canManageStaff === true ? 'resolve' : null
+  return null
+}
+
+export function operationsOverview(health, actions) {
+  const candidates = []
+  for (const check of health?.checks ?? []) {
+    const status = effectiveCheckStatus(health, check)
+    if ((STATUS_RANK[status] ?? 0) > 0) {
+      candidates.push({
+        source: check.id,
+        status,
+        priority: SOURCE_PRIORITY[check.id] ?? 20,
+      })
+    }
+  }
+  for (const [index, action] of currentOperationalActions(health, actions).entries()) {
+    if ((STATUS_RANK[action.severity] ?? 0) > 0) {
+      candidates.push({
+        source: action.kind,
+        status: action.severity,
+        priority: 100 + index,
+      })
+    }
+  }
+  candidates.sort((left, right) => (
+    STATUS_RANK[right.status] - STATUS_RANK[left.status]
+      || left.priority - right.priority
+  ))
+  const worst = candidates[0]
+  if (worst) return Object.freeze({ status: worst.status, source: worst.source })
+  return Object.freeze({
+    status: health?.generatedAt === null ? 'pending' : 'ok',
+    source: null,
+  })
+}
+
+export function operationsSummary(health, actions) {
+  const overview = operationsOverview(health, actions)
+  if (overview.status === 'ok') return Object.freeze({
+    ...overview,
+    title: 'Wszystko działa',
+    description: 'Kopie zapasowe i automatyczne kontrole działają prawidłowo.',
+  })
+  if (overview.status === 'pending') return Object.freeze({
+    ...overview,
+    title: 'Pierwsze sprawdzenie jest w toku',
+    description: 'Stan pojawi się po pierwszym zakończonym sprawdzeniu systemu.',
+  })
+  if (overview.source === 'backup.freshness') {
+    const backup = backupFreshnessState(health)
+    if (backup.detailCode === 'BACKUP_PENDING') return Object.freeze({
+      ...overview,
+      title: 'Kopia zapasowa jest przygotowywana',
+      description: 'Pierwsza nocna kopia czeka na zakończenie.',
+    })
+    if (backup.detailCode === 'BACKUP_FAILED') {
+      let description = 'Ostatnia próba kopii się nie udała i nie ma potwierdzonej aktualnej kopii.'
+      if (backup.status === 'warning') {
+        description = 'Ostatnia próba kopii się nie udała, ale wcześniejsza kopia nadal jest aktualna.'
+      } else if (backup.ageHours !== null) {
+        description = 'Ostatnia próba kopii się nie udała, a poprzednia udana kopia ma ponad 36 godzin.'
+      }
+      return Object.freeze({
+        ...overview,
+        title: backup.status === 'warning'
+          ? 'Kopia zapasowa wymaga uwagi'
+          : 'Kopia zapasowa wymaga działania',
+        description,
+      })
+    }
+    return Object.freeze({
+      ...overview,
+      title: 'Kopia zapasowa wymaga działania',
+      description: 'Od ponad 36 godzin nie powstała nowa kopia zapasowa.',
+    })
+  }
+  if (overview.source === 'access.reconciliation') return Object.freeze({
+    ...overview,
+    title: 'Zmiany dostępu wymagają sprawdzenia',
+    description: 'Przyznanie lub odebranie dostępu mogło jeszcze nie zostać zastosowane.',
+  })
+  if (overview.source === 'scheduler.runs' || overview.source === 'scheduler_stale') {
+    return Object.freeze({
+      ...overview,
+      title: 'Automatyczne kontrole są opóźnione',
+      description: 'Kopie i inne zadania mogą wykonać się później niż zwykle.',
+    })
+  }
+  if (overview.source === 'authorization_denial_spike') return Object.freeze({
+    ...overview,
+    title: 'Uprawnienia wymagają sprawdzenia',
+    description: 'System zablokował więcej działań bez uprawnień niż zwykle.',
+  })
+  return Object.freeze({
+    ...overview,
+    title: overview.status === 'critical'
+      ? 'Jedna sprawa wymaga działania'
+      : 'Jedna sprawa wymaga uwagi',
+    description: 'Poniżej znajdziesz prosty opis problemu i dostępne działanie.',
+  })
+}

@@ -61,7 +61,8 @@ const ownership = createOwnershipCapabilityBoundary()
 const versionBuilder = createRecordVersionBuilder(ownership.consumer)
 const OWN_PAYMENT_LIMIT = 500
 const OWN_PAYMENT_ROW_KEYS = Object.freeze([
-  'id', 'specialist_id', 'service_id', 'starts_at', 'status', 'version',
+  'id', 'specialist_id', 'service_id', 'starts_at', 'status', 'cancellation_reason',
+  'version',
   'charge_id', 'charge_service_id', 'expected_amount_grosze', 'currency',
   'charge_version', 'collected_grosze', 'latest_method', 'latest_received_at',
 ])
@@ -103,6 +104,7 @@ const ownPaymentsInvalid = () => { throw new Error('INTERNAL_ERROR') }
 const OWN_PAYMENTS_SQL = `
   SELECT appointment.id,appointment.specialist_id,appointment.service_id,
          appointment.starts_at,appointment.status,appointment.version,
+         appointment.cancellation_reason,
          charge.id AS charge_id,charge.service_id AS charge_service_id,
          charge.expected_amount_grosze,charge.currency,charge.version AS charge_version,
          COALESCE((
@@ -175,6 +177,7 @@ export async function loadOwnPaymentsWindow(input) {
   const appointments = rows.map((candidate) => {
     const row = captureExact(candidate, OWN_PAYMENT_ROW_KEYS, ownPaymentsInvalid)
     const billable = ['completed', 'noshow'].includes(row.status)
+      || (row.status === 'cancelled' && row.cancellation_reason === 'late_paid')
     const latestNull = row.latest_method === null && row.latest_received_at === null
     if (!isAppointmentId(row.id) || seenAppointments.has(row.id)
       || row.specialist_id !== actor.specialistId
@@ -184,6 +187,9 @@ export async function loadOwnPaymentsWindow(input) {
       || !Object.hasOwn(SERVICE_BY_ID, row.service_id)
       || !canonicalInstant(row.starts_at)
       || !['scheduled', 'completed', 'cancelled', 'noshow'].includes(row.status)
+      || (row.status !== 'cancelled' && row.cancellation_reason !== null)
+      || (row.status === 'cancelled'
+        && ![null, 'client', 'centre', 'late_paid'].includes(row.cancellation_reason))
       || !Number.isSafeInteger(row.version) || row.version < 1
       || !isChargeId(row.charge_id) || seenCharges.has(row.charge_id)
       || row.charge_service_id !== row.service_id || row.currency !== 'PLN'
@@ -205,6 +211,7 @@ export async function loadOwnPaymentsWindow(input) {
       serviceId: row.service_id,
       startsAt: row.starts_at,
       status: row.status,
+      cancellationReason: row.cancellation_reason,
       version: row.version,
       charge: Object.freeze({
         id: row.charge_id,
@@ -360,14 +367,19 @@ const generated = (factory, prefix, predicate, used) => {
   return id
 }
 
+const isBillableAppointment = (appointment) => ['completed', 'noshow']
+  .includes(appointment.status)
+  || (appointment.status === 'cancelled'
+    && appointment.cancellationReason === 'late_paid')
+
 const validateReplay = (value, appointmentId, request) => {
   const replay = captureExact(value, ['status', 'body'], cryptoFailure)
   const body = captureExact(replay.body, ['data'], cryptoFailure)
   const data = captureExact(body.data, ['appointment'], cryptoFailure)
   const appointment = captureExact(data.appointment, [
     'id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone',
-    'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt',
-    'charge', 'payment', 'paymentEntries',
+    'location', 'status', 'source', 'version', 'cancelledAt', 'cancellationReason',
+    'createdAt', 'updatedAt', 'charge', 'payment', 'paymentEntries',
   ], cryptoFailure)
   const charge = captureExact(appointment.charge, [
     'id', 'serviceId', 'expectedAmountGrosze', 'currency', 'version',
@@ -384,8 +396,10 @@ const validateReplay = (value, appointmentId, request) => {
     || request.expectedVersion >= APPOINTMENT_VERSION_CAP
     || appointment.version > APPOINTMENT_VERSION_CAP
     || appointment.version !== request.expectedVersion + 1
-    || !['completed', 'noshow'].includes(appointment.status)
-    || appointment.cancelledAt !== null || appointment.source !== 'panel'
+    || !isBillableAppointment(appointment)
+    || ((appointment.status === 'cancelled') !== (appointment.cancelledAt !== null))
+    || (appointment.status !== 'cancelled' && appointment.cancellationReason !== null)
+    || appointment.source !== 'panel'
     || !canonicalInstant(appointment.createdAt) || !canonicalInstant(appointment.updatedAt)
     || appointment.updatedAt <= appointment.createdAt
     || !isChargeId(charge.id) || charge.serviceId !== appointment.serviceId
@@ -475,8 +489,8 @@ const validateCorrectionReplay = (value, paymentId, request) => {
   const data = captureExact(body.data, ['appointment'], cryptoFailure)
   const appointment = captureExact(data.appointment, [
     'id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone',
-    'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt',
-    'charge', 'payment', 'paymentEntries',
+    'location', 'status', 'source', 'version', 'cancelledAt', 'cancellationReason',
+    'createdAt', 'updatedAt', 'charge', 'payment', 'paymentEntries',
   ], cryptoFailure)
   const charge = captureExact(appointment.charge, [
     'id', 'serviceId', 'expectedAmountGrosze', 'currency', 'version',
@@ -488,8 +502,10 @@ const validateCorrectionReplay = (value, paymentId, request) => {
     || !isClientId(appointment.clientId) || !isSpecialistId(appointment.specialistId)
     || !SERVICE_BY_ID[appointment.serviceId] || !canonicalInstant(appointment.startsAt)
     || !canonicalInstant(appointment.endsAt) || appointment.endsAt <= appointment.startsAt
-    || appointment.timeZone !== 'Europe/Warsaw' || !['completed', 'noshow'].includes(appointment.status)
-    || appointment.source !== 'panel' || appointment.cancelledAt !== null
+    || appointment.timeZone !== 'Europe/Warsaw' || !isBillableAppointment(appointment)
+    || appointment.source !== 'panel'
+    || ((appointment.status === 'cancelled') !== (appointment.cancelledAt !== null))
+    || (appointment.status !== 'cancelled' && appointment.cancellationReason !== null)
     || appointment.version !== request.expectedVersion + 1
     || appointment.version > APPOINTMENT_VERSION_CAP
     || !canonicalInstant(appointment.createdAt) || !canonicalInstant(appointment.updatedAt)
@@ -567,6 +583,7 @@ const validateCorrectionReplay = (value, paymentId, request) => {
   }
   const aggregate = paymentAggregateFor(
     appointment.status, charge.expectedAmountGrosze, collected,
+    appointment.cancellationReason,
   )
   if (!Number.isSafeInteger(collected) || collected > charge.expectedAmountGrosze
     || payment.status !== aggregate.status || payment.collectedGrosze !== collected
@@ -602,7 +619,11 @@ const paymentGuard = (db, values) => db.prepare(
      AND EXISTS (SELECT 1 FROM appointments WHERE id=? AND client_id=?
        AND specialist_id=? AND service_id=? AND starts_at=? AND ends_at=?
        AND time_zone='Europe/Warsaw' AND location IS ? AND status=? AND source='panel'
-       AND version=? AND version<=? AND cancelled_at IS NULL
+       AND version=? AND version<=? AND (
+         (status IN ('completed','noshow') AND cancelled_at IS NULL
+           AND cancellation_reason IS NULL)
+         OR (status='cancelled' AND cancelled_at IS NOT NULL
+           AND cancellation_reason='late_paid'))
        AND created_at=? AND updated_at=?)
      AND EXISTS (SELECT 1 FROM session_charges WHERE id=? AND appointment_id=?
        AND service_id=? AND expected_amount_grosze=? AND currency='PLN' AND version=?
@@ -757,7 +778,7 @@ const reproveRace = async (command, actor, prior, originalError) => {
   if (fresh.appointment.version !== prior.appointment.version) {
     versionConflict(fresh.appointment.version)
   }
-  if (!['completed', 'noshow'].includes(fresh.appointment.status)
+  if (!isBillableAppointment(fresh.appointment)
     || fresh.payment.collectedGrosze + command.body.amountGrosze
       > fresh.charge.expectedAmountGrosze) throw new Error('PAYMENT_AMOUNT_CONFLICT')
   throw originalError
@@ -779,7 +800,7 @@ export async function recordAppointmentPayment(input) {
     versionConflict(current.appointment.version)
   }
   if (current.appointment.version >= APPOINTMENT_VERSION_CAP) notFound()
-  if (!['completed', 'noshow'].includes(current.appointment.status)
+  if (!isBillableAppointment(current.appointment)
     || current.payment.entries.length >= 1_000
     || current.payment.collectedGrosze + command.body.amountGrosze
       > current.charge.expectedAmountGrosze) throw new Error('PAYMENT_AMOUNT_CONFLICT')
@@ -793,6 +814,7 @@ export async function recordAppointmentPayment(input) {
   const collectedGrosze = current.payment.collectedGrosze + command.body.amountGrosze
   const aggregate = paymentAggregateFor(
     current.appointment.status, current.charge.expectedAmountGrosze, collectedGrosze,
+    current.appointment.cancellationReason,
   )
   const appointment = Object.freeze({
     ...current.appointment, version: current.appointment.version + 1, updatedAt: now,
@@ -843,9 +865,14 @@ export async function recordAppointmentPayment(input) {
        SELECT 1 FROM appointments AS appointment
        JOIN session_charges AS charge ON charge.appointment_id=appointment.id
        WHERE appointment.id=? AND appointment.client_id=?
-         AND appointment.specialist_id=? AND appointment.status IN ('completed','noshow')
+         AND appointment.specialist_id=? AND (
+           (appointment.status IN ('completed','noshow')
+             AND appointment.cancelled_at IS NULL
+             AND appointment.cancellation_reason IS NULL)
+           OR (appointment.status='cancelled'
+             AND appointment.cancelled_at IS NOT NULL
+             AND appointment.cancellation_reason='late_paid'))
          AND appointment.version=? AND appointment.version<?
-         AND appointment.cancelled_at IS NULL
          AND charge.id=? AND charge.version=? AND charge.expected_amount_grosze=?
          AND (SELECT count(*) FROM session_charges WHERE appointment_id=appointment.id)=1
          AND (SELECT count(*) FROM payment_entries WHERE appointment_id=appointment.id)<1000
@@ -863,8 +890,11 @@ export async function recordAppointmentPayment(input) {
   ))
   uow.domain(command.db.prepare(
     `UPDATE appointments SET version=?,updated_at=? WHERE id=? AND client_id=?
-       AND version=? AND version<? AND ?<=? AND status IN ('completed','noshow')
-       AND cancelled_at IS NULL
+       AND version=? AND version<? AND ?<=? AND (
+         (status IN ('completed','noshow') AND cancelled_at IS NULL
+           AND cancellation_reason IS NULL)
+         OR (status='cancelled' AND cancelled_at IS NOT NULL
+           AND cancellation_reason='late_paid'))
        AND EXISTS (SELECT 1 FROM payment_entries WHERE id=? AND appointment_id=appointments.id)
        AND (SELECT coalesce(sum(payment.amount_grosze),0)
          FROM payment_entries AS payment WHERE payment.appointment_id=appointments.id
@@ -1032,7 +1062,11 @@ const correctionGuard = (db, values) => {
      AND EXISTS (SELECT 1 FROM appointments WHERE id=? AND client_id=?
        AND specialist_id=? AND service_id=? AND starts_at=? AND ends_at=?
        AND time_zone='Europe/Warsaw' AND location IS ? AND status=? AND source='panel'
-       AND version=? AND version<=? AND cancelled_at IS NULL
+       AND version=? AND version<=? AND (
+         (status IN ('completed','noshow') AND cancelled_at IS NULL
+           AND cancellation_reason IS NULL)
+         OR (status='cancelled' AND cancelled_at IS NOT NULL
+           AND cancellation_reason='late_paid'))
        AND created_at=? AND updated_at=?)
      AND EXISTS (SELECT 1 FROM session_charges WHERE id=? AND appointment_id=?
        AND service_id=? AND expected_amount_grosze=? AND currency='PLN' AND version=?
@@ -1222,6 +1256,7 @@ export async function correctAppointmentPayment(input) {
   ))
   const aggregate = paymentAggregateFor(
     current.appointment.status, current.charge.expectedAmountGrosze, collectedGrosze,
+    current.appointment.cancellationReason,
   )
   const appointment = Object.freeze({
     ...current.appointment, version: current.appointment.version + 1, updatedAt: now,

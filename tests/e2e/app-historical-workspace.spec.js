@@ -42,6 +42,7 @@ const appointment = {
   serviceId: 'zajecia', startsAt: '2026-07-15T09:00:00.000Z',
   endsAt: '2026-07-15T09:50:00.000Z', timeZone: 'Europe/Warsaw', location: null,
   status: 'scheduled', source: 'panel', version: 1, cancelledAt: null,
+  cancellationReason: null,
   createdAt: '2026-07-01T08:00:00.000Z', updatedAt: '2026-07-01T08:00:00.000Z',
   charge: {
     id: 'chg_july', serviceId: 'zajecia', expectedAmountGrosze: 18_000,
@@ -102,13 +103,16 @@ const historicalOccurrences = [
 
 const workspace = (from, to) => {
   const july = from <= '2026-07-15' && to >= '2026-07-15'
+  const unknownOccurrences = historicalOccurrences.filter((item) => item.period.precision === 'unknown')
   return {
     window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
     specialists: [specialist],
     clients: [activeClient],
     appointments: july ? [appointment] : [],
-    historicalClients: july ? historicalClients : [],
-    historicalOccurrences: july ? historicalOccurrences : [],
+    // The API returns records without a known period for every loaded window.
+    // A current-week request must therefore not erase them after a July view.
+    historicalClients: july ? historicalClients : [historicalClients[1]],
+    historicalOccurrences: july ? historicalOccurrences : unknownOccurrences,
     latestPopulatedMonth: '2026-07',
   }
 }
@@ -126,21 +130,20 @@ test('@owner keeps an empty current month until the explicit latest-source actio
   await page.goto('./#/calendar?date=2026-08-28&ym=2026-08&mode=cal')
 
   await expect(page.locator('.month-nav__label')).toHaveText('Sierpień 2026')
-  await expect(page.getByText('W sierpniu 2026 nie ma wpisów kalendarza ani skoroszytu.')).toBeVisible()
+  await expect(page.getByText('W sierpniu 2026 nie ma sesji ani wpisów ze skoroszytu.')).toBeVisible()
   await page.getByRole('button', { name: 'Pokaż lipiec 2026' }).click()
 
   await expect(page.locator('.month-nav__label')).toHaveText('Lipiec 2026')
   await expect(page).toHaveURL(/date=2026-07-01/)
-  await page.getByRole('button', { name: /15 lipca — 3 wpisy/ }).click()
+  await page.getByRole('button', { name: /15 lipca - 1 sesja · 2 wpisy ze skoroszytu/ }).click()
   await expect(page.getByText('Zoja Historyczna', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('Godzina nieustalona', { exact: true }).first()).toBeVisible()
   await expect(page.getByRole('heading', { name: /Wpisy z nieustalonym dniem/ })).toBeVisible()
   await expect(page.getByText('Dzień nieustalony', { exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: /Przejrzyj.*okres/ })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Filtry' }).click()
   await page.getByRole('group', { name: 'Płatność' })
-    .getByRole('button', { name: 'Nieopłacona' }).click()
+    .getByRole('button', { name: 'Do zapłaty' }).click()
   await expect(page.locator('.historical-filter-note')).toContainText(
     'Wpisy ze skoroszytu bez statusu i płatności są ukryte przez aktywny filtr.',
   )
@@ -192,20 +195,92 @@ test('@owner keeps historical client profiles separate from active clients and s
   await expect(page.getByRole('heading', { name: 'Okres nieustalony' })).toBeVisible()
   await expect(page.getByText('Godzina nieustalona', { exact: true })).toBeVisible()
   await expect(page.getByText('Dzień nieustalony', { exact: true })).toBeVisible()
-  await expect(page.getByText('Rozmowa historyczna')).toBeVisible()
+  await expect(page.getByText('Rozmowa historyczna')).toHaveCount(0)
   await expect(page.getByText(/telefon|e-mail|wiek/i)).toHaveCount(0)
 
   await page.goto('./#/client?id=cl_active&ym=2026-07')
   await expect(page.getByRole('heading', { name: 'Ola Aktywna' })).toBeVisible()
-  const sourceHistory = page.getByRole('region', { name: 'Historia ze skoroszytu' })
+  const sourceHistory = page.getByRole('region', { name: 'Historia z dawnego arkusza' })
   await expect(sourceHistory).toContainText('Spotkanie ze skoroszytu')
   await expect(sourceHistory).toContainText('Widoczny zakres')
 
   await page.goto('./#/clients?catalog=historical&historyPeriod=unknown&ym=2026-07')
-  await expect(page.getByRole('table', { name: 'Klienci historyczni' })
-    .getByText('Zoja Historyczna', { exact: true })).toBeVisible()
-  await expect(page.getByRole('table', { name: 'Klienci historyczni' })
+  const unknownDirectory = page.getByRole('table', { name: 'Klienci historyczni' })
+  await expect(unknownDirectory.getByRole('columnheader', { name: 'Sesje z arkusza' })).toBeVisible()
+  await expect(unknownDirectory.getByText('Zoja Historyczna', { exact: true })).toBeVisible()
+  await expect(unknownDirectory
     .getByText('Szkoła Testowa', { exact: true })).toHaveCount(0)
+  await page.getByRole('searchbox', { name: 'Imię, usługa lub specjalistka…' }).fill('brakująca fraza')
+  await expect(page.getByText('Brak wyników dla „brakująca fraza”.', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Wyczyść wyszukiwanie' }).click()
+
+  await unknownDirectory.getByRole('link', { name: 'Otwórz historię — Zoja Historyczna' }).click()
+  await expect(page.getByText('Rozmowa historyczna')).toBeVisible()
+  await expect(page.getByText('Konsultacja historyczna', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Diagnoza historyczna', { exact: true })).toHaveCount(0)
+})
+
+test('@owner opens the protected source directory from the clients link, without restoring a registry route', async ({ page }) => {
+  await freezeTime(page, '2026-08-28T08:00:00.000Z')
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const url = new URL(route.request().url())
+    await route.fulfill(json(200, { data: workspace(
+      url.searchParams.get('from'), url.searchParams.get('to'),
+    ) }))
+  })
+
+  await page.goto('./#/clients')
+  await page.getByRole('link', { name: 'Klienci z dawnego arkusza' }).click()
+  await expect(page).toHaveURL(/#\/clients\?catalog=historical/)
+  await expect(page.getByRole('heading', { name: /Klienci historyczni/ })).toBeVisible()
+  await expect(page.locator('a[href*="ledger"]')).toHaveCount(0)
+})
+
+test('@owner keeps a source-linked client history unavailable until its exact month loads', async ({ page }) => {
+  await freezeTime(page, '2026-08-28T08:00:00.000Z')
+  let januaryReads = 0
+  await page.route('**/api/v1/workspace?*', async (route) => {
+    const url = new URL(route.request().url())
+    const from = url.searchParams.get('from')
+    const to = url.searchParams.get('to')
+    if (from === '2026-01-01' && to === '2026-01-31') {
+      januaryReads += 1
+      if (januaryReads === 1) {
+        await route.fulfill(json(503, { error: { code: 'workspace_unavailable' } }))
+        return
+      }
+      await route.fulfill(json(200, { data: {
+        ...workspace(from, to),
+        historicalClients: [historicalClients[0]],
+        historicalOccurrences: [
+          historicalOccurrence({
+            id: 'hoc_linked_january', historicalClientId: 'hcl_ola_source',
+            serviceLabel: 'Spotkanie ze skoroszytu',
+            period: { precision: 'day', day: '2026-01-15', month: '2026-01' },
+          }),
+        ],
+      } }))
+      return
+    }
+    await route.fulfill(json(200, { data: {
+      ...workspace(from, to),
+      historicalClients: [historicalClients[0]],
+      historicalOccurrences: [historicalOccurrence({
+        id: 'hoc_linked_unknown', historicalClientId: 'hcl_ola_source',
+        period: { precision: 'unknown', day: null, month: null },
+      })],
+    } }))
+  })
+
+  await page.goto('./#/client?id=cl_active&ym=2026-01')
+  const sourceState = page.getByRole('alert', { name: 'Stan historii z dawnego arkusza' })
+  await expect(sourceState).toContainText('Historia z dawnego arkusza jest teraz niedostępna')
+  await expect(page.getByText('Brak wpisów z dokładną datą w widocznym zakresie.')).toHaveCount(0)
+
+  await sourceState.getByRole('button', { name: 'Spróbuj ponownie' }).click()
+  await expect(page.getByRole('region', { name: 'Historia z dawnego arkusza' }))
+    .toContainText('Spotkanie ze skoroszytu')
+  expect(januaryReads).toBeGreaterThanOrEqual(2)
 })
 
 test('@owner @coordinator activates a historical client with an explicit specialist and exact version command', async ({ page }) => {
@@ -243,12 +318,12 @@ test('@owner @coordinator activates a historical client with an explicit special
   })
 
   await page.goto('./#/client?id=hcl_zoja&ym=2026-07')
-  await page.getByRole('button', { name: 'Aktywuj klienta' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Aktywuj klienta historycznego' })
-  await drawer.getByRole('button', { name: 'Aktywuj klienta' }).click()
+  await page.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Dodaj klienta z dawnego arkusza' })
+  await drawer.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
   await expect(drawer.getByText('Wybierz specjalistkę', { exact: true })).toBeVisible()
   await drawer.getByLabel('Specjalistka prowadząca').selectOption('sp_anna')
-  await drawer.getByRole('button', { name: 'Aktywuj klienta' }).click()
+  await drawer.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
 
   await expect(drawer).toHaveCount(0)
   await expect(page.locator('.historical-client-band')).toBeFocused()
@@ -257,7 +332,7 @@ test('@owner @coordinator activates a historical client with an explicit special
     specialistId: 'sp_anna',
   }])
   await expect(page.getByRole('link', { name: 'Otwórz aktywną kartę' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Aktywuj klienta' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Dodaj do kartoteki' })).toHaveCount(0)
 })
 
 test('@owner keeps the activation draft through ordinary failure and guarded close or navigation', async ({ page }) => {
@@ -273,23 +348,23 @@ test('@owner keeps the activation draft through ordinary failure and guarded clo
   ))
 
   await page.goto('./#/client?id=hcl_zoja&ym=2026-07')
-  await page.getByRole('button', { name: 'Aktywuj klienta' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Aktywuj klienta historycznego' })
+  await page.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Dodaj klienta z dawnego arkusza' })
   const specialist = drawer.getByLabel('Specjalistka prowadząca')
   await specialist.selectOption('sp_anna')
-  await drawer.getByRole('button', { name: 'Aktywuj klienta' }).click()
+  await drawer.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
 
   await expect(drawer.getByRole('alert')).toContainText('Nie udało się aktywować klienta')
   await expect(specialist).toHaveValue('sp_anna')
   await drawer.getByRole('button', { name: 'Zamknij' }).click()
-  await expect(drawer.getByText('Masz niezapisane zmiany.')).toBeVisible()
-  await drawer.getByRole('button', { name: 'Wróć' }).click()
+  await expect(drawer.getByText('Zamknąć bez zapisywania?')).toBeVisible()
+  await drawer.getByRole('button', { name: 'Wróć do edycji' }).click()
   await expect(specialist).toHaveValue('sp_anna')
 
   await page.evaluate(() => { window.location.hash = '#/clients?catalog=historical' })
-  const leave = page.getByRole('alertdialog', { name: 'Niezapisane zmiany' })
+  const leave = page.getByRole('alertdialog', { name: 'Wyjść bez zapisywania?' })
   await expect(leave).toBeVisible()
-  await leave.getByRole('button', { name: 'Kontynuuj edycję' }).click()
+  await leave.getByRole('button', { name: 'Wróć do edycji' }).click()
   await expect(page).toHaveURL(/#\/client\?id=hcl_zoja/)
   await expect(specialist).toHaveValue('sp_anna')
 })
@@ -325,16 +400,16 @@ test('@owner refreshes a version conflict without erasing the activation draft',
   })
 
   await page.goto('./#/client?id=hcl_zoja&ym=2026-07')
-  await page.getByRole('button', { name: 'Aktywuj klienta' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Aktywuj klienta historycznego' })
+  await page.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Dodaj klienta z dawnego arkusza' })
   await drawer.getByLabel('Specjalistka prowadząca').selectOption('sp_anna')
-  await drawer.getByRole('button', { name: 'Aktywuj klienta' }).click()
+  await drawer.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
 
   await expect(drawer.locator('.form-warn--error')).toContainText('Profil zmienił się w innym oknie')
   await expect(drawer.getByLabel('Specjalistka prowadząca')).toHaveValue('sp_anna')
   await expect(drawer).toContainText('Wersja źródła: 2')
   await expect(drawer.getByRole('link', { name: 'Otwórz aktywną kartę' })).toBeVisible()
-  await expect(drawer.getByRole('button', { name: 'Aktywuj klienta' })).toBeDisabled()
+  await expect(drawer.getByRole('button', { name: 'Dodaj do kartoteki' })).toBeDisabled()
 })
 
 test('@owner closes an accepted activation whose canonical reload fails and prevents replay', async ({ page }) => {
@@ -373,14 +448,14 @@ test('@owner closes an accepted activation whose canonical reload fails and prev
   })
 
   await page.goto('./#/client?id=hcl_zoja&ym=2026-07')
-  await page.getByRole('button', { name: 'Aktywuj klienta' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Aktywuj klienta historycznego' })
+  await page.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Dodaj klienta z dawnego arkusza' })
   await drawer.getByLabel('Specjalistka prowadząca').selectOption('sp_anna')
-  await drawer.getByRole('button', { name: 'Aktywuj klienta' }).click()
+  await drawer.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
 
   await expect(drawer).toHaveCount(0)
   await expect(page.getByText('Aktywację przyjęto, ale nie udało się odświeżyć kartoteki.')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Aktywuj klienta' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Dodaj do kartoteki' })).toBeDisabled()
   expect(activationRequests).toBe(1)
 })
 
@@ -396,7 +471,7 @@ test('@specialist renders scoped historical records without activation authority
   await page.goto('./#/client?id=hcl_zoja&ym=2026-07')
   await expect(page.getByRole('heading', { name: 'Zoja Historyczna' })).toBeVisible()
   await expect(page.getByText('Konsultacja historyczna')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Aktywuj klienta' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Dodaj do kartoteki' })).toHaveCount(0)
 })
 
 test('@owner authority revision closes a dirty activation and suppresses stale completion without revoking the readable route', async ({ page }) => {
@@ -421,8 +496,8 @@ test('@owner authority revision closes a dirty activation and suppresses stale c
   })
 
   await page.goto('./#/client?id=hcl_zoja&ym=2026-07')
-  await page.getByRole('button', { name: 'Aktywuj klienta' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Aktywuj klienta historycznego' })
+  await page.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Dodaj klienta z dawnego arkusza' })
   await drawer.getByLabel('Specjalistka prowadząca').selectOption('sp_anna')
 
   refreshed = true
@@ -432,8 +507,8 @@ test('@owner authority revision closes a dirty activation and suppresses stale c
   await expect(drawer).toHaveCount(0)
   await expect(page).toHaveURL(/#\/client\?id=hcl_zoja/)
   await expect(page.getByRole('heading', { name: 'Zoja Historyczna' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Aktywuj klienta' })).toHaveCount(0)
-  await expect(page.getByRole('alertdialog', { name: 'Niezapisane zmiany' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Dodaj do kartoteki' })).toHaveCount(0)
+  await expect(page.getByRole('alertdialog', { name: 'Wyjść bez zapisywania?' })).toHaveCount(0)
 })
 
 for (const viewport of [
@@ -456,8 +531,8 @@ for (const viewport of [
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
 
     await page.getByRole('link', { name: 'Otwórz historię — Zoja Historyczna' }).click()
-    await page.getByRole('button', { name: 'Aktywuj klienta' }).click()
-    const drawer = page.getByRole('dialog', { name: 'Aktywuj klienta historycznego' })
+    await page.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
+    const drawer = page.getByRole('dialog', { name: 'Dodaj klienta z dawnego arkusza' })
     const box = await drawer.boundingBox()
     expect(box.x).toBeGreaterThanOrEqual(0)
     expect(box.width).toBeLessThanOrEqual(viewport.width)
@@ -482,15 +557,16 @@ test('@owner operates historical calendar links and the activation guard by keyb
   })
 
   await page.goto('./#/calendar?date=2026-07-15&ym=2026-07&mode=cal')
-  const selectedDay = page.getByRole('button', { name: /15 lipca — 3 wpisy/ })
+  const selectedDay = page.getByRole('button', { name: /15 lipca - 1 sesja · 2 wpisy ze skoroszytu/ })
   await selectedDay.focus()
   await page.keyboard.press('ArrowRight')
-  await expect(page.getByRole('button', { name: /16 lipca — 0 wpisów/ })).toBeFocused()
+  await expect(page.getByRole('button', { name: /16 lipca - 0 sesji/ })).toBeFocused()
   await page.keyboard.press('ArrowLeft')
   await expect(selectedDay).toBeFocused()
 
-  const count = page.locator('[aria-live="polite"]').filter({ hasText: 'wpisy w tym miesiącu' })
+  const count = page.locator('.cal-day-panel__count')
   await expect(count).toHaveAttribute('aria-live', 'polite')
+  await expect(count).toHaveText('1 sesja · 2 wpisy ze skoroszytu')
   const clientLink = page.getByRole('link', {
     name: 'Otwórz klienta historycznego — Zoja Historyczna',
   }).first()
@@ -499,8 +575,8 @@ test('@owner operates historical calendar links and the activation guard by keyb
   await expect(page).toHaveURL(/#\/client\?id=hcl_zoja&ym=2026-07/)
   await expect(page.getByRole('heading', { name: 'Zoja Historyczna' })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Aktywuj klienta' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Aktywuj klienta historycznego' })
+  await page.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Dodaj klienta z dawnego arkusza' })
   const specialistSelect = drawer.getByLabel('Specjalistka prowadząca')
   await expect(specialistSelect).toBeFocused()
   await specialistSelect.selectOption('sp_anna')
@@ -509,7 +585,7 @@ test('@owner operates historical calendar links and the activation guard by keyb
   await expect(drawer.getByRole('button', { name: 'Zamknij' })).toBeFocused()
 
   await page.keyboard.press('Escape')
-  await expect(drawer.getByText('Masz niezapisane zmiany.')).toBeVisible()
-  await drawer.getByRole('button', { name: 'Wróć' }).click()
+  await expect(drawer.getByText('Zamknąć bez zapisywania?')).toBeVisible()
+  await drawer.getByRole('button', { name: 'Wróć do edycji' }).click()
   await expect(specialistSelect).toHaveValue('sp_anna')
 })

@@ -74,7 +74,13 @@ import {
   postAppointmentCancellation,
   postAppointmentEdit,
   postAppointmentPayment,
+  postAppointmentRestoration,
 } from './routes/appointments.js'
+import {
+  getSpecialistAbsences,
+  postSpecialistAbsence,
+  postSpecialistAbsenceCancellation,
+} from './routes/specialist-absences.js'
 import { getOwnPayments, postPaymentCorrection } from './routes/payments.js'
 import {
   postSpecialistAccountLink,
@@ -136,6 +142,7 @@ const INVALID_WORKBOOK_FILENAME_TEXT = /[\p{Cc}\p{Cf}]/u
 const CLIENT_PATH_ID = 'cl_[A-Za-z0-9][A-Za-z0-9_-]{0,124}'
 const STAFF_PATH_ID = 'stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const APPOINTMENT_PATH_ID = 'apt_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
+const SPECIALIST_ABSENCE_PATH_ID = 'abs_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const PAYMENT_PATH_ID = 'pay_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const FINANCE_BATCH_PATH_ID = 'fib_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
 const WORKBOOK_IMPORT_PATH_ID = 'wbi_[A-Za-z0-9][A-Za-z0-9_-]{0,123}'
@@ -172,6 +179,7 @@ const descriptor = (value) => {
     methods: Object.freeze([...value.methods]),
     auditActions: Object.freeze([...value.auditActions]),
     bodyKeys: value.bodyKeys ? Object.freeze([...value.bodyKeys]) : null,
+    optionalBodyKeys: Object.freeze([...(value.optionalBodyKeys ?? [])]),
     bodyMode: value.bodyMode ?? 'json',
     assertedAuth: value.assertedAuth === true,
     idempotency: value.idempotency !== false,
@@ -192,16 +200,19 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'permissions.read', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/capability-overrides$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'permissions.manage', auditActions: [], bodyKeys: null, queryMode: 'none', idempotency: false }),
   descriptor({ id: 'permissions.replace', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/capability-overrides/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'permissions.manage', auditActions: ['staff.capabilities.updated'], bodyKeys: ['expectedAuthorityRevision', 'allow', 'deny'], queryMode: 'none', sharedBudget: CAPABILITY_MUTATION_BUDGET }),
   descriptor({ id: 'staff.role.update', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/role$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['staff.role.updated'], bodyKeys: ['expectedVersion', 'role'], queryMode: 'none', sharedBudget: STAFF_ROLE_MUTATION_BUDGET }),
-  descriptor({ id: 'specialists.create', path: '/api/v1/specialists', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'professionalTitle', 'standardRateGrosze'] }),
-  descriptor({ id: 'specialists.edit', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze'] }),
+  descriptor({ id: 'specialists.create', path: '/api/v1/specialists', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'professionalTitle', 'standardRateGrosze', 'avatarKey'] }),
+  descriptor({ id: 'specialists.edit', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze', 'avatarKey'] }),
   descriptor({ id: 'specialists.account.link', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/account-links$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.account.linked'], bodyKeys: ['staffId', 'expectedSpecialistVersion', 'expectedStaffVersion'] }),
-  descriptor({ id: 'clients.create', path: '/api/v1/clients', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'] }),
-  descriptor({ id: 'clients.edit', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'] }),
+  descriptor({ id: 'clients.create', path: '/api/v1/clients', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'], optionalBodyKeys: ['assignmentStartsAt'] }),
+  descriptor({ id: 'clients.edit', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'], optionalBodyKeys: ['assignmentStartsAt'] }),
   descriptor({ id: 'clients.archive', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/archive$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'] }),
   descriptor({ id: 'appointments.create', path: '/api/v1/appointments', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.created'], bodyKeys: ['clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'] }),
   descriptor({ id: 'appointments.edit', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.updated'], bodyKeys: ['expectedVersion', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'] }),
-  descriptor({ id: 'appointments.cancel', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/cancellation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'appointments.cancel', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/cancellation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion', 'reason'] }),
+  descriptor({ id: 'appointments.restore', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/restoration$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.restored'], bodyKeys: ['expectedVersion'] }),
   descriptor({ id: 'appointments.payment', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/payments$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'] }),
+  descriptor({ id: 'specialist-absences', path: '/api/v1/specialist-absences', methods: ['GET', 'HEAD', 'POST', 'OPTIONS'], allow: 'GET, HEAD, POST, OPTIONS', capability: 'appointment.manage', auditActions: ['specialist.absence.created'], bodyKeys: ['specialistId', 'dateFrom', 'dateTo', 'allDay'], queryMode: 'handler' }),
+  descriptor({ id: 'specialist-absences.cancel', pathPattern: `^/api/v1/specialist-absences/${SPECIALIST_ABSENCE_PATH_ID}/cancellation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['specialist.absence.cancelled'], bodyKeys: ['expectedVersion'] }),
   descriptor({ id: 'payments.correct', pathPattern: `^/api/v1/payments/${PAYMENT_PATH_ID}/corrections$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'] }),
   descriptor({ id: 'payments.own', path: '/api/v1/payments/own', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'appointment.charge.read', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'finance.list', path: '/api/v1/finance', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'finance.centre.read', auditActions: [], bodyKeys: null }),
@@ -230,7 +241,7 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'historical.projection.continue', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/continue$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], assertedAuth: true, sharedBudget: HISTORICAL_PROJECTION_BUDGET }),
   descriptor({ id: 'historical.projection.resolve', pathPattern: `^/api/v1/workbooks/imports/${WORKBOOK_IMPORT_PATH_ID}/historical-projection/resolutions$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId', 'reviewContextDigest', 'directoryCount', 'directoryDigest'], assertedAuth: true }),
   descriptor({ id: 'historical.clients.activate', pathPattern: `^/api/v1/historical-clients/${HISTORICAL_CLIENT_PATH_ID}/activation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'] }),
-  descriptor({ id: 'activities.workspace', path: '/api/v1/activities/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'tus.manage', auditActions: [], bodyKeys: null, queryMode: 'handler' }),
+  descriptor({ id: 'activities.workspace', path: '/api/v1/activities/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capabilityAnyOf: ['tus.manage', 'appointment.charge.read'], auditActions: [], bodyKeys: null, queryMode: 'handler' }),
   descriptor({ id: 'activities.charges.create', path: '/api/v1/activities/charges', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'finance.centre.manage', auditActions: ['activity.charge.created'], bodyKeys: ['participantId', 'groupId', 'membershipId', 'responsibleSpecialistId', 'accountingMonth', 'amountGrosze', 'lessonCount', 'paidAmountGrosze', 'paymentMethod', 'settlementStatus', 'invoiceStatus'], assertedAuth: true }),
   descriptor({ id: 'activities.groups.create', path: '/api/v1/activities/groups', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'] }),
   descriptor({ id: 'activities.groups.edit', pathPattern: `^/api/v1/activities/groups/${ACTIVITY_GROUP_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'tus.manage', auditActions: ['activity.group.updated'], bodyKeys: ['expectedVersion', 'label', 'details', 'status', 'leaderSpecialistIds'] }),
@@ -643,6 +654,10 @@ export function createApp(deps = {}) {
         && !route.capabilityAllOf.every((capability) => (
           actor?.capabilities?.includes(capability) === true
         ))) throw new AppError('FORBIDDEN')
+      if (Array.isArray(route.capabilityAnyOf)
+        && !route.capabilityAnyOf.some((capability) => (
+          actor?.capabilities?.includes(capability) === true
+        ))) throw new AppError('FORBIDDEN')
     }
 
     if (isMutationMethod(method)) {
@@ -664,8 +679,10 @@ export function createApp(deps = {}) {
           throw new AppError('VALIDATION_FAILED', { field: 'body' })
         }
         const keys = Reflect.ownKeys(descriptors)
-        if (keys.length !== route.bodyKeys.length || keys.some((key) => (
-          typeof key !== 'string' || !route.bodyKeys.includes(key)
+        const allowedBodyKeys = [...route.bodyKeys, ...route.optionalBodyKeys]
+        if (keys.length < route.bodyKeys.length || keys.length > allowedBodyKeys.length
+          || route.bodyKeys.some((key) => !keys.includes(key)) || keys.some((key) => (
+          typeof key !== 'string' || !allowedBodyKeys.includes(key)
           || !Object.hasOwn(descriptors[key], 'value') || !descriptors[key].enumerable
         ))) throw new AppError('VALIDATION_FAILED', { field: 'body' })
       }
@@ -897,6 +914,57 @@ export function createApp(deps = {}) {
     }
     const result = await (deps.postAppointmentCancellation
       ?? postAppointmentCancellation)(input)
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/appointments/:appointmentId/restoration', async (c) => {
+    if (c.get('routeId') !== 'appointments.restore') throw new AppError('NOT_FOUND')
+    const input = {
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory,
+      appointmentId: c.req.param('appointmentId'), body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.restoreAppointment ? { restore: deps.restoreAppointment } : {}),
+    }
+    const result = await (deps.postAppointmentRestoration
+      ?? postAppointmentRestoration)(input)
+    return c.json(result.body, result.status)
+  })
+  app.all('/api/v1/specialist-absences', async (c) => {
+    if (c.get('routeId') !== 'specialist-absences') throw new AppError('NOT_FOUND')
+    if (c.req.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: { Allow: 'GET, HEAD, POST, OPTIONS' } })
+    }
+    if (c.req.method === 'GET' || c.req.method === 'HEAD') {
+      const result = await (deps.getSpecialistAbsences ?? getSpecialistAbsences)({
+        db: c.get('coreWorkDb'), actor: c.get('actor'),
+        keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'), url: c.req.url,
+      })
+      return readResponse(c, result)
+    }
+    if (new URL(c.req.url).search) throw new AppError('NOT_FOUND')
+    const result = await (deps.postSpecialistAbsence ?? postSpecialistAbsence)({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory, body: c.get('jsonBody'),
+      idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.createSpecialistAbsence ? { create: deps.createSpecialistAbsence } : {}),
+    })
+    return c.json(result.body, result.status)
+  })
+  app.post('/api/v1/specialist-absences/:absenceId/cancellation', async (c) => {
+    if (c.get('routeId') !== 'specialist-absences.cancel') throw new AppError('NOT_FOUND')
+    const result = await (deps.postSpecialistAbsenceCancellation
+      ?? postSpecialistAbsenceCancellation)({
+      db: c.get('coreWorkDb'), recoveryDb: c.get('coreRecoveryDb'),
+      actor: c.get('actor'), keyring: c.get('cryptoContext')?.keyring,
+      nowMs: c.get('nowMs'), correlationId: c.get('correlationId'),
+      idFactory: deps.idFactory ?? idFactory, absenceId: c.req.param('absenceId'),
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+      ...(deps.cancelSpecialistAbsence ? { cancel: deps.cancelSpecialistAbsence } : {}),
+    })
     return c.json(result.body, result.status)
   })
   app.post('/api/v1/appointments/:appointmentId/payments', async (c) => {

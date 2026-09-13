@@ -9,6 +9,7 @@ import {
   applyFinanceStageC,
   applySpecialistProfilesStageD,
   applyWorkbookRegistryStageE,
+  applyAuthenticationStageF,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
 import { createKeyring } from '../../worker/security/keyring.js'
@@ -21,6 +22,7 @@ await applyCoreDirectoryStageB()
 await applyFinanceStageC()
 await applySpecialistProfilesStageD()
 await applyWorkbookRegistryStageE()
+await applyAuthenticationStageF()
 
 const instant = (day, hour = '10') => `2026-08-${day}T${hour}:00:00.000Z`
 
@@ -66,6 +68,7 @@ const specialistRow = (id, staffId, version = 1) => ({
   staff_id: staffId, staff_specialist_id: id, staff_status: 'active',
   staff_version: version + 2, display_name_envelope: `staff:${staffId}`,
   professional_title_envelope: null,
+  avatar_key: 'bloom',
 })
 
 const archivedSpecialistRow = (id, staffId, version = 2) => ({
@@ -95,6 +98,7 @@ const appointmentRow = (id, clientId, specialistId, status = 'completed') => ({
   starts_at: instant('04'), ends_at: instant('04', '11'), time_zone: 'Europe/Warsaw',
   location: null, status, source: 'panel', version: 3,
   cancelled_at: status === 'cancelled' ? instant('03') : null,
+  cancellation_reason: status === 'cancelled' ? 'client' : null,
   created_at: instant('01'), updated_at: instant('06'), charge_id: `chg_${id.slice(4)}`,
   charge_service_id: 'zajecia', expected_amount_grosze: 20000,
   currency: 'PLN', charge_version: 1,
@@ -243,8 +247,8 @@ describe('workspace read model', () => {
     expect(result).toEqual({ data: {
       window: { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true },
       specialists: [
-        { id: 'sp_ania', displayName: 'Ągata Fikcyjna', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
-        { id: 'sp_zofia', displayName: 'Zofia Fikcyjna', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
+        { id: 'sp_ania', displayName: 'Ągata Fikcyjna', professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
+        { id: 'sp_zofia', displayName: 'Zofia Fikcyjna', professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
       ],
       clients: [
         { id: 'cl_archived', name: 'Archiwalna Fikcyjna', age: null, status: 'archived', version: 2, archivedAt: instant('01'), createdAt: instant('01'), updatedAt: instant('02'), readOnly: true, assignment: null },
@@ -254,7 +258,8 @@ describe('workspace read model', () => {
         id: 'apt_visit', clientId: 'cl_archived', specialistId: 'sp_ania', serviceId: 'zajecia',
         startsAt: instant('04'), endsAt: instant('04', '11'), timeZone: 'Europe/Warsaw',
         location: null, status: 'completed', source: 'panel', version: 3,
-        cancelledAt: null, createdAt: instant('01'), updatedAt: instant('06'),
+        cancelledAt: null, cancellationReason: null,
+        createdAt: instant('01'), updatedAt: instant('06'),
         charge: { id: 'chg_visit', serviceId: 'zajecia', expectedAmountGrosze: 20000, currency: 'PLN', version: 1 },
         payment: { status: 'partial', collectedGrosze: 12000, outstandingGrosze: 8000, latestMethod: 'card', latestReceivedAt: instant('05', '09') },
         paymentEntries: [
@@ -440,7 +445,7 @@ describe('workspace read model', () => {
     })
     expect(result.data.specialists).toEqual([{
       id: 'sp_archived_history', displayName: 'Archiwalna Fikcyjna',
-      professionalTitle: 'Specjalistka', standardRateGrosze: 18000,
+      professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 18000,
       status: 'archived', version: 2, staffVersion: 4,
     }])
     expect(result.data.historicalOccurrences[0].specialistId).toBe('sp_archived_history')
@@ -522,7 +527,7 @@ describe('workspace read model', () => {
     }
   })
 
-  it('rejects impossible cancellation, archive, and current-assignment timestamps', async () => {
+  it('allows a backdated assignment and rejects impossible lifecycle timestamps', async () => {
     const common = {
       actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
       cryptoContext: { keyring: {}, dataKey: {}, scope: {} },
@@ -561,7 +566,16 @@ describe('workspace read model', () => {
       startsAt: '2026-07-31T10:00:00.000Z', version: 1,
     })
     await expect(readWorkspace({ ...common, db: scriptedDb({ clients: [assigned] }).db }))
-      .rejects.toThrow(/^INTERNAL_ERROR$/)
+      .resolves.toMatchObject({ data: { clients: [{ assignment: {
+        startsAt: '2026-07-31T10:00:00.000Z',
+      } }] } })
+    const futureAssignment = clientRow('cl_future_assignment', 'active', {
+      id: 'asg_future_assignment', specialistId: 'sp_owner',
+      startsAt: '2026-08-03T10:00:00.000Z', version: 1,
+    })
+    await expect(readWorkspace({
+      ...common, db: scriptedDb({ clients: [futureAssignment] }).db,
+    })).rejects.toThrow(/^INTERNAL_ERROR$/)
   })
 
   it('rejects malformed correction graphs and never exposes correction reasons', async () => {
@@ -1198,7 +1212,7 @@ describe('workspace read model', () => {
     })
     expect(result.data.specialists).toEqual([{
       id: specialistId, displayName: 'Żaneta Fikcyjna',
-      professionalTitle: 'Specjalistka', standardRateGrosze: 19000,
+      professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 19000,
       status: 'active', version: 2, staffVersion: 4, accessStatus: 'enabled',
     }])
     expect(result.data.clients[0]).toMatchObject({ id: clientId, name: 'Łucja Fikcyjna', age: 11 })

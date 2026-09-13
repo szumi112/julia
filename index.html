@@ -10,9 +10,27 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='12' fill='%23f8f5f0'/%3E%3Cg fill='none' stroke-linecap='round'%3E%3Cpath d='M11 39V23a8.5 8.5 0 0 1 17 0v16' stroke='%23e88aac' stroke-width='6'/%3E%3Cpath d='M19.5 39V27.5a4.6 4.6 0 0 1 9.2 0' stroke='%23ed9936' stroke-width='5.4'/%3E%3Cpath d='M33.5 17.5 39 38' stroke='%23ed5a39' stroke-width='6'/%3E%3C/g%3E%3Ccircle cx='31.5' cy='34.5' r='3.2' fill='%23b2d9ea'/%3E%3C/svg%3E"
     />
+    <style>
+      .startup-loader { display: grid; min-height: 100vh; place-content: center; justify-items: center; gap: 14px; background: var(--paper, Canvas); color: var(--ink, CanvasText); font-family: 'Segoe UI', sans-serif; }
+      .startup-loader__mark { display: block; width: 56px; height: 56px; }
+      .startup-loader__label { margin: 0; visibility: hidden; opacity: 0; font-size: 15px; animation: startup-loader-label 0s linear 300ms forwards; }
+      @keyframes startup-loader-label { to { visibility: visible; opacity: 1; } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="startup-loader">
+        <svg class="startup-loader__mark" viewBox="0 0 48 48" aria-hidden="true">
+          <g fill="none" stroke-linecap="round">
+            <path d="M11 39V23a8.5 8.5 0 0 1 17 0v16" stroke="var(--pink, currentColor)" stroke-width="6" />
+            <path d="M19.5 39V27.5a4.6 4.6 0 0 1 9.2 0" stroke="var(--amber, currentColor)" stroke-width="5.4" />
+            <path d="M33.5 17.5 39 38" stroke="var(--coral, currentColor)" stroke-width="6" />
+          </g>
+          <circle cx="31.5" cy="34.5" r="3.2" fill="var(--sky, currentColor)" />
+        </svg>
+        <p class="startup-loader__label">Otwieramy panel…</p>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

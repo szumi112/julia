@@ -29,6 +29,7 @@ const DENIAL_THRESHOLD = 10
 const DENIAL_ROW_LIMIT = 100
 const DENIAL_GROUP_LIMIT = DENIAL_ROW_LIMIT / DENIAL_THRESHOLD
 const ACTION_CANDIDATE_LIMIT = DENIAL_GROUP_LIMIT + 4
+const AUTO_RECOVERY_LIMIT = 4
 const CHECK_COLLATOR = new Intl.Collator('pl-PL', { sensitivity: 'base', numeric: true })
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const OPAQUE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -868,6 +869,38 @@ async function readOpenActions(db, cryptoContext, fingerprints) {
   return open
 }
 
+async function readRecoverableActions(db, cryptoContext, snapshot, proofs) {
+  const rows = (await db.prepare(
+    `SELECT id,fingerprint,kind,severity,status,entity_type,entity_id,details_envelope,
+            version,created_at,updated_at,resolved_at
+     FROM operational_actions
+     WHERE status='open' AND kind IN ('backup_failed','backup_stale','scheduler_stale')
+     ORDER BY created_at ASC,id ASC
+     LIMIT ?`
+  ).bind(AUTO_RECOVERY_LIMIT).all())?.results
+  if (!Array.isArray(rows) || rows.length > AUTO_RECOVERY_LIMIT) invalidState()
+  const backupCheck = snapshot.checks.find(({ id }) => id === 'backup.freshness')
+  const schedulerCheck = snapshot.checks.find(({ id }) => id === 'scheduler.runs')
+  const recoverable = []
+  for (const raw of rows) {
+    const row = await validateStoredAction(
+      cryptoContext, raw, 'open', raw.fingerprint,
+    )
+    const proof = row.kind === 'scheduler_stale' ? proofs.scheduler : proofs.backup
+    const currentCheck = row.kind === 'scheduler_stale' ? schedulerCheck : backupCheck
+    const validRecovery = row.kind === 'scheduler_stale'
+      ? currentCheck?.detailCode === 'SCHEDULER_HEALTHY'
+      : row.kind === 'backup_failed'
+        || (row.kind === 'backup_stale' && currentCheck?.detailCode === 'BACKUP_FRESH')
+    if (proof
+      && validRecovery
+      && currentCheck?.lastSuccessAt === proof.completedAt
+      && proof.completedAt <= snapshot.generatedAt
+      && proof.completedAt > row.created_at) recoverable.push({ row, proof })
+  }
+  return recoverable
+}
+
 const compareCandidates = (left, right) => left.fingerprint < right.fingerprint
   ? -1
   : left.fingerprint > right.fingerprint
@@ -953,6 +986,17 @@ async function evaluateCaptured(input) {
     snapshot: { generatedAt, checks },
     actionCandidates,
     existingActions,
+    recoveryProofs: {
+      backup: backups.success ? {
+        id: backups.success.id,
+        status: backups.success.status,
+        completedAt: backups.success.completed_at,
+      } : null,
+      scheduler: input.prospectiveSchedulerRun ? {
+        id: input.prospectiveSchedulerRun.id,
+        completedAt: input.prospectiveSchedulerRun.completedAt,
+      } : null,
+    },
   }
 }
 
@@ -1123,6 +1167,56 @@ const actionInsert = (db, action) => db.prepare(
   action.fingerprint,
 )
 
+function prepareAutoResolutions(db, recoverable, completedAt, correlationId, idFactory) {
+  return recoverable.map(({ row, proof }) => {
+    const auditId = actionIdFrom(idFactory)
+    const proofSql = row.kind === 'scheduler_stale'
+      ? `EXISTS (
+           SELECT 1 FROM scheduler_runs
+           WHERE id=? AND status='running' AND completed_at IS NULL
+         )`
+      : `EXISTS (
+           SELECT 1 FROM backup_runs
+           WHERE id=? AND status=? AND completed_at=? AND completed_at>?
+         )`
+    const proofBindings = row.kind === 'scheduler_stale'
+      ? [proof.id]
+      : [proof.id, proof.status, proof.completedAt, row.created_at]
+    return {
+      row,
+      auditId,
+      statement: db.prepare(
+        `UPDATE operational_actions
+         SET status='resolved',version=version+1,updated_at=?,resolved_at=?
+         WHERE id=? AND fingerprint=? AND kind=? AND severity='critical'
+           AND status='open' AND entity_type=? AND entity_id=? AND details_envelope=?
+           AND version=1 AND created_at=? AND updated_at=? AND resolved_at IS NULL
+           AND ${proofSql}`
+      ).bind(
+        completedAt,
+        completedAt,
+        row.id,
+        row.fingerprint,
+        row.kind,
+        row.entity_type,
+        row.entity_id,
+        row.details_envelope,
+        row.created_at,
+        row.updated_at,
+        ...proofBindings,
+      ),
+      audit: db.prepare(
+        `INSERT INTO audit_events
+         (id,occurred_at,actor_staff_id,action,entity_type,entity_id,result,
+          reason_envelope,correlation_id,metadata_json)
+         SELECT ?,?,NULL,'operational_action.resolved','operational_action',?,
+                'success',NULL,?,'{"actionVersion":2}'
+         WHERE changes()=1`
+      ).bind(auditId, completedAt, row.id, correlationId),
+    }
+  })
+}
+
 function snapshotStatement(db, existing, valueJson, completedAt) {
   if (!existing) return db.prepare(
     `INSERT INTO system_state (key,value_json,version,updated_at)
@@ -1156,7 +1250,16 @@ const schedulerSuccessStatement = (db, run, completedAt) => db.prepare(
   completedAt,
 )
 
-function publicationGuard(db, run, completedAt, valueJson, snapshotVersion, actions, attempt) {
+function publicationGuard(
+  db,
+  run,
+  completedAt,
+  valueJson,
+  snapshotVersion,
+  actions,
+  resolutions,
+  attempt,
+) {
   const predicates = [
     `changes()=1`,
     `EXISTS (
@@ -1192,6 +1295,35 @@ function publicationGuard(db, run, completedAt, valueJson, snapshotVersion, acti
     bindings.push(
       action.id,
       action.fingerprint,
+    )
+  }
+  for (const resolution of resolutions) {
+    predicates.push(`EXISTS (
+      SELECT 1
+      FROM operational_actions AS action
+      JOIN audit_events AS resolution
+        ON resolution.action='operational_action.resolved'
+       AND resolution.entity_type='operational_action'
+       AND resolution.entity_id=action.id
+       AND resolution.result='success'
+       AND resolution.reason_envelope IS NULL
+       AND resolution.occurred_at=action.resolved_at
+       AND resolution.metadata_json='{"actionVersion":2}'
+      WHERE action.id=? AND action.fingerprint=? AND action.kind=?
+        AND action.severity='critical' AND action.status='resolved'
+        AND action.entity_type=? AND action.entity_id=? AND action.details_envelope=?
+        AND action.version=2 AND action.created_at=?
+        AND action.updated_at=action.resolved_at
+        AND action.resolved_at>action.created_at
+    )`)
+    bindings.push(
+      resolution.row.id,
+      resolution.row.fingerprint,
+      resolution.row.kind,
+      resolution.row.entity_type,
+      resolution.row.entity_id,
+      resolution.row.details_envelope,
+      resolution.row.created_at,
     )
   }
   return db.prepare(
@@ -1241,6 +1373,12 @@ export async function publishScheduledOperationalState(input) {
     },
     generatedAt: current.completedAt,
   })
+  const recoverable = await readRecoverableActions(
+    validated.db,
+    validated.cryptoContext,
+    evaluated.snapshot,
+    evaluated.recoveryProofs,
+  )
   const existingSnapshot = await readSnapshot(validated.db)
   const valueJson = canonicalJson(evaluated.snapshot)
   const snapshotVersion = existingSnapshot ? existingSnapshot.version + 1 : 1
@@ -1252,8 +1390,20 @@ export async function publishScheduledOperationalState(input) {
     current.completedAt,
     validated.idFactory,
   )
-  const guardedActions = [...evaluated.existingActions, ...proposedActions]
+  const resolutions = prepareAutoResolutions(
+    validated.db,
+    recoverable,
+    current.completedAt,
+    validated.run.id,
+    validated.idFactory,
+  )
+  const resolvingIds = new Set(recoverable.map(({ row }) => row.id))
+  const guardedActions = [
+    ...evaluated.existingActions.filter(({ id }) => !resolvingIds.has(id)),
+    ...proposedActions,
+  ]
   const statements = [
+    ...resolutions.flatMap(({ statement, audit }) => [statement, audit]),
     ...proposedActions.map((action) => actionInsert(validated.db, action)),
     snapshotStatement(validated.db, existingSnapshot, valueJson, current.completedAt),
     schedulerSuccessStatement(validated.db, validated.run, current.completedAt),
@@ -1264,6 +1414,7 @@ export async function publishScheduledOperationalState(input) {
       valueJson,
       snapshotVersion,
       guardedActions,
+      resolutions,
       attempt,
     ),
   ]

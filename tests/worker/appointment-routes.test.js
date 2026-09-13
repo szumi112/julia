@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers'
+import { applyD1Migrations } from 'cloudflare:test'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
   assertAppointmentPaymentTransition,
@@ -6,24 +7,29 @@ import {
   createAppointment,
   digestCancelAppointmentRequest,
   editAppointment,
+  restoreAppointment,
   digestEditAppointmentRequest,
   digestCreateAppointmentRequest,
   validateEditAppointmentBody,
   validateCancelAppointmentBody,
   validateCreateAppointmentBody,
+  validateRestoreAppointmentBody,
 } from '../../worker/core/appointments.js'
 import {
   postAppointment,
   postAppointmentCancellation,
   postAppointmentEdit,
+  postAppointmentRestoration,
 } from '../../worker/routes/appointments.js'
 import { createClient, editClient } from '../../worker/core/clients.js'
+import { recordAppointmentPayment } from '../../worker/core/payments.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import { decryptForScope, encryptForScope, loadDataKey } from '../../worker/security/envelope.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { clientKeyScope } from '../../worker/core/crypto.js'
 import { createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db/query-budget.js'
 import { createApp } from '../../worker/app.js'
+import { selectCoreMigrationStage } from '../../scripts/core-migration-stages.js'
 import {
   applyCoreDirectoryStageB,
   completeCoreDirectoryStageA,
@@ -51,6 +57,11 @@ const suffixes = (label) => {
 beforeAll(async () => {
   expect(await completeCoreDirectoryStageA()).toMatchObject({ status: 'complete' })
   await applyCoreDirectoryStageB()
+  const stageF = selectCoreMigrationStage(env.TEST_STAGE_F_MIGRATIONS, 'stage-f')
+  await applyD1Migrations(env.DB, [
+    stageF.find((migration) => migration.name === '0026_assignment_starts_at.sql'),
+    stageF.find((migration) => migration.name === '0027_appointment_cancellation_reason.sql'),
+  ])
   const now = new Date(NOW_MS).toISOString()
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO staff_users
@@ -111,6 +122,21 @@ const seedClient = async (specialistId = 'sp_appointment_target') => {
     correlationId: CORRELATION_ID, idFactory: factory,
     body: { name: `Fikcyjny ${sequence}`, age: 12, status: 'active', specialistId },
     idempotencyKey: `${marker}-create-key`,
+  })).body.data.client
+}
+
+const backdateClientAssignment = async (client) => {
+  const marker = `appointment_backdate_${++sequence}`
+  return (await editClient({
+    db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+    nowMs: NOW_MS + 500, correlationId: CORRELATION_ID, idFactory: suffixes(marker),
+    clientId: client.id,
+    body: {
+      expectedVersion: client.version, name: client.name, age: client.age,
+      status: client.status, specialistId: client.assignment.specialistId,
+      assignmentStartsAt: '2026-01-15T09:00:00.000Z',
+    },
+    idempotencyKey: `${marker}-key`,
   })).body.data.client
 }
 
@@ -177,7 +203,8 @@ describe('persistent appointment creation', () => {
         startsAt: `2027-01-16T${String(10 + index).padStart(2, '0')}:00:00.000Z`,
         endsAt: `2027-01-16T${String(10 + index).padStart(2, '0')}:50:00.000Z`,
         timeZone: 'Europe/Warsaw', location: null, status, source: 'panel', version: 1,
-        cancelledAt: null, createdAt: new Date(NOW_MS).toISOString(),
+        cancelledAt: null, cancellationReason: null,
+        createdAt: new Date(NOW_MS).toISOString(),
         updatedAt: new Date(NOW_MS).toISOString(),
         charge: { id: expect.stringMatching(/^chg_/), serviceId: 'zajecia',
           expectedAmountGrosze: 19_500, currency: 'PLN', version: 1 },
@@ -213,6 +240,19 @@ describe('persistent appointment creation', () => {
       })).rejects.toThrow('NOT_FOUND')
       expect(idFactory).not.toHaveBeenCalled()
     }
+  })
+
+  it('uses a versioned backdated assignment before creating an appointment', async () => {
+    const client = await backdateClientAssignment(await seedClient())
+    expect(client.assignment).toMatchObject({
+      startsAt: '2026-01-15T09:00:00.000Z', version: 2,
+    })
+    await expect(create(client, { body: {
+      ...BODY, clientId: client.id, date: '2026-01-15', time: '09:59',
+    } })).rejects.toThrow('NOT_FOUND')
+    await expect(create(client, { body: {
+      ...BODY, clientId: client.id, date: '2026-01-15', time: '10:00',
+    } })).resolves.toMatchObject({ status: 201 })
   })
 
   it('allows every active role within its exact appointment scope independent of target staff role', async () => {
@@ -595,7 +635,7 @@ describe('persistent appointment creation', () => {
     const dataKey = await loadDataKey(env.DB, {
       envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
     })
-    for (const [entityId, schema] of [[appointment.id, 'appointment.v1'], [appointment.charge.id, 'session_charge.v1']]) {
+    for (const [entityId, schema] of [[appointment.id, 'appointment.v2'], [appointment.charge.id, 'session_charge.v1']]) {
       const row = await env.DB.prepare('SELECT snapshot_envelope FROM record_versions WHERE entity_id=? AND version=1')
         .bind(entityId).first()
       expect(row.snapshot_envelope).not.toContain('Gabinet 2')
@@ -697,7 +737,7 @@ describe('persistent appointment creation', () => {
         origin: 'https://bearwithme-panel.app', 'content-type': 'application/json',
         'idempotency-key': 'appointment-http-key-0002', 'x-csrf-token': 'valid',
       },
-      body: JSON.stringify({ expectedVersion: 1 }),
+      body: JSON.stringify({ expectedVersion: 1, reason: 'client' }),
     })
     expect(later.status).toBe(404)
   })
@@ -719,6 +759,18 @@ describe('persistent appointment editing', () => {
       idempotencyKey: `${marker}-key`, ...overrides,
     })
   }
+
+  it('edits an appointment after its effective assignment reached version two', async () => {
+    const client = await backdateClientAssignment(await seedClient())
+    const appointment = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2029-02-01',
+    } })).body.data.appointment
+    await expect(edit(appointment, { body: {
+      ...EDIT_BODY, expectedVersion: 1, date: '2029-02-01', location: 'Gabinet 2',
+    } })).resolves.toMatchObject({
+      status: 200, body: { data: { appointment: { version: 2 } } },
+    })
+  })
   const seedCollectedPayment = async (appointment, amountGrosze = 5_000) => {
     const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
       .bind(appointment.clientId).first()
@@ -1255,7 +1307,7 @@ describe('persistent appointment editing', () => {
     const dataKey = await loadDataKey(env.DB, {
       envelope: JSON.parse(clientRow.identity_envelope), expectedScope: scope,
     })
-    for (const [entityId, schema] of [[current.id, 'appointment.v1'], [current.charge.id, 'session_charge.v1']]) {
+    for (const [entityId, schema] of [[current.id, 'appointment.v2'], [current.charge.id, 'session_charge.v1']]) {
       const row = await env.DB.prepare(`SELECT snapshot_envelope FROM record_versions
         WHERE entity_id=? ORDER BY version DESC LIMIT 1`).bind(entityId).first()
       const plaintext = await decryptForScope(await ring(), dataKey, {
@@ -1578,17 +1630,28 @@ describe('persistent appointment editing', () => {
 })
 
 describe('persistent appointment cancellation', () => {
-  const CANCEL_BODY = Object.freeze({ expectedVersion: 1 })
+  const CANCEL_BODY = Object.freeze({ expectedVersion: 1, reason: 'client' })
   const cancel = async (appointment, overrides = {}) => {
     const marker = `appointment_cancel_${++sequence}`
+    const { body: bodyOverride = {}, ...rest } = overrides
     return cancelAppointment({
       db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
       nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: suffixes(marker), appointmentId: appointment.id,
-      body: { expectedVersion: appointment.version },
-      idempotencyKey: `${marker}-key`, ...overrides,
+      body: { expectedVersion: appointment.version, reason: 'client', ...bodyOverride },
+      idempotencyKey: `${marker}-key`, ...rest,
     })
   }
+
+  it('cancels an appointment after its effective assignment reached version two', async () => {
+    const client = await backdateClientAssignment(await seedClient())
+    const appointment = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2029-02-02',
+    } })).body.data.appointment
+    await expect(cancel(appointment)).resolves.toMatchObject({
+      status: 200, body: { data: { appointment: { status: 'cancelled', version: 2 } } },
+    })
+  })
   const cancellationRecordId = async (key) => {
     const encoded = new TextEncoder().encode(
       ['bwm:idempotency:record:v1', OWNER.id, 'appointments.cancel', key].join('\n'),
@@ -1698,14 +1761,19 @@ describe('persistent appointment cancellation', () => {
     return { paymentId, version: corrected ? appointment.version : 2 }
   }
 
-  it('strictly captures the terminal target and exact one-field body', async () => {
+  it('strictly captures the terminal target and exact reason body', async () => {
     expect(validateCancelAppointmentBody(CANCEL_BODY)).toEqual(CANCEL_BODY)
     for (const body of [
-      {}, { expectedVersion: 0 }, { expectedVersion: 1, extra: true },
+      {}, { expectedVersion: 0, reason: 'client' },
+      { expectedVersion: 1, reason: 'other' },
+      { expectedVersion: 1, reason: 'client', extra: true },
     ]) expect(() => validateCancelAppointmentBody(body)).toThrow(/VALIDATION_FAILED/)
     const getter = vi.fn(() => 1)
     const hostile = {}
-    Object.defineProperty(hostile, 'expectedVersion', { enumerable: true, get: getter })
+    Object.defineProperties(hostile, {
+      expectedVersion: { enumerable: true, get: getter },
+      reason: { enumerable: true, value: 'client' },
+    })
     expect(() => validateCancelAppointmentBody(hostile)).toThrow('VALIDATION_FAILED/body')
     expect(getter).not.toHaveBeenCalled()
     await expect(digestCancelAppointmentRequest('apt_cancel_target', CANCEL_BODY))
@@ -1727,13 +1795,14 @@ describe('persistent appointment cancellation', () => {
       const commandNow = new Date(NOW_MS + 1_000).toISOString()
       expect(result).toEqual({ status: 200, body: { data: { appointment: {
         ...current, status: 'cancelled', version: 2, cancelledAt: commandNow,
+        cancellationReason: 'client',
         updatedAt: commandNow, payment: { ...current.payment, outstandingGrosze: 0 },
       } } } })
       expect(result.body.data.appointment.charge).toEqual(current.charge)
-      const row = await env.DB.prepare(`SELECT status,version,cancelled_at,updated_at
+      const row = await env.DB.prepare(`SELECT status,version,cancelled_at,cancellation_reason,updated_at
         FROM appointments WHERE id=?`).bind(current.id).first()
       expect(row).toEqual({ status: 'cancelled', version: 2,
-        cancelled_at: commandNow, updated_at: commandNow })
+        cancelled_at: commandNow, cancellation_reason: 'client', updated_at: commandNow })
       expect(await env.DB.prepare('SELECT * FROM session_charges WHERE id=?')
         .bind(current.charge.id).first()).toEqual(
         before.charges.find(({ id }) => id === current.charge.id),
@@ -1742,7 +1811,9 @@ describe('persistent appointment cancellation', () => {
         FROM audit_events WHERE entity_id=? AND action='appointment.cancelled'`)
         .bind(current.id).first())).toEqual({
         action: 'appointment.cancelled', reason_envelope: null,
-        metadata_json: JSON.stringify({ appointmentVersion: 2, chargeVersion: 1 }),
+        metadata_json: JSON.stringify({
+          appointmentVersion: 2, cancellationReason: 'client', chargeVersion: 1,
+        }),
       })
     },
   )
@@ -1753,7 +1824,7 @@ describe('persistent appointment cancellation', () => {
       ...BODY, clientId: client.id, date: '2027-09-04',
     } })).body.data.appointment
     const staleIds = vi.fn()
-    await expect(cancel(current, { idFactory: staleIds, body: { expectedVersion: 2 } }))
+    await expect(cancel(current, { idFactory: staleIds, body: { expectedVersion: 2, reason: 'client' } }))
       .rejects.toMatchObject({ message: 'VERSION_CONFLICT', details: { currentVersion: 1 } })
     expect(staleIds).not.toHaveBeenCalled()
     await cancel(current)
@@ -1782,7 +1853,9 @@ describe('persistent appointment cancellation', () => {
     }))
     await expect(postAppointmentCancellation({ ...input, appointmentId: 'apt_bad/id' }))
       .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: undefined })
-    await expect(postAppointmentCancellation({ ...input, body: { expectedVersion: 1, extra: 2 } }))
+    await expect(postAppointmentCancellation({ ...input, body: {
+      expectedVersion: 1, reason: 'client', extra: 2,
+    } }))
       .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: { field: 'body' } })
   })
 
@@ -1950,7 +2023,7 @@ describe('persistent appointment cancellation', () => {
       db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
       nowMs: NOW_MS + 99_000, correlationId: CORRELATION_ID,
       idFactory: replayIds, appointmentId: current.id,
-      body: { expectedVersion: 1 }, idempotencyKey: key,
+      body: { expectedVersion: 1, reason: 'client' }, idempotencyKey: key,
     })).toEqual(first)
     expect(replayIds).not.toHaveBeenCalled()
 
@@ -2004,7 +2077,7 @@ describe('persistent appointment cancellation', () => {
       db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring,
       nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: suffixes(marker), appointmentId: current.id,
-      body: { expectedVersion: 1 }, idempotencyKey: key,
+      body: { expectedVersion: 1, reason: 'client' }, idempotencyKey: key,
     })
     const [first, second] = await Promise.all([
       command(`appointment_cancel_same_a_${++sequence}`),
@@ -2035,14 +2108,14 @@ describe('persistent appointment cancellation', () => {
             db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
             nowMs: NOW_MS + 500, correlationId: CORRELATION_ID,
             idFactory: suffixes(`appointment_cancel_race_unrelated_${++sequence}`),
-            appointmentId: unrelated.id, body: { expectedVersion: 1 },
+            appointmentId: unrelated.id, body: { expectedVersion: 1, reason: 'client' },
             idempotencyKey: `appointment-cancel-race-unrelated-${sequence}`,
           })
           await cancelAppointment({
             db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
             nowMs: NOW_MS + 500, correlationId: CORRELATION_ID,
             idFactory: suffixes(`appointment_cancel_race_winner_${++sequence}`),
-            appointmentId: current.id, body: { expectedVersion: 1 },
+            appointmentId: current.id, body: { expectedVersion: 1, reason: 'client' },
             idempotencyKey: `appointment-cancel-race-winner-${sequence}`,
           })
         }
@@ -2087,7 +2160,7 @@ describe('persistent appointment cancellation', () => {
             db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
             nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
             idFactory: suffixes(`appointment_cancel_injected_winner_${++sequence}`),
-            appointmentId: current.id, body: { expectedVersion: 1 },
+            appointmentId: current.id, body: { expectedVersion: 1, reason: 'client' },
             idempotencyKey: key,
           })
         }
@@ -2098,7 +2171,7 @@ describe('persistent appointment cancellation', () => {
       db, recoveryDb, actor: OWNER, keyring: await ring(),
       nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
       idFactory: suffixes(`appointment_cancel_injected_loser_${++sequence}`),
-      appointmentId: current.id, body: { expectedVersion: 1 }, idempotencyKey: key,
+      appointmentId: current.id, body: { expectedVersion: 1, reason: 'client' }, idempotencyKey: key,
     })
     expect(loser).toEqual(winner)
     expect(recoveryReads).toBe(2)
@@ -2126,7 +2199,7 @@ describe('persistent appointment cancellation', () => {
               db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
               nowMs: NOW_MS + 500, correlationId: CORRELATION_ID,
               idFactory: suffixes(`appointment_cancel_hostile_winner_${sequence}`),
-              appointmentId: current.id, body: { expectedVersion: 1 },
+              appointmentId: current.id, body: { expectedVersion: 1, reason: 'client' },
               idempotencyKey: winnerKey,
             })
             await cloneCancellationCandidate(client.id, winnerKey, hostileKey, {
@@ -2274,6 +2347,171 @@ describe('persistent appointment cancellation', () => {
       .rejects.toThrow(/core_directory_invariant_failed/)
   })
 
+  it('restores with CAS, keeps audit identities across a cancel-restore-cancel cycle, and writes v2 snapshots', async () => {
+    const client = await seedClient()
+    const original = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-20', status: 'completed',
+    } })).body.data.appointment
+    const first = await cancel(original, { body: { reason: 'late_paid' } })
+    expect(first.body.data.appointment).toMatchObject({
+      status: 'cancelled', version: 2, cancellationReason: 'late_paid',
+      payment: { outstandingGrosze: BODY.expectedAmountGrosze },
+    })
+    const restoreKey = `appointment-restore-cycle-${sequence}`
+    const restored = await restoreAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(`appointment_restore_cycle_${++sequence}`),
+      appointmentId: original.id, body: { expectedVersion: 2 },
+      idempotencyKey: restoreKey,
+    })
+    expect(restored.body.data.appointment).toMatchObject({
+      status: 'scheduled', version: 3, cancelledAt: null, cancellationReason: null,
+    })
+    const replayIds = vi.fn()
+    await expect(restoreAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 99_000, correlationId: CORRELATION_ID,
+      idFactory: replayIds, appointmentId: original.id,
+      body: { expectedVersion: 2 }, idempotencyKey: restoreKey,
+    })).resolves.toEqual(restored)
+    expect(replayIds).not.toHaveBeenCalled()
+
+    await cancel(restored.body.data.appointment, {
+      nowMs: NOW_MS + 3_000, body: { reason: 'centre' },
+    })
+    const events = (await env.DB.prepare(`SELECT id,action,metadata_json
+      FROM audit_events WHERE entity_id=?
+        AND action IN ('appointment.cancelled','appointment.restored')
+      ORDER BY occurred_at,id`).bind(original.id).all()).results
+    expect(events.map(({ action }) => action)).toEqual([
+      'appointment.cancelled', 'appointment.restored', 'appointment.cancelled',
+    ])
+    expect(new Set(events.map(({ id }) => id)).size).toBe(3)
+    expect(events.map(({ metadata_json }) => JSON.parse(metadata_json))).toEqual([
+      { appointmentVersion: 2, cancellationReason: 'late_paid', chargeVersion: 1 },
+      { appointmentVersion: 3, chargeVersion: 1 },
+      { appointmentVersion: 4, cancellationReason: 'centre', chargeVersion: 1 },
+    ])
+    const clientRow = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(client.id).first()
+    const context = await loadDataKey(env.DB, {
+      envelope: JSON.parse(clientRow.identity_envelope), expectedScope: clientKeyScope(client.id),
+    })
+    const latest = await env.DB.prepare(`SELECT snapshot_envelope FROM record_versions
+      WHERE entity_type='appointment' AND entity_id=? ORDER BY version`).bind(original.id).all()
+    const schemas = []
+    for (const row of latest.results) {
+      const plaintext = await decryptForScope(await ring(), context, {
+        expectedScope: clientKeyScope(client.id), recordId: original.id,
+        field: 'record_version', envelope: JSON.parse(row.snapshot_envelope),
+      })
+      schemas.push(JSON.parse(plaintext).schema)
+    }
+    expect(schemas).toEqual(['appointment.v2', 'appointment.v2', 'appointment.v2', 'appointment.v2'])
+  })
+
+  it('requires zero effective payment before restoring a late-paid cancellation', async () => {
+    const client = await seedClient()
+    const original = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-23', status: 'completed',
+    } })).body.data.appointment
+    const cancelled = (await cancel(original, { body: { reason: 'late_paid' } }))
+      .body.data.appointment
+    const paid = (await recordAppointmentPayment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(`appointment_restore_paid_${++sequence}`),
+      appointmentId: original.id,
+      body: {
+        expectedVersion: cancelled.version, amountGrosze: 1_000, method: 'card',
+        receivedAt: '2027-10-23T10:00:00.000Z',
+      },
+      idempotencyKey: `appointment-restore-paid-${sequence}`,
+    })).body.data.appointment
+    const ids = vi.fn()
+    await expect(restoreAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID,
+      idFactory: ids, appointmentId: original.id,
+      body: { expectedVersion: paid.version },
+      idempotencyKey: `appointment-restore-paid-rejected-${sequence}`,
+    })).rejects.toThrow('APPOINTMENT_PAYMENT_CONFLICT')
+    expect(ids).not.toHaveBeenCalled()
+  })
+
+  it('returns one canonical winner to same-key concurrent restoration', async () => {
+    const client = await seedClient()
+    const original = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-24',
+    } })).body.data.appointment
+    const cancelled = (await cancel(original)).body.data.appointment
+    const key = `appointment-restore-same-key-${sequence}`
+    const keyring = await ring()
+    const command = (marker) => restoreAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring,
+      nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: suffixes(marker), appointmentId: original.id,
+      body: { expectedVersion: cancelled.version }, idempotencyKey: key,
+    })
+    const [first, second] = await Promise.all([
+      command(`appointment_restore_same_a_${++sequence}`),
+      command(`appointment_restore_same_b_${++sequence}`),
+    ])
+    expect(second).toEqual(first)
+    expect(first.body.data.appointment).toMatchObject({ status: 'scheduled', version: 3 })
+    const events = (await env.DB.prepare(`SELECT id FROM audit_events
+      WHERE entity_id=? AND action='appointment.restored'`).bind(original.id).all()).results
+    expect(events).toHaveLength(1)
+  })
+
+  it('keeps restoration exact and rejects overlap, stale versions, and inactive practitioners before IDs', async () => {
+    expect(validateRestoreAppointmentBody({ expectedVersion: 2 })).toEqual({ expectedVersion: 2 })
+    for (const body of [{}, { expectedVersion: 0 }, { expectedVersion: 2, extra: true }]) {
+      expect(() => validateRestoreAppointmentBody(body)).toThrow(/VALIDATION_FAILED/)
+    }
+    const service = vi.fn(async () => ({ status: 200,
+      body: { data: { appointment: { id: 'apt_restore_adapter' } } } }))
+    const input = {
+      db: {}, recoveryDb: {}, actor: OWNER, keyring: {}, nowMs: NOW_MS,
+      correlationId: CORRELATION_ID, idFactory: vi.fn(),
+      appointmentId: 'apt_restore_adapter', body: { expectedVersion: 2 },
+      idempotencyKey: 'appointment-restore-adapter-key', restore: service,
+    }
+    await expect(postAppointmentRestoration(input)).resolves.toMatchObject({ status: 200 })
+    expect(service).toHaveBeenCalledWith(expect.objectContaining({
+      appointmentId: 'apt_restore_adapter', body: { expectedVersion: 2 },
+    }))
+
+    const overlapClient = await seedClient()
+    const target = (await create(overlapClient, { body: {
+      ...BODY, clientId: overlapClient.id, date: '2027-10-21', time: '10:00',
+    } })).body.data.appointment
+    const cancelled = await cancel(target)
+    const blockerClient = await seedClient()
+    await create(blockerClient, { body: {
+      ...BODY, clientId: blockerClient.id, date: '2027-10-21', time: '10:00',
+    } })
+    const restore = (overrides = {}) => restoreAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: overrides.keyring ?? null,
+      nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: overrides.idFactory ?? vi.fn(), appointmentId: target.id,
+      body: overrides.body ?? { expectedVersion: cancelled.body.data.appointment.version },
+      idempotencyKey: `appointment-restore-failure-${++sequence}`,
+    })
+    const staleIds = vi.fn()
+    await expect(restore({ keyring: await ring(), idFactory: staleIds,
+      body: { expectedVersion: 1 } })).rejects.toMatchObject({
+      message: 'VERSION_CONFLICT', details: { currentVersion: 2 },
+    })
+    expect(staleIds).not.toHaveBeenCalled()
+    const overlapIds = vi.fn()
+    await expect(restore({ keyring: await ring(), idFactory: overlapIds }))
+      .rejects.toThrow('APPOINTMENT_OVERLAP')
+    expect(overlapIds).not.toHaveBeenCalled()
+
+  })
+
   it('keeps replay client-scoped across retired, conflicting, and malformed scope state', async () => {
     const client = await seedClient()
     const current = (await create(client, { body: {
@@ -2290,17 +2528,17 @@ describe('persistent appointment cancellation', () => {
     expect(await cancelAppointment({
       db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
       nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
-      appointmentId: current.id, body: { expectedVersion: 1 }, idempotencyKey: key,
+      appointmentId: current.id, body: { expectedVersion: 1, reason: 'client' }, idempotencyKey: key,
     })).toEqual(result)
     await expect(cancelAppointment({
       db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
       nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
-      appointmentId: current.id, body: { expectedVersion: 2 }, idempotencyKey: key,
+      appointmentId: current.id, body: { expectedVersion: 2, reason: 'client' }, idempotencyKey: key,
     })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
     await expect(cancelAppointment({
       db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: {},
       nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
-      appointmentId: current.id, body: { expectedVersion: 1 }, idempotencyKey: key,
+      appointmentId: current.id, body: { expectedVersion: 1, reason: 'client' }, idempotencyKey: key,
     })).rejects.toThrow('CRYPTO_FAILURE')
     const wrongScopeDb = { prepare(sql) {
       const prepared = env.DB.prepare(sql)
@@ -2318,7 +2556,29 @@ describe('persistent appointment cancellation', () => {
     await expect(cancelAppointment({
       db: wrongScopeDb, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
       nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID, idFactory: vi.fn(),
-      appointmentId: current.id, body: { expectedVersion: 1 }, idempotencyKey: key,
+      appointmentId: current.id, body: { expectedVersion: 1, reason: 'client' }, idempotencyKey: key,
     })).rejects.toThrow('CRYPTO_FAILURE')
+  })
+
+  it('requires the restored appointment practitioner and linked staff to stay active', async () => {
+    const client = await seedClient()
+    const target = (await create(client, { body: {
+      ...BODY, clientId: client.id, date: '2027-10-22',
+    } })).body.data.appointment
+    const cancelled = await cancel(target)
+    await env.DB.prepare(`UPDATE specialists SET status='archived',archived_at=?,version=2,
+      updated_at=? WHERE id=?`).bind(
+      new Date(NOW_MS + 1_500).toISOString(), new Date(NOW_MS + 1_500).toISOString(),
+      target.specialistId,
+    ).run()
+    const ids = vi.fn()
+    await expect(restoreAppointment({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
+      nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: ids, appointmentId: target.id,
+      body: { expectedVersion: cancelled.body.data.appointment.version },
+      idempotencyKey: `appointment-restore-inactive-${++sequence}`,
+    })).rejects.toThrow('NOT_FOUND')
+    expect(ids).not.toHaveBeenCalled()
   })
 })

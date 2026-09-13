@@ -3,6 +3,7 @@ import {
   captureHistoricalOccurrence,
 } from './historical-records.js'
 import { isWellFormedUnicode } from './core-records.js'
+import { isSpecialistAvatarKey } from './specialist-avatars.js'
 
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
 const CIVIL_MONTH = /^(\d{4})-(\d{2})$/
@@ -181,9 +182,12 @@ const validProfessionalTitle = (value) => typeof value === 'string'
   && isWellFormedUnicode(value) && !INVALID_PRESENTATION_TEXT.test(value)
   && new TextEncoder().encode(value).byteLength <= 120
 
-const validSpecialist = (value) => ['active', 'archived'].includes(
-  safeProperty(value, 'status'),
-) && validProfessionalTitle(safeProperty(value, 'professionalTitle'))
+const validSpecialist = (value) => {
+  const avatarKey = safeProperty(value, 'avatarKey')
+  return ['active', 'archived'].includes(safeProperty(value, 'status'))
+    && validProfessionalTitle(safeProperty(value, 'professionalTitle'))
+    && (avatarKey === undefined || isSpecialistAvatarKey(avatarKey))
+}
 
 const validClient = (value) => {
   const status = safeProperty(value, 'status')

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createApp } from '../../worker/app.js'
 import { AppError } from '../../worker/http/errors.js'
 import { authorityActor } from './fixtures.js'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const NOW_MS = Date.parse('2027-03-04T08:00:00.000Z')
 const ORIGIN = 'https://bearwithme-panel.app'
@@ -155,6 +156,22 @@ describe('activity HTTP routes', () => {
     expect(postActivityProjectionContinue).toHaveBeenCalledWith(expect.objectContaining({
       actor, importId: 'wbi_activity_http', expectedVersion: 0,
     }))
+  })
+
+  it('rejects an activity workspace request without tus.manage or the scoped read capability', async () => {
+    const getActivityWorkspace = vi.fn()
+    const deniedActor = authorityActor({
+      id: 'stf_activity_http_denied', role: 'specialist', specialistId: 'sp_activity_http_denied',
+      capabilities: ROLE_DEFAULT_CAPABILITIES.specialist.filter((capability) => (
+        capability !== 'tus.manage' && capability !== 'appointment.charge.read'
+      )),
+    })
+    const response = await createApp(depsFor({
+      getActivityWorkspace,
+      resolveActor: vi.fn(async () => deniedActor),
+    })).request('/api/v1/activities/workspace?from=2027-01&to=2027-03')
+    expect(response.status).toBe(403)
+    expect(getActivityWorkspace).not.toHaveBeenCalled()
   })
 
   it('preserves safe activity limit, conflict, and version details over HTTP', async () => {

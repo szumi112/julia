@@ -214,6 +214,59 @@ test('calendar rows distinguish client, counterparty and missing identities safe
   )
 })
 
+test('linked client history only includes occurrences inside the requested source month', () => {
+  const linked = historicalClients[1]
+  const history = historicalClientHistoryModel({
+    historicalClient: linked,
+    occurrences: Object.freeze([
+      occurrence({
+        id: 'hoc_july_linked', historicalClientId: linked.id,
+        serviceLabel: 'Sesja lipcowa',
+        period: Object.freeze({ precision: 'day', day: '2026-07-12', month: '2026-07' }),
+      }),
+      occurrence({
+        id: 'hoc_june_linked', historicalClientId: linked.id,
+        serviceLabel: 'Sesja czerwcowa',
+        period: Object.freeze({ precision: 'month', day: null, month: '2026-06' }),
+      }),
+      occurrence({
+        id: 'hoc_unknown_linked', historicalClientId: linked.id,
+        serviceLabel: 'Sesja bez okresu',
+        period: Object.freeze({ precision: 'unknown', day: null, month: null }),
+      }),
+    ]),
+    workspaceRange: { from: '2026-07-01', to: '2026-07-31' },
+  })
+
+  assert.deepEqual(history.exactDayRows.map(({ id }) => id), ['hoc_july_linked'])
+  assert.deepEqual(history.monthOnlyRows, [])
+  assert.deepEqual(history.unknownRows, [])
+})
+
+test('unknown historical client history keeps unknown rows without mixing known source months', () => {
+  const client = historicalClients[0]
+  const history = historicalClientHistoryModel({
+    historicalClient: client,
+    occurrences: Object.freeze([
+      occurrence({ id: 'hoc_known_day', historicalClientId: client.id }),
+      occurrence({
+        id: 'hoc_known_month', historicalClientId: client.id,
+        period: Object.freeze({ precision: 'month', day: null, month: '2026-06' }),
+      }),
+      occurrence({
+        id: 'hoc_unknown_only', historicalClientId: client.id,
+        period: Object.freeze({ precision: 'unknown', day: null, month: null }),
+      }),
+    ]),
+    workspaceRange: { from: '2026-08-01', to: '2026-08-31' },
+    periodMode: 'unknown',
+  })
+
+  assert.deepEqual(history.exactDayRows, [])
+  assert.deepEqual(history.monthOnlyRows, [])
+  assert.deepEqual(history.unknownRows.map(({ id }) => id), ['hoc_unknown_only'])
+})
+
 test('historical directory groups known or unknown visits and preserves activation link state', () => {
   const known = historicalClientDirectoryModel({
     historicalClients, occurrences, ym: '2026-07', periodMode: 'known', query: '',

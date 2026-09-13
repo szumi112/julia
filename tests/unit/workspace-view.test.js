@@ -3,10 +3,12 @@ import assert from 'node:assert/strict'
 
 import {
   clientIdentityFor,
+  futureWorkspaceRange,
   isWorkspaceRangeCovered,
   monthWorkspaceRange,
   projectLoadedActivities,
   projectLoadedWorkspace,
+  previousWorkspaceRange,
   rollingWorkspaceRange,
   specialistIdentityFor,
   weekWorkspaceRange,
@@ -20,7 +22,7 @@ import {
 
 const specialist = (overrides = {}) => Object.freeze({
   id: 'sp_anna', displayName: 'Anna Nowak', standardRateGrosze: 18_000,
-  professionalTitle: 'Psycholożka', status: 'active', version: 3,
+  professionalTitle: 'Psycholożka', avatarKey: 'orbit', status: 'active', version: 3,
   staffVersion: 4, ...overrides,
 })
 
@@ -39,6 +41,7 @@ const appointment = (overrides = {}) => Object.freeze({
   serviceId: 'zajecia', startsAt: '2026-07-15T08:30:00.000Z',
   endsAt: '2026-07-15T09:20:00.000Z', timeZone: 'Europe/Warsaw', location: 'Gabinet 2',
   status: 'completed', source: 'panel', version: 3, cancelledAt: null,
+  cancellationReason: null,
   createdAt: '2026-07-01T08:00:00.000Z', updatedAt: '2026-07-16T08:00:00.000Z',
   charge: Object.freeze({
     id: 'chg_history', serviceId: 'zajecia', expectedAmountGrosze: 18_050,
@@ -171,26 +174,30 @@ test('projects canonical records into immutable legacy view records without priv
 
   assert.deepEqual(projected.psychologists, [{
     id: 'sp_anna', name: 'Anna Nowak', rate: 180, color: 'var(--pink-deep)',
-    professionalTitle: 'Psycholożka', status: 'active', version: 3, staffVersion: 4,
+    professionalTitle: 'Psycholożka', avatarKey: 'orbit',
+    status: 'active', version: 3, staffVersion: 4,
   }])
   assert.deepEqual(projected.clients, [
     {
       id: 'cl_paused', name: 'Bartek Testowy', age: 12, status: 'paused',
-      psychId: 'sp_anna', version: 2, readOnly: false, since: '2026-01-10',
+      psychId: 'sp_anna', assignmentStartsAt: '2026-01-10T09:00:00.000Z', version: 2, readOnly: false,
+      since: '2026-01-10',
     },
     {
       id: 'cl_ola', name: 'Ola Testowa', age: 12, status: 'active',
-      psychId: 'sp_anna', version: 2, readOnly: false, since: '2026-01-10',
+      psychId: 'sp_anna', assignmentStartsAt: '2026-01-10T09:00:00.000Z', version: 2, readOnly: false,
+      since: '2026-01-10',
     },
     {
       id: 'cl_archived', name: 'Zofia Historyczna', age: 12, status: 'archived',
-      psychId: null, version: 2, readOnly: true, since: '2026-01-10',
+      psychId: null, assignmentStartsAt: null, version: 2, readOnly: true, since: '2026-01-10',
     },
   ])
   assert.deepEqual(projected.sessions, [{
     id: 'apt_history', clientId: 'cl_archived', psychId: 'sp_history',
     service: 'zajecia', date: '2026-07-15', time: '10:30', duration: 50,
-    amount: 180.5, location: 'Gabinet 2', status: 'completed', version: 3,
+    amount: 180.5, location: 'Gabinet 2', status: 'completed', cancellationReason: null,
+    version: 3,
     payment: 'partial', paidAmount: 80.25, method: 'transfer', paidDate: '2026-07-16',
     readOnly: true,
   }])
@@ -240,10 +247,11 @@ test('projects canonical historical DTOs separately from timed sessions and pres
 })
 
 test('keeps archived historical specialist identities out of the active team directory', () => {
-  const archived = specialist({
+  const { avatarKey: _legacyAvatarKey, ...legacyArchived } = specialist({
     id: 'sp_archived_history', displayName: 'Zofia Archiwalna',
     status: 'archived', version: 5, staffVersion: 7,
   })
+  const archived = Object.freeze(legacyArchived)
   const projected = projectLoadedWorkspace(loadedState({
     specialistsById: nullMap({ sp_anna: specialist(), sp_archived_history: archived }),
     historicalClientsById: nullMap({ hcl_ola: historicalClient() }),
@@ -255,13 +263,13 @@ test('keeps archived historical specialist identities out of the active team dir
   assert.deepEqual(projected.psychologists.map(({ id }) => id), ['sp_anna'])
   assert.deepEqual(projected.historicalSpecialists, [{
     id: 'sp_archived_history', name: 'Zofia Archiwalna', rate: 180,
-    color: 'var(--sky-deep)', professionalTitle: 'Psycholożka',
+    color: 'var(--sky-deep)', professionalTitle: 'Psycholożka', avatarKey: 'bloom',
     status: 'archived', version: 5, staffVersion: 7,
   }])
   assert.deepEqual(specialistIdentityFor(
     projected.historicalSpecialists, 'sp_archived_history',
   ), {
-    name: 'Zofia Archiwalna', color: 'var(--sky-deep)', available: true,
+    name: 'Zofia Archiwalna', color: 'var(--sky-deep)', avatarKey: 'bloom', available: true,
   })
 })
 
@@ -288,7 +296,7 @@ test('does not manufacture unreferenced archived clients and marks missing ident
     name: 'Klient niedostępny', available: false, readOnly: true,
   })
   assert.deepEqual(specialistIdentityFor(projected.psychologists, 'sp_history'), {
-    name: 'Specjalistka niedostępna', color: null, available: false,
+    name: 'Specjalistka niedostępna', color: null, avatarKey: null, available: false,
   })
   assert.equal(JSON.stringify(projected).includes('cl_missing'), false)
   assert.equal(JSON.stringify(projected).includes('sp_history'), true)
@@ -351,6 +359,27 @@ test('builds exact leap-safe month, Monday week, and bounded rolling windows', (
   assert.throws(() => rollingWorkspaceRange('2024-02-29', 94), TypeError)
   assert.throws(() => monthWorkspaceRange('2026-13'), TypeError)
   assert.throws(() => weekWorkspaceRange('2026-02-29'), TypeError)
+})
+
+test('keeps the assignment start and builds bounded future and earlier client windows', () => {
+  const projected = projectLoadedWorkspace(loadedState({
+    clientsById: nullMap({
+      cl_ola: client({
+        assignment: Object.freeze({
+          id: 'asg_ola', specialistId: 'sp_anna', startsAt: '2026-02-10T09:00:00.000Z', version: 1,
+        }),
+      }),
+    }),
+    appointmentsById: nullMap({}),
+  }))
+
+  assert.equal(projected.clients[0].assignmentStartsAt, '2026-02-10T09:00:00.000Z')
+  assert.deepEqual(futureWorkspaceRange('2026-08-04'), { from: '2026-08-04', to: '2026-11-02' })
+  assert.deepEqual(
+    previousWorkspaceRange({ from: '2026-05-04', to: '2026-08-04' }, '2026-01-10'),
+    { from: '2026-01-31', to: '2026-05-03' },
+  )
+  assert.equal(previousWorkspaceRange({ from: '2026-02-10', to: '2026-05-13' }, '2026-02-10'), null)
 })
 
 test('uses normalized coverage rather than rows and distinguishes load outcomes', () => {

@@ -23,6 +23,7 @@ import {
 } from '../../worker/db/query-budget.js'
 import { createApp } from '../../worker/app.js'
 import {
+  applyAppointmentCancellationReasonMigration,
   applyCoreDirectoryStageB,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
@@ -69,6 +70,7 @@ const suffixes = (label) => {
 beforeAll(async () => {
   await completeCoreDirectoryStageA()
   await applyCoreDirectoryStageB()
+  await applyAppointmentCancellationReasonMigration()
   const now = new Date(NOW_MS).toISOString()
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO staff_users
@@ -1648,7 +1650,8 @@ describe('appointment payment capture', () => {
       db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring: await ring(),
       nowMs: NOW_MS + 1_000, correlationId: BASE.correlationId,
       idFactory: suffixes(`payment_cancelled_${++sequence}`), appointmentId: cancelled.id,
-      body: { expectedVersion: 1 }, idempotencyKey: `payment-cancelled-${sequence}-key`,
+      body: { expectedVersion: 1, reason: 'client' },
+      idempotencyKey: `payment-cancelled-${sequence}-key`,
     })
     await expect(recordAppointmentPayment(await paymentInput(cancelled, {
       idFactory: vi.fn(),

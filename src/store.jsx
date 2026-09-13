@@ -19,14 +19,27 @@ import {
   projectLoadedWorkspace,
   workspaceRangeState,
 } from './workspace-view.js'
-import { activityWindowLoadOutcome, trackActivityWindowLoad } from './activity-load-request.js'
+import {
+  createWorkspaceRangeLoadCoordinator,
+  finishWorkspaceRangePending,
+  startWorkspaceRangePending,
+  workspaceLoadRequestKey,
+  workspacePendingRangeKeys,
+} from './workspace-load-request.js'
+import {
+  activityWindowRetry,
+  activityWindowLoadOutcome,
+  clearActivityWindowRejection,
+  shouldLoadActivityWindow,
+  trackActivityWindowLoad,
+} from './activity-load-request.js'
 import { activityLoadRequestKey, isActivityWindowLoaded } from './loaded-activities.js'
 import { activityMonthRange } from './activity-workspace.js'
 
 const AppCtx = createContext(null)
 // toasts live in their own context: every add/expire would otherwise
 // recreate the app context value and re-render all of its consumers
-const ToastCtx = createContext([])
+const ToastCtx = createContext(null)
 const ClientMutationCtx = createContext(Object.freeze({ locked: false }))
 const AppointmentMutationCtx = createContext(Object.freeze({ locked: false }))
 const PaymentMutationCtx = createContext(Object.freeze({ locked: false }))
@@ -35,6 +48,8 @@ const CanonicalAppointmentsCtx = createContext(Object.freeze(Object.create(null)
 let nextId = 10000
 
 const makeId = (prefix) => `${prefix}${nextId++}`
+
+export const allocateDemoClientId = () => makeId('c')
 
 const sortClasses = (list) => [...list].sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time))
 
@@ -71,7 +86,12 @@ function reducer(state, action) {
       // guarded in the UI: only allowed when no assigned clients / upcoming sessions
       return { ...state, psychologists: state.psychologists.filter((p) => p.id !== action.id) }
     case 'ADD_CLIENT': {
-      const client = { familyId: null, familyRole: null, ...action.client, id: `c${nextId++}` }
+      const client = {
+        familyId: null,
+        familyRole: null,
+        ...action.client,
+        id: action.client.id || allocateDemoClientId(),
+      }
       if (!action.familyLink) return { ...state, clients: [...state.clients, client] }
       const other = state.clients.find((c) => c.id === action.familyLink.otherId)
       const familyId = other?.familyId || `f${nextId++}`
@@ -267,12 +287,89 @@ function reducer(state, action) {
   }
 }
 
+export function ToastProvider({ children }) {
+  const [toasts, setToasts] = useState([])
+  const toastsRef = useRef([])
+  const timers = useRef(new Map())
+
+  const publishToasts = useCallback((next) => {
+    toastsRef.current = next
+    setToasts(next)
+  }, [])
+
+  const cancelTimer = useCallback((id) => {
+    const timer = timers.current.get(id)
+    if (!timer) return
+    clearTimeout(timer.expire)
+    clearTimeout(timer.remove)
+    timers.current.delete(id)
+  }, [])
+  const clearToasts = useCallback(() => {
+    for (const id of [...timers.current.keys()]) cancelTimer(id)
+    publishToasts([])
+  }, [cancelTimer, publishToasts])
+
+  // Exit motion needs a short overlap, but each toast owns both handles so a
+  // replacement, clear, or unmount cannot leave an old timer behind.
+  const leave = useCallback((id) => {
+    const timer = timers.current.get(id)
+    if (!timer || timer.remove) return
+    clearTimeout(timer.expire)
+    timer.remove = setTimeout(() => {
+      timers.current.delete(id)
+      publishToasts(toastsRef.current.filter((item) => item.id !== id))
+    }, 350)
+    publishToasts(toastsRef.current.map((item) => (item.id === id ? { ...item, leaving: true } : item)))
+  }, [publishToasts])
+
+  const toast = useCallback((msg, icon = 'check', options) => {
+    const id = ++nextId
+    const normalizedAction = options?.label && typeof options.onClick === 'function'
+      ? {
+          label: options.label,
+          onClick: options.onClick,
+        }
+      : null
+    const key = typeof options?.key === 'string' && options.key ? options.key : null
+    const tone = ['success', 'warning', 'error'].includes(options?.tone)
+      ? options.tone
+      : icon === 'alert' ? 'warning' : 'success'
+    const timeoutMs = normalizedAction || tone !== 'success' ? 8000 : 4000
+    if (key) {
+      for (const [activeId, timer] of timers.current) {
+        if (timer.key === key) cancelTimer(activeId)
+      }
+    }
+    const current = toastsRef.current
+    const available = key
+      ? current.filter((item) => item.key !== key)
+      : current
+    const next = [...available.slice(-2), { id, msg, icon, tone, key, action: normalizedAction }]
+    const nextIds = new Set(next.map((item) => item.id))
+    for (const item of current) {
+      if (!nextIds.has(item.id)) cancelTimer(item.id)
+    }
+    publishToasts(next)
+    const expire = setTimeout(() => leave(id), timeoutMs)
+    timers.current.set(id, { expire, remove: null, key })
+  }, [cancelTimer, leave, publishToasts])
+
+  const dismissToast = useCallback((id) => leave(id), [leave])
+  useEffect(() => () => {
+    for (const id of [...timers.current.keys()]) cancelTimer(id)
+  }, [cancelTimer])
+  const toastValue = useMemo(
+    () => ({ toasts, dismissToast, clearToasts, toast }),
+    [clearToasts, dismissToast, toast, toasts]
+  )
+  return <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
+}
+
 export function AppProvider({ children, repositoryFactory, authorityKey }) {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE)
   const stateRef = useRef(state)
   stateRef.current = state
-  const [toasts, setToasts] = useState([])
-  const clearToasts = useCallback(() => setToasts([]), [])
+  const { clearToasts, toast } = useToasts()
   const effectiveAuthorityKey = typeof authorityKey === 'function'
     ? authorityKey(state)
     : authorityKey
@@ -323,41 +420,9 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
   // Toast actions can mutate scoped data. A role boundary invalidates both
   // their visible context and their authority, so never carry them across it.
   useEffect(() => {
-    clearToasts()
-  }, [clearToasts, state.demoRoleId])
-
-  // toasts auto-expire but stay interruptible: a tap marks them leaving so the
-  // exit tween can play before removal; rapid actions cap the stack at 3
-  const leave = useCallback((id, delay) => {
-    const beginLeaving = () => setToasts((t) => t.map((x) => (x.id === id ? { ...x, leaving: true } : x)))
-    if (delay > 0) setTimeout(beginLeaving, delay)
-    else beginLeaving()
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), delay + 350)
-  }, [])
-
-  const toast = useCallback((msg, icon = 'check', action) => {
-    const id = ++nextId
-    const normalizedAction = action?.label && typeof action.onClick === 'function'
-      ? {
-          label: action.label,
-          onClick: action.onClick,
-          timeoutMs: action.timeoutMs,
-          key: typeof action.key === 'string' && action.key ? action.key : null,
-        }
-      : null
-    setToasts((t) => {
-      const available = normalizedAction?.key
-        ? t.filter((item) => item.action?.key !== normalizedAction.key)
-        : t
-      return [...available.slice(-2), { id, msg, icon, action: normalizedAction }]
-    })
-    const timeoutMs = Number.isFinite(normalizedAction?.timeoutMs)
-      ? Math.max(0, normalizedAction.timeoutMs)
-      : 3000
-    leave(id, timeoutMs)
-  }, [leave])
-
-  const dismissToast = useCallback((id) => leave(id, 0), [leave])
+    if (!protectedRecords) clearToasts()
+    return () => clearToasts()
+  }, [clearToasts, protectedRecords, state.demoRoleId])
 
   // Windows whose load was rejected, keyed by range. A failed window renders as
   // unavailable (never as endless loading) until the same range is retried.
@@ -376,6 +441,51 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
       return next
     })
   }, [])
+  const pendingWorkspaceCounts = useRef(new Map())
+  const pendingWorkspaceGeneration = useRef(0)
+  const workspaceLoadCoordinator = useRef(null)
+  if (workspaceLoadCoordinator.current === null) {
+    workspaceLoadCoordinator.current = createWorkspaceRangeLoadCoordinator()
+  }
+  const workspaceRequestAuthority = useRef(effectiveAuthorityKey)
+  const [workspacePendingRanges, setWorkspacePendingRanges] = useState(() => new Set())
+  const resetWorkspaceRequests = useCallback((authorityKey) => {
+    if (workspaceRequestAuthority.current === authorityKey) return
+    workspaceRequestAuthority.current = authorityKey
+    pendingWorkspaceGeneration.current += 1
+    pendingWorkspaceCounts.current = new Map()
+    workspaceLoadCoordinator.current.reset()
+    setWorkspacePendingRanges((current) => (current.size === 0 ? current : new Set()))
+  }, [])
+  useEffect(() => {
+    resetWorkspaceRequests(effectiveAuthorityKey)
+  }, [effectiveAuthorityKey, resetWorkspaceRequests])
+  const beginWorkspaceLoad = useCallback((key) => {
+    const next = startWorkspaceRangePending(pendingWorkspaceCounts.current, key)
+    pendingWorkspaceCounts.current = next
+    setWorkspacePendingRanges(workspacePendingRangeKeys(next))
+    return pendingWorkspaceGeneration.current
+  }, [])
+  const endWorkspaceLoad = useCallback((key, generation) => {
+    if (generation !== pendingWorkspaceGeneration.current) return
+    const next = finishWorkspaceRangePending(pendingWorkspaceCounts.current, key)
+    pendingWorkspaceCounts.current = next
+    setWorkspacePendingRanges(workspacePendingRangeKeys(next))
+  }, [])
+  const loadWorkspaceRange = useCallback((range) => {
+    resetWorkspaceRequests(effectiveAuthorityKey)
+    return workspaceLoadCoordinator.current.load({
+      range,
+      request: () => workspaceSnapshot.workspace.loadWindow(range),
+      onStart: beginWorkspaceLoad,
+      onFulfilled: clearWorkspaceFailure,
+      onRejected: markWorkspaceFailure,
+      onSettled: endWorkspaceLoad,
+    })
+  }, [
+    beginWorkspaceLoad, clearWorkspaceFailure, effectiveAuthorityKey, endWorkspaceLoad,
+    markWorkspaceFailure, resetWorkspaceRequests, workspaceSnapshot.workspace,
+  ])
 
   const value = useMemo(
     () => ({
@@ -384,17 +494,15 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
       toast,
       workspace: workspaceSnapshot.workspace,
       workspaceFailures,
+      workspacePendingRanges,
+      loadWorkspaceRange,
       markWorkspaceFailure,
       clearWorkspaceFailure,
     }),
     [
-      authorityDispatch, clearWorkspaceFailure, markWorkspaceFailure, toast, viewState,
-      workspaceFailures, workspaceSnapshot.workspace,
+      authorityDispatch, clearWorkspaceFailure, loadWorkspaceRange, markWorkspaceFailure, toast, viewState,
+      workspaceFailures, workspacePendingRanges, workspaceSnapshot.workspace,
     ]
-  )
-  const toastValue = useMemo(
-    () => ({ toasts, dismissToast, clearToasts }),
-    [clearToasts, dismissToast, toasts]
   )
   const clientMutationValue = useMemo(
     () => Object.freeze({ locked: workspaceSnapshot.clientMutationLocked }),
@@ -419,9 +527,7 @@ export function AppProvider({ children, repositoryFactory, authorityKey }) {
       <AppointmentMutationCtx.Provider value={appointmentMutationValue}>
         <PaymentMutationCtx.Provider value={paymentMutationValue}>
           <CanonicalAppointmentsCtx.Provider value={canonicalAppointments}>
-            <AppCtx.Provider value={value}>
-              <ToastCtx.Provider value={toastValue}>{children}</ToastCtx.Provider>
-            </AppCtx.Provider>
+            <AppCtx.Provider value={value}>{children}</AppCtx.Provider>
           </CanonicalAppointmentsCtx.Provider>
         </PaymentMutationCtx.Provider>
       </AppointmentMutationCtx.Provider>
@@ -436,22 +542,27 @@ export const useAppointmentMutationLock = () => useContext(AppointmentMutationCt
 export const usePaymentMutationLock = () => useContext(PaymentMutationCtx)
 export const useCanonicalAppointments = () => useContext(CanonicalAppointmentsCtx)
 
-const workspaceWindowKey = (range) => `${range.from}|${range.to}`
-
 export const useWorkspaceWindow = (range, enabled = true) => {
-  const { workspace, workspaceFailures, markWorkspaceFailure } = useApp()
+  const { workspace, workspaceFailures, loadWorkspaceRange } = useApp()
   const requested = useRef(new Set())
-  const key = range ? workspaceWindowKey(range) : ''
+  const key = range ? workspaceLoadRequestKey(range) : ''
   const covered = range
     ? isWorkspaceRangeCovered(workspace.loadedRanges, range)
     : false
 
   useEffect(() => {
-    if (!enabled || !range || covered || workspace.status === 'read-only-error'
+    if (covered) {
+      requested.current.delete(key)
+      return
+    }
+    if (!enabled || !range || workspace.status === 'read-only-error'
       || requested.current.has(key)) return
     requested.current.add(key)
-    Promise.resolve(workspace.loadWindow(range)).catch(() => markWorkspaceFailure(key))
-  }, [covered, enabled, key, markWorkspaceFailure, range, workspace])
+    // Keep a rejected key claimed until an explicit retry covers it. Clearing
+    // it in `finally` lets the retry's failure reset trigger a second automatic
+    // request beside the explicit retry.
+    loadWorkspaceRange(range).catch(() => {})
+  }, [covered, enabled, key, loadWorkspaceRange, range, workspace.status])
 
   if (!enabled || !range) return 'ready'
   if (!covered && workspaceFailures.has(key)) return 'unavailable'
@@ -461,29 +572,35 @@ export const useWorkspaceWindow = (range, enabled = true) => {
 // Retries one window after a rejected load, lifting the read-only latch that an
 // infrastructure error leaves behind. Views pass the range they render.
 export const useWorkspaceRetry = () => {
-  const { workspace, markWorkspaceFailure, clearWorkspaceFailure } = useApp()
+  const { workspace, clearWorkspaceFailure, loadWorkspaceRange } = useApp()
   return useCallback((range) => {
-    const key = workspaceWindowKey(range)
-    clearWorkspaceFailure(key)
+    clearWorkspaceFailure(workspaceLoadRequestKey(range))
     if (workspace.status === 'read-only-error') workspace.recoverFromInfrastructureError()
-    return Promise.resolve(workspace.loadWindow(range)).catch(() => markWorkspaceFailure(key))
-  }, [clearWorkspaceFailure, markWorkspaceFailure, workspace])
+    const request = loadWorkspaceRange(range)
+    // Retry buttons are ordinary onClick handlers, so React does not observe
+    // a rejected promise. Keep the rejection available to callers that await
+    // it while marking the original promise as handled for ignored clicks.
+    request.catch(() => {})
+    return request
+  }, [clearWorkspaceFailure, loadWorkspaceRange, workspace])
 }
 
 // Mutations invalidate no directory rows locally. Callers refresh the same bounded
 // canonical window after a successful command instead of applying command DTOs.
 export const useWorkspaceRefresh = () => {
-  const { workspace } = useApp()
-  return useCallback((range) => workspace.loadWindow(range), [workspace])
+  const { loadWorkspaceRange } = useApp()
+  return useCallback((range) => loadWorkspaceRange(range), [loadWorkspaceRange])
 }
 
-export const useActivityWorkspaceWindow = (range, enabled = true) => {
+export const useActivityWorkspaceWindow = (range, enabled = true, retryToken = 0) => {
   const { workspace } = useApp()
   const activities = workspace.activities
   const requested = useRef(new Set())
   const rejected = useRef(null)
   const mounted = useRef(false)
   const currentKey = useRef('')
+  const lastRetryToken = useRef(retryToken)
+  const forcedRequestKey = useRef(null)
   const [rejectedKey, setRejectedKey] = useState(null)
   const key = activities !== null && range
     ? activityLoadRequestKey(activities.state, range)
@@ -499,6 +616,15 @@ export const useActivityWorkspaceWindow = (range, enabled = true) => {
   }, [])
 
   useEffect(() => {
+    if (lastRetryToken.current !== retryToken) {
+      lastRetryToken.current = retryToken
+      forcedRequestKey.current = key
+      const cleared = clearActivityWindowRejection(rejected.current, key)
+      if (cleared !== rejected.current) {
+        rejected.current = cleared
+        setRejectedKey(cleared)
+      }
+    }
     if (!enabled || activities === null || !range) {
       if (rejected.current !== null) {
         rejected.current = null
@@ -506,10 +632,20 @@ export const useActivityWorkspaceWindow = (range, enabled = true) => {
       }
       return
     }
-    if (covered || activities.status === 'read-only-error' || rejected.current === key
-      || requested.current.has(key)) return
+    if (!shouldLoadActivityWindow({
+      enabled,
+      hasActivities: activities !== null,
+      hasRange: range !== null && range !== undefined,
+      readOnly: activities.status === 'read-only-error',
+      covered,
+      key,
+      rejectedKey: rejected.current,
+      requested: requested.current.has(key),
+      forceKey: forcedRequestKey.current,
+    })) return
     rejected.current = null
     setRejectedKey(null)
+    forcedRequestKey.current = null
     trackActivityWindowLoad({
       key,
       requested: requested.current,
@@ -521,7 +657,7 @@ export const useActivityWorkspaceWindow = (range, enabled = true) => {
         }
       },
     }).catch(() => {})
-  }, [activities, covered, enabled, key, range, rejectedKey])
+  }, [activities, covered, enabled, key, range, rejectedKey, retryToken])
 
   return activityWindowLoadOutcome({
     enabled,
@@ -537,6 +673,20 @@ export const useActivityWorkspaceWindow = (range, enabled = true) => {
 export const useActivityMonth = (month, enabled = true) => {
   const range = useMemo(() => enabled ? activityMonthRange(month) : null, [enabled, month])
   return useActivityWorkspaceWindow(range, enabled)
+}
+
+export const useActivityMonthRetry = (month, enabled = true) => {
+  const { workspace } = useApp()
+  const [retryToken, setRetryToken] = useState(0)
+  const range = useMemo(() => enabled ? activityMonthRange(month) : null, [enabled, month])
+  const state = useActivityWorkspaceWindow(range, enabled, retryToken)
+  const retry = useCallback(() => activityWindowRetry({
+    status: workspace.activities?.status,
+    range,
+    recover: workspace.recoverFromInfrastructureError,
+    schedule: () => setRetryToken((value) => value + 1),
+  }), [range, workspace])
+  return { state, retry }
 }
 
 // ---------- selectors ----------

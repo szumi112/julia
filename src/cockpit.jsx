@@ -19,9 +19,10 @@ import {
 
 const minToTime = (m) => `${pad2(Math.floor((m % 1440) / 60))}:${pad2(m % 60)}`
 
-function useTodayModel() {
+function useTodayModel(workspaceState, workspaceRange) {
   const { state } = useApp()
-  const { role } = useShell()
+  const { appMode, role } = useShell()
+  const isApp = appMode === 'app'
   const now = useMinuteNow()
   const today = toISODate(now)
   const nowMin = now.getHours() * 60 + now.getMinutes()
@@ -34,16 +35,22 @@ function useTodayModel() {
     const running = workspace.current
     const next = workspace.next
     // sessions are kept sorted by date+time, so the first future match wins
-    const future = !running && !next
+    const future = !isApp && !running && !next
       ? scopedSessions.find((s) => s.status === 'scheduled' && s.date > today)
       : null
     const showFinance = role.scope !== 'own'
-    const outstanding = showFinance ? totalOutstanding(state.sessions) : 0
+    const financeSessions = isApp && workspaceRange
+      ? scopedSessions.filter((s) => s.date >= workspaceRange.from && s.date <= workspaceRange.to)
+      : state.sessions
+    const outstanding = showFinance ? totalOutstanding(financeSessions) : 0
     const unpaidCount = showFinance
-      ? state.sessions.filter((s) => isBillable(s) && outstandingOf(s) > 0).length
+      ? financeSessions.filter((s) => isBillable(s) && outstandingOf(s) > 0).length
       : 0
-    return { today, nowMin, todays, done, total, running, next, future, outstanding, unpaidCount, showFinance }
-  }, [state, role, today, nowMin])
+    return {
+      today, nowMin, todays, done, total, running, next, future,
+      outstanding, unpaidCount, showFinance, workspaceState,
+    }
+  }, [isApp, nowMin, role, state, today, workspaceRange, workspaceState])
 }
 
 function CockpitBody({ m, onClose }) {
@@ -59,6 +66,7 @@ function CockpitBody({ m, onClose }) {
   const total = m.total
   const pct = total ? Math.round((m.done / total) * 100) : 0
   const FocusRow = isApp ? 'div' : 'button'
+  const planReady = !isApp || m.workspaceState === 'ready'
 
   return (
     <>
@@ -70,13 +78,24 @@ function CockpitBody({ m, onClose }) {
         <IconBtn name="close" label="Zamknij panel dnia" onClick={onClose} />
       </div>
 
-      {focus ? (
+      {!planReady ? (
+        <div
+          className="cockpit__notice"
+          role={m.workspaceState === 'unavailable' ? 'alert' : 'status'}
+        >
+          <Icon name={m.workspaceState === 'unavailable' ? 'alert' : 'clock'} size={19} />
+          <span>
+            <b>{m.workspaceState === 'unavailable' ? 'Grafik dnia niedostępny' : 'Wczytywanie grafiku dnia…'}</b>
+            {m.workspaceState === 'unavailable' && <small>Nie udało się wczytać sesji.</small>}
+          </span>
+        </div>
+      ) : focus ? (
         <FocusRow className="cockpit__next" onClick={isApp ? undefined : () => go(() => openSessionForm({ session: focus }))}>
           <span className="cockpit__next-time">{focus.time}</span>
           <span className="cockpit__next-main">
             <b>{clientOf(focus.clientId)?.name}</b>
             <span>
-              <Avatar name={focusPsych?.name || '?'} color={focusPsych?.color} size={16} />
+              <Avatar name={focusPsych?.name || '?'} color={focusPsych?.color} avatarKey={focusPsych?.avatarKey} size={16} />
               <span className="cockpit__next-sub">{focusPsych?.name} · {focusPsych?.room}</span>
             </span>
           </span>
@@ -86,7 +105,7 @@ function CockpitBody({ m, onClose }) {
               : untilLabel(timeToMin(focus.time) - m.nowMin)}
           </span>
         </FocusRow>
-      ) : m.future ? (
+      ) : !isApp && m.future ? (
         <FocusRow className="cockpit__next" onClick={isApp ? undefined : () => go(() => openSessionForm({ session: m.future }))}>
           <span className="cockpit__next-time">{m.future.time}</span>
           <span className="cockpit__next-main">
@@ -95,11 +114,21 @@ function CockpitBody({ m, onClose }) {
           </span>
           <Icon name="chevR" size={15} className="faint" />
         </FocusRow>
+      ) : total > 0 ? (
+        <div className="cockpit__notice cockpit__notice--complete">
+          <Icon name="check" size={19} />
+          <span><b>Na dziś to wszystko</b></span>
+        </div>
       ) : (
-        <EmptyState compact icon="sparkle" title="Brak zaplanowanych sesji" hint="Kalendarz jest wolny — czas na oddech." />
+        <EmptyState
+          compact
+          icon="calendar"
+          title={isApp ? 'Dziś bez sesji' : 'Brak zaplanowanych sesji'}
+          hint={isApp ? 'Dziś nie ma zaplanowanych sesji.' : 'Grafik jest wolny — czas na oddech.'}
+        />
       )}
 
-      {total > 0 && (
+      {planReady && total > 0 && (
         <div>
           <div
             className="cockpit__progress"
@@ -143,11 +172,11 @@ function CockpitBody({ m, onClose }) {
         </div>
       )}
 
-      {m.showFinance && (m.outstanding > 0 ? (
+      {planReady && m.showFinance && (m.outstanding > 0 ? (
         <EntityLink route="payments" className="cockpit__due" onClick={onClose}>
           <Icon name="payments" size={19} />
           <span style={{ flex: 1 }}>
-            Zaległe płatności
+            {isApp ? 'Do zapłaty (ten tydzień)' : 'Zaległe płatności'}
             <b style={{ display: 'block' }}>{fmtMoney(m.outstanding)} · {m.unpaidCount} {sessionsWord(m.unpaidCount)}</b>
           </span>
           <Icon name="chevR" size={15} />
@@ -155,7 +184,9 @@ function CockpitBody({ m, onClose }) {
       ) : (
         <div className="cockpit__due cockpit__due--ok">
           <Icon name="check" size={19} />
-          <span style={{ flex: 1 }}>Wszystkie sesje rozliczone</span>
+          <span style={{ flex: 1 }}>
+            {isApp ? 'Brak zaległości w tym tygodniu' : 'Wszystkie sesje rozliczone'}
+          </span>
         </div>
       ))}
 
@@ -168,7 +199,7 @@ function CockpitBody({ m, onClose }) {
         </Button>}
         <EntityLink route="calendar" className="btn btn--ghost btn--sm" onClick={onClose}>
           <Icon name="calendar" size={17} />
-          <span>Kalendarz</span>
+          <span>Grafik</span>
         </EntityLink>
       </div>
     </>
@@ -322,16 +353,37 @@ function CockpitSheet({ onClose, children }) {
   )
 }
 
-export function TodayCockpit({ open, onOpenChange, disabled = false }) {
+const shortClientName = (name) => {
+  const parts = name?.trim().split(/\s+/).filter(Boolean) || []
+  if (parts.length < 2) return parts[0] || 'Klient'
+  return `${parts[0]} ${parts.at(-1)[0]}.`
+}
+
+export function TodayCockpit({
+  open,
+  onOpenChange,
+  disabled = false,
+  workspaceRange = null,
+  workspaceState = 'ready',
+}) {
   const { state } = useApp()
-  const m = useTodayModel()
+  const { appMode } = useShell()
+  const m = useTodayModel(workspaceState, workspaceRange)
   const isPhone = useIsPhone()
   const triggerRef = useRef(null)
   const close = useCallback(() => onOpenChange(false), [onOpenChange])
 
-  const firstName = (id) => state.clients.find((c) => c.id === id)?.name.split(' ')[0]
+  const clientName = (id) => shortClientName(state.clients.find((c) => c.id === id)?.name)
   let text
-  if (m.running) text = `Trwa · ${firstName(m.running.clientId)}`
+  if (appMode === 'app' && workspaceState === 'loading') text = 'Grafik dnia…'
+  else if (appMode === 'app' && workspaceState === 'unavailable') text = 'Grafik dnia niedostępny'
+  else if (appMode === 'app' && m.running) {
+    text = `Teraz: ${clientName(m.running.clientId)}, do ${minToTime(timeToMin(m.running.time) + (m.running.duration || 50))}`
+  } else if (appMode === 'app' && m.next) {
+    text = `Następna o ${m.next.time} · ${clientName(m.next.clientId)}`
+  } else if (appMode === 'app' && m.total > 0) text = 'Na dziś to wszystko'
+  else if (appMode === 'app') text = 'Dziś bez sesji'
+  else if (m.running) text = `Trwa · ${clientName(m.running.clientId)}`
   else if (m.next) text = `${untilLabel(timeToMin(m.next.time) - m.nowMin)} · ${m.next.time}`
   else if (m.total > 0) text = `Po sesjach · ${m.done}/${m.total}`
   else text = 'Wolny dzień'
@@ -349,7 +401,7 @@ export function TodayCockpit({ open, onOpenChange, disabled = false }) {
         aria-label={`Panel dnia: ${text}`}
         title="Panel dnia"
       >
-        <span className={`today-chip__dot ${m.running ? 'is-live' : ''}`} />
+        <span className={`today-chip__dot ${workspaceState === 'ready' && m.running ? 'is-live' : ''}`} />
         <span className="today-chip__text">{text}</span>
         <Icon name="chevD" size={13} className="today-chip__chev" />
       </button>

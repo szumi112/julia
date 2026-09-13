@@ -16,7 +16,7 @@ const resolutionAuthority = Object.freeze({
 const sessionBody = (overrides = {}) => ({
   data: {
     actor: {
-      id: 'stf_owner_1', displayName: 'Julia Właścicielka', professionalTitle: null,
+      id: 'stf_owner_1', displayName: 'Julia Właścicielka', email: 'julia@example.test', professionalTitle: null,
       role: 'owner', specialistId: null, version: 3,
     },
     authorityRevision: 1,

@@ -17,6 +17,7 @@ const ACTIVITY_CHARGE_ID = /^ach_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ACTIVITY_ATTENDANCE_ID = /^aat_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const ACTIVITY_PROJECTION_JOB_ID = /^apj_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 const WORKBOOK_EXPORT_ID = /^wbe_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+const SPECIALIST_ABSENCE_ID = /^abs_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
 
 const schema = (entityType, entityIdKind, metadata) => Object.freeze({
   entityType,
@@ -36,8 +37,9 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'activity.participant.created': schema('activity_participant', 'activityParticipantId', { participantVersion: 'version' }),
   'activity.participant.updated': schema('activity_participant', 'activityParticipantId', { participantVersion: 'version' }),
   'activity.projection.advanced': schema('activity_projection_job', 'activityProjectionJobId', { jobVersion: 'version', processedCount: 'count', projectedCount: 'count' }),
-  'appointment.cancelled': schema('appointment', 'appointmentId', { appointmentVersion: 'version', chargeVersion: 'version' }),
+  'appointment.cancelled': schema('appointment', 'appointmentId', { appointmentVersion: 'version', cancellationReason: 'cancellationReason', chargeVersion: 'version' }),
   'appointment.created': schema('appointment', 'appointmentId', { appointmentVersion: 'version', chargeVersion: 'version' }),
+  'appointment.restored': schema('appointment', 'appointmentId', { appointmentVersion: 'version', chargeVersion: 'version' }),
   'appointment.updated': schema('appointment', 'appointmentId', { appointmentVersion: 'version', chargeVersion: 'version' }),
   'client.archived': schema('client', 'clientId', { assignmentId: 'assignmentId', assignmentVersion: 'version', clientVersion: 'version' }),
   'client.assignment.changed': schema('client', 'clientId', { clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' }),
@@ -52,6 +54,8 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'payment.corrected': schema('payment_entry', 'paymentId', { appointmentVersion: 'version', correctionId: 'correctionId', replacementEntryId: 'nullablePaymentId', reversedEntryId: 'paymentId' }),
   'payment.recorded': schema('appointment', 'appointmentId', { appointmentVersion: 'version', paymentEntryId: 'paymentId' }),
   'specialist.account.linked': schema('specialist', 'specialistId', { specialistVersion: 'version', staffVersion: 'version' }),
+  'specialist.absence.created': schema('specialist_absence', 'specialistAbsenceId', { absenceVersion: 'version' }),
+  'specialist.absence.cancelled': schema('specialist_absence', 'specialistAbsenceId', { absenceVersion: 'version' }),
   'specialist.profile.created': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
   'specialist.profile.updated': schema('specialist', 'specialistId', { specialistVersion: 'version' }),
   'staff.capabilities.updated': schema('staff_user', 'staffId', { actorAuthorityRevision: 'version', allowCount: 'count', denyCount: 'count', targetAuthorityRevision: 'version' }),
@@ -97,6 +101,9 @@ const acceptsType = (type, value) => {
   if (type === 'clientId') return typeof value === 'string' && CLIENT_ID.test(value)
   if (type === 'correctionId') return typeof value === 'string' && CORRECTION_ID.test(value)
   if (type === 'paymentId') return typeof value === 'string' && PAYMENT_ID.test(value)
+  if (type === 'cancellationReason') {
+    return ['client', 'centre', 'late_paid'].includes(value)
+  }
   return type === 'nullablePaymentId'
     && (value === null || (typeof value === 'string' && PAYMENT_ID.test(value)))
 }
@@ -119,6 +126,7 @@ const acceptsEntityId = (kind, value) => typeof value === 'string' && ({
   financeEntryId: FINANCE_ENTRY_ID,
   paymentId: PAYMENT_ID,
   specialistId: SPECIALIST_ID,
+  specialistAbsenceId: SPECIALIST_ABSENCE_ID,
   staffId: STAFF_ID,
   workbookImportId: WORKBOOK_IMPORT_ID,
   workbookExportId: WORKBOOK_EXPORT_ID,

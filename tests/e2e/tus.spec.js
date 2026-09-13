@@ -8,8 +8,8 @@ async function login(page) {
 }
 
 async function switchToTherapist(page) {
-  await page.getByRole('button', { name: /Tryb demonstracyjny.*Anna Maria Janowska/ }).click()
-  await page.getByRole('button', { name: /Specjalistka.*Justyna Jarosz-Jarszewska/ }).click()
+  await page.getByRole('button', { name: 'Twoje konto' }).click()
+  await page.getByRole('button', { name: /Prowadzenie terapii.*Justyna Jarosz-Jarszewska/ }).click()
 }
 
 async function openGroup(page, name) {
@@ -146,7 +146,7 @@ test('Escape closes member search without discarding the group drawer', async ({
   await expect(drawer).toHaveCount(0)
 })
 
-test('Escape closes parent search without discarding the child form', async ({ page }) => {
+test('Escape returns from the child step to the group and keeps its draft guarded', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
   await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
@@ -155,6 +155,7 @@ test('Escape closes parent search without discarding the child form', async ({ p
   const drawer = page.getByRole('dialog', { name: 'Nowe dziecko i rodzic' })
   const search = drawer.getByRole('combobox', { name: 'Szukaj rodzica lub opiekuna' })
 
+  await drawer.getByLabel('Imię i nazwisko dziecka').fill('Mila Kowalska')
   await search.fill('Renata')
   await expect(drawer.getByRole('listbox', { name: 'Wyniki wyszukiwania rodziców' })).toBeVisible()
   await search.press('Escape')
@@ -162,7 +163,64 @@ test('Escape closes parent search without discarding the child form', async ({ p
   await expect(drawer).toBeVisible()
   await expect(drawer.getByRole('listbox', { name: 'Wyniki wyszukiwania rodziców' })).toHaveCount(0)
   await search.press('Escape')
+  const groupDrawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
+  await expect(groupDrawer).toBeVisible()
+  await groupDrawer.getByRole('button', { name: 'Zamknij' }).click()
+  await expect(groupDrawer.getByRole('alert')).toContainText('Zamknąć bez zapisywania?')
+})
+
+test('child-step backdrop returns to the group without closing the group drawer', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await login(page)
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('button', { name: 'Nowa grupa' }).click()
+  const childDrawer = page.getByRole('dialog', { name: 'Nowe dziecko i rodzic' })
+  await page.getByRole('dialog', { name: 'Nowa grupa TUS' }).getByRole('button', { name: 'Dodaj nowe dziecko' }).click()
+  await childDrawer.getByLabel('Imię i nazwisko dziecka').fill('Mila Kowalska')
+  await page.locator('.drawer-backdrop').click({ position: { x: 4, y: 4 } })
+  await expect(page.getByRole('dialog', { name: 'Nowa grupa TUS' })).toBeVisible()
+})
+
+test('phone dedicated child form requires names and age but not a phone number', async ({ page }) => {
+  await login(page)
+  await openGroup(page, 'TUS · przedszkolaki 5–6 lat')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('button', { name: 'Dodaj dziecko' }).first().click()
+  const drawer = page.getByRole('dialog', { name: 'Nowe dziecko' })
+  await drawer.getByRole('button', { name: 'Dodaj dziecko' }).click()
+  await expect(drawer.getByLabel('Imię i nazwisko dziecka')).toBeFocused()
+  await expect(drawer).toContainText('Podaj imię i nazwisko dziecka')
+  await expect(drawer).toContainText('Podaj imię i nazwisko rodzica')
+  await expect(drawer).toContainText('Podaj wiek 3–12 lat')
+
+  await drawer.getByLabel('Imię i nazwisko dziecka').fill('Mila Kowalska')
+  await drawer.getByLabel('Wiek').fill('5')
+  await drawer.getByLabel('Imię i nazwisko rodzica / opiekuna').fill('Anna Kowalska')
+  await drawer.getByRole('button', { name: 'Dodaj dziecko' }).click()
   await expect(drawer).toHaveCount(0)
+  await expect(page.getByText('Mila Kowalska', { exact: true })).toBeVisible()
+})
+
+test('quick child form accepts only a whole age from 3 to 12', async ({ page }) => {
+  await login(page)
+  await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
+  await page.getByRole('button', { name: 'Nowa grupa' }).click()
+  await page.getByRole('dialog', { name: 'Nowa grupa TUS' }).getByRole('button', { name: 'Dodaj nowe dziecko' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowe dziecko i rodzic' })
+  await drawer.getByLabel('Imię i nazwisko dziecka').fill('Mila Kowalska')
+  const parentSearch = drawer.getByRole('combobox', { name: 'Szukaj rodzica lub opiekuna' })
+  await parentSearch.fill('Renata')
+  await drawer.getByRole('option').first().click()
+
+  for (const age of ['3.5', '13']) {
+    await drawer.getByLabel('Wiek').fill(age)
+    await drawer.getByRole('button', { name: 'Dodaj do grupy' }).click()
+    await expect(drawer).toContainText('Podaj wiek 3–12 lat')
+  }
+
+  await drawer.getByLabel('Wiek').fill('3')
+  await drawer.getByRole('button', { name: 'Dodaj do grupy' }).click()
+  await expect(page.getByRole('dialog', { name: 'Nowa grupa TUS' })).toBeVisible()
 })
 
 test('parent search arrow keys select beyond the first result', async ({ page }) => {
@@ -407,12 +465,12 @@ test('family links support a neutral role and unlinking', async ({ page }) => {
 test('payment method is recorded from the calendar payment picker', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await login(page)
-  await page.getByRole('navigation').getByRole('link', { name: 'Kalendarz' }).click()
+  await page.getByRole('navigation').getByRole('link', { name: 'Grafik' }).click()
   const agenda = page.getByRole('region', { name: 'Plan dnia' })
-  const unpaidRow = agenda.locator('[data-terminal="true"][data-payment="unpaid"]').first()
+  const unpaidRow = agenda.locator('[data-terminal="true"][data-payment="unpaid"]:not([data-attendance="cancelled"])').first()
   const rowId = await unpaidRow.getAttribute('data-flip-id')
   const row = agenda.locator(`[data-flip-id="${rowId}"]`)
-  const payPill = row.getByRole('button', { name: /Płatność: Nieopłacona/ })
+  const payPill = row.getByRole('button', { name: /Płatność: Do zapłaty/ })
   await payPill.scrollIntoViewIfNeeded()
   await payPill.click()
   await page.getByRole('menuitemradio', { name: 'Opłacona', exact: true }).click()
@@ -431,19 +489,18 @@ test('session form exposes payment method only for paid sessions', async ({ page
   await page.getByRole('button', { name: 'Nowa sesja' }).first().click()
   const drawer = page.getByRole('dialog', { name: 'Nowa sesja' })
   await expect(drawer.getByRole('radiogroup', { name: 'Forma płatności' })).toHaveCount(0)
+  await drawer.getByRole('radio', { name: 'Nieobecność', exact: true }).click()
   await drawer.getByRole('radio', { name: 'Opłacona', exact: true }).click()
   await expect(drawer.getByRole('radiogroup', { name: 'Forma płatności' })).toBeVisible()
 })
 
-test('google calendar demo toggle connects and disconnects', async ({ page }) => {
+test('google Calendar demo explains that it does not connect accounts', async ({ page }) => {
   await login(page)
   await page.getByRole('navigation').getByRole('link', { name: 'Ustawienia' }).click()
-  await page.getByRole('button', { name: 'Połącz (demo)' }).click()
-  await expect(page.getByText('Połączono z Google Calendar (demo)')).toBeVisible()
-  const disconnect = page.getByRole('button', { name: 'Rozłącz' })
-  await expect(disconnect).toBeVisible()
-  await disconnect.click()
-  await expect(page.getByRole('button', { name: 'Połącz (demo)' })).toBeVisible()
+  await page.getByRole('button', { name: 'Grafik i integracje' }).click()
+  await expect(page.getByText('Grafik Google', { exact: true })).toBeVisible()
+  await expect(page.getByText('W tym demo nie łączymy kont Google ani nie synchronizujemy sesji.')).toBeVisible()
+  await expect(page.getByRole('button', { name: /Połącz|Rozłącz/ })).toHaveCount(0)
 })
 
 test.describe('Task 5 TUS redesign', () => {
@@ -564,7 +621,7 @@ test.describe('Task 5 TUS redesign', () => {
     await expect(assigned).toContainText('+48 613 362 486')
     await expect(assigned.getByRole('checkbox')).not.toBeChecked()
     const payment = page.locator('.card').filter({ hasText: /Płatności ·/ }).locator('tbody tr').filter({ hasText: 'Borys Cygan' })
-    await expect(payment).toContainText('Nieopłacona')
+    await expect(payment).toContainText('Do zapłaty')
   })
 
   test('quick assignment keeps ownership of Ctrl and Cmd K while its native modal is open', async ({ page }) => {
@@ -596,7 +653,7 @@ test.describe('Task 5 TUS redesign', () => {
     await expect(assignment).toBeFocused()
   })
 
-  test('group form validates integer bounds and synchronizes its readable age label', async ({ page }) => {
+test('group form uses plain validation, waits for a complete age range, and puts the picker after settings', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' })
     await login(page)
     await page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' }).click()
@@ -604,6 +661,7 @@ test.describe('Task 5 TUS redesign', () => {
     const drawer = page.getByRole('dialog', { name: 'Nowa grupa TUS' })
     await drawer.getByLabel('Nazwa grupy').fill('Grupa TUS walidacja')
     await drawer.getByLabel('Wiek od').fill('5')
+    await expect(drawer.getByText(/^Przedział:/)).toHaveCount(0)
     await drawer.getByLabel('Wiek do').fill('4')
     await drawer.getByLabel('Liczba miejsc').fill('0')
     await drawer.locator('label.check').first().click()
@@ -619,16 +677,21 @@ test.describe('Task 5 TUS redesign', () => {
 
     await drawer.getByLabel('Wiek do').fill('2.5')
     await drawer.getByRole('button', { name: 'Utwórz grupę' }).click()
-    await expect(drawer.getByText('Wiek musi być dodatnią liczbą całkowitą')).toBeVisible()
+    await expect(drawer.getByText('Podaj wiek w pełnych latach')).toBeVisible()
     await drawer.getByLabel('Wiek od').fill('2')
-    await expect(drawer.getByText('Wiek musi być dodatnią liczbą całkowitą')).toBeVisible()
+    await expect(drawer.getByText('Podaj wiek w pełnych latach')).toBeVisible()
 
     await drawer.getByLabel('Wiek od').fill('5')
     await drawer.getByLabel('Wiek do').fill('5')
     await drawer.getByLabel('Liczba miejsc').fill('2.5')
     await drawer.getByRole('button', { name: 'Utwórz grupę' }).click()
     await expect(drawer.getByLabel('Liczba miejsc')).toHaveValue('2.5')
-    await expect(drawer).toContainText('Liczba miejsc musi być dodatnią liczbą całkowitą')
+    await expect(drawer).toContainText('Podaj pełną liczbę miejsc, np. 8')
+
+    expect(await drawer.locator('.tus-member-picker').evaluate((picker) => {
+      const fee = picker.closest('form')?.querySelector('[name="tus-fee"]')
+      return Boolean(fee && (picker.compareDocumentPosition(fee) & Node.DOCUMENT_POSITION_PRECEDING))
+    })).toBe(true)
 
     await drawer.getByLabel('Liczba miejsc').fill('9')
     await expect(drawer.getByText('Przedział: 5 lat')).toBeVisible()

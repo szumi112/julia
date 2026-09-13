@@ -1,20 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useApp, useClientMutationLock, useWorkspaceRetry, useWorkspaceWindow, clientOutstanding, lastSessionOf } from '../store.jsx'
+import { useApp, useClientMutationLock, useWorkspaceRetry, useWorkspaceWindow, clientOutstanding } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal, useFlip } from '../anim.js'
 import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, Segmented, usePagination, Pager } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
 import { ClientDrawer } from './ClientForm.jsx'
-import { ageLabel, addMonths, fmtMoney, fmtMonthYear, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, monthKey, sessionsWord, toISODate, pad2, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
-import { clientMatchesQuery, clientsForRole, sessionsForRole } from '../workspace.js'
+import { ageLabel, addMonths, fmtMoney, fmtMonthYear, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, monthKey, sessionsWord, toISODate, warsawDateTimeFromUtc, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
+import { clientMatchesQuery, clientsForRole, isBookableClient, sessionsForRole } from '../workspace.js'
 import { serviceBadge, serviceShort } from '../services.js'
-import { EntityLink, FilterBar, FilterGroup, useRouteParamsSync } from '../ux-patterns.jsx'
+import { EntityLink, FilterBar, FilterGroup, useRouteParamsSync, ViewState } from '../ux-patterns.jsx'
 import {
   monthWorkspaceRange,
+  futureWorkspaceRange,
+  previousWorkspaceRange,
   rollingWorkspaceRange,
+  isWorkspaceRangeCovered,
   specialistIdentityFor,
 } from '../workspace-view.js'
+import { isWorkspaceRangePending } from '../workspace-load-request.js'
 import { canPerformAction } from '../capability-access.js'
 import {
   historicalClientDirectoryModel,
@@ -27,14 +31,16 @@ import { HistoricalClientActivation } from './HistoricalClientActivation.jsx'
 
 // the client's next scheduled visit — sessions stay sorted by date+time
 const nextSessionOf = (sessions, clientId) => {
-  const now = new Date()
-  const today = toISODate(now)
-  const nowTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
+  const { date: today, time: nowTime } = warsawDateTimeFromUtc(new Date().toISOString())
   return sessions.find(
     (s) => s.clientId === clientId && s.status === 'scheduled' &&
       (s.date > today || (s.date === today && s.time >= nowTime))
   )
 }
+
+const sessionsInRange = (sessions, range) => sessions.filter(
+  (session) => session.date >= range.from && session.date <= range.to,
+)
 
 function HistoricalHistorySections({ history }) {
   return (
@@ -68,8 +74,8 @@ function HistoricalHistorySections({ history }) {
 }
 
 function HistoricalClientsPanel({
-  directory, historyPeriod, historyYm, latestAction, onCatalog, onHistoryPeriod,
-  onHistoryYm, query, setQuery,
+  directory, historyPeriod, historyYm, latestAction, onHistoryPeriod,
+  onHistoryYm, query, setQuery, notice, stale,
 }) {
   return (
     <div>
@@ -77,19 +83,10 @@ function HistoricalClientsPanel({
         <div>
           <div className="eyebrow">Kartoteka źródłowa</div>
           <h1 className="display view-head__title">Klienci <em>historyczni</em></h1>
-          <p className="view-head__sub">Profile i wizyty odtworzone ze skoroszytu, bez dopisywania bieżącej opieki.</p>
+          <p className="view-head__sub">Profile i sesje odtworzone z dawnego arkusza, bez dopisywania bieżącej opieki.</p>
         </div>
         <div className="view-head__actions historical-directory__actions">
           <SearchInput value={query} onChange={setQuery} placeholder="Imię, usługa lub specjalistka…" />
-          <Segmented
-            ariaLabel="Kartoteka klientów"
-            value="historical"
-            onChange={onCatalog}
-            options={[
-              { value: 'current', label: 'Bieżący' },
-              { value: 'historical', label: 'Historia skoroszytu' },
-            ]}
-          />
         </div>
       </div>
       <div className="historical-directory__toolbar">
@@ -108,12 +105,15 @@ function HistoricalClientsPanel({
           ]}
         />
       </div>
+      {notice}
+      <div className={stale ? 'is-refreshing' : ''} aria-busy={stale || undefined}>
       {directory.length === 0 ? (
         <section className="card card--pad historical-zero" aria-live="polite">
-          <h2 className="card-title">Brak profili historycznych</h2>
-          <p>{historyPeriod === 'unknown'
+          <h2 className="card-title">{query ? 'Nie znaleziono klientów z dawnego arkusza' : 'Brak klientów z dawnego arkusza'}</h2>
+          <p>{query ? `Brak wyników dla „${query}”.` : historyPeriod === 'unknown'
             ? 'Nie ma klientów z wpisami o nieustalonym okresie.'
-            : `W ${fmtMonthYear(historyYm)} nie ma profili ze skoroszytu.`}</p>
+            : `W ${fmtMonthYear(historyYm)} nie ma klientów z dawnego arkusza.`}</p>
+          {query && <Button variant="soft" onClick={() => setQuery('')}>Wyczyść wyszukiwanie</Button>}
           {latestAction && <Button variant="soft" onClick={() => onHistoryYm(latestAction.month)}>{latestAction.label}</Button>}
         </section>
       ) : (
@@ -121,13 +121,13 @@ function HistoricalClientsPanel({
           <div className="table-scroll table-scroll--until-tablet">
             <table className="table table--cards" aria-label="Klienci historyczni">
               <thead>
-                <tr><th>Klient</th><th>Wpisy źródłowe</th><th>Okres</th><th>Status</th><th></th></tr>
+                <tr><th>Klient</th><th>Sesje z arkusza</th><th>Okres</th><th>Status</th><th></th></tr>
               </thead>
               <tbody>
                 {directory.map((client) => (
                   <tr key={client.id} className="historical-client-row" data-history-client-id={client.id}>
                     <td data-th="Klient"><strong>{client.name}</strong></td>
-                    <td data-th="Wpisy źródłowe">{client.visitCount}</td>
+                  <td data-th="Sesje z arkusza">{client.visitCount}</td>
                     <td data-th="Okres">{client.periodSummary}</td>
                     <td data-th="Status"><Pill tone={client.activeClientId ? 'sage' : 'sky'}>{client.lifecycle}</Pill></td>
                     <td data-th="Karta" className="td--actions">
@@ -159,18 +159,19 @@ function HistoricalClientsPanel({
           </div>
         </div>
       )}
+      </div>
     </div>
   )
 }
 
-function HistoricalClientDetail({ historicalClient, occurrences, specialists, workspaceRange }) {
+function HistoricalClientDetail({ historicalClient, occurrences, specialists, workspaceRange, periodMode = 'known' }) {
   const { capabilities, role } = useShell()
   const { locked: clientMutationLocked } = useClientMutationLock()
   const identityRef = useRef(null)
   const [activationOpen, setActivationOpen] = useState(false)
   const history = useMemo(() => historicalClientHistoryModel({
-    historicalClient, occurrences, specialists,
-  }), [historicalClient, occurrences, specialists])
+    historicalClient, occurrences, specialists, workspaceRange, periodMode,
+  }), [historicalClient, occurrences, specialists, workspaceRange, periodMode])
   const canActivate = historicalClient.status === 'historical'
     && role.scope === 'centre'
     && ['owner', 'coordinator'].includes(role.id)
@@ -192,7 +193,7 @@ function HistoricalClientDetail({ historicalClient, occurrences, specialists, wo
       <div className="id-band historical-client-band" ref={identityRef} tabIndex={-1}>
         <Avatar name={historicalClient.name} size={64} />
         <div className="id-band__main">
-          <p className="eyebrow id-band__eyebrow">Profil ze skoroszytu</p>
+          <p className="eyebrow id-band__eyebrow">Dawny arkusz</p>
           <h1 className="display id-band__name">{historicalClient.name}</h1>
           <div className="id-band__pills">
             <Pill tone={historicalClient.activeClientId ? 'sage' : 'sky'}>
@@ -214,7 +215,7 @@ function HistoricalClientDetail({ historicalClient, occurrences, specialists, wo
               disabled={clientMutationLocked}
               onClick={() => setActivationOpen(true)}
             >
-              Aktywuj klienta
+              Dodaj do kartoteki
             </Button>
           </div>
         )}
@@ -233,15 +234,15 @@ function HistoricalClientDetail({ historicalClient, occurrences, specialists, wo
 
 function HistoricalSourceHistory({ historicalClient, occurrences, specialists, workspaceRange }) {
   const history = useMemo(() => historicalClientHistoryModel({
-    historicalClient, occurrences, specialists,
-  }), [historicalClient, occurrences, specialists])
+    historicalClient, occurrences, specialists, workspaceRange,
+  }), [historicalClient, occurrences, specialists, workspaceRange])
   return (
-    <section className="client-record__section" aria-label="Historia ze skoroszytu">
+    <section className="client-record__section" aria-label="Historia z dawnego arkusza">
       <div className="card card--pad">
-        <h2 className="card-title">Historia ze skoroszytu</h2>
+        <h2 className="card-title">Historia z dawnego arkusza</h2>
         <p className="faint">
           Widoczny zakres: {fmtFullDate(workspaceRange.from)} – {fmtFullDate(workspaceRange.to)}.
-          To odrębne wpisy źródłowe, nie historia frekwencji.
+          To dane z dawnego arkusza, oddzielne od historii frekwencji.
         </p>
         <HistoricalHistorySections history={history} />
       </div>
@@ -250,10 +251,12 @@ function HistoricalSourceHistory({ historicalClient, occurrences, specialists, w
 }
 
 export function Clients({ params = {} }) {
-  const { state } = useApp()
+  const { state, workspace, workspaceFailures, workspacePendingRanges } = useApp()
   const { appMode, capabilities, getViewState, openClientForm, patchViewState, role } = useShell()
   const isApp = appMode === 'app'
-  const today = toISODate(new Date())
+  const canViewHistorical = isApp && role.scope === 'centre'
+    && capabilities.includes('finance.centre.read')
+  const today = warsawDateTimeFromUtc(new Date().toISOString()).date
   const ref = useReveal()
   const initialState = useRef(null)
   if (!initialState.current) {
@@ -294,14 +297,26 @@ export function Clients({ params = {} }) {
   const [historyYm, setHistoryYm] = useState(initialState.current.historyYm)
   const [historyPeriod, setHistoryPeriod] = useState(initialState.current.historyPeriod)
   const [clientForm, setClientForm] = useState(null)
+  const effectiveCatalog = canViewHistorical ? catalog : 'current'
   const workspaceRange = useMemo(
-    () => isApp && catalog === 'historical'
+    () => isApp && effectiveCatalog === 'historical'
       ? monthWorkspaceRange(historyYm)
       : rollingWorkspaceRange(today),
-    [catalog, historyYm, isApp, today],
+    [effectiveCatalog, historyYm, isApp, today],
   )
-  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const futureRange = useMemo(() => futureWorkspaceRange(today), [today])
+  const pastWorkspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const futureWorkspaceState = useWorkspaceWindow(
+    futureRange,
+    isApp && effectiveCatalog !== 'historical',
+  )
+  const workspaceState = pastWorkspaceState
   const retryWorkspace = useWorkspaceRetry()
+  const workspaceCovered = !isApp || isWorkspaceRangeCovered(workspace.loadedRanges, workspaceRange)
+  const workspaceFailed = isApp && workspaceFailures.has(`${workspaceRange.from}|${workspaceRange.to}`)
+  const workspaceRefreshing = isApp && workspaceCovered
+    && isWorkspaceRangePending(workspacePendingRanges, workspaceRange)
+  const workspaceRefreshFailed = isApp && workspaceCovered && workspaceFailed
   const { locked: clientMutationLocked } = useClientMutationLock()
   const canManageClients = !isApp || canPerformAction(capabilities, 'client.create')
   const clientActionsLocked = isApp && clientMutationLocked
@@ -317,15 +332,19 @@ export function Clients({ params = {} }) {
     () => clientsForRole(state, role).filter((client) => client.status !== 'archived'),
     [state, role]
   )
+  const recentSessions = useMemo(
+    () => sessionsInRange(state.sessions, workspaceRange),
+    [state.sessions, workspaceRange],
+  )
   const filtered = useMemo(() => {
     return scopedClients.filter((c) => {
       if (role.scope !== 'own' && psychFilter && c.psychId !== psychFilter) return false
-      if (debtOnly && clientOutstanding(state.sessions, c.id) <= 0) return false
+      if (debtOnly && clientOutstanding(recentSessions, c.id) <= 0) return false
       if (statusFilter !== 'all' && c.status !== statusFilter) return false
       if (!clientMatchesQuery(c, query)) return false
       return true
     })
-  }, [scopedClients, state.sessions, query, psychFilter, debtOnly, role.scope, statusFilter])
+  }, [scopedClients, recentSessions, query, psychFilter, debtOnly, role.scope, statusFilter])
 
   const { pageItems, page, pages, setPage } = usePagination(filtered, {
     pageSize: 25,
@@ -387,7 +406,7 @@ export function Clients({ params = {} }) {
     })
   }, [catalog, debtOnly, historyPeriod, historyYm, page, patchViewState, psychFilter, query, role.scope, statusFilter])
 
-  useRouteParamsSync('clients', catalog === 'historical'
+  useRouteParamsSync('clients', effectiveCatalog === 'historical'
     ? { catalog: 'historical', historyPeriod, ym: historyYm }
     : { specialist: role.scope !== 'own' ? psychFilter || undefined : undefined })
 
@@ -410,37 +429,62 @@ export function Clients({ params = {} }) {
     setStatusFilter('all')
   }
 
-  if (isApp && workspaceState !== 'ready') {
-    return (
-      <section role="status" aria-label="Stan kartoteki">
-        <EmptyState
-          icon="clients"
-          title={workspaceState === 'loading' ? 'Wczytywanie kartoteki…' : 'Kartoteka jest teraz niedostępna'}
-          hint={workspaceState === 'loading'
-            ? 'Pobieramy uprawniony zakres klientów i historii spotkań.'
-            : 'Dane pozostają tylko do odczytu.'}
-          action={workspaceState === 'unavailable'
-            ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
-            : undefined}
-        />
-      </section>
-    )
-  }
-
-  if (isApp && catalog === 'historical') {
+  if (isApp && effectiveCatalog === 'historical') {
     return (
       <div ref={ref}>
-        <HistoricalClientsPanel
-          directory={historicalDirectory}
-          historyPeriod={historyPeriod}
-          historyYm={historyYm}
-          latestAction={latestHistoryAction}
-          onCatalog={setCatalog}
-          onHistoryPeriod={setHistoryPeriod}
-          onHistoryYm={setHistoryYm}
-          query={query}
-          setQuery={setQuery}
-        />
+        {workspaceCovered ? <>
+          <HistoricalClientsPanel
+            directory={historicalDirectory}
+            historyPeriod={historyPeriod}
+            historyYm={historyYm}
+            latestAction={latestHistoryAction}
+            onHistoryPeriod={setHistoryPeriod}
+            onHistoryYm={setHistoryYm}
+            query={query}
+            setQuery={setQuery}
+            stale={workspaceRefreshing}
+            notice={<>
+              {workspaceRefreshing && <ViewState
+                compact
+                tone="loading"
+                icon="clients"
+                title="Odświeżamy kartotekę…"
+                hint="Wyświetlamy ostatnio potwierdzony zakres klientów."
+              />}
+              {workspaceRefreshFailed && <ViewState
+                compact
+                tone="error"
+                icon="clients"
+                title="Nie udało się odświeżyć kartoteki"
+                hint="Wyświetlamy ostatnio potwierdzony zakres klientów."
+                action={<Button size="sm" onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>}
+              />}
+            </>}
+          />
+        </> : <>
+          <div className="view-head">
+            <div>
+              <div className="eyebrow">Kartoteka źródłowa</div>
+              <h1 className="display view-head__title">Klienci <em>historyczni</em></h1>
+              <p className="view-head__sub">Profile i sesje odtworzone z dawnego arkusza, bez dopisywania bieżącej opieki.</p>
+            </div>
+            <div className="view-head__actions historical-directory__actions">
+              <SearchInput value={query} onChange={setQuery} placeholder="Imię, usługa lub specjalistka…" />
+            </div>
+          </div>
+          <ViewState
+            ariaLabel="Stan kartoteki"
+            tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
+            icon="clients"
+            title={workspaceState === 'unavailable' ? 'Kartoteka jest teraz niedostępna' : 'Wczytuję kartotekę…'}
+            hint={workspaceState === 'unavailable'
+              ? 'Nie pokazujemy niepełnego zakresu klientów.'
+              : 'Pobieramy uprawniony zakres klientów i historii sesji.'}
+            action={workspaceState === 'unavailable'
+              ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
+              : undefined}
+          />
+        </>}
       </div>
     )
   }
@@ -449,30 +493,20 @@ export function Clients({ params = {} }) {
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">Kartoteka</div>
           <h1 className="display view-head__title">
             {role.scope === 'own' ? <>Moi <em>klienci</em></> : <>Klienci <em>centrum</em></>}
           </h1>
           <p className="view-head__sub">
-            {scopedClients.length} {plural(scopedClients.length, 'osoba', 'osoby', 'osób')}
-            {role.scope === 'own'
-              ? ' przypisanych do Twojej opieki — wyszukuj i przechodź do kart klientów.'
-              : ' pod opieką zespołu — wyszukuj, filtruj i przechodź do kart klientów.'}
+            {isApp && !workspaceCovered
+              ? 'Wczytujemy uprawnioną kartotekę klientów.'
+              : <>{scopedClients.length} {plural(scopedClients.length, 'osoba', 'osoby', 'osób')}
+                {role.scope === 'own'
+                  ? ' przypisanych do Twojej opieki — wyszukuj i przechodź do kart klientów.'
+                  : ' pod opieką zespołu — wyszukuj, filtruj i przechodź do kart klientów.'}</>}
           </p>
         </div>
         <div className="view-head__actions">
-          <SearchInput value={query} onChange={setQuery} placeholder="Imię, e-mail lub telefon…" />
-          {isApp && (
-            <Segmented
-              ariaLabel="Kartoteka klientów"
-              value={catalog}
-              onChange={setCatalog}
-              options={[
-                { value: 'current', label: 'Bieżący' },
-                { value: 'historical', label: 'Historia skoroszytu' },
-              ]}
-            />
-          )}
+          <SearchInput value={query} onChange={setQuery} placeholder="Imię klienta…" />
           {canManageClients && (
             <Button icon="plus" magnetic disabled={clientActionsLocked} onClick={() => openClient({ psychId: role.scope === 'own' ? role.psychId : psychFilter || undefined })}>
               Dodaj klienta
@@ -481,6 +515,40 @@ export function Clients({ params = {} }) {
         </div>
       </div>
 
+      {!workspaceCovered ? <ViewState
+        ariaLabel="Stan kartoteki"
+        tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
+        icon="clients"
+        title={workspaceState === 'unavailable' ? 'Kartoteka jest teraz niedostępna' : 'Wczytuję kartotekę…'}
+        hint={workspaceState === 'unavailable'
+          ? 'Nie pokazujemy niepełnego zakresu klientów.'
+          : 'Pobieramy uprawniony zakres klientów i historii sesji.'}
+        action={workspaceState === 'unavailable'
+          ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
+          : undefined}
+      /> : <>
+      {workspaceRefreshing && <ViewState
+        compact
+        tone="loading"
+        icon="clients"
+        title="Odświeżamy kartotekę…"
+        hint="Wyświetlamy ostatnio potwierdzony zakres klientów."
+      />}
+      {workspaceRefreshFailed && <ViewState
+        compact
+        tone="error"
+        icon="clients"
+        title="Nie udało się odświeżyć kartoteki"
+        hint="Wyświetlamy ostatnio potwierdzony zakres klientów."
+        action={<Button size="sm" onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>}
+      />}
+
+      <div className={workspaceRefreshing ? 'is-refreshing' : ''} aria-busy={workspaceRefreshing || undefined}>
+      {canViewHistorical && (
+        <EntityLink route="clients" params={{ catalog: 'historical' }} className="link">
+          Klienci z dawnego arkusza
+        </EntityLink>
+      )}
       <div data-reveal>
         <FilterBar
           activeCount={activeFilterCount}
@@ -521,23 +589,30 @@ export function Clients({ params = {} }) {
         {filtered.length} {plural(filtered.length, 'wynik', 'wyniki', 'wyników')}
       </p>
 
+      {futureWorkspaceState === 'unavailable' && (
+        <div className="row faint" role="status" style={{ gap: 10, marginBottom: 12 }}>
+          <span>Nie udało się wczytać najbliższych sesji.</span>
+          <Button size="sm" variant="soft" onClick={() => retryWorkspace(futureRange)}>
+            Spróbuj ponownie
+          </Button>
+        </div>
+      )}
+
       <div className="card card--table" data-reveal>
         <div className="table-scroll table-scroll--until-tablet">
         <table className="table table--cards">
           <thead>
             <tr>
               <th>Klient</th>
-              <th>Opieka</th>
-              <th>Ostatnia sesja</th>
+              <th>Specjalistka</th>
               <th>Następna sesja</th>
-              <th className="right">Zaległość</th>
-              <th>Status</th>
+              <th className="right">Do zapłaty od {fmtFullDate(workspaceRange.from)} do {fmtFullDate(workspaceRange.to)}</th>
             </tr>
           </thead>
           <tbody ref={tbodyRef}>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={6}>
+                <td colSpan={4}>
                   {scopedClients.length === 0 ? (
                     <EmptyState
                       icon="clients"
@@ -549,8 +624,12 @@ export function Clients({ params = {} }) {
                     <EmptyState
                       icon="search"
                       title="Nie znaleziono klientów"
-                      hint="Zmień wyszukiwanie lub filtry — albo dodaj nową osobę."
-                      action={canManageClients && <Button size="sm" variant="soft" icon="plus" disabled={clientActionsLocked} onClick={() => openClient()}>Dodaj klienta</Button>}
+                      hint={query
+                        ? `Brak wyników dla „${query}”.`
+                        : 'Zmień filtry, aby zobaczyć klientów w tym zakresie.'}
+                      action={query ? <Button size="sm" variant="soft" onClick={() => setQuery('')}>
+                        Wyczyść wyszukiwanie
+                      </Button> : undefined}
                     />
                   )}
                 </td>
@@ -559,16 +638,15 @@ export function Clients({ params = {} }) {
             {pageItems.map((c) => {
               const p = psychOf(c.psychId)
               const specialist = specialistIdentityFor(state.psychologists, c.psychId)
-              const last = lastSessionOf(state.sessions, c.id)
-              const next = nextSessionOf(state.sessions, c.id)
-              const debt = clientOutstanding(state.sessions, c.id)
+              const next = nextSessionOf(sessionsInRange(state.sessions, futureRange), c.id)
+              const debt = clientOutstanding(recentSessions, c.id)
               return (
                 <tr
                   key={c.id}
                   data-flip-id={c.id}
                   className="client-row"
                 >
-                  <td>
+                  <td data-th="Klient">
                     <EntityLink
                       route="client"
                       params={{ id: c.id }}
@@ -584,25 +662,28 @@ export function Clients({ params = {} }) {
                       </span>
                     </EntityLink>
                   </td>
-                  <td data-th="Opieka">
+                  <td data-th="Specjalistka">
                     <span className="row" style={{ gap: 8 }}>
                       <span style={{ width: 8, height: 8, borderRadius: 99, background: p?.color, display: 'inline-block' }} />
                       <span className="muted">{specialist.name}</span>
                     </span>
                   </td>
-                  <td className="num-cell muted" data-th="Ostatnia sesja">{last ? fmtShortDate(last.date) : '—'}</td>
                   <td data-th="Następna sesja">
-                    {next
-                      ? <span className="num-cell" style={{ fontWeight: 600 }}>{fmtShortDate(next.date)} · {next.time}</span>
-                      : <span className="faint">nie umówiono</span>}
+                    {futureWorkspaceState !== 'ready'
+                      ? <span className="faint">{futureWorkspaceState === 'loading'
+                        ? 'Wczytuję najbliższe sesje…'
+                        : 'Najbliższe sesje są teraz niedostępne.'}</span>
+                      : next
+                      ? <span className="num-cell" style={{ fontWeight: 600 }}>
+                        {cap(fmtWeekday(next.date))}, {fmtDayMonth(next.date)} · {next.time}
+                      </span>
+                      : <span className="faint">Brak sesji w najbliższych 3 miesiącach</span>}
                   </td>
-                  <td className="right" data-th="Zaległość">
-                    {debt > 0 ? <Pill tone="coral">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
-                  </td>
-                  <td data-th="Status">
-                    <Pill tone={c.status === 'active' ? 'sage' : 'pink'} dot>
-                      {c.status === 'active' ? 'Aktywny' : 'Wstrzymany'}
-                    </Pill>
+                  <td className="right" data-th={`Do zapłaty: ${fmtFullDate(workspaceRange.from)} – ${fmtFullDate(workspaceRange.to)}`}>
+                    {workspaceState !== 'ready'
+                      ? <span className="faint">Zakres rozliczeń jest niedostępny.</span>
+                      : debt > 0 ? <Pill tone="amber">{fmtMoney(debt)}</Pill>
+                        : <span className="faint">Brak zaległości w tym zakresie</span>}
                   </td>
                 </tr>
               )
@@ -612,7 +693,9 @@ export function Clients({ params = {} }) {
         </div>
         <Pager page={page} pages={pages} onPage={setPage} />
       </div>
+      </div>
       {clientForm && <ClientDrawer opts={clientForm} onClose={() => setClientForm(null)} />}
+      </>}
     </div>
   )
 }
@@ -621,19 +704,32 @@ export function ClientDetail({ params }) {
   const { state, dispatch, toast } = useApp()
   const { appMode, capabilities, openSessionForm, openClientForm, role } = useShell()
   const isApp = appMode === 'app'
-  const todayIso = toISODate(new Date())
-  const detailYm = /^\d{4}-(0[1-9]|1[0-2])$/.test(params?.ym || '')
-    ? params.ym : monthKey(todayIso)
-  const usesHistoricalWindow = isApp && (
+  const nowParts = warsawDateTimeFromUtc(new Date().toISOString())
+  const todayIso = nowParts.date
+  const sourceHistoryMonth = /^\d{4}-(0[1-9]|1[0-2])$/.test(params?.ym || '')
+    ? params.ym : null
+  const isHistoricalRecord = isApp && (
     /^hcl_/.test(params?.id || '')
-    || /^\d{4}-(0[1-9]|1[0-2])$/.test(params?.ym || '')
     || params?.historyPeriod === 'unknown'
   )
   const workspaceRange = useMemo(
-    () => usesHistoricalWindow ? monthWorkspaceRange(detailYm) : rollingWorkspaceRange(todayIso),
-    [detailYm, todayIso, usesHistoricalWindow],
+    () => isHistoricalRecord ? monthWorkspaceRange(sourceHistoryMonth ?? monthKey(todayIso)) : rollingWorkspaceRange(todayIso),
+    [isHistoricalRecord, sourceHistoryMonth, todayIso],
   )
-  const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const sourceHistoryRange = useMemo(
+    () => !isHistoricalRecord && sourceHistoryMonth ? monthWorkspaceRange(sourceHistoryMonth) : null,
+    [isHistoricalRecord, sourceHistoryMonth],
+  )
+  const futureRange = useMemo(() => futureWorkspaceRange(todayIso), [todayIso])
+  const [historyRange, setHistoryRange] = useState(null)
+  const pastWorkspaceState = useWorkspaceWindow(workspaceRange, isApp)
+  const sourceHistoryState = useWorkspaceWindow(
+    sourceHistoryRange,
+    isApp && sourceHistoryRange !== null && pastWorkspaceState === 'ready',
+  )
+  const futureWorkspaceState = useWorkspaceWindow(futureRange, isApp && !isHistoricalRecord)
+  const historyWorkspaceState = useWorkspaceWindow(historyRange, isApp && historyRange !== null)
+  const workspaceState = pastWorkspaceState
   const retryWorkspace = useWorkspaceRetry()
   const ref = useReveal([params.id])
   const [noteText, setNoteText] = useState('')
@@ -650,30 +746,47 @@ export function ClientDetail({ params }) {
   const linkedHistoricalClient = isApp && client
     ? state.historicalClients.find((candidate) => candidate.activeClientId === client.id)
     : null
+  const earliestHistoryDate = historyRange?.from ?? workspaceRange.from
+  const latestVisibleDate = isHistoricalRecord ? workspaceRange.to : futureRange.to
   const all = client
-    ? sessionsForRole(state, role).filter((session) => session.clientId === client.id)
+    ? sessionsForRole(state, role).filter((session) => (
+        session.clientId === client.id
+        && session.date >= earliestHistoryDate
+        && session.date <= latestVisibleDate
+      ))
     : []
   // upcoming care first, everything else newest-first below it
-  const now = new Date()
-  const nowTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`
+  const nowTime = nowParts.time
   const upcoming = all.filter(
-    (s) => s.status === 'scheduled' && (s.date > todayIso || (s.date === todayIso && s.time >= nowTime))
+    (s) => s.status === 'scheduled'
+      && (s.date > todayIso || (s.date === todayIso && s.time >= nowTime)),
   )
   const upcomingIds = new Set(upcoming.map((s) => s.id))
   const history = all.filter((s) => !upcomingIds.has(s.id)).slice().reverse()
   const historyPages = usePagination(history, { pageSize: 10, resetKey: params.id })
   if (isApp && workspaceState !== 'ready') {
     return (
-      <section role="status" aria-label="Stan karty klienta">
-        <EmptyState
+      <div ref={ref}>
+        <EntityLink route="clients" className="link row" style={{ gap: 7, marginBottom: 20, width: 'fit-content' }}>
+          <Icon name="arrowL" size={16} /> Wróć do kartoteki
+        </EntityLink>
+        <div className="view-head">
+          <div>
+            <div className="eyebrow">Kartoteka klientów</div>
+            <h1 className="display view-head__title">Karta klienta</h1>
+          </div>
+        </div>
+        <ViewState
+          ariaLabel="Stan karty klienta"
+          tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
           icon="clients"
-          title={workspaceState === 'loading' ? 'Wczytywanie karty klienta…' : 'Karta klienta jest teraz niedostępna'}
+          title={workspaceState === 'loading' ? 'Wczytuję kartę klienta…' : 'Karta klienta jest teraz niedostępna'}
           hint="Wyświetlimy wyłącznie dane z uprawnionego, kompletnego zakresu."
           action={workspaceState === 'unavailable'
             ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
             : undefined}
         />
-      </section>
+      </div>
     )
   }
   if (historicalClient) {
@@ -684,6 +797,7 @@ export function ClientDetail({ params }) {
           occurrences={state.historicalOccurrences}
           specialists={historySpecialists}
           workspaceRange={workspaceRange}
+          periodMode={params?.historyPeriod === 'unknown' ? 'unknown' : 'known'}
         />
       </div>
     )
@@ -692,8 +806,8 @@ export function ClientDetail({ params }) {
     return (
       <EmptyState
         icon="clients"
-        title="Nie znaleziono klienta"
-        hint="Być może został usunięty z kartoteki."
+        title="Nie możemy otworzyć tej karty"
+        hint="Link jest nieaktualny albo klient jest pod opieką innej specjalistki."
         action={<EntityLink route="clients" className="btn btn--soft btn--sm">Wróć do listy</EntityLink>}
       />
     )
@@ -701,8 +815,14 @@ export function ClientDetail({ params }) {
 
   const psych = state.psychologists.find((p) => p.id === client.psychId)
   const completed = all.filter((s) => s.status === 'completed')
-  const debt = clientOutstanding(state.sessions, client.id)
-  const next = upcoming[0] || null
+  const debt = clientOutstanding(sessionsInRange(state.sessions, workspaceRange), client.id)
+  const next = nextSessionOf(all, client.id)
+  const earlierHistoryRange = isApp
+    ? previousWorkspaceRange(
+        historyRange ?? workspaceRange,
+        client.since,
+      )
+    : null
   const family = client.familyId
     ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
     : []
@@ -710,7 +830,8 @@ export function ClientDetail({ params }) {
   const canEditClient = !clientMutationLocked && !client.readOnly
     && (!isApp || canPerformAction(capabilities, 'client.edit'))
     && (role.scope !== 'own' || client.psychId === role.psychId)
-  const canManageCare = !isApp && !client.readOnly
+  const canManageCare = isBookableClient(client)
+    && (!isApp || canPerformAction(capabilities, 'appointment.create'))
     && (role.scope !== 'own' || client.psychId === role.psychId)
   const openClient = () => {
     if (isApp) {
@@ -780,7 +901,7 @@ export function ClientDetail({ params }) {
                 <span>{completed.length} {plural(completed.length, 'sesja odbyta', 'sesje odbyte', 'sesji odbytych')}</span>
               </div>
               <div className="id-band__pills">
-                <Pill tone={client.status === 'active' ? 'sage' : 'pink'} dot>
+                <Pill tone={client.status === 'active' ? 'sage' : 'ink'} dot>
                   {client.status === 'archived'
                     ? 'Archiwalny'
                     : client.status === 'active' ? 'Aktywny' : 'Wstrzymany'}
@@ -791,7 +912,7 @@ export function ClientDetail({ params }) {
               <div className="id-band__actions">
                 {canEditClient && <Button variant="ghost" icon="edit" onClick={openClient}>Edytuj</Button>}
                 {canManageCare && <Button icon="plus" onClick={() => openSessionForm({ clientId: client.id })}>
-                  {role.scope === 'own' ? 'Przygotuj sesję' : 'Umów spotkanie'}
+                  {role.scope === 'own' ? 'Przygotuj sesję' : 'Umów sesję'}
                 </Button>}
               </div>
             )}
@@ -807,12 +928,20 @@ export function ClientDetail({ params }) {
               ) : <b>{psych?.name || 'Specjalistka niedostępna'}</b>}
             </div>
             <div className="care-overview__item">
-              <span>Następne spotkanie</span>
-              <b>{next ? `${cap(fmtWeekday(next.date))}, ${fmtDayMonth(next.date)} · ${next.time}` : 'Nie umówiono'}</b>
+              <span>{isHistoricalRecord ? 'Sesje w wybranym miesiącu' : 'Następna sesja'}</span>
+              <b>{isHistoricalRecord
+                ? '—'
+                : futureWorkspaceState !== 'ready'
+                  ? '—'
+                  : next
+                    ? `${cap(fmtWeekday(next.date))}, ${fmtDayMonth(next.date)} · ${next.time}`
+                    : 'Brak sesji w najbliższych 3 miesiącach'}</b>
             </div>
             <div className="care-overview__item">
-              <span>Saldo klienta</span>
-              <b className={debt > 0 ? 'care-overview__debt' : ''}>{debt > 0 ? `Do rozliczenia ${fmtMoney(debt)}` : 'Rozliczony'}</b>
+              <span>Do zapłaty od {fmtFullDate(workspaceRange.from)} do {fmtFullDate(workspaceRange.to)}</span>
+              <b className={debt > 0 ? 'care-overview__debt' : ''}>{debt > 0
+                ? fmtMoney(debt)
+                : 'Brak zaległości w tym zakresie'}</b>
             </div>
             {!isApp && <div className="care-overview__item">
               <span>Rodzina</span>
@@ -844,12 +973,23 @@ export function ClientDetail({ params }) {
         <section className="client-record__section" aria-labelledby="upcoming-appointments-title" data-reveal>
           <div className="card card--pad">
             <h2 className="card-title" id="upcoming-appointments-title">
-              Najbliższe spotkania
+              {isHistoricalRecord ? 'Sesje w wybranym miesiącu' : 'Najbliższe sesje'}
               <span className="faint" style={{ fontSize: 13, fontFamily: 'var(--font-ui)' }}>
                 {upcoming.length} {sessionsWord(upcoming.length)}
               </span>
             </h2>
-            {upcoming.length > 0 ? (
+            {!isHistoricalRecord && futureWorkspaceState !== 'ready' ? (
+              <div className="row" role="status" style={{ gap: 10 }}>
+                <p className="faint">{futureWorkspaceState === 'loading'
+                  ? 'Wczytuję najbliższe sesje…'
+                  : 'Nie udało się wczytać najbliższych sesji.'}</p>
+                {futureWorkspaceState === 'unavailable' && (
+                  <Button size="sm" variant="soft" onClick={() => retryWorkspace(futureRange)}>
+                    Spróbuj ponownie
+                  </Button>
+                )}
+              </div>
+            ) : upcoming.length > 0 ? (
               <div className="agenda agenda--spine" style={{ marginTop: 6 }}>
                 <span className="spine__rule" aria-hidden="true" />
                 {upcoming.map((s) => (
@@ -859,7 +999,7 @@ export function ClientDetail({ params }) {
                       <EntityLink
                         route="calendar"
                         params={{ date: s.date, highlightSessionIds: [s.id] }}
-                        label={`Pokaż w kalendarzu — ${fmtDayMonth(s.date)}, ${s.time}`}
+                        label={`Pokaż w Grafiku — ${fmtDayMonth(s.date)}, ${s.time}`}
                         className="agenda__client agenda__client-link"
                       >
                         {cap(fmtWeekday(s.date))}, {fmtDayMonth(s.date)}
@@ -878,19 +1018,33 @@ export function ClientDetail({ params }) {
                         />
                       </span>
                     </span>
-                    {canManageCare && (
-                      <IconBtn
-                        name="edit"
-                        label={`Edytuj sesję — ${fmtDayMonth(s.date)}, ${s.time}`}
-                        size={16}
-                        onClick={() => openSessionForm({ session: s })}
-                      />
+                    {canManageCare && !s.readOnly && (
+                      <span className="agenda__actions">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => openSessionForm({ session: s, reschedule: true, focus: 'date' })}
+                        >
+                          Przełóż
+                        </Button>
+                        <IconBtn
+                          name="edit"
+                          label={`Edytuj sesję — ${fmtDayMonth(s.date)}, ${s.time}`}
+                          size={16}
+                          onClick={() => openSessionForm({ session: s })}
+                        />
+                      </span>
                     )}
                   </div>
                 ))}
               </div>
             ) : (
-              <EmptyState compact icon="calendar" title="Brak najbliższych spotkań" hint="Umów spotkanie, aby pojawiło się w planie opieki." />
+              <EmptyState
+                compact
+                icon="calendar"
+                title={isHistoricalRecord ? 'Brak sesji w wybranym miesiącu' : 'Brak sesji w najbliższych 3 miesiącach'}
+                hint={isHistoricalRecord ? 'W tym miesiącu nie ma zaplanowanych sesji.' : 'Umów sesję, aby pojawiła się w planie opieki.'}
+              />
             )}
           </div>
         </section>
@@ -905,11 +1059,16 @@ export function ClientDetail({ params }) {
             </h2>
             {isApp && (
               <p className="faint">
-                Zakres historii: {fmtFullDate(workspaceRange.from)} – {fmtFullDate(workspaceRange.to)}
+                {historyRange
+                  ? `Pokazujemy sesje od ${fmtFullDate(historyRange.from)}.`
+                  : 'Pokazujemy sesje z ostatnich 3 miesięcy.'}
               </p>
             )}
             {history.length > 0 ? (
               <>
+              {isApp && historyRange && historyWorkspaceState === 'loading' && (
+                <p className="faint" role="status">Wczytuję wcześniejsze sesje…</p>
+              )}
               <div className="table-scroll table-scroll--until-tablet">
                 <table className="table table--cards" style={{ marginTop: 10 }}>
                   <thead>
@@ -942,14 +1101,23 @@ export function ClientDetail({ params }) {
                             accessibleLabel={`Płatność: ${PAY_LABELS[s.payment]} — ${fmtDayMonth(s.date)}, ${s.time}`}
                           />
                         </td>
-                        <td className="right td--actions" style={{ width: 44 }}>
-                          {canManageCare && (
-                            <IconBtn
-                              name="edit"
-                              label={`Edytuj sesję — ${fmtDayMonth(s.date)}, ${s.time}`}
-                              size={15}
-                              onClick={() => openSessionForm({ session: s })}
-                            />
+                        <td className="right td--actions">
+                          {canManageCare && !s.readOnly && (
+                            <span className="agenda__actions">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => openSessionForm({ session: s, reschedule: true, focus: 'date' })}
+                              >
+                                Przełóż
+                              </Button>
+                              <IconBtn
+                                name="edit"
+                                label={`Edytuj sesję — ${fmtDayMonth(s.date)}, ${s.time}`}
+                                size={15}
+                                onClick={() => openSessionForm({ session: s })}
+                              />
+                            </span>
                           )}
                         </td>
                       </tr>
@@ -959,20 +1127,55 @@ export function ClientDetail({ params }) {
               </div>
               <Pager page={historyPages.page} pages={historyPages.pages} onPage={historyPages.setPage} />
               </>
+            ) : isApp && historyRange && historyWorkspaceState === 'loading' ? (
+              <p className="faint" role="status">Wczytuję wcześniejsze sesje…</p>
+            ) : isApp && historyRange && historyWorkspaceState === 'unavailable' ? (
+              <p className="faint" role="status">Nie udało się wczytać wcześniejszych sesji.</p>
             ) : (
-              <EmptyState compact icon="calendar" title="Brak historii frekwencji" hint="Odbyte, odwołane i nieobecne spotkania pojawią się tutaj." />
+              <EmptyState compact icon="calendar" title="Brak historii frekwencji" hint="Odbyte, odwołane i nieobecne sesje pojawią się tutaj." />
             )}
+            {isApp && historyWorkspaceState === 'unavailable' && historyRange ? (
+              <div className="row" style={{ marginTop: 14, gap: 10 }}>
+                <Button size="sm" variant="soft" onClick={() => retryWorkspace(historyRange)}>
+                  Spróbuj ponownie
+                </Button>
+              </div>
+            ) : isApp && earlierHistoryRange && historyWorkspaceState !== 'loading' ? (
+              <Button
+                size="sm"
+                variant="soft"
+                onClick={() => setHistoryRange(earlierHistoryRange)}
+                style={{ marginTop: 14 }}
+              >
+                Pokaż wcześniejsze sesje
+              </Button>
+            ) : null}
           </div>
         </section>
 
-        {isApp && linkedHistoricalClient && (
+        {isApp && linkedHistoricalClient && sourceHistoryState !== 'ready' ? (
+          <section className="client-record__section" aria-label="Historia z dawnego arkusza">
+            <ViewState
+              ariaLabel="Stan historii z dawnego arkusza"
+              tone={sourceHistoryState === 'unavailable' ? 'error' : 'loading'}
+              icon="clients"
+              title={sourceHistoryState === 'unavailable'
+                ? 'Historia z dawnego arkusza jest teraz niedostępna'
+                : 'Wczytuję historię z dawnego arkusza…'}
+              hint="Pokażemy ją dopiero po pobraniu kompletnego miesiąca źródłowego."
+              action={sourceHistoryState === 'unavailable'
+                ? <Button onClick={() => retryWorkspace(sourceHistoryRange)}>Spróbuj ponownie</Button>
+                : undefined}
+            />
+          </section>
+        ) : isApp && linkedHistoricalClient ? (
           <HistoricalSourceHistory
             historicalClient={linkedHistoricalClient}
             occurrences={state.historicalOccurrences}
             specialists={historySpecialists}
-            workspaceRange={workspaceRange}
+            workspaceRange={sourceHistoryRange ?? workspaceRange}
           />
-        )}
+        ) : null}
 
         {!isApp && <section className="client-record__section" aria-labelledby="clinical-notes-title" data-reveal>
           <div className="card card--pad">

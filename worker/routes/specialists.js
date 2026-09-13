@@ -21,7 +21,7 @@ export async function postSpecialistProfile(input) {
     return await service(Object.fromEntries(KEYS.map((key) => [key, input?.[key]])))
   } catch (error) {
     const match = error instanceof TypeError
-      ? /^VALIDATION_FAILED\/(body|displayName|professionalTitle|standardRateGrosze)$/.exec(error.message)
+      ? /^VALIDATION_FAILED\/(body|displayName|professionalTitle|standardRateGrosze|avatarKey)$/.exec(error.message)
       : null
     if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
     throw error
@@ -38,7 +38,7 @@ export async function postSpecialistProfileEdit(input) {
     })
   } catch (error) {
     const match = error instanceof TypeError
-      ? /^VALIDATION_FAILED\/(body|displayName|professionalTitle|standardRateGrosze|expectedVersion)$/.exec(error.message)
+      ? /^VALIDATION_FAILED\/(body|displayName|professionalTitle|standardRateGrosze|avatarKey|expectedVersion)$/.exec(error.message)
       : null
     if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
     throw error

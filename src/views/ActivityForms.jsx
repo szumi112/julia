@@ -4,6 +4,7 @@ import { useShell } from '../shell-ctx.js'
 import { useDrawerFX } from '../anim.js'
 import { Button, Check, DiscardConfirm, Field, IconBtn, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
+import { activityClassDefaults, activityMonthStart, isActivityDurationValid } from '../tus.js'
 
 const staleAuthority = (error) => ['SESSION_AUTHORITY_STALE', 'WORKSPACE_AUTHORITY_STALE']
   .includes(error?.code)
@@ -266,14 +267,15 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
     ? workspace.activities.state.membershipsById[editing.id] ?? editing
     : null
   const [participantId, setParticipantId] = useState(editing?.participantId ?? '')
-  const [startsOn, setStartsOn] = useState(editing?.startsOn ?? '')
+  const [startsOn, setStartsOn] = useState(editing?.startsOn ?? activityMonthStart(opts.month))
   const [endsOn, setEndsOn] = useState(editing?.endsOn ?? '')
   const [error, setError] = useState(null)
+  const [fieldErrors, setFieldErrors] = useState({})
   const [saving, setSaving] = useState(false)
-  const initial = JSON.stringify({
-    participantId: editing?.participantId ?? '',
-    startsOn: editing?.startsOn ?? '', endsOn: editing?.endsOn ?? '',
-  })
+  const participantRef = useRef(null)
+  const startsOnRef = useRef(null)
+  const endsOnRef = useRef(null)
+  const initial = JSON.stringify({ participantId, startsOn, endsOn })
   const dirty = JSON.stringify({ participantId, startsOn, endsOn }) !== initial
   const discard = useDiscardGuard(dirty)
   const { close, forceClose, shake } = useDrawerFX(
@@ -285,15 +287,26 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
 
   const submit = async (event) => {
     event?.preventDefault()
-    if (!participantId || !/^\d{4}-\d{2}-\d{2}$/.test(startsOn)
-      || (endsOn && endsOn < startsOn)) {
-      setError('Wybierz uczestnika i poprawny zakres dat')
+    const nextFieldErrors = {
+      ...(!participantId ? { participantId: 'Wybierz uczestnika.' } : {}),
+      ...(!/^\d{4}-\d{2}-\d{2}$/.test(startsOn) ? { startsOn: 'Wybierz datę rozpoczęcia.' } : {}),
+      ...(endsOn && endsOn < startsOn ? { endsOn: 'Data zakończenia nie może być wcześniejsza.' } : {}),
+    }
+    if (Object.keys(nextFieldErrors).length > 0) {
+      setFieldErrors(nextFieldErrors)
+      setError(null)
       shake()
+      requestAnimationFrame(() => {
+        if (nextFieldErrors.participantId) participantRef.current?.focus()
+        else if (nextFieldErrors.startsOn) startsOnRef.current?.focus()
+        else endsOnRef.current?.focus()
+      })
       return
     }
     if (saving || readOnly) return
     setSaving(true)
     setError(null)
+    setFieldErrors({})
     const reconciliation = { from: opts.month, to: opts.month }
     try {
       if (editing) {
@@ -331,35 +344,44 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
         ref={drawerRef}
         role="dialog"
         aria-modal="true"
-        aria-label={editing ? 'Edytuj przypisanie do grupy' : 'Nowe przypisanie do grupy'}
+        aria-label={editing ? 'Edytuj przypisanie do grupy' : 'Zapisz uczestnika do grupy'}
       >
         <div className="drawer__head">
           <div>
-            <h2 className="drawer__title">{editing ? 'Edytuj przypisanie' : 'Nowe przypisanie'}</h2>
-            <p className="drawer__sub">Zakres dat jest zapisywany jako jawny fakt członkostwa.</p>
+            <h2 className="drawer__title">{editing ? 'Edytuj przypisanie' : 'Zapisz do grupy'}</h2>
+            <p className="drawer__sub">Określ, od kiedy uczestnik jest w grupie. Data zakończenia jest opcjonalna.</p>
           </div>
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
         <form className="drawer__body" onSubmit={submit} noValidate>
-          <Field label="Uczestnik">
-            <select className="select" value={participantId} disabled={Boolean(editing)} onChange={(event) => setParticipantId(event.target.value)}>
+          <Field label="Uczestnik" error={fieldErrors.participantId}>
+            <select className="select" ref={participantRef} value={participantId} disabled={Boolean(editing)} onChange={(event) => {
+              setParticipantId(event.target.value)
+              setFieldErrors((current) => ({ ...current, participantId: null }))
+            }}>
               <option value="">— wybierz uczestnika —</option>
               {opts.participants.map((participant) => (
                 <option key={participant.id} value={participant.id}>{participant.name}</option>
               ))}
             </select>
           </Field>
-          <Field label="Data rozpoczęcia">
-            <input className="input" type="date" value={startsOn} onChange={(event) => setStartsOn(event.target.value)} />
+          <Field label="Data rozpoczęcia" error={fieldErrors.startsOn}>
+            <input className="input" ref={startsOnRef} type="date" value={startsOn} onChange={(event) => {
+              setStartsOn(event.target.value)
+              setFieldErrors((current) => ({ ...current, startsOn: null, endsOn: null }))
+            }} />
           </Field>
-          <Field label="Data zakończenia" hint="Opcjonalnie.">
-            <input className="input" type="date" value={endsOn} min={startsOn} onChange={(event) => setEndsOn(event.target.value)} />
+          <Field label="Data zakończenia" hint="Opcjonalnie." error={fieldErrors.endsOn}>
+            <input className="input" ref={endsOnRef} type="date" value={endsOn} min={startsOn} onChange={(event) => {
+              setEndsOn(event.target.value)
+              setFieldErrors((current) => ({ ...current, endsOn: null }))
+            }} />
           </Field>
           {error && <div className="form-warn form-warn--error" role="alert"><Icon name="alert" size={15} /> <span>{error}</span></div>}
         </form>
         {discard.confirming && <DiscardConfirm onStay={discard.hide} onDiscard={forceClose} />}
         <div className="drawer__foot">
-          <Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz przypisanie' : 'Dodaj przypisanie'}</Button>
+          <Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz przypisanie' : 'Zapisz do grupy'}</Button>
           <Button variant="ghost" onClick={close}>Anuluj</Button>
         </div>
       </aside>
@@ -376,13 +398,20 @@ export function ActivityClassDrawer({ opts, onClose }) {
   const canonical = editing
     ? workspace.activities.state.classesById[editing.id] ?? editing
     : null
-  const [date, setDate] = useState(editing?.date ?? '')
-  const [time, setTime] = useState(editing?.time ?? '')
-  const [duration, setDuration] = useState(editing?.durationMinutes ?? '')
+  const defaults = useMemo(() => activityClassDefaults(
+    Object.values(workspace.activities.state.classesById), opts,
+  ), [opts, workspace.activities.state.classesById])
+  const [date, setDate] = useState(editing?.date ?? defaults.date)
+  const [time, setTime] = useState(editing?.time ?? defaults.time)
+  const [duration, setDuration] = useState(editing?.durationMinutes ?? defaults.durationMinutes)
   const [topic, setTopic] = useState(editing?.topic ?? '')
   const [status, setStatus] = useState(editing?.status ?? 'scheduled')
   const [error, setError] = useState(null)
+  const [fieldErrors, setFieldErrors] = useState({})
   const [saving, setSaving] = useState(false)
+  const dateRef = useRef(null)
+  const timeRef = useRef(null)
+  const durationRef = useRef(null)
   const [initial] = useState(() => JSON.stringify({ date, time, duration, topic, status }))
   const current = JSON.stringify({ date, time, duration, topic, status })
   const discard = useDiscardGuard(current !== initial)
@@ -396,15 +425,26 @@ export function ActivityClassDrawer({ opts, onClose }) {
   const submit = async (event) => {
     event?.preventDefault()
     const durationMinutes = duration === '' ? null : Number(duration)
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)
-      || !(durationMinutes === null || (Number.isInteger(durationMinutes) && durationMinutes > 0))) {
-      setError('Podaj poprawną datę i czas trwania')
+    const nextFieldErrors = {
+      ...(!/^\d{4}-\d{2}-\d{2}$/.test(date) ? { date: 'Wybierz poprawną datę.' } : {}),
+      ...(time && !/^([01]\d|2[0-3]):[0-5]\d$/.test(time) ? { time: 'Podaj godzinę w formacie GG:MM.' } : {}),
+      ...(!isActivityDurationValid(durationMinutes) ? { duration: 'Podaj liczbę minut od 1 do 1440.' } : {}),
+    }
+    if (Object.keys(nextFieldErrors).length > 0) {
+      setFieldErrors(nextFieldErrors)
+      setError(null)
       shake()
+      requestAnimationFrame(() => {
+        if (nextFieldErrors.date) dateRef.current?.focus()
+        else if (nextFieldErrors.time) timeRef.current?.focus()
+        else durationRef.current?.focus()
+      })
       return
     }
     if (saving || readOnly) return
     setSaving(true)
     setError(null)
+    setFieldErrors({})
     const fields = {
       date,
       time: time || null,
@@ -450,9 +490,9 @@ export function ActivityClassDrawer({ opts, onClose }) {
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
         <form className="drawer__body" onSubmit={submit} noValidate>
-          <Field label="Data zajęć"><input className="input" type="date" value={date} onChange={(event) => setDate(event.target.value)} /></Field>
-          <Field label="Godzina" hint="Opcjonalnie."><input className="input" type="time" value={time} onChange={(event) => setTime(event.target.value)} /></Field>
-          <Field label="Czas trwania w minutach" hint="Opcjonalnie."><input className="input" type="number" min="1" max="1440" value={duration} onChange={(event) => setDuration(event.target.value)} /></Field>
+          <Field label="Data zajęć" error={fieldErrors.date}><input className="input" ref={dateRef} type="date" value={date} onChange={(event) => { setDate(event.target.value); setFieldErrors((current) => ({ ...current, date: null })) }} /></Field>
+          <Field label="Godzina" hint="Opcjonalnie." error={fieldErrors.time}><input className="input" ref={timeRef} type="time" value={time} onChange={(event) => { setTime(event.target.value); setFieldErrors((current) => ({ ...current, time: null })) }} /></Field>
+          <Field label="Czas trwania w minutach" hint="Opcjonalnie." error={fieldErrors.duration}><input className="input" ref={durationRef} type="number" min="1" max="1440" value={duration} onChange={(event) => { setDuration(event.target.value); setFieldErrors((current) => ({ ...current, duration: null })) }} /></Field>
           <Field label="Temat" hint="Opcjonalnie."><textarea className="textarea" maxLength={1000} value={topic} onChange={(event) => setTopic(event.target.value)} /></Field>
           <Field label="Status"><select className="select" value={status} onChange={(event) => setStatus(event.target.value)}><option value="scheduled">Zaplanowane</option><option value="completed">Odbyte</option><option value="cancelled">Odwołane</option></select></Field>
           {error && <div className="form-warn form-warn--error" role="alert"><Icon name="alert" size={15} /> <span>{error}</span></div>}

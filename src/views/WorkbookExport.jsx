@@ -6,16 +6,17 @@ import { financeRepository } from '../finance-repository.js'
 import { useShell } from '../shell-ctx.js'
 import { Button } from '../ui.jsx'
 
-export function WorkbookExport({ own = false, onComplete }) {
-  const { authorityGeneration, capabilities } = useShell()
+export function WorkbookExport({ own = false, onComplete, placement = 'card' }) {
+  const { appMode, authorityGeneration, capabilities, environment } = useShell()
   const [status, setStatus] = useState('idle')
   const [error, setError] = useState('')
+  const [unavailable, setUnavailable] = useState(false)
   const controllerRef = useRef(null)
   const urlRef = useRef(null)
   const authorityGenerationRef = useRef(authorityGeneration)
   const allowed = canPerformAction(
     capabilities, own ? 'workbook.export.own' : 'workbook.export.centre',
-  )
+  ) && (own || (appMode === 'app' && environment === 'staging'))
 
   const clearUrl = useCallback(() => {
     if (urlRef.current) URL.revokeObjectURL(urlRef.current)
@@ -34,6 +35,7 @@ export function WorkbookExport({ own = false, onComplete }) {
     clearUrl()
     setStatus('idle')
     setError('')
+    setUnavailable(false)
   }, [allowed, authorityGeneration, clearUrl])
 
   const download = async (format) => {
@@ -65,6 +67,10 @@ export function WorkbookExport({ own = false, onComplete }) {
       onComplete?.()
     } catch (caught) {
       if (!controller.signal.aborted) {
+        if (caught instanceof ApiError && caught.status === 404) {
+          setUnavailable(true)
+          return
+        }
         setStatus('error')
         setError(caught instanceof ApiError && caught.code === 'IDEMPOTENCY_CONFLICT'
           ? 'Dane zmieniły się — ponów jako nowy eksport.'
@@ -73,13 +79,26 @@ export function WorkbookExport({ own = false, onComplete }) {
     }
   }
 
-  if (!allowed) return null
+  if (!allowed || unavailable) return null
   if (own) return (
     <div className="workbook-export">
       <Button disabled={status === 'loading'} onClick={() => download('panel-v2')}>
         {status === 'loading' ? 'Przygotowywanie…' : 'Eksportuj własne dane'}
       </Button>
       {error ? <p className="form-error" role="alert">{error}</p> : null}
+    </div>
+  )
+  if (placement === 'finance-header') return (
+    <div className="workbook-export workbook-export--finance">
+      <Button
+        variant="ghost"
+        disabled={status === 'loading'}
+        onClick={() => download('panel-v2')}
+      >
+        {status === 'loading' ? 'Przygotowywanie…' : 'Pobierz pełny skoroszyt'}
+      </Button>
+      <p className="muted">Pobiera całą bazę poradni w formacie Panel-v2, nie tylko wybrany miesiąc.</p>
+      {error ? <p className="form-error" role="alert">{error} <Button size="sm" variant="ghost" onClick={() => download('panel-v2')}>Spróbuj ponownie</Button></p> : null}
     </div>
   )
   return (

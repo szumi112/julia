@@ -431,10 +431,11 @@ export async function assertReadySession(response, {
       'dataMode',
     ])
     || !exactKeys(actor, [
-      'id', 'displayName', 'professionalTitle', 'role', 'specialistId', 'version',
+      'id', 'displayName', 'email', 'professionalTitle', 'role', 'specialistId', 'version',
     ])
     || actor.id !== 'stf_local_owner'
     || actor.displayName !== 'Alicja Testowa'
+    || actor.email !== 'owner@example.test'
     || actor.professionalTitle !== null
     || actor.role !== 'owner'
     || actor.specialistId !== null

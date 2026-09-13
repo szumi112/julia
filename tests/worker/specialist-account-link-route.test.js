@@ -74,9 +74,9 @@ describe('specialist account link HTTP boundary', () => {
     })
     expect(Object.isFrozen(link)).toBe(true)
     expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'specialists.create')?.bodyKeys)
-      .toEqual(['displayName', 'professionalTitle', 'standardRateGrosze'])
+      .toEqual(['displayName', 'professionalTitle', 'standardRateGrosze', 'avatarKey'])
     expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'specialists.edit')?.bodyKeys)
-      .toEqual(['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze'])
+      .toEqual(['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze', 'avatarKey'])
   })
 
   it('keeps the link audit action exact, typed, and free of presentation data', () => {

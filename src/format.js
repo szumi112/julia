@@ -25,6 +25,30 @@ export const pad2 = (n) => String(n).padStart(2, '0')
 
 export const toISODate = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 
+const canonicalUtcInstant = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const warsawDateTimeFmt = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Europe/Warsaw',
+  year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  hourCycle: 'h23',
+})
+
+export const warsawDateTimeFromUtc = (instant) => {
+  if (typeof instant !== 'string' || !canonicalUtcInstant.test(instant)) {
+    throw new TypeError('Invalid UTC instant')
+  }
+  const date = new Date(instant)
+  if (!Number.isFinite(date.valueOf()) || date.toISOString() !== instant) {
+    throw new TypeError('Invalid UTC instant')
+  }
+  const parts = Object.fromEntries(warsawDateTimeFmt.formatToParts(date)
+    .filter(({ type }) => type !== 'literal').map(({ type, value }) => [type, value]))
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    time: `${parts.hour}:${parts.minute}`,
+    second: parts.second,
+  }
+}
+
 export const parseISO = (iso) => {
   const [y, m, d] = iso.split('-').map(Number)
   return new Date(y, m - 1, d)
@@ -55,6 +79,10 @@ const shortDateFmt = new Intl.DateTimeFormat('pl-PL', { day: 'numeric', month: '
 
 export const fmtMonthName = (ym) => monthLong.format(monthKeyToDate(ym))
 export const fmtMonthYear = (ym) => monthYearFmt.format(monthKeyToDate(ym))
+export const fmtMonthNameWithYearOutsideCurrent = (ym, currentYear) => {
+  const year = Number(ym.slice(0, 4))
+  return year === Number(currentYear) ? fmtMonthName(ym) : fmtMonthYear(ym)
+}
 // locative case for prose ("w lipcu") — Intl only provides the nominative
 const MONTHS_LOC = ['styczniu', 'lutym', 'marcu', 'kwietniu', 'maju', 'czerwcu', 'lipcu', 'sierpniu', 'wrześniu', 'październiku', 'listopadzie', 'grudniu']
 export const fmtMonthLocative = (ym) => MONTHS_LOC[Number(ym.slice(5, 7)) - 1]
@@ -145,6 +173,18 @@ export const plural = (n, one, few, many) => {
 
 export const sessionsWord = (n) => plural(n, 'sesja', 'sesje', 'sesji')
 export const clientsWord = (n) => plural(n, 'klient', 'klientów', 'klientów')
+export const workbookEntriesWord = (n) => plural(
+  n,
+  'wpis ze skoroszytu',
+  'wpisy ze skoroszytu',
+  'wpisów ze skoroszytu',
+)
+export const absencesWord = (n) => plural(n, 'nieobecność', 'nieobecności', 'nieobecności')
+export const calendarCountLabel = (sessionCount, workbookEntryCount, absenceCount = 0) => [
+  `${sessionCount} ${sessionsWord(sessionCount)}`,
+  workbookEntryCount > 0 ? `${workbookEntryCount} ${workbookEntriesWord(workbookEntryCount)}` : null,
+  absenceCount > 0 ? `${absenceCount} ${absencesWord(absenceCount)}` : null,
+].filter(Boolean).join(' · ')
 
 export const initials = (name) =>
   name
@@ -164,21 +204,21 @@ export const STATUS_LABELS = {
 }
 
 export const STATUS_PILL = {
-  scheduled: 'pill--coral',
+  scheduled: 'pill--ink',
   completed: 'pill--sage',
-  cancelled: 'pill--pink',
+  cancelled: 'pill--ink',
   noshow: 'pill--error',
 }
 
 export const PAY_LABELS = {
   paid: 'Opłacona',
-  unpaid: 'Nieopłacona',
+  unpaid: 'Do zapłaty',
   partial: 'Częściowo opłacona',
 }
 
 export const PAY_PILL = {
   paid: 'pill--sage',
-  unpaid: 'pill--error',
+  unpaid: 'pill--amber',
   partial: 'pill--amber',
 }
 
@@ -202,8 +242,27 @@ export const paymentPatchFor = (payment, amount, paidAmount = 0) => {
   return { payment: 'partial', paidAmount: current > 0 && current < total ? current : fallback }
 }
 
-// Billing rules: completed + no-show sessions are billed; cancelled are not.
+// Billing rules: completed + no-show sessions and paid late cancellations are billed.
 export const isBillable = (s) => s.status === 'completed' || s.status === 'noshow'
+  || (s.status === 'cancelled' && s.cancellationReason === 'late_paid')
+
+export const paymentDisplayFor = (session, now = new Date()) => {
+  if (session.status === 'cancelled' && session.cancellationReason !== 'late_paid'
+    && session.payment === 'unpaid') {
+    return { kind: 'quiet', label: 'bez opłaty', tone: 'ink' }
+  }
+  const current = now instanceof Date
+    ? warsawDateTimeFromUtc(now.toISOString())
+    : { date: now, time: '23:59', second: '59' }
+  const sessionTime = session.time || '00:00'
+  if (session.status === 'scheduled' && session.payment === 'unpaid'
+    && `${session.date}T${sessionTime}:00` > `${current.date}T${current.time}:${current.second}`) return null
+  return {
+    kind: 'payment',
+    label: PAY_LABELS[session.payment],
+    tone: session.payment === 'paid' ? 'sage' : 'amber',
+  }
+}
 
 export const collectedOf = (s) => {
   if (!isBillable(s)) return 0

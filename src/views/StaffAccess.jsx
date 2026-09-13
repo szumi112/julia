@@ -2,45 +2,42 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { ApiError, apiClient } from '../api.js'
 import { useDrawerFX } from '../anim.js'
 import { useAuth } from '../auth.jsx'
+import { accessPresentationFor, roleLabelFor, rolePresentationFor } from '../auth-role.js'
 import { canPerformAction } from '../capability-access.js'
 import {
-  permissionChoicesFor,
+  permissionDefaultsFor,
+  permissionGroupsFor,
   setPermissionEnabled,
 } from '../permission-overrides.js'
 import { useShell } from '../shell-ctx.js'
 import { useApp } from '../store.jsx'
-import { Button, DiscardConfirm, Field, IconBtn, Pill, useDiscardGuard } from '../ui.jsx'
+import { Button, DiscardConfirm, Field, IconBtn, Pill, Toggle, useDiscardGuard } from '../ui.jsx'
+import { EntityLink } from '../ux-patterns.jsx'
 
 const ROLE_OPTIONS = Object.freeze([
-  Object.freeze({ label: 'Koordynator', value: 'coordinator' }),
-  Object.freeze({ label: 'Specjalista', value: 'specialist' }),
-  Object.freeze({ label: 'Właściciel', value: 'owner' }),
+  Object.freeze({
+    label: roleLabelFor('specialist'),
+    value: 'specialist',
+    effect: 'Własny Grafik, przypisani klienci i własne rozliczenia.',
+  }),
+  Object.freeze({
+    label: roleLabelFor('coordinator'),
+    value: 'coordinator',
+    effect: 'Grafik i klienci całej poradni oraz finanse całej poradni.',
+  }),
+  Object.freeze({
+    label: roleLabelFor('owner'),
+    value: 'owner',
+    effect: 'Zarządza całą poradnią, zespołem i dostępem.',
+  }),
 ])
-const ROLE_LABELS = Object.freeze(Object.fromEntries(
-  ROLE_OPTIONS.map(({ label, value }) => [value, label])
-))
-const STAFF_STATUS_LABELS = Object.freeze({
-  active: 'Aktywne',
-  disabled: 'Wyłączone',
-  pending: 'Oczekuje na aktywację',
-})
-const STAFF_STATUS_TONES = Object.freeze({
-  active: 'sage',
-  disabled: 'ink',
-  pending: 'amber',
-})
-const INVITATION_STATUS_LABELS = Object.freeze({
-  provisioning: 'Konfiguracja dostępu w toku',
-})
-const UNKNOWN_ROLE = 'Rola niedostępna'
-const UNKNOWN_STATE = 'Stan niedostępny'
 const INVITATION_ERROR_LABELS = Object.freeze({
   CLIENT_INPUT_INVALID: 'Sprawdź dane zaproszenia i spróbuj ponownie.',
   FORBIDDEN: 'Nie masz już uprawnień do zarządzania personelem.',
   IDEMPOTENCY_CONFLICT: 'Nie można ponowić zmienionego zaproszenia.',
   LAST_ACTIVE_OWNER: 'Nie można zmienić dostępu ostatniego aktywnego właściciela.',
   NOT_FOUND: 'Nie można utworzyć tego zaproszenia.',
-  RATE_LIMITED: 'Limit zaproszeń został wykorzystany. Spróbuj ponownie później.',
+  RATE_LIMITED: 'Możesz wysłać maksymalnie 5 zaproszeń w ciągu godziny. Spróbuj ponownie później.',
   STAFF_INVITATION_CONFLICT: 'Nie można utworzyć tego zaproszenia.',
   VALIDATION_FAILED: 'Sprawdź dane zaproszenia i spróbuj ponownie.',
 })
@@ -78,6 +75,20 @@ const PERMISSION_SAVE_ERROR_LABELS = Object.freeze({
 })
 const PERMISSION_UNKNOWN_ERROR = 'Nie udało się zapisać uprawnień.'
 const PERMISSION_UNCERTAIN_ERROR = 'Nie wiadomo, czy uprawnienia zostały zapisane. Spróbuj ponownie bez zmiany ustawień.'
+const PERMISSION_COPY = Object.freeze({
+  'appointment.manage': Object.freeze({ label: 'Może zarządzać sesjami', effect: 'Umawia, zmienia i odwołuje sesje.' }),
+  'client.manage': Object.freeze({ label: 'Może zarządzać klientami', effect: 'Dodaje i aktualizuje dane klientów.' }),
+  'finance.centre.manage': Object.freeze({ label: 'Może zarządzać finansami centrum', effect: 'Dodaje i zmienia pozycje finansowe całej poradni.' }),
+  'finance.centre.read': Object.freeze({ label: 'Widzi finanse całej poradni', effect: 'Widoczna jest lista płatności, przychodów i zaległości całej poradni.' }),
+  'finance.import': Object.freeze({ label: 'Może importować dane finansowe', effect: 'Wgrywa dane finansowe z arkusza.' }),
+  'operations.health.read': Object.freeze({ label: 'Może sprawdzać stan systemu', effect: 'Widoczny jest stan kopii zapasowych i usług.' }),
+  'payment.manage': Object.freeze({ label: 'Może rejestrować płatności', effect: 'Oznacza wpłaty za sesje.' }),
+  'permissions.manage': Object.freeze({ label: 'Może zarządzać uprawnieniami', effect: 'Zmienia zakres dostępu innych osób.' }),
+  'security.audit.read': Object.freeze({ label: 'Może przeglądać dziennik bezpieczeństwa', effect: 'Widoczna jest historia zdarzeń bezpieczeństwa.' }),
+  'staff.manage': Object.freeze({ label: 'Może zarządzać personelem', effect: 'Zaprasza osoby i zmienia ich dostęp.' }),
+  'workbook.centre.export': Object.freeze({ label: 'Może pobierać skoroszyt centrum', effect: 'Pobiera dane całej poradni do arkusza.' }),
+  'workbook.own.export': Object.freeze({ label: 'Może pobierać własny skoroszyt', effect: 'Pobiera dane własnych sesji do arkusza.' }),
+})
 const EMAIL = /^[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)+$/u
 const INVALID_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
 const expiryFormat = new Intl.DateTimeFormat('pl-PL', {
@@ -102,20 +113,17 @@ const displayNameFor = (value) => value.trim().normalize('NFC')
 const validDisplayName = (value) => value.length > 0
   && bytes(value) <= 120
   && !INVALID_TEXT.test(value)
-const labelFor = (labels, value, fallback) => (
-  typeof value === 'string' && Object.hasOwn(labels, value) ? labels[value] : fallback
-)
 const expiryLabel = (value) => expiryFormat.format(new Date(value))
-const invitationLabel = (invitation) => {
-  if (invitation.status !== 'pending') {
-    return labelFor(INVITATION_STATUS_LABELS, invitation.status, UNKNOWN_STATE)
-  }
-  return invitation.emailSentAt === null ? 'Oczekuje na wysłanie' : 'Przyjęte do wysłania'
-}
 const sameOrdered = (left, right) => left.length === right.length
   && left.every((value, index) => value === right[index])
 const targetLabel = (person) => (
-  `${person.displayName} — ${labelFor(ROLE_LABELS, person.role, UNKNOWN_ROLE)}`
+  `${person.displayName} — ${rolePresentationFor(person)}${person.status === 'disabled' ? ' (bez dostępu)' : ''}`
+)
+const permissionCopyFor = (choice) => (
+  PERMISSION_COPY[choice.capability] || Object.freeze({
+    label: `Może: ${choice.label}`,
+    effect: choice.defaultEnabled ? 'Włączone w tej roli.' : 'Dostępne dla tej roli.',
+  })
 )
 const permissionDraftFor = (authority) => Object.freeze({
   role: authority.role,
@@ -143,21 +151,62 @@ function useNativeModal(fallbackRef) {
   return dialogRef
 }
 
-function InvitationDrawer({ environment, onChanged, onClose, onDirtyChange, onForbidden }) {
+function RoleCards({ disabled, error, onChange, value }) {
+  const errorId = useId()
+  const legendId = useId()
+  return (
+    <fieldset
+      className={`role-cards ${error ? 'has-error' : ''}`}
+      disabled={disabled}
+      role="radiogroup"
+      aria-labelledby={legendId}
+      aria-describedby={error ? errorId : undefined}
+    >
+      <legend id={legendId}>Rola</legend>
+      <div className="role-cards__options">
+        {ROLE_OPTIONS.map((option) => (
+          <label
+            className={`role-cards__option ${value === option.value ? 'is-selected' : ''}`}
+            key={option.value}
+          >
+            <input
+              type="radio"
+              name="staff-role"
+              value={option.value}
+              checked={value === option.value}
+              aria-invalid={error ? true : undefined}
+              onChange={(event) => onChange(event.target.value)}
+            />
+            <span>
+              <strong>{option.label}</strong>
+              <small>{option.effect}</small>
+            </span>
+          </label>
+        ))}
+      </div>
+      {error && <span className="field__error" id={errorId} role="alert">{error}</span>}
+    </fieldset>
+  )
+}
+
+function InvitationDrawer({ environment, initialPerson = null, onChanged, onClose, onDirtyChange, onForbidden }) {
   const { toast } = useApp()
   const dialogRef = useNativeModal()
   const drawerRef = useRef(null)
   const backRef = useRef(null)
-  const [form, setForm] = useState({
-    displayName: '',
-    email: '',
-    roleIndex: '0',
-  })
+  const [initialForm] = useState(() => Object.freeze({
+    displayName: initialPerson?.displayName ?? '',
+    email: initialPerson?.email ?? '',
+    role: initialPerson?.role ?? '',
+  }))
+  const [form, setForm] = useState(initialForm)
   const [errors, setErrors] = useState({})
   const [saveStatus, setSaveStatus] = useState('idle')
   const [saveError, setSaveError] = useState(null)
   const actionRef = useRef(null)
-  const dirty = form.displayName !== '' || form.email !== '' || form.roleIndex !== '0'
+  const reinvite = initialPerson !== null
+  const dirty = form.displayName !== initialForm.displayName
+    || form.email !== initialForm.email || form.role !== initialForm.role
   const discardGuard = useDiscardGuard(dirty)
   const { close, forceClose, shake } = useDrawerFX(
     drawerRef,
@@ -183,7 +232,7 @@ function InvitationDrawer({ environment, onChanged, onClose, onDirtyChange, onFo
     if (saveStatus === 'saving') return
     const displayName = displayNameFor(form.displayName)
     const email = canonicalEmail(form.email, environment)
-    const role = ROLE_OPTIONS[Number(form.roleIndex)]?.value
+    const role = form.role
     const nextErrors = {
       displayName: validDisplayName(displayName) ? null : 'Podaj imię i nazwisko',
       email: email ? null : 'Podaj poprawny adres e-mail',
@@ -213,12 +262,26 @@ function InvitationDrawer({ environment, onChanged, onClose, onDirtyChange, onFo
 
     setSaveStatus('saving')
     setSaveError(null)
+    let accepted = false
     try {
       await apiClient.inviteStaff(action.payload, { idempotencyKey: action.key })
-      await onChanged()
-      toast('Zaproszenie zostało utworzone.')
+      accepted = true
+      const refreshed = await onChanged()
+      if (refreshed === false) {
+        toast(`Wysyłamy zaproszenie do ${action.payload.email}`)
+        toast('Nie udało się odświeżyć listy personelu. Odśwież stronę.', 'alert')
+        forceClose()
+        return
+      }
+      toast(`Wysyłamy zaproszenie do ${action.payload.email}`)
       forceClose()
     } catch (error) {
+      if (accepted) {
+        toast(`Wysyłamy zaproszenie do ${action.payload.email}`)
+        toast('Nie udało się odświeżyć listy personelu. Odśwież stronę.', 'alert')
+        forceClose()
+        return
+      }
       const uncertain = error instanceof ApiError && error.idempotencyKey === action.key
       if (uncertain) {
         setSaveError(INVITATION_UNCERTAIN_ERROR)
@@ -238,7 +301,7 @@ function InvitationDrawer({ environment, onChanged, onClose, onDirtyChange, onFo
     <dialog
       className="modal-layer"
       ref={dialogRef}
-      aria-label="Zaproś osobę"
+      aria-label={reinvite ? 'Zaproś ponownie' : 'Zaproś do panelu'}
       onCancel={(event) => {
         event.preventDefault()
         close()
@@ -251,8 +314,10 @@ function InvitationDrawer({ environment, onChanged, onClose, onDirtyChange, onFo
       >
         <div className="drawer__head">
           <div>
-            <h2 className="drawer__title">Zaproś osobę</h2>
-            <p className="drawer__sub">Dodaj dostęp do panelu personelu.</p>
+            <h2 className="drawer__title">{reinvite ? 'Zaproś ponownie' : 'Zaproś do panelu'}</h2>
+            <p className="drawer__sub">{reinvite
+              ? 'Wyślemy nowe zaproszenie do panelu tej osobie.'
+              : 'Dodaj dostęp do panelu personelu.'}</p>
           </div>
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
@@ -288,20 +353,14 @@ function InvitationDrawer({ environment, onChanged, onClose, onDirtyChange, onFo
               onChange={(event) => set('email', event.target.value)}
             />
           </Field>
-          <Field label="Rola" error={errors.role}>
-            <select
-              className="select"
-              name="staff-role"
-              autoComplete="off"
-              disabled={saveStatus === 'saving'}
-              value={form.roleIndex}
-              onChange={(event) => set('roleIndex', event.target.value)}
-            >
-              {ROLE_OPTIONS.map(({ label }, index) => (
-                <option key={label} value={String(index)}>{label}</option>
-              ))}
-            </select>
-          </Field>
+          <RoleCards
+            disabled={saveStatus === 'saving'}
+            error={errors.role}
+            value={form.role}
+            onChange={(role) => set('role', role)}
+          />
+          {!reinvite && <p className="field__hint">Profil zawodowy i powiązanie terapeutki pozostają osobnym krokiem w Zespole.</p>}
+          <p className="field__hint">Możesz wysłać maksymalnie 5 zaproszeń w ciągu godziny. Każde zaproszenie jest ważne przez 7 dni.</p>
           {saveError && (
             <div className="form-warn form-warn--error" role="alert">
               <span>{saveError}</span>
@@ -316,9 +375,9 @@ function InvitationDrawer({ environment, onChanged, onClose, onDirtyChange, onFo
           <Button variant="primary" disabled={saveStatus === 'saving'} onClick={submit}>
             {saveStatus === 'uncertain'
               ? 'Spróbuj ponownie'
-              : 'Wyślij zaproszenie'}
+              : reinvite ? 'Zaproś ponownie' : 'Wyślij zaproszenie'}
           </Button>
-          <Button variant="ghost" disabled={saveStatus === 'saving'} onClick={close}>Anuluj</Button>
+          <Button variant="ghost" disabled={saveStatus === 'saving'} onClick={close}>Zamknij</Button>
         </div>
       </aside>
     </dialog>
@@ -446,22 +505,14 @@ function RoleChangeDrawer({
         </div>
 
         <form className="drawer__body" onSubmit={submit}>
-          <Field
-            label="Rola"
-            hint="Zmiana roli może natychmiast zmienić zakres dostępu tej osoby."
-          >
-            <select
-              className="select"
-              autoFocus
-              disabled={saveStatus === 'saving'}
-              value={role}
-              onChange={(event) => changeRole(event.target.value)}
-            >
-              {ROLE_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-          </Field>
+          <RoleCards
+            disabled={saveStatus === 'saving'}
+            value={role}
+            onChange={changeRole}
+          />
+          <p className="field__hint">
+            Po zapisaniu roli „{roleLabelFor(role)}” indywidualne wyjątki uprawnień zostaną usunięte, a domyślne uprawnienia tej roli zaczną obowiązywać.
+          </p>
           {saveError && (
             <div className="form-warn form-warn--error" role="alert">
               <span>{saveError}</span>
@@ -501,6 +552,7 @@ function DeactivationConfirm({
   const actionRef = useRef(null)
   const [saveStatus, setSaveStatus] = useState('idle')
   const [saveError, setSaveError] = useState(null)
+  const cancellingInvitation = person.status === 'pending'
 
   useEffect(() => {
     const card = cardRef.current
@@ -556,7 +608,7 @@ function DeactivationConfirm({
         idempotencyKey: action.key,
       })
       await onChanged()
-      toast('Dostęp został wyłączony.')
+      toast(cancellingInvitation ? 'Zaproszenie zostało anulowane.' : 'Dostęp został wyłączony.')
       onClose()
     } catch (error) {
       const uncertain = error instanceof ApiError && error.idempotencyKey === action.key
@@ -606,10 +658,10 @@ function DeactivationConfirm({
           className="leave-confirm__card"
           ref={cardRef}
         >
-          <h2 className="display" id={titleId}>Wyłącz dostęp</h2>
-          <p>
-            {person.displayName} straci dostęp do panelu. Wpis pozostanie na liście personelu.
-          </p>
+          <h2 className="display" id={titleId}>{cancellingInvitation ? 'Anuluj zaproszenie' : 'Wyłącz dostęp'}</h2>
+          <p>{cancellingInvitation
+            ? 'Osoba nie otrzyma już dostępu na podstawie tego zaproszenia. Późniejszy dostęp będzie wymagał nowego zaproszenia.'
+            : 'Po wyłączeniu dostępu ta osoba nie będzie mogła zalogować się do panelu. Sesje, klienci i historia pozostaną bez zmian. Indywidualne wyjątki uprawnień zostaną usunięte. Przyszły dostęp będzie wymagał nowego zaproszenia.'}</p>
           {saveError && (
             <div className="form-warn form-warn--error" role="alert">
               <span>{saveError}</span>
@@ -618,7 +670,7 @@ function DeactivationConfirm({
           <div className="leave-confirm__actions">
             <Button variant="ghost" disabled={saveStatus === 'saving'} onClick={close}>Wróć</Button>
             <Button variant="danger" disabled={saveStatus === 'saving'} onClick={submit}>
-              {saveStatus === 'uncertain' ? 'Spróbuj ponownie' : 'Wyłącz dostęp'}
+              {saveStatus === 'uncertain' ? 'Spróbuj ponownie' : cancellingInvitation ? 'Anuluj zaproszenie' : 'Wyłącz dostęp'}
             </Button>
           </div>
         </div>
@@ -627,14 +679,13 @@ function DeactivationConfirm({
   )
 }
 
-export function PermissionsAccess({ sectionRef }) {
+export function PermissionsAccess({ sectionRef, selectedStaffId, onSelectedStaffIdChange }) {
   const { toast } = useApp()
   const { actor, capabilities, registerLeaveGuard } = useShell()
   const canRead = canPerformAction(capabilities, 'permissions.read')
   const canEdit = canPerformAction(capabilities, 'permissions.edit')
   const [targets, setTargets] = useState([])
   const [targetsStatus, setTargetsStatus] = useState('loading')
-  const [selectedIndex, setSelectedIndex] = useState(0)
   const [authority, setAuthority] = useState(null)
   const [draft, setDraft] = useState(null)
   const [detailStatus, setDetailStatus] = useState('idle')
@@ -645,42 +696,51 @@ export function PermissionsAccess({ sectionRef }) {
   const detailRequestRef = useRef(0)
   const saveRequestRef = useRef(0)
   const actionRef = useRef(null)
-  const selected = targets[selectedIndex] ?? null
-  const choices = useMemo(
-    () => draft ? permissionChoicesFor(draft) : [],
+  const selectedStaffIdRef = useRef(selectedStaffId)
+  selectedStaffIdRef.current = selectedStaffId
+  const selected = targets.find((person) => person.staffId === selectedStaffId) ?? targets[0] ?? null
+  const groups = useMemo(
+    () => draft ? permissionGroupsFor(draft) : [],
     [draft],
   )
   const dirty = Boolean(authority && draft && (
     !sameOrdered(authority.allow, draft.allow)
     || !sameOrdered(authority.deny, draft.deny)
   ))
+  const hasRoleOverrides = Boolean(draft && (draft.allow.length || draft.deny.length))
 
-  const loadTargets = useCallback(async () => {
+  const loadTargets = useCallback(async ({ background = false } = {}) => {
     if (!canRead) return false
     const requestId = ++listRequestRef.current
-    detailRequestRef.current += 1
-    actionRef.current = null
-    setTargetsStatus('loading')
-    setTargets([])
-    setSelectedIndex(0)
-    setAuthority(null)
-    setDraft(null)
-    setDetailStatus('idle')
-    setSaveStatus('idle')
-    setSaveError(null)
-    setSaveNotice(null)
+    if (!background) {
+      detailRequestRef.current += 1
+      actionRef.current = null
+      setTargetsStatus('loading')
+      setTargets([])
+      setAuthority(null)
+      setDraft(null)
+      setDetailStatus('idle')
+      setSaveStatus('idle')
+      setSaveError(null)
+      setSaveNotice(null)
+    }
     try {
       const result = await apiClient.listCapabilityTargets()
       if (listRequestRef.current !== requestId) return false
       setTargets(result.targets)
       setTargetsStatus('ready')
+      const nextSelected = result.targets.find((person) => person.staffId === selectedStaffIdRef.current)
+        ?? result.targets[0]
+      if (nextSelected && nextSelected.staffId !== selectedStaffIdRef.current) {
+        onSelectedStaffIdChange(nextSelected.staffId)
+      }
       return true
     } catch {
       if (listRequestRef.current !== requestId) return false
-      setTargetsStatus('error')
+      if (!background) setTargetsStatus('error')
       return false
     }
-  }, [canRead])
+  }, [canRead, onSelectedStaffIdChange])
 
   const loadAuthority = useCallback(async (staffId) => {
     if (!canRead) return false
@@ -719,13 +779,14 @@ export function PermissionsAccess({ sectionRef }) {
   }, [canRead, loadTargets])
 
   useEffect(() => {
-    if (targetsStatus !== 'ready' || !selected) return undefined
-    const timer = window.setTimeout(() => { void loadAuthority(selected.staffId) }, 0)
+    const staffId = selected?.staffId
+    if (targetsStatus !== 'ready' || !staffId) return undefined
+    const timer = window.setTimeout(() => { void loadAuthority(staffId) }, 0)
     return () => {
       window.clearTimeout(timer)
       detailRequestRef.current += 1
     }
-  }, [loadAuthority, selected, targetsStatus])
+  }, [loadAuthority, selected?.staffId, targetsStatus])
 
   useEffect(
     () => registerLeaveGuard(() => dirty),
@@ -755,6 +816,20 @@ export function PermissionsAccess({ sectionRef }) {
     setSaveStatus('idle')
     setSaveError(null)
     setSaveNotice(null)
+  }
+
+  const restoreRoleDefaults = () => {
+    if (!draft || saveStatus === 'saving' || !canEdit || targetDisabled) return
+    try {
+      setDraft(permissionDefaultsFor(draft))
+      actionRef.current = null
+      setSaveStatus('idle')
+      setSaveError(null)
+      setSaveNotice(null)
+    } catch {
+      setSaveError(PERMISSION_UNKNOWN_ERROR)
+      setSaveStatus('error')
+    }
   }
 
   const submit = async (event) => {
@@ -791,15 +866,17 @@ export function PermissionsAccess({ sectionRef }) {
         action.payload,
         { idempotencyKey: action.key },
       )
-      if (saveRequestRef.current !== requestId) return
+      const selfTarget = action.staffId === actor.id
+      if (saveRequestRef.current !== requestId && !selfTarget) return
       actionRef.current = null
       // A self-target mutation changes the mounted actor authority. The API
       // refresh/remount is the only safe publisher for that result.
-      if (action.staffId === actor.id) return
+      toast(`Uprawnienia zostały zapisane · ${result.authority.displayName}`)
+      if (selfTarget) return
       setAuthority(result.authority)
       setDraft(permissionDraftFor(result.authority))
       setSaveStatus('saved')
-      toast('Uprawnienia zostały zapisane.')
+      void loadTargets({ background: true })
     } catch (error) {
       if (saveRequestRef.current !== requestId) return
       const uncertain = error instanceof ApiError && error.idempotencyKey === action.key
@@ -867,14 +944,14 @@ export function PermissionsAccess({ sectionRef }) {
               className="select"
               aria-label="Osoba"
               disabled={dirty || saveStatus === 'saving'}
-              value={String(selectedIndex)}
+              value={selected?.staffId || ''}
               onChange={(event) => {
                 actionRef.current = null
-                setSelectedIndex(Number(event.target.value))
+                onSelectedStaffIdChange(event.target.value)
               }}
             >
-              {targets.map((person, index) => (
-                <option key={person.staffId} value={String(index)}>{targetLabel(person)}</option>
+              {targets.map((person) => (
+                <option key={person.staffId} value={person.staffId}>{targetLabel(person)}</option>
               ))}
             </select>
           </Field>
@@ -898,69 +975,110 @@ export function PermissionsAccess({ sectionRef }) {
             <form className="permissions-access__editor" onSubmit={submit}>
               <div className="permissions-access__identity">
                 <strong>{authority.displayName}</strong>
-                <span>{labelFor(ROLE_LABELS, authority.role, UNKNOWN_ROLE)}</span>
-                <Pill tone={STAFF_STATUS_TONES[authority.status] || 'ink'}>
-                  {labelFor(STAFF_STATUS_LABELS, authority.status, UNKNOWN_STATE)}
+                <span>{rolePresentationFor(authority)}</span>
+                {authority.staffId === actor?.id && (
+                  <span>Zmieniasz własne uprawnienia</span>
+                )}
+                <Pill tone={accessPresentationFor(authority).tone}>
+                  {accessPresentationFor(authority).label}
                 </Pill>
               </div>
               {targetDisabled && (
                 <div className="form-warn" role="status">
-                  Dostęp tej osoby jest wyłączony. Uprawnienia są tylko do odczytu.
+                  Ta osoba nie ma dostępu do panelu. Może otrzymać nowe zaproszenie.
                 </div>
               )}
-              <fieldset className="permissions-access__choices" disabled={saveStatus === 'saving'}>
-                <legend>Zakres dostępu</legend>
-                {choices.map((choice) => (
-                  <label className="permissions-choice" key={choice.capability}>
-                    <span>
-                      <strong>{choice.label}</strong>
-                      <small>
-                        {choice.locked
-                          ? 'Wymagane dla aktywnego właściciela'
-                          : choice.defaultEnabled ? 'Domyślne dla tej roli' : 'Dodatkowe dla tej roli'}
-                      </small>
+              {!targetDisabled && (
+                <>
+                  <fieldset className="permissions-access__choices" disabled={saveStatus === 'saving'}>
+                    <legend>Zakres dostępu</legend>
+                    <div className="permissions-choice">
+                      <span>
+                        <strong>Dostęp podstawowy: grafik, klienci i sesje</strong>
+                        <small>
+                          {authority.role === 'specialist'
+                            ? 'Ta osoba widzi tylko własny Grafik, klientów i sesje.'
+                            : 'Ta osoba widzi Grafik, klientów i sesje całej poradni.'}
+                        </small>
+                      </span>
+                    </div>
+                    {hasRoleOverrides && (
+                      <div className="form-warn permissions-access__role-warning" role="status">
+                        <span>
+                          <strong>Uprawnienia odbiegają od roli</strong>
+                          <small>Przywrócenie usunie dodatkowe wyjątki dla tej osoby.</small>
+                        </span>
+                        <Button
+                          size="sm"
+                          type="button"
+                          variant="ghost"
+                          disabled={controlsDisabled}
+                          onClick={restoreRoleDefaults}
+                        >
+                          Przywróć ustawienia roli
+                        </Button>
+                      </div>
+                    )}
+                    {groups.filter((group) => group.choices.length > 0).map((group) => (
+                      <fieldset className="permissions-access__group" key={group.title}>
+                        <legend>Może: {group.title}</legend>
+                        {group.choices.map((choice) => {
+                          const copy = permissionCopyFor(choice)
+                          return (
+                            <div className="permissions-choice" key={choice.capability}>
+                              <span>
+                                <strong>{copy.label}</strong>
+                                <small>
+                                  {choice.locked
+                                    ? 'Wymagane dla aktywnej właścicielki'
+                                    : copy.effect}
+                                </small>
+                              </span>
+                              <Toggle
+                                label={copy.label}
+                                on={choice.enabled}
+                                disabled={controlsDisabled || choice.locked}
+                                onChange={(enabled) => changePermission(choice.capability, enabled)}
+                              />
+                            </div>
+                          )
+                        })}
+                      </fieldset>
+                    ))}
+                  </fieldset>
+                  {saveError && (
+                    <div className="form-warn form-warn--error" role="alert">{saveError}</div>
+                  )}
+                  {saveNotice && (
+                    <div className="form-warn" role="status">{saveNotice}</div>
+                  )}
+                  <div className="permissions-access__actions">
+                    <span className="settings-save__status" role="status" aria-live="polite">
+                      {saveStatus === 'saving'
+                        ? 'Zapisywanie…'
+                        : dirty ? 'Niezapisane zmiany' : ''}
                     </span>
-                    <input
-                      type="checkbox"
-                      aria-label={choice.label}
-                      checked={choice.enabled}
-                      disabled={controlsDisabled || choice.locked}
-                      onChange={(event) => changePermission(choice.capability, event.target.checked)}
-                    />
-                  </label>
-                ))}
-              </fieldset>
-              {saveError && (
-                <div className="form-warn form-warn--error" role="alert">{saveError}</div>
+                    {dirty && (
+                      <Button
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                        disabled={saveStatus === 'saving'}
+                        onClick={resetDraft}
+                      >
+                        Odrzuć zmiany
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      type="submit"
+                      disabled={!dirty || controlsDisabled}
+                    >
+                      {saveStatus === 'uncertain' ? 'Spróbuj ponownie' : 'Zapisz uprawnienia'}
+                    </Button>
+                  </div>
+                </>
               )}
-              {saveNotice && (
-                <div className="form-warn" role="status">{saveNotice}</div>
-              )}
-              <div className="permissions-access__actions">
-                <span className="settings-save__status" role="status" aria-live="polite">
-                  {saveStatus === 'saving'
-                    ? 'Zapisywanie…'
-                    : saveStatus === 'saved' ? 'Zapisano' : dirty ? 'Niezapisane zmiany' : ''}
-                </span>
-                {dirty && (
-                  <Button
-                    size="sm"
-                    type="button"
-                    variant="ghost"
-                    disabled={saveStatus === 'saving'}
-                    onClick={resetDraft}
-                  >
-                    Odrzuć zmiany
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  type="submit"
-                  disabled={!dirty || controlsDisabled}
-                >
-                  {saveStatus === 'uncertain' ? 'Spróbuj ponownie' : 'Zapisz uprawnienia'}
-                </Button>
-              </div>
             </form>
           )}
         </div>
@@ -977,6 +1095,7 @@ export function StaffAccess({ sectionRef }) {
   const canChangeRole = actor?.role === 'owner'
     && canPerformAction(capabilities, 'staff.role.edit')
   const canDeactivate = canPerformAction(capabilities, 'staff.deactivate')
+  const canManagePermissions = canPerformAction(capabilities, 'permissions.read')
   const [staff, setStaff] = useState([])
   const [loadStatus, setLoadStatus] = useState('loading')
   const [inviteOpen, setInviteOpen] = useState(false)
@@ -1074,7 +1193,7 @@ export function StaffAccess({ sectionRef }) {
             <p>Zarządzaj dostępem osób pracujących w centrum.</p>
           </div>
           {canInvite && (
-            <Button icon="plus" size="sm" onClick={() => setInviteOpen(true)}>Zaproś osobę</Button>
+            <Button icon="plus" size="sm" onClick={() => setInviteOpen(true)}>Zaproś do panelu</Button>
           )}
         </div>
 
@@ -1089,48 +1208,76 @@ export function StaffAccess({ sectionRef }) {
         )}
         {loadStatus === 'ready' && (
           <ul className="staff-access__list" aria-label="Lista personelu">
-            {staff.map((person) => (
-              <li className="staff-access-row" key={person.id}>
+            {staff.map((person) => {
+              const access = accessPresentationFor(person)
+              return (
+                <li className="staff-access-row" key={person.id}>
                 <div className="staff-access-row__identity">
                   <strong className="staff-access-row__name">{person.displayName}</strong>
                   <span className="staff-access-row__email">{person.email}</span>
                 </div>
                 <div className="staff-access-row__details">
-                  <span>{labelFor(ROLE_LABELS, person.role, UNKNOWN_ROLE)}</span>
-                  <Pill tone={STAFF_STATUS_TONES[person.status] || 'ink'}>
-                    {labelFor(STAFF_STATUS_LABELS, person.status, UNKNOWN_STATE)}
+                  <span>{rolePresentationFor(person)}</span>
+                  <Pill tone={access.tone}>
+                    {access.label}
                   </Pill>
-                  {canChangeRole && (
-                    <IconBtn
-                      name="edit"
-                      label={`Zmień rolę — ${person.displayName}`}
+                  {person.id === actor?.id ? (
+                    <span>To Ty</span>
+                  ) : canChangeRole && (
+                    <Button
+                      icon="edit"
+                      size="sm"
+                      variant="ghost"
                       onClick={() => setRoleChange(person)}
-                    />
+                    >Zmień rolę</Button>
                   )}
-                  {canDeactivate && person.status !== 'disabled' && (
-                    <IconBtn
-                      name="logout"
-                      label={`Wyłącz dostęp — ${person.displayName}`}
+                  {canManagePermissions && (
+                    <EntityLink
+                      route="team"
+                      params={{ section: 'permissions', staffId: person.id }}
+                      className="btn btn--ghost btn--sm"
+                    >
+                      Uprawnienia
+                    </EntityLink>
+                  )}
+                  {person.id !== actor?.id && canDeactivate && access.action === 'deactivate' && (
+                    <Button
+                      icon="logout"
+                      size="sm"
+                      variant="danger"
                       onClick={() => setDeactivation(person)}
-                    />
+                    >Wyłącz dostęp</Button>
+                  )}
+                  {person.id !== actor?.id && canDeactivate && access.action === 'cancel' && (
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      onClick={() => setDeactivation(person)}
+                    >Anuluj zaproszenie</Button>
+                  )}
+                  {person.id !== actor?.id && canInvite && access.action === 'reinvite' && (
+                    <Button
+                      size="sm"
+                      variant="soft"
+                      onClick={() => setInviteOpen(person)}
+                    >Zaproś ponownie</Button>
                   )}
                 </div>
                 {person.invitation && (
                   <div className="staff-access-row__invitation">
-                    <span>
-                      {invitationLabel(person.invitation)}
-                    </span>
                     <span>Ważne do {expiryLabel(person.invitation.expiresAt)}</span>
                   </div>
                 )}
-              </li>
-            ))}
+                </li>
+              )
+            })}
           </ul>
         )}
       </section>
       {canInvite && inviteOpen && (
         <InvitationDrawer
           environment={session.environment}
+          initialPerson={inviteOpen === true ? null : inviteOpen}
           onChanged={loadStaff}
           onClose={() => setInviteOpen(false)}
           onDirtyChange={setInviteDirty}

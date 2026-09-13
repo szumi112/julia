@@ -10,6 +10,8 @@ const {
   tusMemberOptions, filterTusMemberOptions, assignTusGroupMembers, materializeTusGroupMembers,
   linkTusGuardian, unlinkTusGuardian, updateTusKidAndClients, searchTusOverview, tusAssignmentOptions,
   tusAgeLabel, tusAssignmentStatusLabel, withTusGroupDefaults, sortTusGroups,
+  activityClassDefaults, activityModuleVisible, activityMonthStart, activityRangeOverlapsMonth,
+  isActivityDurationValid,
 } = tus
 
 const groups = [
@@ -170,6 +172,49 @@ test('TUS age labels collapse equal bounds and preserve readable ranges', () => 
   assert.equal(tusAgeLabel(5, 6), '5–6 lat')
   assert.equal(tusAgeLabel(6, 5), '')
   assert.equal(tusAgeLabel(null, null), '')
+})
+
+test('activity assignment defaults start on the first day of the viewed Warsaw month', () => {
+  assert.equal(activityMonthStart('2026-09'), '2026-09-01')
+  assert.throws(() => activityMonthStart('2026-13'), /Invalid activity month/)
+})
+
+test('active leader ranges determine whether an activity module is visible in a month', () => {
+  const activityState = {
+    programsById: {
+      apg_tus: { id: 'apg_tus', code: 'tus' },
+      apg_english: { id: 'apg_english', code: 'english' },
+    },
+    groupsById: {
+      agr_tus: { id: 'agr_tus', programId: 'apg_tus' },
+      agr_english: { id: 'agr_english', programId: 'apg_english' },
+    },
+    groupLeadersById: {
+      agl_tus: { groupId: 'agr_tus', specialistId: 'sp_ola', startsOn: '2026-08-15', endsOn: '2026-09-01', status: 'active' },
+      agl_english: { groupId: 'agr_english', specialistId: 'sp_ola', startsOn: '2026-09-02', endsOn: null, status: 'active' },
+      agl_inactive: { groupId: 'agr_tus', specialistId: 'sp_ola', startsOn: '2026-01-01', endsOn: null, status: 'inactive' },
+    },
+  }
+
+  assert.equal(activityRangeOverlapsMonth(activityState.groupLeadersById.agl_tus, '2026-09'), true)
+  assert.equal(activityModuleVisible({ capabilities: [], state: activityState, specialistId: 'sp_ola', program: 'tus', month: '2026-09' }), true)
+  assert.equal(activityModuleVisible({ capabilities: [], state: activityState, specialistId: 'sp_ola', program: 'english', month: '2026-09' }), true)
+  assert.equal(activityModuleVisible({ capabilities: [], state: activityState, specialistId: 'sp_ola', program: 'tus', month: '2026-10' }), false)
+  assert.equal(activityModuleVisible({ capabilities: ['tus.manage'], state: null, specialistId: null, program: 'english', month: '2026-10' }), true)
+})
+
+test('a new single class uses the viewed month and the most recent group schedule', () => {
+  assert.deepEqual(activityClassDefaults([
+    { groupId: 'agr_tus', date: '2026-08-10', time: '15:30', durationMinutes: 60 },
+    { groupId: 'agr_tus', date: '2026-09-07', time: '16:15', durationMinutes: 75 },
+  ], { groupId: 'agr_tus', month: '2026-09' }), {
+    date: '2026-09-01', time: '16:15', durationMinutes: 75,
+  })
+})
+
+test('activity class duration accepts optional whole-minute values from 1 through 1440', () => {
+  for (const duration of [null, 1, 1440]) assert.equal(isActivityDurationValid(duration), true)
+  for (const duration of [0, -1, 1441, 1.5, Number.NaN]) assert.equal(isActivityDurationValid(duration), false)
 })
 
 test('classes filter by month and months list is sorted unique', () => {

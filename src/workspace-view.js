@@ -6,6 +6,7 @@ import {
 } from './historical-records.js'
 import { captureLoadedActivitiesState } from './loaded-activities.js'
 import { assertProfessionalTitle } from './core-records.js'
+import { specialistAvatarKeyOrDefault } from './specialist-avatars.js'
 
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
 const CIVIL_MONTH = /^(\d{4})-(\d{2})$/
@@ -212,6 +213,10 @@ const professionalTitle = (value) => {
   try { return assertProfessionalTitle(value) } catch { fail('workspace specialist') }
 }
 
+const specialistAvatarKey = (value) => {
+  try { return specialistAvatarKeyOrDefault(value) } catch { fail('workspace specialist') }
+}
+
 const warsawParts = (value, label) => {
   if (typeof value !== 'string' || !INSTANT.test(value)) fail(label)
   const instant = new Date(value)
@@ -229,6 +234,7 @@ const projectSpecialist = (item) => frozenRecord({
   id: safeText(item.id, 'workspace specialist'),
   name: safeText(item.displayName, 'workspace specialist'),
   professionalTitle: professionalTitle(item.professionalTitle),
+  avatarKey: specialistAvatarKey(item.avatarKey),
   rate: safeInteger(item.standardRateGrosze, 1, 1_000_000, 'workspace specialist') / 100,
   color: presentationColor(item.id),
   status: ['active', 'archived'].includes(item.status)
@@ -248,9 +254,14 @@ const projectClient = (item) => {
     : fail('workspace client')
   const readOnly = typeof item.readOnly === 'boolean' ? item.readOnly : fail('workspace client')
   let psychId = null
+  let assignmentStartsAt = null
+  let since = warsawParts(item.createdAt, 'workspace client').date
   if (item.assignment !== null) {
     const assignment = exactDataObject(item.assignment, 'workspace assignment')
     psychId = safeText(assignment.specialistId, 'workspace assignment')
+    const assignmentStart = warsawParts(assignment.startsAt, 'workspace assignment')
+    assignmentStartsAt = assignment.startsAt
+    since = assignmentStart.date
   }
   if ((status === 'archived') !== readOnly || (status === 'archived' && psychId !== null)) {
     fail('workspace client')
@@ -261,9 +272,10 @@ const projectClient = (item) => {
     age: item.age === null ? null : safeInteger(item.age, 1, 26, 'workspace client'),
     status,
     psychId,
+    assignmentStartsAt,
     version: safeInteger(item.version, 1, Number.MAX_SAFE_INTEGER, 'workspace client'),
     readOnly,
-    since: warsawParts(item.createdAt, 'workspace client').date,
+    since,
   })
 }
 
@@ -278,6 +290,11 @@ const projectAppointment = (item, clientIds, specialistIds, clientsById) => {
   const specialistId = safeText(item.specialistId, 'workspace appointment')
   const status = ['scheduled', 'completed', 'cancelled', 'noshow'].includes(item.status)
     ? item.status
+    : fail('workspace appointment')
+  const cancellationReason = item.cancellationReason === null
+    || (status === 'cancelled'
+      && ['client', 'centre', 'late_paid'].includes(item.cancellationReason))
+    ? item.cancellationReason
     : fail('workspace appointment')
   const paidDate = payment.latestReceivedAt === null
     ? null
@@ -296,6 +313,7 @@ const projectAppointment = (item, clientIds, specialistIds, clientsById) => {
       ? item.location
       : fail('workspace appointment'),
     status,
+    cancellationReason,
     version: safeInteger(item.version, 1, 4_096, 'workspace appointment'),
     payment: ['paid', 'unpaid', 'partial'].includes(payment.status)
       ? payment.status
@@ -405,8 +423,8 @@ export const clientIdentityFor = (clients, id) => {
 export const specialistIdentityFor = (specialists, id) => {
   const item = identityList(specialists, 'workspace specialists').find((candidate) => candidate.id === id)
   return frozenRecord(item
-    ? { name: item.name, color: item.color, available: true }
-    : { name: 'Specjalistka niedostępna', color: null, available: false })
+    ? { name: item.name, color: item.color, avatarKey: item.avatarKey, available: true }
+    : { name: 'Specjalistka niedostępna', color: null, avatarKey: null, available: false })
 }
 
 const captureMonth = (value) => {
@@ -439,6 +457,23 @@ export const rollingWorkspaceRange = (value, days = 93) => {
   civilParts(value, 'workspace rolling window')
   if (!Number.isSafeInteger(days) || days < 1 || days > 93) fail('workspace rolling window')
   return frozenRecord({ from: addCivilDays(value, -(days - 1)), to: value })
+}
+
+export const futureWorkspaceRange = (value) => {
+  civilParts(value, 'workspace future window')
+  return frozenRecord({ from: value, to: addCivilDays(value, 90) })
+}
+
+export const previousWorkspaceRange = (value, boundary) => {
+  const current = captureRange(value, 'workspace previous window')
+  const boundaryOrdinal = civilOrdinal(boundary, 'workspace previous boundary')
+  if (boundaryOrdinal >= current.fromOrdinal) return null
+  const range = rollingWorkspaceRange(addCivilDays(current.from, -1))
+  return frozenRecord({
+    from: civilOrdinal(range.from, 'workspace previous window') < boundaryOrdinal
+      ? boundary : range.from,
+    to: range.to,
+  })
 }
 
 const captureRange = (value, label = 'workspace range') => {

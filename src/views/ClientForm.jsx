@@ -1,14 +1,14 @@
 // Add/Edit client — slide-over drawer with validation and delete-with-confirm.
 import { useEffect, useRef, useState } from 'react'
-import { useApp, clientOutstanding, useClientMutationLock, useWorkspaceRefresh } from '../store.jsx'
+import { allocateDemoClientId, useApp, clientOutstanding, useClientMutationLock, useWorkspaceRefresh } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { clientsForRole } from '../workspace.js'
 import { Button, Field, Segmented, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
-import { toISODate, plural, fmtMoney } from '../format.js'
+import { toISODate, plural, fmtMoney, warsawDateTimeFromUtc } from '../format.js'
 import { ApiError } from '../api.js'
-import { validateClientInput } from '../core-records.js'
+import { validateClientInput, warsawDateTimeToUtc } from '../core-records.js'
 import { canPerformAction } from '../capability-access.js'
 
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -20,16 +20,27 @@ export function ClientDrawer({ opts, onClose }) {
   const refreshWorkspace = useWorkspaceRefresh()
   const isApp = appMode === 'app'
   const editing = opts.client || null
+  const today = warsawDateTimeFromUtc(new Date().toISOString()).date
+  const initialAssignmentDate = isApp && editing?.assignmentStartsAt
+    ? warsawDateTimeFromUtc(editing.assignmentStartsAt).date
+    : editing?.since || today
   const drawerRef = useRef(null)
   const backRef = useRef(null)
+  const availablePsychologists = state.psychologists.filter((psych) => (
+    (!isApp || psych.status === 'active')
+    && (role.scope !== 'own' || psych.id === role.psychId)
+  ))
+  const defaultPsych = editing?.psychId || opts.psychId || (role.scope === 'own' ? role.psychId : '')
+    || (availablePsychologists.length === 1 ? availablePsychologists[0].id : '')
 
   const [form, setForm] = useState({
     name: editing?.name || '',
     age: editing?.age ?? '',
-    psychId: editing?.psychId || opts.psychId || '',
+    psychId: defaultPsych,
     email: editing?.email || '',
     phone: editing?.phone || '',
     status: editing?.status || 'active',
+    assignmentDate: initialAssignmentDate,
     familyOtherId: '',
     familyRole: editing?.familyRole || '',
     note: '',
@@ -40,8 +51,11 @@ export function ClientDrawer({ opts, onClose }) {
   const [saveError, setSaveError] = useState(null)
   const [initialForm] = useState(form)
   const discardGuard = useDiscardGuard(JSON.stringify(form) !== JSON.stringify(initialForm))
+  const allowCreatedClientNavigation = useRef(false)
   const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
-  useEffect(() => registerLeaveGuard(discardGuard.check), [registerLeaveGuard, discardGuard.check])
+  useEffect(() => registerLeaveGuard(() => (
+    allowCreatedClientNavigation.current ? false : discardGuard.check()
+  )), [registerLeaveGuard, discardGuard.check])
 
   // the drawer may unlink while open — read the live record, not the snapshot
   const current = editing ? state.clients.find((c) => c.id === editing.id) || editing : null
@@ -52,9 +66,8 @@ export function ClientDrawer({ opts, onClose }) {
   const linkables = clientsForRole(state, role).filter(
     (c) => c.id !== editing?.id && !familyMembers.some((m) => m.id === c.id)
   )
-  const availablePsychologists = role.scope === 'own'
-    ? state.psychologists.filter((psych) => psych.id === role.psychId)
-    : state.psychologists
+  const reassigned = isApp && Boolean(editing && form.psychId !== editing.psychId)
+  const assignmentMax = editing && !reassigned ? initialAssignmentDate : today
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }))
@@ -71,29 +84,52 @@ export function ClientDrawer({ opts, onClose }) {
   }
 
   const appErrors = (payload) => {
+    const errors = {
+      name: form.name.trim() ? null : 'Podaj imię i nazwisko',
+      age: null,
+      psychId: form.psychId ? null : 'Wybierz specjalistkę',
+      status: form.status ? null : 'Wybierz status klienta',
+      assignmentDate: form.assignmentDate ? null : 'Podaj datę rozpoczęcia opieki',
+      body: null,
+    }
     try {
       validateClientInput(payload)
-      return {}
+      return errors
     } catch (error) {
       const field = error instanceof TypeError ? error.message.split('/').at(-1) : 'body'
-      return {
-        name: field === 'name' ? 'Podaj imię i nazwisko' : null,
-        age: field === 'age' ? 'Podaj wiek od 1 do 26 lat' : null,
-        psychId: field === 'specialistId' ? 'Wybierz specjalistkę' : null,
-        status: field === 'status' ? 'Wybierz status klienta' : null,
-        body: ['name', 'age', 'specialistId', 'status'].includes(field)
-          ? null
-          : 'Sprawdź dane klienta',
-      }
+      if (field === 'name') errors.name ||= 'Podaj imię i nazwisko'
+      else if (field === 'age') errors.age = 'Podaj wiek od 1 do 26 lat'
+      else if (field === 'specialistId') errors.psychId ||= 'Wybierz specjalistkę'
+      else if (field === 'status') errors.status ||= 'Wybierz status klienta'
+      else if (field === 'assignmentStartsAt') errors.assignmentDate ||= 'Podaj prawidłową datę rozpoczęcia opieki'
+      else errors.body = 'Sprawdź dane klienta'
+      return errors
     }
   }
 
-  const appPayload = () => ({
-    name: form.name.trim().normalize('NFC'),
-    age: String(form.age).trim() === '' ? null : Number(form.age),
-    status: form.status,
-    specialistId: form.psychId,
-  })
+  const appPayload = () => {
+    const assignmentStartsAt = reassigned
+      ? null
+      : editing && form.assignmentDate === initialAssignmentDate
+        ? editing.assignmentStartsAt
+        : warsawDateTimeToUtc(form.assignmentDate, '00:00')
+    return {
+      name: form.name.trim().normalize('NFC'),
+      age: String(form.age).trim() === '' ? null : Number(form.age),
+      status: form.status,
+      specialistId: form.psychId,
+      assignmentStartsAt,
+    }
+  }
+
+  const assignmentDateError = () => {
+    if (!form.assignmentDate) return 'Podaj datę rozpoczęcia opieki'
+    if (form.assignmentDate > today) return 'Data rozpoczęcia opieki nie może być w przyszłości'
+    if (editing && !reassigned && form.assignmentDate > initialAssignmentDate) {
+      return 'Datę rozpoczęcia opieki można tylko cofnąć'
+    }
+    return null
+  }
 
   const refreshAfterAppMutation = async (failureMessage) => {
     try {
@@ -111,8 +147,25 @@ export function ClientDrawer({ opts, onClose }) {
     if (saveStatus === 'saving' || clientMutationLocked
       || !canPerformAction(capabilities, editing ? 'client.edit' : 'client.create')
       || editing?.readOnly || editing?.status === 'archived') return
-    const payload = appPayload()
-    const nextErrors = appErrors(payload)
+    let payload
+    let nextErrors
+    try {
+      payload = appPayload()
+      nextErrors = appErrors(payload)
+    } catch {
+      payload = null
+      nextErrors = {
+        name: form.name.trim() ? null : 'Podaj imię i nazwisko',
+        psychId: form.psychId ? null : 'Wybierz specjalistkę',
+        assignmentDate: 'Podaj prawidłową datę rozpoczęcia opieki',
+      }
+    }
+    nextErrors.assignmentDate = assignmentDateError() || nextErrors.assignmentDate
+    if (form.psychId && !availablePsychologists.some((psychologist) => psychologist.id === form.psychId)) {
+      nextErrors.psychId = role.scope === 'own'
+        ? 'Klient musi pozostać pod opieką aktywnej specjalistki'
+        : 'Wybierz aktywną specjalistkę'
+    }
     setErrors(nextErrors)
     if (Object.values(nextErrors).some(Boolean)) {
       focusFirstError()
@@ -120,9 +173,11 @@ export function ClientDrawer({ opts, onClose }) {
     }
     setSaveStatus('saving')
     setSaveError(null)
+    let createdClient = null
     try {
-      if (editing) await workspace.editClient(editing.id, editing.version, payload)
-      else await workspace.createClient(payload)
+      createdClient = editing
+        ? await workspace.editClient(editing.id, editing.version, payload)
+        : await workspace.createClient(payload)
     } catch (error) {
       if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
         forceClose()
@@ -134,13 +189,27 @@ export function ClientDrawer({ opts, onClose }) {
         }
         return
       }
+      if (error instanceof ApiError && (error.code === 'CLIENT_ASSIGNMENT_CONFLICT'
+        || (error.code === 'VALIDATION_FAILED' && error.details?.field === 'assignmentStartsAt'))) {
+        setSaveStatus('error')
+        setErrors({ assignmentDate: 'Nie można zapisać tej daty rozpoczęcia opieki' })
+        focusFirstError()
+        return
+      }
       setSaveStatus('error')
       setSaveError('Nie udało się zapisać danych klienta.')
       return
     }
     if (!await refreshAfterAppMutation('Dane zapisano, ale nie udało się odświeżyć kartoteki.')) return
-    toast(editing ? 'Dane klienta zapisane' : 'Nowy klient dodany do kartoteki')
+    if (editing) {
+      forceClose()
+      toast('Dane klienta zapisane')
+      return
+    }
+    allowCreatedClientNavigation.current = true
     forceClose()
+    navigate('client', { id: createdClient.id })
+    setTimeout(() => toast('Nowy klient dodany. Otworzono kartę.'), 0)
   }
 
   const submit = (e) => {
@@ -153,6 +222,8 @@ export function ClientDrawer({ opts, onClose }) {
       errs.psychId = 'Klient musi pozostać pod opieką aktywnej specjalistki'
     }
     if (form.email.trim() && !EMAIL_SHAPE.test(form.email.trim())) errs.email = 'Podaj poprawny adres e-mail'
+    const dateError = assignmentDateError()
+    if (dateError) errs.assignmentDate = dateError
     if (String(form.age).trim()) {
       const age = Number(form.age)
       if (!Number.isInteger(age) || age < 1 || age > 26) errs.age = 'Podaj wiek od 1 do 26 lat'
@@ -170,6 +241,7 @@ export function ClientDrawer({ opts, onClose }) {
       email: form.email.trim(),
       phone: form.phone.trim(),
       status: form.status,
+      since: form.assignmentDate,
     }
     if (editing) {
       const patch = { ...payload }
@@ -181,18 +253,24 @@ export function ClientDrawer({ opts, onClose }) {
       toast('Dane klienta zapisane')
     } else {
       const note = form.note.trim()
+      const createdClientId = allocateDemoClientId()
       dispatch({
         type: 'ADD_CLIENT',
         client: {
+          id: createdClientId,
           ...payload,
-          since: toISODate(new Date()),
+          since: form.assignmentDate,
           notes: note ? [{ date: toISODate(new Date()), text: note }] : [],
         },
         familyLink: form.familyOtherId
           ? { otherId: form.familyOtherId, role: form.familyRole || null }
           : undefined,
       })
-      toast('Nowy klient dodany do kartoteki')
+      allowCreatedClientNavigation.current = true
+      forceClose()
+      navigate('client', { id: createdClientId })
+      setTimeout(() => toast('Nowy klient dodany. Otworzono kartę.'), 0)
+      return
     }
     forceClose()
   }
@@ -272,22 +350,40 @@ export function ClientDrawer({ opts, onClose }) {
                 ))}
               </select>
             </Field>
-            <Field label="Wiek" error={errors.age} hint="Zostaw puste dla osoby dorosłej.">
+            <Field
+              label="Pod opieką od"
+              error={errors.assignmentDate}
+              hint={reassigned ? 'Nowe przypisanie zacznie się przy zapisie.' : undefined}
+            >
               <input
-                type="number"
-                min="1"
-                max="26"
-                step="1"
-                inputMode="numeric"
-                name="client-age"
+                type="date"
+                name="client-assignment-date"
                 autoComplete="off"
                 className="input"
-                value={form.age}
-                placeholder="np. 9"
-                onChange={(e) => set('age', e.target.value)}
+                value={form.assignmentDate}
+                max={assignmentMax}
+                required
+                disabled={reassigned}
+                onChange={(e) => set('assignmentDate', e.target.value)}
               />
             </Field>
           </div>
+
+          <Field label="Wiek" error={errors.age} hint="Zostaw puste dla osoby dorosłej.">
+            <input
+              type="number"
+              min="1"
+              max="26"
+              step="1"
+              inputMode="numeric"
+              name="client-age"
+              autoComplete="off"
+              className="input"
+              value={form.age}
+              placeholder="np. 9"
+              onChange={(e) => set('age', e.target.value)}
+            />
+          </Field>
 
           {!isApp && <div className="form-grid">
             <Field label="E-mail" error={errors.email} hint="Kontakt do rodzica lub opiekuna.">

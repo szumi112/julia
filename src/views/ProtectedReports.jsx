@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { AreaChart, BarFill } from '../charts.jsx'
-import { addMonths, cap, fmtMoney, fmtMonthYear, plural } from '../format.js'
+import { fmtMoney, fmtMonthYear, plural } from '../format.js'
 import {
   FINANCE_WINDOW_MIN_MONTH,
   financeMonthView,
@@ -10,8 +10,8 @@ import {
 import { SERVICE_BY_ID } from '../services.js'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
-import { Button, EmptyState, IconBtn, TableScroll } from '../ui.jsx'
-import { useRouteParamsSync } from '../ux-patterns.jsx'
+import { Button, TableScroll } from '../ui.jsx'
+import { PeriodNav, useRouteParamsSync, ViewState } from '../ux-patterns.jsx'
 import { useFinanceWindow } from './use-finance-window.js'
 
 const money = (value) => fmtMoney(value / 100)
@@ -53,7 +53,7 @@ function MoneySplit({ title, rows }) {
 }
 
 export function ProtectedReports({ params = {} }) {
-  const { getViewState, navigate, patchViewState, route } = useShell()
+  const { getViewState, patchViewState, route } = useShell()
   const browserMonth = warsawMonthKey()
   const [selectedMonth, setSelectedMonth] = useState(() => {
     const saved = getViewState('reports', { ym: browserMonth })
@@ -70,9 +70,9 @@ export function ProtectedReports({ params = {} }) {
   const finance = useFinanceWindow(selectedMonth)
   const headingRef = useRef(null)
   const pendingMonthFocusRef = useRef(false)
-  const window = finance.data
-  const serverCurrentMonth = window?.currentMonth ?? browserMonth
-  const specialistNames = new Map(window?.specialistLabels.map(({ id, label }) => [id, label]) ?? [])
+  const financeWindow = finance.data
+  const serverCurrentMonth = financeWindow?.currentMonth ?? browserMonth
+  const specialistNames = new Map(financeWindow?.specialistLabels.map(({ id, label }) => [id, label]) ?? [])
 
   useEffect(() => patchViewState('reports', { ym: selectedMonth }), [patchViewState, selectedMonth])
   useRouteParamsSync('reports', {
@@ -83,75 +83,89 @@ export function ProtectedReports({ params = {} }) {
     pendingMonthFocusRef.current = false
     requestAnimationFrame(() => headingRef.current?.focus({ preventScroll: true }))
   }, [finance.status, selectedMonth])
-  const revealRef = useReveal([finance.status, selectedMonth])
+  const revealRef = useReveal()
 
   const selectMonth = (month) => {
     pendingMonthFocusRef.current = true
     setSelectedMonth(month)
   }
 
-  if (finance.status !== 'ready') return (
+  if (!finance.isCurrent) return (
     <div className="report-window">
-      <div className="view-head"><div>
-        <div className="eyebrow">Raporty centrum</div>
-        <h1 className="display view-head__title">Raport <em>miesięczny</em></h1>
-      </div></div>
-      <section role={finance.status === 'loading' ? 'status' : 'alert'}>
-        <EmptyState
-          icon="reports"
-          title={finance.status === 'loading' ? 'Wczytywanie raportu…' : 'Raport jest teraz niedostępny'}
-          hint="Nie pokazujemy częściowych zestawień."
-          action={finance.status === 'error' ? <Button onClick={finance.reload}>Spróbuj ponownie</Button> : null}
-        />
-      </section>
+      <div className="view-head">
+        <div>
+          <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>Raport — <em>{fmtMonthYear(selectedMonth)}</em></h1>
+          <p className="view-head__sub">Sześć kolejnych miesięcy zakończonych wybranym miesiącem.</p>
+        </div>
+        <div className="view-head__actions"><PeriodNav month={selectedMonth} min={FINANCE_WINDOW_MIN_MONTH} max={serverCurrentMonth} current={serverCurrentMonth} onChange={selectMonth} /></div>
+      </div>
+      <ViewState
+        tone={finance.phase === 'error' || finance.phase === 'refresh-error' ? 'error' : 'loading'}
+        icon="reports"
+        title={finance.phase === 'error' || finance.phase === 'refresh-error' ? 'Raport jest teraz niedostępny' : 'Wczytuję raport…'}
+        hint="Nie pokazujemy niezweryfikowanych zestawień dla wybranego miesiąca."
+        action={finance.phase === 'error' || finance.phase === 'refresh-error' ? <Button onClick={finance.reload}>Spróbuj ponownie</Button> : null}
+      />
     </div>
   )
 
   const monthView = financeMonthView({
     requestedMonth: null,
     savedMonth: selectedMonth,
-    currentMonth: window.currentMonth,
+    currentMonth: financeWindow.currentMonth,
     selectedMonth,
-    selectedRowCount: window.rows.length,
-    latestPopulatedMonth: window.latestPopulatedMonth,
+    selectedRowCount: financeWindow.rows.length,
+    latestPopulatedMonth: financeWindow.latestPopulatedMonth,
   })
   const moneyRows = (values, labelFor) => Object.entries(values).map(([id, value]) => ({
     id, label: labelFor(id), value,
-  })).sort((left, right) => left.label.localeCompare(right.label, 'pl'))
+  })).sort((left, right) => right.value - left.value || left.label.localeCompare(right.label, 'pl'))
 
   return (
     <div className="report-window" ref={revealRef}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">Raporty centrum</div>
           <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>Raport — <em>{fmtMonthYear(selectedMonth)}</em></h1>
-          <p className="view-head__sub">Sześć kolejnych miesięcy zakończonych wybranym miesiącem.</p>
+          <p className="view-head__sub">Porównuje sześć miesięcy i podsumowuje wybrany miesiąc. Finanse służą do bieżących rozliczeń.</p>
         </div>
-        <div className="view-head__actions"><div className="month-nav">
-          <IconBtn
-            name="chevL"
-            label="Poprzedni miesiąc"
-            disabled={selectedMonth <= FINANCE_WINDOW_MIN_MONTH}
-            onClick={() => selectMonth(addMonths(selectedMonth, -1))}
-          />
-          <span className="month-nav__label">{cap(fmtMonthYear(selectedMonth))}</span>
-          <IconBtn name="chevR" label="Następny miesiąc" disabled={selectedMonth >= serverCurrentMonth} onClick={() => selectMonth(addMonths(selectedMonth, 1))} />
-        </div></div>
+        <div className="view-head__actions no-print">
+          {!monthView.emptyCopy && <Button variant="ghost" icon="print" onClick={() => window.print()}>Drukuj</Button>}
+          <PeriodNav month={selectedMonth} min={FINANCE_WINDOW_MIN_MONTH} max={serverCurrentMonth} current={serverCurrentMonth} onChange={selectMonth} />
+        </div>
       </div>
-      {monthView.emptyCopy ? <p role="status" className="finance-window__empty">
-        {monthView.emptyCopy}
-      </p> : null}
-      {monthView.latestPopulatedMonth ? (
-        <Button variant="ghost" onClick={() => selectMonth(monthView.latestPopulatedMonth)}>
+      {finance.phase === 'refreshing' && <ViewState
+        tone="loading"
+        compact
+        icon="reports"
+        title="Odświeżamy raport…"
+        hint="Wyświetlone zestawienie dotyczy nadal wybranego miesiąca."
+      />}
+      {finance.phase === 'refresh-error' && <ViewState
+        tone="error"
+        compact
+        icon="reports"
+        title="Nie udało się odświeżyć raportu"
+        hint="Pokazujemy ostatnio potwierdzone zestawienie wybranego miesiąca."
+        action={<Button size="sm" onClick={finance.reload}>Spróbuj ponownie</Button>}
+      />}
+      <div className={finance.isStale ? 'is-refreshing' : ''} aria-busy={finance.phase === 'refreshing' || undefined}>
+      {monthView.emptyCopy ? <ViewState
+        icon="reports"
+        title={monthView.emptyCopy}
+        hint="Wybierz inny miesiąc, aby zobaczyć podsumowanie."
+        action={monthView.latestPopulatedMonth ? <Button variant="ghost" onClick={() => selectMonth(monthView.latestPopulatedMonth)}>
           Pokaż ostatni miesiąc z danymi — {fmtMonthYear(monthView.latestPopulatedMonth)}
-        </Button>
-      ) : null}
+        </Button> : null}
+      /> : null}
+      <section className="report-print-sheet print-only" aria-label="Arkusz wydruku raportu">
+        <p>Podsumowanie miesiąca: {fmtMonthYear(selectedMonth)}</p>
+      </section>
 
       <section className="card card--pad report-window__trend" data-reveal aria-labelledby="report-trend-title">
         <h2 className="card-title" id="report-trend-title">Trend sześciu miesięcy</h2>
-        <div className="chart-frame">
+        <div className="chart-frame no-print">
           <AreaChart
-            data={window.trend.map((point) => ({
+            data={financeWindow.trend.map((point) => ({
               ym: point.month,
               revenue: point.revenueGrosze / 100,
             }))}
@@ -163,7 +177,7 @@ export function ProtectedReports({ params = {} }) {
           <thead><tr><th>Miesiąc</th><th className="right">Przychody</th>
             <th className="right">Wpłacono</th><th className="right">Do sprawdzenia</th><th className="right">Wydatki</th>
             <th className="right">Dochód</th></tr></thead>
-          <tbody>{window.trend.map((point) => <tr key={point.month}>
+          <tbody>{financeWindow.trend.map((point) => <tr key={point.month}>
             <th scope="row">{fmtMonthYear(point.month)}</th>
             <td className="right">{money(point.revenueGrosze)}</td>
             <td className="right">{money(point.collectedGrosze)}</td>
@@ -177,22 +191,23 @@ export function ProtectedReports({ params = {} }) {
       <div className="report-window__splits">
         <MoneySplit
           title="Przychody według specjalistki"
-          rows={moneyRows(window.splits.specialist, (id) => specialistNames.get(id) ?? 'Nie ustalono')}
+          rows={moneyRows(financeWindow.splits.specialist, (id) => specialistNames.get(id) ?? 'Nie ustalono')}
         />
         <MoneySplit
           title="Przychody według usługi"
-          rows={moneyRows(window.splits.service, (id) => SERVICE_BY_ID[id]?.label ?? 'Nie ustalono')}
+          rows={moneyRows(financeWindow.splits.service, (id) => SERVICE_BY_ID[id]?.label ?? 'Nie ustalono')}
         />
         <MoneySplit
           title="Płatności i zaległości"
-          rows={moneyRows(window.splits.payment, (id) => PAYMENT_LABELS[id] ?? 'Nie ustalono')}
+          rows={moneyRows(financeWindow.splits.payment, (id) => PAYMENT_LABELS[id] ?? 'Nie ustalono')}
         />
-        <section className="card card--pad report-window__split" data-reveal>
+      <section className="card card--pad report-window__split" data-reveal>
           <h2 className="card-title">Faktury</h2>
-          {Object.keys(window.splits.invoice).length === 0 ? <p className="muted">Brak danych</p> : (
-            <dl className="activity-card-facts">{Object.entries(window.splits.invoice)
+          {Object.keys(financeWindow.splits.invoice).length === 0 ? <p className="muted">Brak danych</p> : (
+            <dl className="activity-card-facts">{Object.entries(financeWindow.splits.invoice)
               .map(([id, value]) => ({ id, label: INVOICE_LABELS[id] ?? 'Do sprawdzenia', value }))
-              .sort((left, right) => left.label.localeCompare(right.label, 'pl'))
+              .sort((left, right) => right.value.revenueGrosze - left.value.revenueGrosze
+                || left.label.localeCompare(right.label, 'pl'))
               .map(({ id, label, value }) => <div key={id}>
               <dt>{label}</dt>
               <dd>{value.count} · {money(value.revenueGrosze)}</dd>
@@ -201,34 +216,38 @@ export function ProtectedReports({ params = {} }) {
         </section>
         <section className="card card--pad report-window__split" data-reveal>
           <h2 className="card-title">TUS i angielski</h2>
-          <dl className="activity-card-facts">{Object.entries(window.splits.program).map(([program, value]) => <div key={program}>
-            <dt>{program === 'tus' ? 'TUS' : 'Angielski'}</dt>
+          <dl className="activity-card-facts">{Object.entries(financeWindow.splits.program)
+            .map(([program, value]) => ({
+              program, value, label: program === 'tus' ? 'TUS' : 'Angielski',
+            }))
+            .sort((left, right) => right.value.revenueGrosze - left.value.revenueGrosze
+              || left.label.localeCompare(right.label, 'pl'))
+            .map(({ program, value, label }) => <div key={program}>
+            <dt>{label}</dt>
             <dd>{money(value.revenueGrosze)} · {value.count} {plural(
               value.count, 'aktywność', 'aktywności', 'aktywności',
             )}</dd>
           </div>)}</dl>
-        </section>
+      </section>
       </div>
 
       <section className="card card--pad report-window__coverage" data-reveal aria-labelledby="coverage-title">
         <h2 className="card-title" id="coverage-title">Pokrycie czasu i dat</h2>
         <dl className="activity-card-facts">
-          <div><dt>Dokładna godzina</dt><dd>{window.coverage.timedCount}</dd></div>
-          <div><dt>Godzina nieustalona</dt><dd>{window.coverage.dateOnlyCount}</dd></div>
-          <div><dt>Dzień nieustalony</dt><dd>{window.coverage.monthOnlyCount}</dd></div>
-          <div><dt>Okres nieustalony w wybranym miesiącu</dt><dd>{window.coverage.unknownCount}</dd></div>
+          <div><dt>Dokładna godzina</dt><dd>{financeWindow.coverage.timedCount}</dd></div>
+          <div><dt>Godzina nieustalona</dt><dd>{financeWindow.coverage.dateOnlyCount}</dd></div>
+          <div><dt>Dzień nieustalony</dt><dd>{financeWindow.coverage.monthOnlyCount}</dd></div>
+          <div><dt>Okres nieustalony w wybranym miesiącu</dt><dd>{financeWindow.coverage.unknownCount}</dd></div>
         </dl>
       </section>
-      {window.unknownPeriodCount > 0 ? <section className="card card--pad report-window__unknown" data-reveal>
+      {financeWindow.unknownPeriodCount > 0 ? <section className="card card--pad report-window__unknown" data-reveal>
         <h2 className="card-title">Nieustalony miesiąc księgowy</h2>
-        <p>{window.unknownPeriodCount} {plural(
-          window.unknownPeriodCount,
+        <p>{financeWindow.unknownPeriodCount} {plural(
+          financeWindow.unknownPeriodCount,
           'pozycja wymaga', 'pozycje wymagają', 'pozycji wymaga',
         )} przeglądu poza wybranym miesiącem.</p>
-        <Button variant="ghost" onClick={() => navigate('ledger', { section: 'unknown' })}>
-          Przejdź do pozycji z nieustalonym okresem
-        </Button>
       </section> : null}
+      </div>
     </div>
   )
 }

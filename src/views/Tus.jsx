@@ -122,7 +122,7 @@ function GroupCard({ centre, group, leaders, monthSummary, next, roster }) {
       <div className="gcard__leaders">
         {leaders.map((psychologist) => (
           <span className="row" style={{ gap: 7 }} key={psychologist.id}>
-            <Avatar name={psychologist.name} color={psychologist.color} size={26} />
+            <Avatar name={psychologist.name} color={psychologist.color} avatarKey={psychologist.avatarKey} size={26} />
             <span className="muted">{psychologist.name.split(' ')[0]}</span>
           </span>
         ))}

@@ -8,6 +8,9 @@ const {
   roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters,
   dissolveLoneFamilies, normalizeSearchText, clientMatchesQuery, dayStatusSummary, sessionConflicts,
   paymentEntryFor, paymentSnapshotOf, scopedBillingSummary, specialistWeekLoad, withPsychologistDefaults,
+  sessionHasStarted, isBeforeAssignmentStart, assignmentStartLabel,
+  latestSessionForClient, occupiedSessionsForSpecialistDay, occupiedTimeLabels, suggestedSessionTime,
+  sessionSpecialistId, sessionClientOptions, filterSessionClientOptions, isBookableClient, bookableClientsForRole,
 } = workspace
 
 const state = {
@@ -88,6 +91,22 @@ test('today workspace selects the next scheduled session for the active role', (
   })
 })
 
+test('today workspace limits outstanding money to its explicit range', () => {
+  const workspace = todayWorkspace({
+    ...state,
+    sessions: [
+      { id: 's-before', psychId: 'p1', date: '2026-04-13', time: '09:00', status: 'completed', amount: 110, payment: 'unpaid', paidAmount: 0 },
+      { id: 's-in-range', psychId: 'p1', date: '2026-04-14', time: '09:00', status: 'completed', amount: 180, payment: 'unpaid', paidAmount: 0 },
+      { id: 's-today', psychId: 'p2', date: '2026-07-15', time: '10:00', status: 'noshow', amount: 260, payment: 'partial', paidAmount: 60 },
+      { id: 's-after', psychId: 'p2', date: '2026-07-16', time: '10:00', status: 'completed', amount: 300, payment: 'unpaid', paidAmount: 0 },
+    ],
+  }, roleById('owner'), new Date('2026-07-15T12:00:00'), {
+    from: '2026-04-14', to: '2026-07-15',
+  })
+
+  assert.equal(workspace.outstanding, 380)
+})
+
 test('search normalization folds Polish diacritics and removes separators', () => {
   assert.equal(normalizeSearchText('  ŻÓŁĆ, +48 (500) 100-200  '), 'zolc48500100200')
 })
@@ -111,6 +130,33 @@ test('client search compares formatted and unformatted phone numbers', () => {
 
 test('an empty normalized client query matches every client', () => {
   assert.equal(clientMatchesQuery({ name: 'Dowolna osoba' }, '  ---  '), true)
+})
+
+test('session client options use Polish name order and search only matching scoped clients', () => {
+  const clients = [
+    { id: 'c-3', name: 'Żaneta Lis' },
+    { id: 'c-2', name: 'Alicja Nowak' },
+    { id: 'c-1', name: 'Adam Nowak' },
+  ]
+  const options = sessionClientOptions(clients)
+
+  assert.deepEqual(options.map((client) => client.id), ['c-1', 'c-2', 'c-3'])
+  assert.deepEqual(filterSessionClientOptions(options, 'nowak').map((client) => client.id), ['c-1', 'c-2'])
+  assert.deepEqual(filterSessionClientOptions(options, 'żaneta').map((client) => client.id), ['c-3'])
+  assert.deepEqual(clients.map((client) => client.id), ['c-3', 'c-2', 'c-1'])
+})
+
+test('only active or paused writable clients are bookable for a session', () => {
+  const clients = [
+    { id: 'c-active', status: 'active', archivedAt: null, readOnly: false },
+    { id: 'c-paused', status: 'paused', archivedAt: null, readOnly: false },
+    { id: 'c-archived', status: 'archived', archivedAt: '2026-07-20T08:00:00.000Z', readOnly: true },
+    { id: 'c-read-only', status: 'active', archivedAt: null, readOnly: true },
+    { id: 'c-history', status: 'historical', archivedAt: null, readOnly: false },
+  ]
+
+  assert.deepEqual(clients.filter(isBookableClient).map((client) => client.id), ['c-active', 'c-paused'])
+  assert.deepEqual(bookableClientsForRole({ clients }, roleById('owner')).map((client) => client.id), ['c-active', 'c-paused'])
 })
 
 test('day status summary gives current interval boundaries precedence', () => {
@@ -184,6 +230,26 @@ test('cancelled sessions never create conflicts', () => {
   assert.deepEqual(sessionConflicts(sessions), [])
 })
 
+test('session status becomes available at the session start, while a no-show remains valid before it', () => {
+  const session = { date: '2026-09-11', time: '14:05' }
+
+  assert.equal(sessionHasStarted(session, new Date('2026-09-11T12:04:00.000Z')), false)
+  assert.equal(sessionHasStarted(session, new Date('2026-09-11T12:05:00.000Z')), true)
+  assert.equal(sessionHasStarted(session, new Date('2026-09-12T06:00:00.000Z')), true)
+})
+
+test('assignment start rejects an earlier session at full Warsaw date and time precision', () => {
+  const startsAt = '2026-09-11T12:05:00.000Z'
+  const startsAtWithSeconds = '2026-09-11T12:05:30.000Z'
+
+  assert.equal(isBeforeAssignmentStart('2026-09-11', '14:04', startsAt), true)
+  assert.equal(isBeforeAssignmentStart('2026-09-11', '14:05', startsAt), false)
+  assert.equal(isBeforeAssignmentStart('2026-09-11', '14:05', startsAtWithSeconds), true)
+  assert.equal(isBeforeAssignmentStart('2026-09-11', '14:06', startsAtWithSeconds), false)
+  assert.equal(isBeforeAssignmentStart('2026-09-12', '08:00', startsAt), false)
+  assert.equal(assignmentStartLabel(startsAt), '11 września o 14:05')
+})
+
 test('billing summary scopes billable amounts to one specialist', () => {
   const sessions = [
     { id: 's1', psychId: 'p1', status: 'completed', amount: 200, payment: 'paid', paidAmount: 200 },
@@ -204,12 +270,12 @@ test('billing summary scopes billable amounts to one specialist', () => {
   })
 })
 
-test('psychologist capacity defaults to twenty while preserving explicit values', () => {
-  assert.deepEqual(withPsychologistDefaults({ id: 'p-new', weeklyCapacity: 12 }), {
-    id: 'p-new', weeklyCapacity: 12,
+test('psychologist defaults include a stable avatar while preserving explicit values', () => {
+  assert.deepEqual(withPsychologistDefaults({ id: 'p-new', weeklyCapacity: 12, avatarKey: 'wave' }), {
+    id: 'p-new', weeklyCapacity: 12, avatarKey: 'wave',
   })
   assert.deepEqual(withPsychologistDefaults({ id: 'p-default' }), {
-    id: 'p-default', weeklyCapacity: 20,
+    id: 'p-default', weeklyCapacity: 20, avatarKey: 'bloom',
   })
   // every seeded specialist declares her own capacity, so the default never
   // has to fire — part-time members (the TUS trainers) sit below twenty
@@ -257,6 +323,70 @@ test('session filters combine payment and attendance constraints', () => {
   assert.equal(sessionMatchesFilters({ ...state.sessions[1], payment: 'unpaid' }, filters), false)
   assert.equal(sessionMatchesFilters({ ...state.sessions[1], status: 'noshow' }, filters), false)
   assert.equal(sessionMatchesFilters(state.sessions[1], { payment: 'all', attendance: 'all' }), true)
+  assert.equal(sessionMatchesFilters(state.sessions[1], { payment: 'all', attendance: 'all', specialist: 'p2' }), true)
+  assert.equal(sessionMatchesFilters(state.sessions[1], { payment: 'all', attendance: 'all', specialist: 'p1' }), false)
+})
+
+test('the latest non-cancelled client session supplies the specialist default', () => {
+  const sessions = [
+    { id: 'cancelled-latest', clientId: 'c1', psychId: 'p3', date: '2026-08-05', time: '16:00', status: 'cancelled' },
+    { id: 'latest', clientId: 'c1', psychId: 'p2', date: '2026-08-04', time: '14:00', status: 'scheduled' },
+    { id: 'earlier', clientId: 'c1', psychId: 'p1', date: '2026-08-04', time: '09:00', status: 'completed' },
+    { id: 'other-client', clientId: 'c2', psychId: 'p3', date: '2026-08-06', time: '10:00', status: 'scheduled' },
+  ]
+
+  assert.equal(latestSessionForClient(sessions, 'c1')?.id, 'latest')
+  assert.equal(latestSessionForClient(sessions, 'missing'), null)
+})
+
+test('session specialist defaults stay within the available scope', () => {
+  const availablePsychologists = [{ id: 'p1' }, { id: 'p2' }]
+
+  assert.equal(sessionSpecialistId({
+    availablePsychologists, latestPsychId: 'p2', clientPsychId: 'p3', currentPsychId: 'p1',
+  }), 'p2')
+  assert.equal(sessionSpecialistId({
+    availablePsychologists, latestPsychId: 'p3', clientPsychId: 'p4', currentPsychId: 'p1',
+  }), 'p1')
+  assert.equal(sessionSpecialistId({
+    availablePsychologists, latestPsychId: 'p3', clientPsychId: 'p2', currentPsychId: 'p1',
+  }), 'p2')
+  assert.equal(sessionSpecialistId({
+    availablePsychologists, ownPsychId: 'p2', latestPsychId: 'p1', clientPsychId: 'p1',
+  }), 'p2')
+  assert.equal(sessionSpecialistId({
+    availablePsychologists, preferredPsychId: 'p1', latestPsychId: 'p2', clientPsychId: 'p2',
+  }), 'p1')
+  assert.equal(sessionSpecialistId({
+    availablePsychologists, latestPsychId: 'p3', clientPsychId: 'p4', currentPsychId: 'p5',
+  }), '')
+})
+
+test('occupied specialist sessions provide an exact next-time suggestion without inventing availability', () => {
+  const sessions = [
+    { id: 'cancelled', psychId: 'p1', date: '2026-08-04', time: '15:00', duration: 50, status: 'cancelled' },
+    { id: 'late', psychId: 'p1', date: '2026-08-04', time: '14:00', duration: 60, status: 'scheduled' },
+    { id: 'early', psychId: 'p1', date: '2026-08-04', time: '09:00', duration: 50, status: 'completed' },
+    { id: 'other-specialist', psychId: 'p2', date: '2026-08-04', time: '16:00', duration: 50, status: 'scheduled' },
+  ]
+
+  assert.deepEqual(
+    occupiedSessionsForSpecialistDay(sessions, { psychId: 'p1', date: '2026-08-04' }).map((session) => session.id),
+    ['early', 'late'],
+  )
+  assert.equal(suggestedSessionTime(sessions, { psychId: 'p1', date: '2026-08-04' }), '15:00')
+  assert.equal(suggestedSessionTime(sessions, { psychId: 'p2', date: '2026-08-04' }), '16:50')
+  assert.equal(suggestedSessionTime(sessions, { psychId: 'missing', date: '2026-08-04' }), null)
+})
+
+test('occupied-time labels keep the first matching interval and omit later duplicates', () => {
+  const sessions = [
+    { id: 'first', time: '09:00', duration: 50 },
+    { id: 'duplicate', time: '09:00', duration: 50 },
+    { id: 'next', time: '10:00', duration: 60 },
+  ]
+
+  assert.deepEqual(occupiedTimeLabels(sessions), ['09:00-09:50', '10:00-11:00'])
 })
 
 test('families with fewer than two members dissolve completely', () => {

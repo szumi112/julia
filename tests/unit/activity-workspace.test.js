@@ -108,9 +108,30 @@ test('sorts protected groups by Polish label and never invents classes or attend
   assert.equal(august.memberships[0].period.precision, 'month')
   assert.deepEqual(august.classes.map(({ activityClass }) => activityClass.id), ['acl_real'])
   assert.deepEqual(august.classes[0].attendance.map(({ attendance }) => attendance.id), ['aat_real'])
+  assert.equal(august.latestClass?.id, 'acl_real')
   assert.equal(august.chargeRows.length, 1)
   assert.equal(august.summary.amountGrosze, 34_000)
   assert.equal(activityGroupView(state, { groupId: 'agr_missing', month: '2026-08' }), null)
+})
+
+test('uses the most recent completed class for an optional last-class date', () => {
+  const classesById = frozenMap({
+    ...state.classesById,
+    acl_scheduled: Object.freeze({
+      id: 'acl_scheduled', groupId: 'agr_a', date: '2026-08-25', time: null,
+      durationMinutes: null, topic: null, status: 'scheduled', version: 1,
+    }),
+    acl_cancelled: Object.freeze({
+      id: 'acl_cancelled', groupId: 'agr_a', date: '2026-08-28', time: null,
+      durationMinutes: null, topic: null, status: 'cancelled', version: 1,
+    }),
+  })
+  const withLaterNonCompleted = Object.freeze({ ...state, classesById })
+
+  const overview = activityProgramOverview(withLaterNonCompleted, { program: 'tus', month: '2026-08' })
+  const group = activityGroupView(withLaterNonCompleted, { groupId: 'agr_a', month: '2026-08' })
+  assert.equal(overview.groups.find(({ group: item }) => item.id === 'agr_a').latestClass?.id, 'acl_real')
+  assert.equal(group.latestClass?.id, 'acl_real')
 })
 
 test('combines the global TUS grant with centre and proved leader eligibility', () => {
@@ -145,6 +166,15 @@ test('combines the global TUS grant with centre and proved leader eligibility', 
   })
   assert.equal(mismatchedProfessionalLink.editGroup, false)
   assert.equal(mismatchedProfessionalLink.createClass, false)
+})
+
+test('does not expose creation actions before the selected activity overview is ready', () => {
+  const actions = activityActionAvailability({
+    actor: { specialistId: null }, role: { scope: 'centre' },
+    capabilities: ['tus.manage'], group: null, loadState: 'loading',
+  })
+  assert.equal(actions.createGroup, false)
+  assert.equal(actions.createParticipant, false)
 })
 
 test('group participant choices are active-only and sort by Polish name then ID', () => {

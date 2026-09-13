@@ -256,6 +256,7 @@ const readyResponse = (overrides = {}) => {
     actor: {
       id: 'stf_local_owner',
       displayName: 'Alicja Testowa',
+      email: 'owner@example.test',
       professionalTitle: null,
       role: 'owner',
       specialistId: null,

@@ -5,7 +5,7 @@ import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const NOW = '2026-09-05T10:00:00.000Z'
 const session = { data: {
-  actor: { id: 'stf_owner_1', displayName: 'Fikcyjna Osoba', professionalTitle: null,
+  actor: { id: 'stf_owner_1', displayName: 'Fikcyjna Osoba', email: 'owner@example.test', professionalTitle: null,
     role: 'owner', specialistId: null, version: 3 },
   authorityRevision: 1, capabilities: [...ROLE_DEFAULT_CAPABILITIES.owner],
   csrfToken: `v1.1999999999.${'A'.repeat(22)}.${'B'.repeat(43)}`,

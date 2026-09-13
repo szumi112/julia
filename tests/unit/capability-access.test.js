@@ -102,11 +102,11 @@ test('protected payments selects authority scope from capabilities, never displa
   assert.equal(protectedPaymentsSurface([], 'sp_fictional'), 'unavailable')
 })
 
-test('protected activity routes require the TUS management capability', () => {
+test('protected activity routes resolve with workspace read so a direct link can show its safe scope state', () => {
   for (const routeName of ['tus', 'tusGroup', 'english']) {
-    assert.equal(canAccessProtectedRoute(['tus.manage'], routeName), true)
+    assert.equal(canAccessProtectedRoute(WORKSPACE_CAPABILITIES, routeName), true)
     assert.equal(canAccessProtectedRoute([], routeName), false)
-    assert.equal(canAccessProtectedRoute(['chat.general'], routeName), false)
+    assert.equal(canAccessProtectedRoute(['tus.manage'], routeName), false)
   }
 })
 
@@ -119,9 +119,13 @@ test('payments accepts either centre finance or appointment charge read authorit
   assert.equal(canAccessProtectedRoute([], 'payments'), false)
 })
 
-test('settings requires authentication represented by a valid capability array only', () => {
-  assert.equal(canAccessProtectedRoute([], 'settings'), true)
-  assert.equal(canAccessProtectedRoute(['chat.general'], 'settings'), true)
+test('protected settings requires access to the operations section', () => {
+  assert.equal(canAccessProtectedRoute(['operations.health.read'], 'settings'), true)
+  for (const capability of ['staff.manage', 'permissions.manage']) {
+    assert.equal(canAccessProtectedRoute([capability], 'settings'), false)
+  }
+  assert.equal(canAccessProtectedRoute([], 'settings'), false)
+  assert.equal(canAccessProtectedRoute(['chat.general'], 'settings'), false)
 })
 
 test('catalog-ordered effective subsets preserve every mapped grant', () => {

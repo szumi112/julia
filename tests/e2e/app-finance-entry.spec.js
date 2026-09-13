@@ -7,7 +7,7 @@ const json = (data, status = 200) => ({ status, contentType: 'application/json',
 const settlement = (entry) => Object.fromEntries(['accountingMonth', 'paidAmountGrosze',
   'paymentMethod', 'settlementStatus', 'invoiceStatus'].map((field) => [field, entry[field]]))
 
-test('@owner keeps invalid pasted finance text editable without sending or locking a save', async ({ page }) => {
+test('@owner keeps invalid manual finance input editable without sending or locking a save', async ({ page }) => {
   const requests = []
   await page.route('**/api/v1/finance/entries', (route) => {
     requests.push(route.request().postDataJSON())
@@ -16,16 +16,45 @@ test('@owner keeps invalid pasted finance text editable without sending or locki
   await page.goto('./#/payments')
   await page.getByRole('button', { name: 'Dodaj pozycję', exact: true }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowa pozycja finansowa' })
-  await drawer.getByLabel('Opis pozycji').fill('Opłata\u200b za zajęcia')
-  await drawer.getByLabel('Kwota (zł)', { exact: true }).fill('10')
+  await expect(drawer.getByLabel('Opis pozycji')).toHaveAttribute('placeholder', 'Wpisz, za co jest ta pozycja')
   await drawer.getByRole('button', { name: 'Dodaj pozycję', exact: true }).click()
-  await expect(drawer.getByRole('alert')).toContainText('niewidoczne')
+  await expect(drawer.getByLabel('Opis pozycji')).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.getByLabel('Kwota (zł)', { exact: true })).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.getByText('Wpisz, za co jest ta pozycja', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('Wpisz kwotę, np. 180 albo 180,50', { exact: true })).toBeVisible()
+  await expect(drawer.getByLabel('Opis pozycji')).toBeFocused()
+  expect(requests).toEqual([])
+  await drawer.getByLabel('Opis pozycji').fill('Opłata za zajęcia')
+  await drawer.getByLabel('Kwota (zł)', { exact: true }).fill('10,001')
+  await drawer.getByRole('button', { name: 'Dodaj pozycję', exact: true }).click()
+  await expect(drawer.getByText('Wpisz kwotę, np. 180 albo 180,50', { exact: true })).toBeVisible()
+  await drawer.getByLabel('Kwota (zł)', { exact: true }).fill('180')
+  await drawer.getByLabel('Łącznie wpłacono (zł)').fill('10,001')
+  await drawer.getByRole('button', { name: 'Dodaj pozycję', exact: true }).click()
+  await expect(drawer.getByLabel('Łącznie wpłacono (zł)')).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.getByLabel('Łącznie wpłacono (zł)')).toBeFocused()
   await expect(drawer.getByLabel('Opis pozycji')).toBeEnabled()
   await expect(drawer.getByRole('button', { name: 'Anuluj', exact: true })).toBeEnabled()
   await expect(drawer.getByRole('button', { name: 'Ponów ten sam zapis' })).toHaveCount(0)
   expect(requests).toEqual([])
   await drawer.getByLabel('Opis pozycji').fill('Opłata za zajęcia')
   await expect(drawer.getByLabel('Opis pozycji')).toHaveValue('Opłata za zajęcia')
+})
+
+test('@owner lets a new entry follow its date until the accounting month is selected manually', async ({ page }) => {
+  await page.goto('./#/payments')
+  await page.getByRole('button', { name: 'Dodaj pozycję', exact: true }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowa pozycja finansowa' })
+  const month = drawer.getByLabel('Miesiąc rozliczenia')
+  await drawer.getByLabel('Data').fill('2026-08-14')
+  await expect(month).toHaveValue('2026-08')
+  await month.selectOption('2026-07')
+  await drawer.getByLabel('Data').fill('2026-09-02')
+  await expect(month).toHaveValue('2026-07')
+  await expect(drawer.getByText(
+    'Zwykle miesiąc z daty; zmień, jeśli pozycja ma się liczyć do innego miesiąca.',
+    { exact: true },
+  )).toBeVisible()
 })
 
 async function installEntryContract(page, { programId = null } = {}) {
@@ -84,7 +113,7 @@ async function installEntryContract(page, { programId = null } = {}) {
   await page.route(`**/api/v1/finance/entries/${entryId}/adjustments`, (route) => {
     const body = route.request().postDataJSON()
     expect(body).toEqual({ expectedVersion: entry.version, reason: programId
-      ? 'Potwierdzono fikcyjną wpłatę TUS' : 'Potwierdzono fikcyjny przelew i fakturę',
+      ? 'Potwierdzono fikcyjną wpłatę TUS' : 'Potwierdzono fikcyjną zapłatę i fakturę.',
       accountingMonth: entry.accountingMonth, paidAmountGrosze: programId ? 34000 : 12345,
       paymentMethod: programId ? 'unknown' : 'transfer', settlementStatus: 'paid', invoiceStatus: programId ? 'not_required' : 'issued' })
     expect(route.request().headers()['idempotency-key']).toMatch(/^[A-Za-z0-9._~-]{8,128}$/)
@@ -131,52 +160,17 @@ async function installEntryContract(page, { programId = null } = {}) {
   return { requests, adjustments }
 }
 
-for (const kind of ['expense', 'income']) {
-  test(`@owner UI contract adjusts unknown-period ${kind} through the registry`, async ({ page }) => {
-    await page.emulateMedia({ reducedMotion: 'reduce' })
-    let entry = { id: 'fin_unknown_action', version: 1, kind, recordType: kind,
-      accountingMonth: null, occurredOn: null, amountGrosze: 12000, paidAmountGrosze: 0,
-      paymentMethod: 'unknown', settlementStatus: 'unknown', invoiceStatus: 'unknown',
-      appointmentId: null, counterparty: 'Fikcyjny kontrahent', sourceLabel: 'Fikcyjna pozycja' }
-    const commands = []
-    const json = (data) => ({ status: 200, contentType: 'application/json', body: JSON.stringify({ data }) })
-    await page.route('**/api/v1/workbooks/registry?*', (route) => route.fulfill(json({
-      cursor: null, nextCursor: null, imports: [], exports: [], complete: true,
-      entries: entry.accountingMonth ? [] : [{ id: entry.id, importId: null, state: 'active',
-        voidType: null, kind, recordType: kind, accountingMonth: null, amountGrosze: 12000, version: entry.version }],
-    })))
-    await page.route('**/api/v1/finance/entries/fin_unknown_action', (route) => route.fulfill(json({ entry, adjustments: [], historyTruncated: false })))
-    await page.route('**/api/v1/finance/entries/fin_unknown_action/adjustments', (route) => {
-      const command = route.request().postDataJSON()
-      commands.push(command)
-      entry = { ...entry, accountingMonth: command.accountingMonth, paidAmountGrosze: command.paidAmountGrosze,
-        paymentMethod: command.paymentMethod, settlementStatus: command.settlementStatus,
-        invoiceStatus: command.invoiceStatus, version: 2 }
-      return route.fulfill(json({ entryId: entry.id, version: 2 }))
-    })
-    await page.goto('./#/ledger?section=unknown')
-    await page.getByRole('button', { name: 'Rozliczenie / faktura' }).click()
-    const drawer = page.getByRole('dialog', { name: 'Rozliczenie i faktura' })
-    if (kind === 'expense') await drawer.getByLabel('Miesiąc księgowy').fill('2026-08')
-    else await expect(drawer.getByLabel('Miesiąc księgowy')).toBeDisabled()
-    await drawer.getByLabel('Łącznie wpłacono (zł)').fill('120')
-    await drawer.getByLabel('Status płatności').selectOption('paid')
-    await drawer.getByLabel('Stan faktury').selectOption('issued')
-    await drawer.getByLabel('Powód korekty').fill('Ustalono fikcyjne rozliczenie')
-    await drawer.getByRole('button', { name: 'Zapisz korektę' }).click()
-    await expect(drawer).toHaveCount(0)
-    expect(commands).toMatchObject([{ accountingMonth: kind === 'expense' ? '2026-08' : null,
-      expectedVersion: 1, paidAmountGrosze: 12000, settlementStatus: 'paid', invoiceStatus: 'issued' }])
-  })
-}
-
-test('@owner UI contract creates an expense with a safe retry, then adjusts payment and invoice with history', async ({ page }) => {
+test('@owner UI contract creates a compact expense and retains its settlement classification on correction', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   const { requests, adjustments } = await installEntryContract(page)
-  await page.goto('./#/payments?tab=expenses')
+  await page.goto('./#/payments')
   await page.getByRole('button', { name: 'Dodaj pozycję', exact: true }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowa pozycja finansowa' })
   await drawer.getByLabel('Rodzaj').selectOption('expense')
+  await expect(drawer.getByLabel('Łącznie wpłacono (zł)')).toHaveCount(0)
+  await expect(drawer.getByLabel('Forma płatności')).toHaveCount(0)
+  await expect(drawer.getByLabel('Status płatności')).toHaveCount(0)
+  await expect(drawer.getByLabel('Stan faktury')).toHaveCount(0)
   await drawer.getByLabel('Opis pozycji').fill('Fikcyjny zakup pomocy edukacyjnych')
   await drawer.getByLabel('Kwota (zł)', { exact: true }).fill('123,45')
   await drawer.getByRole('button', { name: 'Dodaj pozycję', exact: true }).click()
@@ -190,17 +184,21 @@ test('@owner UI contract creates an expense with a safe retry, then adjusts paym
   const row = page.getByRole('row').filter({ hasText: 'Fikcyjny zakup pomocy edukacyjnych' })
   await row.getByRole('button', { name: 'Rozliczenie / faktura' }).click()
   const edit = page.getByRole('dialog', { name: 'Rozliczenie i faktura' })
-  await edit.getByLabel('Łącznie wpłacono (zł)').fill('123,45')
-  await edit.getByLabel('Status płatności').selectOption('paid')
-  await edit.getByLabel('Forma płatności').selectOption('transfer')
+  await expect(edit.getByLabel('Kwota zapłacona (zł)')).toHaveValue('0.00')
+  await expect(edit.getByLabel('Stan zapłaty')).toHaveValue('unpaid')
+  await expect(edit.getByLabel('Forma zapłaty')).toHaveValue('unknown')
+  await expect(edit.getByLabel('Stan faktury')).toHaveValue('not_required')
+  await edit.getByLabel('Kwota zapłacona (zł)').fill('123,45')
+  await edit.getByLabel('Stan zapłaty').selectOption('paid')
+  await edit.getByLabel('Forma zapłaty').selectOption('transfer')
   await edit.getByLabel('Stan faktury').selectOption('issued')
-  await edit.getByLabel('Powód korekty').fill('Potwierdzono fikcyjny przelew i fakturę')
+  await edit.getByLabel('Powód korekty').fill('Potwierdzono fikcyjną zapłatę i fakturę.')
   await edit.getByRole('button', { name: 'Zapisz korektę' }).click()
   await expect(edit).toHaveCount(0)
   await row.getByRole('button', { name: 'Rozliczenie / faktura' }).click()
-  await expect(edit.getByLabel('Łącznie wpłacono (zł)')).toHaveValue('123.45')
+  await expect(edit.getByLabel('Kwota zapłacona (zł)')).toHaveValue('123.45')
   await expect(edit.getByLabel('Stan faktury')).toHaveValue('issued')
-  await expect(edit.getByRole('region', { name: 'Historia korekt' })).toContainText('Potwierdzono fikcyjny przelew i fakturę')
+  await expect(edit.getByRole('region', { name: 'Historia korekt' })).toContainText('Potwierdzono fikcyjną zapłatę i fakturę.')
   expect(adjustments).toHaveLength(1)
 })
 
@@ -248,16 +246,17 @@ test('@owner UI contract bills a TUS participant through an explicit group membe
   await expect(group).toHaveCount(0)
   await page.getByRole('link', { name: 'Otwórz grupę — Fikcyjna grupa rozliczenia TUS' }).click()
   const month = await page.locator('.month-nav time').getAttribute('datetime')
-  await page.getByRole('button', { name: 'Dodaj przypisanie', exact: true }).click()
-  const membership = page.getByRole('dialog', { name: 'Nowe przypisanie do grupy' })
+  await page.getByRole('button', { name: 'Zapisz do grupy', exact: true }).click()
+  const membership = page.getByRole('dialog', { name: 'Zapisz uczestnika do grupy' })
   await membership.getByLabel('Uczestnik').selectOption({ label: 'Fikcyjny Uczestnik Rozliczenia TUS' })
   await membership.getByLabel('Data rozpoczęcia').fill(`${month}-01`)
-  await membership.getByRole('button', { name: 'Dodaj przypisanie', exact: true }).click()
+  await membership.getByRole('button', { name: 'Zapisz do grupy', exact: true }).click()
   await expect(membership).toHaveCount(0)
   await page.getByRole('button', { name: 'Dodaj rozliczenie miesiąca' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowe rozliczenie miesiąca' })
   await drawer.getByLabel('Uczestnik', { exact: true }).selectOption({ label: 'Fikcyjny Uczestnik Rozliczenia TUS' })
-  await drawer.getByLabel('Przypisanie do grupy').selectOption({ label: `Fikcyjna grupa rozliczenia TUS · ${month}-01` })
+  await expect(drawer.getByLabel('Przypisanie do grupy')).toHaveCount(0)
+  await expect(drawer.getByLabel('Miesiąc rozliczenia')).toHaveCount(0)
   await drawer.getByLabel('Odpowiedzialny specjalista').selectOption({ label: 'Zofia Fikcyjna' })
   await drawer.getByLabel('Kwota (zł)', { exact: true }).fill('340')
   await drawer.getByRole('button', { name: 'Dodaj pozycję' }).click()
@@ -274,5 +273,10 @@ test('@owner UI contract bills a TUS participant through an explicit group membe
   await expect(charge.getByText('Opłacona', { exact: true })).toBeVisible()
   await expect(page.getByText('Dane są teraz niedostępne')).toHaveCount(0)
   expect(requests).toHaveLength(1)
+  expect(requests[0]).toMatchObject({ body: {
+    participantId: expect.stringMatching(/^acp_/), groupId: expect.stringMatching(/^agr_/),
+    membershipId: expect.stringMatching(/^amb_/), accountingMonth: month,
+    amountGrosze: 34_000, paidAmountGrosze: 0, settlementStatus: 'unpaid',
+  }, key: expect.stringMatching(/^[A-Za-z0-9._~-]{8,128}$/) })
   expect(adjustments).toHaveLength(1)
 })

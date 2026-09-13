@@ -1,12 +1,16 @@
 import { cloneElement, isValidElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Icon } from './icons.jsx'
 import { initials, fmtNumber, fmtMoney } from './format.js'
+import {
+  DEFAULT_SPECIALIST_AVATAR_KEY,
+  isSpecialistAvatarKey,
+  SPECIALIST_AVATAR_KEYS,
+} from './specialist-avatars.js'
 import { useToasts } from './store.jsx'
-import { useMagnetic, useCountUp, motionOK } from './anim.js'
+import { useCountUp, motionOK } from './anim.js'
 import { pageCount, pageSlice } from './pagination.js'
 
-export function Button({ children, icon, variant = 'primary', size, magnetic, className = '', ...rest }) {
-  const magRef = useMagnetic(0.22)
+export function Button({ children, icon, variant = 'primary', size, magnetic: _magnetic, className = '', ...rest }) {
   const cls = [
     'btn',
     `btn--${variant}`,
@@ -14,7 +18,7 @@ export function Button({ children, icon, variant = 'primary', size, magnetic, cl
     className,
   ].join(' ')
   return (
-    <button type="button" ref={magnetic ? magRef : undefined} className={cls} {...rest}>
+    <button type="button" className={cls} {...rest}>
       {icon && <Icon name={icon} size={17} />}
       {children && <span>{children}</span>}
     </button>
@@ -63,10 +67,10 @@ export function DiscardConfirm({ onStay, onDiscard }) {
   return (
     <div className="form-warn drawer__discard" role="alert">
       <Icon name="alert" size={16} />
-      <span>Masz niezapisane zmiany.</span>
+      <span><strong>Zamknąć bez zapisywania?</strong> Wprowadzone zmiany przepadną.</span>
       <span className="drawer__discard-actions">
-        <Button size="sm" variant="ghost" onClick={onStay}>Wróć</Button>
-        <Button size="sm" variant="soft" onClick={onDiscard}>Odrzuć</Button>
+        <Button size="sm" autoFocus onClick={onStay}>Wróć do edycji</Button>
+        <Button size="sm" variant="danger" onClick={onDiscard}>Zamknij bez zapisywania</Button>
       </span>
     </div>
   )
@@ -109,7 +113,21 @@ export function Segmented({ options, value, onChange, ariaLabel }) {
       const idx = options.findIndex((o) => o.value === value)
       const btn = wrap.querySelectorAll('.seg__opt')[idx]
       // track top/height too — on phones the options can wrap to a second row
-      if (btn) setThumb({ left: btn.offsetLeft, width: btn.offsetWidth, top: btn.offsetTop, height: btn.offsetHeight })
+      if (btn) {
+        const next = {
+          left: btn.offsetLeft,
+          width: btn.offsetWidth,
+          top: btn.offsetTop,
+          height: btn.offsetHeight,
+        }
+        setThumb((current) => current
+          && current.left === next.left
+          && current.width === next.width
+          && current.top === next.top
+          && current.height === next.height
+          ? current
+          : next)
+      }
     }
     measure()
     const ro = new ResizeObserver(measure)
@@ -141,7 +159,11 @@ export function Segmented({ options, value, onChange, ariaLabel }) {
   // radio-style keyboard model: one tab stop, arrows move the selection
   const move = (dir) => {
     const idx = options.findIndex((o) => o.value === value)
-    const next = (idx + dir + options.length) % options.length
+    let next = idx
+    do {
+      next = (next + dir + options.length) % options.length
+    } while (options[next].disabled && next !== idx)
+    if (options[next].disabled) return
     onChange(options[next].value)
     requestAnimationFrame(() => wrapRef.current?.querySelectorAll('.seg__opt')[next]?.focus())
   }
@@ -155,8 +177,10 @@ export function Segmented({ options, value, onChange, ariaLabel }) {
           type="button"
           role="radio"
           className={`seg__opt ${o.value === value ? 'is-on' : ''}`}
-          onClick={() => onChange(o.value)}
+          disabled={o.disabled}
+          onClick={() => !o.disabled && onChange(o.value)}
           onKeyDown={(e) => {
+            if (o.disabled) return
             if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); move(1) }
             if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); move(-1) }
           }}
@@ -175,14 +199,41 @@ export function Tabs({ options, value, onChange, ariaLabel, children, className 
   const baseId = useId()
   const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value))
   const listRef = useRef(null)
+  const [edges, setEdges] = useState({ overflow: false, previous: false, next: false })
+
+  useLayoutEffect(() => {
+    const list = listRef.current
+    if (!list) return undefined
+    const updateEdges = () => {
+      const maxScroll = Math.max(0, list.scrollWidth - list.clientWidth)
+      setEdges({
+        overflow: maxScroll > 1,
+        previous: list.scrollLeft > 1,
+        next: list.scrollLeft < maxScroll - 1,
+      })
+    }
+    updateEdges()
+    const observer = new ResizeObserver(updateEdges)
+    observer.observe(list)
+    list.addEventListener('scroll', updateEdges, { passive: true })
+    return () => {
+      observer.disconnect()
+      list.removeEventListener('scroll', updateEdges)
+    }
+  }, [options])
+
   const move = useCallback((index) => {
     const next = (index + options.length) % options.length
     onChange(options[next].value)
-    requestAnimationFrame(() => listRef.current?.querySelectorAll('[role="tab"]')[next]?.focus())
+    requestAnimationFrame(() => {
+      const tab = listRef.current?.querySelectorAll('[role="tab"]')[next]
+      tab?.focus()
+      tab?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    })
   }, [onChange, options])
 
   return (
-    <div className={`tabs ${className}`}>
+    <div className={`tabs ${edges.overflow ? 'tabs--overflow' : ''} ${edges.previous ? 'tabs--has-previous' : ''} ${edges.next ? 'tabs--has-next' : ''} ${className}`}>
       <div className="tabs__list" role="tablist" aria-label={ariaLabel} ref={listRef}>
         {options.map((option, index) => {
           const selected = index === selectedIndex
@@ -294,7 +345,7 @@ export function Figure({ label, value, fmt = fmtNumber, suffix, sub, attention, 
 export function Stat({ label, value, fmt = fmtNumber, sub, tone }) {
   const ref = useCountUp(value, fmt)
   return (
-    <div className={`card stat card--lift ${tone ? `stat--${tone}` : ''}`} data-reveal>
+    <div className={`card stat ${tone ? `stat--${tone}` : ''}`} data-reveal>
       <div className="stat__label">{label}</div>
       <div className="stat__value"><span ref={ref}>{fmt(value)}</span></div>
       {sub && <div className="stat__sub">{sub}</div>}
@@ -305,10 +356,10 @@ export function Stat({ label, value, fmt = fmtNumber, sub, tone }) {
 // Money KPI card for the protected finance surfaces — the boxed cousin of
 // Figure/Stat with the same count-up. `grosze` keeps the API's integer
 // money; the card formats złote.
-export function MoneyKpi({ label, grosze }) {
+export function MoneyKpi({ label, grosze, tone }) {
   const ref = useCountUp(grosze / 100, fmtMoney)
   return (
-    <article className="finance-window__kpi" data-reveal>
+    <article className={`finance-window__kpi ${tone ? `finance-window__kpi--${tone}` : ''}`} data-reveal>
       <span>{label}</span>
       <strong ref={ref}>{fmtMoney(grosze / 100)}</strong>
     </article>
@@ -341,8 +392,39 @@ export function Toggle({ on, onChange, label, disabled }) {
   )
 }
 
-export function Avatar({ name, color = '#b03a1c', size = 38, variant = 'solid' }) {
+const avatarVectorVariantFor = (name) => {
+  const text = typeof name === 'string' ? name : ''
+  let hash = 0
+  for (let index = 0; index < text.length; index += 1) hash = (hash * 31 + text.charCodeAt(index)) >>> 0
+  return SPECIALIST_AVATAR_KEYS[hash % SPECIALIST_AVATAR_KEYS.length]
+}
+
+function AvatarArt({ variant }) {
+  if (variant === 'cross') return <>
+    <circle cx="9" cy="10" r="8" />
+    <circle cx="31" cy="30" r="9" />
+  </>
+  if (variant === 'orbit') return <>
+    <ellipse cx="20" cy="20" rx="17" ry="8" transform="rotate(-35 20 20)" />
+    <circle cx="29" cy="12" r="4" />
+  </>
+  if (variant === 'wave') return <path d="M-2 26C6 16 12 34 21 23s15 8 23-5v24H-2Z" />
+  return <>
+    <circle cx="11" cy="13" r="7" />
+    <circle cx="29" cy="13" r="7" />
+    <circle cx="20" cy="29" r="8" />
+  </>
+}
+
+const AVATAR_LABELS = Object.freeze({
+  bloom: 'Kwiat', cross: 'Kropki', orbit: 'Orbita', wave: 'Fala',
+})
+
+export function Avatar({ name, color, size = 38, variant = 'solid', avatarKey }) {
   const softVariant = variant !== 'solid'
+  const vectorVariant = isSpecialistAvatarKey(avatarKey)
+    ? avatarKey : avatarVectorVariantFor(name)
+  const avatarColor = typeof color === 'string' && color ? color : 'var(--coral-deep)'
   return (
     <span
       className={`avatar${softVariant ? ` avatar--${variant}` : ''}`}
@@ -351,18 +433,45 @@ export function Avatar({ name, color = '#b03a1c', size = 38, variant = 'solid' }
         width: size,
         height: size,
         fontSize: size * 0.36,
-        ...(softVariant ? {} : { background: `linear-gradient(135deg, ${color}, ${color}cc)` }),
+        '--avatar-color': avatarColor,
       }}
     >
-      {initials(name)}
+      <svg className={`avatar__art avatar__art--${vectorVariant}`} viewBox="0 0 40 40" focusable="false">
+        <AvatarArt variant={vectorVariant} />
+      </svg>
+      <span className="avatar__initials">{initials(name)}</span>
     </span>
+  )
+}
+
+export function SpecialistAvatarPicker({ value = DEFAULT_SPECIALIST_AVATAR_KEY, onChange }) {
+  const selected = isSpecialistAvatarKey(value) ? value : DEFAULT_SPECIALIST_AVATAR_KEY
+  return (
+    <fieldset className="avatar-picker">
+      <legend>Wariant awatara</legend>
+      <div className="avatar-picker__options">
+        {SPECIALIST_AVATAR_KEYS.map((avatarKey) => (
+          <label className={`avatar-picker__option ${selected === avatarKey ? 'is-selected' : ''}`} key={avatarKey}>
+            <input
+              type="radio"
+              name="specialist-avatar"
+              value={avatarKey}
+              checked={selected === avatarKey}
+              onChange={() => onChange(avatarKey)}
+            />
+            <Avatar name={AVATAR_LABELS[avatarKey]} avatarKey={avatarKey} size={44} />
+            <span>{AVATAR_LABELS[avatarKey]}</span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
   )
 }
 
 // Lightweight popover (status pickers, menus). Closes on outside click / Esc.
 // Positioned with fixed viewport coordinates so it escapes scroll containers
 // (.table-scroll) and flips/clamps instead of clipping at viewport edges.
-export function Popover({ trigger, children, align = 'left', ariaLabel, contentRole = 'menu', open, setOpen }) {
+export function Popover({ trigger, children, align = 'left', ariaLabel, contentRole = 'menu', open, setOpen, focusOnOpen = false }) {
   const ref = useRef(null)
   const popRef = useRef(null)
   const [pos, setPos] = useState(null)
@@ -436,6 +545,18 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, contentR
   }, [contentRole, open, setOpen])
 
   useEffect(() => {
+    if (!open || !focusOnOpen) return
+    const frame = requestAnimationFrame(() => {
+      const picker = popRef.current
+      const item = picker?.querySelector('.popover__item.is-on:not(:disabled)')
+        || picker?.querySelector('.popover__item.is-selected:not(:disabled)')
+        || picker?.querySelector('.popover__item:not(:disabled)')
+      item?.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [focusOnOpen, open])
+
+  useEffect(() => {
     if (!open || !motionOK()) return
     const el = popRef.current
     if (el) window.gsap.fromTo(el, { y: -4, scale: 0.99 }, { y: 0, scale: 1, duration: 0.2, ease: 'power3.out' })
@@ -466,14 +587,14 @@ export function Popover({ trigger, children, align = 'left', ariaLabel, contentR
   )
 }
 
-export function PopItem({ on, role = 'menuitemradio', pressed, children, ...rest }) {
+export function PopItem({ on, role = 'menuitemradio', pressed, children, className = '', ...rest }) {
   return (
     <button
       type="button"
       role={role}
       aria-checked={role === 'menuitemradio' ? !!on : undefined}
       aria-pressed={pressed ? !!on : undefined}
-      className={`popover__item ${on ? 'is-on' : ''}`}
+      className={`popover__item ${on ? 'is-on' : ''} ${className}`}
       {...rest}
     >
       {children}
@@ -482,9 +603,9 @@ export function PopItem({ on, role = 'menuitemradio', pressed, children, ...rest
 }
 
 // Friendly empty state — icon, one line, optional hint + primary action.
-export function EmptyState({ icon = 'sparkle', title, hint, action, compact }) {
+export function EmptyState({ icon = 'sparkle', title, hint, action, compact, tone = 'empty' }) {
   return (
-    <div className={`empty ${compact ? 'empty--sm' : ''}`}>
+    <div className={`empty empty--${tone} ${compact ? 'empty--sm' : ''}`}>
       <span className="empty__icon">
         <Icon name={icon} size={compact ? 18 : 22} />
       </span>
@@ -585,7 +706,7 @@ function ToastItem({ toast, onDismiss }) {
     }
   }
   return (
-    <div className="toast" ref={ref}>
+    <div className={`toast toast--${toast.tone}`} ref={ref}>
       <Icon name={toast.icon} size={16} />
       <span className="toast__message">{toast.msg}</span>
       {toast.action && (

@@ -62,6 +62,9 @@ export function createAuthClient(fetchImpl = globalThis.fetch) {
     resetPassword: (token, newPassword) => request(`${AUTH_BASE}/reset-password`, {
       body: { token, newPassword },
     }),
+    changePassword: (currentPassword, newPassword) => request(`${AUTH_BASE}/change-password`, {
+      body: { currentPassword, newPassword },
+    }),
     listAccounts: () => request(`${AUTH_BASE}/list-accounts`),
     signOut: () => request(`${AUTH_BASE}/sign-out`, { body: {} }),
     setFirstPassword: (newPassword, csrfToken) => request('/api/v1/account/password', {

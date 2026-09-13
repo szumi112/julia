@@ -17,6 +17,7 @@ import {
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
+  applyAuthenticationStageF,
   applySpecialistProfilesStageD,
   applyWorkbookRegistryStageE,
   completeCoreDirectoryStageA,
@@ -105,11 +106,12 @@ const seedStaff = async ({
 
 const specialistSnapshot = (row, displayName, professionalTitle) => ({
   archivedAt: row.archived_at,
+  avatarKey: row.avatar_key ?? 'bloom',
   createdAt: row.created_at,
   displayName,
   id: row.id,
   professionalTitle,
-  schema: 'specialist.v3',
+  schema: 'specialist.v4',
   staffUserId: row.staff_user_id,
   standardRateGrosze: row.standard_rate_grosze,
   status: row.status,
@@ -193,7 +195,7 @@ const facts = async ({ staffId, specialistId }) => Object.freeze({
   ).bind(staffId).first(),
   profile: await env.DB.prepare(
     `SELECT staff_user_id,display_name_envelope,professional_title_envelope,
-            standard_rate_grosze,status,version,archived_at,created_at,updated_at
+            avatar_key,standard_rate_grosze,status,version,archived_at,created_at,updated_at
      FROM specialists WHERE id=?`,
   ).bind(specialistId).first(),
   links: await count('specialist_account_links'),
@@ -209,6 +211,7 @@ describe('specialist account link command', () => {
     await applyFinanceStageC()
     await applySpecialistProfilesStageD()
     await applyWorkbookRegistryStageE()
+    await applyAuthenticationStageF()
     const keyring = await createKeyring(env, {
       activeDataKekVersion: 1,
       activeLookupKeyVersion: 1,
@@ -390,7 +393,7 @@ describe('specialist account link command', () => {
       },
     ))
     expect(snapshot).toMatchObject({
-      schema: 'specialist.v3', professionalTitle: 'Specjalistka',
+      schema: 'specialist.v4', avatarKey: 'bloom', professionalTitle: 'Specjalistka',
       standardRateGrosze: 18000, staffUserId: staff.id,
       version: result.body.data.link.specialistVersion,
     })

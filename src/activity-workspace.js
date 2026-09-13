@@ -112,6 +112,9 @@ const summaryFor = ({ memberships, charges, classes }) => {
   }
 }
 
+const latestCompletedClass = (classes) => [...classes].reverse()
+  .find((activityClass) => activityClass.status === 'completed') ?? null
+
 export function activityCurrentMonth(now = new Date()) {
   if (!(now instanceof Date) || Number.isNaN(now.getTime())) invalidMonth()
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -159,6 +162,7 @@ export function activityProgramOverview(state, { program, month }) {
         left.specialistId.localeCompare(right.specialistId) || left.id.localeCompare(right.id)
       )),
       summary: summaryFor({ memberships, charges, classes }),
+      latestClass: latestCompletedClass(classes),
     }
   })
   return freeze({
@@ -216,21 +220,23 @@ export function activityGroupView(state, { groupId, month }) {
     participantRows: membershipRows,
     participantOptions: [...facts.participants].sort(byPolishName),
     classes,
+    latestClass: latestCompletedClass(groupClasses),
     chargeRows,
     summary: summaryFor({ memberships, charges, classes: groupClasses }),
   })
 }
 
-export function activityActionAvailability({ actor, role, capabilities, group }) {
+export function activityActionAvailability({ actor, role, capabilities, group, loadState = 'ready' }) {
   const centre = role?.scope === 'centre'
   const specialistId = actor?.specialistId ?? null
   const led = Boolean(group?.leaders?.some((leader) => leader.specialistId === specialistId))
   const eligibleToManageGroup = centre || led
   const allowed = (actionId, eligible) => canPerformAction(capabilities, actionId) && eligible
+  const overviewReady = loadState === 'ready'
   return freeze({
-    createGroup: allowed('activity.group.create', centre),
+    createGroup: overviewReady && allowed('activity.group.create', centre),
     editGroup: allowed('activity.group.edit', eligibleToManageGroup),
-    createParticipant: allowed('activity.participant.create', centre),
+    createParticipant: overviewReady && allowed('activity.participant.create', centre),
     editParticipant: allowed('activity.participant.edit', centre),
     createMembership: allowed('activity.membership.create', centre),
     editMembership: allowed('activity.membership.edit', centre),

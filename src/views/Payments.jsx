@@ -89,17 +89,17 @@ function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
         open={open}
         setOpen={setOpen}
         contentRole="dialog"
-        ariaLabel="Zaksięguj wpłatę"
+        ariaLabel="Dodaj wpłatę"
         align="right"
         trigger={(
           <Button
             variant="soft"
             size="sm"
             aria-haspopup="dialog"
-            aria-label={`Zaksięguj wpłatę — ${client?.name || 'klient'}, ${fmtFullDate(session.date)}`}
+            aria-label={`Dodaj wpłatę — ${client?.name || 'klient'}, ${fmtFullDate(session.date)}`}
             onClick={begin}
           >
-            Zaksięguj
+            Dodaj wpłatę
           </Button>
         )}
       >
@@ -156,8 +156,9 @@ function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
 
 export function AppPaymentEntry({
   session, client, fallbackFocusRef, paymentMutationLocked, refreshWorkspace, workspace,
-  workspaceRange, onReconciled,
+  workspaceRange, onReconciled, onRecordPayment = null, onRefresh = null,
 }) {
+  const { toast } = useApp()
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ amount: '', method: '', paidDate: toISODate(new Date()) })
   const [errors, setErrors] = useState({})
@@ -172,8 +173,11 @@ export function AppPaymentEntry({
   const saving = saveStatus === 'saving'
   const reconciled = saveStatus === 'reconciling'
 
+  const workspaceReady = workspace?.status === undefined || workspace.status === 'ready'
+  const subject = client?.name || 'Sesja'
+
   const begin = () => {
-    if (paymentMutationLocked || workspace.status !== 'ready') return
+    if (paymentMutationLocked || !workspaceReady) return
     setForm({
       amount: String(remainder), method: session.method || '', paidDate: toISODate(new Date()),
     })
@@ -227,12 +231,18 @@ export function AppPaymentEntry({
         input: null,
       }
     }
-    return { errors: {}, input: { amountGrosze, method: form.method, paidDate: form.paidDate } }
+    const input = validatePaymentDateInput({
+      amountGrosze, method: form.method, paidDate: form.paidDate,
+    })
+    return {
+      errors: {},
+      input: { amountGrosze, method: form.method, paidDate: form.paidDate, receivedAt: input.receivedAt },
+    }
   }
 
   const save = async (event) => {
     event.preventDefault()
-    if (saving || reconciled || paymentMutationLocked || workspace.status !== 'ready') return
+    if (saving || reconciled || paymentMutationLocked || !workspaceReady) return
     const next = paymentInput()
     setErrors(next.errors)
     if (!next.input) {
@@ -246,22 +256,32 @@ export function AppPaymentEntry({
     setSaveStatus('saving')
     setSaveError(null)
     try {
-      await workspace.recordPayment(session.id, session.version, next.input)
+      if (onRecordPayment) await onRecordPayment(next.input)
+      else await workspace.recordPayment(session.id, session.version, {
+        amountGrosze: next.input.amountGrosze,
+        method: next.input.method,
+        paidDate: next.input.paidDate,
+      })
     } catch {
       setSaveStatus('error')
-      setSaveError('Nie udało się zaksięgować wpłaty.')
+      setSaveError('Nie udało się zapisać wpłaty. Spróbuj ponownie.')
       return
     }
-    try {
-      await refreshWorkspace(workspaceRange)
-    } catch {
-      setSaveStatus('reconciling')
-      setSaveError('Wpłata została zapisana, ale nie udało się odświeżyć rozliczeń.')
-      return
-    }
-    onReconciled?.()
+    toast(`Wpłata zapisana: ${fmtMoney(next.input.amountGrosze / 100)}, ${METHOD_LABELS[next.input.method]}`)
     setOpen(false)
+    setSaveStatus('reconciling')
+    try {
+      if (onRefresh) await onRefresh()
+      else await refreshWorkspace(workspaceRange)
+    } catch {
+      setSaveStatus('idle')
+      focusAfterClose()
+      toast('Nie udało się odświeżyć rozliczeń. Odśwież stronę, żeby zobaczyć nowe kwoty.', 'alert')
+      return
+    }
+    setSaveStatus('idle')
     focusAfterClose()
+    onReconciled?.()
   }
 
   const close = () => {
@@ -276,25 +296,25 @@ export function AppPaymentEntry({
         open={open}
         setOpen={(next) => { if (!saving && !reconciled) setOpen(next) }}
         contentRole="dialog"
-        ariaLabel="Zaksięguj wpłatę"
+        ariaLabel="Dodaj wpłatę"
         align="right"
         trigger={(
           <Button
             variant="soft"
             size="sm"
             aria-haspopup="dialog"
-            aria-label={`Zaksięguj wpłatę — ${client?.name || 'klient'}, ${fmtFullDate(session.date)}`}
-            disabled={paymentMutationLocked || workspace.status !== 'ready'}
+            aria-label={`Dodaj wpłatę — ${subject.toLowerCase()}, ${fmtFullDate(session.date)}${session.time ? `, ${session.time}` : ''}`}
+            disabled={paymentMutationLocked || !workspaceReady}
             onClick={begin}
           >
-            Zaksięguj
+            Dodaj wpłatę
           </Button>
         )}
       >
         <form className="payment-entry" onSubmit={save} noValidate>
           <div>
-            <strong>{client?.name || 'Klient'}</strong>
-            <p>{fmtFullDate(session.date)} · pozostało {fmtMoney(remainder)}</p>
+            <strong>{subject}</strong>
+            <p>{fmtFullDate(session.date)}{session.time ? ` · ${session.time}` : ''} · pozostało {fmtMoney(remainder)}</p>
           </div>
           {saveError && <p className="form-error" role="alert">{saveError}</p>}
           <Field label="Kwota wpłaty" error={errors.amount}>
@@ -715,16 +735,10 @@ export function Payments({ ownSpecialistId = null }) {
   const scopeLabel = `${periodLabel} · ${selectedPsychologist?.name || 'Cały zespół'}`
 
   const bookPayment = (session, patch) => {
-    const snapshot = paymentSnapshotOf(session)
-    const amount = patch.paidAmount - snapshot.paidAmount
+    const amount = patch.paidAmount - paymentSnapshotOf(session).paidAmount
     const client = clientOf(session.clientId)
     dispatch({ type: 'UPDATE_SESSION', id: session.id, patch })
-    toast(`Zaksięgowano wpłatę ${fmtMoney(amount)} — ${client?.name || 'klient'}`, 'payments', {
-      label: 'Cofnij',
-      key: `payment:${session.id}`,
-      timeoutMs: 5000,
-      onClick: () => dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: snapshot }),
-    })
+    toast(`Wpłata zapisana: ${fmtMoney(amount)}, ${METHOD_LABELS[patch.method] ?? 'Nie ustalono'}`, 'payments')
   }
 
   if (isApp && workspaceState !== 'ready') {
@@ -745,7 +759,6 @@ export function Payments({ ownSpecialistId = null }) {
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">Rozliczenia</div>
           <h1 className="display view-head__title">Finanse <em>i płatności</em></h1>
           <p className="view-head__sub">
             Sesje rozliczane: odbyte i nieobecności. Odwołane nie są fakturowane.
@@ -757,15 +770,12 @@ export function Payments({ ownSpecialistId = null }) {
         <div className="finance-scope__summary">Zakres: {scopeLabel}</div>
         <div className="finance-scope__controls">
           <FilterGroup label="Okres">
-            <Chip on={!allPeriods} onClick={() => setAllPeriods(false)}>Wybrany miesiąc</Chip>
-            {!isApp && <Chip on={allPeriods} onClick={() => setAllPeriods(true)}>Wszystkie okresy</Chip>}
-            {!allPeriods && (
-              <div className="month-nav">
-                <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={!isApp && ym <= months[0]} onClick={() => setYm(addMonths(ym, -1))} />
+            {!isApp && <Chip on={allPeriods} onClick={() => setAllPeriods((current) => !current)}>Wszystkie okresy</Chip>}
+            <div className="month-nav">
+                <IconBtn name="chevL" label="Poprzedni miesiąc" disabled={allPeriods || (!isApp && ym <= months[0])} onClick={() => setYm(addMonths(ym, -1))} />
                 <span className="month-nav__label">{fmtMonthYear(ym)}</span>
-                <IconBtn name="chevR" label="Następny miesiąc" disabled={ym >= maxYm} onClick={() => setYm(addMonths(ym, 1))} />
-              </div>
-            )}
+                <IconBtn name="chevR" label="Następny miesiąc" disabled={allPeriods || ym >= maxYm} onClick={() => setYm(addMonths(ym, 1))} />
+            </div>
           </FilterGroup>
           {!ownScope ? <FilterGroup label="Specjalistka">
             <Chip on={!psychFilter} onClick={() => setPsychFilter(null)}>Cały zespół</Chip>
@@ -835,7 +845,7 @@ export function Payments({ ownSpecialistId = null }) {
             {comparison.map(({ psychologist, collected, outstanding }) => (
               <div className="hbar__row hbar__row--labeled finance-comparison__row" key={psychologist.id}>
                 <span className="hbar__name">
-                  <Avatar name={psychologist.name} color={psychologist.color} size={26} />
+                  <Avatar name={psychologist.name} color={psychologist.color} avatarKey={psychologist.avatarKey} size={26} />
                   <span>{psychologist.name.split(' ')[0]}</span>
                 </span>
                 <div>

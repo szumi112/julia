@@ -112,14 +112,31 @@ const historyRowCompare = (left, right) => (
   byText(left.serviceLabel, right.serviceLabel) || compareId(left, right)
 )
 
-export function historicalClientHistoryModel({ historicalClient, occurrences, specialists = [] }) {
+const occurrenceInWorkspaceRange = (occurrence, workspaceRange, periodMode) => {
+  if (periodMode === 'unknown') return occurrence.period.precision === 'unknown'
+  if (!workspaceRange) return true
+  if (occurrence.period.precision === 'day') {
+    return occurrence.period.day >= workspaceRange.from && occurrence.period.day <= workspaceRange.to
+  }
+  if (occurrence.period.precision === 'month') {
+    const fromMonth = workspaceRange.from.slice(0, 7)
+    const toMonth = workspaceRange.to.slice(0, 7)
+    return occurrence.period.month >= fromMonth && occurrence.period.month <= toMonth
+  }
+  return false
+}
+
+export function historicalClientHistoryModel({
+  historicalClient, occurrences, specialists = [], workspaceRange = null, periodMode = 'known',
+}) {
   const { clientsById, specialistsById } = rowContext([historicalClient], specialists)
   const exactDayRows = []
   const monthOnlyRows = []
   const unknownRows = []
   for (const occurrence of occurrences) {
     if (occurrence.status !== 'recorded'
-      || occurrence.historicalClientId !== historicalClient.id) continue
+      || occurrence.historicalClientId !== historicalClient.id
+      || !occurrenceInWorkspaceRange(occurrence, workspaceRange, periodMode)) continue
     const row = rowFor(occurrence, clientsById, specialistsById)
     if (occurrence.period.precision === 'day') exactDayRows.push(row)
     else if (occurrence.period.precision === 'month') monthOnlyRows.push(row)

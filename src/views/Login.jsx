@@ -27,7 +27,7 @@ function LoginFrame({ children, cardRef, rootRef }) {
   )
 }
 
-export function AppLogin({ client = authClient, onAuthenticated }) {
+export function AppLogin({ client = authClient, initialNotice = '', onAuthenticated }) {
   const [methods, setMethods] = useState([])
   const [resetToken] = useState(() => resetTokenFromLocation(window.location.search, window.location.hash))
   const [mode, setMode] = useState(() => resetToken ? 'reset' : 'password')
@@ -36,7 +36,7 @@ export function AppLogin({ client = authClient, onAuthenticated }) {
   const [remember, setRemember] = useState(true)
   const [newPassword, setNewPassword] = useState('')
   const [otp, setOtp] = useState('')
-  const [notice, setNotice] = useState('')
+  const [notice, setNotice] = useState(initialNotice)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const cardRef = useRef(null)
@@ -197,13 +197,13 @@ export function Login({ onLogin }) {
     tl.fromTo(
       cardRef.current,
       { autoAlpha: 0, y: 30, scale: 0.975 },
-      { autoAlpha: 1, y: 0, scale: 1, duration: 0.7, ease: 'power3.out', delay: 0.1 }
+      { autoAlpha: 1, y: 0, scale: 1, duration: 0.25, ease: 'power3.out', delay: 0.05 }
     )
     tl.fromTo(
       cardRef.current.querySelectorAll('[data-stagger]'),
       { autoAlpha: 0, y: 12 },
-      { autoAlpha: 1, y: 0, duration: 0.5, ease: 'power3.out', stagger: 0.055, clearProps: 'transform,opacity,visibility' },
-      '-=0.45'
+      { autoAlpha: 1, y: 0, duration: 0.2, ease: 'power3.out', stagger: 0.025, clearProps: 'transform,opacity,visibility' },
+      '-=0.2'
     )
   }, [])
 
@@ -227,9 +227,9 @@ export function Login({ onLogin }) {
     }
     setLoading(true)
     if (!motionOK()) return void setTimeout(onLogin, 350)
-    const tl = window.gsap.timeline({ onComplete: onLogin, delay: 0.55 })
-    tl.to(cardRef.current, { y: -26, autoAlpha: 0, scale: 0.97, duration: 0.55, ease: 'power3.in' })
-    tl.to(rootRef.current, { autoAlpha: 0, duration: 0.5, ease: 'power2.inOut' }, '-=0.2')
+    const tl = window.gsap.timeline({ onComplete: onLogin, delay: 0.05 })
+    tl.to(cardRef.current, { y: -26, autoAlpha: 0, scale: 0.97, duration: 0.2, ease: 'power3.in' })
+    tl.to(rootRef.current, { autoAlpha: 0, duration: 0.15, ease: 'power2.inOut' }, '-=0.05')
   }
 
   return (

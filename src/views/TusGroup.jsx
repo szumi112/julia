@@ -53,7 +53,7 @@ function TusPayPill({ payment, onPatch }) {
       setOpen={setOpen}
       ariaLabel="Status opłaty"
       trigger={
-        <Pill tone={payment.status === 'paid' ? 'sage' : 'error'} dot onClick={() => setOpen(!open)} title="Zmień status opłaty">
+        <Pill tone={payment.status === 'paid' ? 'sage' : 'amber'} dot onClick={() => setOpen(!open)} title="Zmień status opłaty">
           {PAY_LABELS[payment.status]}
           <Icon name="chevD" size={11} />
         </Pill>
@@ -137,7 +137,7 @@ function DemoTusGroupDetail({ params }) {
             <span>{leaders.length === 1 ? 'prowadzi' : 'prowadzą'}</span>
             {leaders.map((p) => (
               <span className="row" key={p.id}>
-                <Avatar name={p.name} color={p.color} size={24} />
+                <Avatar name={p.name} color={p.color} avatarKey={p.avatarKey} size={24} />
                 <span>{p.name}</span>
               </span>
             ))}
@@ -154,7 +154,7 @@ function DemoTusGroupDetail({ params }) {
         <div className="id-band__actions">
           {centre && <Button variant="ghost" icon="edit" onClick={() => openTusGroupForm({ group })}>Edytuj grupę</Button>}
           {centre && <Button variant="ghost" icon="plus" onClick={() => openTusKidForm({ groupId: group.id })}>Dodaj dziecko</Button>}
-          {canEdit && <Button icon="plus" onClick={() => openTusClassForm({ groupId: group.id })}>Dodaj zajęcia</Button>}
+          {canEdit && <Button icon="plus" onClick={() => openTusClassForm({ groupId: group.id, month: ym })}>Dodaj zajęcia</Button>}
         </div>
       </div>
 

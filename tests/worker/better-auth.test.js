@@ -123,6 +123,48 @@ describe('application authentication', () => {
     expect(logout.status).toBe(200)
     await expect(resolveBetterAuthPrincipal(request('/get-session', undefined, cookies(replacement)), { env: bindings, config, auth })).rejects.toThrow('AUTH_REQUIRED')
   })
+  it('changes an existing password only when the current password is correct', async () => {
+    const email = await person('login_change_password')
+    const { cookie } = await signIn(email)
+    const app = createApp()
+    const sessionResponse = await app.fetch(new Request(`${origin}/api/v1/session`, {
+      headers: { Cookie: cookie },
+    }), bindings)
+    const { data: session } = await sessionResponse.json()
+    const initial = await app.fetch(new Request(`${origin}/api/v1/account/password`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: origin,
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': session.csrfToken,
+      },
+      body: JSON.stringify({ newPassword: 'first-change-password-2026' }),
+    }), bindings)
+    expect(initial.status).toBe(200)
+
+    const incorrect = await auth.handler(request('/change-password', {
+      currentPassword: 'wrong-current-password',
+      newPassword: 'replacement-change-password-2026',
+    }, cookie))
+    expect(incorrect.status).toBe(400)
+
+    const changed = await auth.handler(request('/change-password', {
+      currentPassword: 'first-change-password-2026',
+      newPassword: 'replacement-change-password-2026',
+    }, cookie))
+    expect(changed.status).toBe(200)
+    expect((await auth.handler(request('/sign-in/email', {
+      email,
+      password: 'first-change-password-2026',
+      rememberMe: false,
+    }))).status).toBe(401)
+    expect((await auth.handler(request('/sign-in/email', {
+      email,
+      password: 'replacement-change-password-2026',
+      rememberMe: false,
+    }))).status).toBe(200)
+  })
   it('rejects cross-origin login and unavailable social login', async () => {
     const app = createApp()
     const crossOrigin = request('/sign-in/email', { email: 'login_password@example.test', password: 'replacement-password-test-2026' })

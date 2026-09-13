@@ -1,11 +1,64 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  METHOD_LABELS, fmtMoney, fmtWeekRange, isoWeek, relDayLabel, toISODate, untilLabel,
+  METHOD_LABELS, PAY_LABELS, PAY_PILL, STATUS_PILL, calendarCountLabel, fmtMonthNameWithYearOutsideCurrent, fmtMoney, fmtWeekRange, isoWeek,
+  paymentDisplayFor, relDayLabel, sessionsWord, toISODate, untilLabel, warsawDateTimeFromUtc,
 } from '../../src/format.js'
 
 test('payment method labels include the canonical monthly settlement method', () => {
   assert.equal(METHOD_LABELS.monthly, 'Miesięcznie')
+})
+
+test('calendar counters decline sessions and keep workbook entries and absences separate', () => {
+  assert.equal(sessionsWord(1), 'sesja')
+  assert.equal(sessionsWord(2), 'sesje')
+  assert.equal(sessionsWord(5), 'sesji')
+  assert.equal(calendarCountLabel(3, 2, 1), '3 sesje · 2 wpisy ze skoroszytu · 1 nieobecność')
+  assert.equal(calendarCountLabel(0, 1), '0 sesji · 1 wpis ze skoroszytu')
+})
+
+test('calendar month picker omits the current year', () => {
+  assert.equal(fmtMonthNameWithYearOutsideCurrent('2026-07', 2026), 'lipiec')
+  assert.equal(fmtMonthNameWithYearOutsideCurrent('2027-07', 2026), 'lipiec 2027')
+})
+
+test('formats UTC instants in the Warsaw civil date and wall-clock time', () => {
+  assert.deepEqual(warsawDateTimeFromUtc('2026-08-04T22:30:00.000Z'), {
+    date: '2026-08-05', time: '00:30', second: '00',
+  })
+})
+
+test('payment display only shows due pills when a session is billable or has a prepayment', () => {
+  assert.deepEqual(paymentDisplayFor({ status: 'completed', payment: 'unpaid', date: '2026-09-14' }, '2026-09-13'), {
+    kind: 'payment', label: 'Do zapłaty', tone: 'amber',
+  })
+  assert.deepEqual(paymentDisplayFor({ status: 'noshow', payment: 'unpaid', date: '2026-09-14' }, '2026-09-13'), {
+    kind: 'payment', label: 'Do zapłaty', tone: 'amber',
+  })
+  assert.deepEqual(paymentDisplayFor({ status: 'cancelled', payment: 'unpaid', date: '2026-09-14' }, '2026-09-13'), {
+    kind: 'quiet', label: 'bez opłaty', tone: 'ink',
+  })
+  assert.equal(paymentDisplayFor({ status: 'scheduled', payment: 'unpaid', date: '2026-09-14' }, '2026-09-13'), null)
+  assert.equal(paymentDisplayFor({
+    status: 'scheduled', payment: 'unpaid', date: '2026-09-13', time: '15:00',
+  }, new Date('2026-09-13T14:59:00+02:00')), null)
+  assert.deepEqual(paymentDisplayFor({
+    status: 'scheduled', payment: 'unpaid', date: '2026-09-13', time: '15:00',
+  }, new Date('2026-09-13T15:00:00+02:00')), {
+    kind: 'payment', label: 'Do zapłaty', tone: 'amber',
+  })
+  assert.deepEqual(paymentDisplayFor({ status: 'scheduled', payment: 'partial', date: '2026-09-14' }, '2026-09-13'), {
+    kind: 'payment', label: 'Częściowo opłacona', tone: 'amber',
+  })
+  assert.equal(PAY_LABELS.unpaid, 'Do zapłaty')
+  assert.equal(PAY_PILL.unpaid, 'pill--amber')
+})
+
+test('session pill colors distinguish neutral states from completed and missed sessions', () => {
+  assert.equal(STATUS_PILL.scheduled, 'pill--ink')
+  assert.equal(STATUS_PILL.cancelled, 'pill--ink')
+  assert.equal(STATUS_PILL.completed, 'pill--sage')
+  assert.equal(STATUS_PILL.noshow, 'pill--error')
 })
 
 test('money formatting preserves cents only for fractional złoty values', () => {

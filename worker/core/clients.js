@@ -52,15 +52,18 @@ const validation = (field) => { throw new TypeError(`VALIDATION_FAILED/${field}`
 const forbidden = () => { throw new Error('FORBIDDEN') }
 const notFound = () => { throw new Error('NOT_FOUND') }
 
-const captureExact = (value, keys, field = 'body') => {
+const captureExact = (value, keys, field = 'body', optionalKeys = []) => {
   try {
     if (value === null || typeof value !== 'object' || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype) validation(field)
     const descriptors = Object.getOwnPropertyDescriptors(value)
     const actual = Reflect.ownKeys(descriptors)
-    if (actual.length !== keys.length || !keys.every((key) => actual.includes(key))) validation(field)
+    const allowed = [...keys, ...optionalKeys]
+    if (actual.length < keys.length || actual.length > allowed.length
+      || !keys.every((key) => actual.includes(key))
+      || actual.some((key) => !allowed.includes(key))) validation(field)
     const captured = {}
-    for (const key of keys) {
+    for (const key of allowed.filter((key) => actual.includes(key))) {
       const descriptor = descriptors[key]
       if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) validation(field)
       captured[key] = descriptor.value
@@ -82,26 +85,31 @@ const validName = (value) => {
 }
 
 export function validateCreateClientBody(value) {
-  const body = captureExact(value, BODY_KEYS)
+  const body = captureExact(value, BODY_KEYS, 'body', ['assignmentStartsAt'])
   if (!validName(body.name)) validation('name')
   if (body.age !== null && (!Number.isSafeInteger(body.age) || body.age < 1 || body.age > 26)) validation('age')
   if (!['active', 'paused'].includes(body.status)) validation('status')
   if (typeof body.specialistId !== 'string' || !SPECIALIST_ID.test(body.specialistId)) validation('specialistId')
-  return body
+  const assignmentStartsAt = body.assignmentStartsAt === undefined
+    || body.assignmentStartsAt === null ? null : body.assignmentStartsAt
+  if (assignmentStartsAt !== null && !canonicalInstant(assignmentStartsAt)) {
+    validation('assignmentStartsAt')
+  }
+  return Object.freeze({ ...body, assignmentStartsAt })
 }
 
 export function validateEditClientBody(value) {
-  const body = captureExact(value, EDIT_BODY_KEYS)
+  const body = captureExact(value, EDIT_BODY_KEYS, 'body', ['assignmentStartsAt'])
   if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 1) {
     validation('expectedVersion')
   }
-  validateCreateClientBody(Object.freeze({
+  return Object.freeze({ expectedVersion: body.expectedVersion, ...validateCreateClientBody(Object.freeze({
     name: body.name,
     age: body.age,
     status: body.status,
     specialistId: body.specialistId,
-  }))
-  return body
+    assignmentStartsAt: body.assignmentStartsAt ?? null,
+  })) })
 }
 
 export function validateArchiveClientBody(value) {
@@ -121,6 +129,7 @@ export async function digestCreateClientRequest(value) {
       name: body.name,
       specialistId: body.specialistId,
       status: body.status,
+      assignmentStartsAt: body.assignmentStartsAt,
     },
   })
   const encoded = new TextEncoder().encode(plaintext)
@@ -145,6 +154,7 @@ export async function digestEditClientRequest(clientId, value) {
       name: body.name,
       specialistId: body.specialistId,
       status: body.status,
+      assignmentStartsAt: body.assignmentStartsAt,
     },
   })
   const encoded = new TextEncoder().encode(plaintext)
@@ -305,7 +315,8 @@ const validateCreateReplay = (value, request) => {
     || !canonicalInstant(client.createdAt) || client.updatedAt !== client.createdAt
     || !ASSIGNMENT_ID.test(assignment.id)
     || assignment.specialistId !== request.specialistId
-    || assignment.startsAt !== client.createdAt || assignment.version !== 1) replayFailure()
+    || assignment.startsAt !== (request.assignmentStartsAt ?? client.createdAt)
+    || assignment.version !== 1) replayFailure()
   return Object.freeze({
     status: 201,
     body: Object.freeze({ data: Object.freeze({
@@ -362,7 +373,8 @@ const guardStatement = (db, values) => {
   ).bind(
     values.dataKeyId, values.client.id,
     values.client.id, values.client.status, values.now, values.now, values.dataKeyId,
-    values.assignment.id, values.client.id, values.assignment.specialistId, values.now,
+    values.assignment.id, values.client.id, values.assignment.specialistId,
+    values.assignment.startsAt,
     values.actorId, values.now, values.now,
     values.clientVersionId, values.client.id,
     values.assignmentVersionId, values.assignment.id, values.dataKeyId,
@@ -658,6 +670,8 @@ const validateEditReplay = (value, clientId, request) => {
     || !ASSIGNMENT_ID.test(assignment.id)
     || assignment.specialistId !== request.specialistId
     || !canonicalInstant(assignment.startsAt)
+    || (request.assignmentStartsAt !== null
+      && assignment.startsAt !== request.assignmentStartsAt)
     || !Number.isSafeInteger(assignment.version) || assignment.version < 1) replayFailure()
   return Object.freeze({
     status: 200,
@@ -797,9 +811,8 @@ const retainedAssignmentHistoryFacts = (value, current, dataKeyId) => {
         || !canonicalInstant(row.starts_at)
         || (row.ends_at !== null && (!canonicalInstant(row.ends_at) || row.ends_at <= row.starts_at))
         || typeof row.assigned_by_staff_id !== 'string' || !STAFF_ID.test(row.assigned_by_staff_id)
-        || !Number.isSafeInteger(row.assignment_version)
-        || !((row.ends_at === null && row.assignment_version === 1)
-          || (row.ends_at !== null && row.assignment_version === 2))
+        || !Number.isSafeInteger(row.assignment_version) || row.assignment_version < 1
+        || (row.ends_at !== null && row.assignment_version < 2)
         || !canonicalInstant(row.created_at) || !canonicalInstant(row.updated_at)
         || row.created_at > row.updated_at
         || typeof row.record_version_id !== 'string' || !VERSION_ID.test(row.record_version_id)
@@ -860,28 +873,35 @@ const authenticateRetainedAssignmentHistory = async (context, history) => {
   try {
     for (const group of history) {
       const assignment = group.assignment
+      let previous = null
       for (const version of group.versions) {
-        const endsAt = version.number === assignment.version ? assignment.endsAt : null
-        const updatedAt = version.number === assignment.version
-          ? assignment.updatedAt
-          : assignment.createdAt
-        const expected = JSON.stringify({
-          assignedByStaffId: assignment.assignedByStaffId,
-          clientId: assignment.clientId,
-          createdAt: assignment.createdAt,
-          endsAt,
-          id: assignment.id,
-          schema: 'client_assignment.v1',
-          specialistId: assignment.specialistId,
-          startsAt: assignment.startsAt,
-          updatedAt,
-          version: version.number,
-        })
         const plaintext = await decryptForScope(context.keyring, context.dataKey, {
           expectedScope: context.scope, recordId: assignment.id,
           field: 'record_version', envelope: JSON.parse(version.envelope),
         })
-        if (plaintext !== expected) notFound()
+        const fact = replayObject(JSON.parse(plaintext), [
+          'assignedByStaffId', 'clientId', 'createdAt', 'endsAt', 'id', 'schema',
+          'specialistId', 'startsAt', 'updatedAt', 'version',
+        ])
+        const latest = version.number === assignment.version
+        if (fact.assignedByStaffId !== assignment.assignedByStaffId
+          || fact.clientId !== assignment.clientId || fact.createdAt !== assignment.createdAt
+          || fact.id !== assignment.id || fact.schema !== 'client_assignment.v1'
+          || fact.specialistId !== assignment.specialistId
+          || !canonicalInstant(fact.startsAt) || !canonicalInstant(fact.updatedAt)
+          || fact.updatedAt !== version.changedAt || fact.version !== version.number
+          || (fact.endsAt !== null
+            && (!canonicalInstant(fact.endsAt) || fact.endsAt <= fact.startsAt))
+          || (!latest && fact.endsAt !== null)
+          || (latest && (fact.startsAt !== assignment.startsAt
+            || fact.endsAt !== assignment.endsAt
+            || fact.updatedAt !== assignment.updatedAt))) notFound()
+        if (previous === null) {
+          if (fact.endsAt !== null) notFound()
+        } else if (fact.updatedAt <= previous.updatedAt || previous.endsAt !== null
+          || (fact.endsAt === null && fact.startsAt >= previous.startsAt)
+          || (fact.endsAt !== null && fact.startsAt !== previous.startsAt)) notFound()
+        previous = fact
       }
     }
   } catch (error) {
@@ -932,7 +952,7 @@ const archiveGuardStatement = (db, values) => {
        AND NOT EXISTS (SELECT 1 FROM client_assignments WHERE client_id=? AND ends_at IS NULL)
        AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
          WHERE retained.client_id=?
-           AND (retained.ends_at IS NULL OR retained.version!=2))
+           AND (retained.ends_at IS NULL OR retained.version<2))
        AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
          WHERE retained.client_id=? AND (
            (SELECT count(*) FROM record_versions AS history
@@ -1053,7 +1073,7 @@ const loadArchiveConflictProof = async (db, values) => {
          AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
            WHERE retained.client_id=? AND (
              (retained.id=? AND (retained.ends_at IS NOT NULL OR retained.version!=?))
-             OR (retained.id!=? AND (retained.ends_at IS NULL OR retained.version!=2))
+             OR (retained.id!=? AND (retained.ends_at IS NULL OR retained.version<2))
            ))
          AND NOT EXISTS (SELECT 1 FROM client_assignments AS retained
            WHERE retained.client_id=? AND (
@@ -1226,7 +1246,10 @@ const editGuardStatement = (db, values) => {
   const versionIds = values.reassigned
     ? [values.clientVersionId, values.client.id, values.oldAssignmentVersionId,
         values.oldAssignment.id, values.assignmentVersionId, values.assignment.id]
-    : [values.clientVersionId, values.client.id]
+    : values.assignmentStartChanged
+      ? [values.clientVersionId, values.client.id,
+          values.assignmentVersionId, values.assignment.id]
+      : [values.clientVersionId, values.client.id]
   const metadata = values.reassigned
     ? {
         clientVersion: values.client.version,
@@ -1253,7 +1276,9 @@ const editGuardStatement = (db, values) => {
          WHERE ((id=? AND entity_type='client' AND entity_id=? AND version=?)
            ${values.reassigned
     ? "OR (id=? AND entity_type='client_assignment' AND entity_id=? AND version=?) OR (id=? AND entity_type='client_assignment' AND entity_id=? AND version=1)"
-    : ''})
+    : values.assignmentStartChanged
+      ? "OR (id=? AND entity_type='client_assignment' AND entity_id=? AND version=?)"
+      : ''})
            AND changed_by_staff_id=? AND changed_at=? AND correlation_id=?
            AND json_extract(snapshot_envelope,'$.dataKeyId')=?
            AND json_extract(snapshot_envelope,'$.dataKeyVersion')=1)=?
@@ -1302,9 +1327,11 @@ const editGuardStatement = (db, values) => {
     ...(values.reassigned
       ? [versionIds[2], versionIds[3], values.oldAssignment.version,
           versionIds[4], versionIds[5]]
-      : []),
+      : values.assignmentStartChanged
+        ? [versionIds[2], versionIds[3], values.assignment.version]
+        : []),
     values.actorId, values.now, values.correlationId,
-    values.dataKeyId, values.reassigned ? 3 : 1,
+    values.dataKeyId, values.reassigned ? 3 : values.assignmentStartChanged ? 2 : 1,
     values.client.id, values.client.version,
     values.client.id, values.client.id, values.client.version,
     values.client.id, values.client.id, values.dataKeyId,
@@ -1359,8 +1386,18 @@ export async function editClient(input) {
   if (command.body.expectedVersion !== current.version) versionConflict(current.version)
   const reassigned = command.body.specialistId !== current.assignment.specialistId
   if (reassigned && actor.role === 'specialist') throw new Error('CLIENT_ASSIGNMENT_CONFLICT')
+  if (reassigned && command.body.assignmentStartsAt !== null) {
+    throw new Error('CLIENT_ASSIGNMENT_CONFLICT')
+  }
+  const assignmentStartChanged = !reassigned
+    && command.body.assignmentStartsAt !== null
+    && command.body.assignmentStartsAt !== current.assignment.startsAt
+  if (assignmentStartChanged
+    && command.body.assignmentStartsAt > current.assignment.startsAt) {
+    throw new Error('CLIENT_ASSIGNMENT_CONFLICT')
+  }
   if (!reassigned && identity.name === command.body.name && identity.age === command.body.age
-    && current.status === command.body.status) validation('body')
+    && current.status === command.body.status && !assignmentStartChanged) validation('body')
 
   let targetPractitioner = null
   if (reassigned) {
@@ -1382,6 +1419,18 @@ export async function editClient(input) {
   if (reassigned && now <= current.assignment.startsAt) {
     throw new Error('CLIENT_ASSIGNMENT_CONFLICT')
   }
+  if (assignmentStartChanged) {
+    const overlap = await command.db.prepare(
+      `SELECT 1 AS blocked FROM client_assignments
+       WHERE client_id=? AND id!=? AND ends_at>? LIMIT 1`
+    ).bind(current.id, current.assignment.id, command.body.assignmentStartsAt).first()
+    if (overlap) {
+      const fact = replayObject(overlap, ['blocked'])
+      if (fact.blocked !== 1) throw new Error('INTERNAL_ERROR')
+      throw new Error('CLIENT_ASSIGNMENT_CONFLICT')
+    }
+  }
+  const assignmentChanged = reassigned || assignmentStartChanged
   const used = new Set()
   const assignmentId = reassigned
     ? generated(command.idFactory, 'asg', ASSIGNMENT_ID, used)
@@ -1390,7 +1439,7 @@ export async function editClient(input) {
   const oldAssignmentVersionId = reassigned
     ? generated(command.idFactory, 'ver', VERSION_ID, used)
     : null
-  const assignmentVersionId = reassigned
+  const assignmentVersionId = assignmentChanged
     ? generated(command.idFactory, 'ver', VERSION_ID, used)
     : null
   const auditId = generated(command.idFactory, 'aud', AUDIT_ID, used)
@@ -1403,11 +1452,18 @@ export async function editClient(input) {
     ...current.assignment, endsAt: now, version: current.assignment.version + 1,
     updatedAt: now,
   }) : current.assignment
-  const assignment = reassigned ? Object.freeze({
-    id: assignmentId, clientId: current.id, specialistId: targetPractitioner.id,
-    startsAt: now, endsAt: null, assignedByStaffId: actor.id, version: 1,
-    createdAt: now, updatedAt: now,
-  }) : current.assignment
+  const assignment = reassigned
+    ? Object.freeze({
+        id: assignmentId, clientId: current.id, specialistId: targetPractitioner.id,
+        startsAt: now, endsAt: null, assignedByStaffId: actor.id, version: 1,
+        createdAt: now, updatedAt: now,
+      })
+    : assignmentStartChanged
+      ? Object.freeze({
+          ...current.assignment, startsAt: command.body.assignmentStartsAt,
+          version: current.assignment.version + 1, updatedAt: now,
+        })
+      : current.assignment
   const identityEnvelope = await encryptClientIdentity(context, {
     clientId: current.id, name: client.name, age: client.age,
   })
@@ -1422,7 +1478,7 @@ export async function editClient(input) {
     changedByStaffId: actor.id, changedAt: now,
     correlationId: command.correlationId, ownerFact: null,
   }) : null
-  const assignmentVersion = reassigned ? await versionBuilder.build(command.db, context, {
+  const assignmentVersion = assignmentChanged ? await versionBuilder.build(command.db, context, {
     clientId: current.id, versionId: assignmentVersionId,
     entityType: 'client_assignment', entity: assignment,
     changedByStaffId: actor.id, changedAt: now,
@@ -1474,6 +1530,19 @@ export async function editClient(input) {
       assignment.id, current.id, assignment.specialistId, now, null, actor.id, 1, now, now,
       oldAssignment.id, now, current.id, client.version, identityEnvelope, now,
     ))
+  } else if (assignmentStartChanged) {
+    uow.domain(command.db.prepare(
+      `UPDATE client_assignments SET starts_at=?,version=?,updated_at=?
+       WHERE id=? AND client_id=? AND specialist_id=? AND starts_at=?
+         AND version=? AND ends_at IS NULL
+         AND EXISTS (SELECT 1 FROM clients
+           WHERE id=? AND version=? AND identity_envelope=? AND updated_at=?)`
+    ).bind(
+      assignment.startsAt, assignment.version, now,
+      current.assignment.id, current.id, current.assignment.specialistId,
+      current.assignment.startsAt, current.assignment.version,
+      current.id, client.version, identityEnvelope, now,
+    ))
   }
   uow.version(conditionalVersionStatement(
     command.db, clientVersion,
@@ -1491,6 +1560,12 @@ export async function editClient(input) {
       'EXISTS (SELECT 1 FROM record_versions WHERE id=?) AND EXISTS (SELECT 1 FROM client_assignments WHERE id=? AND version=1 AND ends_at IS NULL)',
       [clientVersionId, assignment.id],
     ))
+  } else if (assignmentStartChanged) {
+    uow.version(conditionalVersionStatement(
+      command.db, assignmentVersion,
+      'EXISTS (SELECT 1 FROM record_versions WHERE id=?) AND EXISTS (SELECT 1 FROM client_assignments WHERE id=? AND version=? AND starts_at=? AND ends_at IS NULL)',
+      [clientVersionId, assignment.id, assignment.version, assignment.startsAt],
+    ))
   }
   uow.audit(auditEventStatement(command.db, {
     id: auditId, occurredAt: now, actorStaffId: actor.id,
@@ -1500,7 +1575,8 @@ export async function editClient(input) {
   }))
   uow.idempotency(idempotency)
   uow.guard(editGuardStatement(command.db, {
-    reassigned, client, oldAssignment, assignment, now, actorId: actor.id,
+    reassigned, assignmentStartChanged, client, oldAssignment, assignment, now,
+    actorId: actor.id,
     clientVersionId, oldAssignmentVersionId, assignmentVersionId, auditId,
     correlationId: command.correlationId, idempotencyKey: command.idempotencyKey,
     dataKeyId: context.dataKey.id, targetPractitioner,
@@ -1728,6 +1804,8 @@ export async function createClient(input) {
 
   let now
   try { now = new Date(command.nowMs).toISOString() } catch { throw new Error('INTERNAL_ERROR') }
+  if (command.body.assignmentStartsAt !== null
+    && command.body.assignmentStartsAt > now) validation('assignmentStartsAt')
   const used = new Set()
   const clientId = generated(command.idFactory, 'cl', CLIENT_ID, used)
   const assignmentId = generated(command.idFactory, 'asg', ASSIGNMENT_ID, used)
@@ -1746,7 +1824,8 @@ export async function createClient(input) {
     createdAt: now, updatedAt: now,
   })
   const assignment = Object.freeze({
-    id: assignmentId, clientId, specialistId: practitioner.id, startsAt: now,
+    id: assignmentId, clientId, specialistId: practitioner.id,
+    startsAt: command.body.assignmentStartsAt ?? now,
     endsAt: null, assignedByStaffId: actor.id, version: 1,
     createdAt: now, updatedAt: now,
   })
@@ -1792,7 +1871,10 @@ export async function createClient(input) {
      (id,client_id,specialist_id,starts_at,ends_at,assigned_by_staff_id,
       version,created_at,updated_at)
      VALUES (?,?,?,?,?,?,?,?,?)`
-  ).bind(assignmentId, clientId, practitioner.id, now, null, actor.id, 1, now, now))
+  ).bind(
+    assignmentId, clientId, practitioner.id, assignment.startsAt,
+    null, actor.id, 1, now, now,
+  ))
   uow.version(clientVersion.statement)
   uow.version(assignmentVersion.statement)
   uow.audit(auditEventStatement(command.db, {

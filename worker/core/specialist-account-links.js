@@ -14,6 +14,7 @@ import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
 import { encodeBase64Url } from '../security/encoding.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
+import { isSpecialistAvatarKey } from '../../src/specialist-avatars.js'
 
 const SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const CENTRE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
@@ -222,7 +223,7 @@ const targetRows = async (db, staffId, specialistId) => Promise.all([
   ).bind(staffId).first(),
   db.prepare(
     `SELECT id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
-            archived_at,created_at,updated_at,professional_title_envelope
+            archived_at,created_at,updated_at,professional_title_envelope,avatar_key
      FROM specialists WHERE id=?`,
   ).bind(specialistId).first(),
 ])
@@ -281,11 +282,12 @@ const encryptSnapshot = async (context, recordId, value) => JSON.stringify(
 
 const specialistSnapshot = (profile, presentation) => ({
   archivedAt: profile.archived_at,
+  avatarKey: profile.avatar_key,
   createdAt: profile.created_at,
   displayName: presentation.displayName,
   id: profile.id,
   professionalTitle: presentation.professionalTitle,
-  schema: 'specialist.v3',
+  schema: 'specialist.v4',
   staffUserId: profile.staff_user_id,
   standardRateGrosze: profile.standard_rate_grosze,
   status: profile.status,
@@ -300,7 +302,7 @@ const validateTargetState = (staff, profile, body) => {
     || staff.role === 'specialist'
     || staff.status !== 'active' || staff.specialist_id !== null
     || profile.status !== 'active' || profile.archived_at !== null
-    || profile.staff_user_id !== null) conflict()
+    || profile.staff_user_id !== null || !isSpecialistAvatarKey(profile.avatar_key)) conflict()
   if (staff.version !== body.expectedStaffVersion
     || profile.version !== body.expectedSpecialistVersion) versionConflict()
 }
@@ -437,7 +439,7 @@ export async function linkSpecialistAccount(value) {
      SET staff_user_id=?,version=version+1,updated_at=?
      WHERE id=? AND staff_user_id IS NULL AND status='active' AND archived_at IS NULL
        AND version=? AND display_name_envelope=? AND professional_title_envelope IS ?
-       AND standard_rate_grosze=? AND created_at=? AND (SELECT changes())=1`,
+       AND standard_rate_grosze=? AND avatar_key=? AND created_at=? AND (SELECT changes())=1`,
   ).bind(
     staff.id,
     now,
@@ -446,6 +448,7 @@ export async function linkSpecialistAccount(value) {
     profile.display_name_envelope,
     profile.professional_title_envelope,
     profile.standard_rate_grosze,
+    profile.avatar_key,
     profile.created_at,
   ))
   unit.version(command.db.prepare(
@@ -502,7 +505,7 @@ export async function linkSpecialistAccount(value) {
        AND EXISTS (SELECT 1 FROM specialists
          WHERE id=? AND staff_user_id=? AND display_name_envelope=?
            AND professional_title_envelope IS ? AND standard_rate_grosze=?
-           AND status='active' AND version=? AND archived_at IS NULL
+           AND avatar_key=? AND status='active' AND version=? AND archived_at IS NULL
            AND created_at=? AND updated_at=?)
        AND EXISTS (SELECT 1 FROM record_versions
          WHERE id=? AND entity_type='staff_user' AND entity_id=? AND version=?
@@ -542,6 +545,7 @@ export async function linkSpecialistAccount(value) {
     profile.display_name_envelope,
     profile.professional_title_envelope,
     profile.standard_rate_grosze,
+    profile.avatar_key,
     nextProfile.version,
     profile.created_at,
     now,

@@ -18,6 +18,12 @@ const projection = (kind, version, status = 'complete') => ({
 })
 
 test('@owner completes clients and activities after financial import and resumes after reload', async ({ page }) => {
+  await page.route('**/api/v1/session', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.environment = 'staging'
+    await route.fulfill({ response, body: JSON.stringify(body) })
+  })
   let historical = null
   let activity = null
   const calls = []
@@ -40,7 +46,8 @@ test('@owner completes clients and activities after financial import and resumes
       return route.fulfill(json(kind === 'historical' ? { projection: next } : { job: next }, expectedVersion === 0 ? 201 : 200))
     })
   }
-  await page.goto('./#/ledger')
+  await page.goto('./#/payments')
+  await page.getByText('Wgraj arkusz', { exact: true }).click()
   await page.getByRole('button', { name: 'Dokończ import klientów i zajęć', exact: true }).click()
   const review = page.getByRole('region', { name: 'Import klientów i zajęć' })
   await expect(review.getByText('Oczekuje', { exact: true })).toHaveCount(2)
@@ -49,12 +56,19 @@ test('@owner completes clients and activities after financial import and resumes
   await expect(review.getByText('Finanse, historia klientów i zajęcia zostały zaimportowane.')).toBeVisible()
   expect(calls).toEqual([['historical', 0], ['historical', 1], ['activity', 0], ['activity', 1]])
   await page.reload()
+  await page.getByText('Wgraj arkusz', { exact: true }).click()
   await page.getByRole('button', { name: 'Dokończ import klientów i zajęć', exact: true }).click()
   await expect(review.getByText('Finanse, historia klientów i zajęcia zostały zaimportowane.')).toBeVisible()
   expect(calls).toHaveLength(4)
 })
 
 test('@owner continues a job paused on a legacy conflict without any manual decision', async ({ page }) => {
+  await page.route('**/api/v1/session', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.environment = 'staging'
+    await route.fulfill({ response, body: JSON.stringify(body) })
+  })
   const context = { counterparty: 'Fikcyjny Podmiot', serviceLabel: 'Opis ze skoroszytu',
     proposedClassification: 'review', proposedServiceId: null, nearSubjectIds: [] }
   const conflict = { id: 'hcf_browser', sourceRecordId: 'wbs_browser', kind: 'classification', context }
@@ -87,7 +101,8 @@ test('@owner continues a job paused on a legacy conflict without any manual deci
     }
     return route.fulfill(json({ projection: historical }))
   })
-  await page.goto('./#/ledger')
+  await page.goto('./#/payments')
+  await page.getByText('Wgraj arkusz', { exact: true }).click()
   await page.getByRole('button', { name: 'Dokończ import klientów i zajęć', exact: true }).click()
   const review = page.getByRole('region', { name: 'Import klientów i zajęć' })
   await expect(review.getByText('W trakcie', { exact: true })).toHaveCount(1)

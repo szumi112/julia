@@ -8,6 +8,7 @@ import {
   getOrCreateDataKey,
 } from '../../worker/security/envelope.js'
 import {
+  applyAppointmentCancellationReasonMigration,
   applyCoreDirectoryStageB,
   applyFinanceStageC,
   applySpecialistProfilesStageD,
@@ -101,6 +102,7 @@ const createClient = (name, specialistId) => ({
 beforeAll(async () => {
   expect(await completeCoreDirectoryStageA()).toMatchObject({ status: 'complete' })
   await applyCoreDirectoryStageB()
+  await applyAppointmentCancellationReasonMigration()
   await applyFinanceStageC()
   await applySpecialistProfilesStageD()
   await applyWorkbookRegistryStageE()

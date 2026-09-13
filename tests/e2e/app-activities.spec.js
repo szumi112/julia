@@ -2,6 +2,32 @@ import { expect, test } from '@playwright/test'
 
 const NOW = '2026-08-01T10:00:00.000Z'
 
+const activityScopeSession = () => ({
+  status: 200,
+  contentType: 'application/json',
+  body: JSON.stringify({ data: {
+    actor: {
+      id: 'stf_activity_scope', displayName: 'Zofia Bez Grupy', email: 'scope@example.test',
+      professionalTitle: 'Psycholożka', role: 'specialist', specialistId: 'sp_scope', version: 1,
+    },
+    authorityRevision: 1,
+    capabilities: ['appointment.charge.read', 'client.operational.read', 'specialist.directory.read'],
+    csrfExpiresAt: '2030-01-01T00:00:00.000Z',
+    csrfToken: `v1.1893456000.${'A'.repeat(22)}.${'B'.repeat(43)}`,
+    dataMode: 'fictional', environment: 'development',
+  } }),
+})
+
+const emptyScopedActivityWorkspace = ({ from, to }) => ({
+  data: {
+    from, to, complete: true, currentDay: '2026-08-28',
+    latestPopulatedMonths: { tus: null, english: null },
+    programs: [program('english'), program('tus')],
+    groups: [], groupLeaders: [], participants: [], memberships: [], classes: [],
+    attendance: [], charges: [], payments: [],
+  },
+})
+
 const program = (code) => ({
   id: `apg_${code}`, code, label: code === 'tus' ? 'TUS' : 'Angielski',
   status: 'active', version: 1, createdAt: NOW, updatedAt: NOW,
@@ -11,7 +37,7 @@ const activityWorkspace = ({
   from, to, attendanceStatus = 'present', createdClass = null,
   createdGroupLabel = null, createdLeaders = [], createdMembership = null, createdParticipantName = null,
   emptyTusMonth = null, englishCount = 1, englishGroupCount = 1, includeClass = false,
-  latestTus = '2026-08', specialistScope = false, tusCount = 1,
+  groupLeaderIds = [], latestTus = '2026-08', specialistScope = false, specialistScopeId = 'sp_local_specialist', tusCount = 1,
   tusGroupLabel = 'Fikcyjna grupa TUS', tusGroupVersion = 1,
 }) => ({
   data: {
@@ -36,8 +62,12 @@ const activityWorkspace = ({
       details: null, status: 'active', version: tusGroupVersion, createdAt: NOW, updatedAt: NOW,
       },
     ].sort((left, right) => left.id.localeCompare(right.id)),
-    groupLeaders: [...createdLeaders, ...(specialistScope ? [{
-      id: 'agl_fikcyjna', groupId: 'agr_fikcyjna', specialistId: 'sp_local_specialist',
+    groupLeaders: [...createdLeaders, ...groupLeaderIds.map((specialistId, index) => ({
+      id: `agl_group_${index}`, groupId: 'agr_fikcyjna', specialistId,
+      startsOn: '2026-01-01', endsOn: null, status: 'active', version: 1,
+      createdAt: NOW, updatedAt: NOW,
+    })), ...(specialistScope ? [{
+      id: 'agl_fikcyjna', groupId: 'agr_fikcyjna', specialistId: specialistScopeId,
       startsOn: '2026-01-01', endsOn: null, status: 'active', version: 1,
       createdAt: NOW, updatedAt: NOW,
     }] : [])].sort((left, right) => left.id.localeCompare(right.id)),
@@ -157,7 +187,7 @@ const activityWorkspace = ({
 const installActivityFixture = async (page, {
   acceptedReloadFailure = false, editGroupConflict = false, emptyTusMonth = null,
   englishCount = 1, englishGroupCount = 1, includeClass = false, latestTus = '2026-08',
-  specialistScope = false, tusCount = 1, workspaceDelayMs = 0, workspaceFailure = false,
+  groupLeaderIds = [], historyEmptyFacts = false, specialistScope = false, specialistScopeId = 'sp_local_specialist', tusCount = 1, workspaceDelayMs = 0, workspaceFailure = false,
 } = {}) => {
   let attendanceStatus = 'present'
   let createdClass = null
@@ -193,10 +223,10 @@ const installActivityFixture = async (page, {
       createdLeaders: [...createdLeaders, ...(editedLeaders ?? [])],
       createdMembership, createdParticipantName, includeClass,
       emptyTusMonth, englishCount, englishGroupCount, latestTus,
-      specialistScope: specialistScope && editedLeaders === null, tusCount,
+      groupLeaderIds, specialistScope: specialistScope && editedLeaders === null, specialistScopeId, tusCount,
       tusGroupLabel, tusGroupVersion,
     })
-    if (from > '2026-08') {
+    if (from > '2026-08' || (historyEmptyFacts && from < '2026-08')) {
       // Seeded observations/charges belong to August, not each requested month.
       payload.data.memberships = []
       payload.data.charges = []
@@ -341,12 +371,77 @@ test('@owner protected TUS renders canonical group facts without demo schedule o
   await expect(page.getByText(/co tydzień/i)).toHaveCount(0)
 })
 
+test('@owner TUS group keeps enrollment primary, settlement soft, and attendance neutral', async ({ page }) => {
+  await installActivityFixture(page, { includeClass: true })
+  await page.goto('./#/tus?ym=2026-08')
+
+  const groupLink = page.getByRole('link', { name: 'Otwórz grupę — Fikcyjna grupa TUS' })
+  await expect(groupLink).toContainText('Ostatnie zajęcia: 18 sierpnia')
+  await groupLink.click()
+
+  await expect(page.getByRole('button', { name: 'Dodaj przypisanie' })).toHaveCount(0)
+  const participants = page.getByRole('region', { name: 'Uczestnicy grupy' })
+  await expect(participants.getByRole('button', { name: 'Zapisz do grupy' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Edytuj grupę' })).toHaveClass(/btn--ghost/)
+  await expect(page.getByRole('button', { name: 'Dodaj rozliczenie miesiąca' })).toHaveClass(/btn--soft/)
+
+  const attendance = page.getByRole('button', {
+    name: 'Obecność: Fikcyjna Uczestniczka, 18 sierpnia, Obecność',
+  })
+  await expect(attendance).toHaveAttribute('aria-pressed', 'true')
+  await attendance.click()
+  await expect(page.getByRole('button', {
+    name: 'Obecność: Fikcyjna Uczestniczka, 18 sierpnia, Nieobecność',
+  })).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('button', { name: 'Cofnij' })).toHaveCount(0)
+
+  await page.goto('./#/english?ym=2026-08')
+  await expect(page.getByRole('link', { name: 'Otwórz grupę — Fikcyjny program angielski' })).toHaveCount(0)
+})
+
+test('@owner TUS settlement keeps one compact participant drawer with group defaults', async ({ page }) => {
+  await installActivityFixture(page, { groupLeaderIds: ['sp_local_specialist'] })
+  await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
+
+  await page.getByRole('button', { name: 'Dodaj rozliczenie miesiąca' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowe rozliczenie miesiąca' })
+  await expect(drawer).toContainText('Rozliczenie za sierpień 2026.')
+  await expect(drawer.getByLabel('Miesiąc rozliczenia')).toHaveCount(0)
+  await expect(drawer.getByLabel('Kwota (zł)')).toHaveValue('')
+  await drawer.getByRole('button', { name: 'Dodaj pozycję' }).click()
+  await expect(drawer.getByLabel('Uczestnik')).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.getByLabel('Uczestnik')).toBeFocused()
+  await drawer.getByLabel('Uczestnik').selectOption({ label: 'Fikcyjna Uczestniczka' })
+  await expect(drawer.getByLabel('Przypisanie do grupy')).toHaveCount(0)
+  await expect(drawer.getByLabel('Odpowiedzialny specjalista')).toHaveValue('sp_local_specialist')
+  await drawer.getByRole('button', { name: 'Dodaj pozycję' }).click()
+  await expect(drawer.getByLabel('Kwota (zł)')).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.getByLabel('Kwota (zł)')).toBeFocused()
+  await expect(drawer.getByLabel(/Łącznie wpłacono|Forma płatności|Status płatności|Stan faktury/)).toHaveCount(0)
+  await expect(drawer.getByRole('button', { name: 'Dodaj pozycję' })).toHaveCount(1)
+})
+
+test('@owner TUS settlement focuses a missing leading specialist when the group has no default', async ({ page }) => {
+  await installActivityFixture(page)
+  await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
+
+  await page.getByRole('button', { name: 'Dodaj rozliczenie miesiąca' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowe rozliczenie miesiąca' })
+  await drawer.getByLabel('Uczestnik').selectOption({ label: 'Fikcyjna Uczestniczka' })
+  await drawer.getByLabel('Kwota (zł)').fill('340')
+  await drawer.getByRole('button', { name: 'Dodaj pozycję' }).click()
+  await expect(drawer.getByLabel('Odpowiedzialny specjalista')).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.getByLabel('Odpowiedzialny specjalista')).toBeFocused()
+})
+
 test('@owner English keeps zero facts and uniquely labels each group article', async ({ page }) => {
   await installActivityFixture(page, { englishGroupCount: 2 })
   await page.goto('./#/english?ym=2026-08')
 
   await expect(page.getByRole('heading', { level: 1, name: 'Angielski' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Nowa grupa angielskiego' })).toBeVisible()
+  const actions = page.locator('.view-head__actions')
+  await expect(actions.getByRole('button', { name: 'Nowa grupa', exact: true })).toHaveClass(/btn--primary/)
+  await expect(actions.getByRole('button', { name: 'Nowy uczestnik', exact: true })).toHaveClass(/btn--ghost/)
   await expect(page.getByRole('article', { name: 'Fikcyjny program angielski' })).toBeVisible()
   await expect(page.getByRole('article', { name: 'Drugi fikcyjny program' })).toBeVisible()
   const row = page.getByRole('row', { name: /Fikcyjny Zero/ })
@@ -393,13 +488,15 @@ test('@owner protected group exposes an explicit dated membership drawer', async
   const fixture = await installActivityFixture(page)
   await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
 
-  await page.getByRole('button', { name: 'Dodaj przypisanie' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Nowe przypisanie do grupy' })
+  await page.getByRole('button', { name: 'Zapisz do grupy' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Zapisz uczestnika do grupy' })
   await expect(drawer.getByLabel('Uczestnik')).toBeVisible()
-  await expect(drawer.getByLabel('Data rozpoczęcia')).toHaveValue('')
+  await expect(drawer.getByLabel('Data rozpoczęcia')).toHaveValue('2026-08-01')
   await drawer.getByLabel('Uczestnik').selectOption({ label: 'Fikcyjny Nieprzypisany' })
-  await drawer.getByRole('button', { name: 'Dodaj przypisanie' }).click()
-  await expect(drawer.getByRole('alert')).toContainText('poprawny zakres dat')
+  await drawer.getByLabel('Data rozpoczęcia').fill('')
+  await drawer.getByRole('button', { name: 'Zapisz do grupy' }).click()
+  await expect(drawer.getByLabel('Data rozpoczęcia')).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.getByRole('alert')).toContainText('Wybierz datę rozpoczęcia')
   expect(fixture.commands.filter(({ kind }) => kind === 'membership')).toHaveLength(0)
 })
 
@@ -409,12 +506,35 @@ test('@owner protected group creates only a one-off civil-dated class', async ({
 
   await page.getByRole('button', { name: 'Dodaj zajęcia' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowe zajęcia TUS' })
-  await expect(drawer.getByLabel('Data zajęć')).toHaveValue('')
+  await expect(drawer.getByLabel('Data zajęć')).toHaveValue('2026-08-01')
   await expect(drawer.getByLabel('Godzina')).toHaveValue('')
   await expect(drawer.getByLabel(/cykl|co tydzień|liczba spotkań/i)).toHaveCount(0)
+  await drawer.getByLabel('Data zajęć').fill('')
   await drawer.getByRole('button', { name: 'Dodaj zajęcia' }).click()
-  await expect(drawer.getByRole('alert')).toContainText('poprawną datę')
+  await expect(drawer.getByLabel('Data zajęć')).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.getByRole('alert')).toContainText('Wybierz poprawną datę')
   expect(fixture.commands.filter(({ kind }) => kind === 'class')).toHaveLength(0)
+})
+
+test('@owner class duration above 1440 stays in the drawer and focuses its field', async ({ page }) => {
+  const fixture = await installActivityFixture(page)
+  await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
+
+  await page.getByRole('button', { name: 'Dodaj zajęcia' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Nowe zajęcia TUS' })
+  const duration = drawer.getByLabel('Czas trwania w minutach')
+  await duration.fill('1441')
+  await drawer.getByRole('button', { name: 'Dodaj zajęcia' }).click()
+  await expect(duration).toHaveAttribute('aria-invalid', 'true')
+  await expect(drawer.getByRole('alert')).toContainText('Podaj liczbę minut od 1 do 1440')
+  await expect(duration).toBeFocused()
+  expect(fixture.commands.filter(({ kind }) => kind === 'class')).toHaveLength(0)
+
+  await duration.fill('60')
+  await drawer.getByRole('button', { name: 'Dodaj zajęcia' }).click()
+  await expect(drawer).toHaveCount(0)
+  expect(fixture.commands.filter(({ kind }) => kind === 'class')).toHaveLength(1)
+  expect(fixture.commands.find(({ kind }) => kind === 'class').body.durationMinutes).toBe(60)
 })
 
 test('@owner attendance toggles only a real class participant and reconciles canonical state', async ({ page }) => {
@@ -422,12 +542,12 @@ test('@owner attendance toggles only a real class participant and reconciles can
   await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
 
   const attendance = page.getByRole('button', {
-    name: 'Obecność: Fikcyjna Uczestniczka, 2026-08-18, obecna',
+    name: 'Obecność: Fikcyjna Uczestniczka, 18 sierpnia, Obecność',
   })
   await expect(attendance).toHaveAttribute('aria-pressed', 'true')
   await attendance.click()
   await expect(page.getByRole('button', {
-    name: 'Obecność: Fikcyjna Uczestniczka, 2026-08-18, nieobecna',
+    name: 'Obecność: Fikcyjna Uczestniczka, 18 sierpnia, Nieobecność',
   })).toHaveAttribute('aria-pressed', 'false')
   expect(fixture.loads()).toBeGreaterThanOrEqual(2)
 })
@@ -466,7 +586,7 @@ test('@owner accepted write reload failure closes mutation UI and prevents repla
 
   await expect(drawer).toHaveCount(0)
   await expect(page.getByRole('heading', { level: 1, name: 'Grupy TUS' })).toBeVisible()
-  await expect(page.getByText('Dane są teraz niedostępne')).toBeVisible()
+  await expect(page.getByText('Grupy TUS są teraz niedostępne')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Nowa grupa' })).toHaveCount(0)
   expect(fixture.commands.filter(({ kind }) => kind === 'group')).toHaveLength(1)
 })
@@ -475,15 +595,20 @@ test('@owner activity loading state retains the route heading', async ({ page })
   await installActivityFixture(page, { workspaceDelayMs: 3_000 })
   await page.goto('./#/tus?ym=2026-08')
   await expect(page.getByRole('heading', { level: 1, name: 'Grupy TUS' })).toBeVisible({ timeout: 1_000 })
-  await expect(page.getByText('Wczytywanie danych…')).toBeVisible()
+  await expect(page.getByText('Wczytuję zajęcia…')).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Fikcyjna grupa TUS' })).toBeVisible()
+
+  await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-09')
+  const groupHead = page.locator('.view-head')
+  await expect(groupHead.getByRole('heading', { level: 1, name: 'Grupa TUS' })).toHaveCount(1, { timeout: 1_000 })
+  await expect(groupHead.locator('.eyebrow')).toHaveCount(0)
 })
 
 test('@owner activity error state retains the route heading', async ({ page }) => {
   await installActivityFixture(page, { workspaceFailure: true })
   await page.goto('./#/english?ym=2026-08')
   await expect(page.getByRole('heading', { level: 1, name: 'Angielski' })).toBeVisible()
-  await expect(page.getByText('Dane są teraz niedostępne')).toBeVisible()
+  await expect(page.getByText('Angielski jest teraz niedostępny')).toBeVisible()
 })
 
 test('@owner participant create posts the exact canonical DTO and renders the refreshed record', async ({ page }) => {
@@ -508,14 +633,14 @@ test('@owner participant create posts the exact canonical DTO and renders the re
 test('@owner membership create posts explicit dates and renders the refreshed assignment', async ({ page }) => {
   const fixture = await installActivityFixture(page)
   await page.goto('./#/tusGroup?id=agr_fikcyjna&ym=2026-08')
-  await page.getByRole('button', { name: 'Dodaj przypisanie' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Nowe przypisanie do grupy' })
+  await page.getByRole('button', { name: 'Zapisz do grupy' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Zapisz uczestnika do grupy' })
   await drawer.getByLabel('Uczestnik').selectOption({ label: 'Fikcyjny Nieprzypisany' })
   await drawer.getByLabel('Data rozpoczęcia').fill('2026-08-01')
-  await drawer.getByRole('button', { name: 'Dodaj przypisanie' }).click()
+  await drawer.getByRole('button', { name: 'Zapisz do grupy' }).click()
 
   await expect(drawer).toHaveCount(0)
-  await expect(page.getByRole('region', { name: 'Przypisania uczestników' }))
+  await expect(page.getByRole('region', { name: 'Uczestnicy grupy' }))
     .toContainText('Fikcyjny Nieprzypisany')
   const command = fixture.commands.find(({ kind }) => kind === 'membership')
   expect(command.body).toEqual({
@@ -535,7 +660,7 @@ test('@owner class create posts nullable optional facts and renders the refreshe
   await drawer.getByRole('button', { name: 'Dodaj zajęcia' }).click()
 
   await expect(drawer).toHaveCount(0)
-  await expect(page.getByRole('heading', { level: 3, name: '2026-08-21' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 3, name: '21 sierpnia' })).toBeVisible()
   const command = fixture.commands.find(({ kind }) => kind === 'class')
   expect(command.body).toEqual({
     groupId: 'agr_fikcyjna', date: '2026-08-21', time: null,
@@ -571,10 +696,10 @@ test('@owner saving a class in another month selects its reconciled month', asyn
   await drawer.getByRole('button', { name: 'Dodaj zajęcia' }).click()
   await expect(drawer).toHaveCount(0)
   await expect(page.locator('time[datetime="2026-09"]')).toBeVisible()
-  await expect(page.getByRole('heading', { level: 3, name: '2026-09-21' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 3, name: '21 września' })).toBeVisible()
   await expect(page).toHaveURL(/#\/tusGroup\?id=agr_fikcyjna&ym=2026-09$/)
   await page.reload()
-  await expect(page.getByRole('heading', { level: 3, name: '2026-09-21' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 3, name: '21 września' })).toBeVisible()
 })
 
 test('@owner group forms assign leaders from the specialist directory', async ({ page }) => {
@@ -616,7 +741,7 @@ test('@specialist renders only the D1-scoped DTO and conceals a direct other-gro
   await page.getByRole('link', { name: 'Otwórz grupę — Fikcyjna grupa TUS' }).click()
   await expect(page.getByRole('button', { name: 'Edytuj grupę' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Edytuj zajęcia' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Dodaj przypisanie' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Zapisz do grupy' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Edytuj grupę', exact: true }).click()
   const drawer = page.getByRole('dialog', { name: 'Edytuj grupę TUS' })
   await expect(drawer.getByRole('region', { name: 'Prowadzący' })).toHaveCount(0)
@@ -627,12 +752,68 @@ test('@specialist renders only the D1-scoped DTO and conceals a direct other-gro
   await expect(page.getByText(/należy do innej|brak uprawnień/i)).toHaveCount(0)
 })
 
+test('@specialist discovers a freshly assigned group without tus.manage, including a history month', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-08-28T10:00:00Z') })
+  const fixture = await installActivityFixture(page, {
+    historyEmptyFacts: true, specialistScope: true, specialistScopeId: 'sp_scope',
+  })
+  await page.route('**/api/v1/session', async (route) => route.fulfill(activityScopeSession()))
+
+  await page.goto('./#/tus?ym=2026-08')
+  await expect(page.getByRole('heading', { name: 'Fikcyjna grupa TUS' })).toBeVisible()
+  await expect(page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' })).toBeVisible()
+  await expect(page.getByRole('navigation').getByRole('link', { name: 'Angielski' })).toHaveCount(0)
+  expect(fixture.loads()).toBe(1)
+
+  await page.goto('./#/tus?ym=2026-07')
+  await expect(page.getByRole('heading', { name: 'Fikcyjna grupa TUS' })).toBeVisible()
+  expect(fixture.loads()).toBe(2)
+})
+
+test('@specialist direct activity links outside a scope make one safe request and show one clean state', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-08-28T10:00:00Z') })
+  let activityRequests = 0
+  await page.route('**/api/v1/activities/workspace?*', async (route) => {
+    activityRequests += 1
+    const url = new URL(route.request().url())
+    await route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify(emptyScopedActivityWorkspace({
+        from: url.searchParams.get('from'), to: url.searchParams.get('to'),
+      })),
+    })
+  })
+  await page.route('**/api/v1/session', async (route) => route.fulfill(activityScopeSession()))
+
+  await page.goto('./#/tus?ym=2026-08')
+  await expect(page.getByText('Zajęcia TUS nie są teraz w Twoim zakresie', { exact: true })).toBeVisible()
+  await expect(page.getByRole('navigation').getByRole('link', { name: 'Zajęcia TUS' })).toHaveCount(0)
+  await expect(page.locator('.figures, .activity-group-card')).toHaveCount(0)
+
+  await page.goto('./#/english?ym=2026-08')
+  await expect(page.getByText('Angielski nie jest teraz w Twoim zakresie', { exact: true })).toBeVisible()
+  await expect(page.getByRole('navigation').getByRole('link', { name: 'Angielski' })).toHaveCount(0)
+  expect(activityRequests).toBe(1)
+})
+
 test('@coordinator sees centre activity routes and eligible creation actions', async ({ page }) => {
   await installActivityFixture(page)
   await page.goto('./#/tus?ym=2026-08')
   await expect(page.getByRole('button', { name: 'Nowa grupa' })).toBeVisible()
   await page.goto('./#/english?ym=2026-08')
   await expect(page.getByRole('button', { name: 'Nowy uczestnik' })).toBeVisible()
+})
+
+test('@owner renders a distinct English icon in the main navigation', async ({ page }) => {
+  await installActivityFixture(page)
+  await page.goto('./#/english?ym=2026-08')
+
+  const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
+  const englishIcon = navigation.getByRole('link', { name: 'Angielski' }).locator('svg')
+  const clientsIcon = navigation.getByRole('link', { name: 'Klienci' }).locator('svg')
+  await expect(englishIcon).toBeVisible()
+  await expect(clientsIcon).toBeVisible()
+  expect(await englishIcon.innerHTML()).not.toEqual(await clientsIcon.innerHTML())
 })
 
 test('@owner empty current month stays selected until the real latest-month link enters history', async ({ page }) => {
@@ -677,7 +858,7 @@ test('@owner protected activities contain long facts at desktop, tablet, phone, 
     }))).toEqual({ local: 0, session: 0 })
     if (viewport.width <= 640) {
       await page.getByRole('navigation', { name: 'Nawigacja dolna' })
-        .getByRole('button', { name: 'Menu' }).click()
+        .getByRole('button', { name: 'Więcej' }).click()
       await expect(page.getByRole('dialog', { name: 'Nawigacja' })
         .getByRole('link', { name: 'Angielski' })).toBeVisible()
     }

@@ -3,10 +3,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useApp } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
-import { Button, Field, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
+import { Button, Field, IconBtn, DiscardConfirm, SpecialistAvatarPicker, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, plural } from '../format.js'
+import { DEFAULT_SPECIALIST_AVATAR_KEY } from '../specialist-avatars.js'
 
 // palette for newly added specialists — brand hues at text strength,
 // each paired with its ghost tint (same pairs as the seeded team)
@@ -32,6 +33,7 @@ export function PsychDrawer({ opts, onClose }) {
     phone: editing?.phone || '',
     room: editing?.room || '',
     rate: editing ? editing.rate : '',
+    avatarKey: editing?.avatarKey ?? DEFAULT_SPECIALIST_AVATAR_KEY,
   })
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
@@ -67,6 +69,7 @@ export function PsychDrawer({ opts, onClose }) {
       phone: form.phone.trim(),
       room: form.room.trim(),
       rate,
+      avatarKey: form.avatarKey,
     }
     if (editing) {
       dispatch({ type: 'UPDATE_PSYCH', id: editing.id, patch: payload })
@@ -110,6 +113,10 @@ export function PsychDrawer({ opts, onClose }) {
         </div>
 
         <form className="drawer__body" onSubmit={submit} noValidate>
+          <Field label="Imię i nazwisko" error={errors.name}>
+            <input name="psych-name" autoComplete="off" className="input" value={form.name}
+              placeholder="np. Maria Nowak" onChange={(e) => set('name', e.target.value)} />
+          </Field>
           <div className="form-grid">
             <Field label="Tytuł">
               <select name="psych-title" autoComplete="off" className="select" value={form.title} onChange={(e) => set('title', e.target.value)}>
@@ -118,42 +125,22 @@ export function PsychDrawer({ opts, onClose }) {
                 <option value="dr hab.">dr hab.</option>
               </select>
             </Field>
-            <Field label="Stawka (zł / sesja)" error={errors.rate}>
+            <Field label="Specjalizacja">
               <input
-                type="number"
-                min="0"
-                step="10"
-                inputMode="decimal"
-                name="psych-rate"
+                name="psych-spec"
                 autoComplete="off"
                 className="input"
-                value={form.rate}
-                placeholder="np. 220…"
-                onChange={(e) => set('rate', e.target.value)}
+                value={form.spec}
+                placeholder="np. Terapia ACT"
+                onChange={(e) => set('spec', e.target.value)}
               />
             </Field>
           </div>
 
-          <Field label="Imię i nazwisko" error={errors.name}>
-            <input
-              name="psych-name"
-              autoComplete="off"
-              className="input"
-              value={form.name}
-              placeholder="np. Maria Nowak"
-              onChange={(e) => set('name', e.target.value)}
-            />
-          </Field>
-
-          <Field label="Specjalizacja">
-            <input
-              name="psych-spec"
-              autoComplete="off"
-              className="input"
-              value={form.spec}
-              placeholder="np. Terapia ACT"
-              onChange={(e) => set('spec', e.target.value)}
-            />
+          <Field label="Stawka (zł / sesja)" error={errors.rate}>
+            <input type="number" min="0" step="10" inputMode="decimal" name="psych-rate"
+              autoComplete="off" className="input" value={form.rate} placeholder="np. 220…"
+              onChange={(e) => set('rate', e.target.value)} />
           </Field>
 
           <div className="form-grid">
@@ -192,6 +179,8 @@ export function PsychDrawer({ opts, onClose }) {
               onChange={(e) => set('room', e.target.value)}
             />
           </Field>
+
+          <SpecialistAvatarPicker value={form.avatarKey} onChange={(value) => set('avatarKey', value)} />
 
           {/* a permanently blocked delete is explained up front, not after a press */}
           {editing && blocked && (

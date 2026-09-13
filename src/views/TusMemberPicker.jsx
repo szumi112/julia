@@ -211,19 +211,11 @@ export function TusMemberPicker({
   )
 }
 
-export function TusChildQuickCreate({ clients, pendingParents = [], onAdd, onCancel, onInvalid }) {
+export function TusChildQuickCreate({ clients, pendingParents = [], draft, onDraftChange, onAdd, onCancel, onInvalid }) {
   const parentListId = useId()
   const parentErrorId = useId()
   const parentListRef = useRef(null)
-  const [form, setForm] = useState({
-    childName: '',
-    age: '',
-    parentClientId: '',
-    parentName: '',
-    parentPhone: '',
-    parentEmail: '',
-    regulationsSigned: false,
-  })
+  const form = draft
   const [errors, setErrors] = useState({})
   const [parentMode, setParentMode] = useState('existing')
   const [parentQuery, setParentQuery] = useState('')
@@ -231,7 +223,7 @@ export function TusChildQuickCreate({ clients, pendingParents = [], onAdd, onCan
   const [parentActiveIndex, setParentActiveIndex] = useState(0)
 
   const set = (key, value) => {
-    setForm((current) => ({ ...current, [key]: value }))
+    onDraftChange((current) => ({ ...current, [key]: value }))
     setErrors((current) => ({ ...current, [key]: null }))
   }
 
@@ -273,10 +265,11 @@ export function TusChildQuickCreate({ clients, pendingParents = [], onAdd, onCan
     event.preventDefault()
     const nextErrors = {}
     if (!form.childName.trim()) nextErrors.childName = 'Podaj imię i nazwisko dziecka'
-    if (!(Number(form.age) >= 3 && Number(form.age) <= 12)) nextErrors.age = 'Podaj wiek 3–12 lat'
+    if (!Number.isInteger(Number(form.age)) || !(Number(form.age) >= 3 && Number(form.age) <= 12)) {
+      nextErrors.age = 'Podaj wiek 3–12 lat'
+    }
     if (parentMode === 'existing' && !form.parentClientId) nextErrors.parentClientId = 'Wybierz rodzica lub dodaj nową osobę'
     if (parentMode === 'new' && !form.parentName.trim()) nextErrors.parentName = 'Podaj imię i nazwisko rodzica'
-    if (parentMode === 'new' && !form.parentPhone.trim()) nextErrors.parentPhone = 'Podaj telefon kontaktowy'
     if (parentMode === 'new' && form.parentEmail.trim() && !EMAIL_SHAPE.test(form.parentEmail.trim())) {
       nextErrors.parentEmail = 'Podaj poprawny adres e-mail'
     }
@@ -477,7 +470,7 @@ export function TusChildQuickCreate({ clients, pendingParents = [], onAdd, onCan
                 <input name="tus-parent-name" autoComplete="off" className="input" value={form.parentName} placeholder="np. Anna Kowalska" onChange={(event) => set('parentName', event.target.value)} />
               </Field>
               <div className="form-grid">
-                <Field label="Telefon rodzica" error={errors.parentPhone}>
+                <Field label="Telefon rodzica (opcjonalnie)" error={errors.parentPhone}>
                   <input type="tel" name="tus-parent-phone" autoComplete="off" className="input" value={form.parentPhone} placeholder="+48 600 000 000" onChange={(event) => set('parentPhone', event.target.value)} />
                 </Field>
                 <Field label="E-mail rodzica (opcjonalnie)" error={errors.parentEmail}>
