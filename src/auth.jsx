@@ -46,7 +46,7 @@ function AuthScreen({ state, onLogout, onRetry }) {
       )}
       {state === 'reauth' && (
         <>
-          <p className="auth-screen__message">Sesja logowania wygasła. Zaloguj się ponownie, aby wrócić do panelu.</p>
+          <p className="auth-screen__message">Logowanie wygasło. Zaloguj się ponownie.</p>
           <button type="button" className="btn btn--primary" onClick={onLogout}>Zaloguj się ponownie</button>
         </>
       )}
@@ -66,6 +66,7 @@ export function AuthProvider({ children, client = apiClient, loginClient = authC
   const bootstrapStartedRef = useRef(false)
   const loggingOutRef = useRef(false)
   const requestRef = useRef(0)
+  const hadAuthenticatedSessionRef = useRef(false)
 
   const requestSession = useCallback(async (status) => {
     const requestId = ++requestRef.current
@@ -78,6 +79,12 @@ export function AuthProvider({ children, client = apiClient, loginClient = authC
     } catch (error) {
       if (!mountedRef.current || requestRef.current !== requestId) return
       const nextStatus = authStateFor(error)
+      if (status === 'refreshing' && nextStatus === 'unavailable') {
+        setAuth((current) => current.session
+          ? { status: 'authenticated', session: current.session }
+          : current)
+        return
+      }
       if (nextStatus === 'denied' && error instanceof ApiError && error.code === 'FORBIDDEN') {
         client.clearSession()
       }
@@ -91,6 +98,7 @@ export function AuthProvider({ children, client = apiClient, loginClient = authC
       if (!mountedRef.current) return
       requestRef.current += 1
       if (loggingOutRef.current) return
+      if (session) hadAuthenticatedSessionRef.current = true
       setAuth(session
         ? { status: 'authenticated', session }
         : { status: reason === 'reauth' ? 'reauth' : 'denied', session: null })
@@ -167,7 +175,15 @@ export function AuthProvider({ children, client = apiClient, loginClient = authC
   }), [auth.session, auth.status, logout, refresh])
 
   if (AUTH_STRATEGY === 'better-auth' && (auth.status === 'login' || auth.status === 'reauth')) {
-    return <AppLogin client={loginClient} onAuthenticated={() => requestSession('loading')} />
+    return (
+      <AppLogin
+        client={loginClient}
+        initialNotice={hadAuthenticatedSessionRef.current && auth.status === 'reauth'
+          ? 'Logowanie wygasło. Zaloguj się ponownie.'
+          : ''}
+        onAuthenticated={() => requestSession('loading')}
+      />
+    )
   }
 
   if (auth.status === 'loading' || auth.status === 'denied' || auth.status === 'reauth' || auth.status === 'unavailable') {

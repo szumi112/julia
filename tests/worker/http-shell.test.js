@@ -161,11 +161,14 @@ describe('closed core route descriptors', () => {
     ['/api/v1/clients/cl_one/archive', { expectedVersion: 1 }],
     ['/api/v1/appointments', { clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', date: '2026-08-04', time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20000, location: null, status: 'scheduled' }],
     ['/api/v1/appointments/apt_one/edits', { expectedVersion: 1, specialistId: 'sp_one', serviceId: 'zajecia', date: '2026-08-04', time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20000, location: null, status: 'scheduled' }],
-    ['/api/v1/appointments/apt_one/cancellation', { expectedVersion: 1 }],
+    ['/api/v1/appointments/apt_one/cancellation', { expectedVersion: 1, reason: 'client' }],
+    ['/api/v1/appointments/apt_one/restoration', { expectedVersion: 2 }],
     ['/api/v1/appointments/apt_one/payments', { expectedVersion: 1, amountGrosze: 10000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }],
     ['/api/v1/payments/pay_one/corrections', { expectedVersion: 1, reason: 'Korekta', replacement: null }],
+    ['/api/v1/specialist-absences', { specialistId: 'sp_one', dateFrom: '2026-08-04', dateTo: '2026-08-05', allDay: true }],
+    ['/api/v1/specialist-absences/abs_one/cancellation', { expectedVersion: 1 }],
   ]
-  const futureCommands = commands.slice(6)
+  const futureCommands = commands.slice(6).filter(([path]) => !path.includes('specialist-absences'))
   const headers = {
     origin,
     'content-type': 'application/json',
@@ -182,16 +185,19 @@ describe('closed core route descriptors', () => {
       { id: 'permissions.read', capability: 'permissions.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'permissions.replace', capability: 'permissions.manage', auditActions: ['staff.capabilities.updated'], bodyKeys: ['expectedAuthorityRevision', 'allow', 'deny'], sharedBudget: { totalLimit: 80, recoveryReserve: 12 } },
       { id: 'staff.role.update', capability: 'staff.manage', auditActions: ['staff.role.updated'], bodyKeys: ['expectedVersion', 'role'], sharedBudget: { totalLimit: 96, recoveryReserve: 16 } },
-      { id: 'specialists.create', capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'professionalTitle', 'standardRateGrosze'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'specialists.edit', capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'specialists.create', capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'professionalTitle', 'standardRateGrosze', 'avatarKey'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'specialists.edit', capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze', 'avatarKey'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'specialists.account.link', capability: 'staff.manage', auditActions: ['specialist.account.linked'], bodyKeys: ['staffId', 'expectedSpecialistVersion', 'expectedStaffVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'clients.create', capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'clients.edit', capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'clients.archive', capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'appointments.create', capability: 'appointment.manage', auditActions: ['appointment.created'], bodyKeys: ['clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'appointments.edit', capability: 'appointment.manage', auditActions: ['appointment.updated'], bodyKeys: ['expectedVersion', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'appointments.cancel', capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'appointments.cancel', capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion', 'reason'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'appointments.restore', capability: 'appointment.manage', auditActions: ['appointment.restored'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'appointments.payment', capability: 'payment.manage', auditActions: ['payment.recorded'], bodyKeys: ['expectedVersion', 'amountGrosze', 'method', 'receivedAt'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'specialist-absences', capability: 'appointment.manage', auditActions: ['specialist.absence.created'], bodyKeys: ['specialistId', 'dateFrom', 'dateTo', 'allDay'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'specialist-absences.cancel', capability: 'appointment.manage', auditActions: ['specialist.absence.cancelled'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'payments.correct', capability: 'payment.manage', auditActions: ['payment.corrected'], bodyKeys: ['expectedVersion', 'reason', 'replacement'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'payments.own', capability: 'appointment.charge.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'finance.list', capability: 'finance.centre.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
@@ -220,7 +226,7 @@ describe('closed core route descriptors', () => {
       { id: 'historical.projection.continue', capability: 'finance.import', auditActions: [], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 160, recoveryReserve: 8 } },
       { id: 'historical.projection.resolve', capability: 'finance.import', auditActions: [], bodyKeys: ['expectedJobVersion', 'conflictId', 'classification', 'existingSubjectId', 'serviceId', 'reviewContextDigest', 'directoryCount', 'directoryDigest'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'historical.clients.activate', capability: 'client.manage', auditActions: ['historical_client.activated'], bodyKeys: ['expectedVersion', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
-      { id: 'activities.workspace', capability: 'tus.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'activities.workspace', capability: null, auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'activities.charges.create', capability: 'finance.centre.manage', auditActions: ['activity.charge.created'], bodyKeys: ['participantId', 'groupId', 'membershipId', 'responsibleSpecialistId', 'accountingMonth', 'amountGrosze', 'lessonCount', 'paidAmountGrosze', 'paymentMethod', 'settlementStatus', 'invoiceStatus'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'activities.groups.create', capability: 'tus.manage', auditActions: ['activity.group.created'], bodyKeys: ['programId', 'label', 'details', 'leaderSpecialistIds'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'activities.groups.edit', capability: 'tus.manage', auditActions: ['activity.group.updated'], bodyKeys: ['expectedVersion', 'label', 'details', 'status', 'leaderSpecialistIds'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
@@ -238,6 +244,12 @@ describe('closed core route descriptors', () => {
       .toMatchObject({
         capability: null,
         capabilityAnyOf: ['workbook.centre.export', 'workbook.own.export'],
+      })
+    expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'activities.workspace'))
+      .toMatchObject({
+        capability: null,
+        capabilityAnyOf: ['tus.manage', 'appointment.charge.read'],
+        capabilityAllOf: null,
       })
     expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'workspace'))
       .toMatchObject({
@@ -264,6 +276,27 @@ describe('closed core route descriptors', () => {
     expect(() => {
       CORE_ROUTE_DESCRIPTORS[0].sharedBudget.totalLimit = 1
     }).toThrow(TypeError)
+  })
+
+  it('returns specialist absence GET and HEAD as top-level data envelopes', async () => {
+    const data = { from: '2026-08-01', to: '2026-08-31', absences: [] }
+    const getSpecialistAbsences = vi.fn(async ({ url }) => {
+      expect(new URL(url).search).toBe('?from=2026-08-01&to=2026-08-31')
+      return { data }
+    })
+    const input = deps({ db: coreBudgetDb(), getSpecialistAbsences })
+    const app = createApp(input)
+    const get = await app.request('/api/v1/specialist-absences?from=2026-08-01&to=2026-08-31', {
+      headers: { origin },
+    })
+    expect(get.status).toBe(200)
+    expect(await get.json()).toEqual({ data })
+    const head = await app.request('/api/v1/specialist-absences?from=2026-08-01&to=2026-08-31', {
+      method: 'HEAD', headers: { origin },
+    })
+    expect(head.status).toBe(200)
+    expect(await head.text()).toBe('')
+    expect(getSpecialistAbsences).toHaveBeenCalledTimes(2)
   })
 
   it('dispatches staff role replacement with the exact body and dedicated shared budget', async () => {
@@ -470,13 +503,48 @@ describe('closed core route descriptors', () => {
     })
   })
 
+  it('dispatches appointment restoration through the authentic shared command boundary', async () => {
+    let views
+    const restoreAppointment = vi.fn(async (input) => {
+      views = { work: input.db, recovery: input.recoveryDb }
+      expect(input).toMatchObject({
+        appointmentId: 'apt_one', idempotencyKey: 'core-command-key-0001',
+        body: commands[5][1],
+      })
+      await input.db.prepare('SELECT appointment_restore_domain_1').first()
+      return { status: 200, body: { data: { appointment: {
+        id: input.appointmentId, status: 'scheduled',
+      } } } }
+    })
+    const input = deps({
+      db: coreBudgetDb(), restoreAppointment,
+      verifyCsrfToken: vi.fn(async () => true),
+      readJsonBodyOnce: vi.fn(async (request) => request.json()),
+    })
+    const response = await createApp(input).request(
+      '/api/v1/appointments/apt_one/restoration', {
+        method: 'POST', headers, body: JSON.stringify(commands[5][1]),
+      },
+    )
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ data: { appointment: {
+      id: 'apt_one', status: 'scheduled',
+    } } })
+    expect(restoreAppointment).toHaveBeenCalledOnce()
+    expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
+    expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
+      used: 1, remaining: 49, workRemaining: 41,
+      totalLimit: 50, recoveryReserve: 8,
+    })
+  })
+
   it('dispatches appointment payment through the authentic shared command boundary', async () => {
     let views
     const recordAppointmentPayment = vi.fn(async (input) => {
       views = { work: input.db, recovery: input.recoveryDb }
       expect(input).toMatchObject({
         appointmentId: 'apt_one', idempotencyKey: 'core-command-key-0001',
-        body: commands[5][1],
+        body: commands[6][1],
       })
       await input.db.prepare('SELECT appointment_payment_domain_1').first()
       return { status: 200, body: { data: { appointment: {
@@ -490,7 +558,7 @@ describe('closed core route descriptors', () => {
     })
     const response = await createApp(input).request(
       '/api/v1/appointments/apt_one/payments', {
-        method: 'POST', headers, body: JSON.stringify(commands[5][1]),
+        method: 'POST', headers, body: JSON.stringify(commands[6][1]),
       },
     )
     expect(response.status).toBe(200)
@@ -507,7 +575,7 @@ describe('closed core route descriptors', () => {
       views = { work: input.db, recovery: input.recoveryDb }
       expect(input).toMatchObject({
         paymentId: 'pay_one', idempotencyKey: 'core-command-key-0001',
-        body: commands[6][1],
+        body: commands[7][1],
       })
       await input.db.prepare('SELECT payment_correction_domain_1').first()
       return { status: 200, body: { data: { appointment: {
@@ -521,7 +589,7 @@ describe('closed core route descriptors', () => {
     })
     const response = await createApp(input).request(
       '/api/v1/payments/pay_one/corrections', {
-        method: 'POST', headers, body: JSON.stringify(commands[6][1]),
+        method: 'POST', headers, body: JSON.stringify(commands[7][1]),
       },
     )
     expect(response.status).toBe(200)
@@ -714,7 +782,9 @@ describe('closed core route descriptors', () => {
     const input = deps({ verifyCsrfToken: vi.fn(), readJsonBodyOnce: vi.fn(), db: coreBudgetDb() })
     const response = await createApp(input).request(path, { method: 'OPTIONS', headers: { origin } })
     expect(response.status).toBe(204)
-    expect(response.headers.get('allow')).toBe('POST, OPTIONS')
+    expect(response.headers.get('allow')).toBe(
+      path === '/api/v1/specialist-absences' ? 'GET, HEAD, POST, OPTIONS' : 'POST, OPTIONS',
+    )
     expect(input.resolveAccessPrincipal).toHaveBeenCalledOnce()
     expect(input.resolveActor).toHaveBeenCalledOnce()
     expect(input.verifyCsrfToken).not.toHaveBeenCalled()

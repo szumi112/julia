@@ -155,6 +155,7 @@ export function Reports({ params = {} }) {
           <h1 className="display view-head__title">Raport miesięczny — <em>{fmtMonthYear(ym)}</em></h1>
           <p className="view-head__sub">
             {selectedPsychologist ? `Zakres: ${selectedPsychologist.name}.` : 'Zakres: cały zespół.'}
+            {' '}Raporty porównują okresy, a Finanse służą do bieżących rozliczeń.
           </p>
         </div>
         <div className="view-head__actions no-print">
@@ -246,7 +247,7 @@ export function Reports({ params = {} }) {
                 {ranked.map(({ p, sessions, hours, revenue, collected, outstanding }) => (
                   <div className="hbar__row report-psych__row" key={p.id} data-specialist-id={p.id}>
                     <span className="hbar__name">
-                      <Avatar name={p.name} color={p.color} size={26} />
+                      <Avatar name={p.name} color={p.color} avatarKey={p.avatarKey} size={26} />
                       <span className="report-psych__name">{p.name}</span>
                     </span>
                     <div className="report-psych__bar">

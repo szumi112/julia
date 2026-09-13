@@ -27,7 +27,7 @@ import {
   encryptClientIdentity,
 } from '../../worker/core/crypto.js'
 import { createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db/query-budget.js'
-import { createApp } from '../../worker/app.js'
+import { CORE_ROUTE_DESCRIPTORS, createApp } from '../../worker/app.js'
 import { selectCoreMigrationStage } from '../../scripts/core-migration-stages.js'
 import {
   applyCoreDirectoryStageB,
@@ -98,7 +98,9 @@ const registerRealRouteAuthorizationAndBudgetTests = () => describe('core route 
         date: '2027-01-01', time: '10:00', durationMinutes: 50,
         expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
       }],
-      ['/api/v1/appointments/apt_route_missing/cancellation', { expectedVersion: 1 }],
+      ['/api/v1/appointments/apt_route_missing/cancellation', {
+        expectedVersion: 1, reason: 'client',
+      }],
       ['/api/v1/appointments/apt_route_missing/payments', {
         expectedVersion: 1, amountGrosze: 18_000, method: 'card',
         receivedAt: '2027-01-01T09:00:00.000Z',
@@ -793,6 +795,11 @@ beforeAll(async () => {
     )),
     stageE.find((migration) => migration.name === '0020_capability_overrides.sql'),
   ])
+  const stageF = selectCoreMigrationStage(env.TEST_STAGE_F_MIGRATIONS, 'stage-f')
+  await applyD1Migrations(env.DB, [
+    stageF.find((migration) => migration.name === '0026_assignment_starts_at.sql'),
+    stageF.find((migration) => migration.name === '0027_appointment_cancellation_reason.sql'),
+  ])
   const instant = new Date(NOW_MS).toISOString()
   await env.DB.batch([
     env.DB.prepare(`INSERT INTO staff_users
@@ -1084,13 +1091,21 @@ const countedDb = () => {
 
 describe('persistent client creation', () => {
   it('strictly captures the exact create body without invoking accessors', () => {
-    expect(validateCreateClientBody(BODY)).toEqual(BODY)
+    expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'clients.create')
+      .optionalBodyKeys).toEqual(['assignmentStartsAt'])
+    expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'clients.edit')
+      .optionalBodyKeys).toEqual(['assignmentStartsAt'])
+    expect(validateCreateClientBody(BODY)).toEqual({ ...BODY, assignmentStartsAt: null })
+    expect(validateCreateClientBody({
+      ...BODY, assignmentStartsAt: '2026-01-02T03:04:05.000Z',
+    })).toEqual({ ...BODY, assignmentStartsAt: '2026-01-02T03:04:05.000Z' })
     for (const [body, field] of [
       [{ ...BODY, name: ' Fikcyjna' }, 'name'],
       [{ ...BODY, name: '\uD800' }, 'name'],
       [{ ...BODY, age: 0 }, 'age'],
       [{ ...BODY, status: 'archived' }, 'status'],
       [{ ...BODY, specialistId: 'staff_target' }, 'specialistId'],
+      [{ ...BODY, assignmentStartsAt: '2026-01-02T03:04:05Z' }, 'assignmentStartsAt'],
       [{ ...BODY, extra: true }, 'body'],
     ]) expect(() => validateCreateClientBody(body)).toThrow(`VALIDATION_FAILED/${field}`)
 
@@ -1164,6 +1179,12 @@ describe('persistent client creation', () => {
     expect(service).toHaveBeenCalledWith(expect.objectContaining({
       db: input.db, recoveryDb: input.recoveryDb, body: BODY,
     }))
+    await expect(postClient({
+      ...input,
+      create: async () => { throw new TypeError('VALIDATION_FAILED/assignmentStartsAt') },
+    })).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED', details: { field: 'assignmentStartsAt' },
+    })
   })
 
   it('creates key, client, assignment, versions, one audit, idempotency, and guard atomically', async () => {
@@ -1234,6 +1255,45 @@ describe('persistent client creation', () => {
       body: { ...BODY, age: 13 },
       idempotencyKey: 'client-create-key-success-0001',
     })).rejects.toThrow('IDEMPOTENCY_CONFLICT')
+    expect(replayFactory).not.toHaveBeenCalled()
+    const futureFactory = vi.fn()
+    await expect(createClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS, correlationId: CORRELATION_ID,
+      idFactory: futureFactory,
+      body: { ...BODY, assignmentStartsAt: '2027-01-15T09:00:00.000Z' },
+      idempotencyKey: 'client-create-future-start-0001',
+    })).rejects.toThrow('VALIDATION_FAILED/assignmentStartsAt')
+    expect(futureFactory).not.toHaveBeenCalled()
+  })
+
+  it('creates and replays a client with an explicit past assignment start', async () => {
+    const startsAt = '2025-01-15T09:30:00.000Z'
+    const body = { ...BODY, assignmentStartsAt: startsAt }
+    const ids = ['past_start_client', 'past_start_assignment', 'past_start_client_ver',
+      'past_start_assignment_ver', 'past_start_audit', 'past_start_key']
+    const result = await createClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS, correlationId: CORRELATION_ID,
+      idFactory: () => ids.shift(), body,
+      idempotencyKey: 'client-create-past-start-0001',
+    })
+    expect(result.body.data.client).toMatchObject({
+      createdAt: new Date(NOW_MS).toISOString(),
+      assignment: { startsAt, version: 1 },
+    })
+    expect((await env.DB.prepare(
+      'SELECT starts_at,created_at FROM client_assignments WHERE id=?'
+    ).bind(result.body.data.client.assignment.id).first())).toEqual({
+      starts_at: startsAt, created_at: new Date(NOW_MS).toISOString(),
+    })
+    const replayFactory = vi.fn()
+    expect(await createClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: replayFactory, body,
+      idempotencyKey: 'client-create-past-start-0001',
+    })).toEqual(result)
     expect(replayFactory).not.toHaveBeenCalled()
   })
 
@@ -1683,14 +1743,17 @@ describe('persistent client edit and reassignment', () => {
     return { clientId, assignmentId, keyring }
   }
 
-  it('strictly captures the exact edit target and five-key body', () => {
-    expect(validateEditClientBody(editBody)).toEqual(editBody)
+  it('strictly captures the exact edit target and optional assignment start', () => {
+    expect(validateEditClientBody(editBody)).toEqual({
+      ...editBody, assignmentStartsAt: null,
+    })
     for (const [body, field] of [
       [{ ...editBody, expectedVersion: 0 }, 'expectedVersion'],
       [{ ...editBody, name: ' Zmieniona' }, 'name'],
       [{ ...editBody, age: 27 }, 'age'],
       [{ ...editBody, status: 'archived' }, 'status'],
       [{ ...editBody, specialistId: 'staff_target' }, 'specialistId'],
+      [{ ...editBody, assignmentStartsAt: '2026-01-02T03:04:05Z' }, 'assignmentStartsAt'],
       [{ ...editBody, extra: true }, 'body'],
     ]) expect(() => validateEditClientBody(body)).toThrow(`VALIDATION_FAILED/${field}`)
 
@@ -1824,6 +1887,109 @@ describe('persistent client edit and reassignment', () => {
       clientId: original.id, body, idempotencyKey: 'client-edit-identity-success-0001',
     })).toEqual(result)
     expect(replayFactory).not.toHaveBeenCalled()
+  })
+
+  it('backdates one open assignment with its own version and preserves it on later edits', async () => {
+    const original = await seedEditable()
+    const startsAt = '2025-02-03T08:00:00.000Z'
+    const firstIds = ['backdate_client_ver', 'backdate_assignment_ver', 'backdate_audit']
+    const body = {
+      expectedVersion: 1, name: original.name, age: original.age,
+      status: original.status, specialistId: original.assignment.specialistId,
+      assignmentStartsAt: startsAt,
+    }
+    const backdated = await editClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS + 1_000, correlationId: CORRELATION_ID,
+      idFactory: () => firstIds.shift(), clientId: original.id, body,
+      idempotencyKey: 'client-edit-backdate-start-0001',
+    })
+    expect(backdated.body.data.client).toMatchObject({
+      version: 2, assignment: {
+        id: original.assignment.id, startsAt, version: 2,
+      },
+    })
+    expect(await env.DB.prepare(
+      'SELECT starts_at,version FROM client_assignments WHERE id=?'
+    ).bind(original.assignment.id).first()).toEqual({ starts_at: startsAt, version: 2 })
+
+    const replayFactory = vi.fn()
+    expect(await editClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: replayFactory, clientId: original.id, body,
+      idempotencyKey: 'client-edit-backdate-start-0001',
+    })).toEqual(backdated)
+    expect(replayFactory).not.toHaveBeenCalled()
+
+    await expect(editClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: vi.fn(), clientId: original.id,
+      body: { ...body, expectedVersion: 1 },
+      idempotencyKey: 'client-edit-backdate-stale-0001',
+    })).rejects.toMatchObject({
+      message: 'VERSION_CONFLICT', details: { currentVersion: 2 },
+    })
+
+    const laterIds = ['backdate_later_client_ver', 'backdate_later_audit']
+    const later = await editClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS + 2_000, correlationId: CORRELATION_ID,
+      idFactory: () => laterIds.shift(), clientId: original.id,
+      body: {
+        expectedVersion: 2, name: 'Fikcyjna później', age: original.age,
+        status: original.status, specialistId: original.assignment.specialistId,
+      },
+      idempotencyKey: 'client-edit-preserve-start-0001',
+    })
+    expect(later.body.data.client).toMatchObject({
+      version: 3, assignment: { startsAt, version: 2 },
+    })
+
+    await expect(editClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS + 3_000, correlationId: CORRELATION_ID,
+      idFactory: vi.fn(), clientId: original.id,
+      body: {
+        expectedVersion: 3, name: 'Fikcyjna później', age: original.age,
+        status: original.status, specialistId: 'sp_client_self',
+        assignmentStartsAt: startsAt,
+      },
+      idempotencyKey: 'client-edit-reassign-with-start-0001',
+    })).rejects.toThrow('CLIENT_ASSIGNMENT_CONFLICT')
+
+    const reassignIds = ['backdate_reassign_asg', 'backdate_reassign_client_ver',
+      'backdate_reassign_old_ver', 'backdate_reassign_new_ver', 'backdate_reassign_audit']
+    const reassigned = await editClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS + 4_000, correlationId: CORRELATION_ID,
+      idFactory: () => reassignIds.shift(), clientId: original.id,
+      body: {
+        expectedVersion: 3, name: 'Fikcyjna później', age: original.age,
+        status: original.status, specialistId: 'sp_client_self',
+        assignmentStartsAt: null,
+      },
+      idempotencyKey: 'client-edit-reassign-after-backdate-0001',
+    })
+    expect(reassigned.body.data.client).toMatchObject({
+      version: 4,
+      assignment: {
+        specialistId: 'sp_client_self', version: 1,
+        startsAt: new Date(NOW_MS + 4_000).toISOString(),
+      },
+    })
+
+    const archiveIds = ['backdate_archive_client_ver',
+      'backdate_archive_assignment_ver', 'backdate_archive_audit']
+    const archived = await archiveClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS + 5_000, correlationId: CORRELATION_ID,
+      idFactory: () => archiveIds.shift(), clientId: original.id,
+      body: { expectedVersion: 4 },
+      idempotencyKey: 'client-archive-after-backdate-0001',
+    })
+    expect(archived.body.data.client).toMatchObject({ status: 'archived', version: 5 })
   })
 
   it('closes the exact assignment and inserts a new encrypted v1 without overwriting history', async () => {

@@ -108,6 +108,11 @@ const exactAppointment = (resource) => {
     && isSpecialistId(fact.specialistId) ? fact : null
 }
 
+const exactSpecialistAbsence = (resource) => {
+  const fact = captureExact(resource, ['kind', 'specialistId'])
+  return fact?.kind === 'specialist_absence' && isSpecialistId(fact.specialistId) ? fact : null
+}
+
 const legacyClient = (resource) => {
   const fact = captureFields(resource, ['kind', 'clientId'])
   return fact?.kind === 'client' && isClientId(fact.clientId) ? fact : null
@@ -150,6 +155,11 @@ export function authorize(value, capability, resource, options = {}) {
       return ['owner', 'coordinator'].includes(actor.role) && exactCentre(resource)
     }
     if (capability === 'specialist.directory.read') return exactDirectory(resource)
+    if (capability === 'appointment.manage') {
+      const absence = exactSpecialistAbsence(resource)
+      if (absence) return ['owner', 'coordinator'].includes(actor.role)
+        || (actor.role === 'specialist' && ownSpecialist(actor, absence.specialistId))
+    }
     if (capability === 'chat.general') return exactCentre(resource)
     if (capability === 'chat.direct') {
       const conversation = captureFields(resource, ['kind', 'conversationId', 'participantStaffIds'])

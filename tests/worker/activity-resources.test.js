@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
   parseActivityWorkspaceQuery,
@@ -30,6 +31,18 @@ const owner = authorityActor({ id: 'stf_activity_read_owner', role: 'owner' })
 const specialist = authorityActor({
   id: 'stf_activity_read_own', role: 'specialist',
   specialistId: 'sp_activity_read_own',
+})
+const specialistWithoutTus = authorityActor({
+  id: 'stf_activity_read_own', role: 'specialist', specialistId: 'sp_activity_read_own',
+  capabilities: ROLE_DEFAULT_CAPABILITIES.specialist.filter((capability) => capability !== 'tus.manage'),
+})
+const unassignedSpecialistWithoutTus = authorityActor({
+  id: 'stf_activity_read_unassigned', role: 'specialist', specialistId: 'sp_activity_read_unassigned',
+  capabilities: ROLE_DEFAULT_CAPABILITIES.specialist.filter((capability) => capability !== 'tus.manage'),
+})
+const coordinatorWithoutTus = authorityActor({
+  id: 'stf_activity_read_coordinator', role: 'coordinator',
+  capabilities: ROLE_DEFAULT_CAPABILITIES.coordinator.filter((capability) => capability !== 'tus.manage'),
 })
 const key = (byte) => encodeBase64Url(new Uint8Array(32).fill(byte))
 let keyring
@@ -268,10 +281,10 @@ describe('scoped activity workspace resources', () => {
     })
   })
 
-  it('keeps current led roster plus in-window own facts and hides old/other sentinels', async () => {
+  it('lets a specialist without tus.manage discover only her current led roster and in-window own facts', async () => {
     const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
     const result = await readActivityWorkspace({
-      db: budget.work, actor: specialist, keyring, nowMs: NOW_MS,
+      db: budget.work, actor: specialistWithoutTus, keyring, nowMs: NOW_MS,
       window: { from: '2026-07', to: '2026-07' },
     })
     expect(result.data.groups.map(({ id }) => id)).toEqual(['agr_activity_read_led'])
@@ -289,6 +302,30 @@ describe('scoped activity workspace resources', () => {
     expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toMatchObject({
       used: 10, totalLimit: 50, recoveryReserve: 8,
     })
+  })
+
+  it('returns one empty scoped workspace when a specialist without tus.manage has no assignment', async () => {
+    const result = await readActivityWorkspace({
+      db: env.DB, actor: unassignedSpecialistWithoutTus, keyring, nowMs: NOW_MS,
+      window: { from: '2026-07', to: '2026-07' },
+    })
+    expect(result.data.programs.map(({ code }) => code)).toEqual(['english', 'tus'])
+    expect(result.data.groups).toEqual([])
+    expect(result.data.groupLeaders).toEqual([])
+    expect(result.data.participants).toEqual([])
+    expect(result.data.memberships).toEqual([])
+    expect(result.data.classes).toEqual([])
+    expect(result.data.attendance).toEqual([])
+    expect(result.data.charges).toEqual([])
+    expect(result.data.latestPopulatedMonths).toEqual({ tus: null, english: null })
+  })
+
+  it('denies a coordinator without tus.manage before any activity query', async () => {
+    const db = { prepare: () => { throw new Error('activity query must not run') } }
+    await expect(readActivityWorkspace({
+      db, actor: coordinatorWithoutTus, keyring, nowMs: NOW_MS,
+      window: { from: '2026-07', to: '2026-07' },
+    })).rejects.toMatchObject({ code: 'FORBIDDEN' })
   })
 
   it('closes a historical led class over its attendance participant and interval only', async () => {

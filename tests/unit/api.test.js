@@ -78,6 +78,7 @@ const sessionBody = (overrides = {}) => ({
     actor: {
       id: 'stf_owner_1',
       displayName: 'Julia Właścicielka',
+      email: 'julia@example.test',
       professionalTitle: null,
       role: 'owner',
       specialistId: null,
@@ -172,6 +173,7 @@ const ownPaymentsBody = () => ({
     appointments: [{
       id: 'apt_own_august', serviceId: 'zajecia',
       startsAt: '2026-08-10T08:00:00.000Z', status: 'completed', version: 2,
+      cancellationReason: null,
       charge: {
         id: 'chg_own_august', serviceId: 'zajecia', expectedAmountGrosze: 18_000,
         currency: 'PLN', version: 1,
@@ -196,6 +198,7 @@ const fullWorkspaceBody = () => ({
       id: 'sp_anna',
       displayName: 'Anna Żuraw',
       professionalTitle: 'Psycholożka',
+      avatarKey: 'wave',
       standardRateGrosze: 18000,
       status: 'active',
       version: 2,
@@ -231,6 +234,7 @@ const fullWorkspaceBody = () => ({
       source: 'panel',
       version: 4,
       cancelledAt: null,
+      cancellationReason: null,
       createdAt: '2026-08-01T08:00:00.000Z',
       updatedAt: '2026-08-10T12:00:00.000Z',
       charge: {
@@ -387,7 +391,19 @@ test('own payments API reads only the dedicated narrow projection', async () => 
   assert.equal(Object.isFrozen(result.appointments), true)
   assert.equal(Object.isFrozen(result.appointments[0].charge), true)
   assert.equal(Object.isFrozen(result.appointments[0].payment), true)
-  assert.doesNotMatch(JSON.stringify(result), /client|specialists|displayName/i)
+  assert.doesNotMatch(JSON.stringify(result), /clientId|clients|specialists|displayName/i)
+
+  const latePaid = ownPaymentsBody()
+  latePaid.data.appointments[0].status = 'cancelled'
+  latePaid.data.appointments[0].cancellationReason = 'late_paid'
+  latePaid.data.appointments[0].payment = {
+    status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18_000,
+    latestMethod: null, latestReceivedAt: null,
+  }
+  const latePaidResult = await createApiClient({
+    fetchImpl: queuedFetch(parsedResponse(latePaid)).fetchImpl,
+  }).loadOwnPaymentsWindow({ from: '2026-08-01', to: '2026-08-31' })
+  assert.equal(latePaidResult.appointments[0].cancellationReason, 'late_paid')
 })
 
 test('own payments API rejects invalid windows and widened or incoherent responses', async () => {
@@ -410,6 +426,7 @@ test('own payments API rejects invalid windows and widened or incoherent respons
     (body) => { body.data.appointments[0].charge.expectedAmountGrosze = 0 },
     (body) => { body.data.appointments[0].payment.collectedGrosze = 8_000 },
     (body) => { body.data.appointments[0].payment.latestMethod = null },
+    (body) => { body.data.appointments[0].cancellationReason = 'client' },
   ]
   for (const mutate of hostile) {
     const body = ownPaymentsBody()
@@ -520,6 +537,18 @@ test('captures and deeply freezes a complete workspace response independently of
   source.data.appointments[0].paymentEntries[1].amountGrosze = 1
   assert.equal(result.clients[0].name, 'Ola Nowak')
   assert.equal(result.appointments[0].paymentEntries[1].amountGrosze, 18000)
+})
+
+test('defaults a legacy workspace specialist without an avatar key to bloom', async () => {
+  const source = fullWorkspaceBody()
+  delete source.data.specialists[0].avatarKey
+  const { fetchImpl } = queuedFetch(parsedResponse(source))
+
+  const result = await createApiClient({ fetchImpl }).loadWorkspaceWindow({
+    from: '2026-08-01', to: '2026-08-31',
+  })
+
+  assert.equal(result.specialists[0].avatarKey, 'bloom')
 })
 
 test('captures historical people, counterparties, source precision, and scoped latest month without inventing timed facts', async () => {
@@ -723,7 +752,9 @@ test('rejects missing, extra, and wrong-typed workspace keys at every nesting le
     for (const key of keys) {
       const missing = historicalWorkspaceBody()
       delete workspaceAt(missing, path)[key]
-      await rejectWorkspaceBody(missing)
+      if (!(key === 'avatarKey' && path.join('/') === 'data/specialists/0')) {
+        await rejectWorkspaceBody(missing)
+      }
 
       const wrong = historicalWorkspaceBody()
       workspaceAt(wrong, path)[key] = { invalid: true }
@@ -747,6 +778,7 @@ test('rejects invalid specialist, client, assignment, and appointment scalar con
     (body) => { body.data.specialists[0].professionalTitle = ' Psycholożka' },
     (body) => { body.data.specialists[0].professionalTitle = 'Psycholożka\u0000' },
     (body) => { body.data.specialists[0].professionalTitle = 'x'.repeat(121) },
+    (body) => { body.data.specialists[0].avatarKey = 'photo' },
     (body) => { body.data.specialists[0].standardRateGrosze = 1_000_001 },
     (body) => { body.data.specialists[0].status = 'pending' },
     (body) => { body.data.specialists[0].version = 0 },
@@ -762,7 +794,7 @@ test('rejects invalid specialist, client, assignment, and appointment scalar con
     (body) => { body.data.clients[0].readOnly = true },
     (body) => { body.data.clients[0].assignment.id = 'assignment_1' },
     (body) => { body.data.clients[0].assignment.specialistId = 'sp_missing' },
-    (body) => { body.data.clients[0].assignment.startsAt = '2026-06-01T08:00:00.000Z' },
+    (body) => { body.data.clients[0].assignment.startsAt = '2026-08-11T08:00:00.000Z' },
     (body) => { body.data.clients[0].assignment.version = 0 },
     (body) => { body.data.appointments[0].id = 'appointment_1' },
     (body) => { body.data.appointments[0].clientId = 'cl_missing' },
@@ -862,6 +894,7 @@ test('recomputes payment aggregates and rejects incoherent correction relationsh
     Object.assign(body.data.appointments[0], {
       status,
       cancelledAt: status === 'cancelled' ? '2026-08-10T12:00:00.000Z' : null,
+      cancellationReason: status === 'cancelled' ? 'client' : null,
     })
     await rejectWorkspaceBody(body)
   }
@@ -1262,6 +1295,7 @@ test('creates, edits, and targets an invitation at one stable specialist profile
     data: { specialist: {
       id: 'sp_anna_profile', displayName: 'Anna Janowska',
       professionalTitle: 'Specjalistka',
+      avatarKey: 'orbit',
       standardRateGrosze: 18000, status: 'active', version: 1,
       accessStatus: 'unclaimed', createdAt, updatedAt: createdAt,
     } },
@@ -1272,6 +1306,7 @@ test('creates, edits, and targets an invitation at one stable specialist profile
       ...created.data.specialist,
       displayName: 'Anna Janowska-Kowalska',
       professionalTitle: 'Psycholożka',
+      avatarKey: 'wave',
       standardRateGrosze: 19000,
       version: 2,
       staffVersion: null,
@@ -1299,11 +1334,11 @@ test('creates, edits, and targets an invitation at one stable specialist profile
   await client.getSession()
   await client.createSpecialistProfile({
     displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
-    standardRateGrosze: 18000,
+    avatarKey: 'orbit', standardRateGrosze: 18000,
   }, { idempotencyKey: 'specialist-create-api-0001' })
   await client.updateSpecialistProfile('sp_anna_profile', 1, {
     displayName: 'Anna Janowska-Kowalska', professionalTitle: 'Psycholożka',
-    standardRateGrosze: 19000,
+    avatarKey: 'wave', standardRateGrosze: 19000,
   }, { idempotencyKey: 'specialist-edit-api-0001' })
   await client.inviteSpecialistProfile('sp_anna_profile', {
     email: 'anna-j@gmail.com', expectedVersion: 2,
@@ -1316,11 +1351,11 @@ test('creates, edits, and targets an invitation at one stable specialist profile
     url,
   })), [
     {
-      body: '{"displayName":"Anna Janowska","professionalTitle":"Specjalistka","standardRateGrosze":18000}',
+      body: '{"displayName":"Anna Janowska","professionalTitle":"Specjalistka","standardRateGrosze":18000,"avatarKey":"orbit"}',
       key: 'specialist-create-api-0001', method: 'POST', url: '/api/v1/specialists',
     },
     {
-      body: '{"expectedVersion":1,"displayName":"Anna Janowska-Kowalska","professionalTitle":"Psycholożka","standardRateGrosze":19000}',
+      body: '{"expectedVersion":1,"displayName":"Anna Janowska-Kowalska","professionalTitle":"Psycholożka","standardRateGrosze":19000,"avatarKey":"wave"}',
       key: 'specialist-edit-api-0001', method: 'POST',
       url: '/api/v1/specialists/sp_anna_profile/edits',
     },
@@ -1406,6 +1441,7 @@ test('refreshes and safely replays a self-link before the public command settles
     actor: {
       id: 'stf_owner_1',
       displayName: 'Julia Właścicielka',
+      email: 'julia@example.test',
       professionalTitle: 'Psycholożka',
       role: 'owner',
       specialistId: 'sp_owner_profile',
@@ -1709,6 +1745,7 @@ test('invalidates an in-flight session read when authentication is cleared', asy
     actor: {
       id: 'stf_coordinator_1',
       displayName: 'Karolina Koordynatorka',
+      email: 'karolina@example.test',
       professionalTitle: null,
       role: 'coordinator',
       specialistId: null,
@@ -1769,6 +1806,7 @@ test('contains a stale authentication denial after a newer session succeeds', as
     actor: {
       id: 'stf_coordinator_1',
       displayName: 'Karolina Koordynatorka',
+      email: 'karolina@example.test',
       professionalTitle: null,
       role: 'coordinator',
       specialistId: null,
@@ -2703,12 +2741,13 @@ test('requires and freezes the exact presentation actor and positive authority r
   assert.equal(session.authorityRevision, 1)
   assert.equal(Object.isFrozen(session.actor), true)
   assert.deepEqual(Reflect.ownKeys(session.actor).sort(), [
-    'displayName', 'id', 'professionalTitle', 'role', 'specialistId', 'version',
+    'displayName', 'email', 'id', 'professionalTitle', 'role', 'specialistId', 'version',
   ])
 
   const boundaryActor = {
     id: `stf_${'a'.repeat(124)}`,
     displayName: 'Anna Graniczna',
+    email: `${'a'.repeat(241)}@example.test`,
     professionalTitle: 'x'.repeat(120),
     role: 'specialist',
     specialistId: `sp_${'a'.repeat(125)}`,
@@ -2727,6 +2766,11 @@ test('requires and freezes the exact presentation actor and positive authority r
     (actor) => { actor.extra = true },
     (actor) => { actor.id = 'sp_owner' },
     (actor) => { actor.id = `stf_${'a'.repeat(125)}` },
+    (actor) => { delete actor.email },
+    (actor) => { actor.email = 'Julia@Example.test' },
+    (actor) => { actor.email = ' julia@example.test' },
+    (actor) => { actor.email = 'julia..owner@example.test' },
+    (actor) => { actor.email = `${'a'.repeat(242)}@example.test` },
     (actor) => { actor.specialistId = 'stf_profile' },
     (actor) => { actor.specialistId = `sp_${'a'.repeat(126)}` },
     (actor) => { delete actor.professionalTitle },
@@ -2852,9 +2896,9 @@ test('rejects descriptor-hostile session envelopes, actors, and capability array
 
 test('accepts canonical effective capabilities within each role ceiling', async () => {
   const actors = [
-    { id: 'stf_owner_1', displayName: 'Ola', professionalTitle: 'Psycholożka', role: 'owner', specialistId: 'sp_owner', version: 2 },
-    { id: 'stf_coord_1', displayName: 'Ela', professionalTitle: null, role: 'coordinator', specialistId: null, version: 3 },
-    { id: 'stf_spec_1', displayName: 'Anna', professionalTitle: 'Specjalistka', role: 'specialist', specialistId: 'sp_spec', version: 4 },
+    { id: 'stf_owner_1', displayName: 'Ola', email: 'ola@example.test', professionalTitle: 'Psycholożka', role: 'owner', specialistId: 'sp_owner', version: 2 },
+    { id: 'stf_coord_1', displayName: 'Ela', email: 'ela@example.test', professionalTitle: null, role: 'coordinator', specialistId: null, version: 3 },
+    { id: 'stf_spec_1', displayName: 'Anna', email: 'anna@example.test', professionalTitle: 'Specjalistka', role: 'specialist', specialistId: 'sp_spec', version: 4 },
   ]
   for (const actor of actors) {
     const capabilities = [...ROLE_DEFAULT_CAPABILITIES[actor.role]]
@@ -3264,7 +3308,8 @@ const AUDIT_FACTS = [
   { action: 'client.archived', entityType: 'client', entityId: 'cl_audit_archived', result: 'success', metadata: { clientVersion: 3, assignmentId: 'asg_audit_archive', assignmentVersion: 2 }, actorStaffId: 'stf_audit_actor' },
   { action: 'appointment.created', entityType: 'appointment', entityId: 'apt_audit_created', result: 'success', metadata: { appointmentVersion: 1, chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' },
   { action: 'appointment.updated', entityType: 'appointment', entityId: 'apt_audit_updated', result: 'success', metadata: { appointmentVersion: 2, chargeVersion: 2 }, actorStaffId: 'stf_audit_actor' },
-  { action: 'appointment.cancelled', entityType: 'appointment', entityId: 'apt_audit_cancelled', result: 'success', metadata: { appointmentVersion: 2, chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' },
+  { action: 'appointment.cancelled', entityType: 'appointment', entityId: 'apt_audit_cancelled', result: 'success', metadata: { appointmentVersion: 2, cancellationReason: 'client', chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' },
+  { action: 'appointment.restored', entityType: 'appointment', entityId: 'apt_audit_restored', result: 'success', metadata: { appointmentVersion: 3, chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' },
   { action: 'payment.recorded', entityType: 'appointment', entityId: 'apt_audit_paid', result: 'success', metadata: { appointmentVersion: 2, paymentEntryId: 'pay_audit_recorded' }, actorStaffId: 'stf_audit_actor' },
   { action: 'payment.corrected', entityType: 'payment_entry', entityId: 'pay_audit_reversed', result: 'success', metadata: { appointmentVersion: 3, correctionId: 'cor_audit_corrected', reversedEntryId: 'pay_audit_reversed', replacementEntryId: null }, actorStaffId: 'stf_audit_actor' },
 ]
@@ -3700,7 +3745,7 @@ test('security audit builds URLSearchParams in cursor-limit order and validates 
   })
 })
 
-test('security audit projects and deeply freezes all twenty-five exact registry actions with opaque correlations', async () => {
+test('security audit projects and deeply freezes every exact registry action with opaque correlations', async () => {
   const body = auditBody()
   const { fetchImpl } = queuedFetch(jsonResponse(body))
   const result = await createApiClient({ fetchImpl }).getSecurityAudit({ limit: 50 })
@@ -5102,8 +5147,8 @@ test('exposes client commands and sends canonical create, edit, and archive requ
     '/api/v1/clients/cl_ola/archive',
   ])
   assert.deepEqual(calls.slice(1).map((call) => call.init.body), [
-    '{"name":"Ola Żuraw","age":12,"status":"active","specialistId":"sp_anna"}',
-    '{"expectedVersion":1,"name":"Ola Nowak","age":null,"status":"paused","specialistId":"sp_beata"}',
+    '{"name":"Ola Żuraw","age":12,"status":"active","specialistId":"sp_anna","assignmentStartsAt":null}',
+    '{"expectedVersion":1,"name":"Ola Nowak","age":null,"status":"paused","specialistId":"sp_beata","assignmentStartsAt":null}',
     '{"expectedVersion":2}',
   ])
   assert.deepEqual(calls.slice(1).map((call) => header(call, 'Idempotency-Key')), [
@@ -5198,6 +5243,38 @@ test('client commands reject malformed and hostile inputs before fetch or key ge
   assert.equal(gets, 0)
 })
 
+test('client commands send and accept an explicit assignment start before client creation', async () => {
+  const assignmentStartsAt = '2025-01-15T09:30:00.000Z'
+  const created = clientDto({
+    assignment: {
+      ...clientDto().assignment, startsAt: assignmentStartsAt,
+    },
+  })
+  const edited = clientDto({
+    version: 2, updatedAt: '2026-08-04T09:00:00.000Z',
+    assignment: {
+      ...clientDto().assignment, startsAt: assignmentStartsAt, version: 2,
+    },
+  })
+  const queued = queuedFetch(
+    jsonResponse(sessionBody()), jsonResponse(clientEnvelope(created), 201),
+    jsonResponse(clientEnvelope(edited)),
+  )
+  const client = createApiClient({ fetchImpl: queued.fetchImpl })
+  await client.getSession()
+  const createResult = await client.createClient(clientInput({ assignmentStartsAt }))
+  assert.equal(createResult.assignment.startsAt, assignmentStartsAt)
+  const editResult = await client.editClient(
+    'cl_ola', 1, clientInput({ assignmentStartsAt }),
+  )
+  assert.equal(editResult.version, 2)
+  assert.deepEqual(editResult.assignment, edited.assignment)
+  assert.equal(queued.calls[1].init.body,
+    `{"name":"Ola Żuraw","age":12,"status":"active","specialistId":"sp_anna","assignmentStartsAt":"${assignmentStartsAt}"}`)
+  assert.equal(queued.calls[2].init.body,
+    `{"expectedVersion":1,"name":"Ola Żuraw","age":12,"status":"active","specialistId":"sp_anna","assignmentStartsAt":"${assignmentStartsAt}"}`)
+})
+
 test('client command options distinguish omission from every malformed supplied object', async () => {
   let generated = 0
   let reads = 0
@@ -5248,8 +5325,8 @@ test('client command options distinguish omission from every malformed supplied 
 test('client identity validation stays byte-for-byte aligned across browser, core, and Worker', async () => {
   const joinedName = 'Ada\u200DNowak'
   const input = clientInput({ name: joinedName })
-  assert.deepEqual(validateClientInput(input), input)
-  assert.deepEqual(validateCreateClientBody(input), input)
+  assert.deepEqual(validateClientInput(input), { ...input, assignmentStartsAt: null })
+  assert.deepEqual(validateCreateClientBody(input), { ...input, assignmentStartsAt: null })
 
   const response = clientEnvelope(clientDto({ name: joinedName }))
   const queued = queuedFetch(jsonResponse(sessionBody()), jsonResponse(response, 201))
@@ -5263,7 +5340,7 @@ test('client identity validation stays byte-for-byte aligned across browser, cor
   assert.equal(generated, 1)
   assert.equal(result.name, joinedName)
   assert.equal(queued.calls[1].init.body,
-    '{"name":"Ada‍Nowak","age":12,"status":"active","specialistId":"sp_anna"}')
+    '{"name":"Ada‍Nowak","age":12,"status":"active","specialistId":"sp_anna","assignmentStartsAt":null}')
 
   const workspace = fullWorkspaceBody()
   workspace.data.clients[0].name = joinedName
@@ -5295,7 +5372,7 @@ test('client command success validators enforce exact operation relationships', 
     ['edit wrong target', 'edit', (body) => { body.data.client.id = 'cl_other' }],
     ['edit wrong version', 'edit', (body) => { body.data.client.version = 3 }],
     ['edit wrong specialist', 'edit', (body) => { body.data.client.assignment.specialistId = 'sp_other' }],
-    ['edit noncurrent assignment version', 'edit', (body) => { body.data.client.assignment.version = 2 }],
+    ['edit malformed assignment version', 'edit', (body) => { body.data.client.assignment.version = 0 }],
     ['archive remains writable', 'archive', (body) => { body.data.client.readOnly = false }],
     ['archive retains assignment', 'archive', (body) => { body.data.client.assignment = clientDto().assignment }],
     ['archive time differs from update', 'archive', (body) => { body.data.client.updatedAt = '2026-08-04T09:59:59.000Z' }],
@@ -5510,6 +5587,26 @@ test('client conflicts expose only safe details and authentication denials clear
   assert.equal(auth.calls.length, 2)
 })
 
+test('client assignment validation exposes only its safe field detail', async () => {
+  const { fetchImpl } = queuedFetch(
+    jsonResponse(sessionBody()),
+    errorResponse('VALIDATION_FAILED', 400, {
+      details: { field: 'assignmentStartsAt', name: 'Private Ola' },
+    }),
+  )
+  const client = createApiClient({ fetchImpl })
+  await client.getSession()
+
+  await assert.rejects(client.createClient(clientInput(), {
+    idempotencyKey: 'client-assignment-validation-key-0001',
+  }), (error) => {
+    assert.equal(error.code, 'VALIDATION_FAILED')
+    assert.deepEqual(error.details, { field: 'assignmentStartsAt' })
+    assert.doesNotMatch(JSON.stringify(error), /Private Ola/)
+    return true
+  })
+})
+
 const appointmentInput = (overrides = {}) => ({
   clientId: 'cl_ola',
   specialistId: 'sp_anna',
@@ -5537,6 +5634,7 @@ const ledgerAppointment = (overrides = {}) => {
     source: 'panel',
     version: 1,
     cancelledAt: null,
+    cancellationReason: null,
     createdAt: '2026-08-04T08:00:00.000Z',
     updatedAt: '2026-08-04T08:00:00.000Z',
     charge: {
@@ -5562,7 +5660,7 @@ const appointmentEnvelope = (appointment) => ({ data: { appointment } })
 
 test('ledger commands expose the public API and send exact canonical requests', async () => {
   for (const name of [
-    'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
+    'createAppointment', 'editAppointment', 'cancelAppointment', 'restoreAppointment', 'recordPayment',
     'correctPayment',
   ]) assert.equal(typeof apiClient[name], 'function')
 
@@ -5577,10 +5675,15 @@ test('ledger commands expose the public API and send exact canonical requests', 
   })
   const cancelled = ledgerAppointment({
     version: 3, status: 'cancelled', cancelledAt: '2026-08-04T10:00:00.000Z',
+    cancellationReason: 'client',
     updatedAt: '2026-08-04T10:00:00.000Z',
   })
+  const restored = ledgerAppointment({
+    version: 4, status: 'scheduled', updatedAt: '2026-08-04T10:30:00.000Z',
+    payment: { outstandingGrosze: 0 },
+  })
   const recorded = ledgerAppointment({
-    version: 4, status: 'completed', updatedAt: '2026-08-04T11:00:00.000Z',
+    version: 5, status: 'completed', updatedAt: '2026-08-04T11:00:00.000Z',
     payment: {
       status: 'partial', collectedGrosze: 7_000, outstandingGrosze: 11_000,
       latestMethod: 'card', latestReceivedAt: '2026-08-04T10:30:00.000Z',
@@ -5592,7 +5695,7 @@ test('ledger commands expose the public API and send exact canonical requests', 
     }],
   })
   const corrected = ledgerAppointment({
-    version: 5, status: 'completed', updatedAt: '2026-08-04T12:00:00.000Z',
+    version: 6, status: 'completed', updatedAt: '2026-08-04T12:00:00.000Z',
     payment: {
       status: 'partial', collectedGrosze: 6_000, outstandingGrosze: 12_000,
       latestMethod: 'transfer', latestReceivedAt: '2026-08-04T10:45:00.000Z',
@@ -5612,6 +5715,7 @@ test('ledger commands expose the public API and send exact canonical requests', 
     jsonResponse(appointmentEnvelope(created), 201),
     jsonResponse(appointmentEnvelope(edited)),
     jsonResponse(appointmentEnvelope(cancelled)),
+    jsonResponse(appointmentEnvelope(restored)),
     jsonResponse(appointmentEnvelope(recorded)),
     jsonResponse(appointmentEnvelope(corrected)),
   )
@@ -5638,32 +5742,36 @@ test('ledger commands expose the public API and send exact canonical requests', 
     await client.createAppointment(createSource),
     await client.editAppointment('apt_ola_august', 1, editSource,
       { idempotencyKey: 'ledger-edit-key-0002' }),
-    await client.cancelAppointment('apt_ola_august', 2),
-    await client.recordPayment('apt_ola_august', 3, paymentSource,
+    await client.cancelAppointment('apt_ola_august', 2, 'client'),
+    await client.restoreAppointment('apt_ola_august', 3,
+      { idempotencyKey: 'ledger-restore-key-0004' }),
+    await client.recordPayment('apt_ola_august', 4, paymentSource,
       { idempotencyKey: 'ledger-record-key-0004' }),
-    await client.correctPayment('pay_original', 4, correctionSource,
+    await client.correctPayment('pay_original', 5, correctionSource,
       { idempotencyKey: 'ledger-correct-key-0005' }),
   ]
-  assert.deepEqual(results, [created, edited, cancelled, recorded, corrected])
+  assert.deepEqual(results, [created, edited, cancelled, restored, recorded, corrected])
   for (const result of results) assertDeepFrozen(result)
   assert.deepEqual(createSource, appointmentInput())
   assert.deepEqual(queued.calls.slice(1).map(({ url }) => url), [
     '/api/v1/appointments',
     '/api/v1/appointments/apt_ola_august/edits',
     '/api/v1/appointments/apt_ola_august/cancellation',
+    '/api/v1/appointments/apt_ola_august/restoration',
     '/api/v1/appointments/apt_ola_august/payments',
     '/api/v1/payments/pay_original/corrections',
   ])
   assert.deepEqual(queued.calls.slice(1).map(({ init }) => init.body), [
     '{"clientId":"cl_ola","specialistId":"sp_anna","serviceId":"zajecia","date":"2026-08-10","time":"10:00","durationMinutes":50,"expectedAmountGrosze":18000,"location":"Gabinet 1","status":"scheduled"}',
     '{"expectedVersion":1,"specialistId":"sp_beata","serviceId":"konsultacja","date":"2026-08-11","time":"11:30","durationMinutes":90,"expectedAmountGrosze":25000,"location":null,"status":"completed"}',
-    '{"expectedVersion":2}',
-    '{"expectedVersion":3,"amountGrosze":7000,"method":"card","receivedAt":"2026-08-04T10:30:00.000Z"}',
-    '{"expectedVersion":4,"reason":"Zmiana metody","replacement":{"amountGrosze":6000,"method":"transfer","receivedAt":"2026-08-04T10:45:00.000Z"}}',
+    '{"expectedVersion":2,"reason":"client"}',
+    '{"expectedVersion":3}',
+    '{"expectedVersion":4,"amountGrosze":7000,"method":"card","receivedAt":"2026-08-04T10:30:00.000Z"}',
+    '{"expectedVersion":5,"reason":"Zmiana metody","replacement":{"amountGrosze":6000,"method":"transfer","receivedAt":"2026-08-04T10:45:00.000Z"}}',
   ])
   assert.deepEqual(queued.calls.slice(1).map((call) => header(call, 'Idempotency-Key')), [
     'ledger-create-key-0001', 'ledger-edit-key-0002', 'ledger-cancel-key-0003',
-    'ledger-record-key-0004', 'ledger-correct-key-0005',
+    'ledger-restore-key-0004', 'ledger-record-key-0004', 'ledger-correct-key-0005',
   ])
   for (const call of queued.calls.slice(1)) {
     assert.equal(call.init.method, 'POST')
@@ -5714,7 +5822,9 @@ test('ledger commands reject invalid hostile inputs and options before session, 
   for (const invoke of [
     ...badCreateInputs.map((input) => (client) => client.createAppointment(input)),
     (client) => client.editAppointment('apt_ola_august', 0, appointmentInput()),
-    (client) => client.cancelAppointment('cl_wrong', 1),
+    (client) => client.cancelAppointment('cl_wrong', 1, 'client'),
+    (client) => client.cancelAppointment('apt_ola_august', 1, 'other'),
+    (client) => client.restoreAppointment('cl_wrong', 1),
     (client) => client.recordPayment('apt_ola_august', 4_096, {
       amountGrosze: 1, method: 'cash', receivedAt: '2026-08-04T10:00:00.000Z',
     }),
@@ -5734,7 +5844,7 @@ test('ledger commands reject invalid hostile inputs and options before session, 
       reason: 'ą'.repeat(251), replacement: null,
     }),
     ...malformedOptions.map((options) => (client) => (
-      client.cancelAppointment('apt_ola_august', 1, options)
+      client.cancelAppointment('apt_ola_august', 1, 'client', options)
     )),
   ]) {
     const queued = queuedFetch()
@@ -5747,6 +5857,25 @@ test('ledger commands reject invalid hostile inputs and options before session, 
   }
   assert.equal(generated, 0)
   assert.equal(reads, 0)
+})
+
+test('restoration response accepts only a scheduled zero-payment appointment', async () => {
+  for (const status of ['completed', 'noshow']) {
+    const malformed = ledgerAppointment({
+      status,
+      version: 2,
+      updatedAt: '2026-08-04T10:00:00.000Z',
+      payment: { outstandingGrosze: 18_000 },
+    })
+    const queued = queuedFetch(
+      jsonResponse(sessionBody()), jsonResponse(appointmentEnvelope(malformed)),
+    )
+    const client = createApiClient({ fetchImpl: queued.fetchImpl })
+    await client.getSession()
+    await assert.rejects(client.restoreAppointment('apt_ola_august', 1, {
+      idempotencyKey: `ledger-restore-status-${status}`,
+    }), assertInvalidResponse)
+  }
 })
 
 test('ledger response validation enforces binary payment graphs, aggregates, and command relationships', async () => {

@@ -11,6 +11,10 @@ import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { encodeBase64Url } from '../security/encoding.js'
 import { encryptForScope } from '../security/envelope.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
+import {
+  isSpecialistAvatarKey,
+  specialistAvatarKeyOrDefault,
+} from '../../src/specialist-avatars.js'
 
 const SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const BODY_KEYS = Object.freeze(['displayName', 'professionalTitle', 'standardRateGrosze'])
@@ -67,14 +71,19 @@ const validProfessionalTitle = (value) => {
 }
 
 export function validateSpecialistProfileBody(value) {
-  const body = captureExact(value, BODY_KEYS)
+  let body
+  try { body = captureExact(value, [...BODY_KEYS, 'avatarKey']) }
+  catch { body = captureExact(value, BODY_KEYS) }
+  let avatarKey
+  try { avatarKey = specialistAvatarKeyOrDefault(body.avatarKey) }
+  catch { validation('avatarKey') }
   if (!validName(body.displayName)) validation('displayName')
   if (!validProfessionalTitle(body.professionalTitle)) validation('professionalTitle')
   if (!Number.isSafeInteger(body.standardRateGrosze)
     || body.standardRateGrosze < 1 || body.standardRateGrosze > 1_000_000) {
     validation('standardRateGrosze')
   }
-  return body
+  return Object.freeze({ ...body, avatarKey })
 }
 
 const generated = (factory, prefix, grammar, used) => {
@@ -98,6 +107,7 @@ const profileDto = (profile) => Object.freeze({
   displayName: profile.displayName,
   professionalTitle: profile.professionalTitle,
   standardRateGrosze: profile.standardRateGrosze,
+  avatarKey: profile.avatarKey,
   status: 'active',
   version: 1,
   accessStatus: 'unclaimed',
@@ -112,12 +122,13 @@ const replayResult = (value, request) => {
     const data = captureExact(body.data, ['specialist'])
     const profile = captureExact(data.specialist, [
       'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
-      'version', 'accessStatus', 'createdAt', 'updatedAt',
+      'version', 'accessStatus', 'createdAt', 'updatedAt', 'avatarKey',
     ])
     if (replay.status !== 201 || !SPECIALIST_ID.test(profile.id ?? '')
       || profile.displayName !== request.displayName
       || profile.professionalTitle !== request.professionalTitle
       || profile.standardRateGrosze !== request.standardRateGrosze
+      || profile.avatarKey !== request.avatarKey || !isSpecialistAvatarKey(profile.avatarKey)
       || profile.status !== 'active' || profile.version !== 1
       || profile.accessStatus !== 'unclaimed' || profile.updatedAt !== profile.createdAt
       || new Date(profile.createdAt).toISOString() !== profile.createdAt) {
@@ -128,6 +139,37 @@ const replayResult = (value, request) => {
       body: Object.freeze({ data: Object.freeze({ specialist: profileDto({
         ...profile, createdAt: profile.createdAt,
       }) }) }),
+    })
+  } catch (error) {
+    if (error?.message === 'CRYPTO_FAILURE') throw error
+    throw new Error('CRYPTO_FAILURE')
+  }
+}
+
+const editReplayResult = (value, specialistId, request) => {
+  try {
+    const replay = captureExact(value, ['status', 'body'])
+    const body = captureExact(replay.body, ['data'])
+    const data = captureExact(body.data, ['specialist'])
+    const profile = captureExact(data.specialist, [
+      'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
+      'version', 'staffVersion', 'accessStatus', 'createdAt', 'updatedAt', 'avatarKey',
+    ])
+    if (replay.status !== 200 || profile.id !== specialistId
+      || profile.displayName !== request.displayName
+      || profile.professionalTitle !== request.professionalTitle
+      || profile.standardRateGrosze !== request.standardRateGrosze
+      || profile.avatarKey !== request.avatarKey || !isSpecialistAvatarKey(profile.avatarKey)
+      || profile.status !== 'active' || profile.version !== request.expectedVersion + 1
+      || !(profile.staffVersion === null
+        || (Number.isSafeInteger(profile.staffVersion) && profile.staffVersion >= 1))
+      || !['unclaimed', 'invited', 'enabled'].includes(profile.accessStatus)
+      || new Date(profile.createdAt).toISOString() !== profile.createdAt
+      || new Date(profile.updatedAt).toISOString() !== profile.updatedAt
+      || profile.updatedAt < profile.createdAt) throw new Error('CRYPTO_FAILURE')
+    return Object.freeze({
+      status: 200,
+      body: Object.freeze({ data: Object.freeze({ specialist: Object.freeze(profile) }) }),
     })
   } catch (error) {
     if (error?.message === 'CRYPTO_FAILURE') throw error
@@ -176,6 +218,7 @@ export async function createSpecialistProfile(input) {
     displayName: body.displayName,
     professionalTitle: body.professionalTitle,
     standardRateGrosze: body.standardRateGrosze,
+    avatarKey: body.avatarKey,
   })
   const idem = Object.freeze({
     actorId: actor.id, operation: OPERATION, idempotencyKey: command.idempotencyKey,
@@ -195,6 +238,7 @@ export async function createSpecialistProfile(input) {
     displayName: body.displayName,
     professionalTitle: body.professionalTitle,
     standardRateGrosze: body.standardRateGrosze,
+    avatarKey: body.avatarKey,
     createdAt: now,
   })
   const displayNameEnvelope = JSON.stringify(await encryptForScope(
@@ -211,11 +255,12 @@ export async function createSpecialistProfile(input) {
   ))
   const snapshot = JSON.stringify({
     archivedAt: null,
+    avatarKey: body.avatarKey,
     createdAt: now,
     displayName: body.displayName,
     id: specialistId,
     professionalTitle: body.professionalTitle,
-    schema: 'specialist.v3',
+    schema: 'specialist.v4',
     staffUserId: null,
     standardRateGrosze: body.standardRateGrosze,
     status: 'active',
@@ -242,11 +287,11 @@ export async function createSpecialistProfile(input) {
   uow.domain(command.db.prepare(
     `INSERT INTO specialists
      (id,staff_user_id,display_name_envelope,professional_title_envelope,
-      standard_rate_grosze,status,version,archived_at,created_at,updated_at)
-     VALUES (?,NULL,?,?,?,'active',1,NULL,?,?)`,
+      standard_rate_grosze,status,version,archived_at,created_at,updated_at,avatar_key)
+     VALUES (?,NULL,?,?,?,'active',1,NULL,?,?,?)`,
   ).bind(
     specialistId, displayNameEnvelope, professionalTitleEnvelope,
-    body.standardRateGrosze, now, now,
+    body.standardRateGrosze, now, now, body.avatarKey,
   ))
   uow.version(command.db.prepare(
     `INSERT INTO record_versions
@@ -268,7 +313,7 @@ export async function createSpecialistProfile(input) {
        EXISTS (SELECT 1 FROM specialists
          WHERE id=? AND staff_user_id IS NULL AND display_name_envelope=?
            AND professional_title_envelope=?
-           AND standard_rate_grosze=? AND status='active' AND version=1
+           AND standard_rate_grosze=? AND avatar_key=? AND status='active' AND version=1
            AND archived_at IS NULL AND created_at=? AND updated_at=?)
        AND EXISTS (SELECT 1 FROM record_versions
          WHERE id=? AND entity_type='specialist' AND entity_id=? AND version=1
@@ -282,7 +327,7 @@ export async function createSpecialistProfile(input) {
      )`,
   ).bind(
     specialistId, displayNameEnvelope, professionalTitleEnvelope,
-    body.standardRateGrosze, now, now,
+    body.standardRateGrosze, body.avatarKey, now, now,
     versionId, specialistId, actor.id, now, command.correlationId,
     auditId, specialistId, actor.id, command.correlationId,
     actor.id, OPERATION, command.idempotencyKey, specialistId,
@@ -311,14 +356,17 @@ export async function updateSpecialistProfile(input) {
     || !CORRELATION_ID.test(command.correlationId ?? '')
     || !SPECIALIST_ID.test(command.specialistId ?? '')
     || !IDEMPOTENCY_KEY.test(command.idempotencyKey ?? '')) validation('body')
-  const body = captureExact(command.body, [
-    'expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze',
-  ])
-  validateSpecialistProfileBody({
-    displayName: body.displayName,
-    professionalTitle: body.professionalTitle,
-    standardRateGrosze: body.standardRateGrosze,
+  let capturedBody
+  const editKeys = ['expectedVersion', ...BODY_KEYS]
+  try { capturedBody = captureExact(command.body, [...editKeys, 'avatarKey']) }
+  catch { capturedBody = captureExact(command.body, editKeys) }
+  const profileBody = validateSpecialistProfileBody({
+    displayName: capturedBody.displayName,
+    professionalTitle: capturedBody.professionalTitle,
+    standardRateGrosze: capturedBody.standardRateGrosze,
+    ...(Object.hasOwn(capturedBody, 'avatarKey') ? { avatarKey: capturedBody.avatarKey } : {}),
   })
+  const body = Object.freeze({ expectedVersion: capturedBody.expectedVersion, ...profileBody })
   if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 1) {
     validation('expectedVersion')
   }
@@ -334,6 +382,7 @@ export async function updateSpecialistProfile(input) {
       expectedVersion: body.expectedVersion,
       professionalTitle: body.professionalTitle,
       standardRateGrosze: body.standardRateGrosze,
+      avatarKey: body.avatarKey,
     },
   )
   const idem = Object.freeze({
@@ -344,11 +393,11 @@ export async function updateSpecialistProfile(input) {
     expectedScope: SCOPE,
   })
   const replay = await inspectIdempotency(command.db, context, idem)
-  if (replay) return replay
+  if (replay) return editReplayResult(replay, command.specialistId, body)
   const current = await command.db.prepare(
     `SELECT specialist.id,specialist.staff_user_id,specialist.status,specialist.version,
             specialist.archived_at,specialist.created_at,staff.status AS staff_status,
-            staff.version AS staff_version
+            staff.version AS staff_version,specialist.avatar_key
      FROM specialists AS specialist
      LEFT JOIN staff_users AS staff ON staff.id=specialist.staff_user_id
      WHERE specialist.id=?`,
@@ -382,11 +431,12 @@ export async function updateSpecialistProfile(input) {
       expectedScope: SCOPE, recordId: current.id, field: 'record_version',
       plaintext: JSON.stringify({
         archivedAt: current.archived_at,
+        avatarKey: body.avatarKey,
         createdAt: current.created_at,
         displayName: body.displayName,
         id: current.id,
         professionalTitle: body.professionalTitle,
-        schema: 'specialist.v3',
+        schema: 'specialist.v4',
         staffUserId: current.staff_user_id,
         standardRateGrosze: body.standardRateGrosze,
         status: current.status,
@@ -401,7 +451,7 @@ export async function updateSpecialistProfile(input) {
   const specialist = Object.freeze({
     id: current.id, displayName: body.displayName,
     professionalTitle: body.professionalTitle,
-    standardRateGrosze: body.standardRateGrosze, status: 'active',
+    standardRateGrosze: body.standardRateGrosze, avatarKey: body.avatarKey, status: 'active',
     version: nextVersion, staffVersion: current.staff_version,
     accessStatus, createdAt: current.created_at, updatedAt: now,
   })
@@ -415,10 +465,10 @@ export async function updateSpecialistProfile(input) {
   uow.domain(command.db.prepare(
     `UPDATE specialists
      SET display_name_envelope=?,professional_title_envelope=?,standard_rate_grosze=?,
-         version=version+1,updated_at=?
+         avatar_key=?,version=version+1,updated_at=?
      WHERE id=? AND version=? AND status IN ('active','pending')`,
   ).bind(
-    displayNameEnvelope, professionalTitleEnvelope, body.standardRateGrosze, now,
+    displayNameEnvelope, professionalTitleEnvelope, body.standardRateGrosze, body.avatarKey, now,
     current.id, current.version,
   ))
   uow.version(command.db.prepare(
@@ -447,7 +497,7 @@ export async function updateSpecialistProfile(input) {
        EXISTS (SELECT 1 FROM specialists
          WHERE id=? AND staff_user_id IS ? AND display_name_envelope=?
            AND professional_title_envelope=?
-           AND standard_rate_grosze=? AND version=? AND updated_at=?)
+           AND standard_rate_grosze=? AND avatar_key=? AND version=? AND updated_at=?)
        AND EXISTS (SELECT 1 FROM record_versions
          WHERE id=? AND entity_type='specialist' AND entity_id=? AND version=?)
        AND EXISTS (SELECT 1 FROM audit_events
@@ -458,7 +508,7 @@ export async function updateSpecialistProfile(input) {
      )`,
   ).bind(
     current.id, current.staff_user_id, displayNameEnvelope, professionalTitleEnvelope,
-    body.standardRateGrosze, nextVersion, now,
+    body.standardRateGrosze, body.avatarKey, nextVersion, now,
     versionId, current.id, nextVersion,
     auditId, current.id,
     actor.id, command.idempotencyKey, current.id,

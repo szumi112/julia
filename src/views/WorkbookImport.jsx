@@ -59,6 +59,16 @@ const panelEnumLabel = Object.freeze({
     not_issued: 'Niewystawiona', not_required: 'Nie wymaga', unknown: 'Do sprawdzenia',
   }),
 })
+const conciseSpecialistOptions = (options) => {
+  const totals = new Map()
+  const seen = new Map()
+  options.forEach(({ label }) => totals.set(label, (totals.get(label) ?? 0) + 1))
+  return options.map(({ id, label }) => {
+    const index = (seen.get(label) ?? 0) + 1
+    seen.set(label, index)
+    return { id, selectLabel: totals.get(label) > 1 ? `${label} (${index})` : label }
+  })
+}
 const panelValueText = (field, value, specialistNames) => {
   if (value === null) return 'brak wartości'
   if (field === 'amountGrosze' || field === 'paidAmountGrosze') {
@@ -75,7 +85,7 @@ const panelValueText = (field, value, specialistNames) => {
 }
 
 export function WorkbookImport({
-  flow, dispatchFlow, generation, selectedFileRef, onCommitted,
+  concise = false, flow, dispatchFlow, generation, selectedFileRef, onCommitted,
 }) {
   const { capabilities } = useShell()
   const [inputGeneration, setInputGeneration] = useState(0)
@@ -89,7 +99,8 @@ export function WorkbookImport({
   const allowed = canPerformAction(capabilities, 'finance.import.preview')
     && canPerformAction(capabilities, 'finance.import.create')
   const specialists = flow.preview?.specialistOptions ?? []
-  const specialistSelectOptions = specialistOptionsForSelect(specialists)
+  const specialistSelectOptions = concise
+    ? conciseSpecialistOptions(specialists) : specialistOptionsForSelect(specialists)
   const specialistNames = useMemo(() => new Map(
     (flow.preview?.specialistLabels ?? []).map(({ id, label }) => [id, label]),
   ), [flow.preview?.specialistLabels])
@@ -283,7 +294,7 @@ export function WorkbookImport({
             <ul>{flow.preview.panelChanges.updates.map((update, index) => <li
               key={`panel-update:${index}`}
             >
-              <strong>{update.id}</strong>: {Object.entries(update.values).map(
+              {concise ? 'Pozycja do zmiany: ' : <><strong>{update.id}</strong>: </>}{Object.entries(update.values).map(
                 ([field, value]) => `${panelFieldLabel[field]} — ${panelValueText(
                   field, value, specialistNames,
                 )}`,
@@ -292,9 +303,12 @@ export function WorkbookImport({
           </> : <p>Brak zmian pól.</p>}
           {flow.preview.panelChanges.voidIds.length > 0 ? <>
             <p>Pozycje do unieważnienia</p>
-            <ul>{flow.preview.panelChanges.voidIds.map((id, index) => <li
+            {concise ? <p>{flow.preview.panelChanges.voidIds.length} {plural(
+              flow.preview.panelChanges.voidIds.length, 'pozycja do unieważnienia',
+              'pozycje do unieważnienia', 'pozycji do unieważnienia',
+            )}.</p> : <ul>{flow.preview.panelChanges.voidIds.map((id, index) => <li
               key={`panel-void:${index}`}
-            >{id}</li>)}</ul>
+            >{id}</li>)}</ul>}
           </> : <p>Brak unieważnień.</p>}
         </section> : null}
         {conflicts.length > 0 ? <section
@@ -328,7 +342,7 @@ export function WorkbookImport({
             hint="Ten podgląd jest blokujący i nie może zostać zapisany automatycznie."
           />
           <ul>{panelConflicts.map((conflict, index) => <li key={`panel-conflict:${index}`}>
-            <strong>{conflict.recordId}</strong> — {panelConflictLabel[conflict.code]}
+            {concise ? 'Pozycja w pliku' : <strong>{conflict.recordId}</strong>}{' — '}{panelConflictLabel[conflict.code]}
             {conflict.field ? `: ${panelFieldLabel[conflict.field]}` : ''}
             {conflict.code === 'PANEL_CONCURRENT_EDIT' ? <span>
               {' '}· obecnie: {panelValueText(conflict.field, conflict.current, specialistNames)}
@@ -344,7 +358,7 @@ export function WorkbookImport({
         </p> : null}
       </section> : null}
       {flow.phase === 'materializing' ? <p role="status">Import zapisany. Możesz kontynuować przetwarzanie poniżej.</p> : null}
-      {flow.phase === 'complete' ? <p role="status">Finanse zostały zapisane. W rejestrze sprawdź import klientów i zajęć.</p> : null}
+      {flow.phase === 'complete' ? <p role="status">Finanse zostały zapisane. Poniżej możesz dokończyć import klientów i zajęć.</p> : null}
       {flow.phase === 'review' && flow.errorCode === 'WORKBOOK_COMMIT_FAILED'
         ? <p className="form-error" role="alert">
           Nie udało się potwierdzić zapisu. Ten sam plik i klucz operacji zostały zachowane do bezpiecznej ponownej próby.

@@ -45,7 +45,13 @@ const STAGE_E_NAMES = Object.freeze([
   '0021_finance_reporting_registry.sql',
   '0022_outbox_job_recoveries.sql',
 ])
-const STAGE_F_NAMES = Object.freeze(['0023_better_auth.sql'])
+const STAGE_F_NAMES = Object.freeze([
+  '0023_better_auth.sql',
+  '0024_specialist_absences.sql',
+  '0025_specialist_avatars.sql',
+  '0026_assignment_starts_at.sql',
+  '0027_appointment_cancellation_reason.sql',
+])
 
 const migration = (name) => Object.freeze({
   name,
@@ -162,7 +168,7 @@ test('stage E selects the ordered workbook workspace migrations', async () => {
   assert.equal(Object.isFrozen(selected), true)
 })
 
-test('stage F selects only the Better Auth migration', async () => {
+test('stage F selects Better Auth, absence, avatar, and assignment migrations in order', async () => {
   const module = await loadStageModule()
   const source = [...STAGE_A_NAMES, ...STAGE_B_NAMES, ...STAGE_C_NAMES,
     ...STAGE_D_NAMES, ...STAGE_E_NAMES, ...STAGE_F_NAMES].map(migration)

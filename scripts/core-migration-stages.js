@@ -35,7 +35,13 @@ export const CORE_MIGRATION_STAGE_E_NAMES = Object.freeze([
   '0022_outbox_job_recoveries.sql',
 ])
 
-export const CORE_MIGRATION_STAGE_F_NAMES = Object.freeze(['0023_better_auth.sql'])
+export const CORE_MIGRATION_STAGE_F_NAMES = Object.freeze([
+  '0023_better_auth.sql',
+  '0024_specialist_absences.sql',
+  '0025_specialist_avatars.sql',
+  '0026_assignment_starts_at.sql',
+  '0027_appointment_cancellation_reason.sql',
+])
 
 export const CORE_MIGRATION_REMOTE_ENV_NAMES = Object.freeze(['production', 'staging'])
 

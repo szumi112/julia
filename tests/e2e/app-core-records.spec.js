@@ -19,6 +19,13 @@ const freezeTime = async (page, iso = '2026-08-04T08:00:00.000Z') => {
   }, iso)
 }
 
+const selectSessionClient = async (drawer, name) => {
+  const input = drawer.getByRole('combobox', { name: 'Klient' })
+  await input.fill(name)
+  await input.press('ArrowDown')
+  await input.press('Enter')
+}
+
 const specialist = (id, displayName, standardRateGrosze = 18_000) => ({
   id, displayName, professionalTitle: 'Specjalistka', standardRateGrosze,
   status: 'active', version: 1, staffVersion: 1,
@@ -46,6 +53,7 @@ const appointment = ({
   id, clientId, specialistId, serviceId: 'zajecia', startsAt, endsAt,
   timeZone: 'Europe/Warsaw', location: null, status, source: 'panel', version,
   cancelledAt: status === 'cancelled' ? '2026-08-04T09:00:00.000Z' : null,
+  cancellationReason: status === 'cancelled' ? 'client' : null,
   createdAt, updatedAt,
   charge: { id: `chg_${id.slice(4)}`, serviceId: 'zajecia', expectedAmountGrosze, currency: 'PLN', version: chargeVersion },
   payment: {
@@ -125,7 +133,7 @@ const financeWindow = (selectedMonth, visit = null) => {
 const session = (actor, capabilities, authorityRevision = actor.version) => {
   const expiresAt = '2030-01-01T00:00:00.000Z'
   return json(200, { data: {
-    actor, authorityRevision, capabilities, csrfExpiresAt: expiresAt,
+    actor: { email: 'konto@example.test', ...actor }, authorityRevision, capabilities, csrfExpiresAt: expiresAt,
     csrfToken: `v1.${Date.parse(expiresAt) / 1000}.${'A'.repeat(22)}.${'B'.repeat(43)}`,
     dataMode: 'fictional', environment: 'development',
   } })
@@ -149,10 +157,14 @@ const expectCommand = (route, { method, path, body }) => {
 }
 
 test('@owner reconciles POST payment and correction mutations in the fictional reload workflow', async ({ page }) => {
-  await freezeTime(page)
+  await freezeTime(page, '2026-08-04T11:00:00.000Z')
   const writes = []
   const specialists = [specialist('sp_anna', 'Anna Nowak')]
-  const createdClient = client({ id: 'cl_iga', name: 'Iga Próbna', age: 10, specialistId: 'sp_anna' })
+  const createdClient = client({
+    id: 'cl_iga', name: 'Iga Próbna', age: 10, specialistId: 'sp_anna',
+    createdAt: '2026-08-04T08:00:00.000Z',
+  })
+  createdClient.assignment.startsAt = '2026-08-03T22:00:00.000Z'
   const scheduledVisit = appointment({})
   const completedVisit = appointment({ status: 'completed', version: 2, updatedAt: '2026-08-04T12:00:00.000Z' })
   const paidVisit = appointment({
@@ -195,6 +207,7 @@ test('@owner reconciles POST payment and correction mutations in the fictional r
   await page.route('**/api/v1/clients', (route) => {
     expectCommand(route, { method: 'POST', path: '/api/v1/clients', body: {
       name: 'Iga Próbna', age: 10, status: 'active', specialistId: 'sp_anna',
+      assignmentStartsAt: '2026-08-03T22:00:00.000Z',
     } })
     clients = [createdClient]
     return route.fulfill(json(201, { data: { client: createdClient } }))
@@ -251,7 +264,7 @@ test('@owner reconciles POST payment and correction mutations in the fictional r
   await page.goto('./#/calendar?date=2026-08-04')
   await page.getByRole('button', { name: 'Nowa sesja' }).click()
   const visitDrawer = page.getByRole('dialog', { name: 'Nowa sesja' })
-  await visitDrawer.getByLabel('Klient').selectOption('cl_iga')
+  await selectSessionClient(visitDrawer, 'Iga Próbna')
   await visitDrawer.getByLabel('Godzina').fill('12:00')
   await visitDrawer.getByRole('button', { name: 'Dodaj sesję' }).click()
   const plan = page.getByRole('region', { name: 'Plan dnia' })
@@ -261,16 +274,16 @@ test('@owner reconciles POST payment and correction mutations in the fictional r
   await expect(plan.getByRole('button', { name: 'Status: Odbyta — Iga Próbna, 12:00' })).toBeVisible()
 
   await page.goto('./#/payments?ym=2026-08')
-  const ledger = page.getByRole('table', { name: 'Lista rozliczeń' })
+  const ledger = page.getByRole('table', { name: 'Lista wpływów' })
   const financeRow = ledger.locator('tbody tr', { hasText: 'Iga Próbna' })
-  await ledger.getByRole('button', { name: /Zaksięguj wpłatę/ }).click()
-  const payment = page.getByRole('dialog', { name: 'Zaksięguj wpłatę' })
+  await ledger.getByRole('button', { name: /Dodaj wpłatę/ }).click()
+  const payment = page.getByRole('dialog', { name: 'Dodaj wpłatę' })
   await payment.getByLabel('Kwota wpłaty').fill('120')
   await payment.getByLabel('Forma płatności').selectOption('card')
   await payment.getByLabel('Data wpłaty').fill('2026-08-04')
   await payment.getByRole('button', { name: 'Zapisz wpłatę' }).click()
-  await expect(financeRow.locator('td').nth(3)).toHaveText('120 zł')
-  await expect(financeRow.locator('td').nth(4)).toHaveText('60 zł')
+  await expect(financeRow.locator('td').nth(5)).toHaveText('120 zł')
+  await expect(financeRow.locator('td').nth(6)).toHaveText('60 zł')
   await expect(page.getByRole('heading', { name: 'Finanse — sierpień 2026' })).toBeVisible()
   await expect(page.getByText('Finanse są teraz niedostępne', { exact: true })).toHaveCount(0)
   await expect.poll(() => financeReadsAfterPayment).toBeGreaterThan(0)
@@ -283,8 +296,8 @@ test('@owner reconciles POST payment and correction mutations in the fictional r
   await correction.getByLabel('Data zastępcza').fill('2026-08-05')
   await correction.getByRole('button', { name: 'Zapisz korektę' }).click()
   await expect(ledger).toContainText('Skorygowana')
-  await expect(financeRow.locator('td').nth(3)).toHaveText('100 zł')
-  await expect(financeRow.locator('td').nth(4)).toHaveText('80 zł')
+  await expect(financeRow.locator('td').nth(5)).toHaveText('100 zł')
+  await expect(financeRow.locator('td').nth(6)).toHaveText('80 zł')
   await expect(page.getByRole('heading', { name: 'Finanse — sierpień 2026' })).toBeVisible()
   await expect(page.getByText('Finanse są teraz niedostępne', { exact: true })).toHaveCount(0)
   await expect.poll(() => financeReadsAfterCorrection).toBeGreaterThan(0)
@@ -295,7 +308,7 @@ test('@owner reconciles POST payment and correction mutations in the fictional r
   await expect(plan.getByRole('button', { name: 'Status: Nieobecność — Iga Próbna, 12:00' })).toBeVisible()
   await page.goto('./#/payments?ym=2026-08')
   await page.reload()
-  await expect(page.getByRole('table', { name: 'Lista rozliczeń' })).toContainText('100 zł')
+  await expect(page.getByRole('table', { name: 'Lista wpływów' })).toContainText('100 zł')
   expect(writes).not.toContain('DELETE')
   expect(await noDurableBrowserState(page)).toEqual({ caches: [], indexedDb: [], local: [], serviceWorkers: [], session: [] })
 })
@@ -334,7 +347,7 @@ test('@owner @coordinator keeps retained active practitioners in the exact 93-da
     await page.goto('./#/team')
     await expect(page.getByText('Alicja Retencja', { exact: true })).toBeVisible()
     await expect(page.getByText('Celina Retencja', { exact: true })).toBeVisible()
-    await expect(page.getByText('Dostęp aktywny', { exact: true })).toHaveCount(2)
+    await expect(page.getByText('Ma dostęp', { exact: true })).toHaveCount(2)
   }
   expect(sessionReads).toBe(1)
   expect(directory.map(({ id }) => id)).toContain(actor.specialistId)
@@ -367,6 +380,30 @@ test('@specialist renders only assigned clients and their own appointments', asy
   await page.goto('./#/calendar?date=2026-08-04')
   await expect(page.getByRole('region', { name: 'Plan dnia' })).toContainText('Maja Własna')
   await expect(page.getByRole('region', { name: 'Plan dnia' })).not.toContainText('Klientka Poza Zakresem')
+})
+
+test('@specialist keeps her own selection when the client’s latest session belongs to another specialist', async ({ page }) => {
+  await freezeTime(page)
+  await page.route('**/api/v1/session', (route) => route.fulfill(session({
+    id: 'stf_specialist_default', displayName: 'Zofia Fikcyjna', professionalTitle: 'Specjalistka', role: 'specialist',
+    specialistId: 'sp_anna', version: 1,
+  }, roleCapabilities.specialist)))
+  const own = client({ id: 'cl_own_history', name: 'Maja Z Historią', specialistId: 'sp_anna' })
+  const formerAppointment = appointment({
+    id: 'apt_former_specialist', clientId: own.id, specialistId: 'sp_basia', status: 'completed',
+    startsAt: '2026-08-03T09:00:00.000Z', endsAt: '2026-08-03T09:50:00.000Z',
+  })
+  await page.route('**/api/v1/workspace?*', (route) => {
+    const url = new URL(route.request().url())
+    return route.fulfill(workspace(url.searchParams.get('from'), url.searchParams.get('to'), {
+      specialists: [specialist('sp_anna', 'Anna Nowak'), specialist('sp_basia', 'Basia Zielińska')],
+      clients: [own], appointments: [formerAppointment],
+    }))
+  })
+
+  await page.goto('./#/client?id=cl_own_history')
+  await page.getByRole('button', { name: 'Przygotuj sesję' }).click()
+  await expect(page.getByRole('dialog', { name: 'Nowa sesja' })).toContainText('Prowadzi: Anna Nowak')
 })
 
 test('@owner renders a referenced archived client as phone read-only history', async ({ page }) => {
@@ -414,14 +451,17 @@ test('@owner keeps archive conflict explicit until cancellation makes archive le
     return route.fulfill(json(200, { data: { client: archived } }))
   })
   await page.route('**/api/v1/appointments/apt_archive/cancellation', (route) => {
-    expectCommand(route, { method: 'POST', path: '/api/v1/appointments/apt_archive/cancellation', body: { expectedVersion: 1 } })
+    expectCommand(route, {
+      method: 'POST', path: '/api/v1/appointments/apt_archive/cancellation',
+      body: { expectedVersion: 1, reason: 'client' },
+    })
     const cancelled = appointment({ id: 'apt_archive', clientId: 'cl_archive', status: 'cancelled', version: 2, updatedAt: '2026-08-04T09:00:00.000Z' })
     visit = cancelled
     return route.fulfill(json(200, { data: { appointment: cancelled } }))
   })
 
   await page.goto('./#/client?id=cl_archive')
-  await page.getByRole('button', { name: 'Edytuj' }).click()
+  await page.getByRole('button', { name: 'Edytuj', exact: true }).click()
   let drawer = page.getByRole('dialog', { name: 'Edycja klienta' })
   await drawer.getByRole('button', { name: 'Archiwizuj klienta' }).click()
   await drawer.getByRole('button', { name: 'Tak, archiwizuj klienta' }).click()
@@ -431,9 +471,12 @@ test('@owner keeps archive conflict explicit until cancellation makes archive le
   await page.goto('./#/calendar?date=2026-08-04')
   const plan = page.getByRole('region', { name: 'Plan dnia' })
   await plan.getByRole('button', { name: 'Status: Zaplanowana — Iga Do Archiwum, 12:00' }).click()
-  await plan.getByRole('menuitemradio', { name: 'Odwołaj' }).click()
+  await plan.getByRole('menuitem', { name: 'Odwołaj sesję…' }).click()
+  const cancellation = page.getByRole('dialog', { name: 'Odwołaj sesję?' })
+  await cancellation.getByRole('radio', { name: 'Odwołanie przez klienta' }).check()
+  await cancellation.getByRole('button', { name: 'Odwołaj sesję', exact: true }).click()
   await page.goto('./#/client?id=cl_archive')
-  await page.getByRole('button', { name: 'Edytuj' }).click()
+  await page.getByRole('button', { name: 'Edytuj', exact: true }).click()
   drawer = page.getByRole('dialog', { name: 'Edycja klienta' })
   await drawer.getByRole('button', { name: 'Archiwizuj klienta' }).click()
   await drawer.getByRole('button', { name: 'Tak, archiwizuj klienta' }).click()
@@ -456,6 +499,7 @@ test('@owner discards a stale second drawer while an offline draft remains open'
     if (edits === 1) {
       expectCommand(route, { method: 'POST', path: '/api/v1/clients/cl_stale/edits', body: {
         expectedVersion: 1, name: 'Ola Zwycięska', age: 11, status: 'active', specialistId: 'sp_anna',
+        assignmentStartsAt: '2026-05-04T08:00:00.000Z',
       } })
       const canonical = client({
         id: 'cl_stale', name: 'Ola Zwycięska', version: 2,
@@ -466,6 +510,7 @@ test('@owner discards a stale second drawer while an offline draft remains open'
     }
     expectCommand(route, { method: 'POST', path: '/api/v1/clients/cl_stale/edits', body: {
       expectedVersion: 1, name: 'Ola Przestarzała', age: 11, status: 'active', specialistId: 'sp_anna',
+      assignmentStartsAt: '2026-05-04T08:00:00.000Z',
     } })
     return route.fulfill(error(409, 'VERSION_CONFLICT'))
   })

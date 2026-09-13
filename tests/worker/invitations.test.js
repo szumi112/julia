@@ -18,7 +18,7 @@ import {
 } from '../../worker/identity/invitations.js'
 import { resolveCurrentAuthorityActor } from '../../worker/identity/staff.js'
 import { NOW_MS, authorityActor } from './fixtures.js'
-import { applyCapabilityOverridesMigration, applyAuthenticationStageF } from './apply-migrations.js'
+import { applyBetterAuthMigration, applyCapabilityOverridesMigration } from './apply-migrations.js'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const WEEK_MS = 7 * DAY_MS
@@ -2194,7 +2194,7 @@ it('deactivates native-auth staff without scheduling Access synchronization', as
 })
 
 it('revokes native-auth sessions atomically when disabling staff', async () => {
-  await applyAuthenticationStageF()
+  await applyBetterAuthMigration()
   const context = await cryptoContext()
   const created = await invite(context, { displayName: 'Nowa Osoba', email: `native-${serial}@example.test`, role: 'coordinator' }, { appEnv: 'staging' })
   await env.DB.prepare('INSERT INTO auth_user (id,name,email,emailVerified,createdAt,updatedAt) VALUES (?,?,?,1,?,?)').bind('auth_disable_test','Test',`native-${serial}@example.test`,NOW_MS,NOW_MS).run()

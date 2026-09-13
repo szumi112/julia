@@ -27,7 +27,7 @@ export const SERVICES = [
     label: 'Terapia rodzinna',
     duration: 60,
     price: 220,
-    note: 'Spotkanie z rodziną lub rodzicami',
+    note: 'Sesja z rodziną lub rodzicami',
   },
   {
     id: 'plan',
@@ -38,7 +38,7 @@ export const SERVICES = [
   },
   {
     id: 'plan-spotkanie',
-    label: 'Spotkanie z rodzicami i plan pracy',
+    label: 'Sesja z rodzicami i plan pracy',
     duration: 90,
     price: 400,
     note: 'Gotowy plan terapeutyczny z zaleceniami do przedszkola i domu',

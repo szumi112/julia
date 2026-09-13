@@ -43,7 +43,7 @@ const appointment = (index) => ({
   startsAt: `2026-07-${String(index + 1).padStart(2, '0')}T08:00:00.000Z`,
   endsAt: `2026-07-${String(index + 1).padStart(2, '0')}T08:50:00.000Z`,
   timeZone: 'Europe/Warsaw', location: null, status: 'completed', source: 'panel',
-  version: 1, cancelledAt: null, createdAt: NOW, updatedAt: NOW,
+  version: 1, cancelledAt: null, cancellationReason: null, createdAt: NOW, updatedAt: NOW,
   charge: {
     id: `chg_finance_e2e_${index}`, serviceId: 'zajecia',
     expectedAmountGrosze: 18_000, currency: 'PLN', version: 1,
@@ -63,15 +63,16 @@ const workspace = (from, to) => ({ data: {
   )),
   historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: '2026-07',
 } })
-const ownPayments = (from, to) => ({ data: {
+const ownPayments = (from, to, records = appointments) => ({ data: {
   window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
-  appointments: appointments.filter((item) => (
+  appointments: records.filter((item) => (
     item.startsAt.slice(0, 10) >= from && item.startsAt.slice(0, 10) <= to
   )).map((item) => ({
     id: item.id,
     serviceId: item.serviceId,
     startsAt: item.startsAt,
     status: item.status,
+    cancellationReason: item.cancellationReason,
     version: item.version,
     charge: item.charge,
     payment: item.payment,
@@ -260,12 +261,27 @@ const routeRegistry = async (page, imports = []) => page.route(
   },
 )
 
-test('@owner sees imported labels and keeps unverified settlement outside confirmed arrears', async ({ page }) => {
+const enableStagingWorkbookTools = async (page) => page.route(
+  '**/api/v1/session', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.environment = 'staging'
+    await route.fulfill({ response, body: JSON.stringify(body) })
+  },
+)
+
+const openWorkbookTools = async (page, { sessionConfigured = false } = {}) => {
+  if (!sessionConfigured) await enableStagingWorkbookTools(page)
+  await page.goto('./#/payments')
+  await page.getByText('Wgraj arkusz', { exact: true }).click()
+}
+
+test('@owner keeps workbook entries in one income list with unverified amounts and a separate invoice list', async ({ page }) => {
   await freezeTime(page)
   await routeWorkspace(page)
   const response = financeWindow('2026-07')
   response.data.rows[0] = { ...response.data.rows[0], sourceKind: 'workbook', appointmentId: null,
-    settlementStatus: 'unknown', counterparty: 'Fikcyjna rodzina Leśna', sourceLabel: 'Zajęcia z arkusza' }
+    settlementStatus: 'unknown', invoiceStatus: 'action_required', counterparty: 'Fikcyjna rodzina Leśna', sourceLabel: 'Zajęcia z arkusza' }
   response.data.kpis.outstandingGrosze = 342_000
   response.data.kpis.verificationGrosze = 18_000
   response.data.trend[5] = { month: '2026-07', ...response.data.kpis }
@@ -274,13 +290,21 @@ test('@owner sees imported labels and keeps unverified settlement outside confir
   response.data.coverage.dateOnlyCount += 1
   await page.route('**/api/v1/finance/window?*', (route) => route.fulfill(json(response)))
   await page.goto('./#/payments?ym=2026-07')
-  const table = page.getByRole('table', { name: 'Lista rozliczeń' })
+  const table = page.getByRole('table', { name: 'Lista wpływów' })
+  await expect(table).toContainText('Fikcyjna rodzina Leśna')
+  await expect(page.locator('.finance-window__verification')).toContainText('Do sprawdzenia')
+  await expect(page.getByText('Przychody minus wydatki', { exact: true })).toBeVisible()
+  await expect(table.getByRole('button', { name: /Dodaj wpłatę/ }).first()).toBeVisible()
+  await page.getByRole('group', { name: 'Widok wpływów' }).getByRole('button', { name: 'Zaległości' }).click()
   const row = table.getByRole('row').filter({ hasText: 'Fikcyjna rodzina Leśna' })
   await expect(row).toContainText('Zajęcia z arkusza')
-  await expect(row).toContainText('Do sprawdzenia')
-  await page.getByRole('group', { name: 'Widok rozliczeń' }).getByRole('button', { name: 'Zaległości' }).click()
-  await expect(table).not.toContainText('Fikcyjna rodzina Leśna')
-  await expect(table.getByRole('row')).toHaveCount(20)
+  await expect(row.locator('td[data-th="Wpłacono"]')).toHaveText('Nie ustalono')
+  await expect(row.locator('td[data-th="Pozostało"]')).toHaveText('Do sprawdzenia')
+  await expect(row.getByRole('button', { name: /Dodaj wpłatę/ })).toHaveCount(0)
+  await page.getByRole('tab', { name: 'Faktury' }).click()
+  const invoices = page.getByRole('table', { name: 'Lista faktur' })
+  await expect(invoices).toContainText('Fikcyjna rodzina Leśna')
+  await expect(invoices.getByText('Wymaga wystawienia', { exact: true })).toBeVisible()
 })
 
 test('@owner filters protected settlements to outstanding balances and restores the filter from the route', async ({ page }) => {
@@ -300,8 +324,8 @@ test('@owner filters protected settlements to outstanding balances and restores 
 
   await page.goto('./#/payments?unpaidOnly=true&ym=2026-07')
 
-  const table = page.getByRole('table', { name: 'Lista rozliczeń' })
-  const filters = page.getByRole('group', { name: 'Widok rozliczeń' })
+  const table = page.getByRole('table', { name: 'Lista wpływów' })
+  const filters = page.getByRole('group', { name: 'Widok wpływów' })
   await expect(filters.getByRole('button', { name: 'Zaległości' }))
     .toHaveAttribute('aria-pressed', 'true')
   await expect(table.getByRole('row')).toHaveCount(20)
@@ -310,23 +334,84 @@ test('@owner filters protected settlements to outstanding balances and restores 
   await filters.getByRole('button', { name: 'Wszystkie' }).click()
   await expect(table.getByRole('row')).toHaveCount(21)
   await expect(table.getByText('1 lip', { exact: true })).toBeVisible()
-  await expect(page).toHaveURL(/#\/payments\?ym=2026-07$/)
+  await expect(page).toHaveURL(/#\/payments\?unpaidOnly=false&ym=2026-07$/)
 
   await filters.getByRole('button', { name: 'Zaległości' }).click()
-  await page.getByRole('tab', { name: 'Przychody' }).click()
-  await expect(page).toHaveURL(/#\/payments\?tab=income&ym=2026-07$/)
-  await page.getByRole('tab', { name: 'Płatności i zaległości' }).click()
-  await expect(filters.getByRole('button', { name: 'Zaległości' }))
-    .toHaveAttribute('aria-pressed', 'true')
-  await expect(table.getByRole('row')).toHaveCount(20)
-  await expect(page).toHaveURL(/#\/payments\?unpaidOnly=true&ym=2026-07$/)
+  await expect(page).toHaveURL(/#\/payments\?ym=2026-07$/)
 
   await page.getByRole('link', { name: 'Raporty', exact: true }).click()
   await page.getByRole('link', { name: 'Finanse', exact: true }).click()
   await expect(filters.getByRole('button', { name: 'Zaległości' }))
     .toHaveAttribute('aria-pressed', 'true')
   await expect(table.getByRole('row')).toHaveCount(20)
-  await expect(page).toHaveURL(/#\/payments\?unpaidOnly=true&ym=2026-07$/)
+  await expect(page).toHaveURL(/#\/payments\?ym=2026-07$/)
+})
+
+test('@owner prints a monthly report with coverage and amount-ranked breakdowns', async ({ page }) => {
+  await freezeTime(page)
+  await page.addInitScript(() => {
+    window.__reportPrintCalls = 0
+    Object.defineProperty(window, 'print', {
+      configurable: true,
+      value: () => { window.__reportPrintCalls += 1 },
+    })
+  })
+  const response = financeWindow('2026-07')
+  response.data.splits.program = {
+    tus: { count: 2, revenueGrosze: 40_000 },
+    english: { count: 3, revenueGrosze: 90_000 },
+  }
+  await page.route('**/api/v1/finance/window?*', (route) => route.fulfill(json(response)))
+
+  await page.goto('./#/reports?ym=2026-07')
+
+  await expect(page.getByText(
+    'Porównuje sześć miesięcy i podsumowuje wybrany miesiąc. Finanse służą do bieżących rozliczeń.',
+    { exact: true },
+  )).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Pokrycie czasu i dat' })).toBeVisible()
+  const programs = page.locator('.report-window__split', {
+    has: page.getByRole('heading', { name: 'TUS i angielski' }),
+  }).locator('dt')
+  await expect(programs).toHaveText(['Angielski', 'TUS'])
+
+  await page.getByRole('button', { name: 'Drukuj' }).click()
+  await expect.poll(() => page.evaluate(() => window.__reportPrintCalls)).toBe(1)
+  await page.emulateMedia({ media: 'print' })
+  await expect(page.locator('.report-print-sheet')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Drukuj' })).toBeHidden()
+})
+
+test('@owner keeps the six-month report context beside the selected month empty state', async ({ page }) => {
+  await freezeTime(page)
+  await page.route('**/api/v1/finance/window?*', (route) => route.fulfill(json(financeWindow('2026-08'))))
+
+  await page.goto('./#/reports?ym=2026-08')
+
+  await expect(page.getByText('Brak danych w bieżącym miesiącu', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Pokaż ostatni miesiąc z danymi — lipiec 2026' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Drukuj' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Trend sześciu miesięcy' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Pokrycie czasu i dat' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Faktury' })).toBeVisible()
+})
+
+test('@owner keeps concise finance tabs keyboard-reachable on a phone', async ({ page }) => {
+  await freezeTime(page)
+  await page.setViewportSize({ width: 320, height: 844 })
+  await routeWorkspace(page)
+  await page.route('**/api/v1/finance/window?*', (route) => route.fulfill(json(financeWindow('2026-07'))))
+  await page.goto('./#/payments?ym=2026-07')
+
+  const tabs = page.getByRole('tablist', { name: 'Obszary finansów' })
+  await expect(tabs.getByRole('tab')).toHaveText(['Wpływy', 'Wydatki', 'Faktury'])
+
+  const first = page.getByRole('tab', { name: 'Wpływy' })
+  const last = page.getByRole('tab', { name: 'Faktury' })
+  await first.focus()
+  await page.keyboard.press('End')
+  await expect(last).toBeFocused()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
 test('@owner uses one authoritative finance window, latest month and unknown-period route', async ({ page }) => {
@@ -348,29 +433,27 @@ test('@owner uses one authoritative finance window, latest month and unknown-per
   })
 
   await page.goto('./#/payments')
-  await expect(page.getByText('Brak danych w bieżącym miesiącu', { exact: true })).toBeVisible()
-  await expect(page.getByRole('tab')).toHaveText([
-    'Przychody', 'Płatności i zaległości', 'Wydatki', 'Faktury',
-  ])
-  for (const label of [
-    'Przychody', 'Wpłacono', 'Pozostało do zapłaty', 'Wydatki', 'Dochód',
-  ]) await expect(page.getByText(label, { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('Brak pozycji w tym miesiącu', { exact: true })).toBeVisible()
+  await expect(page.getByRole('tab')).toHaveCount(0)
+  await expect(page.locator('.finance-window__kpi')).toHaveCount(0)
+  await expect(page.locator('.finance-window__trend')).toHaveCount(0)
   await page.getByRole('button', { name: /Pokaż ostatni miesiąc z danymi/ }).click()
   await julyStarted
-  await expect(page.getByRole('heading', { level: 1, name: 'Finanse centrum' }))
+  await expect(page.getByRole('heading', { level: 1, name: 'Finanse — lipiec 2026' }))
     .toBeVisible()
-  await expect(page.getByText('Wczytywanie finansów…', { exact: true })).toBeVisible()
-  await expect(page.getByText('Brak danych w bieżącym miesiącu', { exact: true }))
+  await expect(page.getByRole('button', { name: 'Dodaj pozycję' })).toBeVisible()
+  await expect(page.getByText('Wczytuję finanse…', { exact: true })).toBeVisible()
+  await expect(page.getByText('Brak pozycji w tym miesiącu', { exact: true }))
     .toHaveCount(0)
   releaseJuly()
   const heading = page.getByRole('heading', { level: 1, name: /Finanse — lipiec 2026/ })
   await expect(heading).toBeFocused()
-  await expect(page.getByRole('table', { name: 'Lista rozliczeń' }).getByRole('row'))
+  await expect(page.getByRole('table', { name: 'Lista wpływów' }).getByRole('row'))
     .toHaveCount(21)
   expect(workspaceRequests.filter(({ from, to }) => (
     from === '2026-07-01' && to === '2026-07-31'
   ))).toHaveLength(1)
-  await expect(page.getByRole('button', { name: /Zaksięguj wpłatę/ }).first())
+  await expect(page.getByRole('button', { name: /Dodaj wpłatę/ }).first())
     .toBeVisible()
 
   await page.goto('./#/reports?ym=2026-07')
@@ -383,18 +466,20 @@ test('@owner uses one authoritative finance window, latest month and unknown-per
   await expect(page.getByRole('button', { name: 'Poprzedni miesiąc' })).toBeDisabled()
   await page.goto('./#/reports?ym=2000-06')
   await expect(page.getByRole('button', { name: 'Poprzedni miesiąc' })).toBeDisabled()
-  await page.getByRole('button', {
+  await expect(page.getByText('Nieustalony miesiąc księgowy', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', {
     name: 'Przejdź do pozycji z nieustalonym okresem',
-  }).click()
-  await expect(page).toHaveURL(/#\/ledger\?section=unknown$/)
-  await expect(page.getByRole('tab', { name: 'Okres nieustalony' }))
-    .toHaveAttribute('aria-selected', 'true')
-  await expect(page.getByRole('table', { name: 'Pozycje rejestru finansowego' }))
-    .toContainText('Okres nieustalony')
+  })).toHaveCount(0)
 })
 
 test('@owner preserves the exact file and idempotency key across an ambiguous create retry', async ({ page }) => {
   await freezeTime(page)
+  await page.route('**/api/v1/session', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.environment = 'staging'
+    await route.fulfill({ response, body: JSON.stringify(body) })
+  })
   await routeWorkspace(page)
   await routeRegistry(page)
   const duplicateSpecialistId = 'sp_anna_duplicate'
@@ -420,7 +505,8 @@ test('@owner preserves the exact file and idempotency key across an ambiguous cr
     return route.fulfill(json({ data: { import: importedDto() } }, 201))
   })
 
-  await page.goto('./#/ledger')
+  await page.goto('./#/payments')
+  await page.getByText('Wgraj arkusz', { exact: true }).click()
   const picker = page.getByLabel('Wybierz plik XLSX')
   await picker.setInputFiles({
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
@@ -436,10 +522,10 @@ test('@owner preserves the exact file and idempotency key across an ambiguous cr
   await expect(page.getByText('Fikcyjny arkusz · wiersz 4', { exact: true })).toBeVisible()
   const mappingSelect = page.getByLabel('Wybierz specjalistkę — konflikt 1')
   await expect(mappingSelect.getByRole('option', {
-    name: `Anna Nowak · ${specialist.id}`, exact: true,
+    name: 'Anna Nowak (1)', exact: true,
   })).toHaveCount(1)
   await expect(mappingSelect.getByRole('option', {
-    name: `Anna Nowak · ${duplicateSpecialistId}`, exact: true,
+    name: 'Anna Nowak (2)', exact: true,
   })).toHaveCount(1)
   await mappingSelect.selectOption(duplicateSpecialistId)
   await page.getByRole('button', { name: 'Zapisz i rozpocznij import' }).click()
@@ -463,6 +549,8 @@ test('@owner preserves the exact file and idempotency key across an ambiguous cr
   expect(await page.getByLabel('Wybierz plik XLSX')
     .evaluate((input) => input.files.length)).toBe(0)
   await expect(page.getByRole('main')).not.toContainText('RAW_SOURCE_MUST_NOT_RENDER')
+  await expect(page.getByRole('main')).not.toContainText(specialist.id)
+  await expect(page.getByRole('main')).not.toContainText(duplicateSpecialistId)
   expect(await page.evaluate(() => ({
     local: localStorage.length, session: sessionStorage.length,
   }))).toEqual({ local: 0, session: 0 })
@@ -482,7 +570,7 @@ test('@owner clears a definitively rejected create and requires a fresh preview'
     },
   }, 409)))
 
-  await page.goto('./#/ledger')
+  await openWorkbookTools(page)
   await page.getByLabel('Wybierz plik XLSX').setInputFiles({
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
@@ -507,7 +595,7 @@ test('@owner explains a rejected workbook fingerprint instead of a generic failu
     },
   }, 400)))
 
-  await page.goto('./#/ledger')
+  await openWorkbookTools(page)
   await page.getByLabel('Wybierz plik XLSX').setInputFiles({
     name: 'edytowany.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
@@ -524,13 +612,13 @@ test('@owner reviews exact signed Panel-v2 updates, voids and blocking conflicts
   await routeWorkspace(page)
   await routeRegistry(page)
   await page.route('**/api/v1/workbooks/preview', (route) => route.fulfill(json(panelPreview)))
-  await page.goto('./#/ledger')
+  await openWorkbookTools(page)
   await page.getByLabel('Wybierz plik XLSX').setInputFiles({
     name: 'fikcyjny-panel.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
   await expect(page.getByRole('heading', { name: 'Zmiany Panel-v2' })).toBeVisible()
   const updateEvidence = page.locator('.workbook-import__evidence li')
-    .filter({ hasText: 'fin_panel_review_update' })
+    .filter({ hasText: 'Pozycja do zmiany:' })
   await expect(updateEvidence).toContainText('kwota — 190,00 zł')
   await expect(updateEvidence).toContainText('miesiąc księgowy — lipiec 2026')
   await expect(updateEvidence).toContainText('data — 15 lip')
@@ -541,14 +629,14 @@ test('@owner reviews exact signed Panel-v2 updates, voids and blocking conflicts
   await expect(updateEvidence).not.toContainText('transfer')
   await expect(updateEvidence).not.toContainText('issued')
   await expect(updateEvidence).not.toContainText(specialist.id)
-  await expect(page.getByText('fin_panel_review_void', { exact: true })).toBeVisible()
+  await expect(page.getByText('1 pozycja do unieważnienia.', { exact: true })).toBeVisible()
   const conflictEvidence = page.locator('.workbook-import__evidence li')
-    .filter({ hasText: 'fin_panel_review_conflict' })
+    .filter({ hasText: 'Równoległa zmiana pola' })
   await expect(conflictEvidence).toContainText(
     'obecnie: 180,00 zł · w pliku: 200,00 zł',
   )
   const dependencyEvidence = page.locator('.workbook-import__evidence li')
-    .filter({ hasText: 'fin_panel_review_dependency' })
+    .filter({ hasText: 'Pozycja ma aktywne powiązanie' })
   await expect(dependencyEvidence).toContainText(
     'Pozycja ma aktywne powiązanie i nie może być zmieniona w pliku',
   )
@@ -573,6 +661,7 @@ test('@owner clears native workbook and in-flight export state on authority refr
   await page.route('**/api/v1/session', async (route) => {
     const response = await route.fetch()
     const body = await response.json()
+    body.data.environment = 'staging'
     if (refreshed) body.data.authorityRevision += 1
     await route.fulfill({ response, body: JSON.stringify(body) })
   })
@@ -600,12 +689,11 @@ test('@owner clears native workbook and in-flight export state on authority refr
     }
   }))
 
-  await page.goto('./#/ledger')
-  await expect(page.getByRole('button', { name: 'Przejrzyj import' })).toBeVisible()
+  await openWorkbookTools(page, { sessionConfigured: true })
   await expect(page.getByRole('button', { name: 'Kontynuuj import' })).toHaveCount(0)
-  await expect(page.getByText('wba_finance_e2e', { exact: true })).toBeVisible()
-  await expect(page.getByText('a'.repeat(64), { exact: true })).toBeVisible()
-  await expect(page.getByText('Parser 2 · materializator 2', { exact: true })).toBeVisible()
+  await expect(page.getByText('wba_finance_e2e', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('a'.repeat(64), { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Parser 2 · materializator 2', { exact: true })).toHaveCount(0)
   await page.getByLabel('Wybierz plik XLSX').setInputFiles({
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
@@ -621,8 +709,8 @@ test('@owner clears native workbook and in-flight export state on authority refr
   expect(requests.some(({ url, body }) => url.includes(AUTHORIZED_SOURCE)
     || body.includes(AUTHORIZED_SOURCE))).toBe(false)
   expect(messages.some((value) => value.includes(AUTHORIZED_SOURCE))).toBe(false)
-  await page.getByRole('button', { name: 'Eksportuj Panel-v2' }).click()
-  await expect(page.getByRole('button', { name: 'Eksportuj Panel-v2' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Pobierz pełny skoroszyt' }).click()
+  await expect(page.getByRole('button', { name: 'Przygotowywanie…' })).toBeDisabled()
 
   refreshed = true
   const sessionRefresh = page.waitForResponse('**/api/v1/session')
@@ -637,7 +725,7 @@ test('@owner clears native workbook and in-flight export state on authority refr
   })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Zapisz i rozpocznij import' }))
     .toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Eksportuj Panel-v2' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Pobierz pełny skoroszyt' })).toBeEnabled()
   await expect(page.getByRole('main')).not.toContainText(AUTHORIZED_SOURCE)
   expect(await page.evaluate(async () => ({
     local: localStorage.length,
@@ -651,7 +739,7 @@ test('@owner clears native workbook and in-flight export state on authority refr
   await finishExport?.()
 })
 
-test('@owner downloads an audited export and safely retries a manual void', async ({ page }) => {
+test('@owner downloads a whole-centre workbook with an idempotent retry', async ({ page }) => {
   await freezeTime(page)
   await routeWorkspace(page)
   const entry = {
@@ -685,68 +773,22 @@ test('@owner downloads an audited export and safely retries a manual void', asyn
       },
     })
   })
-  const voidKeys = []
-  let voidAttempts = 0
-  let releaseVoidFailure
-  await page.route('**/api/v1/finance/entries/fin_void_e2e/voids', async (route) => {
-    voidAttempts += 1
-    voidKeys.push(route.request().headers()['idempotency-key'])
-    if (voidAttempts === 1) return new Promise((resolve) => {
-      releaseVoidFailure = async () => {
-        await route.abort('connectionreset')
-        resolve()
-      }
-    })
-    return route.fulfill(json({ data: {
-      entryId: entry.id, state: 'void', version: 1,
-    } }))
-  })
-
-  await page.goto('./#/ledger')
-  await page.getByRole('button', { name: 'Eksportuj Panel-v2' }).click()
+  await openWorkbookTools(page)
+  await page.getByRole('button', { name: 'Pobierz pełny skoroszyt' }).click()
   await expect(page.getByRole('alert')).toContainText(
     'Nie udało się przygotować bezpiecznego eksportu',
   )
-  await page.getByRole('button', { name: 'Eksportuj Panel-v2' }).click()
+  await page.getByRole('button', { name: 'Pobierz pełny skoroszyt' }).click()
   await expect(page.getByRole('alert')).toContainText(
     'Dane zmieniły się — ponów jako nowy eksport',
   )
   const download = page.waitForEvent('download')
-  await page.getByRole('button', { name: 'Eksportuj Panel-v2' }).click()
+  await page.getByRole('button', { name: 'Pobierz pełny skoroszyt' }).click()
   expect((await download).suggestedFilename())
     .toBe('bear-with-me-panel-v2-2026-08-15.xlsx')
   expect(exportKeys).toHaveLength(3)
   expect(exportKeys[0]).toBe(exportKeys[1])
   expect(exportKeys[2]).not.toBe(exportKeys[1])
-  await page.getByRole('tab', { name: 'Pozycje rejestru' }).click()
-  const opener = page.getByRole('button', { name: 'Unieważnij pozycję' })
-  await opener.click()
-  await expect(page.getByRole('dialog')).toContainText(
-    'Niezmienny skoroszyt i rekord źródłowy pozostają zachowane',
-  )
-  await page.getByRole('dialog').evaluate((dialog) => dialog.click())
-  await expect(opener).toBeFocused()
-  await opener.click()
-  await page.getByLabel('Powód unieważnienia').fill('Fikcyjna pozycja testowa jest podwójna.')
-  await page.getByRole('button', { name: 'Potwierdź unieważnienie' }).click()
-  await expect(page.getByRole('dialog').getByRole('button', { name: 'Anuluj' })).toBeDisabled()
-  await expect(page.getByLabel('Powód unieważnienia')).toBeDisabled()
-  await page.keyboard.press('Escape')
-  await page.getByRole('dialog').evaluate((dialog) => dialog.click())
-  await expect(page.getByRole('dialog')).toBeVisible()
-  expect(voidAttempts).toBe(1)
-  await releaseVoidFailure()
-  await expect(page.getByRole('dialog').getByRole('alert'))
-    .toContainText('Nie potwierdzono zapisu')
-  await expect(page.getByRole('dialog').getByRole('button', { name: 'Anuluj' }))
-    .toBeDisabled()
-  await page.keyboard.press('Escape')
-  await page.getByRole('dialog').evaluate((dialog) => dialog.click())
-  await expect(page.getByRole('dialog')).toBeVisible()
-  await page.getByRole('button', { name: 'Potwierdź unieważnienie' }).click()
-  await expect(opener).toBeFocused()
-  expect(voidKeys).toHaveLength(2)
-  expect(voidKeys[0]).toBe(voidKeys[1])
 })
 
 test('@owner resolves creator-bound conflicts and continues with authoritative versions', async ({ page }) => {
@@ -812,18 +854,8 @@ test('@owner resolves creator-bound conflicts and continues with authoritative v
     } })),
   )
 
-  await page.goto('./#/ledger')
-  const detailOpener = page.getByRole('button', { name: 'Przejrzyj import' })
-  await detailOpener.click()
-  await page.getByRole('tab', { name: 'Konflikty' }).click()
-  await expect(page.getByText(
-    'Fikcyjna specjalistka po ponownym wczytaniu', { exact: true },
-  )).toBeVisible()
-  await detailOpener.evaluate((element) => element.remove())
-  await page.getByRole('button', { name: 'Zamknij szczegóły' }).click()
-  await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
-    .toBeFocused()
-  await page.getByRole('button', { name: 'Rozstrzygnij konflikty' }).click()
+  await openWorkbookTools(page)
+  await page.getByRole('button', { name: 'Rozstrzygnij przypisania' }).click()
   await expect(page.getByRole('heading', { name: 'Rozstrzygnij przypisania' }))
     .toBeFocused()
   await expect(page.getByText(
@@ -842,8 +874,7 @@ test('@owner resolves creator-bound conflicts and continues with authoritative v
   await page.getByRole('button', {
     name: 'Zapisz rozstrzygnięcia i kontynuuj',
   }).click()
-  await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
-    .toBeFocused()
+  await expect(page.getByText('Wgraj arkusz', { exact: true })).toBeVisible()
   expect(resolutionBodies).toEqual([{
     expectedVersion: 0, planDigest: PLAN_DIGEST,
     resolutions: [{ conflictId: 'wmc_conflict_e2e', specialistId: specialist.id }],
@@ -854,7 +885,7 @@ test('@owner resolves creator-bound conflicts and continues with authoritative v
   expect(resolutionKeys[0]).toBe(resolutionKeys[1])
 })
 
-test('@owner can switch between pending creator imports without carrying retry state', async ({ page }) => {
+test('@owner continues the pending import without carrying retry state', async ({ page }) => {
   await freezeTime(page)
   await routeWorkspace(page)
   const first = registryImport({
@@ -912,21 +943,13 @@ test('@owner can switch between pending creator imports without carrying retry s
     } }))
   })
 
-  await page.goto('./#/ledger')
-  const firstCard = page.locator('article').filter({ hasText: first.id })
-  const secondCard = page.locator('article').filter({ hasText: second.id })
-  await firstCard.getByRole('button', { name: 'Rozstrzygnij konflikty' }).click()
-  await expect(page.getByText('Fikcyjna wartość pierwszego importu', { exact: true }))
-    .toBeVisible()
-  await secondCard.getByRole('button', { name: 'Kontynuuj import' }).click()
-  await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
-    .toBeFocused()
-  await expect(page.getByText('Fikcyjna wartość pierwszego importu', { exact: true }))
-    .toHaveCount(0)
+  await openWorkbookTools(page)
+  await page.getByRole('button', { name: 'Kontynuuj import' }).click()
+  await expect(page.getByRole('button', { name: 'Kontynuuj import', exact: true })).toBeVisible()
   expect(secondContinuations).toBe(1)
 })
 
-test('@owner can retry a failed continuation and cannot overlap it with a void', async ({ page }) => {
+test('@owner can retry a failed continuation from the workbook tools', async ({ page }) => {
   await freezeTime(page)
   await routeWorkspace(page)
   const imported = registryImport({ status: 'ready', version: 1 })
@@ -949,6 +972,8 @@ test('@owner can retry a failed continuation and cannot overlap it with a void',
     } }))
   ))
   let releaseFailure
+  let markFirstAttempt
+  const firstAttempt = new Promise((resolve) => { markFirstAttempt = resolve })
   let attempts = 0
   const keys = []
   await page.route(
@@ -957,6 +982,7 @@ test('@owner can retry a failed continuation and cannot overlap it with a void',
       attempts += 1
       keys.push(route.request().headers()['idempotency-key'])
       if (attempts === 1) return new Promise((resolve) => {
+        markFirstAttempt()
         releaseFailure = async () => {
           await route.fulfill(json({ error: {
             code: 'INTERNAL_ERROR', correlationId: '88888888-8888-4888-8888-888888888888',
@@ -981,16 +1007,13 @@ test('@owner can retry a failed continuation and cannot overlap it with a void',
     },
   )
 
-  await page.goto('./#/ledger')
+  await openWorkbookTools(page)
   await page.getByRole('button', { name: 'Kontynuuj import' }).click()
-  await page.getByRole('tab', { name: 'Pozycje rejestru' }).click()
-  await expect(page.getByRole('button', { name: 'Unieważnij pozycję' })).toBeDisabled()
+  await firstAttempt
   await releaseFailure()
   await expect(page.getByRole('alert')).toContainText('Nie udało się kontynuować importu')
-  await page.getByRole('tab', { name: 'Importy' }).click()
   await page.getByRole('button', { name: 'Kontynuuj import' }).click()
-  await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
-    .toBeFocused()
+  await expect(page.getByRole('button', { name: 'Kontynuuj import', exact: true })).toBeVisible()
   expect(keys).toHaveLength(2)
   expect(keys[0]).toBe(keys[1])
 })
@@ -1056,13 +1079,14 @@ test('@owner drives every remaining materialization slice from one continuation 
     if (request.url().includes('/workbooks/registry?')) registryLoads += 1
   })
 
-  await page.goto('./#/ledger')
-  const continueButton = page.getByRole('button', { name: 'Kontynuuj import' })
+  await enableStagingWorkbookTools(page)
+  await page.goto('./#/payments?ym=2026-07')
+  await page.getByText('Wgraj arkusz', { exact: true }).click()
+  const continueButton = page.getByRole('button', { name: 'Kontynuuj import', exact: true })
   await expect(continueButton).toBeVisible()
   const settledLoads = registryLoads
   await continueButton.click()
-  await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
-    .toBeFocused()
+  await expect(page.getByRole('button', { name: 'Kontynuuj import', exact: true })).toBeVisible()
   await expect(page.getByRole('alert')).toHaveCount(0)
   expect(keys).toHaveLength(3)
   expect(new Set(keys).size).toBe(3)
@@ -1080,10 +1104,11 @@ test('@coordinator @specialist keeps capability-scoped finance controls', async 
   ))
 
   if (testInfo.project.name === 'coordinator') {
-    await page.goto('./#/ledger')
+    await page.goto('./#/payments')
+    await expect(page.getByText('Wgraj arkusz', { exact: true })).toHaveCount(0)
     await expect(page.getByLabel('Wybierz plik XLSX')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Kontynuuj import' })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Eksportuj Panel-v2' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Pobierz pełny skoroszyt' })).toHaveCount(0)
     return
   }
   await page.goto('./#/payments')
@@ -1111,8 +1136,18 @@ test('@owner chooses the finance surface from current capabilities rather than r
 
   await page.goto('./#/payments')
   await expect(page.getByRole('heading', { name: 'Finanse niedostępne' })).toBeVisible()
+  await expect(page.getByText('Dostęp do finansów nadaje osoba zarządzająca panelem.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Finanse' })).toHaveCount(0)
   expect(financeRequests).toBe(0)
   await expect(page.getByRole('button', { name: 'Eksportuj własne dane' })).toHaveCount(0)
+
+  await page.goto('./#/reports')
+  await expect(page).toHaveURL(/#\/dashboard$/)
+  await expect(page.locator('.toast').filter({ hasText: 'Nie możemy otworzyć tego widoku.' })).toHaveCount(1)
+
+  await page.goto('./#/nieznana')
+  await expect(page).toHaveURL(/#\/dashboard$/)
+  await expect(page.locator('.toast').filter({ hasText: 'Nie możemy otworzyć tego widoku.' })).toHaveCount(1)
 })
 
 test('@owner with a proven specialist profile falls back to own payments after centre-read denial', async ({ page }) => {
@@ -1146,7 +1181,7 @@ test('@owner with a proven specialist profile falls back to own payments after c
   expect(ownRequests.every(({ from, to }) => (
     from === '2026-07-01' && to === '2026-07-31'
   ))).toBe(true)
-  expect(workspaceRequests).toEqual([])
+  expect(workspaceRequests).toEqual([{ from: '2026-08-10', to: '2026-08-16' }])
 })
 
 test('@owner keeps own payments with charge-read alone and never loads workspace', async ({ page }) => {
@@ -1173,6 +1208,9 @@ test('@owner keeps own payments with charge-read alone and never loads workspace
   await expect(page.getByRole('heading', { name: 'Finanse i płatności' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Finanse' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Eksportuj własne dane' })).toHaveCount(0)
+  const ownTable = page.getByRole('table', { name: 'Własne rozliczenia sesji' })
+  await expect(ownTable.getByRole('button', { name: /Dodaj wpłatę.*sesja/i }).first()).toBeVisible()
+  await expect(ownTable.getByRole('link', { name: 'Otwórz w Grafiku' })).toHaveCount(0)
   expect(ownRequests.length).toBeGreaterThan(0)
   expect(ownRequests.every(({ from, to }) => (
     from === '2026-07-01' && to === '2026-07-31'
@@ -1180,11 +1218,93 @@ test('@owner keeps own payments with charge-read alone and never loads workspace
   expect(workspaceRequests).toBe(0)
 })
 
+test('@owner records an own-session payment through the narrow monthly window', async ({ page }) => {
+  await freezeTime(page)
+  await page.route('**/api/v1/session', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.actor.specialistId = specialist.id
+    body.data.actor.professionalTitle = 'Psycholożka'
+    body.data.capabilities = body.data.capabilities.filter((value) => value !== 'finance.centre.read')
+    await route.fulfill({ response, body: JSON.stringify(body) })
+  })
+  let records = [...appointments]
+  const calls = []
+  await page.route('**/api/v1/payments/own?*', async (route) => {
+    const url = new URL(route.request().url())
+    await route.fulfill(json(ownPayments(
+      url.searchParams.get('from'), url.searchParams.get('to'), records,
+    )))
+  })
+  await page.route('**/api/v1/appointments/apt_finance_e2e_0/payments', async (route) => {
+    calls.push(route.request().postDataJSON())
+    const receivedAt = '2026-08-15T10:00:00.000Z'
+    const updated = {
+      ...appointments[0], version: 2, updatedAt: '2026-08-15T10:01:00.000Z',
+      payment: {
+        status: 'paid', collectedGrosze: 18_000, outstandingGrosze: 0,
+        latestMethod: 'card', latestReceivedAt: receivedAt,
+      },
+      paymentEntries: [{
+        id: 'pay_finance_e2e_0', amountGrosze: 18_000, method: 'card', receivedAt,
+        correctedAt: null, replacementEntryId: null,
+      }],
+    }
+    records = [updated, ...appointments.slice(1)]
+    await route.fulfill(json({ data: { appointment: updated } }))
+  })
+
+  await page.goto('./#/payments?ym=2026-07')
+  const table = page.getByRole('table', { name: 'Własne rozliczenia sesji' })
+  const row = table.locator('tbody tr').first()
+  await expect(row).toContainText('1 lipca 2026')
+  await expect(row).toContainText('10:00')
+  await expect(row.getByRole('link', { name: 'Otwórz w Grafiku' })).toHaveAttribute(
+    'href', '#/calendar?date=2026-07-01&highlightSessionIds=apt_finance_e2e_0',
+  )
+  await row.getByRole('button', { name: /Dodaj wpłatę.*sesja/i }).click()
+  const entry = page.getByRole('dialog', { name: 'Dodaj wpłatę' })
+  await expect(entry).toContainText('1 lipca 2026 · 10:00')
+  await expect(entry.getByLabel('Kwota wpłaty')).toHaveValue('180')
+  await entry.getByLabel('Forma płatności').selectOption('card')
+  await entry.getByRole('button', { name: 'Zapisz wpłatę' }).click()
+
+  await expect(entry).toHaveCount(0)
+  await expect(row).toContainText('Opłacona')
+  await expect(row.getByRole('button', { name: /Dodaj wpłatę/i })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: /Własne sesje/ })).toBeFocused()
+  expect(calls).toEqual([{
+    expectedVersion: 1, amountGrosze: 18_000, method: 'card',
+    receivedAt: '2026-08-15T10:00:00.000Z',
+  }])
+})
+
+test('@owner without payment management can read own balances but cannot record a payment', async ({ page }) => {
+  await freezeTime(page)
+  await page.route('**/api/v1/session', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.actor.specialistId = specialist.id
+    body.data.actor.professionalTitle = 'Psycholożka'
+    body.data.capabilities = body.data.capabilities.filter((value) => ![
+      'client.operational.read', 'finance.centre.read', 'payment.manage', 'specialist.directory.read',
+    ].includes(value))
+    await route.fulfill({ response, body: JSON.stringify(body) })
+  })
+  await routeOwnPayments(page)
+
+  await page.goto('./#/payments?ym=2026-07')
+  const table = page.getByRole('table', { name: 'Własne rozliczenia sesji' })
+  await expect(table).toContainText('180 zł')
+  await expect(table.getByRole('button', { name: /Dodaj wpłatę/i })).toHaveCount(0)
+})
+
 test('@owner uses finance-owned specialist labels and import choices without workspace authority', async ({ page }) => {
   await freezeTime(page)
   await page.route('**/api/v1/session', async (route) => {
     const response = await route.fetch()
     const body = await response.json()
+    body.data.environment = 'staging'
     body.data.capabilities = body.data.capabilities.filter((value) => ![
       'appointment.charge.read', 'client.operational.read', 'specialist.directory.read',
     ].includes(value))
@@ -1221,18 +1341,15 @@ test('@owner uses finance-owned specialist labels and import choices without wor
     } }))
   ))
 
-  await page.goto('./#/payments?ym=2026-07&tab=income')
+  await page.goto('./#/payments?ym=2026-07')
   await expect(page.getByText(specialist.displayName, { exact: true }).first()).toBeVisible()
   await page.goto('./#/reports?ym=2026-07')
   await expect(page.getByText(specialist.displayName, { exact: true })).toBeVisible()
-  await page.goto('./#/ledger')
+  await openWorkbookTools(page, { sessionConfigured: true })
   await page.getByLabel('Wybierz plik XLSX').setInputFiles({
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
   await expect(page.getByLabel('Wybierz specjalistkę — konflikt 1')
-    .getByRole('option', { name: specialist.displayName })).toHaveCount(1)
-  await page.getByRole('button', { name: 'Rozstrzygnij konflikty' }).click()
-  await expect(page.getByLabel('Konflikt przypisania 1')
     .getByRole('option', { name: specialist.displayName })).toHaveCount(1)
   expect(workspaceRequests).toBe(0)
 })
@@ -1242,6 +1359,7 @@ test('@owner reviews an archived Panel specialist from preview authority without
   await page.route('**/api/v1/session', async (route) => {
     const response = await route.fetch()
     const body = await response.json()
+    body.data.environment = 'staging'
     body.data.capabilities = body.data.capabilities.filter((value) => ![
       'appointment.charge.read', 'client.operational.read', 'specialist.directory.read',
     ].includes(value))
@@ -1263,19 +1381,20 @@ test('@owner reviews an archived Panel specialist from preview authority without
     route.fulfill(json(archivedPreview))
   ))
 
-  await page.goto('./#/ledger')
+  await openWorkbookTools(page, { sessionConfigured: true })
   await page.getByLabel('Wybierz plik XLSX').setInputFiles({
     name: 'fikcyjny-panel.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
   const evidence = page.locator('.workbook-import__evidence li')
-    .filter({ hasText: 'fin_panel_review_update' })
+    .filter({ hasText: 'Pozycja do zmiany:' })
   await expect(evidence).toContainText(`specjalistka — ${archivedLabel}`)
   await expect(page.getByRole('main')).not.toContainText(archivedId)
   expect(workspaceRequests).toBe(0)
 })
 
-test('@owner keeps Task 11 grids bounded and the ledger icon distinct at every breakpoint', async ({ page }) => {
+test('@owner keeps Task 11 grids bounded and the workbook registry out of navigation at every breakpoint', async ({ page }) => {
   await freezeTime(page)
+  await enableStagingWorkbookTools(page)
   await routeWorkspace(page)
   await routeRegistry(page, [registryImport()])
   await page.route('**/api/v1/finance/window?*', (route) => (
@@ -1296,32 +1415,32 @@ test('@owner keeps Task 11 grids bounded and the ledger icon distinct at every b
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
       .toBe(true)
     if (width <= 640) {
-      await expect(page.getByRole('button', { name: 'Menu', exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Więcej', exact: true })).toBeVisible()
       await expect(page.getByRole('button', { name: 'Otwórz menu' })).toHaveCount(0)
     } else if (width <= 1024) {
       await expect(page.getByRole('button', { name: 'Otwórz menu' })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'Menu', exact: true })).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Więcej', exact: true })).toHaveCount(0)
     } else {
-      await expect(page.getByRole('link', { name: 'Rejestr' })).toBeVisible()
+      await expect(page.getByRole('link', { name: 'Rejestr' })).toHaveCount(0)
       await expect(page.getByRole('button', { name: 'Otwórz menu' })).toHaveCount(0)
     }
     await page.goto('./#/reports?ym=2026-07')
     await expect(page.getByRole('heading', { name: /Raport/ })).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
       .toBe(true)
-    await page.goto('./#/ledger')
-    await expect(page.getByRole('heading', { name: /Rejestr skoroszytów/ })).toBeVisible()
+    await openWorkbookTools(page, { sessionConfigured: true })
+    await expect(page.getByText('Wgraj arkusz', { exact: true })).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
       .toBe(true)
   }
 
-  const icons = await page.evaluate(() => {
+  const navigationIcons = await page.evaluate(() => {
     const byText = (text) => [...document.querySelectorAll('a')]
       .find((link) => link.textContent.includes(text))?.querySelector('svg')?.innerHTML
     return { ledger: byText('Rejestr'), reports: byText('Raporty') }
   })
-  expect(icons.ledger).toBeTruthy()
-  expect(icons.ledger).not.toBe(icons.reports)
+  expect(navigationIcons.ledger).toBeUndefined()
+  expect(navigationIcons.reports).toBeTruthy()
 
   await page.setViewportSize({ width: 390, height: 900 })
   await page.getByLabel('Wybierz plik XLSX').setInputFiles({
@@ -1332,29 +1451,17 @@ test('@owner keeps Task 11 grids bounded and the ledger icon distinct at every b
     .toBe(true)
 
   await page.setViewportSize({ width: 320, height: 900 })
-  await page.goto('./#/payments?ym=2026-07&tab=income')
-  for (const label of [
-    'Przewijana tabela — Przychody miesiąca',
-  ]) {
-    const region = page.getByRole('region', { name: label })
-    await region.focus()
-    await expect(region).toBeFocused()
-    const before = await region.evaluate((element) => element.scrollLeft)
-    await region.press('ArrowRight')
-    expect(await region.evaluate((element) => element.scrollLeft)).toBeGreaterThan(before)
-  }
+  await page.goto('./#/payments?ym=2026-07')
+  const incomeTable = page.getByRole('table', { name: 'Lista wpływów' })
+  await expect(incomeTable).toHaveClass(/table--cards/)
+  await expect(incomeTable.locator('td[data-th="Płatność"]').first()).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   await page.goto('./#/reports?ym=2026-07')
   const trend = page.getByRole('region', { name: 'Przewijana tabela trendu sześciu miesięcy' })
   await trend.focus()
   const trendBefore = await trend.evaluate((element) => element.scrollLeft)
   await trend.press('ArrowRight')
   expect(await trend.evaluate((element) => element.scrollLeft)).toBeGreaterThan(trendBefore)
-  await page.goto('./#/ledger?section=entries')
-  const registryTable = page.getByRole('region', { name: 'Przewijana tabela pozycji rejestru' })
-  await registryTable.focus()
-  const registryBefore = await registryTable.evaluate((element) => element.scrollLeft)
-  await registryTable.press('ArrowRight')
-  expect(await registryTable.evaluate((element) => element.scrollLeft)).toBeGreaterThan(registryBefore)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
     .toBe(true)
 
@@ -1366,7 +1473,7 @@ test('@owner keeps Task 11 grids bounded and the ledger icon distinct at every b
   expect(page.url()).toBe(routeBeforeSkip)
 })
 
-test('@owner renders Polish 1/2/5 registry and report counts', async ({ page }) => {
+test('@owner renders Polish report counts without exposing workbook history', async ({ page }) => {
   await freezeTime(page)
   const values = [5, 2, 1].map((count) => registryImport({
     id: `wbi_plural_${count}`,
@@ -1381,13 +1488,6 @@ test('@owner renders Polish 1/2/5 registry and report counts', async ({ page }) 
     route.fulfill(json(financeWindow('2026-07')))
   ))
 
-  await page.goto('./#/ledger')
-  await expect(page.getByText(/1 pozycja · 1 pozycja w kwarantannie/)).toBeVisible()
-  await expect(page.getByText(/2 pozycje · 2 pozycje w kwarantannie/)).toBeVisible()
-  await expect(page.getByText(/5 pozycji · 5 pozycji w kwarantannie/)).toBeVisible()
-  await expect(page.getByText(/1 konflikt · 1 duplikat/)).toBeVisible()
-  await expect(page.getByText(/2 konflikty · 2 duplikaty/)).toBeVisible()
-  await expect(page.getByText(/5 konfliktów · 5 duplikatów/)).toBeVisible()
   await page.goto('./#/reports?ym=2026-07')
   await expect(page.getByText(/2 aktywności/)).toBeVisible()
   await expect(page.getByText(/5 aktywności/)).toBeVisible()
@@ -1395,43 +1495,23 @@ test('@owner renders Polish 1/2/5 registry and report counts', async ({ page }) 
     .toBeVisible()
 })
 
-test('@coordinator reads centre resolution labels directly without workspace', async ({ page }) => {
+test('@coordinator cannot open hidden workbook history from Finance', async ({ page }) => {
   await freezeTime(page)
-  let workspaceRequests = 0
+  const workspaceRequests = []
+  const workbookRequests = []
+  page.on('request', (request) => {
+    if (request.url().includes('/api/v1/workbooks/')) workbookRequests.push(request.url())
+  })
   await page.route('**/api/v1/workspace?*', (route) => {
-    workspaceRequests += 1
-    return route.fulfill(json(workspace('2026-07-01', '2026-07-31')))
+    const url = new URL(route.request().url())
+    const from = url.searchParams.get('from')
+    const to = url.searchParams.get('to')
+    workspaceRequests.push({ from, to })
+    return route.fulfill(json(workspace(from, to)))
   })
-  await routeRegistry(page, [registryImport({ status: 'complete', phase: 'complete' })])
-  await page.route('**/api/v1/workbooks/registry/details', (route) => {
-    const section = route.request().postDataJSON().section
-    return route.fulfill(json({ data: {
-      importId: 'wbi_finance_e2e', section, cursor: null, nextCursor: null,
-      ...(section === 'resolutions' ? {
-        specialistLabels: [{ id: specialist.id, label: specialist.displayName }],
-        items: [{
-          id: 'wbr_finance_e2e_blank', kind: 'specialist_mapping',
-          decision: 'blank_assigned_to_julia', specialistId: specialist.id,
-          serviceId: null, targetId: null, resolvedByStaffId: 'stf_local_owner',
-          sourceRecordId: null, conflictId: null, sourceValue: '',
-          version: 1, createdAt: NOW, choices: [],
-        }, {
-          id: 'wbr_finance_e2e_resolution', kind: 'specialist_mapping',
-          decision: 'explicit_match', specialistId: specialist.id,
-          serviceId: null, targetId: null, resolvedByStaffId: 'stf_local_owner',
-          sourceRecordId: null, conflictId: null, sourceValue: 'Anna N.',
-          version: 1, createdAt: NOW, choices: [],
-        }],
-      } : { items: [] }), complete: true,
-    } }))
-  })
-
-  await page.goto('./#/ledger')
-  await page.getByRole('button', { name: 'Przejrzyj import' }).click()
-  await page.getByRole('tab', { name: 'Rozstrzygnięcia' }).click()
-  await expect(page.getByText(specialist.displayName, { exact: true })).toHaveCount(2)
-  await expect(page.getByText('Jawnie przypisano specjalistkę', { exact: true })).toBeVisible()
-  await expect(page.getByText('Przypisano pustą wartość źródłową', { exact: true }))
-    .toBeVisible()
-  expect(workspaceRequests).toBe(0)
+  await page.goto('./#/payments')
+  await expect(page.getByText('Wgraj arkusz', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Rozstrzygnięcia', { exact: true })).toHaveCount(0)
+  expect(workbookRequests).toEqual([])
+  expect(workspaceRequests).toContainEqual({ from: '2026-08-01', to: '2026-08-31' })
 })

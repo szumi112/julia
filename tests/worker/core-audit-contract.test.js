@@ -33,11 +33,13 @@ const valueFor = (type) => ({
   clientId: 'cl_one',
   correctionId: 'cor_one',
   count: 2,
+  cancellationReason: 'client',
   financeBatchId: 'fib_one',
   financeEntryId: 'fin_one',
   nullableVersion: null,
   nullablePaymentId: null,
   paymentId: 'pay_one',
+  specialistAbsenceId: 'abs_one',
   staffId: 'stf_one',
   version: 1,
   workbookImportId: 'wbi_one',
@@ -61,7 +63,8 @@ const eventFor = (action) => {
       : schema.entityIdKind === 'appointmentId' ? 'apt_one'
         : schema.entityIdKind === 'financeBatchId' ? 'fib_one'
           : schema.entityIdKind === 'financeEntryId' ? 'fin_one'
-            : schema.entityIdKind === 'specialistId' ? 'sp_one'
+          : schema.entityIdKind === 'specialistId' ? 'sp_one'
+            : schema.entityIdKind === 'specialistAbsenceId' ? 'abs_one'
                 : schema.entityIdKind === 'workbookImportId' ? 'wbi_one'
                   : schema.entityIdKind === 'workbookExportId' ? 'wbe_one'
                 : schema.entityIdKind === 'historicalClientId' ? 'hcl_one'

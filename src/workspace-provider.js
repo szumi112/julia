@@ -39,6 +39,10 @@ import {
   isActivityMembershipId,
   isActivityParticipantId,
 } from './activity-records.js'
+import {
+  captureSpecialistAbsence,
+  captureSpecialistAbsencesPayload,
+} from './specialist-absences.js'
 
 const AUTHORITY_KEYS = Object.freeze([
   'repositoryMode', 'dataMode', 'actorId', 'actorVersion', 'authorityRevision',
@@ -46,8 +50,9 @@ const AUTHORITY_KEYS = Object.freeze([
 ])
 const REPOSITORY_METHODS = Object.freeze([
   'loadWindow', 'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient',
-  'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
-  'correctPayment',
+  'createAppointment', 'editAppointment', 'cancelAppointment', 'restoreAppointment',
+  'recordPayment',
+  'correctPayment', 'loadAbsences', 'createSpecialistAbsence', 'cancelSpecialistAbsence',
 ])
 const ACTIVITY_REPOSITORY_METHODS = Object.freeze([
   'loadWindow',
@@ -59,11 +64,16 @@ const ACTIVITY_REPOSITORY_METHODS = Object.freeze([
 const ACTIVITY_COMMAND_METHODS = Object.freeze(
   ACTIVITY_REPOSITORY_METHODS.filter((name) => name !== 'loadWindow'),
 )
-const WORKSPACE_METHODS = Object.freeze(REPOSITORY_METHODS.filter((name) => name !== 'loadWindow'))
+const WORKSPACE_METHODS = Object.freeze(REPOSITORY_METHODS.filter((name) => (
+  name !== 'loadWindow' && name !== 'loadAbsences'
+)))
+const ABSENCE_COMMAND_METHODS = new Set(['createSpecialistAbsence', 'cancelSpecialistAbsence'])
 const CLIENT_MUTATION_METHODS = new Set([
   'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient',
 ])
-const APPOINTMENT_MUTATION_METHODS = new Set(['createAppointment', 'editAppointment', 'cancelAppointment'])
+const APPOINTMENT_MUTATION_METHODS = new Set([
+  'createAppointment', 'editAppointment', 'cancelAppointment', 'restoreAppointment',
+])
 const PAYMENT_MUTATION_METHODS = new Set(['recordPayment', 'correctPayment'])
 const PAYMENT_ENTRY_KEYS = new Set([
   'id', 'amountGrosze', 'method', 'receivedAt', 'correctedAt', 'replacementEntryId',
@@ -79,6 +89,22 @@ const INFRASTRUCTURE_CODES = new Set([
 
 const fail = (message) => {
   throw new TypeError(message)
+}
+
+const absenceRange = (value) => {
+  const captured = captureExactRecord(value, ['from', 'to'], 'absence range')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(captured.from)
+    || !/^\d{4}-\d{2}-\d{2}$/.test(captured.to)
+    || captured.from > captured.to) fail('Invalid absence range')
+  return Object.freeze(captured)
+}
+
+const capturedAbsencePayload = (value, requested) => {
+  const captured = captureSpecialistAbsencesPayload(value)
+  if (captured.from !== requested.from || captured.to !== requested.to) {
+    fail('Invalid absence payload')
+  }
+  return captured
 }
 
 const captureExactRecord = (value, keys, label) => {
@@ -778,13 +804,16 @@ export const createWorkspaceProviderController = (options) => {
   let repository = repositoryFrom(repositoryFactory, captured.dispatch, captured.getState)
   let loadedState = createLoadedWorkspaceState()
   let loadedActivitiesState = createLoadedActivitiesState()
+  let absenceState = Object.freeze({ from: null, to: null, absences: Object.freeze([]) })
   let pendingLoads = 0
   let pendingActivityLoads = 0
+  let pendingAbsenceLoads = 0
   let readOnly = false
   let clientMutationLocked = false
   let historicalActivationLock = null
   let appointmentMutationLocked = false
   let paymentMutationLock = null
+  let absenceMutationLocked = false
   let activityMutationLocked = false
   let activityLoadSequence = 0
   let infrastructureError = null
@@ -805,6 +834,9 @@ export const createWorkspaceProviderController = (options) => {
   const activityStatus = () => readOnly
     ? 'read-only-error'
     : pendingActivityLoads > 0 || activityMutationLocked ? 'loading' : 'ready'
+  const absenceStatus = () => readOnly
+    ? 'read-only-error'
+    : pendingAbsenceLoads > 0 || absenceMutationLocked ? 'loading' : 'ready'
   const publish = () => {
     const activities = repository?.activities === null || repository?.activities === undefined
       ? null
@@ -823,16 +855,25 @@ export const createWorkspaceProviderController = (options) => {
         editClass: activityCommands.editClass,
         setAttendance: activityCommands.setAttendance,
       })
+    const absences = Object.freeze({
+      status: absenceStatus(),
+      state: absenceState,
+      loadWindow: loadAbsenceWindow,
+      create: commands.createSpecialistAbsence,
+      cancel: commands.cancelSpecialistAbsence,
+    })
     snapshot = Object.freeze({
       loadedState,
       loadedActivitiesState,
       clientMutationLocked,
       appointmentMutationLocked,
       paymentMutationLocked: paymentMutationLock !== null,
+      absenceMutationLocked,
       workspace: Object.freeze({
         status: status(),
         loadedRanges: loadedState.loadedRanges,
         activities,
+        absences,
         loadWindow,
         recoverFromInfrastructureError,
         createClient: commands.createClient,
@@ -842,6 +883,7 @@ export const createWorkspaceProviderController = (options) => {
         createAppointment: commands.createAppointment,
         editAppointment: commands.editAppointment,
         cancelAppointment: commands.cancelAppointment,
+        restoreAppointment: commands.restoreAppointment,
         recordPayment: commands.recordPayment,
         correctPayment: commands.correctPayment,
       }),
@@ -913,6 +955,37 @@ export const createWorkspaceProviderController = (options) => {
     } finally {
       if (loadedState.authorityGeneration === generation) {
         pendingLoads = Math.max(0, pendingLoads - 1)
+        publish()
+      }
+    }
+  }
+
+  async function loadAbsenceWindow(requested) {
+    if (readOnly || repository === null) throw readOnlyError()
+    const rangeValue = absenceRange(requested)
+    const generation = loadedState.authorityGeneration
+    const operationRepository = repository
+    pendingAbsenceLoads += 1
+    publish()
+    try {
+      let rawPayload
+      try {
+        rawPayload = await operationRepository.loadAbsences(rangeValue)
+      } catch (error) {
+        if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
+        throw error
+      }
+      if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
+      try {
+        absenceState = capturedAbsencePayload(rawPayload, rangeValue)
+      } catch (error) {
+        throw error
+      }
+      publish()
+      return rawPayload
+    } finally {
+      if (loadedState.authorityGeneration === generation) {
+        pendingAbsenceLoads = Math.max(0, pendingAbsenceLoads - 1)
         publish()
       }
     }
@@ -1032,6 +1105,23 @@ export const createWorkspaceProviderController = (options) => {
     },
   ]))
 
+  const reconcileAbsenceCommand = (name, result) => {
+    const absence = captureSpecialistAbsence(result)
+    if (absenceState.from === null) return absence
+    const current = absenceState.absences.filter((value) => value.id !== absence.id)
+    if (name === 'createSpecialistAbsence' && absence.cancelledAt === null
+      && absence.dateFrom <= absenceState.to && absence.dateTo >= absenceState.from) {
+      current.push(absence)
+    }
+    current.sort((left, right) => left.dateFrom.localeCompare(right.dateFrom)
+      || left.specialistId.localeCompare(right.specialistId)
+      || left.id.localeCompare(right.id))
+    absenceState = Object.freeze({
+      from: absenceState.from, to: absenceState.to, absences: Object.freeze(current),
+    })
+    return absence
+  }
+
   const commands = Object.fromEntries(WORKSPACE_METHODS.map((name) => [name,
     async (...args) => {
       if (readOnly || repository === null) throw readOnlyError()
@@ -1044,6 +1134,9 @@ export const createWorkspaceProviderController = (options) => {
       if (PAYMENT_MUTATION_METHODS.has(name) && paymentMutationLock !== null) {
         throw fixedError('WORKSPACE_RECONCILIATION_REQUIRED')
       }
+      if (ABSENCE_COMMAND_METHODS.has(name) && absenceMutationLocked) {
+        throw fixedError('WORKSPACE_RECONCILIATION_REQUIRED')
+      }
       const generation = loadedState.authorityGeneration
       const operationRepository = repository
       const nextPaymentMutationLock = PAYMENT_MUTATION_METHODS.has(name)
@@ -1052,9 +1145,14 @@ export const createWorkspaceProviderController = (options) => {
       const nextHistoricalActivationLock = name === 'activateHistoricalClient'
         ? historicalActivationLockFor(args)
         : null
+      if (ABSENCE_COMMAND_METHODS.has(name)) {
+        absenceMutationLocked = true
+        publish()
+      }
       try {
         const result = await operationRepository[name](...args)
         if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
+        if (ABSENCE_COMMAND_METHODS.has(name)) reconcileAbsenceCommand(name, result)
         if (CLIENT_MUTATION_METHODS.has(name)) clientMutationLocked = true
         if (name === 'activateHistoricalClient') {
           historicalActivationLock = nextHistoricalActivationLock
@@ -1068,6 +1166,11 @@ export const createWorkspaceProviderController = (options) => {
         if (loadedState.authorityGeneration !== generation) throw staleAuthorityError()
         if (infrastructureFailure(error)) enterReadOnly(error, generation)
         throw error
+      } finally {
+        if (loadedState.authorityGeneration === generation && ABSENCE_COMMAND_METHODS.has(name)) {
+          absenceMutationLocked = false
+          publish()
+        }
       }
     },
   ]))
@@ -1080,14 +1183,17 @@ export const createWorkspaceProviderController = (options) => {
     repository = null
     loadedState = resetLoadedWorkspaceAuthority(loadedState)
     loadedActivitiesState = resetLoadedActivitiesAuthority(loadedActivitiesState)
+    absenceState = Object.freeze({ from: null, to: null, absences: Object.freeze([]) })
     activityLoadSequence = 0
     pendingLoads = 0
     pendingActivityLoads = 0
+    pendingAbsenceLoads = 0
     readOnly = true
     clientMutationLocked = false
     historicalActivationLock = null
     appointmentMutationLocked = false
     paymentMutationLock = null
+    absenceMutationLocked = false
     activityMutationLocked = false
     infrastructureError = resetFailedError()
     publish()

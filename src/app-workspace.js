@@ -1,8 +1,10 @@
 const WORKSPACE_API_METHODS = Object.freeze([
   'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
   'activateHistoricalClient',
-  'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
+  'createAppointment', 'editAppointment', 'cancelAppointment', 'restoreAppointment',
+  'recordPayment',
   'correctPayment',
+  'loadSpecialistAbsences', 'createSpecialistAbsence', 'cancelSpecialistAbsence',
   'loadActivityWorkspace',
   'createActivityGroup', 'editActivityGroup',
   'createActivityParticipant', 'editActivityParticipant',

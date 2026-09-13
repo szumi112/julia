@@ -13,13 +13,15 @@ import { warsawDateFromUtc } from '../core-records.js'
 import { Pill } from '../ui.jsx'
 import { AppPaymentCorrection, AppPaymentEntry } from './Payments.jsx'
 
-export function useProtectedPaymentContext(selectedMonth, enabled, sharedWorkspaceState = null) {
+export function useProtectedPaymentContext(
+  selectedMonth, enabled, sharedWorkspaceState = null, rangeOverride = null,
+) {
   const { state, workspace } = useApp()
   const canonicalAppointments = useCanonicalAppointments()
   const { capabilities } = useShell()
   const { locked: paymentMutationLocked } = usePaymentMutationLock()
   const refreshWorkspace = useWorkspaceRefresh()
-  const workspaceRange = monthWorkspaceRange(selectedMonth)
+  const workspaceRange = rangeOverride ?? monthWorkspaceRange(selectedMonth)
   const localWorkspaceState = useWorkspaceWindow(
     workspaceRange, enabled && sharedWorkspaceState === null,
   )
@@ -32,6 +34,7 @@ export function useProtectedPaymentContext(selectedMonth, enabled, sharedWorkspa
 
 function ProtectedPaymentActionInner({
   appointmentId, outstandingGrosze, fallbackFocusRef, onReconciled, paymentContext,
+  compact = false, hideEmpty = false,
 }) {
   const {
     canonicalAppointments, capabilities, paymentMutationLocked, refreshWorkspace,
@@ -46,9 +49,8 @@ function ProtectedPaymentActionInner({
     && session && !session.readOnly && !client?.readOnly
 
   const entries = canonicalAppointments[appointmentId]?.paymentEntries ?? []
-  return (
-    <div className="finance-window__payment-actions">
-      {enabled ? <AppPaymentEntry
+  const content = <>
+    {enabled ? <AppPaymentEntry
         session={session}
         client={client}
         fallbackFocusRef={fallbackFocusRef}
@@ -57,8 +59,8 @@ function ProtectedPaymentActionInner({
         workspace={workspace}
         workspaceRange={workspaceRange}
         onReconciled={onReconciled}
-      /> : <span className="faint">—</span>}
-      {entries.length > 0 ? <div role="region" aria-label="Historia wpłat">
+      /> : hideEmpty ? null : <span className="faint">—</span>}
+    {!compact && entries.length > 0 ? <div role="region" aria-label="Historia wpłat">
         <strong>Historia wpłat</strong>
         {entries.map((entry) => <div className="finance-window__payment-entry" key={entry.id}>
           <span>{fmtMoney(entry.amountGrosze / 100)} · {METHOD_LABELS[entry.method] || 'Nie ustalono'}
@@ -77,9 +79,10 @@ function ProtectedPaymentActionInner({
             /> : entry.correctedAt !== null ? <Pill tone="ink">Skorygowana</Pill>
               : <span className="faint">—</span>}
         </div>)}
-      </div> : null}
-    </div>
-  )
+    </div> : null}
+  </>
+  return compact ? <span className="finance-window__payment-actions finance-window__payment-actions--compact">{content}</span>
+    : <div className="finance-window__payment-actions">{content}</div>
 }
 
 export function ProtectedPaymentAction(props) {

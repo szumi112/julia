@@ -543,7 +543,8 @@ const AUDIT_FACTS = Object.freeze([
   Object.freeze({ action: 'client.archived', entityType: 'client', entityId: 'cl_audit_archived', result: 'success', metadata: { clientVersion: 3, assignmentId: 'asg_audit_archive', assignmentVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'appointment.created', entityType: 'appointment', entityId: 'apt_audit_created', result: 'success', metadata: { appointmentVersion: 1, chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'appointment.updated', entityType: 'appointment', entityId: 'apt_audit_updated', result: 'success', metadata: { appointmentVersion: 2, chargeVersion: 2 }, actorStaffId: 'stf_audit_actor' }),
-  Object.freeze({ action: 'appointment.cancelled', entityType: 'appointment', entityId: 'apt_audit_cancelled', result: 'success', metadata: { appointmentVersion: 2, chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'appointment.cancelled', entityType: 'appointment', entityId: 'apt_audit_cancelled', result: 'success', metadata: { appointmentVersion: 2, cancellationReason: 'client', chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
+  Object.freeze({ action: 'appointment.restored', entityType: 'appointment', entityId: 'apt_audit_restored', result: 'success', metadata: { appointmentVersion: 3, chargeVersion: 1 }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'payment.recorded', entityType: 'appointment', entityId: 'apt_audit_paid', result: 'success', metadata: { appointmentVersion: 2, paymentEntryId: 'pay_audit_recorded' }, actorStaffId: 'stf_audit_actor' }),
   Object.freeze({ action: 'payment.corrected', entityType: 'payment_entry', entityId: 'pay_audit_reversed', result: 'success', metadata: { appointmentVersion: 3, correctionId: 'cor_audit_corrected', reversedEntryId: 'pay_audit_reversed', replacementEntryId: null }, actorStaffId: 'stf_audit_actor' }),
 ])

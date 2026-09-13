@@ -19,6 +19,10 @@ const WEEKDAY_OPTIONS = [
 ]
 
 const AGE_RANGE_ERROR = 'Wiek końcowy nie może być mniejszy niż początkowy'
+const EMPTY_CHILD_DRAFT = Object.freeze({
+  childName: '', age: '', parentClientId: '', parentName: '', parentPhone: '', parentEmail: '',
+  regulationsSigned: false,
+})
 
 const focusFirstInvalid = (drawerRef) =>
   requestAnimationFrame(() =>
@@ -48,10 +52,18 @@ export function TusGroupDrawer({ opts, onClose }) {
     ? state.tusKids.filter((kid) => kid.groupId === editing.id).map((kid) => `kid:${kid.id}`)
     : [])
   const [newChildren, setNewChildren] = useState([])
+  const [childDraft, setChildDraft] = useState(() => ({ ...EMPTY_CHILD_DRAFT }))
   const nextDraftId = useRef(1)
-  const [initialSnapshot] = useState(() => JSON.stringify({ form, memberKeys, newChildren }))
-  const discardGuard = useDiscardGuard(JSON.stringify({ form, memberKeys, newChildren }) !== initialSnapshot)
-  const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
+  const [initialSnapshot] = useState(() => JSON.stringify({ form, memberKeys, newChildren, childDraft }))
+  const discardGuard = useDiscardGuard(JSON.stringify({ form, memberKeys, newChildren, childDraft }) !== initialSnapshot)
+  const attemptClose = () => {
+    if (mode === 'child') {
+      setMode('group')
+      return false
+    }
+    return discardGuard.guard()
+  }
+  const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, attemptClose)
   useEffect(() => registerLeaveGuard(discardGuard.check), [registerLeaveGuard, discardGuard.check])
 
   const set = (k, v) => {
@@ -73,6 +85,7 @@ export function TusGroupDrawer({ opts, onClose }) {
     const key = `new:${nextDraftId.current++}`
     setNewChildren((current) => [...current, { ...draft, key }])
     setMemberKeys((current) => [...current, key])
+    setChildDraft({ ...EMPTY_CHILD_DRAFT })
     setMode('group')
   }
 
@@ -83,13 +96,13 @@ export function TusGroupDrawer({ opts, onClose }) {
     const ageMin = Number(form.ageMin)
     const ageMax = Number(form.ageMax)
     const capacity = Number(form.capacity)
-    if (!Number.isInteger(ageMin) || ageMin <= 0) errs.ageMin = 'Wiek musi być dodatnią liczbą całkowitą'
-    if (!Number.isInteger(ageMax) || ageMax <= 0) errs.ageMax = 'Wiek musi być dodatnią liczbą całkowitą'
+    if (!Number.isInteger(ageMin) || ageMin <= 0) errs.ageMin = 'Podaj wiek w pełnych latach'
+    if (!Number.isInteger(ageMax) || ageMax <= 0) errs.ageMax = 'Podaj wiek w pełnych latach'
     if (!errs.ageMin && !errs.ageMax && ageMin > ageMax) {
       errs.ageMax = AGE_RANGE_ERROR
     }
     if (!Number.isInteger(capacity) || capacity <= 0) {
-      errs.capacity = 'Liczba miejsc musi być dodatnią liczbą całkowitą'
+      errs.capacity = 'Podaj pełną liczbę miejsc, np. 8'
     }
     if (form.leaderIds.length === 0) errs.leaderIds = 'Wybierz co najmniej jedną prowadzącą'
     if (!(Number(form.fee) > 0)) errs.fee = 'Podaj kwotę większą od zera'
@@ -150,6 +163,8 @@ export function TusGroupDrawer({ opts, onClose }) {
           <TusChildQuickCreate
             clients={state.clients}
             pendingParents={newChildren}
+            draft={childDraft}
+            onDraftChange={setChildDraft}
             onAdd={addDraftChild}
             onCancel={() => setMode('group')}
             onInvalid={() => {
@@ -205,23 +220,11 @@ export function TusGroupDrawer({ opts, onClose }) {
                   />
                 </Field>
               </div>
-              <p className="field__hint tus-age-preview" aria-live="polite">
-                {tusAgeLabel(form.ageMin, form.ageMax)
-                  ? `Przedział: ${tusAgeLabel(form.ageMin, form.ageMax)}`
-                  : 'Podaj poprawny przedział wiekowy.'}
-              </p>
-
-              <TusMemberPicker
-                clients={state.clients}
-                kids={state.tusKids}
-                groups={state.tusGroups}
-                selectedKeys={memberKeys}
-                newChildren={newChildren}
-                onToggle={toggleMember}
-                onRemove={removeMember}
-                onStartCreate={() => setMode('child')}
-                targetGroupId={editing?.id || null}
-              />
+              {form.ageMin !== '' && form.ageMax !== '' && tusAgeLabel(form.ageMin, form.ageMax) ? (
+                <p className="field__hint tus-age-preview" aria-live="polite">
+                  Przedział: {tusAgeLabel(form.ageMin, form.ageMax)}
+                </p>
+              ) : null}
 
               <Field label="Prowadzące" error={errors.leaderIds} hint="Zwykle dwie psycholożki na grupę.">
                 <div className="stack" style={{ gap: 9, paddingTop: 2 }}>
@@ -249,6 +252,18 @@ export function TusGroupDrawer({ opts, onClose }) {
               <Field label="Opłata miesięczna (zł)" error={errors.fee}>
                 <input type="number" min="0" step="25" inputMode="decimal" name="tus-fee" autoComplete="off" className="input" value={form.fee} onChange={(e) => set('fee', e.target.value)} />
               </Field>
+
+              <TusMemberPicker
+                clients={state.clients}
+                kids={state.tusKids}
+                groups={state.tusGroups}
+                selectedKeys={memberKeys}
+                newChildren={newChildren}
+                onToggle={toggleMember}
+                onRemove={removeMember}
+                onStartCreate={() => setMode('child')}
+                targetGroupId={editing?.id || null}
+              />
             </form>
 
             {discardGuard.confirming && (
@@ -297,8 +312,8 @@ export function TusKidDrawer({ opts, onClose }) {
     e.preventDefault()
     const errs = {}
     if (!form.name.trim()) errs.name = 'Podaj imię i nazwisko dziecka'
-    if (!form.parentName.trim()) errs.parentName = 'Podaj kontakt do rodzica'
-    if (form.age !== '' && !(Number(form.age) >= 3 && Number(form.age) <= 12)) errs.age = 'Podaj wiek 3–12 lat'
+    if (!form.parentName.trim()) errs.parentName = 'Podaj imię i nazwisko rodzica'
+    if (!Number.isInteger(Number(form.age)) || !(Number(form.age) >= 3 && Number(form.age) <= 12)) errs.age = 'Podaj wiek 3–12 lat'
     setErrors(errs)
     if (Object.keys(errs).length) {
       shake()
@@ -343,7 +358,7 @@ export function TusKidDrawer({ opts, onClose }) {
 
         <form className="drawer__body" onSubmit={submit} noValidate>
           <div className="form-grid">
-            <Field label="Imię i nazwisko" error={errors.name} className="span2">
+            <Field label="Imię i nazwisko dziecka" error={errors.name} className="span2">
               <input name="tus-kid-name" autoComplete="off" className="input" value={form.name} placeholder="np. Hania Malik" onChange={(e) => set('name', e.target.value)} />
             </Field>
             <Field label="Wiek" error={errors.age}>
@@ -360,10 +375,10 @@ export function TusKidDrawer({ opts, onClose }) {
           </div>
 
           <div className="form-grid">
-            <Field label="Rodzic / opiekun" error={errors.parentName} hint="Rodzic bywa zapisany pod innym nazwiskiem.">
+            <Field label="Imię i nazwisko rodzica / opiekuna" error={errors.parentName} hint="Rodzic bywa zapisany pod innym nazwiskiem.">
               <input name="tus-parent-name" autoComplete="off" className="input" value={form.parentName} placeholder="np. Ewa Malik" onChange={(e) => set('parentName', e.target.value)} />
             </Field>
-            <Field label="Telefon rodzica">
+            <Field label="Telefon rodzica (opcjonalnie)">
               <input type="tel" name="tus-parent-phone" autoComplete="off" className="input" value={form.parentPhone} placeholder="+48 600 000 000" onChange={(e) => set('parentPhone', e.target.value)} />
             </Field>
           </div>
@@ -419,7 +434,9 @@ export function TusClassDrawer({ opts, onClose }) {
   // adding: propose the next weekly slot after the group's last class
   const defaultDate = () => {
     const last = state.tusClasses.filter((c) => c.groupId === group?.id).at(-1)
-    if (!last) return toISODate(new Date())
+    if (!last) return /^\d{4}-(0[1-9]|1[0-2])$/.test(opts.month || '')
+      ? `${opts.month}-01`
+      : toISODate(new Date())
     const d = parseISO(last.date)
     d.setDate(d.getDate() + 7)
     return toISODate(d)

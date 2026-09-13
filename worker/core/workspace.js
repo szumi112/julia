@@ -29,6 +29,7 @@ import {
   isHistoricalOccurrenceId,
 } from '../../src/historical-records.js'
 import { SERVICE_BY_ID } from '../../src/services.js'
+import { specialistAvatarKeyOrDefault } from '../../src/specialist-avatars.js'
 import { decryptHistoricalIdentityWithDataKey } from './historical-crypto.js'
 
 const validation = (field) => { throw new AppError('VALIDATION_FAILED', { field }) }
@@ -53,6 +54,7 @@ const STAFF_KEYS = Object.freeze([
   'staff_specialist_id', 'staff_status', 'staff_version', 'display_name_envelope',
 ])
 const STAFF_V3_KEYS = Object.freeze([...STAFF_KEYS, 'professional_title_envelope'])
+const STAFF_V4_KEYS = Object.freeze([...STAFF_V3_KEYS, 'avatar_key'])
 const CLIENT_KEYS = Object.freeze([
   'id', 'identity_envelope', 'status', 'version', 'archived_at', 'created_at',
   'updated_at', 'assignment_id', 'assignment_specialist_id', 'assignment_starts_at',
@@ -62,8 +64,9 @@ const CLIENT_KEYS = Object.freeze([
 ])
 const APPOINTMENT_KEYS = Object.freeze([
   'id', 'client_id', 'specialist_id', 'service_id', 'starts_at', 'ends_at',
-  'time_zone', 'location', 'status', 'source', 'version', 'cancelled_at', 'created_at',
-  'updated_at', 'charge_id', 'charge_service_id', 'expected_amount_grosze',
+  'time_zone', 'location', 'status', 'source', 'version', 'cancelled_at',
+  'cancellation_reason', 'created_at', 'updated_at', 'charge_id',
+  'charge_service_id', 'expected_amount_grosze',
   'currency', 'charge_version',
 ])
 const PAYMENT_KEYS = Object.freeze([
@@ -324,12 +327,32 @@ const directoryV3Sql = (specialist) => `
   ORDER BY specialist.id
   LIMIT ?`
 
+const directoryV4Sql = (specialist) => `
+  SELECT specialist.id, specialist.staff_user_id, specialist.standard_rate_grosze,
+         specialist.status, specialist.version, staff.id AS staff_id,
+         staff.specialist_id AS staff_specialist_id, staff.status AS staff_status,
+         staff.version AS staff_version, specialist.display_name_envelope,
+         specialist.professional_title_envelope, specialist.avatar_key
+  FROM specialists AS specialist
+  LEFT JOIN staff_users AS staff
+    ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
+  WHERE (specialist.status IN ('active','pending')
+      AND (specialist.staff_user_id IS NULL OR staff.status IN ('pending','active')))
+    OR (specialist.status='archived' AND EXISTS (
+      SELECT 1 FROM historical_service_occurrences AS occurrence
+      WHERE occurrence.specialist_id=specialist.id
+        AND ${historicalWindowSql(specialist)}
+    ))
+  ORDER BY specialist.id
+  LIMIT ?`
+
 const appointmentSql = (specialist) => `
   SELECT appointment.id, appointment.client_id, appointment.specialist_id,
          appointment.service_id, appointment.starts_at, appointment.ends_at,
          appointment.time_zone, appointment.location, appointment.status,
          appointment.source, appointment.version, appointment.cancelled_at,
-         appointment.created_at, appointment.updated_at, charge.id AS charge_id,
+         appointment.cancellation_reason, appointment.created_at,
+         appointment.updated_at, charge.id AS charge_id,
          charge.service_id AS charge_service_id,
          charge.expected_amount_grosze, charge.currency,
          charge.version AS charge_version
@@ -563,6 +586,7 @@ const defaultDecryptHistoricalField = async ({
 const specialistDto = async (row, context, decrypt, profileVersion) => {
   const profileV2 = profileVersion >= 2
   const profileV3 = profileVersion >= 3
+  const profileV4 = profileVersion >= 4
   const archived = row.status === 'archived'
   const accessStatus = row.staff_user_id === null
     ? 'unclaimed'
@@ -617,18 +641,21 @@ const specialistDto = async (row, context, decrypt, profileVersion) => {
     } catch { cryptoFailure() }
     professionalTitle = canonicalProfessionalTitle(decryptedTitle)
   }
+  let avatarKey
+  try { avatarKey = specialistAvatarKeyOrDefault(profileV4 ? row.avatar_key : undefined) }
+  catch { cryptoFailure() }
   if (profileV2 && archived) return freeze({
-    id: row.id, displayName, professionalTitle,
+    id: row.id, displayName, professionalTitle, avatarKey,
     standardRateGrosze: row.standard_rate_grosze,
     status: 'archived', version: row.version, staffVersion: row.staff_version,
   })
   return freeze(profileV2 ? {
-    id: row.id, displayName, professionalTitle,
+    id: row.id, displayName, professionalTitle, avatarKey,
     standardRateGrosze: row.standard_rate_grosze,
     status: 'active', version: row.version, staffVersion: row.staff_version,
     accessStatus,
   } : {
-    id: row.id, displayName, professionalTitle,
+    id: row.id, displayName, professionalTitle, avatarKey,
     standardRateGrosze: row.standard_rate_grosze,
     status: 'active', version: row.version, staffVersion: row.staff_version,
   })
@@ -657,8 +684,7 @@ const clientDto = async (row, actor, context, decrypt, appointmentByClient) => {
   if (row.status === 'archived' && assignment !== null) invalid()
   if ((row.archived_at !== null
       && (row.archived_at < row.created_at || row.archived_at > row.updated_at))
-    || (assignment !== null
-      && (assignment.startsAt < row.created_at || assignment.startsAt > row.updated_at))) invalid()
+    || (assignment !== null && assignment.startsAt > row.updated_at)) invalid()
   const fact = assignment === null
     ? (() => {
       const appointment = appointmentByClient.get(row.id)?.[0]
@@ -778,6 +804,9 @@ const appointmentBase = (row, actor, window) => {
     || row.source !== 'panel' || !positive(row.version)
     || !nullableInstant(row.cancelled_at)
     || (row.status === 'cancelled') !== (row.cancelled_at !== null)
+    || (row.status !== 'cancelled' && row.cancellation_reason !== null)
+    || (row.cancellation_reason !== null
+      && !['client', 'centre', 'late_paid'].includes(row.cancellation_reason))
     || !isCanonicalUtc(row.created_at) || !isCanonicalUtc(row.updated_at)
     || row.created_at > row.updated_at
     || (row.cancelled_at !== null
@@ -846,8 +875,11 @@ const paymentDtos = (appointment, rows) => {
     if (!Number.isSafeInteger(next)) invalid()
     return next
   }, 0)
+  const billable = ['completed', 'noshow'].includes(appointment.status)
+    || (appointment.status === 'cancelled'
+      && appointment.cancellation_reason === 'late_paid')
   if (collected < 0 || collected > appointment.expected_amount_grosze
-    || (!['completed', 'noshow'].includes(appointment.status) && collected !== 0)) invalid()
+    || (!billable && collected !== 0)) invalid()
   const latest = effective.at(-1) ?? null
   return freeze({
     entries: sorted.map((row) => freeze({
@@ -859,7 +891,7 @@ const paymentDtos = (appointment, rows) => {
       status: collected === 0 ? 'unpaid'
         : collected === appointment.expected_amount_grosze ? 'paid' : 'partial',
       collectedGrosze: collected,
-      outstandingGrosze: ['completed', 'noshow'].includes(appointment.status)
+      outstandingGrosze: billable
         ? appointment.expected_amount_grosze - collected : 0,
       latestMethod: latest?.method ?? null,
       latestReceivedAt: latest?.received_at ?? null,
@@ -909,13 +941,18 @@ export async function readWorkspace(input) {
     window.from, window.to, window.from.slice(0, 7), window.to.slice(0, 7),
   ]
   let specialistRows
-  let profileVersion = 3
+  let profileVersion = 4
   try {
     specialistRows = limit(await query(
-      db, directoryV3Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_V3_KEYS,
+      db, directoryV4Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_V4_KEYS,
     ), 'specialists')
   } catch (error) {
-    if (isD1MissingColumn(error, 'specialist.display_name_envelope')) {
+    if (isD1MissingColumn(error, 'specialist.avatar_key')) {
+      profileVersion = 3
+      specialistRows = limit(await query(
+        db, directoryV3Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_V3_KEYS,
+      ), 'specialists')
+    } else if (isD1MissingColumn(error, 'specialist.display_name_envelope')) {
       profileVersion = 1
       specialistRows = limit(await query(
         db, DIRECTORY_SQL, [CAPS.specialists + 1], STAFF_KEYS,
@@ -1073,6 +1110,7 @@ export async function readWorkspace(input) {
       serviceId: row.service_id, startsAt: row.starts_at, endsAt: row.ends_at,
       timeZone: row.time_zone, location: row.location, status: row.status,
       source: row.source, version: row.version, cancelledAt: row.cancelled_at,
+      cancellationReason: row.cancellation_reason,
       createdAt: row.created_at, updatedAt: row.updated_at,
       charge: {
         id: row.charge_id, serviceId: row.charge_service_id,

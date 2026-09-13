@@ -55,6 +55,9 @@ const DATA_KEY_FIELDS = Object.freeze([
   'id', 'scope_type', 'scope_id', 'purpose', 'dek_version', 'wrapped_key_b64',
   'wrap_nonce_b64', 'kek_version', 'created_at', 'retired_at',
 ])
+const ACTIVITY_WORKSPACE_READ_CAPABILITIES = Object.freeze([
+  'appointment.charge.read', 'client.operational.read', 'specialist.directory.read',
+])
 
 const invalid = (field = 'body') => { throw new AppError('VALIDATION_FAILED', { field }) }
 const internal = () => { throw new Error('INTERNAL_ERROR') }
@@ -420,10 +423,17 @@ export async function readActivityWorkspace(input) {
   if (!command.db?.prepare || !command.keyring
     || !Number.isSafeInteger(command.nowMs) || command.nowMs < 0) internal()
   const actor = actorFact(command.actor)
+  const scoped = actor.role === 'specialist'
+  const hasWorkspaceRead = ACTIVITY_WORKSPACE_READ_CAPABILITIES.every((capability) => (
+    actor.capabilities.includes(capability)
+  ))
+  const centreRead = authorize(actor, 'tus.manage', ACTIVITY_CENTRE_RESOURCE, {
+    nowMs: command.nowMs,
+  })
+  if (!hasWorkspaceRead || (!scoped && !centreRead)) throw new AppError('FORBIDDEN')
   let window
   try { window = captureActivityMonthWindow(command.window) } catch { invalid('body') }
   const current = partsInWarsaw(command.nowMs)
-  const scoped = actor.role === 'specialist'
   const clock = [current.day, window.from, window.to]
   const activityDataKey = await dataKey(command.db)
   const programs = await rowsFor(command.db, programsSql, [], 'programs')

@@ -19,6 +19,7 @@ const exactSignal = (error, signal) => new RegExp(
 const MISSING_COLUMNS = new Set([
   'specialist.display_name_envelope',
   'specialist.professional_title_envelope',
+  'specialist.avatar_key',
 ])
 
 export const isD1IdentityCollision = (error) => exactSignal(error, 'identity_collision')

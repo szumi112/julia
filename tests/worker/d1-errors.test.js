@@ -100,6 +100,10 @@ it('recognizes only an exact D1 missing-column signal for the requested column',
     column,
   )).toBe(true)
   expect(isD1MissingColumn(new Error(`no such column: ${column}`), column)).toBe(true)
+  expect(isD1MissingColumn(
+    new Error('D1_ERROR: no such column: specialist.avatar_key at offset 321: SQLITE_ERROR'),
+    'specialist.avatar_key',
+  )).toBe(true)
   for (const message of [
     `D1_ERROR: no such column: ${column}: SQLITE_ERROR: retry`,
     `D1_ERROR: query failed; no such column: ${column} at offset 321: SQLITE_ERROR`,

@@ -8,6 +8,10 @@ import { createSystemUnitOfWork } from '../db/unit-of-work.js'
 import { resolveCurrentAuthorityActor } from '../identity/staff.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
+import {
+  DEFAULT_SPECIALIST_AVATAR_KEY,
+  isSpecialistAvatarKey,
+} from '../../src/specialist-avatars.js'
 
 const SCOPE = Object.freeze({ type: 'staff_directory', id: 'centre_1', purpose: 'identity' })
 const INPUT_KEYS = Object.freeze([
@@ -144,7 +148,15 @@ const decrypt = async (context, recordId, field, serialized) => {
   }
 }
 
+const hasAvatarColumn = async (db) => {
+  const row = await db.prepare(
+    "SELECT name FROM pragma_table_info('specialists') WHERE name='avatar_key'",
+  ).first()
+  return row?.name === 'avatar_key'
+}
+
 const loadDirectory = async (db, context) => {
+  const profileV4 = await hasAvatarColumn(db)
   const [staffResult, profileResult] = await Promise.all([
     db.prepare(
       `SELECT id,email_lookup,email_envelope,display_name_envelope,role,status,
@@ -154,7 +166,7 @@ const loadDirectory = async (db, context) => {
     ).bind(STAFF_CAP + 1).all(),
     db.prepare(
       `SELECT id,staff_user_id,display_name_envelope,professional_title_envelope,
-              standard_rate_grosze,status,version,archived_at,created_at,updated_at
+              standard_rate_grosze,status,version,archived_at,created_at,updated_at${profileV4 ? ',avatar_key' : ''}
        FROM specialists ORDER BY id LIMIT ?`,
     ).bind(PROFILE_CAP + 1).all(),
   ])
@@ -216,6 +228,7 @@ const loadDirectory = async (db, context) => {
       || row.standard_rate_grosze < 1 || row.standard_rate_grosze > 1_000_000
       || !['pending', 'active', 'archived'].includes(row.status)
       || !Number.isSafeInteger(row.version) || row.version < 1
+      || (profileV4 && !isSpecialistAvatarKey(row.avatar_key))
       || (row.status === 'archived') !== (row.archived_at !== null)) failure()
     const displayName = await decrypt(
       context,
@@ -238,6 +251,7 @@ const loadDirectory = async (db, context) => {
       displayName,
       canonicalName: canonicalName(displayName),
       professionalTitle,
+      avatarKey: profileV4 ? row.avatar_key : DEFAULT_SPECIALIST_AVATAR_KEY,
       legacyTitle,
       standardRateGrosze: row.standard_rate_grosze,
       status: row.status,
@@ -507,7 +521,8 @@ const finalVerification = async (db, context) => {
     const profile = resolveProfile(directory, desired)
     if (!profile || profile.displayName !== desired.displayName
       || profile.legacyTitle || profile.professionalTitle !== desired.professionalTitle
-      || profile.standardRateGrosze !== desired.standardRateGrosze) failure()
+      || profile.standardRateGrosze !== desired.standardRateGrosze
+      || !isSpecialistAvatarKey(profile.avatarKey)) failure()
     const claim = currentClaim(directory, profile)
     if (desired.linkSelector) {
       if (profile.status !== 'active' || claim?.id !== julia.id
@@ -574,6 +589,7 @@ export function createStagingSpecialistMaterializer(value) {
             displayName: desired.displayName,
             professionalTitle: desired.professionalTitle,
             standardRateGrosze: desired.standardRateGrosze,
+            avatarKey: DEFAULT_SPECIALIST_AVATAR_KEY,
           },
           idempotencyKey: `staging-specialist-create-${index + 1}-v1`,
         })
@@ -584,6 +600,7 @@ export function createStagingSpecialistMaterializer(value) {
           displayName: desired.displayName,
           canonicalName: desired.displayName,
           professionalTitle: desired.professionalTitle,
+          avatarKey: DEFAULT_SPECIALIST_AVATAR_KEY,
           legacyTitle: false,
           standardRateGrosze: desired.standardRateGrosze,
           status: 'active',
@@ -610,6 +627,7 @@ export function createStagingSpecialistMaterializer(value) {
               displayName: desired.displayName,
               professionalTitle: desired.professionalTitle,
               standardRateGrosze: desired.standardRateGrosze,
+              avatarKey: profile.avatarKey,
             },
             idempotencyKey: `staging-specialist-update-${index + 1}-v${profile.version}`,
           })

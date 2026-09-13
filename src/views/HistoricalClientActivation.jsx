@@ -108,13 +108,13 @@ export function HistoricalClientActivation({ historicalClient, workspaceRange, o
         ref={drawerRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Aktywuj klienta historycznego"
+        aria-label="Dodaj klienta z dawnego arkusza"
       >
         <div className="drawer__head">
           <div>
-            <h2 className="drawer__title">Aktywuj klienta</h2>
+            <h2 className="drawer__title">Dodaj do bieżącej kartoteki</h2>
             <p className="drawer__sub">
-              {current.name} · profil ze skoroszytu pozostaje niezmieniony<br />
+              {current.name} · dane z dawnego arkusza pozostają niezmienione<br />
               Wersja źródła: {current.version}
             </p>
           </div>
@@ -122,7 +122,7 @@ export function HistoricalClientActivation({ historicalClient, workspaceRange, o
         </div>
         <form className="drawer__body" onSubmit={submit} noValidate>
           <p className="faint">
-            Aktywacja tworzy odrębną bieżącą kartę. Wybierz osobę prowadzącą bez domyślnego przypisania z historii.
+            Utworzymy odrębną bieżącą kartę. Wybierz osobę prowadzącą bez domyślnego przypisania z historii.
           </p>
           <Field label="Specjalistka prowadząca" error={fieldError}>
             <select
@@ -145,7 +145,7 @@ export function HistoricalClientActivation({ historicalClient, workspaceRange, o
           )}
           {alreadyActivated && current.activeClientId && (
             <div className="form-warn" role="alert">
-              <span>Profil został już aktywowany.</span>
+              <span>Klient został już dodany do bieżącej kartoteki.</span>
               <EntityLink route="client" params={{ id: current.activeClientId }} className="link">
                 Otwórz aktywną kartę
               </EntityLink>
@@ -161,7 +161,7 @@ export function HistoricalClientActivation({ historicalClient, workspaceRange, o
             onClick={submit}
             disabled={!eligible || alreadyActivated || clientMutationLocked || saving}
           >
-            Aktywuj klienta
+            Dodaj do kartoteki
           </Button>
           <Button variant="ghost" onClick={close}>Anuluj</Button>
         </div>

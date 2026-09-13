@@ -2,8 +2,8 @@ import { test, expect } from '@playwright/test'
 import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const ACTORS = {
-  owner: { name: 'Alicja Testowa', role: 'Właściciel' },
-  coordinator: { name: 'Celina Testowa', role: 'Koordynator' },
+  owner: { name: 'Alicja Testowa', role: 'Zarządzanie / Właścicielka' },
+  coordinator: { name: 'Celina Testowa', role: 'Koordynacja i recepcja' },
   specialist: { name: 'Zofia Fikcyjna', role: 'Specjalistka' },
 }
 
@@ -34,7 +34,7 @@ const sessionEnvelope = ({
   const csrfExpiresUnix = Date.parse(csrfExpiresAt) / 1000
   return json(200, {
     data: {
-      actor,
+      actor: { email: 'owner@example.test', ...actor },
       authorityRevision,
       capabilities,
       csrfExpiresAt,
@@ -63,20 +63,26 @@ async function openSettings(page) {
   await page.goto('.')
   await expectAuthenticated(page, 'owner')
   await page.getByRole('navigation', { name: 'Nawigacja główna' })
-    .getByRole('link', { name: 'Ustawienia' })
+    .getByRole('link', { name: 'Zespół' })
     .click()
+  await page.getByRole('tab', { name: 'Dostęp' }).click()
 }
 
 async function fillStaffInvitation(page, {
   displayName,
   email,
-  role = 'Koordynator',
+  role = 'Koordynacja i recepcja',
 }) {
-  await page.getByRole('button', { name: 'Zaproś osobę' }).click()
-  const drawer = page.getByRole('dialog', { name: 'Zaproś osobę' })
+  await page.getByRole('button', { name: 'Zaproś do panelu' }).click()
+  const drawer = page.getByRole('dialog', { name: 'Zaproś do panelu' })
   await drawer.getByLabel('Imię i nazwisko').fill(displayName)
   await drawer.getByLabel('Adres e-mail').fill(email)
-  await drawer.getByLabel('Rola').selectOption({ label: role })
+  const roleValue = {
+    'Zarządzanie / Właścicielka': 'owner',
+    'Koordynacja i recepcja': 'coordinator',
+    'Prowadzenie terapii / Zespół terapeutyczny': 'specialist',
+  }[role] ?? role
+  await drawer.locator(`input[name="staff-role"][value="${roleValue}"]`).check()
   return drawer
 }
 
@@ -156,7 +162,7 @@ test('@owner delays the fictional shell behind the loading boundary', async ({ p
   await expectAuthenticated(page, 'owner')
 })
 
-test('@owner presents a linked owner as an ordinary specialist without losing owner navigation', async ({ page }) => {
+test('@owner presents a linked owner with separate role and professional title without losing owner navigation', async ({ page }) => {
   await page.route('**/api/v1/session', async (route) => {
     const response = await route.fetch()
     const body = await response.json()
@@ -192,19 +198,19 @@ test('@owner presents a linked owner as an ordinary specialist without losing ow
 
   const account = page.locator('.userchip').first()
   await expect(account).toContainText('Julia Wolanin')
+  await expect(account).toContainText('Zarządzanie / Właścicielka')
   await expect(account).toContainText('Specjalistka')
-  await expect(account).not.toContainText('Właściciel')
   await expect(page.getByRole('navigation', { name: 'Nawigacja główna' })
     .getByRole('link', { name: 'Zespół' })).toBeVisible()
 
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('navigation', { name: 'Nawigacja dolna' })
-    .getByRole('button', { name: 'Menu', exact: true }).click()
+    .getByRole('button', { name: 'Więcej', exact: true }).click()
   const drawer = page.getByRole('dialog', { name: 'Nawigacja' })
   const mobileAccount = drawer.locator('.mobile-account__identity')
   await expect(mobileAccount).toContainText('Julia Wolanin')
+  await expect(mobileAccount).toContainText('Zarządzanie / Właścicielka')
   await expect(mobileAccount).toContainText('Specjalistka')
-  await expect(mobileAccount).not.toContainText('Właściciel')
 
   await page.keyboard.press('Escape')
   await page.setViewportSize({ width: 1280, height: 844 })
@@ -213,11 +219,11 @@ test('@owner presents a linked owner as an ordinary specialist without losing ow
   await expect(julia).toContainText('Specjalistka')
   await expect(julia).not.toContainText('Właściciel')
 
-  await page.goto('./#/settings')
+  await page.goto('./#/profile')
   const settingsIdentity = page.locator('.settings-account-identity')
   await expect(settingsIdentity).toContainText('Julia Wolanin')
+  await expect(settingsIdentity).toContainText('Zarządzanie / Właścicielka')
   await expect(settingsIdentity).toContainText('Specjalistka')
-  await expect(settingsIdentity).not.toContainText('Właściciel')
 })
 
 for (const [status, code] of [
@@ -268,6 +274,7 @@ for (const [status, code] of [
     await page.goto('.')
 
     await expect(page.getByRole('heading', { name: 'Witaj z powrotem' })).toBeVisible()
+    await expect(page.getByText('Logowanie wygasło. Zaloguj się ponownie.', { exact: true })).toHaveCount(0)
     await expect(page.getByLabel('Adres e-mail')).toBeVisible()
     await expect(page.getByLabel('Hasło')).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Brak dostępu do panelu' })).toHaveCount(0)
@@ -309,6 +316,7 @@ for (const unavailable of [
 
     await expect(page.getByRole('heading', { name: 'Nie udało się połączyć z panelem' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
+    await expect(page.getByRole('navigation', { name: 'Nawigacja główna' })).toHaveCount(0)
     await page.waitForTimeout(200)
     expect(attempts).toBe(1)
   })
@@ -345,6 +353,76 @@ test('@owner retries only after the explicit command', async ({ page }) => {
   expect(attempts).toBe(2)
 })
 
+for (const failedRefresh of [
+  {
+    name: 'a transport failure',
+    respond: (route) => route.abort('connectionfailed'),
+  },
+  {
+    name: 'a server failure',
+    respond: (route) => route.fulfill(errorEnvelope(503, 'INTERNAL_ERROR')),
+  },
+]) {
+  test(`@all keeps an open session form after ${failedRefresh.name} during a background session refresh`, async ({ page }, testInfo) => {
+    await page.goto('./#/calendar')
+    await expectAuthenticated(page, testInfo.project.name)
+    await page.getByRole('button', { name: 'Nowa sesja' }).click()
+    const drawer = page.getByRole('dialog', { name: 'Nowa sesja' })
+    await drawer.getByLabel('Godzina').fill('14:35')
+
+    let refreshes = 0
+    await page.route('**/api/v1/session', (route) => {
+      refreshes += 1
+      return failedRefresh.respond(route)
+    })
+
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('bwm:test-auth-refresh'))
+    })
+
+    await expect.poll(() => refreshes).toBe(1)
+    await expect(page.locator('.shell')).toHaveAttribute('aria-busy', 'false')
+    await expect(drawer).toBeVisible()
+    await expect(drawer.getByLabel('Godzina')).toHaveValue('14:35')
+    await expect(page.getByRole('heading', { name: 'Nie udało się połączyć z panelem' })).toHaveCount(0)
+    await expectAuthenticated(page, testInfo.project.name)
+  })
+}
+
+for (const denial of [
+  {
+    status: 401,
+    code: 'AUTH_REQUIRED',
+    heading: 'Witaj z powrotem',
+  },
+  {
+    status: 403,
+    code: 'ACCESS_DENIED',
+    heading: 'Brak dostępu do panelu',
+  },
+]) {
+  test(`@all leaves the authenticated shell after a background ${denial.status} ${denial.code}`, async ({ page }, testInfo) => {
+    await page.goto('./#/calendar')
+    await expectAuthenticated(page, testInfo.project.name)
+    await page.route('**/api/auth/config', (route) => route.fulfill(json(200, {
+      methods: ['password', 'email-otp'],
+    })))
+    await page.route('**/api/v1/session', (route) => (
+      route.fulfill(errorEnvelope(denial.status, denial.code))
+    ))
+
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('bwm:test-auth-refresh'))
+    })
+
+    await expect(page.getByRole('heading', { name: denial.heading })).toBeVisible()
+    await expect(page.locator('.shell')).toHaveCount(0)
+    if (denial.status === 401) {
+      await expect(page.getByText('Logowanie wygasło. Zaloguj się ponownie.', { exact: true })).toBeVisible()
+    }
+  })
+}
+
 test('@owner refreshes in place and replaces subscribed session authority', async ({ page }) => {
   await page.goto('.')
   await expectAuthenticated(page, 'owner')
@@ -363,6 +441,7 @@ test('@owner refreshes in place and replaces subscribed session authority', asyn
         actor: {
           id: 'stf_refreshed_specialist',
           displayName: 'Renata Odświeżona',
+          email: 'renata@example.test',
           professionalTitle: 'Specjalistka',
           role: 'specialist',
           specialistId: 'sp_refreshed_specialist',
@@ -447,6 +526,7 @@ test('@owner constrains a max-length authenticated identity at shell breakpoints
       actor: {
         id: 'stf_max_name_owner',
         displayName,
+        email: 'owner@example.test',
         professionalTitle: null,
         role: 'owner',
         specialistId: null,
@@ -468,7 +548,7 @@ test('@owner constrains a max-length authenticated identity at shell breakpoints
   })))
 
   await page.setViewportSize({ width: 641, height: 800 })
-  await page.goto('.')
+  await page.goto('./#/team?section=access')
 
   for (const width of [641, 1025]) {
     await page.setViewportSize({ width, height: 800 })
@@ -476,7 +556,8 @@ test('@owner constrains a max-length authenticated identity at shell breakpoints
     const name = identity.locator('.userchip__name')
     await expect(identity).toBeVisible()
     await expect(name).toHaveText(displayName)
-    await expect(page.getByRole('button', { name: 'Wyloguj się' })).toBeVisible()
+    await page.getByRole('button', { name: 'Twoje konto' }).click()
+    await expect(page.getByRole('menuitem', { name: 'Wyloguj się' })).toBeVisible()
     await expect(page.getByRole('button', { name: /Panel dnia:/ })).toBeVisible()
 
     const geometry = await page.evaluate(() => {
@@ -551,16 +632,20 @@ test('@owner renders immutable identity and keeps browser application storage em
   await expectAuthenticated(page, 'owner')
   await expectNoDemoAuth(page)
 
-  const navigation = page.getByRole('navigation', { name: 'Nawigacja główna' })
-  await navigation.getByRole('link', { name: 'Ustawienia' }).click()
+  await page.getByRole('button', { name: 'Twoje konto' }).click()
+  await expect(page.getByRole('menuitem', { name: 'Mój profil' })).toBeFocused()
+  await expect(page.getByRole('menuitem', { name: 'Ustawienia centrum' })).toBeVisible()
+  await page.getByRole('menuitem', { name: 'Mój profil' }).click()
+  await expect(page.getByRole('heading', { level: 1, name: 'Mój profil', exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Twoje konto' })).toBeVisible()
   const account = page.locator('.settings-account-identity')
   await expect(account).toContainText('Alicja Testowa')
-  await expect(account).toContainText('Konto centrum')
-  await expect(account).not.toContainText('Właściciel')
-  await expect(account).toContainText('Adres e-mail i dostęp do panelu są przypisane przez administrację centrum.')
+  await expect(account).toContainText('Zarządzanie / Właścicielka')
+  await expect(account).not.toContainText('Konto centrum')
+  await expect(account).toContainText('Imienia i adresu e-mail nie da się zmienić w panelu.')
+  await expect(account).toContainText('Aby wyłączyć dostęp danej osoby, wyłącz go w Dostępie personelu i wyślij nowe zaproszenie.')
   await expect(account.getByRole('textbox')).toHaveCount(0)
-  await expect(account).not.toContainText('@')
+  await expect(account).toContainText('owner@example.test')
   await expect(page.getByRole('button', { name: 'Zapisz konto' })).toHaveCount(0)
 
   await page.reload()
@@ -588,6 +673,21 @@ test('@owner renders immutable identity and keeps browser application storage em
   expect(clientErrors).toEqual([])
 })
 
+test('@owner opens staff access from the Team route and loads its directory there', async ({ page }) => {
+  let staffRequests = 0
+  page.on('request', (request) => {
+    if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/v1/staff') staffRequests += 1
+  })
+
+  await page.goto('./#/team?section=access')
+  await expectAuthenticated(page, 'owner')
+  await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toBeVisible()
+  await page.waitForTimeout(100)
+  await expect.poll(() => staffRequests).toBe(1)
+
+  await expect(page.getByRole('tab', { name: 'Dostęp' })).toHaveAttribute('aria-selected', 'true')
+})
+
 test('@owner staff access lists the server-ordered fictional directory', async ({ page }) => {
   await openSettings(page)
 
@@ -604,23 +704,52 @@ test('@owner staff access lists the server-ordered fictional directory', async (
 
 test('@owner staff invitation form keeps the approved role order', async ({ page }) => {
   await openSettings(page)
-  await page.getByRole('button', { name: 'Zaproś osobę' }).click()
+  await page.getByRole('button', { name: 'Zaproś do panelu' }).click()
 
-  const drawer = page.getByRole('dialog', { name: 'Zaproś osobę' })
+  const drawer = page.getByRole('dialog', { name: 'Zaproś do panelu' })
   await expect(drawer).toBeVisible()
-  await expect(drawer.getByLabel('Rola').locator('option')).toHaveText([
-    'Koordynator',
-    'Specjalista',
-    'Właściciel',
+  expect(await drawer.getByRole('radiogroup', { name: 'Rola' }).getByRole('radio')
+    .evaluateAll((inputs) => inputs.map((input) => input.value)))
+    .toEqual(['specialist', 'coordinator', 'owner'])
+})
+
+test('@owner invitation requires an explicit role choice and explains its seven-day validity', async ({ page }) => {
+  let invitations = 0
+  page.on('request', (request) => {
+    if (request.method() === 'POST'
+      && new URL(request.url()).pathname === '/api/v1/staff/invitations') invitations += 1
+  })
+  await openSettings(page)
+  await page.getByRole('button', { name: 'Zaproś do panelu' }).click()
+
+  const drawer = page.getByRole('dialog', { name: 'Zaproś do panelu' })
+  const roles = drawer.getByRole('radiogroup', { name: 'Rola' })
+  await expect(roles.getByRole('radio')).toHaveCount(3)
+  await expect(roles.getByRole('radio', { checked: true })).toHaveCount(0)
+  await expect(roles.locator('.role-cards__option')).toHaveText([
+    /Prowadzenie terapii \/ Zespół terapeutycznyWłasny Grafik, przypisani klienci i własne rozliczenia\./,
+    /Koordynacja i recepcjaGrafik i klienci całej poradni oraz finanse całej poradni\./,
+    /Zarządzanie \/ WłaścicielkaZarządza całą poradnią, zespołem i dostępem\./,
   ])
+  await expect(drawer.getByText(
+    'Możesz wysłać maksymalnie 5 zaproszeń w ciągu godziny. Każde zaproszenie jest ważne przez 7 dni.',
+    { exact: true },
+  )).toBeVisible()
+
+  await drawer.getByLabel('Imię i nazwisko').fill('Iga Bez Roli')
+  await drawer.getByLabel('Adres e-mail').fill('iga-bez-roli@example.test')
+  await drawer.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
+
+  await expect(drawer.getByText('Wybierz rolę', { exact: true })).toBeVisible()
+  expect(invitations).toBe(0)
 })
 
 test('@owner staff invitation is a native modal that owns the shell shortcuts', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await openSettings(page)
-  await page.getByRole('button', { name: 'Zaproś osobę' }).click()
+  await page.getByRole('button', { name: 'Zaproś do panelu' }).click()
 
-  const drawer = page.getByRole('dialog', { name: 'Zaproś osobę' })
+  const drawer = page.getByRole('dialog', { name: 'Zaproś do panelu' })
   await expectStaffModalOwnsShell(page, drawer)
 })
 
@@ -662,13 +791,13 @@ test('@owner changes a staff role with optimistic data and refreshes session aut
   await openSettings(page)
   const row = page.locator('.staff-access-row').filter({ hasText: roleChangeStaff.displayName })
 
-  await row.getByRole('button', { name: `Zmień rolę — ${roleChangeStaff.displayName}` }).click()
+  await row.getByRole('button', { name: 'Zmień rolę' }).click()
   const drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
-  await drawer.getByLabel('Rola').selectOption('owner')
+  await drawer.locator('input[name="staff-role"][value="owner"]').check()
   await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
 
   await expect(drawer).toHaveCount(0)
-  await expect(row).toContainText('Właściciel')
+  await expect(row).toContainText('Zarządzanie / Właścicielka')
   await expect.poll(() => sessionRequests).toBeGreaterThanOrEqual(2)
   expect(roleRequests).toHaveLength(2)
   expect(roleRequests[1]).toEqual(roleRequests[0])
@@ -683,21 +812,35 @@ test('@owner role editor guards its draft and restores focus safely', async ({ p
     data: { staff: [roleChangeStaff] },
   })))
   await openSettings(page)
-  const opener = page.getByRole('button', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
+  const opener = page.getByRole('button', { name: 'Zmień rolę' })
   await opener.click()
   const drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
 
-  await expect(drawer.getByLabel('Rola')).toHaveValue('coordinator')
-  await drawer.getByLabel('Rola').selectOption('specialist')
-  await drawer.getByRole('button', { name: 'Zamknij' }).click()
-  await expect(drawer.getByText('Masz niezapisane zmiany.', { exact: true })).toBeVisible()
-  await drawer.getByRole('button', { name: 'Wróć' }).click()
-  await expect(drawer.getByLabel('Rola')).toHaveValue('specialist')
-  await drawer.getByRole('button', { name: 'Zamknij' }).click()
-  await drawer.getByRole('button', { name: 'Odrzuć' }).click()
+  await expect(drawer.locator('input[name="staff-role"][value="coordinator"]')).toBeChecked()
+  await drawer.locator('input[name="staff-role"][value="specialist"]').check()
+  await drawer.locator('.drawer__foot').getByRole('button', { name: 'Anuluj' }).click()
+  await expect(drawer.getByText('Zamknąć bez zapisywania?', { exact: true })).toBeVisible()
+  const stayEditing = drawer.getByRole('button', { name: 'Wróć do edycji' })
+  await expect(stayEditing).toBeFocused()
+  await stayEditing.click()
+  await expect(drawer.locator('input[name="staff-role"][value="specialist"]')).toBeChecked()
+  await drawer.getByRole('button', { name: 'Anuluj' }).click()
+  await drawer.getByRole('button', { name: 'Zamknij bez zapisywania' }).click()
 
   await expect(drawer).toHaveCount(0)
   await expect(opener).toBeFocused()
+})
+
+test('@owner sees labelled staff actions without a narrow-screen overflow', async ({ page }) => {
+  await openSettings(page)
+  const row = page.locator('.staff-access-row').filter({ hasText: 'Celina Testowa' })
+
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 })
+    await expect(row.getByRole('button', { name: 'Zmień rolę' })).toBeVisible()
+    await expect(row.getByRole('button', { name: 'Wyłącz dostęp' })).toBeVisible()
+    expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
+  }
 })
 
 test('@owner retries role authority uncertainty with the exact original action', async ({ page }) => {
@@ -727,9 +870,9 @@ test('@owner retries role authority uncertainty with the exact original action',
     }))
   })
   await openSettings(page)
-  await page.getByRole('button', { name: `Zmień rolę — ${roleChangeStaff.displayName}` }).click()
+  await page.getByRole('button', { name: 'Zmień rolę' }).click()
   const drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
-  await drawer.getByLabel('Rola').selectOption('owner')
+  await drawer.locator('input[name="staff-role"][value="owner"]').check()
 
   await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
   await expect(drawer.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
@@ -753,13 +896,11 @@ test('@owner handles role conflict, last-owner, and forbidden responses without 
     return route.fulfill(errorEnvelope(status, responseCode))
   })
   await openSettings(page)
-  const openRole = () => page.getByRole('button', {
-    name: `Zmień rolę — ${roleChangeStaff.displayName}`,
-  }).click()
+  const openRole = () => page.getByRole('button', { name: 'Zmień rolę' }).click()
 
   await openRole()
   let drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
-  await drawer.getByLabel('Rola').selectOption('owner')
+  await drawer.locator('input[name="staff-role"][value="owner"]').check()
   const beforeConflict = listRequests
   await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
   await expect(drawer).toHaveCount(0)
@@ -769,7 +910,7 @@ test('@owner handles role conflict, last-owner, and forbidden responses without 
   responseCode = 'LAST_ACTIVE_OWNER'
   await openRole()
   drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
-  await drawer.getByLabel('Rola').selectOption('owner')
+  await drawer.locator('input[name="staff-role"][value="owner"]').check()
   await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
   await expect(drawer.getByText(
     'Nie można zmienić roli ostatniego aktywnego właściciela.',
@@ -777,12 +918,12 @@ test('@owner handles role conflict, last-owner, and forbidden responses without 
   )).toBeVisible()
   await expect(drawer).not.toContainText('LAST_ACTIVE_OWNER')
   await drawer.getByRole('button', { name: 'Anuluj' }).click()
-  await drawer.getByRole('button', { name: 'Odrzuć' }).click()
+  await drawer.getByRole('button', { name: 'Zamknij bez zapisywania' }).click()
 
   responseCode = 'FORBIDDEN'
   await openRole()
   drawer = page.getByRole('dialog', { name: `Zmień rolę — ${roleChangeStaff.displayName}` })
-  await drawer.getByLabel('Rola').selectOption('owner')
+  await drawer.locator('input[name="staff-role"][value="owner"]').check()
   await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
   await expect(drawer).toHaveCount(0)
   await expect(page.locator('.staff-access-row')).toHaveCount(0)
@@ -798,9 +939,9 @@ test('@owner rejects an invalid staff email inline without a request', async ({ 
     }
   })
   await openSettings(page)
-  await page.getByRole('button', { name: 'Zaproś osobę' }).click()
+  await page.getByRole('button', { name: 'Zaproś do panelu' }).click()
 
-  const drawer = page.getByRole('dialog', { name: 'Zaproś osobę' })
+  const drawer = page.getByRole('dialog', { name: 'Zaproś do panelu' })
   await drawer.getByLabel('Imię i nazwisko').fill('Iga Testowa')
   await drawer.getByLabel('Adres e-mail').fill('niepoprawny-adres')
   await drawer.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
@@ -858,7 +999,7 @@ test('@owner submits a live team address in fictional staging', async ({ page })
   }])
 })
 
-test('@owner distinguishes queued invitation mail from provider acceptance', async ({ page }) => {
+test('@owner presents queued and accepted invitation mail as the same pending access state', async ({ page }) => {
   await page.route('**/api/v1/staff', (route) => route.fulfill(json(200, {
     data: {
       staff: [
@@ -902,9 +1043,8 @@ test('@owner distinguishes queued invitation mail from provider acceptance', asy
 
   const queued = page.locator('.staff-access-row').filter({ hasText: 'Mail Queued' })
   const accepted = page.locator('.staff-access-row').filter({ hasText: 'Mail Accepted' })
-  await expect(queued).toContainText('Oczekuje na wysłanie')
-  await expect(queued).not.toContainText('Przyjęte do wysłania')
-  await expect(accepted).toContainText('Przyjęte do wysłania')
+  await expect(queued).toContainText('Zaproszenie wysłane')
+  await expect(accepted).toContainText('Zaproszenie wysłane')
 })
 
 test('@owner refreshes asynchronous invitation state on focus without overlapping requests', async ({ page }) => {
@@ -939,18 +1079,18 @@ test('@owner refreshes asynchronous invitation state on focus without overlappin
   try {
     await openSettings(page)
     const row = page.locator('.staff-access-row').filter({ hasText: 'Focus Refresh' })
-    await expect(row).toContainText('Oczekuje na wysłanie')
+    await expect(row).toContainText('Zaproszenie wysłane')
 
     await page.evaluate(() => {
       window.dispatchEvent(new Event('focus'))
       window.dispatchEvent(new Event('focus'))
     })
     await expect.poll(() => listRequests, { timeout: 1_500 }).toBe(2)
-    await expect(row).toContainText('Oczekuje na wysłanie')
+    await expect(row).toContainText('Zaproszenie wysłane')
     await expect(page.getByText('Pobieranie listy personelu…', { exact: true })).toHaveCount(0)
 
     releaseRefresh()
-    await expect(row).toContainText('Przyjęte do wysłania')
+    await expect(row).toContainText('Zaproszenie wysłane')
     expect(listRequests).toBe(2)
   } finally {
     releaseRefresh()
@@ -989,7 +1129,7 @@ test('@owner keeps the current staff list when a background refresh fails', asyn
 
   await openSettings(page)
   const row = page.locator('.staff-access-row').filter({ hasText: 'Background Failure' })
-  await expect(row).toContainText('Oczekuje na wysłanie')
+  await expect(row).toContainText('Zaproszenie wysłane')
 
   const failed = page.waitForEvent('requestfailed', (request) => (
     new URL(request.url()).pathname === '/api/v1/staff'
@@ -997,20 +1137,20 @@ test('@owner keeps the current staff list when a background refresh fails', asyn
   await page.evaluate(() => window.dispatchEvent(new Event('focus')))
   await failed
 
-  await expect(row).toContainText('Oczekuje na wysłanie')
+  await expect(row).toContainText('Zaproszenie wysłane')
   await expect(page.getByText('Nie udało się pobrać listy personelu.', { exact: true })).toHaveCount(0)
   expect(listRequests).toBe(2)
 })
 
 test('@owner staff invitation drawer guards a changed draft', async ({ page }) => {
   await openSettings(page)
-  await page.getByRole('button', { name: 'Zaproś osobę' }).click()
+  await page.getByRole('button', { name: 'Zaproś do panelu' }).click()
 
-  const drawer = page.getByRole('dialog', { name: 'Zaproś osobę' })
+  const drawer = page.getByRole('dialog', { name: 'Zaproś do panelu' })
   await drawer.getByLabel('Imię i nazwisko').fill('Iga Testowa')
-  await drawer.getByRole('button', { name: 'Zamknij' }).click()
-  await expect(drawer.getByText('Masz niezapisane zmiany.', { exact: true })).toBeVisible()
-  await drawer.getByRole('button', { name: 'Odrzuć' }).click()
+  await drawer.locator('.drawer__foot').getByRole('button', { name: 'Zamknij' }).click()
+  await expect(drawer.getByText('Zamknąć bez zapisywania?', { exact: true })).toBeVisible()
+  await drawer.getByRole('button', { name: 'Zamknij bez zapisywania' }).click()
   await expect(drawer).toHaveCount(0)
 })
 
@@ -1029,9 +1169,10 @@ test('@owner staff access performs one effective initial list request', async ({
 
 test('@owner staff local navigation focuses the section heading', async ({ page }) => {
   await openSettings(page)
-  const sections = page.getByRole('navigation', { name: 'Sekcje ustawień' })
+  const sections = page.getByRole('tablist', { name: 'Obszary zespołu' })
 
-  await sections.getByRole('button', { name: 'Dostęp personelu' }).click()
+  await sections.getByRole('tab', { name: 'Uprawnienia' }).click()
+  await sections.getByRole('tab', { name: 'Dostęp' }).click()
 
   await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toBeFocused()
 })
@@ -1045,20 +1186,20 @@ test('@owner dirty staff invitation blocks route navigation', async ({ page }) =
 
   await page.evaluate(() => { window.location.hash = '#/calendar' })
 
-  const confirm = page.getByRole('alertdialog', { name: 'Niezapisane zmiany' })
+  const confirm = page.getByRole('alertdialog', { name: 'Wyjść bez zapisywania?' })
   await expect(confirm).toBeVisible()
   await expect(drawer).toBeVisible()
   expect(await drawer.evaluate((element) => element.matches(':modal'))).toBe(true)
   expect(await confirm.evaluate((element) => element.matches(':modal'))).toBe(true)
-  await confirm.getByRole('button', { name: 'Odrzuć i wyjdź' }).click()
+  await confirm.getByRole('button', { name: 'Wyjdź bez zapisywania' }).click()
   await expect(drawer).toHaveCount(0)
-  await expect(page.locator('.topbar__title b')).toHaveText('Kalendarz')
+  await expect(page.locator('.topbar__title b')).toHaveText('Grafik')
 })
 
 test('@owner deactivation confirmation traps and restores focus', async ({ page }) => {
   await openSettings(page)
   const row = page.locator('.staff-access-row').filter({ hasText: 'Celina Testowa' })
-  const opener = row.getByRole('button', { name: 'Wyłącz dostęp — Celina Testowa' })
+  const opener = row.getByRole('button', { name: 'Wyłącz dostęp' })
   await opener.click()
   const confirm = page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })
   const back = confirm.getByRole('button', { name: 'Wróć' })
@@ -1078,7 +1219,7 @@ test('@owner staff deactivation is a native modal that owns the shell shortcuts'
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await openSettings(page)
   const row = page.locator('.staff-access-row').filter({ hasText: 'Celina Testowa' })
-  await row.getByRole('button', { name: 'Wyłącz dostęp — Celina Testowa' }).click()
+  await row.getByRole('button', { name: 'Wyłącz dostęp' }).click()
 
   const confirm = page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })
   await expectStaffModalOwnsShell(page, confirm)
@@ -1095,7 +1236,7 @@ test('@owner rejects a malformed capability grant before requesting the director
 
   await expect(page.getByRole('heading', { name: 'Nie udało się połączyć z panelem' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Zaproś osobę' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Zaproś do panelu' })).toHaveCount(0)
   for (const email of [
     'owner@example.test',
     'coordinator@example.test',
@@ -1172,13 +1313,19 @@ test('@owner keeps staff email out of URLs, attributes, labels, and logs', async
 
   const leaks = await page.evaluate(() => {
     const emails = ['owner@example.test', 'coordinator@example.test', 'specialist@example.test']
-    const sensitiveToken = /(?:stf_|inv_|^(?:active|disabled|pending|provisioning|owner|coordinator|specialist)$)/
+    const sensitiveToken = /(?:inv_|^(?:active|disabled|pending|provisioning|owner|coordinator|specialist)$)/
+    const staffId = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
+    const staffPermissionHref = /^#\/team\?section=permissions&staffId=stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
     const attributes = [...document.querySelectorAll('*')].flatMap((element) => (
       [...element.attributes].map(({ name, value }) => ({ name, value }))
     ))
     return {
       emailAttributes: attributes.filter(({ value }) => emails.some((email) => value.includes(email))),
-      sensitiveAttributes: attributes.filter(({ value }) => sensitiveToken.test(value)),
+      sensitiveAttributes: attributes.filter(({ name, value }) => (
+        sensitiveToken.test(value) || (value.includes('stf_')
+          && !(name === 'value' && staffId.test(value))
+          && !(name === 'href' && staffPermissionHref.test(value)))
+      )),
       sensitiveText: [...document.querySelectorAll('body *')]
         .map((element) => element.childNodes.length === 1 ? element.textContent : '')
         .filter((value) => /(?:stf_|inv_)/.test(value)),
@@ -1191,7 +1338,9 @@ test('@owner keeps staff email out of URLs, attributes, labels, and logs', async
     sensitiveText: [],
   })
   expect(urls.filter((url) => url.includes('@example.test'))).toEqual([])
+  expect(urls.filter((url) => /(?:inv_|(?:active|disabled|pending|provisioning|owner|coordinator|specialist)(?:[&#?=]|$))/.test(url))).toEqual([])
   expect(logs.filter((message) => message.includes('@example.test'))).toEqual([])
+  expect(logs.filter((message) => /(?:stf_|inv_|active|disabled|pending|provisioning|owner|coordinator|specialist)/.test(message))).toEqual([])
 })
 
 test('@owner keeps max-length staff content contained at 320px', async ({ page }) => {
@@ -1212,7 +1361,7 @@ test('@owner keeps max-length staff content contained at 320px', async ({ page }
     },
   })))
   await page.setViewportSize({ width: 320, height: 844 })
-  await page.goto('./#/settings')
+  await page.goto('./#/team?section=access')
   await expect(page.getByText(email, { exact: true })).toBeVisible()
   const row = page.locator('.staff-access-row')
 
@@ -1226,7 +1375,7 @@ test('@owner keeps max-length staff content contained at 320px', async ({ page }
   expect(geometry.documentOverflow).toBeLessThanOrEqual(0)
   expect(geometry.rowOverflow).toBeLessThanOrEqual(0)
 
-  await row.getByRole('button', { name: `Wyłącz dostęp — ${displayName}` }).click()
+  await row.getByRole('button', { name: 'Wyłącz dostęp' }).click()
   await expect(page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })).toBeVisible()
   geometry = await page.evaluate(() => {
     const target = document.querySelector('.leave-confirm__card')
@@ -1242,7 +1391,7 @@ test('@owner keeps max-length staff content contained at 320px', async ({ page }
   expect(geometry.right).toBeLessThanOrEqual(0)
 })
 
-test('@owner sends one fictional invitation and renders pending mail', async ({ page }) => {
+test('@owner sends one fictional invitation and renders its access status', async ({ page }) => {
   let releaseRequest
   const requestReleased = new Promise((resolve) => { releaseRequest = resolve })
   let requests = 0
@@ -1277,9 +1426,79 @@ test('@owner sends one fictional invitation and renders pending mail', async ({ 
   await expect(drawer).toHaveCount(0)
   const row = page.locator('.staff-access-row').filter({ hasText: 'Beata Bramowa' })
   await expect(row).toContainText('gate-c-invite@example.test')
-  await expect(row).toContainText('Oczekuje na aktywację')
-  await expect(row).toContainText('Oczekuje na wysłanie')
-  await expect(page.getByText('Zaproszenie zostało utworzone.', { exact: true })).toBeVisible()
+  await expect(row).toContainText('Zaproszenie wysłane')
+  await expect(row).not.toContainText('Oczekuje na wysłanie')
+  await expect(page.getByText('Wysyłamy zaproszenie do gate-c-invite@example.test', { exact: true })).toBeVisible()
+})
+
+test('@owner cancels a pending invitation and safely pre-fills a disabled-person reinvitation', async ({ page }) => {
+  await openSettings(page)
+  const drawer = await fillStaffInvitation(page, {
+    displayName: 'Róża Ponawiana',
+    email: 'roza-reinvite@example.test',
+  })
+  await drawer.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
+  await expect(drawer).toHaveCount(0)
+
+  const row = page.locator('.staff-access-row').filter({ hasText: 'Róża Ponawiana' })
+  await expect(row).toContainText('Zaproszenie wysłane')
+  await row.getByRole('button', { name: 'Anuluj zaproszenie' }).click()
+  const confirmation = page.getByRole('alertdialog', { name: 'Anuluj zaproszenie' })
+  await expect(confirmation).toContainText('Późniejszy dostęp będzie wymagał nowego zaproszenia.')
+  await confirmation.getByRole('button', { name: 'Anuluj zaproszenie' }).click()
+  await expect(confirmation).toHaveCount(0)
+  await expect(page.getByText('Zaproszenie zostało anulowane.', { exact: true })).toBeVisible()
+  await expect(row).toContainText('Dostęp wyłączony')
+
+  await row.getByRole('button', { name: 'Zaproś ponownie' }).click()
+  const reinvite = page.getByRole('dialog', { name: 'Zaproś ponownie' })
+  await expect(reinvite.getByLabel('Imię i nazwisko')).toHaveValue('Róża Ponawiana')
+  await expect(reinvite.getByLabel('Adres e-mail')).toHaveValue('roza-reinvite@example.test')
+  await expect(reinvite.locator('input[name="staff-role"][value="coordinator"]')).toBeChecked()
+  await expect(reinvite.getByText('Możesz wysłać maksymalnie 5 zaproszeń w ciągu godziny. Każde zaproszenie jest ważne przez 7 dni.', { exact: true })).toBeVisible()
+  await reinvite.getByRole('button', { name: 'Zaproś ponownie' }).click()
+  await expect(reinvite).toHaveCount(0)
+  await expect(page.locator('.toast__message', { hasText: 'Wysyłamy zaproszenie do roza-reinvite@example.test' })).toHaveCount(1)
+})
+
+test('@owner confirms an accepted invitation when the staff refresh fails', async ({ page }) => {
+  const invitations = []
+  let staffRequests = 0
+  await page.route('**/api/v1/staff', async (route) => {
+    staffRequests += 1
+    if (staffRequests === 1) {
+      await route.continue()
+      return
+    }
+    await route.fulfill(errorEnvelope(500, 'INTERNAL_ERROR'))
+  })
+  await page.route('**/api/v1/staff/invitations', async (route) => {
+    invitations.push({
+      body: route.request().postData(),
+      key: route.request().headers()['idempotency-key'],
+    })
+    await route.continue()
+  })
+  await openSettings(page)
+  await expect(page.locator('.staff-access-row').first()).toBeVisible()
+  const drawer = await fillStaffInvitation(page, {
+    displayName: 'Marta Odświeżenie',
+    email: 'marta-refresh@example.test',
+  })
+
+  await drawer.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
+
+  await expect(drawer).toHaveCount(0)
+  await expect(page.getByText('Wysyłamy zaproszenie do marta-refresh@example.test', { exact: true })).toBeVisible()
+  await expect(page.getByText('Nie udało się odświeżyć listy personelu. Odśwież stronę.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Spróbuj ponownie' })).toHaveCount(0)
+  expect(invitations).toHaveLength(1)
+  expect(JSON.parse(invitations[0].body)).toEqual({
+    displayName: 'Marta Odświeżenie',
+    email: 'marta-refresh@example.test',
+    role: 'coordinator',
+  })
+  expect(invitations[0].key).toMatch(/^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/)
 })
 
 test('@owner retries an uncertain invitation with the exact action key', async ({ page }) => {
@@ -1299,7 +1518,7 @@ test('@owner retries an uncertain invitation with the exact action key', async (
   const drawer = await fillStaffInvitation(page, {
     displayName: 'Róża Ponowna',
     email: 'gate-c-retry@example.test',
-    role: 'Specjalista',
+    role: 'Prowadzenie terapii / Zespół terapeutyczny',
   })
 
   await drawer.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
@@ -1343,8 +1562,28 @@ test('@owner starts a new invitation action after deterministic error or field c
 
 test('@owner confirms and retries deactivation of a dedicated invited row', async ({ page }) => {
   const attempts = []
+  const invited = {
+    id: 'stf_daria_invited',
+    displayName: 'Daria Wyłączana',
+    email: 'gate-c-deactivate@example.test',
+    role: 'coordinator',
+    status: 'pending',
+    version: 1,
+    specialistId: null,
+    invitation: {
+      id: 'inv_daria_invited',
+      status: 'pending',
+      expiresAt: '2026-09-20T12:00:00.000Z',
+      emailSentAt: '2026-09-13T12:00:00.000Z',
+      version: 1,
+    },
+  }
   let releaseFirstAttempt
+  let cancelled = false
   const firstAttemptReleased = new Promise((resolve) => { releaseFirstAttempt = resolve })
+  await page.route('**/api/v1/staff', (route) => route.fulfill(json(200, {
+    data: { staff: [cancelled ? { ...invited, invitation: null, status: 'disabled', version: 2 } : invited] },
+  })))
   await page.route('**/api/v1/staff/*/deactivation', async (route) => {
     attempts.push({
       body: route.request().postData(),
@@ -1356,27 +1595,29 @@ test('@owner confirms and retries deactivation of a dedicated invited row', asyn
       await route.abort('connectionfailed')
       return
     }
-    await route.continue()
+    cancelled = true
+    await route.fulfill(json(200, {
+      data: {
+        staff: {
+          ...invited,
+          status: 'disabled',
+          version: 2,
+        },
+      },
+    }))
   })
   await openSettings(page)
-  let drawer = await fillStaffInvitation(page, {
-    displayName: 'Daria Wyłączana',
-    email: 'gate-c-deactivate@example.test',
-  })
-  await drawer.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
-  await expect(drawer).toHaveCount(0)
-
   const row = page.locator('.staff-access-row').filter({ hasText: 'Daria Wyłączana' })
-  await row.getByRole('button', { name: 'Wyłącz dostęp — Daria Wyłączana' }).click()
-  const confirm = page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })
+  await row.getByRole('button', { name: 'Anuluj zaproszenie' }).click()
+  const confirm = page.getByRole('alertdialog', { name: 'Anuluj zaproszenie' })
   await expect(confirm).toBeVisible()
   await expect(confirm).not.toContainText('gate-c-deactivate@example.test')
   expect(attempts).toHaveLength(0)
 
   const requestSeen = page.waitForRequest('**/api/v1/staff/*/deactivation')
-  await confirm.getByRole('button', { name: 'Wyłącz dostęp' }).click()
+  await confirm.getByRole('button', { name: 'Anuluj zaproszenie' }).click()
   await requestSeen
-  await expect(confirm.getByRole('button', { name: 'Wyłącz dostęp' })).toBeDisabled()
+  await expect(confirm.getByRole('button', { name: 'Anuluj zaproszenie' })).toBeDisabled()
   expect(attempts).toHaveLength(1)
   expect(JSON.parse(attempts[0].body)).toEqual({ version: 1 })
   expect(new URL(attempts[0].url).search).toBe('')
@@ -1385,11 +1626,9 @@ test('@owner confirms and retries deactivation of a dedicated invited row', asyn
   await expect(confirm.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
   await confirm.getByRole('button', { name: 'Spróbuj ponownie' }).click()
   await expect(confirm).toHaveCount(0)
-  expect(attempts).toHaveLength(3)
+  expect(attempts).toHaveLength(2)
   expect(attempts[1]).toEqual(attempts[0])
-  expect(attempts[2]).toEqual(attempts[0])
-  await expect(row).toContainText('Wyłączone')
-  await expect(row).not.toContainText('Konfiguracja dostępu w toku')
+  await expect(row).toContainText('Dostęp wyłączony')
 })
 
 test('@owner closes and refreshes after a deactivation version conflict', async ({ page }) => {
@@ -1403,16 +1642,16 @@ test('@owner closes and refreshes after a deactivation version conflict', async 
   ))
   await openSettings(page)
   const row = page.locator('.staff-access-row').filter({ hasText: 'Celina Testowa' })
-  await expect(row).toContainText('Aktywne')
+  await expect(row).toContainText('Ma dostęp')
   const requestsBeforeConflict = listRequests
-  await row.getByRole('button', { name: 'Wyłącz dostęp — Celina Testowa' }).click()
+  await row.getByRole('button', { name: 'Wyłącz dostęp' }).click()
   const confirm = page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })
   await confirm.getByRole('button', { name: 'Wyłącz dostęp' }).click()
 
   await expect(confirm).toHaveCount(0)
   await expect(page.getByText('Lista personelu została odświeżona.', { exact: true })).toBeVisible()
   await expect.poll(() => listRequests).toBeGreaterThan(requestsBeforeConflict)
-  await expect(row).toContainText('Aktywne')
+  await expect(row).toContainText('Ma dostęp')
 })
 
 test('@owner reports a failed version-conflict refresh without claiming success', async ({ page }) => {
@@ -1430,7 +1669,7 @@ test('@owner reports a failed version-conflict refresh without claiming success'
   ))
   await openSettings(page)
   const row = page.locator('.staff-access-row').filter({ hasText: 'Celina Testowa' })
-  await row.getByRole('button', { name: 'Wyłącz dostęp — Celina Testowa' }).click()
+  await row.getByRole('button', { name: 'Wyłącz dostęp' }).click()
 
   const confirm = page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })
   await confirm.getByRole('button', { name: 'Wyłącz dostęp' }).click()
@@ -1471,7 +1710,7 @@ test('@owner restores stable focus when deactivation success removes its row', a
     }))
   ))
   await openSettings(page)
-  const opener = page.getByRole('button', { name: 'Wyłącz dostęp — Felicja Fokusowa' })
+  const opener = page.getByRole('button', { name: 'Wyłącz dostęp' })
   await opener.click()
 
   const confirm = page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })
@@ -1494,7 +1733,7 @@ test('@owner restores stable focus when a conflict refresh replaces its row', as
     route.fulfill(errorEnvelope(409, 'VERSION_CONFLICT'))
   ))
   await openSettings(page)
-  const opener = page.getByRole('button', { name: 'Wyłącz dostęp — Felicja Fokusowa' })
+  const opener = page.getByRole('button', { name: 'Wyłącz dostęp' })
   await opener.click()
 
   const confirm = page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })
@@ -1513,7 +1752,7 @@ test('@owner restores stable focus when forbidden deactivation clears its row', 
     route.fulfill(errorEnvelope(403, 'FORBIDDEN'))
   ))
   await openSettings(page)
-  const opener = page.getByRole('button', { name: 'Wyłącz dostęp — Felicja Fokusowa' })
+  const opener = page.getByRole('button', { name: 'Wyłącz dostęp' })
   await opener.click()
 
   const confirm = page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })
@@ -1525,12 +1764,25 @@ test('@owner restores stable focus when forbidden deactivation clears its row', 
 })
 
 test('@owner sees a fixed last-active-owner deactivation error', async ({ page }) => {
+  const otherOwner = {
+    id: 'stf_other_owner',
+    displayName: 'Beata Właścicielka',
+    email: 'other-owner@example.test',
+    role: 'owner',
+    status: 'active',
+    version: 1,
+    specialistId: null,
+    invitation: null,
+  }
+  await page.route('**/api/v1/staff', (route) => route.fulfill(json(200, {
+    data: { staff: [otherOwner] },
+  })))
   await page.route('**/api/v1/staff/*/deactivation', (route) => (
     route.fulfill(errorEnvelope(409, 'LAST_ACTIVE_OWNER'))
   ))
   await openSettings(page)
-  const row = page.locator('.staff-access-row').filter({ hasText: 'Alicja Testowa' })
-  await row.getByRole('button', { name: 'Wyłącz dostęp — Alicja Testowa' }).click()
+  const row = page.locator('.staff-access-row').filter({ hasText: 'Beata Właścicielka' })
+  await row.getByRole('button', { name: 'Wyłącz dostęp' }).click()
   const confirm = page.getByRole('alertdialog', { name: 'Wyłącz dostęp' })
 
   await confirm.getByRole('button', { name: 'Wyłącz dostęp' }).click()
@@ -1559,7 +1811,8 @@ test('@owner revokes the Better Auth session before leaving the app', async ({ p
   await page.goto('.')
   await expectAuthenticated(page, 'owner')
 
-  await page.getByRole('button', { name: 'Wyloguj się' }).click()
+  await page.getByRole('button', { name: 'Twoje konto' }).click()
+  await page.getByRole('menuitem', { name: 'Wyloguj się' }).click()
   await expect.poll(() => logoutRequests.length).toBe(1)
 
   expect(logoutRequests).toEqual([{
@@ -1593,14 +1846,13 @@ test('@coordinator never requests or renders staff access data', async ({ page }
   })
   await page.goto('./#/settings')
   await expectAuthenticated(page, 'coordinator')
-  await expect(page.getByRole('heading', { name: 'Twoje konto' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Mój profil', exact: true })).toBeVisible()
 
   await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Zaproś osobę' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Zaproś do panelu' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Wyłącz dostęp/ })).toHaveCount(0)
   for (const value of [
     'owner@example.test',
-    'coordinator@example.test',
     'specialist@example.test',
     'Alicja Testowa',
     'Zofia Fikcyjna',
@@ -1617,7 +1869,7 @@ test('@specialist keeps authenticated identity, gains Finances, and stays fictio
   await expectNoDemoAuth(page)
 
   const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })
-  await bottomNavigation.getByRole('button', { name: 'Menu', exact: true }).click()
+  await bottomNavigation.getByRole('button', { name: 'Więcej', exact: true }).click()
   let drawer = page.getByRole('dialog', { name: 'Nawigacja' })
   await expect(drawer.getByText('Zofia Fikcyjna', { exact: true })).toBeVisible()
   await expect(drawer.getByText('Specjalistka', { exact: true })).toBeVisible()
@@ -1625,11 +1877,12 @@ test('@specialist keeps authenticated identity, gains Finances, and stays fictio
   await expect(drawer.getByRole('button', { name: 'Wyloguj się' })).toBeVisible()
   await expect(drawer.getByRole('link', { name: 'Finanse', exact: true })).toBeVisible()
 
-  await drawer.getByRole('link', { name: 'Klienci', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await bottomNavigation.getByRole('link', { name: 'Klienci', exact: true }).click()
   await expect(drawer).toHaveCount(0)
   await expect(page.getByText('Kartoteka jest jeszcze pusta', { exact: true })).toBeVisible()
 
-  await bottomNavigation.getByRole('button', { name: 'Menu', exact: true }).click()
+  await bottomNavigation.getByRole('button', { name: 'Więcej', exact: true }).click()
   drawer = page.getByRole('dialog', { name: 'Nawigacja' })
   const financesLink = drawer.getByRole('link', { name: 'Finanse', exact: true })
   await expect(financesLink).toBeVisible()
@@ -1660,15 +1913,16 @@ test('@specialist never requests or renders staff access data', async ({ page })
   })
   await page.goto('./#/settings')
   await expectAuthenticated(page, 'specialist')
-  await expect(page.getByRole('heading', { name: 'Twoje konto' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Mój profil', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Twoje konto' }).click()
+  await expect(page.getByRole('menuitem', { name: 'Ustawienia centrum' })).toHaveCount(0)
 
   await expect(page.getByRole('heading', { name: 'Dostęp personelu' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Zaproś osobę' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Zaproś do panelu' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /Wyłącz dostęp/ })).toHaveCount(0)
   for (const value of [
     'owner@example.test',
     'coordinator@example.test',
-    'specialist@example.test',
     'Alicja Testowa',
     'Celina Testowa',
   ]) {

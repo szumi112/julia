@@ -21,7 +21,8 @@ const FACTS = Object.freeze([
   ['client.archived', 'client', 'cl_incremental', { clientVersion: 4, assignmentId: 'asg_incremental_two', assignmentVersion: 2 }],
   ['appointment.created', 'appointment', 'apt_incremental', { appointmentVersion: 1, chargeVersion: 1 }],
   ['appointment.updated', 'appointment', 'apt_incremental', { appointmentVersion: 2, chargeVersion: 2 }],
-  ['appointment.cancelled', 'appointment', 'apt_incremental', { appointmentVersion: 3, chargeVersion: 2 }],
+  ['appointment.cancelled', 'appointment', 'apt_incremental', { appointmentVersion: 3, cancellationReason: 'centre', chargeVersion: 2 }],
+  ['appointment.restored', 'appointment', 'apt_incremental_restored', { appointmentVersion: 4, chargeVersion: 2 }],
   ['payment.recorded', 'appointment', 'apt_incremental', { appointmentVersion: 4, paymentEntryId: 'pay_incremental' }],
   ['payment.corrected', 'payment_entry', 'pay_incremental', { appointmentVersion: 5, correctionId: 'cor_incremental', reversedEntryId: 'pay_incremental', replacementEntryId: 'pay_incremental_two' }],
   ['finance.import.started', 'finance_import', 'fib_incremental', { batchVersion: 1, rowCount: 2 }],
@@ -32,7 +33,7 @@ const FACTS = Object.freeze([
 const session = {
   data: {
     actor: {
-      id: ACTOR.id, displayName: 'Fikcyjna Właścicielka', professionalTitle: null,
+      id: ACTOR.id, displayName: 'Fikcyjna Właścicielka', email: 'owner@example.test', professionalTitle: null,
       role: 'owner', specialistId: null, version: 1,
     },
     authorityRevision: ACTOR.authorityRevision,

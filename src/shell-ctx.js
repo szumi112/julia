@@ -3,13 +3,13 @@ import { canAccessProtectedRoute } from './capability-access.js'
 
 const DEMO_ROLE_NAV = Object.freeze({
   owner: Object.freeze([
-    'dashboard', 'calendar', 'clients', 'tus', 'team', 'payments', 'reports', 'settings',
+    'dashboard', 'calendar', 'clients', 'tus', 'team', 'payments', 'reports', 'settings', 'profile',
   ]),
   coordinator: Object.freeze([
-    'dashboard', 'calendar', 'clients', 'tus', 'payments', 'settings',
+    'dashboard', 'calendar', 'clients', 'tus', 'payments', 'settings', 'profile',
   ]),
   therapist: Object.freeze([
-    'dashboard', 'calendar', 'clients', 'tus', 'settings',
+    'dashboard', 'calendar', 'clients', 'tus', 'settings', 'profile',
   ]),
 })
 const DETAIL_PARENT = Object.freeze({
@@ -20,11 +20,13 @@ const DETAIL_PARENT = Object.freeze({
 const SHELL_ROUTE_NAMES = new Set([
   'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'team',
   'psych', 'payments', 'ledger', 'reports', 'settings', 'english',
+  'profile',
 ])
 const SAFE_ROUTE_ORDER = Object.freeze([
   'dashboard', 'calendar', 'clients', 'tus', 'english', 'team', 'payments', 'ledger',
-  'reports', 'settings',
+  'reports', 'profile', 'settings',
 ])
+const ROUTE_FALLBACKS = Object.freeze({ settings: 'profile' })
 
 export const ShellCtx = createContext(null)
 export const useShell = () => useContext(ShellCtx)
@@ -34,6 +36,7 @@ export function canAccessShellRoute(context, routeName) {
     if (!context || typeof context !== 'object' || Array.isArray(context)
       || typeof routeName !== 'string' || !SHELL_ROUTE_NAMES.has(routeName)) return false
     if (context.appMode === 'app') {
+      if (routeName === 'settings' && context.roleId !== 'owner') return false
       return canAccessProtectedRoute(context.capabilities, routeName)
     }
     if (context.appMode !== 'demo') return false
@@ -56,6 +59,8 @@ export function resolveShellRoute(context, requested) {
       const descriptor = Object.getOwnPropertyDescriptor(requested, 'name')
       if (descriptor?.enumerable && Object.hasOwn(descriptor, 'value')
         && canAccessShellRoute(context, descriptor.value)) return requested
+      const fallback = ROUTE_FALLBACKS[descriptor?.value]
+      if (fallback && canAccessShellRoute(context, fallback)) return { name: fallback }
     }
   } catch { /* Fall through to the first safe route. */ }
   const name = firstAccessibleShellRoute(context)

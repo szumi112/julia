@@ -51,8 +51,19 @@ test('core records reject unknown object keys and entity-mismatched identifiers'
 
 test('command inputs have closed keys and canonical core values', () => {
   assert.deepEqual(validateClientInput({ name: 'Ada', age: 8, status: 'active', specialistId: 'sp_one' }), {
-    name: 'Ada', age: 8, status: 'active', specialistId: 'sp_one',
+    name: 'Ada', age: 8, status: 'active', specialistId: 'sp_one', assignmentStartsAt: null,
   })
+  assert.deepEqual(validateClientInput({
+    name: 'Ada', age: 8, status: 'active', specialistId: 'sp_one',
+    assignmentStartsAt: '2025-12-01T09:30:00.000Z',
+  }), {
+    name: 'Ada', age: 8, status: 'active', specialistId: 'sp_one',
+    assignmentStartsAt: '2025-12-01T09:30:00.000Z',
+  })
+  assert.throws(() => validateClientInput({
+    name: 'Ada', age: 8, status: 'active', specialistId: 'sp_one',
+    assignmentStartsAt: '2025-12-01T09:30:00Z',
+  }), /VALIDATION_FAILED\/assignmentStartsAt/)
   assert.throws(() => validateClientInput({ name: 'Ada', age: 8, status: 'active', specialistId: 'sp_one', email: '' }), /VALIDATION_FAILED\/object/)
   assert.deepEqual(validateAppointmentInput({
     clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', date: '2026-08-04', time: '09:15', durationMinutes: 50,
@@ -75,7 +86,7 @@ test('core records require already trimmed NFC strings and bounded snapshots', (
   assert.throws(() => assertServiceSnapshot({ serviceId: 'zajecia', durationMinutes: 60, expectedAmountGrosze: 18000 }), /VALIDATION_FAILED\/durationMinutes/)
 })
 
-test('specialist DTO requires one canonical professional title', () => {
+test('specialist DTO requires one canonical professional title and avatar key', () => {
   const specialist = {
     id: 'sp_one',
     displayName: 'Ada',
@@ -86,7 +97,11 @@ test('specialist DTO requires one canonical professional title', () => {
     staffVersion: 2,
   }
 
-  assert.deepEqual(specialistDto(specialist), specialist)
+  assert.deepEqual(specialistDto(specialist), { ...specialist, avatarKey: 'bloom' })
+  assert.deepEqual(specialistDto({ ...specialist, avatarKey: 'orbit' }), {
+    ...specialist, avatarKey: 'orbit',
+  })
+  assert.throws(() => specialistDto(null), /VALIDATION_FAILED\/specialist/)
   assert.throws(
     () => specialistDto(Object.fromEntries(
       Object.entries(specialist).filter(([key]) => key !== 'professionalTitle'),
@@ -97,6 +112,12 @@ test('specialist DTO requires one canonical professional title', () => {
     assert.throws(
       () => specialistDto({ ...specialist, professionalTitle }),
       /VALIDATION_FAILED\/professionalTitle/,
+    )
+  }
+  for (const avatarKey of ['', 'BLOOM', 'photo']) {
+    assert.throws(
+      () => specialistDto({ ...specialist, avatarKey }),
+      /VALIDATION_FAILED\/avatarKey/,
     )
   }
 })
@@ -197,7 +218,7 @@ test('canonical DTOs fail closed and separate legacy projections derive frontend
   assert.throws(() => clientDto({ ...client, assignment: { id: 'asg_one' } }), /VALIDATION_FAILED\/client/)
   assert.deepEqual(specialistDto({ id: 'sp_one', displayName: 'Ada', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 2 }).id, 'sp_one')
   assert.equal(legacyClientProjection(client).email, '')
-  const dto = appointmentDto({ id: 'apt_one', clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', startsAt: '2026-08-04T07:15:00.000Z', endsAt: '2026-08-04T08:05:00.000Z', timeZone: 'Europe/Warsaw', location: null, status: 'completed', source: 'panel', version: 1, cancelledAt: null, createdAt: '2026-08-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z', charge: { id: 'chg_one', serviceId: 'zajecia', expectedAmountGrosze: 18000, currency: 'PLN', version: 1 }, paymentEntries: [{ id: 'pay_one', appointmentId: 'apt_one', amountGrosze: 18000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }], corrections: [] })
+  const dto = appointmentDto({ id: 'apt_one', clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', startsAt: '2026-08-04T07:15:00.000Z', endsAt: '2026-08-04T08:05:00.000Z', timeZone: 'Europe/Warsaw', location: null, status: 'completed', source: 'panel', version: 1, cancelledAt: null, cancellationReason: null, createdAt: '2026-08-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z', charge: { id: 'chg_one', serviceId: 'zajecia', expectedAmountGrosze: 18000, currency: 'PLN', version: 1 }, paymentEntries: [{ id: 'pay_one', appointmentId: 'apt_one', amountGrosze: 18000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }], corrections: [] })
   assert.deepEqual(legacyAppointmentProjection(dto), { ...dto, psychId: 'sp_one', date: '2026-08-04', time: '09:15', duration: 50, amount: 180, payment: 'paid', paidAmount: 180, method: 'card', paidDate: '2026-08-04' })
 })
 

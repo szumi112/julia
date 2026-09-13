@@ -62,7 +62,7 @@ const STATUS_BY_CODE = Object.freeze({
 
 const VALIDATION_FIELDS = new Set([
   'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
-  'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes',
+  'specialistId', 'clientId', 'assignmentStartsAt', 'serviceId', 'dateTime', 'durationMinutes',
   'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt',
   'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to',
   'specialists', 'clients', 'appointments', 'paymentEntries',

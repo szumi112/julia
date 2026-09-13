@@ -1,11 +1,16 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { ApiError, apiClient } from '../api.js'
+import { canPerformAction } from '../capability-access.js'
+import {
+  currentOperationalActions,
+  operationalActionCommand,
+  operationsSummary,
+} from '../operations-view.js'
 import { useShell } from '../shell-ctx.js'
 import { useApp } from '../store.jsx'
-import { Button, IconBtn, Pill, Popover } from '../ui.jsx'
-import { groupOperationalActions, ACTION_GUIDANCE, HEALTH_GUIDANCE, AUDIT_ENTITY_LABELS } from '../operations-view.js'
+import { Button } from '../ui.jsx'
+import { EntityLink } from '../ux-patterns.jsx'
 import { BACKUP_FAILURE_COPY } from '../operations-diagnostics.js'
-import { canPerformAction } from '../capability-access.js'
 
 const timeFormat = new Intl.DateTimeFormat('pl-PL', {
   dateStyle: 'medium',
@@ -13,246 +18,77 @@ const timeFormat = new Intl.DateTimeFormat('pl-PL', {
   timeZone: 'Europe/Warsaw',
 })
 
-const HEALTH_STATUS = Object.freeze({
-  ok: Object.freeze({ label: 'Działa prawidłowo', tone: 'sage' }),
-  warning: Object.freeze({ label: 'Wymaga uwagi', tone: 'amber' }),
-  critical: Object.freeze({ label: 'Wymaga działania', tone: 'error' }),
+const STATUS_COPY = Object.freeze({
+  critical: 'wymaga działania',
+  ok: 'działa',
+  warning: 'wymaga uwagi',
 })
 
-const HEALTH_DETAILS = Object.freeze({
-  ACCESS_CURRENT: 'Dostęp personelu jest zsynchronizowany.',
-  ACCESS_RECONCILIATION_LAG: 'Synchronizacja dostępu personelu jest opóźniona.',
-  BACKUP_NOT_DUE: 'Pierwsza kopia zapasowa nie jest jeszcze wymagana.',
-  BACKUP_FRESH: 'Ostatnia kopia zapasowa jest aktualna.',
-  BACKUP_PENDING: 'Kopia zapasowa oczekuje na utworzenie.',
-  BACKUP_FAILED: 'Ostatnia próba utworzenia kopii zapasowej nie powiodła się.',
-  BACKUP_STALE: 'Brakuje aktualnej kopii zapasowej.',
-  OUTBOX_HEALTHY: 'Kolejka zadań działa prawidłowo.',
-  OUTBOX_DEAD: 'Co najmniej jedno zadanie wymaga interwencji.',
-  OUTBOX_DRAIN_FAILED: 'Ostatnia próba obsługi kolejki nie powiodła się.',
-  OUTBOX_DRAIN_STALE: 'Kolejka zadań nie została obsłużona w oczekiwanym czasie.',
-  SCHEDULER_STARTING: 'Zadania cykliczne oczekują na pierwsze zakończenie.',
-  SCHEDULER_HEALTHY: 'Zadania cykliczne działają prawidłowo.',
-  SCHEDULER_STALE: 'Zadania cykliczne nie zakończyły się w oczekiwanym czasie.',
-})
-
-const ACTION_COPY = Object.freeze({
-  access_reconciliation_lag: Object.freeze({
-    label: 'Opóźniona synchronizacja dostępu',
-    description: 'Stan dostępu personelu wymaga ponownej synchronizacji.',
-  }),
-  authorization_denial_spike: Object.freeze({
-    label: 'Wzrost odmów dostępu',
-    description: 'Liczba odmów dostępu przekroczyła próg bezpieczeństwa.',
-  }),
-  backup_failed: Object.freeze({
-    label: 'Nieudana kopia zapasowa',
-    description: 'Ostatnia próba utworzenia kopii zapasowej nie powiodła się.',
-  }),
-  backup_stale: Object.freeze({
-    label: 'Nieaktualna kopia zapasowa',
-    description: 'Brakuje aktualnej kopii zapasowej.',
-  }),
-  outbox_job_failed: Object.freeze({
-    label: 'Nieudane zadanie',
-    description: 'Zadanie w kolejce zakończyło się trwałym błędem.',
-  }),
-  scheduler_stale: Object.freeze({
-    label: 'Nieaktualne zadania cykliczne',
-    description: 'Zadania cykliczne nie zakończyły się w oczekiwanym czasie.',
-  }),
-})
-
-const AUDIT_ACTIONS = Object.freeze({
-  'appointment.cancelled': 'Odwołanie wizyty',
-  'appointment.created': 'Dodanie wizyty',
-  'appointment.updated': 'Zmiana wizyty',
-  'client.archived': 'Archiwizacja klienta',
-  'client.assignment.changed': 'Zmiana specjalisty prowadzącego',
-  'client.created': 'Dodanie klienta',
-  'client.updated': 'Zmiana danych klienta',
-  'finance.import.chunk.accepted': 'Przyjęcie części importu finansowego',
-  'finance.import.committed': 'Zatwierdzenie importu finansowego',
-  'finance.import.started': 'Rozpoczęcie importu finansowego',
-  'payment.corrected': 'Korekta płatności',
-  'payment.recorded': 'Zapisanie płatności',
-  'specialist.account.linked': 'Powiązanie specjalisty z kontem',
-  'specialist.profile.created': 'Dodanie profilu specjalisty',
-  'specialist.profile.updated': 'Zmiana profilu specjalisty',
-  'staff.capabilities.updated': 'Zmiana uprawnień personelu',
-  'staff.role.updated': 'Zmiana roli w personelu',
-  'workbook.import.created': 'Rozpoczęcie importu arkusza',
-  'workbook.import.materialized': 'Zapisanie danych z importu arkusza',
-  'workbook.export.created': 'Utworzenie eksportu arkusza',
-  'workbook.resolutions.recorded': 'Zapisanie rozstrzygnięć importu',
-  'historical_client.activated': 'Aktywacja klienta z danych historycznych',
-  'specialist.backfilled': 'Uzupełnienie katalogu specjalistów',
-  'core_directory.upgrade.advanced': 'Postęp aktualizacji katalogu personelu',
-  'activity.attendance.set': 'Ustawienie obecności na zajęciach',
-  'activity.charge.created': 'Utworzenie miesięcznego rozliczenia zajęć',
-  'activity.class.created': 'Utworzenie zajęć grupowych',
-  'activity.class.updated': 'Aktualizacja zajęć grupowych',
-  'activity.group.created': 'Utworzenie grupy zajęciowej',
-  'activity.group.updated': 'Aktualizacja grupy zajęciowej',
-  'activity.membership.created': 'Dodanie uczestnika do grupy',
-  'activity.membership.updated': 'Aktualizacja członkostwa w grupie',
-  'activity.participant.created': 'Utworzenie uczestnika zajęć',
-  'activity.participant.updated': 'Aktualizacja uczestnika zajęć',
-  'activity.projection.advanced': 'Postęp importu aktywności',
-  'authorization.denied': 'Odmowa autoryzacji',
-  'backup.pruned': 'Usunięcie wygasłej kopii zapasowej',
-  'data_key.rewrapped': 'Ponowne zabezpieczenie klucza danych',
-  'finance.entry.created': 'Dodanie pozycji finansowej',
-  'finance.entry.adjusted': 'Korekta rozliczenia finansowego',
-  'finance.entry.voided': 'Unieważnienie pozycji finansowej',
-  'identity.activation': 'Aktywacja tożsamości',
-  'identity.denied': 'Odmowa aktywacji tożsamości',
-  'identity.reindex': 'Aktualizacja indeksu tożsamości',
-  'operational_action.resolved': 'Rozwiązanie działania operacyjnego',
-  'outbox.recovery.requested': 'Ponowienie zadania kolejki',
-  'staff.access.reconciled': 'Synchronizacja dostępu personelu',
-  'staff.bootstrap': 'Utworzenie konta właściciela',
-  'staff.deactivated': 'Wyłączenie dostępu personelu',
-  'staff.invitation.email_accepted': 'Przyjęcie wiadomości z zaproszeniem',
-  'staff.invitation.expired': 'Wygaśnięcie zaproszenia',
-  'staff.invited': 'Zaproszenie personelu',
-  'staff.profile.updated': 'Aktualizacja profilu personelu',
-})
-
-const AUDIT_RESULTS = Object.freeze({
-  denied: Object.freeze({ label: 'Odmowa', tone: 'error' }),
-  success: Object.freeze({ label: 'Powodzenie', tone: 'sage' }),
-})
-
-const GENERIC_ERROR = 'Nie udało się pobrać danych.'
-const HEALTH_PENDING = 'Stan systemu nie został jeszcze wygenerowany. Pierwsze zadanie cykliczne zakończy się w ciągu kilku minut.'
-const FORBIDDEN_ERROR = 'Uprawnienia do tych danych uległy zmianie.'
-const STALE_ERROR = 'Nie udało się odświeżyć. Wyświetlane dane mogą być nieaktualne.'
-const UNCERTAIN_RECONCILIATION_ERROR = 'Nie udało się potwierdzić wyniku. Odśwież listę działań przed ponowieniem.'
-const SUCCESS_RECONCILIATION_ERROR = 'Działanie zapisano, ale lista może być nieaktualna.'
-
-const initialResource = (status = 'loading') => ({
-  data: null,
+const INITIAL_SNAPSHOT = Object.freeze({
+  actions: null,
   error: null,
-  loadingMore: false,
-  refreshing: false,
+  health: null,
   resolutionBlocked: false,
   staleMessage: null,
-  status,
+  status: 'loading',
 })
 
-const initialAnnouncements = () => ({
-  actions: { message: '', sequence: 0 },
-  audit: { message: '', sequence: 0 },
-  health: { message: '', sequence: 0 },
-})
+const GENERIC_ERROR = 'Nie udało się sprawdzić, czy wszystko działa. Spróbuj ponownie za chwilę.'
+const FORBIDDEN_ERROR = 'Nie masz już dostępu do bezpieczeństwa danych.'
+const STALE_ERROR = 'Nie udało się odświeżyć listy problemów. Pokazujemy ostatnio wczytany stan.'
+const UNCERTAIN_ERROR = 'Nie udało się potwierdzić wyniku. Sprawdź listę przed ponowieniem.'
+const SUCCESS_STALE_ERROR = 'Działanie przyjęto, ale nie udało się odświeżyć listy problemów.'
 
+const formatTime = (instant) => timeFormat.format(new Date(instant))
 const failureCopy = (error) => error instanceof ApiError && error.code === 'FORBIDDEN'
   ? FORBIDDEN_ERROR
   : GENERIC_ERROR
 
-const formatTime = (instant) => timeFormat.format(new Date(instant))
-
-const combinedAuditPage = (current, next) => {
-  const events = [...current.events, ...next.events]
-  const ids = new Set()
-  for (let index = 0; index < events.length; index += 1) {
-    const event = events[index]
-    if (ids.has(event.id)) return null
-    ids.add(event.id)
-    if (index === 0) continue
-    const previous = events[index - 1]
-    if (previous.occurredAt < event.occurredAt
-      || (previous.occurredAt === event.occurredAt && previous.id <= event.id)) return null
+function problemCopy(action) {
+  if (action.kind === 'authorization_denial_spike') return {
+    title: 'System zablokował więcej działań niż zwykle',
+    description: 'Ktoś próbował wykonać czynności bez wymaganych uprawnień. Sam alarm nie oznacza włamania.',
   }
-  return { events, nextCursor: next.nextCursor }
+  if (action.kind === 'access_reconciliation_lag') return {
+    title: 'Zmiany dostępu jeszcze nie działają wszędzie',
+    description: 'Przyznanie lub odebranie dostępu mogło jeszcze nie zostać zastosowane.',
+  }
+  if (action.kind === 'backup_stale') return {
+    title: 'Brakuje aktualnej kopii zapasowej',
+    description: 'Po awarii można byłoby odtworzyć tylko starszy stan danych.',
+  }
+  if (action.kind === 'scheduler_stale') return {
+    title: 'Automatyczne kontrole są opóźnione',
+    description: 'Kopie i inne zadania mogą wykonać się później niż zwykle.',
+  }
+  if (action.kind === 'outbox_job_failed') {
+    if (action.details.outboxType === 'staff.invitation.email') return {
+      title: 'Nie udało się wysłać zaproszenia',
+      description: action.recovery?.status === 'unsafe'
+        ? 'Zaproszenie mogło mimo wszystko dotrzeć. Sprawdź jego status przed kolejną próbą.'
+        : 'Zaproszenie nie zostało wysłane automatycznie.',
+    }
+    if (action.details.outboxType === 'staff.access.reconcile') return {
+      title: 'Nie udało się zaktualizować dostępu',
+      description: 'Ostatnia zmiana dostępu personelu mogła jeszcze nie zostać zastosowana.',
+    }
+    if (action.details.outboxType === 'staff.invitation.expire') return {
+      title: 'Nie udało się zamknąć wygasłego zaproszenia',
+      description: 'Status zaproszenia może odświeżyć się z opóźnieniem.',
+    }
+  }
+  return {
+    title: 'Nie udało się wykonać automatycznego zadania',
+    description: 'Jedna czynność w tle wymaga sprawdzenia.',
+  }
 }
 
-function ResourceError({ copy, onRetry }) {
+function ResourceError({ copy, onRetry, stale = false }) {
   return (
-    <div className="operations-state operations-state--error" role="alert">
+    <div className={`operations-state operations-state--${stale ? 'stale' : 'error'}`} role="alert">
       <span>{copy}</span>
       <Button size="sm" variant="ghost" onClick={onRetry}>Spróbuj ponownie</Button>
     </div>
-  )
-}
-
-function StaleNotice({ copy, onRetry }) {
-  return (
-    <div className="operations-state operations-state--stale" role="alert">
-      <span>{copy}</span>
-      <Button size="sm" variant="ghost" onClick={onRetry}>Spróbuj ponownie</Button>
-    </div>
-  )
-}
-
-function PanelHeader({ title, refreshLabel, refreshing, onRefresh, titleRef }) {
-  return (
-    <div className="operations-panel__head">
-      <h3 ref={titleRef}>{title}</h3>
-      <IconBtn
-        name="refresh"
-        label={refreshLabel}
-        disabled={refreshing}
-        aria-busy={refreshing ? 'true' : undefined}
-        onClick={onRefresh}
-      />
-    </div>
-  )
-}
-
-function OperationDetails({ label, children }) {
-  const [open, setOpen] = useState(false)
-  return (
-    <Popover
-      open={open}
-      setOpen={setOpen}
-      contentRole="region"
-      ariaLabel={`Szczegóły: ${label}`}
-      trigger={<Button size="sm" variant="ghost" onClick={() => setOpen(!open)}>Szczegóły</Button>}
-    >
-      <div className="operations-details">
-        <strong>{label}</strong>
-        {children}
-      </div>
-    </Popover>
-  )
-}
-
-function BackupStatus({ health }) {
-  const backup = health.data?.checks.find((check) => check.id === 'backup.freshness')
-  return (
-    <p>
-      {backup?.lastSuccessAt
-        ? <>Ostatnia udana kopia: <time dateTime={backup.lastSuccessAt}>{formatTime(backup.lastSuccessAt)}</time>.</>
-        : backup ? 'Brak zapisanej udanej kopii.' : 'Nie udało się jeszcze ustalić daty ostatniej udanej kopii.'}
-      {health.data?.generatedAt ? <> Stan z {formatTime(health.data.generatedAt)}.</> : null}
-      {health.staleMessage ? ' Dane mogą być nieaktualne.' : null}
-    </p>
-  )
-}
-
-function ActionDetails({ action, health }) {
-  const { details, kind } = action
-  return (
-    <OperationDetails label={ACTION_COPY[kind].label}>
-      <p>Zgłoszenie z {formatTime(action.createdAt)}.</p>
-      <p>{ACTION_GUIDANCE[kind]}</p>
-      {kind === 'backup_failed' ? <p><b>Przyczyna: </b>{BACKUP_FAILURE_COPY[details.backupErrorCode]
-        || 'Dla tej próby nie zapisano dokładniejszej przyczyny. Administrator może sprawdzić dziennik zadania.'}</p> : null}
-      {kind === 'backup_failed' || kind === 'backup_stale' ? <BackupStatus health={health} /> : null}
-      {kind === 'backup_stale' ? <p>Próg aktualności kopii: {details.thresholdHours} godzin.</p> : null}
-      {kind === 'scheduler_stale' ? <p>Próg braku zakończenia zadania: {details.thresholdMinutes} minut.</p> : null}
-      {kind === 'authorization_denial_spike' ? <p>{details.count
-        ? `Zarejestrowano ${details.count} odmów. Próg alarmu: ${details.threshold}.`
-        : `Zarejestrowano co najmniej ${details.minimumCount} odmów w ciągu ${details.windowMinutes} minut.`}</p> : null}
-      {kind === 'outbox_job_failed' ? <p>Dotyczy: {details.outboxType === 'staff.access.reconcile'
-        ? 'synchronizacji dostępu personelu' : details.outboxType === 'staff.invitation.email'
-          ? 'wysłania zaproszenia' : details.outboxType === 'staff.invitation.expire'
-            ? 'wygaszenia zaproszenia' : 'zadania w tle'}.</p> : null}
-      <p>Zamknięcie zgłoszenia nie naprawia przyczyny ani nie ponawia zadania.</p>
-      <p className="operations-row__meta">Dla administratora: {details.backupErrorCode || details.errorCode}<br />Numer zgłoszenia: {action.id}</p>
-    </OperationDetails>
   )
 }
 
@@ -283,12 +119,9 @@ function ActionConfirm({ action, fallbackRef, mode, opener, onClose, onReconcile
       }
       if (event.key !== 'Tab') return
       const elements = controls()
-      if (!elements.length) {
-        event.preventDefault()
-        return
-      }
+      if (!elements.length) return
       const first = elements[0]
-      const last = elements[elements.length - 1]
+      const last = elements.at(-1)
       if (event.shiftKey && (document.activeElement === first
         || !cardRef.current?.contains(document.activeElement))) {
         event.preventDefault()
@@ -326,9 +159,7 @@ function ActionConfirm({ action, fallbackRef, mode, opener, onClose, onReconcile
       const command = recovering
         ? apiClient.recoverOperationalAction
         : apiClient.resolveOperationalAction
-      await command(action.id, action.version, {
-        idempotencyKey: key,
-      })
+      await command(action.id, action.version, { idempotencyKey: key })
       if (!activeRef.current) return
       key = null
       setSaveStatus('reconciling')
@@ -343,11 +174,7 @@ function ActionConfirm({ action, fallbackRef, mode, opener, onClose, onReconcile
       key = null
       if (conflict || uncertain) {
         setSaveStatus('reconciling')
-        const result = await onReconcile(
-          action,
-          conflict ? 'conflict' : 'uncertain',
-          mode,
-        )
+        const result = await onReconcile(action, conflict ? 'conflict' : 'uncertain', mode)
         if (activeRef.current && result.active) onClose()
         return
       }
@@ -356,7 +183,7 @@ function ActionConfirm({ action, fallbackRef, mode, opener, onClose, onReconcile
         ? error instanceof ApiError && error.code === 'OUTBOX_RECOVERY_UNSAFE'
           ? 'Tego zadania nie można bezpiecznie ponowić.'
           : 'Nie udało się zlecić ponowienia zadania.'
-        : 'Nie udało się oznaczyć działania jako rozwiązanego.')
+        : 'Nie udało się ukryć powiadomienia.')
     } finally {
       submitLockRef.current = false
     }
@@ -377,22 +204,16 @@ function ActionConfirm({ action, fallbackRef, mode, opener, onClose, onReconcile
         <div className="leave-confirm__backdrop" onClick={close} />
         <div className="leave-confirm__card" ref={cardRef} aria-busy={busy ? 'true' : undefined}>
           <h2 className="display" id={titleId}>
-            {recovering ? 'Ponów nieudane zadanie' : 'Oznacz działanie jako rozwiązane'}
+            {recovering ? 'Ponowić zadanie?' : 'Ukryć powiadomienie?'}
           </h2>
-          <p>
-            {recovering
-              ? 'System utworzy nowe, bezpieczne zadanie zastępcze i zachowa historię wcześniejszej próby.'
-              : 'Potwierdź, że działanie zostało sprawdzone i nie wymaga dalszej interwencji. Zamknięcie zgłoszenia nie naprawia przyczyny ani nie ponawia zadania. Jeśli problem trwa, system może zgłosić go ponownie.'}
-          </p>
-          {saveError ? (
-            <div className="form-warn form-warn--error" role="alert">
-              <span>{saveError}</span>
-            </div>
-          ) : null}
+          <p>{recovering
+            ? 'System utworzy nową próbę i zachowa historię wcześniejszego zadania.'
+            : 'Powiadomienie zniknie z listy. Ta czynność nie naprawia przyczyny problemu.'}</p>
+          {saveError ? <div className="form-warn form-warn--error" role="alert">{saveError}</div> : null}
           <div className="leave-confirm__actions">
             <Button variant="ghost" disabled={busy} onClick={close}>Wróć</Button>
             <Button disabled={busy} onClick={submit}>
-              {recovering ? 'Ponów zadanie' : 'Oznacz jako rozwiązane'}
+              {recovering ? 'Ponów zadanie' : 'Ukryj powiadomienie'}
             </Button>
           </div>
         </div>
@@ -401,224 +222,175 @@ function ActionConfirm({ action, fallbackRef, mode, opener, onClose, onReconcile
   )
 }
 
+function TechnicalDetails({ actions, health }) {
+  return (
+    <details className="operations-technical">
+      <summary>Pokaż szczegóły techniczne</summary>
+      <div className="operations-technical__body">
+        {health.generatedAt ? <p>Stan wygenerowano: <time dateTime={health.generatedAt}>{formatTime(health.generatedAt)}</time>.</p> : (
+          <p>Nie ma jeszcze wygenerowanego stanu.</p>
+        )}
+        <ul>
+          {health.checks.map((check) => (
+            <li key={check.id}>
+              <strong>{check.label}</strong>
+              <span>{STATUS_COPY[check.status] || check.status}</span>
+              <code>{check.detailCode}</code>
+              <span>{check.lastSuccessAt
+                ? <>Ostatnie powodzenie: <time dateTime={check.lastSuccessAt}>{formatTime(check.lastSuccessAt)}</time></>
+                : 'Brak zapisanego powodzenia'}</span>
+            </li>
+          ))}
+        </ul>
+        {actions.length ? (
+          <>
+            <p>Otwarte numery powiadomień:</p>
+            <ul>
+              {actions.map((action) => (
+                <li key={action.id}>
+                  <code>{action.id}</code>
+                  <code>{action.details.backupErrorCode || action.details.errorCode}</code>
+                  {action.details.backupErrorCode ? (
+                    <span>{BACKUP_FAILURE_COPY[action.details.backupErrorCode]}</span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </div>
+    </details>
+  )
+}
+
+function ProblemAction({ action, blocked, canRecover, onConfirm }) {
+  if (action.kind === 'authorization_denial_spike'
+    || action.kind === 'access_reconciliation_lag') {
+    return (
+      <EntityLink route="team" params={{ section: 'permissions' }} className="btn btn--soft btn--sm">
+        Sprawdź uprawnienia
+      </EntityLink>
+    )
+  }
+  const recoveryPending = action.recovery?.status === 'queued'
+    || action.recovery?.status === 'processing'
+  if (recoveryPending) return <span className="operations-problem__note">Ponowienie jest w toku.</span>
+  const command = operationalActionCommand(action, canRecover)
+  if (command === null) return null
+  return (
+    <Button size="sm" variant="soft" disabled={blocked} onClick={(event) => onConfirm({
+      action, mode: command, opener: event.currentTarget,
+    })}>
+      {command === 'recover' ? 'Ponów zadanie' : 'Ukryj powiadomienie'}
+    </Button>
+  )
+}
+
 export function OperationsPanel({ sectionRef }) {
   const { toast } = useApp()
   const { actor, appMode, capabilities } = useShell()
-  const canRecover = appMode === 'app' && actor?.role === 'owner'
-    && canPerformAction(capabilities, 'staff.invite')
-  const canReadAudit = appMode === 'app'
-    && canPerformAction(capabilities, 'security.audit.read')
-  const tabs = useMemo(() => [
-    { id: 'health', label: 'Stan systemu' },
-    { id: 'actions', label: 'Działania' },
-    ...(canReadAudit ? [{ id: 'security', label: 'Bezpieczeństwo' }] : []),
-  ], [canReadAudit])
-  const [activeTab, setActiveTab] = useState('health')
-  const [health, setHealth] = useState(() => initialResource())
-  const [actions, setActions] = useState(() => initialResource())
-  const [audit, setAudit] = useState(() => initialResource('idle'))
+  const canView = appMode === 'app' && actor?.role === 'owner'
+    && canPerformAction(capabilities, 'operations.health.read')
+  const canRecover = canView && canPerformAction(capabilities, 'staff.invite')
+  const [snapshot, setSnapshot] = useState(INITIAL_SNAPSHOT)
   const [confirmation, setConfirmation] = useState(null)
-  const [announcements, setAnnouncements] = useState(initialAnnouncements)
-  const healthRequestRef = useRef(0)
+  const requestRef = useRef(0)
   const actionsRequestRef = useRef(0)
-  const auditRequestRef = useRef(0)
-  const auditRequestLockRef = useRef(null)
   const activeRef = useRef(false)
-  const tabRefs = useRef({})
-  const actionsTabRef = useRef(null)
+  const fallbackRef = useRef(null)
 
-  const announce = useCallback((resource, message) => {
-    setAnnouncements((current) => ({
+  const loadSnapshot = useCallback(async () => {
+    const requestId = ++requestRef.current
+    setSnapshot((current) => ({
       ...current,
-      [resource]: {
-        message,
-        sequence: current[resource].sequence + 1,
-      },
+      error: null,
+      staleMessage: null,
+      status: current.health && current.actions ? 'ready' : 'loading',
     }))
+    try {
+      const [health, actions] = await Promise.all([
+        apiClient.getOperationsHealth(),
+        apiClient.getOperationalActions(),
+      ])
+      if (!activeRef.current || requestRef.current !== requestId) return { ok: false }
+      setSnapshot({ ...INITIAL_SNAPSHOT, actions, health, status: 'ready' })
+      return { actions, health, ok: true }
+    } catch (error) {
+      if (!activeRef.current || requestRef.current !== requestId) return { ok: false }
+      setSnapshot((current) => current.health && current.actions
+        ? { ...current, error: null, staleMessage: STALE_ERROR, status: 'ready' }
+        : { ...INITIAL_SNAPSHOT, error: failureCopy(error), status: 'error' })
+      return { ok: false }
+    }
   }, [])
 
-  const loadHealth = useCallback(async ({ staleMessage = STALE_ERROR } = {}) => {
-    const requestId = ++healthRequestRef.current
-    setHealth((current) => ({
-      ...current,
-      error: null,
-      refreshing: Boolean(current.data),
-      staleMessage: current.data ? current.staleMessage : null,
-      status: current.data ? 'ready' : 'loading',
-    }))
-    try {
-      const data = await apiClient.getOperationsHealth()
-      if (healthRequestRef.current !== requestId) return { ok: false }
-      setHealth({ ...initialResource('ready'), data })
-      announce('health', 'Stan systemu został odświeżony.')
-      return { data, ok: true }
-    } catch (error) {
-      if (healthRequestRef.current !== requestId) return { ok: false }
-      setHealth((current) => current.data
-        ? { ...current, refreshing: false, staleMessage, status: 'ready' }
-        : { ...initialResource('error'), error: failureCopy(error) })
-      return { ok: false }
-    }
-  }, [announce])
-
-  const loadActions = useCallback(async ({
-    blockResolutionOnFailure = false,
-    staleMessage = STALE_ERROR,
-  } = {}) => {
+  const loadActions = useCallback(async ({ blockResolutionOnFailure = false, staleMessage = STALE_ERROR } = {}) => {
     const requestId = ++actionsRequestRef.current
-    setActions((current) => ({
-      ...current,
-      error: null,
-      refreshing: Boolean(current.data),
-      staleMessage: current.data ? current.staleMessage : null,
-      status: current.data ? 'ready' : 'loading',
-    }))
     try {
-      const result = await apiClient.getOperationalActions()
-      if (actionsRequestRef.current !== requestId) return { ok: false }
-      const visibleActions = canReadAudit
-        ? result.actions
-        : result.actions.filter((action) => action.kind !== 'authorization_denial_spike')
-      const data = {
-        actions: visibleActions,
-        truncated: result.truncated && visibleActions.length === 100,
-      }
-      setActions({ ...initialResource('ready'), data })
-      announce('actions', 'Lista działań została odświeżona.')
-      return { data, ok: true }
-    } catch (error) {
-      if (actionsRequestRef.current !== requestId) return { ok: false }
-      setActions((current) => current.data
-        ? {
-            ...current,
-            refreshing: false,
-            resolutionBlocked: current.resolutionBlocked || blockResolutionOnFailure,
-            staleMessage,
-            status: 'ready',
-          }
-        : { ...initialResource('error'), error: failureCopy(error) })
-      return { ok: false }
-    }
-  }, [announce, canReadAudit])
-
-  const loadAudit = useCallback(async ({ mode = 'initial' } = {}) => {
-    const pending = auditRequestLockRef.current
-    if (pending && (mode === 'older' || pending.mode === mode)) return { ok: false }
-    const requestId = ++auditRequestRef.current
-    auditRequestLockRef.current = { mode, requestId }
-    const cursor = mode === 'older' ? audit.data?.nextCursor : null
-    setAudit((current) => {
-      return {
+      const actions = await apiClient.getOperationalActions()
+      if (!activeRef.current || actionsRequestRef.current !== requestId) return { ok: false }
+      setSnapshot((current) => ({
+        ...current, actions, error: null, resolutionBlocked: false, staleMessage: null, status: 'ready',
+      }))
+      return { actions, ok: true }
+    } catch {
+      if (!activeRef.current || actionsRequestRef.current !== requestId) return { ok: false }
+      setSnapshot((current) => ({
         ...current,
-        error: null,
-        loadingMore: mode === 'older',
-        refreshing: mode === 'refresh' && Boolean(current.data),
-        staleMessage: mode === 'refresh' && current.data ? current.staleMessage : null,
-        status: current.data ? 'ready' : 'loading',
-      }
-    })
-    try {
-      const page = await apiClient.getSecurityAudit({
-        ...(mode === 'older' ? { cursor } : {}),
-        limit: 50,
-      })
-      if (auditRequestRef.current !== requestId) return { ok: false }
-      let data = page
-      if (mode === 'older') {
-        const current = audit.data
-        data = current ? combinedAuditPage(current, page) : null
-        if (!data) throw new Error('invalid combined page')
-      }
-      setAudit({ ...initialResource('ready'), data })
-      announce('audit', 'Zdarzenia bezpieczeństwa zostały odświeżone.')
-      return { data, ok: true }
-    } catch (error) {
-      if (auditRequestRef.current !== requestId) return { ok: false }
-      setAudit((current) => {
-        if (!current.data) return { ...initialResource('error'), error: failureCopy(error) }
-        if (mode === 'refresh') {
-          return { ...current, refreshing: false, staleMessage: STALE_ERROR, status: 'ready' }
-        }
-        return { ...current, error: failureCopy(error), loadingMore: false, status: 'ready' }
-      })
+        resolutionBlocked: current.resolutionBlocked || blockResolutionOnFailure,
+        staleMessage,
+      }))
       return { ok: false }
-    } finally {
-      if (auditRequestLockRef.current?.requestId === requestId) {
-        auditRequestLockRef.current = null
-      }
     }
-  }, [announce, audit.data])
+  }, [])
 
   useEffect(() => {
+    if (!canView) return undefined
     activeRef.current = true
+    const timer = window.setTimeout(() => { void loadSnapshot() }, 0)
     return () => {
       activeRef.current = false
-    }
-  }, [])
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void loadHealth()
-      void loadActions()
-    }, 0)
-    return () => {
       window.clearTimeout(timer)
-      healthRequestRef.current += 1
+      requestRef.current += 1
       actionsRequestRef.current += 1
-      auditRequestRef.current += 1
-      auditRequestLockRef.current = null
     }
-  }, [loadActions, loadHealth])
+  }, [canView, loadSnapshot])
 
-  useEffect(() => {
-    if (activeTab === 'security' && audit.status === 'idle') void loadAudit()
-  }, [activeTab, audit.status, loadAudit])
-
-  const activateTab = (id, focus = false) => {
-    setActiveTab(id)
-    if (focus) requestAnimationFrame(() => tabRefs.current[id]?.focus())
-  }
-
-  const onTabKeyDown = (event, index) => {
-    let nextIndex
-    if (event.key === 'Home') nextIndex = 0
-    else if (event.key === 'End') nextIndex = tabs.length - 1
-    else if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
-      nextIndex = (index + 1) % tabs.length
-    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
-      nextIndex = (index - 1 + tabs.length) % tabs.length
-    } else return
-    event.preventDefault()
-    activateTab(tabs[nextIndex].id, true)
-  }
-
-  const reconcileAction = useCallback(async (action, outcome, mode = 'resolve') => {
+  const reconcileAction = useCallback(async (action, outcome, mode) => {
     if (!activeRef.current) return { active: false, ok: false }
     const result = await loadActions({
       blockResolutionOnFailure: outcome === 'uncertain',
       staleMessage: outcome === 'success'
-        ? SUCCESS_RECONCILIATION_ERROR
-        : outcome === 'uncertain' ? UNCERTAIN_RECONCILIATION_ERROR : STALE_ERROR,
+        ? SUCCESS_STALE_ERROR
+        : outcome === 'uncertain' ? UNCERTAIN_ERROR : STALE_ERROR,
     })
     if (!activeRef.current) return { active: false, ok: false }
     if (outcome === 'success') {
       toast(mode === 'recover'
         ? 'Ponowienie zadania zostało zlecone.'
-        : 'Działanie zostało oznaczone jako rozwiązane.')
+        : 'Powiadomienie zostało ukryte.')
       return { ...result, active: true }
     }
     if (result.ok) {
-      const stillOpen = result.data.actions.some((item) => item.id === action.id)
-      toast(stillOpen ? 'Działanie nadal jest otwarte.' : 'Lista działań została odświeżona.', 'alert')
+      const stillOpen = result.actions.actions.some((item) => item.id === action.id)
+      toast(stillOpen ? 'Powiadomienie nadal jest widoczne.' : 'Lista problemów została odświeżona.', 'alert')
     }
     return { ...result, active: true }
   }, [loadActions, toast])
 
-  const closeConfirmation = useCallback(() => setConfirmation(null), [])
-
   useEffect(() => {
-    if (confirmation?.mode === 'recover' && !canRecover) setConfirmation(null)
-  }, [canRecover, confirmation?.mode])
+    if (confirmation && (
+      !canView
+      || operationalActionCommand(confirmation.action, canRecover) !== confirmation.mode
+    )) setConfirmation(null)
+  }, [canRecover, canView, confirmation])
+
+  if (!canView) return null
+
+  const health = snapshot.health
+  const actions = snapshot.actions?.actions ?? []
+  const currentActions = health ? currentOperationalActions(health, actions) : []
+  const summary = health ? operationsSummary(health, actions) : null
 
   return (
     <>
@@ -627,326 +399,79 @@ export function OperationsPanel({ sectionRef }) {
         aria-labelledby="operations-title"
         ref={sectionRef}
       >
-        <h2 className="settings-section__title" id="operations-title" tabIndex={-1}>
-          Stan i bezpieczeństwo
+        <h2
+          className="settings-section__title"
+          id="operations-title"
+          ref={fallbackRef}
+          tabIndex={-1}
+        >
+          Bezpieczeństwo danych
         </h2>
-        <p className="operations__intro">
-          Monitoruj stan usług, otwarte działania i zdarzenia bezpieczeństwa.
-        </p>
-        <div className="operations-tabs" role="tablist" aria-label="Obszary stanu i bezpieczeństwa">
-          {tabs.map((tab, index) => (
-            <button
-              type="button"
-              role="tab"
-              id={`operations-tab-${tab.id}`}
-              key={tab.id}
-              ref={(element) => {
-                tabRefs.current[tab.id] = element
-                if (tab.id === 'actions') actionsTabRef.current = element
-              }}
-              className={`operations-tab ${activeTab === tab.id ? 'is-active' : ''}`}
-              aria-controls={`operations-panel-${tab.id}`}
-              aria-selected={activeTab === tab.id}
-              tabIndex={activeTab === tab.id ? 0 : -1}
-              onClick={() => activateTab(tab.id)}
-              onKeyDown={(event) => onTabKeyDown(event, index)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
+        <p className="operations__intro">Kopie zapasowe są wykonywane automatycznie każdej nocy.</p>
 
-        <div
-          className="operations-panel"
-          id="operations-panel-health"
-          role="tabpanel"
-          aria-labelledby="operations-tab-health"
-          hidden={activeTab !== 'health'}
-        >
-          <PanelHeader
-            title="Stan systemu"
-            refreshLabel="Odśwież stan systemu"
-            refreshing={health.refreshing}
-            onRefresh={() => loadHealth()}
-          />
-          {health.status === 'loading' ? (
-            <p className="operations-state" role="status" aria-live="polite">Pobieranie stanu systemu…</p>
-          ) : null}
-          {health.status === 'error' ? <ResourceError copy={health.error} onRetry={() => loadHealth()} /> : null}
-          {health.data && health.data.generatedAt === null ? (
-            <p className="operations-state" role="status">{HEALTH_PENDING}</p>
-          ) : null}
-          {health.data && health.data.generatedAt !== null ? (
-            <>
-              {health.staleMessage ? <StaleNotice copy={health.staleMessage} onRetry={() => loadHealth()} /> : null}
-              <p className="operations-snapshot">
-                Stan z <time dateTime={health.data.generatedAt}>{formatTime(health.data.generatedAt)}</time>
-              </p>
-              <ul className="operations-list" aria-label="Stan systemu">
-                {health.data.checks.map((check) => {
-                  const status = HEALTH_STATUS[check.status]
-                  return (
-                    <li className="operations-row" key={check.id}>
-                      <div className="operations-row__content">
-                        <strong className="operations-row__title">{check.label}</strong>
-                        <p>{HEALTH_DETAILS[check.detailCode]}</p>
-                        <OperationDetails label={check.label}>
-                          <p>{HEALTH_GUIDANCE[check.id]}</p>
-                          <p>{check.status === 'ok' ? 'Ta kontrola nie wymaga teraz interwencji.'
-                            : check.detailCode === 'BACKUP_PENDING' || check.detailCode === 'SCHEDULER_STARTING'
-                              ? 'Poczekaj na zakończenie zadania i odśwież stan. Jeśli oczekiwanie się przedłuża, skontaktuj się z administratorem.'
-                              : 'Sprawdź zakładkę Działania. Jeśli problem się utrzymuje, skontaktuj się z administratorem.'}</p>
-                          <p>Odświeżenie pobiera ostatni wynik kontroli. Nie uruchamia naprawy ani nowej kopii.</p>
-                        </OperationDetails>
-                        <p className="operations-row__meta">
-                          {check.lastSuccessAt ? (
-                            <>Ostatnie powodzenie: <time dateTime={check.lastSuccessAt}>{formatTime(check.lastSuccessAt)}</time></>
-                          ) : 'Brak zapisanego powodzenia.'}
-                        </p>
-                      </div>
-                      <Pill tone={status.tone}>{status.label}</Pill>
-                    </li>
-                  )
-                })}
-              </ul>
-            </>
-          ) : null}
-        </div>
+        {snapshot.status === 'loading' ? (
+          <p className="operations-state" role="status" aria-live="polite">Sprawdzam, czy wszystko działa…</p>
+        ) : null}
+        {snapshot.status === 'error' ? <ResourceError copy={snapshot.error} onRetry={loadSnapshot} /> : null}
 
-        <div
-          className="operations-panel"
-          id="operations-panel-actions"
-          role="tabpanel"
-          aria-labelledby="operations-tab-actions"
-          hidden={activeTab !== 'actions'}
-        >
-          <PanelHeader
-            title="Działania"
-            refreshLabel="Odśwież działania"
-            refreshing={actions.refreshing}
-            onRefresh={() => loadActions()}
-          />
-          <p className="operations-snapshot">Otwarte zgłoszenia wymagające sprawdzenia. Mogą pozostać na liście po ustąpieniu problemu. Bieżącą sytuację sprawdzisz w zakładce Stan systemu.</p>
-          {actions.status === 'loading' ? (
-            <p className="operations-state" role="status" aria-live="polite">Pobieranie działań…</p>
-          ) : null}
-          {actions.status === 'error' ? <ResourceError copy={actions.error} onRetry={() => loadActions()} /> : null}
-          {actions.data ? (
-            <>
-              {actions.staleMessage ? <StaleNotice copy={actions.staleMessage} onRetry={() => loadActions()} /> : null}
-              {actions.data.actions.length === 0 ? (
-                <p className="operations-state">Brak otwartych działań.</p>
-              ) : (
-                <ul className="operations-list" aria-label="Otwarte działania">
-                  {groupOperationalActions(actions.data.actions).map((group) => {
-                    const rows = group.map((action) => {
-                      const copy = ACTION_COPY[action.kind]
-                      const recovery = action.recovery
-                      const recoveryPending = recovery?.status === 'queued'
-                        || recovery?.status === 'processing'
-                      const severity = action.severity === 'warning'
-                        ? { label: 'Ostrzeżenie', tone: 'amber' }
-                        : { label: 'Krytyczne', tone: 'error' }
-                      return (
-                        <li className="operations-row operations-action-row" key={action.id}>
-                          <div className="operations-row__content">
-                            <strong className="operations-row__title">{copy.label}</strong>
-                            <p>{action.kind === 'backup_failed' ? 'Ta próba utworzenia kopii nie powiodła się.' : copy.description}</p>
-                            <ActionDetails action={action} health={health} />
-                            {recovery?.status === 'unsafe' ? (
-                              <p>Ponowienie mogłoby wysłać zaproszenie drugi raz. Sprawdź stan ręcznie przed zamknięciem działania.</p>
-                            ) : null}
-                            {recovery?.status === 'available' && !canRecover ? (
-                              <p>{actor?.role === 'owner'
-                                ? 'Brakuje uprawnienia do zarządzania personelem.'
-                                : 'Wymaga działania właściciela'}</p>
-                            ) : null}
-                            <p className="operations-row__meta">
-                              Utworzono <time dateTime={action.createdAt}>{formatTime(action.createdAt)}</time>
-                            </p>
-                          </div>
-                          <div className="operations-row__commands">
-                            <Pill tone={severity.tone}>{severity.label}</Pill>
-                            {recoveryPending ? <Pill tone="amber">Ponawianie w toku</Pill> : null}
-                            {recovery?.status === 'unsafe' ? (
-                              <Pill tone="error">Nie można bezpiecznie ponowić</Pill>
-                            ) : null}
-                            {recovery?.status === 'available' && canRecover ? (
-                              <Button
-                                size="sm"
-                                variant="soft"
-                                disabled={actions.resolutionBlocked}
-                                onClick={(event) => setConfirmation({
-                                  action,
-                                  mode: 'recover',
-                                  opener: event.currentTarget,
-                                })}
-                              >
-                                Ponów zadanie
-                              </Button>
-                            ) : null}
-                            {(recovery === null
-                              || (recovery?.status === 'unsafe' && canRecover)) ? (
-                              <Button
-                                size="sm"
-                                variant="soft"
-                                disabled={actions.resolutionBlocked}
-                                onClick={(event) => setConfirmation({
-                                  action,
-                                  mode: 'resolve',
-                                  opener: event.currentTarget,
-                                })}
-                              >
-                                Oznacz jako rozwiązane
-                              </Button>
-                            ) : null}
-                          </div>
-                        </li>
-                      )
-                    })
-                    if (group.length === 1) return rows[0]
+        {health && summary ? (
+          <>
+            {snapshot.staleMessage ? (
+              <ResourceError copy={snapshot.staleMessage} onRetry={loadActions} stale />
+            ) : null}
+            <div className="card card--pad operations-summary" data-status={summary.status}>
+              <strong className="operations-summary__title">{summary.title}</strong>
+              <p>{summary.description}</p>
+              {health.generatedAt ? (
+                <p className="operations-summary__time">
+                  Ostatnie sprawdzenie: <time dateTime={health.generatedAt}>{formatTime(health.generatedAt)}</time>
+                </p>
+              ) : null}
+            </div>
+
+            {currentActions.length ? (
+              <section className="operations-problems" aria-labelledby="operations-problems-title">
+                <h3 id="operations-problems-title">Co wymaga uwagi ({currentActions.length})</h3>
+                <div className="operations-problems__list">
+                  {currentActions.map((action) => {
+                    const copy = problemCopy(action)
                     return (
-                      <li className="operations-backup-group" key="backup-failures">
-                        <strong className="operations-row__title">Nieudana kopia zapasowa</strong>
-                        <Pill tone="error">Krytyczne</Pill>
-                        <p>Liczba otwartych zgłoszeń: {group.length}{actions.data.truncated ? ' (w pobranej części listy)' : ''}. Nieudane próby mogą dotyczyć tego samego problemu.</p>
-                        <p>Najstarsze na liście: {formatTime(group.at(-1).createdAt)}. Najnowsze: {formatTime(group[0].createdAt)}.</p>
-                        <BackupStatus health={health} />
-                        <ActionDetails action={group[0]} health={health} />
-                        <details>
-                          <summary>Pokaż zgłoszenia ({group.length})</summary>
-                          <ul className="operations-list" aria-label="Nieudane próby kopii zapasowej">{rows}</ul>
-                        </details>
-                      </li>
+                      <article className="card card--pad operations-problem" key={action.id}>
+                        <div>
+                          <strong>{copy.title}</strong>
+                          <p>{copy.description}</p>
+                          <p className="operations-problem__time">
+                            Zgłoszono <time dateTime={action.createdAt}>{formatTime(action.createdAt)}</time>
+                          </p>
+                        </div>
+                        <ProblemAction
+                          action={action}
+                          blocked={snapshot.resolutionBlocked}
+                          canRecover={canRecover}
+                          onConfirm={setConfirmation}
+                        />
+                      </article>
                     )
                   })}
-                </ul>
-              )}
-              {actions.data.truncated ? (
-                <p className="operations-limit-note">Wyświetlono 100 najnowszych działań.</p>
-              ) : null}
-            </>
-          ) : null}
-        </div>
+                </div>
+                {snapshot.actions.truncated ? (
+                  <p className="operations-limit-note">Pokazujemy 100 najnowszych powiadomień.</p>
+                ) : null}
+              </section>
+            ) : null}
 
-        {canReadAudit ? (
-          <div
-            className="operations-panel"
-            id="operations-panel-security"
-            role="tabpanel"
-            aria-labelledby="operations-tab-security"
-            hidden={activeTab !== 'security'}
-          >
-            <PanelHeader
-              title="Bezpieczeństwo"
-              refreshLabel="Odśwież bezpieczeństwo"
-              refreshing={audit.refreshing}
-              onRefresh={() => loadAudit({ mode: 'refresh' })}
-            />
-            <p className="operations-snapshot">Historia czynności i decyzji o dostępie. Zawiera również prawidłowe operacje. Odmowa oznacza zablokowanie danej próby, a nie potwierdzenie włamania.</p>
-            {audit.status === 'loading' ? (
-              <p className="operations-state" role="status" aria-live="polite">Pobieranie zdarzeń bezpieczeństwa…</p>
-            ) : null}
-            {audit.status === 'error' ? <ResourceError copy={audit.error} onRetry={() => loadAudit()} /> : null}
-            {audit.data ? (
-              <>
-                {audit.staleMessage ? (
-                  <StaleNotice copy={audit.staleMessage} onRetry={() => loadAudit({ mode: 'refresh' })} />
-                ) : null}
-                {audit.error ? (
-                  <div className="operations-state operations-state--error" role="alert">
-                    <span>{audit.error}</span>
-                  </div>
-                ) : null}
-                {audit.data.events.length === 0 ? (
-                  <p className="operations-state">Brak zdarzeń bezpieczeństwa.</p>
-                ) : (
-                  <ul className="operations-list" aria-label="Zdarzenia bezpieczeństwa">
-                    {audit.data.events.map((event) => {
-                      const result = AUDIT_RESULTS[event.result]
-                      return (
-                        <li className="operations-row operations-audit-row" key={event.id}>
-                          <div className="operations-row__content">
-                            <strong className="operations-row__title">{AUDIT_ACTIONS[event.action] || 'Zdarzenie w panelu'}</strong>
-                            <p>{event.actorStaffId === null ? 'Zdarzenie systemowe' : 'Działanie personelu'}</p>
-                            <OperationDetails label={AUDIT_ACTIONS[event.action] || 'Zdarzenie w panelu'}>
-                              <p>Dotyczy: {AUDIT_ENTITY_LABELS[event.entityType] || 'rekordu w panelu'}.</p>
-                              <p>{event.result === 'denied'
-                                ? 'Ta próba została odrzucona. Jeśli odmowy się powtarzają, właściciel powinien sprawdzić uprawnienia personelu i kontekst zdarzeń.'
-                                : event.action === 'staff.invitation.email_accepted'
-                                  ? 'Usługa pocztowa przyjęła zaproszenie do wysłania. Nie oznacza to potwierdzenia dostarczenia ani odczytania wiadomości.'
-                                  : event.action === 'operational_action.resolved'
-                                    ? 'Zgłoszenie oznaczono jako rozwiązane. Ten wpis nie potwierdza naprawy przyczyny.'
-                                    : 'System zarejestrował pomyślne wykonanie tej czynności. Sam wpis nie wymaga działania.'}</p>
-                              <p className="operations-row__meta">Dla administratora: {event.action}<br />Numer zdarzenia: {event.id}<br />Numer powiązanej operacji: {event.correlationId}</p>
-                            </OperationDetails>
-                            <p className="operations-row__meta">
-                              <time dateTime={event.occurredAt}>{formatTime(event.occurredAt)}</time>
-                            </p>
-                          </div>
-                          <Pill tone={result.tone}>{result.label}</Pill>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-                {audit.data.nextCursor ? (
-                  <div className="operations-audit-pager">
-                    <Button
-                      variant="ghost"
-                      disabled={audit.loadingMore}
-                      aria-busy={audit.loadingMore ? 'true' : undefined}
-                      onClick={() => loadAudit({ mode: 'older' })}
-                    >
-                      Pokaż starsze
-                    </Button>
-                  </div>
-                ) : null}
-              </>
-            ) : null}
-          </div>
-        ) : null}
-
-        <p
-          className="sr-only"
-          role="status"
-          aria-label="Komunikaty stanu systemu"
-          aria-live="polite"
-        >
-          {announcements.health.message ? (
-            <span key={announcements.health.sequence}>{announcements.health.message}</span>
-          ) : null}
-        </p>
-        <p
-          className="sr-only"
-          role="status"
-          aria-label="Komunikaty działań"
-          aria-live="polite"
-        >
-          {announcements.actions.message ? (
-            <span key={announcements.actions.sequence}>{announcements.actions.message}</span>
-          ) : null}
-        </p>
-        {canReadAudit ? (
-          <p
-            className="sr-only"
-            role="status"
-            aria-label="Komunikaty bezpieczeństwa"
-            aria-live="polite"
-          >
-            {announcements.audit.message ? (
-              <span key={announcements.audit.sequence}>{announcements.audit.message}</span>
-            ) : null}
-          </p>
+            <TechnicalDetails actions={actions} health={health} />
+          </>
         ) : null}
       </section>
+
       {confirmation ? (
         <ActionConfirm
           action={confirmation.action}
-          fallbackRef={actionsTabRef}
+          fallbackRef={fallbackRef}
           mode={confirmation.mode}
           opener={confirmation.opener}
-          onClose={closeConfirmation}
+          onClose={() => setConfirmation(null)}
           onReconcile={reconcileAction}
         />
       ) : null}

@@ -5,6 +5,58 @@ import { ageLabel, monthKey, searchNorm } from './format.js'
 import { normalizeSearchText } from './workspace.js'
 
 const polishNameOrder = new Intl.Collator('pl', { sensitivity: 'base' })
+const activityMonth = /^(?!0000)\d{4}-(0[1-9]|1[0-2])$/
+
+const validActivityMonth = (month) => {
+  if (typeof month !== 'string' || !activityMonth.test(month)) {
+    throw new TypeError('Invalid activity month')
+  }
+  return month
+}
+
+// Activity group-leader ranges are canonical civil dates. Keep visibility and
+// form defaults in this pure module so both runtime modes can share the same
+// Warsaw-month behaviour without turning a month into a local Date.
+export const activityMonthStart = (month) => `${validActivityMonth(month)}-01`
+
+export const activityRangeOverlapsMonth = (assignment, month) => {
+  const start = activityMonthStart(month)
+  const end = `${validActivityMonth(month)}-31`
+  return assignment?.status === 'active'
+    && typeof assignment.startsOn === 'string'
+    && assignment.startsOn <= end
+    && (assignment.endsOn === null || assignment.endsOn === undefined || assignment.endsOn >= start)
+}
+
+export const activityModuleVisible = ({ capabilities, state, specialistId, program, month }) => {
+  validActivityMonth(month)
+  if (Array.isArray(capabilities) && capabilities.includes('tus.manage')) return true
+  if (!['tus', 'english'].includes(program) || typeof specialistId !== 'string') return false
+  const programs = Object.values(state?.programsById ?? {})
+  const programIds = new Set(programs.filter((item) => item?.code === program).map(({ id }) => id))
+  if (programIds.size === 0) return false
+  const groups = new Map(Object.values(state?.groupsById ?? {}).map((group) => [group?.id, group]))
+  return Object.values(state?.groupLeadersById ?? {}).some((leader) => (
+    leader?.specialistId === specialistId
+      && programIds.has(groups.get(leader.groupId)?.programId)
+      && activityRangeOverlapsMonth(leader, month)
+  ))
+}
+
+export const activityClassDefaults = (classes, { groupId, month }) => {
+  const date = activityMonthStart(month)
+  const last = [...(Array.isArray(classes) ? classes : [])]
+    .filter((activityClass) => activityClass?.groupId === groupId)
+    .sort((left, right) => `${right.date ?? ''}${right.time ?? ''}`.localeCompare(`${left.date ?? ''}${left.time ?? ''}`))[0]
+  return Object.freeze({
+    date,
+    time: last?.time ?? '',
+    durationMinutes: last?.durationMinutes ?? '',
+  })
+}
+
+export const isActivityDurationValid = (durationMinutes) => durationMinutes === null
+  || (Number.isInteger(durationMinutes) && durationMinutes >= 1 && durationMinutes <= 1440)
 
 export const sortTusByName = (items) => items.toSorted((a, b) =>
   polishNameOrder.compare(a.name, b.name) || a.id.localeCompare(b.id)

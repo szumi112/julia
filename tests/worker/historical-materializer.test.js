@@ -27,6 +27,7 @@ import {
   WORKBOOK_SOURCE_SCOPE,
 } from '../../worker/core/workbook-source-registry.js'
 import {
+  applyAppointmentCancellationReasonMigration,
   applyCoreDirectoryStageB,
   applyFinanceStageC,
   applySpecialistProfilesStageD,
@@ -64,6 +65,7 @@ beforeAll(async () => {
   await applyFinanceStageC()
   await applySpecialistProfilesStageD()
   await applyWorkbookRegistryStageE()
+  await applyAppointmentCancellationReasonMigration()
   keyring = await createKeyring({
     BWM_DATA_KEK_V1: key(1), BWM_LOOKUP_HMAC_V1: key(2),
     BWM_WORKBOOK_KEK_V1: key(3), BWM_WORKBOOK_HMAC_V1: key(4),

@@ -597,7 +597,7 @@ test('captures caller data deeply and freezes merge state and result', () => {
   assert.ok(Object.isFrozen(result.state.appointmentsById.apt_one.paymentEntries))
 })
 
-test('requires a canonical professional title on every loaded specialist', () => {
+test('requires canonical presentation fields on every loaded specialist', () => {
   const state = createLoadedWorkspaceState()
   const capture = captureLoadedWorkspaceLoad(state, range('2026-08-01'))
   const missing = specialist()
@@ -608,6 +608,7 @@ test('requires a canonical professional title on every loaded specialist', () =>
     { ...specialist(), professionalTitle: '' },
     { ...specialist(), professionalTitle: ' Specjalistka' },
     { ...specialist(), professionalTitle: 'Specjalistka\u0000' },
+    { ...specialist(), avatarKey: 'photo' },
   ]) {
     assert.throws(() => mergeLoadedWorkspaceLoad(state, capture, payload({
       from: '2026-08-01', specialists: [value],

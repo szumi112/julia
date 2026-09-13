@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useApp, useActivityMonth } from '../store.jsx'
+import { useApp, useActivityMonthRetry } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
 import { EmptyState } from '../ui.jsx'
 import { Button } from '../ui.jsx'
 import { EntityLink, useRouteParamsSync } from '../ux-patterns.jsx'
-import { fmtMonthYear } from '../format.js'
+import { fmtDayMonth, fmtMonthYear, plural } from '../format.js'
+import { Icon } from '../icons.jsx'
 import { ActivityBillingAction } from './FinanceEntryActions.jsx'
 import {
   activityCurrentMonth,
@@ -13,12 +14,14 @@ import {
   activityGroupView,
   activityProgramOverview,
 } from '../activity-workspace.js'
+import { activityModuleVisible } from '../tus.js'
 import {
   ActivityBackLink,
   ActivityChargeTable,
   ActivityFigures,
   ActivityLatestLink,
   ActivityLoadState,
+  ActivityModuleEmpty,
   ActivityMonthNav,
   activityMoney,
 } from './ActivityUi.jsx'
@@ -41,8 +44,8 @@ const useSelectedActivityMonth = (routeName, params) => {
 }
 
 const ATTENDANCE_LABEL = Object.freeze({
-  absent: 'nieobecna', excused: 'nieobecność usprawiedliwiona',
-  present: 'obecna', unknown: 'status nieznany',
+  absent: 'Nieobecność', excused: 'Nieobecność usprawiedliwiona',
+  present: 'Obecność', unknown: 'Nieoznaczona obecność',
 })
 
 function ProtectedAttendance({ actions, activityClass, month, participantRows, rows }) {
@@ -86,7 +89,7 @@ function ProtectedAttendance({ actions, activityClass, month, participantRows, r
             type="button"
             className="att"
             key={participant.id}
-            aria-label={`Obecność: ${participant.name}, ${activityClass.date}, ${ATTENDANCE_LABEL[status]}`}
+            aria-label={`Obecność: ${participant.name}, ${fmtDayMonth(activityClass.date)}, ${ATTENDANCE_LABEL[status]}`}
             aria-pressed={status === 'present'}
             disabled={!actions.editAttendance || pendingId !== null}
             onClick={() => setAttendance(participant)}
@@ -103,27 +106,56 @@ function ProtectedAttendance({ actions, activityClass, month, participantRows, r
 export function ProtectedTusOverview({ params }) {
   const { workspace } = useApp()
   const {
-    actor, capabilities, openActivityGroupForm, openActivityParticipantForm, role,
+    actor, activityDiscovery, capabilities, openActivityGroupForm, openActivityParticipantForm, role,
   } = useShell()
   const ref = useReveal()
   const { currentMonth, month, setMonth } = useSelectedActivityMonth('tus', params)
-  const loadState = useActivityMonth(month)
+  const moduleVisible = useMemo(() => activityModuleVisible({
+    capabilities,
+    state: workspace.activities?.state,
+    specialistId: actor?.specialistId,
+    program: 'tus',
+    month,
+  }), [actor?.specialistId, capabilities, month, workspace.activities?.state])
+  const usesDiscovery = activityDiscovery?.month === month
+  const canLoad = role.scope === 'own' || capabilities.includes('tus.manage')
+  const { state: requestedLoadState, retry: retryRequestedLoad } = useActivityMonthRetry(
+    month, canLoad && !usesDiscovery,
+  )
+  const loadState = usesDiscovery ? activityDiscovery.state : requestedLoadState
+  const retry = usesDiscovery ? activityDiscovery.retry : retryRequestedLoad
   useRouteParamsSync('tus', { ym: month })
+  const actions = activityActionAvailability({ actor, role, capabilities, group: null, loadState })
   const overview = useMemo(() => loadState === 'ready'
     ? activityProgramOverview(workspace.activities.state, { program: 'tus', month })
     : null, [loadState, month, workspace.activities])
 
-  if (!overview) return <ActivityLoadState state={loadState} title="Grupy TUS" />
-  const actions = activityActionAvailability({ actor, role, capabilities, group: null })
+  if (loadState !== 'ready') return (
+    <div ref={ref}>
+      <div className="view-head">
+        <div>
+          <h1 className="display view-head__title">Grupy TUS</h1>
+          <p className="view-head__sub">
+            W miesiącu {fmtMonthYear(month)} wyświetlamy grupy i rozliczenia {role.scope === 'own' ? 'z Twojego zakresu' : 'całego centrum'}.
+          </p>
+        </div>
+        <div className="view-head__actions">
+          {actions.createParticipant && <Button variant="ghost" icon="plus" onClick={() => openActivityParticipantForm({ month, programId: 'apg_tus' })}>Nowy uczestnik TUS</Button>}
+          {actions.createGroup && <Button icon="plus" onClick={() => openActivityGroupForm({ month, programId: 'apg_tus', leaderSpecialistIds: [] })}>Nowa grupa</Button>}
+          <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
+        </div>
+      </div>
+      <ActivityLoadState state={loadState} title="Grupy TUS" onRetry={retry} />
+    </div>
+  )
+  if (!moduleVisible) return <ActivityModuleEmpty program="tus" />
   return (
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">Zajęcia grupowe</div>
           <h1 className="display view-head__title">Grupy TUS</h1>
           <p className="view-head__sub">
-            {role.scope === 'own' ? 'Widok grup i rozliczeń w Twoim zakresie' : 'Widok grup i rozliczeń całego centrum'}
-            {' · '}{fmtMonthYear(month)}
+            W miesiącu {fmtMonthYear(month)} wyświetlamy grupy i rozliczenia {role.scope === 'own' ? 'z Twojego zakresu' : 'całego centrum'}.
           </p>
         </div>
         <div className="view-head__actions">
@@ -150,7 +182,7 @@ export function ProtectedTusOverview({ params }) {
         route="tus"
       />
       <div className="grid-2 activity-group-grid">
-        {overview.groups.map(({ group, leaders, summary }) => {
+        {overview.groups.map(({ group, leaders, latestClass, summary }) => {
           const titleId = `protected-tus-group-${group.id}`
           return (
             <article className="card card--pad activity-group-card" key={group.id} aria-labelledby={titleId} data-reveal>
@@ -160,17 +192,25 @@ export function ProtectedTusOverview({ params }) {
                 className="activity-group-card__link"
                 label={`Otwórz grupę — ${group.label}`}
               >
-                <h2 className="card-title" id={titleId}>{group.label}</h2>
+                <div className="row row--between">
+                  <h2 className="card-title" id={titleId}>{group.label}</h2>
+                  <Icon name="chevR" size={18} aria-hidden="true" />
+                </div>
+                {group.details && <p className="muted activity-wrap">{group.details}</p>}
+                {latestClass && (
+                  <p className="muted activity-group-card__latest">
+                    Ostatnie zajęcia: <time dateTime={latestClass.date}>{fmtDayMonth(latestClass.date)}</time>
+                  </p>
+                )}
+                <dl className="activity-card-facts">
+                  <div><dt>Uczestnicy</dt><dd>{summary.participantCount}</dd></div>
+                  <div><dt>Zajęcia</dt><dd>{summary.classCount}</dd></div>
+                  <div><dt>Prowadzący</dt><dd>{leaders.length}</dd></div>
+                  <div><dt>Kwota</dt><dd>{activityMoney(summary.amountGrosze)}</dd></div>
+                  <div><dt>Wpłacono</dt><dd>{activityMoney(summary.paidAmountGrosze)}</dd></div>
+                  <div><dt>Pozostało</dt><dd>{activityMoney(summary.outstandingAmountGrosze)}</dd></div>
+                </dl>
               </EntityLink>
-              {group.details && <p className="muted activity-wrap">{group.details}</p>}
-              <dl className="activity-card-facts">
-                <div><dt>Uczestnicy</dt><dd>{summary.participantCount}</dd></div>
-                <div><dt>Zajęcia</dt><dd>{summary.classCount}</dd></div>
-                <div><dt>Prowadzący</dt><dd>{leaders.length}</dd></div>
-                <div><dt>Kwota</dt><dd>{activityMoney(summary.amountGrosze)}</dd></div>
-                <div><dt>Wpłacono</dt><dd>{activityMoney(summary.paidAmountGrosze)}</dd></div>
-                <div><dt>Pozostało</dt><dd>{activityMoney(summary.outstandingAmountGrosze)}</dd></div>
-              </dl>
             </article>
           )
         })}
@@ -188,18 +228,48 @@ export function ProtectedTusOverview({ params }) {
 export function ProtectedTusGroup({ params }) {
   const { workspace } = useApp()
   const {
-    actor, capabilities, openActivityClassForm, openActivityGroupForm,
+    actor, activityDiscovery, capabilities, openActivityClassForm, openActivityGroupForm,
     openActivityMembershipForm, openActivityParticipantForm, role,
   } = useShell()
   const ref = useReveal([params.id])
   const { currentMonth, month, setMonth } = useSelectedActivityMonth('tusGroup', params)
-  const loadState = useActivityMonth(month)
+  const group = workspace.activities.state.groupsById[params.id]
+  const moduleVisible = useMemo(() => activityModuleVisible({
+    capabilities,
+    state: workspace.activities?.state,
+    specialistId: actor?.specialistId,
+    program: 'tus',
+    month,
+  }) && (capabilities.includes('tus.manage') || group?.programId === 'apg_tus'), [
+    actor?.specialistId, capabilities, group?.programId, month, workspace.activities?.state,
+  ])
+  const usesDiscovery = activityDiscovery?.month === month
+  const canLoad = role.scope === 'own' || capabilities.includes('tus.manage')
+  const { state: requestedLoadState, retry: retryRequestedLoad } = useActivityMonthRetry(
+    month, canLoad && !usesDiscovery,
+  )
+  const loadState = usesDiscovery ? activityDiscovery.state : requestedLoadState
+  const retry = usesDiscovery ? activityDiscovery.retry : retryRequestedLoad
   useRouteParamsSync('tusGroup', { id: params.id, ym: month })
   const view = useMemo(() => loadState === 'ready'
     ? activityGroupView(workspace.activities.state, { groupId: params.id, month })
     : undefined, [loadState, month, params.id, workspace.activities])
 
-  if (loadState !== 'ready') return <ActivityLoadState state={loadState} title="Grupa TUS" />
+  if (loadState !== 'ready') return (
+    <div ref={ref}>
+      <ActivityBackLink month={month} />
+      <div className="view-head">
+        <div>
+          <h1 className="display view-head__title">Grupa TUS</h1>
+        </div>
+        <div className="view-head__actions">
+          <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
+        </div>
+      </div>
+      <ActivityLoadState state={loadState} title="Grupa TUS" onRetry={retry} />
+    </div>
+  )
+  if (!moduleVisible) return <ActivityModuleEmpty program="tus" />
   if (view === null) {
     return (
       <EmptyState
@@ -231,11 +301,6 @@ export function ProtectedTusGroup({ params }) {
               month,
             })}>Edytuj grupę</Button>
           )}
-          {actions.createMembership && (
-            <Button variant="ghost" icon="plus" onClick={() => openActivityMembershipForm({
-              groupId: view.group.id, month, participants,
-            })}>Dodaj przypisanie</Button>
-          )}
           {actions.createClass && (
             <Button icon="plus" onClick={() => openActivityClassForm({
               groupId: view.group.id, month, onSavedMonth: setMonth,
@@ -254,8 +319,15 @@ export function ProtectedTusGroup({ params }) {
         route="tusGroup"
         params={{ id: view.group.id }}
       />
-      <section className="card card--pad" aria-label="Przypisania uczestników">
-        <h2 className="card-title">Przypisania uczestników</h2>
+      <section className="card card--pad" aria-labelledby="protected-tus-participants">
+        <div className="row row--between">
+          <h2 className="card-title" id="protected-tus-participants">Uczestnicy grupy</h2>
+          {actions.createMembership && (
+            <Button icon="plus" onClick={() => openActivityMembershipForm({
+              groupId: view.group.id, month, participants,
+            })}>Zapisz do grupy</Button>
+          )}
+        </div>
         {view.participantRows.length > 0 ? (
           <ul className="activity-participant-list">
             {view.participantRows.map(({ membership, participant }) => (
@@ -283,7 +355,7 @@ export function ProtectedTusGroup({ params }) {
               </li>
             ))}
           </ul>
-        ) : <p className="muted">Brak jawnych przypisań w tym miesiącu.</p>}
+        ) : <p className="muted">W tym miesiącu w tej grupie nie ma jeszcze uczestników.</p>}
       </section>
       <section className="card card--pad" aria-labelledby="protected-tus-charges">
         <h2 className="card-title" id="protected-tus-charges">Rozliczenia uczestników</h2>
@@ -299,14 +371,14 @@ export function ProtectedTusGroup({ params }) {
         ) : view.classes.map(({ activityClass, attendance }) => (
           <article className="activity-class" key={activityClass.id}>
             <div className="row row--between">
-              <h3><time dateTime={activityClass.date}>{activityClass.date}</time>{activityClass.time ? ` · ${activityClass.time}` : ''}</h3>
+              <h3><time dateTime={activityClass.date}>{fmtDayMonth(activityClass.date)}</time>{activityClass.time ? ` · ${activityClass.time}` : ''}</h3>
               {actions.editClass && (
                 <Button size="sm" variant="ghost" onClick={() => openActivityClassForm({
                   activityClass, groupId: view.group.id, month, onSavedMonth: setMonth,
                 })}>Edytuj zajęcia</Button>
               )}
             </div>
-            <p>{activityClass.topic ?? 'Bez zapisanego tematu'} · {attendance.length} zapisów obecności</p>
+            <p>{activityClass.topic ?? 'Bez zapisanego tematu'} · {attendance.length} {plural(attendance.length, 'zapis obecności', 'zapisy obecności', 'zapisów obecności')}</p>
             <ProtectedAttendance
               actions={actions}
               activityClass={activityClass}

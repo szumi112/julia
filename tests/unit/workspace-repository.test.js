@@ -7,9 +7,10 @@ import {
 import { warsawDateFromUtc } from '../../src/core-records.js'
 
 const METHODS = [
-  'activateHistoricalClient', 'archiveClient', 'cancelAppointment', 'correctPayment',
+  'activateHistoricalClient', 'archiveClient', 'cancelAppointment', 'restoreAppointment',
+  'correctPayment',
   'createAppointment', 'createClient', 'editAppointment', 'editClient', 'loadWindow',
-  'recordPayment',
+  'recordPayment', 'loadAbsences', 'createSpecialistAbsence', 'cancelSpecialistAbsence',
 ]
 const REPOSITORY_KEYS = [...METHODS, 'activities'].sort()
 
@@ -35,8 +36,12 @@ const apiDouble = () => {
     createAppointment: async (...args) => (calls.push(['createAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
     editAppointment: async (...args) => (calls.push(['editAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
     cancelAppointment: async (...args) => (calls.push(['cancelAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
+    restoreAppointment: async (...args) => (calls.push(['restoreAppointment', ...args]), Object.freeze({ kind: 'appointment' })),
     recordPayment: async (...args) => (calls.push(['recordPayment', ...args]), Object.freeze({ kind: 'appointment' })),
     correctPayment: async (...args) => (calls.push(['correctPayment', ...args]), Object.freeze({ kind: 'appointment' })),
+    loadSpecialistAbsences: async (...args) => (calls.push(['loadSpecialistAbsences', ...args]), Object.freeze({ from: args[0].from, to: args[0].to, absences: [] })),
+    createSpecialistAbsence: async (...args) => (calls.push(['createSpecialistAbsence', ...args]), Object.freeze({ kind: 'absence' })),
+    cancelSpecialistAbsence: async (...args) => (calls.push(['cancelSpecialistAbsence', ...args]), Object.freeze({ kind: 'absence' })),
     loadActivityWorkspace: async (...args) => (calls.push(['loadActivityWorkspace', ...args]), Object.freeze({ kind: 'activity-workspace' })),
     createActivityGroup: async (...args) => (calls.push(['createActivityGroup', ...args]), Object.freeze({ kind: 'activity-group' })),
     editActivityGroup: async (...args) => (calls.push(['editActivityGroup', ...args]), Object.freeze({ kind: 'activity-group' })),
@@ -85,26 +90,28 @@ test('API repository delegates every command with exact captured arguments and f
     }),
     repository.createAppointment(appointment),
     repository.editAppointment('apt_visit', 3, appointmentEdit),
-    repository.cancelAppointment('apt_visit', 4),
+    repository.cancelAppointment('apt_visit', 4, 'client'),
+    repository.restoreAppointment('apt_visit', 5),
     repository.recordPayment('apt_visit', 5, { amountGrosze: 7_000, method: 'card', paidDate: '2026-08-04' }),
     repository.correctPayment('pay_entry', 6, { reason: 'Zmiana metody', replacement: { amountGrosze: 6_000, method: 'transfer', paidDate: '2026-01-04' } }),
   ])
 
   assert.deepEqual(results.map((value) => value.kind), [
     'window', 'client', 'client', 'client', 'historical-activation', 'appointment', 'appointment',
-    'appointment', 'appointment', 'appointment',
+    'appointment', 'appointment', 'appointment', 'appointment',
   ])
   assert.deepEqual(calls, [
     ['loadWorkspaceWindow', { from: '2026-08-01', to: '2026-08-31' }],
-    ['createClient', create, { idempotencyKey: 'repository-key-0001' }],
-    ['editClient', 'cl_ola', 1, edit, { idempotencyKey: 'repository-key-0002' }],
+    ['createClient', { ...create, assignmentStartsAt: null }, { idempotencyKey: 'repository-key-0001' }],
+    ['editClient', 'cl_ola', 1, { ...edit, assignmentStartsAt: null }, { idempotencyKey: 'repository-key-0002' }],
     ['archiveClient', 'cl_ola', 2, { idempotencyKey: 'repository-key-0003' }],
     ['activateHistoricalClient', 'hcl_ola', 3, 'sp_anna', { idempotencyKey: 'repository-key-0004' }],
     ['createAppointment', appointment, { idempotencyKey: 'repository-key-0005' }],
     ['editAppointment', 'apt_visit', 3, appointmentEdit, { idempotencyKey: 'repository-key-0006' }],
-    ['cancelAppointment', 'apt_visit', 4, { idempotencyKey: 'repository-key-0007' }],
-    ['recordPayment', 'apt_visit', 5, { amountGrosze: 7_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }, { idempotencyKey: 'repository-key-0008' }],
-    ['correctPayment', 'pay_entry', 6, { reason: 'Zmiana metody', replacement: { amountGrosze: 6_000, method: 'transfer', receivedAt: '2026-01-04T11:00:00.000Z' } }, { idempotencyKey: 'repository-key-0009' }],
+    ['cancelAppointment', 'apt_visit', 4, 'client', { idempotencyKey: 'repository-key-0007' }],
+    ['restoreAppointment', 'apt_visit', 5, { idempotencyKey: 'repository-key-0008' }],
+    ['recordPayment', 'apt_visit', 5, { amountGrosze: 7_000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }, { idempotencyKey: 'repository-key-0009' }],
+    ['correctPayment', 'pay_entry', 6, { reason: 'Zmiana metody', replacement: { amountGrosze: 6_000, method: 'transfer', receivedAt: '2026-01-04T11:00:00.000Z' } }, { idempotencyKey: 'repository-key-0010' }],
   ])
   assert.deepEqual(create, clientInput())
   assert.deepEqual(appointment, appointmentInput())
@@ -272,6 +279,50 @@ test('demo client lifecycle dispatches legacy actions and keeps core IDs and ver
   assert.equal(harness.actions.length, 3)
 })
 
+test('demo client assignment start backdates, versions, preserves, and gates appointments', async () => {
+  const harness = demoHarness()
+  const repository = createDemoWorkspaceRepository({
+    dispatch: harness.dispatch, getState: harness.getState,
+  })
+  const created = await repository.createClient(clientInput({
+    specialistId: 'sp_demo_p1', assignmentStartsAt: '2020-02-03T08:00:00.000Z',
+  }))
+  assert.equal(created.assignment.startsAt, '2020-02-03T08:00:00.000Z')
+  assert.equal(created.assignment.version, 1)
+  const backdated = await repository.editClient(created.id, 1, clientInput({
+    specialistId: 'sp_demo_p1', assignmentStartsAt: '2020-01-03T08:00:00.000Z',
+  }))
+  assert.equal(backdated.version, 2)
+  assert.equal(backdated.assignment.startsAt, '2020-01-03T08:00:00.000Z')
+  assert.equal(backdated.assignment.version, 2)
+  const preserved = await repository.editClient(created.id, 2, clientInput({
+    name: 'Ola Zachowana', specialistId: 'sp_demo_p1', assignmentStartsAt: null,
+  }))
+  assert.equal(preserved.assignment.startsAt, backdated.assignment.startsAt)
+  assert.equal(preserved.assignment.version, 2)
+  await assert.rejects(repository.editClient(created.id, 3, clientInput({
+    name: 'Ola Zachowana', specialistId: 'sp_demo_p2',
+    assignmentStartsAt: backdated.assignment.startsAt,
+  })), /CLIENT_ASSIGNMENT_CONFLICT/)
+  await assert.rejects(repository.createAppointment(appointmentInput({
+    clientId: created.id, specialistId: 'sp_demo_p1', date: '2019-12-01',
+  })), /NOT_FOUND/)
+  const appointment = await repository.createAppointment(appointmentInput({
+    clientId: created.id, specialistId: 'sp_demo_p1', date: '2020-02-01',
+  }))
+  const actionsBeforeInvalidEdits = harness.actions.length
+  const edit = { ...appointmentInput({
+    specialistId: 'sp_demo_p1', date: '2020-01-02',
+  }) }
+  delete edit.clientId
+  await assert.rejects(repository.editAppointment(appointment.id, 1, edit), /NOT_FOUND/)
+  await assert.rejects(repository.editAppointment(appointment.id, 1, {
+    ...edit, specialistId: 'sp_demo_p2', date: '2020-02-01',
+    expectedAmountGrosze: 20_000,
+  }), /NOT_FOUND/)
+  assert.equal(harness.actions.length, actionsBeforeInvalidEdits)
+})
+
 test('demo appointment and payment lifecycle preserves cents, versions, reversal links, and reducer actions', async () => {
   const harness = demoHarness()
   const repository = createDemoWorkspaceRepository({ dispatch: harness.dispatch, getState: harness.getState })
@@ -283,7 +334,7 @@ test('demo appointment and payment lifecycle preserves cents, versions, reversal
   assert.equal(harness.actions[0].session.location, 'Gabinet 2')
   assert.equal(harness.actions[0].session.note, '')
 
-  const editInput = { ...appointmentInput({ specialistId: 'sp_demo_p2', status: 'completed', expectedAmountGrosze: 20_000, location: 'Sala TUS' }) }
+  const editInput = { ...appointmentInput({ specialistId: 'sp_demo_p1', status: 'completed', expectedAmountGrosze: 20_000, location: 'Sala TUS' }) }
   delete editInput.clientId
   const edited = await repository.editAppointment(created.id, 1, editInput)
   assert.equal(edited.version, 2)
@@ -308,11 +359,30 @@ test('demo appointment and payment lifecycle preserves cents, versions, reversal
 
   const second = await repository.createAppointment(appointmentInput({
     clientId: 'cl_demo_c1', specialistId: 'sp_demo_p1', date: '2026-08-20',
+    status: 'completed',
   }))
-  const cancelled = await repository.cancelAppointment(second.id, 1)
+  const cancelled = await repository.cancelAppointment(second.id, 1, 'centre')
   assert.equal(cancelled.status, 'cancelled')
   assert.equal(cancelled.version, 2)
-  assert.deepEqual(harness.actions[5], { type: 'DELETE_SESSION', id: 's12' })
+  assert.equal(cancelled.cancellationReason, 'centre')
+  assert.deepEqual(harness.actions[5], {
+    type: 'UPDATE_SESSION', id: 's12',
+    patch: {
+      status: 'cancelled', cancellationReason: 'centre',
+      workspaceId: second.id, version: 2,
+    },
+  })
+  const restored = await repository.restoreAppointment(second.id, 2)
+  assert.equal(restored.status, 'scheduled')
+  assert.equal(restored.version, 3)
+  assert.equal(restored.cancellationReason, null)
+  assert.deepEqual(harness.actions[6], {
+    type: 'UPDATE_SESSION', id: 's12',
+    patch: {
+      status: 'scheduled', cancellationReason: null,
+      workspaceId: second.id, version: 3,
+    },
+  })
 })
 
 test('demo appointment edit treats a location-only change as a real mutation', async () => {
@@ -338,7 +408,7 @@ test('demo rejects stale and missing targets before dispatch and never mutates c
   const repository = createDemoWorkspaceRepository({ dispatch: harness.dispatch, getState: harness.getState })
   const input = clientInput({ specialistId: 'sp_demo_p1' })
   await assert.rejects(repository.editClient('cl_demo_c1', 2, input), /VERSION_CONFLICT/)
-  await assert.rejects(repository.cancelAppointment('apt_missing', 1), /NOT_FOUND/)
+  await assert.rejects(repository.cancelAppointment('apt_missing', 1, 'client'), /NOT_FOUND/)
   await assert.rejects(repository.createAppointment(appointmentInput({ clientId: 'cl_missing', specialistId: 'sp_demo_p1' })), /NOT_FOUND/)
   assert.deepEqual(input, clientInput({ specialistId: 'sp_demo_p1' }))
   assert.deepEqual(harness.getState(), initial)
@@ -591,11 +661,11 @@ test('demo serializes client and appointment edits against terminal mutations', 
       time: '10:00', durationMinutes: 50, expectedAmountGrosze: 20_000,
       location: 'Gabinet 4', status: 'scheduled',
     }),
-    repository.cancelAppointment('apt_demo_s2', 1),
+    repository.cancelAppointment('apt_demo_s2', 1, 'client'),
   ])
   assert.deepEqual(appointmentResults.map(({ status }) => status), ['fulfilled', 'rejected'])
   assert.match(appointmentResults[1].reason.message, /VERSION_CONFLICT/)
-  const cancelled = await repository.cancelAppointment('apt_demo_s2', 2)
+  const cancelled = await repository.cancelAppointment('apt_demo_s2', 2, 'client')
   assert.equal(cancelled.status, 'cancelled')
 })
 

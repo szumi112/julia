@@ -68,6 +68,22 @@ export const applyAuthenticationStageF = () => applyD1Migrations(
   selectCoreMigrationStage(env.TEST_STAGE_F_MIGRATIONS, 'stage-f'),
 )
 
+export const applyBetterAuthMigration = () => {
+  const migration = env.TEST_STAGE_F_MIGRATIONS.find(({ name }) => (
+    name === '0023_better_auth.sql'
+  ))
+  if (!migration) throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')
+  return applyD1Migrations(env.DB, [migration])
+}
+
+export const applyAppointmentCancellationReasonMigration = () => {
+  const migration = env.TEST_STAGE_F_MIGRATIONS.find(({ name }) => (
+    name === '0027_appointment_cancellation_reason.sql'
+  ))
+  if (!migration) throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')
+  return applyD1Migrations(env.DB, [migration])
+}
+
 export const applyCapabilityOverridesMigration = () => {
   if (env.CORE_DIRECTORY_STAGE !== 'stage-a-complete-before-fixtures') {
     throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')

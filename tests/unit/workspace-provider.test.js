@@ -8,9 +8,9 @@ import { createApiActivityRepository } from '../../src/activity-repository.js'
 const { createWorkspaceAuthorityKey, createWorkspaceProviderController } = workspaceProvider
 
 const WORKSPACE_KEYS = [
-  'activateHistoricalClient', 'activities', 'archiveClient', 'cancelAppointment', 'correctPayment',
+  'absences', 'activateHistoricalClient', 'activities', 'archiveClient', 'cancelAppointment', 'correctPayment',
   'createAppointment', 'createClient', 'editAppointment', 'editClient', 'loadWindow',
-  'loadedRanges', 'recordPayment', 'recoverFromInfrastructureError', 'status',
+  'loadedRanges', 'recordPayment', 'recoverFromInfrastructureError', 'restoreAppointment', 'status',
 ]
 const ACTIVITY_KEYS = [
   'createClass', 'createGroup', 'createMembership', 'createParticipant',
@@ -34,6 +34,11 @@ const paymentAppointment = (paymentEntries = []) => ({
 const paymentEntry = (overrides = {}) => ({
   id: 'pay_ola', amountGrosze: 100, method: 'cash',
   receivedAt: '2026-08-04T10:00:00.000Z', correctedAt: null, replacementEntryId: null,
+  ...overrides,
+})
+const absence = (overrides = {}) => ({
+  id: 'abs_anna', specialistId: 'sp_anna', dateFrom: '2026-08-04', dateTo: '2026-08-04',
+  allDay: true, version: 1, createdAt: '2026-08-01T10:00:00.000Z', cancelledAt: null,
   ...overrides,
 })
 const historicalClient = (overrides = {}) => ({
@@ -76,8 +81,13 @@ const repositoryWith = (overrides = {}) => Object.freeze({
   editClient: async () => ({}), archiveClient: async () => ({}),
   activateHistoricalClient: async () => ({}),
   createAppointment: async () => ({}), editAppointment: async () => ({}),
-  cancelAppointment: async () => ({}), recordPayment: async () => ({}),
-  correctPayment: async () => ({}), activities: null, ...overrides,
+  cancelAppointment: async () => ({}), restoreAppointment: async () => ({}),
+  recordPayment: async () => ({}),
+  correctPayment: async () => ({}),
+  loadAbsences: async ({ from, to }) => ({ from, to, absences: [] }),
+  createSpecialistAbsence: async () => absence(),
+  cancelSpecialistAbsence: async () => absence({ cancelledAt: '2026-08-04T10:00:00.000Z', version: 2 }),
+  activities: null, ...overrides,
 })
 
 const activityPayload = (from, to = from, overrides = {}) => ({
@@ -177,6 +187,43 @@ test('exposes the exact workspace contract and constructs one repository with ex
   assert.equal(controller.getSnapshot().workspace.activities, null)
   controller.getSnapshot()
   assert.equal(factoryCalls, 1)
+})
+
+test('absence repository is exposed as a scoped workspace resource with soft-cancel reconciliation', async () => {
+  const controller = makeController(() => repositoryWith())
+  const workspace = controller.getSnapshot().workspace
+  assert.deepEqual(Object.keys(workspace.absences).sort(), ['cancel', 'create', 'loadWindow', 'state', 'status'])
+  await workspace.absences.loadWindow(range('2026-08-04'))
+  assert.deepEqual(controller.getSnapshot().workspace.absences.state.absences, [])
+  const created = await controller.getSnapshot().workspace.absences.create({
+    specialistId: 'sp_anna', dateFrom: '2026-08-04', dateTo: '2026-08-04', allDay: true,
+  })
+  assert.equal(created.id, 'abs_anna')
+  assert.equal(controller.getSnapshot().workspace.absences.state.absences.length, 1)
+  await controller.getSnapshot().workspace.absences.cancel('abs_anna', 1)
+  assert.deepEqual(controller.getSnapshot().workspace.absences.state.absences, [])
+})
+
+test('absence list failure stays local and does not block a session mutation', async () => {
+  const listFailure = Object.assign(new Error('temporary list outage'), { code: 'NETWORK_ERROR' })
+  let listCalls = 0
+  let createCalls = 0
+  const controller = makeController(() => repositoryWith({
+    loadAbsences: async () => {
+      listCalls += 1
+      throw listFailure
+    },
+    createAppointment: async () => {
+      createCalls += 1
+      return {}
+    },
+  }))
+  const workspace = controller.getSnapshot().workspace
+  await assert.rejects(workspace.absences.loadWindow(range('2026-08-04')), /temporary list outage/)
+  assert.equal(listCalls, 1)
+  assert.equal(workspace.status, 'ready')
+  await workspace.createAppointment({})
+  assert.equal(createCalls, 1)
 })
 
 test('protected activities expose an exact frozen boundary and load without touching demo reducer state', async () => {
@@ -835,7 +882,8 @@ test('authority reset replaces repository, clears state and toasts, and rejects 
 test('every old-authority mutation completion is replaced by one fixed stale error', async () => {
   const methods = [
     'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient', 'createAppointment',
-    'editAppointment', 'cancelAppointment', 'recordPayment', 'correctPayment',
+    'editAppointment', 'cancelAppointment', 'restoreAppointment',
+    'recordPayment', 'correctPayment',
   ]
   for (const method of methods) {
     const turn = deferred()

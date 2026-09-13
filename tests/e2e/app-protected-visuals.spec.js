@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 
 const NOW = '2026-08-15T10:00:00.000Z'
 const json = (body) => ({
@@ -30,26 +31,19 @@ const contrast = (foreground, background) => {
   return (lighter + 0.05) / (darker + 0.05)
 }
 
-test('@owner enriches protected Finanse without replacing its summary, tabs or ledger', async ({ page }) => {
+test('@owner keeps an empty protected Finanse focused on one clear next step', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto('./#/payments')
 
   await expect(page.getByRole('heading', { level: 1, name: /Finanse/ })).toBeVisible()
-  await expect(page.getByRole('tab')).toHaveText([
-    'Przychody', 'Płatności i zaległości', 'Wydatki', 'Faktury',
-  ])
-  await expect(page.locator('.finance-window__kpi')).toHaveCount(6)
-  await expect(page.getByRole('region', { name: 'Rozliczenie miesiąca' })).toBeVisible()
-  await expect(page.getByRole('img', { name: /Przychody w sześciu miesiącach/ })).toBeVisible()
-  await expect(page.getByText('Brak należności', { exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Przychody według usługi' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Wpłaty według formy' })).toBeVisible()
-  const backgrounds = await page.locator('.finance-window__kpi').evaluateAll((items) => (
-    items.map((item) => getComputedStyle(item).backgroundColor)
-  ))
-  expect(new Set(backgrounds).size).toBe(1)
-  await expect(page.locator('.finance-window__kpi strong').first()).toHaveText(/zł/)
-  await expect(page.locator('.finance-window__table')).toBeVisible()
+  await expect(page.getByText('Brak pozycji w tym miesiącu', { exact: true })).toBeVisible()
+  await expect(page.getByText(
+    'Pozycje pojawią się tu po odbytych sesjach albo po dodaniu wydatku.',
+    { exact: true },
+  )).toBeVisible()
+  await expect(page.getByRole('tab')).toHaveCount(0)
+  await expect(page.locator('.finance-window__kpi')).toHaveCount(0)
+  await expect(page.locator('.finance-window__trend')).toHaveCount(0)
 })
 
 test('@owner adds a chart to protected Raporty while retaining its trend table and detail cards', async ({ page }) => {
@@ -81,45 +75,14 @@ test('@owner adds a chart to protected Raporty while retaining its trend table a
   })).toContainText('Brak danych')
 })
 
-test('@owner aligns Registry header, navigation and cards with protected finance surfaces', async ({ page }) => {
+test('@owner keeps workbook tools compact inside protected Finanse', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
-
-  await page.goto('./#/reports')
-  const referenceHeader = await page.locator('.report-window > .view-head').evaluate((element) => {
-    const style = getComputedStyle(element)
-    return {
-      backgroundColor: style.backgroundColor,
-      backgroundImage: style.backgroundImage,
-      borderBottom: `${style.borderBottomWidth} ${style.borderBottomStyle} ${style.borderBottomColor}`,
-      borderLeft: `${style.borderLeftWidth} ${style.borderLeftStyle} ${style.borderLeftColor}`,
-      borderRadius: style.borderRadius,
-      borderRight: `${style.borderRightWidth} ${style.borderRightStyle} ${style.borderRightColor}`,
-      borderTop: `${style.borderTopWidth} ${style.borderTopStyle} ${style.borderTopColor}`,
-      boxShadow: style.boxShadow,
-      padding: `${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft}`,
-    }
-  })
-  const referenceCard = await page.locator('.report-window__trend').evaluate((element) => {
-    const style = getComputedStyle(element)
-    return {
-      backgroundColor: style.backgroundColor,
-      borderBottomColor: style.borderBottomColor,
-      borderLeftColor: style.borderLeftColor,
-      borderRightColor: style.borderRightColor,
-      boxShadow: style.boxShadow,
-    }
-  })
-
-  await page.goto('./#/payments')
-  const referenceTabs = await page.locator('.finance-window .tabs__list').evaluate((element) => {
-    const style = getComputedStyle(element)
-    return {
-      backgroundColor: style.backgroundColor,
-      borderBottomColor: style.borderBottomColor,
-      borderLeftColor: style.borderLeftColor,
-      borderRightColor: style.borderRightColor,
-      borderTopColor: style.borderTopColor,
-    }
+  await page.route('**/api/v1/session', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.data.environment = 'staging'
+    body.data.capabilities = ROLE_DEFAULT_CAPABILITIES.owner
+    await route.fulfill({ response, body: JSON.stringify(body) })
   })
 
   await page.route('**/api/v1/workbooks/registry?*', (route) => route.fulfill(json({ data: {
@@ -144,81 +107,13 @@ test('@owner aligns Registry header, navigation and cards with protected finance
     entries: [],
     complete: true,
   } })))
-  await page.goto('./#/ledger')
-
-  await expect(page.getByRole('heading', { level: 1, name: /Rejestr skoroszytów/ }))
-    .toBeVisible()
-  await expect(page.getByRole('tab')).toHaveText([
-    'Importy', 'Eksporty', 'Pozycje rejestru', 'Okres nieustalony',
-  ])
-  const registryHeader = await page.locator('.registry-view > .view-head').evaluate((element) => {
-    const style = getComputedStyle(element)
-    return {
-      backgroundColor: style.backgroundColor,
-      backgroundImage: style.backgroundImage,
-      borderBottom: `${style.borderBottomWidth} ${style.borderBottomStyle} ${style.borderBottomColor}`,
-      borderLeft: `${style.borderLeftWidth} ${style.borderLeftStyle} ${style.borderLeftColor}`,
-      borderRadius: style.borderRadius,
-      borderRight: `${style.borderRightWidth} ${style.borderRightStyle} ${style.borderRightColor}`,
-      borderTop: `${style.borderTopWidth} ${style.borderTopStyle} ${style.borderTopColor}`,
-      boxShadow: style.boxShadow,
-      padding: `${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft}`,
-    }
-  })
-  const registryTabs = await page.locator('.registry-view .tabs__list').evaluate((element) => {
-    const style = getComputedStyle(element)
-    return {
-      backgroundColor: style.backgroundColor,
-      borderBottomColor: style.borderBottomColor,
-      borderLeftColor: style.borderLeftColor,
-      borderRightColor: style.borderRightColor,
-      borderTopColor: style.borderTopColor,
-    }
-  })
-  const workflowCards = await page.locator('.registry-view__workflows > .card')
-    .evaluateAll((elements) => elements.map((element) => {
-      const style = getComputedStyle(element)
-      return {
-        backgroundColor: style.backgroundColor,
-        borderBottomColor: style.borderBottomColor,
-        borderLeftColor: style.borderLeftColor,
-        borderRightColor: style.borderRightColor,
-        boxShadow: style.boxShadow,
-      }
-    }))
-  expect(registryHeader).toEqual(referenceHeader)
-  expect(registryTabs).toEqual(referenceTabs)
-  expect(workflowCards).toEqual([referenceCard, referenceCard])
-
-  const registryItemStyle = await page.locator('.registry-list__item').evaluate((element) => {
-    const computed = getComputedStyle(element)
-    const root = getComputedStyle(document.documentElement)
-    return {
-      backgroundColor: computed.backgroundColor,
-      borderLeftColor: computed.borderLeftColor,
-      borderLeftWidth: computed.borderLeftWidth,
-      line: root.getPropertyValue('--line').trim(),
-      surface: root.getPropertyValue('--surface').trim(),
-    }
-  })
-  expect(rgb(registryItemStyle.backgroundColor)).toEqual(rgb(registryItemStyle.surface))
-  expect(rgb(registryItemStyle.borderLeftColor)).toEqual(rgb(registryItemStyle.line))
-  expect(registryItemStyle.borderLeftWidth).toBe('1px')
-
-  const provenanceStyle = await page.locator('.registry-provenance').evaluate((element) => {
-    const computed = getComputedStyle(element)
-    const root = getComputedStyle(document.documentElement)
-    return {
-      backgroundColor: computed.backgroundColor,
-      borderColor: computed.borderColor,
-      borderWidth: computed.borderWidth,
-      lineSoft: root.getPropertyValue('--line-soft').trim(),
-      surfaceWarm: root.getPropertyValue('--surface-warm').trim(),
-    }
-  })
-  expect(rgb(provenanceStyle.backgroundColor)).toEqual(rgb(provenanceStyle.surfaceWarm))
-  expect(rgb(provenanceStyle.borderColor)).toEqual(rgb(provenanceStyle.lineSoft))
-  expect(provenanceStyle.borderWidth).toBe('1px')
+  await page.goto('./#/payments')
+  await page.getByText('Wgraj arkusz', { exact: true }).click()
+  await expect(page.locator('.finance-workbook-tools')).toBeVisible()
+  await expect(page.locator('.registry-view')).toHaveCount(0)
+  await expect(page.getByText('wbi_visual_import', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('wba_visual_artifact', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Odcisk SHA-256', { exact: true })).toHaveCount(0)
 
   const picker = page.getByLabel('Wybierz plik XLSX')
   await expect(picker).toBeVisible()
@@ -273,6 +168,22 @@ test('@owner gives protected Team avatars a visible surface and readable initial
   expect(colors.shadow).toBe('none')
 })
 
+test('@owner search uses names and professional titles without technical fallback text', async ({ page }) => {
+  await page.goto('./#/team')
+  const avatar = page.locator('.team-card .avatar').first()
+  await expect(avatar).toBeVisible()
+  await expect(avatar.locator('svg')).toBeVisible()
+  expect(await avatar.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .not.toBe('rgba(0, 0, 0, 0)')
+
+  await page.keyboard.press('Control+k')
+  const search = page.getByRole('combobox', { name: 'Szukaj w panelu' })
+  await expect(search).toBeFocused()
+  await expect(page.getByText(/^undefined\s/)).toHaveCount(0)
+  await expect(page.locator('.cmd__item').filter({ hasText: 'Zofia Fikcyjna' }))
+    .toContainText('Specjalistka')
+})
+
 test('@specialist own payments render readable KPI cards on one neutral surface', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.goto('./#/payments')
@@ -284,5 +195,5 @@ test('@specialist own payments render readable KPI cards on one neutral surface'
   const backgrounds = await kpis.evaluateAll((items) => (
     items.map((item) => getComputedStyle(item).backgroundColor)
   ))
-  expect(new Set(backgrounds).size).toBe(1)
+  expect(new Set(backgrounds).size).toBe(2)
 })

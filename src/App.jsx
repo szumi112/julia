@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AppProvider, useApp, useToasts } from './store.jsx'
+import { AppProvider, ToastProvider, useApp, useToasts } from './store.jsx'
 import { Shell } from './layout.jsx'
 import { Login } from './views/Login.jsx'
 import { ToastHost } from './ui.jsx'
@@ -68,8 +68,6 @@ function DemoRoot({ authed, initialDemoRoleId, onAuthenticatedChange }) {
       ) : (
         <Login key="login" onLogin={() => setAuthenticated(true)} />
       )}
-      <ToastHost />
-      <div className="grain" aria-hidden="true" />
     </>
   )
 }
@@ -86,17 +84,21 @@ function DemoApp() {
       : { authed, generation: current.generation + 1, demoRoleId }
   ))
   return (
-    <AppProvider
-      key={`demo-auth-${auth.generation}`}
-      repositoryFactory={demoRepositoryFactory}
-      authorityKey={authorityKeyForState}
-    >
-      <DemoRoot
-        authed={auth.authed}
-        initialDemoRoleId={auth.demoRoleId}
-        onAuthenticatedChange={setAuthenticated}
-      />
-    </AppProvider>
+    <ToastProvider>
+      <AppProvider
+        key={`demo-auth-${auth.generation}`}
+        repositoryFactory={demoRepositoryFactory}
+        authorityKey={authorityKeyForState}
+      >
+        <DemoRoot
+          authed={auth.authed}
+          initialDemoRoleId={auth.demoRoleId}
+          onAuthenticatedChange={setAuthenticated}
+        />
+      </AppProvider>
+      <ToastHost />
+      <div className="grain" aria-hidden="true" />
+    </ToastProvider>
   )
 }
 
@@ -117,21 +119,23 @@ function ProtectedApp() {
   const { logout, session, status } = useAuth()
   const authorityKey = authorityKeyFor(session)
   return (
-    <AppProvider
-      key={authorityKey}
-      repositoryFactory={apiRepositoryFactory}
-      authorityKey={authorityKey}
-    >
-      <MotionSync />
-      <Shell
-        appMode="app"
-        authStatus={status}
-        session={session}
-        onLogout={logout}
-      />
+    <ToastProvider>
+      <AppProvider
+        key={authorityKey}
+        repositoryFactory={apiRepositoryFactory}
+        authorityKey={authorityKey}
+      >
+        <MotionSync />
+        <Shell
+          appMode="app"
+          authStatus={status}
+          session={session}
+          onLogout={logout}
+        />
+      </AppProvider>
       <ToastHost />
       <div className="grain" aria-hidden="true" />
-    </AppProvider>
+    </ToastProvider>
   )
 }
 

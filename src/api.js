@@ -20,6 +20,10 @@ import {
 import { isWellFormedUnicode, validateAppointmentInput } from './core-records.js'
 import { SERVICE_BY_ID } from './services.js'
 import {
+  isSpecialistAvatarKey,
+  specialistAvatarKeyOrDefault,
+} from './specialist-avatars.js'
+import {
   FINANCE_METHODS,
   INVOICE_STATES,
   financeEntryDto,
@@ -70,6 +74,13 @@ import {
   isActivityMembershipId,
   isActivityParticipantId,
 } from './activity-records.js'
+import {
+  captureSpecialistAbsence,
+  captureSpecialistAbsenceCancelInput,
+  captureSpecialistAbsenceInput,
+  captureSpecialistAbsencesPayload,
+  isSpecialistAbsenceId,
+} from './specialist-absences.js'
 
 const API_ROOT = '/api/v1'
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
@@ -115,6 +126,7 @@ const OUTBOX_TYPE = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+){0,7}$/
 const AUDIT_CURSOR = /^v1\.([1-9]\d*)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
+const CANONICAL_EMAIL = /^[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)+$/u
 const INVALID_TEXT = /[\p{Cc}\p{Cf}]/u
 const workspaceCollator = new Intl.Collator('pl-PL', { sensitivity: 'base', usage: 'sort' })
 const WORKSPACE_SERVICE_IDS = new Set(Object.keys(SERVICE_BY_ID))
@@ -195,7 +207,7 @@ const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 
 const authDenialReason = (code) => (code === 'ACCESS_DENIED' ? 'denied' : 'reauth')
 const VALIDATION_FIELDS = new Set([
   'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
-  'specialistId', 'clientId', 'serviceId', 'dateTime', 'durationMinutes',
+  'specialistId', 'clientId', 'assignmentStartsAt', 'serviceId', 'dateTime', 'durationMinutes',
   'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt',
   'paidDate', 'reason', 'replacement', 'expectedVersion', 'from', 'to',
   'specialists', 'clients', 'appointments', 'paymentEntries', 'historicalClients',
@@ -310,6 +322,9 @@ const validId = (value) => typeof value === 'string' && ID.test(value)
 const validText = (value, maxBytes) => typeof value === 'string' && value.length > 0
   && value === value.normalize('NFC') && value === value.trim() && !INVALID_TEXT.test(value)
   && new TextEncoder().encode(value).byteLength <= maxBytes
+const validCanonicalEmail = (value) => validText(value, 254)
+  && value === value.toLowerCase() && CANONICAL_EMAIL.test(value)
+  && !value.startsWith('.') && !value.includes('..') && !value.includes('.@')
 const validIso = (value) => {
   if (typeof value !== 'string') return false
   const parsed = new Date(value)
@@ -408,6 +423,32 @@ const acceptedWorkspaceOptions = (options) => {
     : null
 }
 
+const acceptedSpecialistAbsence = (payload, status, expectedStatus, requested = null) => {
+  if (status !== expectedStatus) return null
+  const outer = captureDataObject(payload, ['data'])
+  const data = outer && captureDataObject(outer.data, ['absence'])
+  if (!data) return null
+  let value
+  try { value = captureSpecialistAbsence(data.absence) } catch { return null }
+  if (requested && requested.operation === 'create'
+    && (value.specialistId !== requested.specialistId
+      || value.dateFrom !== requested.dateFrom || value.dateTo !== requested.dateTo
+      || value.allDay !== true || value.version !== 1 || value.cancelledAt !== null)) return null
+  if (requested && requested.operation === 'cancel'
+    && (value.id !== requested.absenceId
+      || value.version !== requested.expectedVersion + 1
+      || value.cancelledAt === null)) return null
+  return value
+}
+
+const acceptedSpecialistAbsences = (payload, requested) => {
+  const outer = captureDataObject(payload, ['data'])
+  if (!outer) return null
+  let value
+  try { value = captureSpecialistAbsencesPayload(outer.data) } catch { return null }
+  return value.from === requested.from && value.to === requested.to ? value : null
+}
+
 const workspaceOffsetAt = (epoch) => {
   const fields = Object.fromEntries(workspaceDayFormatter.formatToParts(new Date(epoch))
     .filter(({ type }) => type !== 'literal')
@@ -450,8 +491,13 @@ const captureWorkspaceSpecialist = (raw) => {
     'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
     'version', 'staffVersion',
   ]
-  const value = captureDataObject(raw, legacyKeys)
+  const value = captureDataObject(raw, [...legacyKeys, 'avatarKey', 'accessStatus'])
+    ?? captureDataObject(raw, [...legacyKeys, 'avatarKey'])
     ?? captureDataObject(raw, [...legacyKeys, 'accessStatus'])
+    ?? captureDataObject(raw, legacyKeys)
+  let avatarKey
+  try { avatarKey = specialistAvatarKeyOrDefault(value?.avatarKey) }
+  catch { return null }
   if (!value || typeof value.id !== 'string' || !SPECIALIST_ID.test(value.id)
     || !validWorkspaceText(value.displayName, 120)
     || !validWorkspaceText(value.professionalTitle, 120)
@@ -465,6 +511,7 @@ const captureWorkspaceSpecialist = (raw) => {
     id: value.id,
     displayName: value.displayName,
     professionalTitle: value.professionalTitle,
+    avatarKey,
     standardRateGrosze: value.standardRateGrosze,
     status: value.status,
     version: value.version,
@@ -474,6 +521,7 @@ const captureWorkspaceSpecialist = (raw) => {
     id: value.id,
     displayName: value.displayName,
     professionalTitle: value.professionalTitle,
+    avatarKey,
     standardRateGrosze: value.standardRateGrosze,
     status: value.status,
     version: value.version,
@@ -512,8 +560,7 @@ const captureWorkspaceClient = (raw) => {
     || (value.status === 'archived' && assignment !== null)
     || (value.archivedAt !== null
       && (value.archivedAt < value.createdAt || value.archivedAt > value.updatedAt))
-    || (assignment !== null
-      && (assignment.startsAt < value.createdAt || assignment.startsAt > value.updatedAt))) return null
+    || (assignment !== null && assignment.startsAt > value.updatedAt)) return null
   return Object.freeze({
     id: value.id,
     name: value.name,
@@ -532,10 +579,13 @@ const CLIENT_INPUT_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'
 const CLIENT_STATUSES = new Set(['active', 'paused'])
 
 const captureClientInput = (raw) => {
-  const value = captureDataObject(raw, CLIENT_INPUT_KEYS)
+  const value = captureDataObject(raw, [...CLIENT_INPUT_KEYS, 'assignmentStartsAt'])
+    ?? captureDataObject(raw, CLIENT_INPUT_KEYS)
   if (!value || !workspaceIdentity(value.name, value.age)
     || !CLIENT_STATUSES.has(value.status)
-    || typeof value.specialistId !== 'string' || !SPECIALIST_ID.test(value.specialistId)) {
+    || typeof value.specialistId !== 'string' || !SPECIALIST_ID.test(value.specialistId)
+    || !(value.assignmentStartsAt === undefined || value.assignmentStartsAt === null
+      || validInstant(value.assignmentStartsAt))) {
     return null
   }
   return Object.freeze({
@@ -543,6 +593,7 @@ const captureClientInput = (raw) => {
     age: value.age,
     status: value.status,
     specialistId: value.specialistId,
+    assignmentStartsAt: value.assignmentStartsAt ?? null,
   })
 }
 
@@ -567,19 +618,22 @@ const acceptedCreatedClient = (payload, status, requested) => {
     || client.archivedAt !== null || client.readOnly !== false
     || client.updatedAt !== client.createdAt || client.assignment === null
     || client.assignment.specialistId !== requested.specialistId
-    || client.assignment.startsAt !== client.createdAt
+    || client.assignment.startsAt !== (requested.assignmentStartsAt ?? client.createdAt)
     || client.assignment.version !== 1) return null
   return client
 }
 
 const captureSpecialistProfileInput = (raw) => {
-  const value = captureDataObject(raw, [
-    'displayName', 'professionalTitle', 'standardRateGrosze',
-  ])
+  const keys = ['displayName', 'professionalTitle', 'standardRateGrosze']
+  const value = captureDataObject(raw, [...keys, 'avatarKey'])
+    ?? captureDataObject(raw, keys)
+  let avatarKey
+  try { avatarKey = specialistAvatarKeyOrDefault(value?.avatarKey) }
+  catch { return null }
   if (!value || !validWorkspaceText(value.displayName, 120)
     || !validWorkspaceText(value.professionalTitle, 120)
     || !workspacePositive(value.standardRateGrosze, 1_000_000)) return null
-  return Object.freeze(value)
+  return Object.freeze({ ...value, avatarKey })
 }
 
 const acceptedSpecialistProfile = (payload, status, requested) => {
@@ -587,12 +641,13 @@ const acceptedSpecialistProfile = (payload, status, requested) => {
   const data = outer && captureDataObject(outer.data, ['specialist'])
   const value = data && captureDataObject(data.specialist, [
     'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
-    'version', 'accessStatus', 'createdAt', 'updatedAt',
+    'version', 'accessStatus', 'createdAt', 'updatedAt', 'avatarKey',
   ])
   if (status !== 201 || !value || !SPECIALIST_ID.test(value.id ?? '')
     || value.displayName !== requested.displayName
     || value.professionalTitle !== requested.professionalTitle
     || value.standardRateGrosze !== requested.standardRateGrosze
+    || value.avatarKey !== requested.avatarKey || !isSpecialistAvatarKey(value.avatarKey)
     || value.status !== 'active' || value.version !== 1
     || value.accessStatus !== 'unclaimed' || !validInstant(value.createdAt)
     || value.updatedAt !== value.createdAt) return null
@@ -606,12 +661,13 @@ const acceptedEditedSpecialistProfile = (
   const data = outer && captureDataObject(outer.data, ['specialist'])
   const value = data && captureDataObject(data.specialist, [
     'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
-    'version', 'staffVersion', 'accessStatus', 'createdAt', 'updatedAt',
+    'version', 'staffVersion', 'accessStatus', 'createdAt', 'updatedAt', 'avatarKey',
   ])
   if (status !== 200 || !value || value.id !== specialistId
     || value.displayName !== requested.displayName
     || value.professionalTitle !== requested.professionalTitle
     || value.standardRateGrosze !== requested.standardRateGrosze
+    || value.avatarKey !== requested.avatarKey || !isSpecialistAvatarKey(value.avatarKey)
     || value.status !== 'active' || value.version !== expectedVersion + 1
     || !(value.staffVersion === null || positive(value.staffVersion))
     || !['unclaimed', 'invited', 'enabled'].includes(value.accessStatus)
@@ -657,7 +713,8 @@ const acceptedEditedClient = (payload, status, clientId, expectedVersion, reques
     || client.version !== expectedVersion + 1 || client.archivedAt !== null
     || client.readOnly !== false || client.assignment === null
     || client.assignment.specialistId !== requested.specialistId
-    || client.assignment.version !== 1) return null
+    || (requested.assignmentStartsAt !== null
+      && client.assignment.startsAt !== requested.assignmentStartsAt)) return null
   return client
 }
 
@@ -695,8 +752,8 @@ const captureWorkspacePaymentEntry = (raw) => {
 const captureWorkspaceAppointment = (raw, bounds = null) => {
   const value = captureDataObject(raw, [
     'id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone',
-    'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt',
-    'charge', 'payment', 'paymentEntries',
+    'location', 'status', 'source', 'version', 'cancelledAt', 'cancellationReason',
+    'createdAt', 'updatedAt', 'charge', 'payment', 'paymentEntries',
   ])
   if (!value || typeof value.id !== 'string' || !APPOINTMENT_ID.test(value.id)
     || typeof value.clientId !== 'string' || !CLIENT_ID.test(value.clientId)
@@ -710,6 +767,9 @@ const captureWorkspaceAppointment = (raw, bounds = null) => {
     || value.source !== 'panel' || !workspacePositive(value.version, 4_096)
     || !workspaceNullableInstant(value.cancelledAt)
     || (value.status === 'cancelled') !== (value.cancelledAt !== null)
+    || (value.status !== 'cancelled' && value.cancellationReason !== null)
+    || (value.cancellationReason !== null
+      && !['client', 'centre', 'late_paid'].includes(value.cancellationReason))
     || !validInstant(value.createdAt) || !validInstant(value.updatedAt)
     || value.createdAt > value.updatedAt
     || new Date(value.endsAt).getTime() - new Date(value.startsAt).getTime()
@@ -786,6 +846,7 @@ const captureWorkspaceAppointment = (raw, bounds = null) => {
     effective.push(entry)
   }
   const billable = value.status === 'completed' || value.status === 'noshow'
+    || (value.status === 'cancelled' && value.cancellationReason === 'late_paid')
   const expectedStatus = collected === 0 ? 'unpaid'
     : collected === charge.expectedAmountGrosze ? 'paid' : 'partial'
   const latest = effective.at(-1) ?? null
@@ -808,6 +869,7 @@ const captureWorkspaceAppointment = (raw, bounds = null) => {
     source: 'panel',
     version: value.version,
     cancelledAt: value.cancelledAt,
+    cancellationReason: value.cancellationReason,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     charge: Object.freeze({
@@ -830,7 +892,7 @@ const captureWorkspaceAppointment = (raw, bounds = null) => {
 
 const captureOwnPaymentAppointment = (raw, bounds) => {
   const value = captureDataObject(raw, [
-    'id', 'serviceId', 'startsAt', 'status', 'version', 'charge', 'payment',
+    'id', 'serviceId', 'startsAt', 'status', 'cancellationReason', 'version', 'charge', 'payment',
   ])
   if (!value || typeof value.id !== 'string' || !APPOINTMENT_ID.test(value.id)
     || typeof value.serviceId !== 'string' || !WORKSPACE_SERVICE_IDS.has(value.serviceId)
@@ -838,6 +900,10 @@ const captureOwnPaymentAppointment = (raw, bounds) => {
     || value.startsAt >= bounds.upper
     || !['scheduled', 'completed', 'cancelled', 'noshow'].includes(value.status)
     || !workspacePositive(value.version, 4_096)) return null
+  const cancellationReason = value.cancellationReason
+  if ((value.status !== 'cancelled' && cancellationReason !== null)
+    || (value.status === 'cancelled'
+      && ![null, 'client', 'centre', 'late_paid'].includes(cancellationReason))) return null
   const charge = captureDataObject(value.charge, [
     'id', 'serviceId', 'expectedAmountGrosze', 'currency', 'version',
   ])
@@ -853,6 +919,7 @@ const captureOwnPaymentAppointment = (raw, bounds) => {
     || payment.collectedGrosze > charge.expectedAmountGrosze
     || !safeCount(payment.outstandingGrosze)) return null
   const billable = ['completed', 'noshow'].includes(value.status)
+    || (value.status === 'cancelled' && cancellationReason === 'late_paid')
   const expectedOutstanding = billable
     ? charge.expectedAmountGrosze - payment.collectedGrosze : 0
   const expectedStatus = payment.collectedGrosze === 0 ? 'unpaid'
@@ -869,6 +936,7 @@ const captureOwnPaymentAppointment = (raw, bounds) => {
     serviceId: value.serviceId,
     startsAt: value.startsAt,
     status: value.status,
+    cancellationReason,
     version: value.version,
     charge: Object.freeze({
       id: charge.id,
@@ -982,6 +1050,7 @@ const acceptedCreatedAppointment = (payload, status, requested) => {
     || appointment.startsAt !== normalized.startsAt || appointment.endsAt !== normalized.endsAt
     || appointment.location !== requested.location || appointment.status !== requested.status
     || appointment.version !== 1 || appointment.cancelledAt !== null
+    || appointment.cancellationReason !== null
     || appointment.createdAt !== appointment.updatedAt || appointment.charge.version !== 1
     || appointment.charge.serviceId !== requested.serviceId
     || appointment.charge.expectedAmountGrosze !== requested.expectedAmountGrosze
@@ -1008,17 +1077,36 @@ const acceptedEditedAppointment = (
     || appointment.startsAt !== normalized.startsAt || appointment.endsAt !== normalized.endsAt
     || appointment.location !== requested.location || appointment.status !== requested.status
     || appointment.version !== expectedVersion + 1 || appointment.cancelledAt !== null
+    || appointment.cancellationReason !== null
     || appointment.updatedAt <= appointment.createdAt
     || appointment.charge.serviceId !== requested.serviceId
     || appointment.charge.expectedAmountGrosze !== requested.expectedAmountGrosze) return null
   return appointment
 }
 
-const acceptedCancelledAppointment = (payload, status, appointmentId, expectedVersion) => {
+const acceptedCancelledAppointment = (
+  payload, status, appointmentId, expectedVersion, reason,
+) => {
   const appointment = status === 200 ? captureAppointmentEnvelope(payload) : null
   if (!appointment || appointment.id !== appointmentId
     || appointment.version !== expectedVersion + 1 || appointment.status !== 'cancelled'
     || appointment.cancelledAt === null || appointment.cancelledAt !== appointment.updatedAt
+    || appointment.cancellationReason !== reason
+    || appointment.updatedAt <= appointment.createdAt
+    || appointment.payment.collectedGrosze !== 0
+    || appointment.payment.outstandingGrosze !== (reason === 'late_paid'
+      ? appointment.charge.expectedAmountGrosze : 0)
+    || appointment.payment.latestMethod !== null
+    || appointment.payment.latestReceivedAt !== null) return null
+  return appointment
+}
+
+const acceptedRestoredAppointment = (payload, status, appointmentId, expectedVersion) => {
+  const appointment = status === 200 ? captureAppointmentEnvelope(payload) : null
+  if (!appointment || appointment.id !== appointmentId
+    || appointment.version !== expectedVersion + 1
+    || appointment.status !== 'scheduled'
+    || appointment.cancelledAt !== null || appointment.cancellationReason !== null
     || appointment.updatedAt <= appointment.createdAt
     || appointment.payment.collectedGrosze !== 0
     || appointment.payment.outstandingGrosze !== 0
@@ -1034,7 +1122,9 @@ const acceptedRecordedPayment = (
   if (!appointment || appointment.id !== appointmentId
     || appointment.version !== expectedVersion + 1
     || appointment.updatedAt <= appointment.createdAt
-    || !['completed', 'noshow'].includes(appointment.status)) return null
+    || !(appointment.status === 'completed' || appointment.status === 'noshow'
+      || (appointment.status === 'cancelled'
+        && appointment.cancellationReason === 'late_paid'))) return null
   const matches = appointment.paymentEntries.filter((entry) => entry.correctedAt === null
     && entry.amountGrosze === requested.amountGrosze && entry.method === requested.method
     && entry.receivedAt === requested.receivedAt)
@@ -1332,9 +1422,10 @@ const clientError = (code, options) => new ApiError(code, options)
 
 const acceptedActor = (value) => {
   const actor = captureDataObject(value, [
-    'id', 'displayName', 'professionalTitle', 'role', 'specialistId', 'version',
+    'id', 'displayName', 'email', 'professionalTitle', 'role', 'specialistId', 'version',
   ])
   if (!actor || !STAFF_ID.test(actor.id) || !validText(actor.displayName, 120)
+    || !validCanonicalEmail(actor.email)
     || !(actor.professionalTitle === null
       || validWorkspaceText(actor.professionalTitle, 120))
     || !ROLES.has(actor.role) || !positive(actor.version)
@@ -1346,6 +1437,7 @@ const acceptedActor = (value) => {
   return Object.freeze({
     id: actor.id,
     displayName: actor.displayName,
+    email: actor.email,
     professionalTitle: actor.professionalTitle,
     role: actor.role,
     specialistId: actor.specialistId,
@@ -3445,6 +3537,58 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       { validate: (payload) => acceptedWorkspace(payload, accepted) },
     )
   }
+  const loadSpecialistAbsences = (options) => {
+    const accepted = acceptedWorkspaceOptions(options)
+    if (!accepted) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    return requestJson(
+      `${API_ROOT}/specialist-absences?from=${accepted.from}&to=${accepted.to}`,
+      {
+        method: 'GET', credentials: 'same-origin', headers: baseHeaders(),
+      },
+      { validate: (payload) => acceptedSpecialistAbsences(payload, accepted) },
+    )
+  }
+  const createSpecialistAbsence = (input, options) => {
+    let requestBody
+    let requested
+    try {
+      requestBody = captureSpecialistAbsenceInput(input)
+      requested = {
+        ...requestBody,
+        operation: 'create',
+      }
+    } catch { requested = null }
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
+    if (!requested || !acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/specialist-absences`, JSON.stringify(requestBody),
+      (payload, status) => acceptedSpecialistAbsence(payload, status, 201, requested),
+      acceptedOptions.idempotencyKey, acceptedOptions.signal,
+    )
+  }
+  const cancelSpecialistAbsence = (absenceId, expectedVersion, options) => {
+    let requestBody
+    let requested
+    try {
+      requestBody = captureSpecialistAbsenceCancelInput({ expectedVersion })
+      requested = {
+        ...requestBody,
+        operation: 'cancel', absenceId,
+      }
+    } catch { requested = null }
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
+    if (!isSpecialistAbsenceId(absenceId) || !requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/specialist-absences/${absenceId}/cancellation`,
+      JSON.stringify(requestBody),
+      (payload, status) => acceptedSpecialistAbsence(payload, status, 200, requested),
+      acceptedOptions.idempotencyKey, acceptedOptions.signal,
+    )
+  }
   const loadOwnPaymentsWindow = (options) => {
     const accepted = acceptedWorkspaceOptions(options)
     if (!accepted) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
@@ -3945,6 +4089,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       age: requested.age,
       status: requested.status,
       specialistId: requested.specialistId,
+      assignmentStartsAt: requested.assignmentStartsAt,
     })
     return mutation(
       `${API_ROOT}/clients`,
@@ -4453,6 +4598,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       age: requested.age,
       status: requested.status,
       specialistId: requested.specialistId,
+      assignmentStartsAt: requested.assignmentStartsAt,
     })
     return mutation(
       `${API_ROOT}/clients/${clientId}/edits`,
@@ -4547,7 +4693,24 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       acceptedOptions.idempotencyKey,
     )
   }
-  const cancelAppointment = (appointmentId, expectedVersion, options) => {
+  const cancelAppointment = (appointmentId, expectedVersion, reason, options) => {
+    const acceptedOptions = captureClientOptions(options)
+    if (typeof appointmentId !== 'string' || !APPOINTMENT_ID.test(appointmentId)
+      || !positive(expectedVersion) || expectedVersion >= 4_096
+      || !['client', 'centre', 'late_paid'].includes(reason) || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(
+      `${API_ROOT}/appointments/${appointmentId}/cancellation`,
+      JSON.stringify({ expectedVersion, reason }),
+      (payload, status) => acceptedCancelledAppointment(
+        payload, status, appointmentId, expectedVersion, reason,
+      ),
+      acceptedOptions.idempotencyKey,
+    )
+  }
+  const restoreAppointment = (appointmentId, expectedVersion, options) => {
     const acceptedOptions = captureClientOptions(options)
     if (typeof appointmentId !== 'string' || !APPOINTMENT_ID.test(appointmentId)
       || !positive(expectedVersion) || expectedVersion >= 4_096 || !acceptedOptions) {
@@ -4555,9 +4718,9 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     }
     if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
     return mutation(
-      `${API_ROOT}/appointments/${appointmentId}/cancellation`,
+      `${API_ROOT}/appointments/${appointmentId}/restoration`,
       JSON.stringify({ expectedVersion }),
-      (payload, status) => acceptedCancelledAppointment(
+      (payload, status) => acceptedRestoredAppointment(
         payload, status, appointmentId, expectedVersion,
       ),
       acceptedOptions.idempotencyKey,
@@ -4750,6 +4913,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     getCapabilityOverrides,
     replaceCapabilityOverrides,
     loadWorkspaceWindow,
+    loadSpecialistAbsences,
     loadOwnPaymentsWindow,
     loadActivityWorkspace,
     getOperationsHealth,
@@ -4798,6 +4962,9 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     createAppointment,
     editAppointment,
     cancelAppointment,
+    restoreAppointment,
+    createSpecialistAbsence,
+    cancelSpecialistAbsence,
     recordPayment,
     correctPayment,
     inviteStaff,

@@ -3,6 +3,7 @@ import { issueCsrfToken } from '../security/csrf.js'
 import { decryptForScope as decryptField, loadDataKey } from '../security/envelope.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
 import { acceptEffectiveCapabilities } from '../../src/capabilities.js'
+import { acceptCanonicalEmail } from '../identity/canonical-email.js'
 
 const denied = () => { throw new Error('ACCESS_DENIED') }
 const titleFailure = () => { throw new Error('CRYPTO_FAILURE') }
@@ -40,7 +41,9 @@ export async function getSession({
   loadDataKey: loadKey = loadDataKey,
 } = {}) {
   const capabilities = acceptEffectiveCapabilities(actor?.role, actor?.capabilities)
+  const email = acceptCanonicalEmail(principal?.normalizedEmail)
   if (!db?.prepare || principal?.kind !== 'human' || typeof principal.subject !== 'string'
+    || !email
     || !actor?.id || !Number.isSafeInteger(actor.version) || actor.version < 1
     || !Number.isSafeInteger(actor.authorityRevision) || actor.authorityRevision < 1
     || !capabilities
@@ -107,6 +110,7 @@ export async function getSession({
   const sessionActor = Object.freeze({
     id: actor.id,
     displayName,
+    email,
     professionalTitle,
     role: actor.role,
     specialistId: actor.specialistId,

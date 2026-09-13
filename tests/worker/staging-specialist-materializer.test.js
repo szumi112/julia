@@ -74,6 +74,7 @@ const seedProfile = async ({
   version = 1,
   rate = 18000,
   professionalTitle = 'Specjalistka',
+  avatarKey,
 } = {}) => {
   const row = {
     id,
@@ -89,12 +90,16 @@ const seedProfile = async ({
       ? null
       : await envelope(id, 'professional_title', professionalTitle),
   }
-  await activeDb.prepare(
-    `INSERT INTO specialists
-     (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
-      archived_at,created_at,updated_at,professional_title_envelope)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`,
-  ).bind(...Object.values(row)).run()
+  await activeDb.prepare(avatarKey === undefined
+    ? `INSERT INTO specialists
+       (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
+        archived_at,created_at,updated_at,professional_title_envelope)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`
+    : `INSERT INTO specialists
+       (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
+        archived_at,created_at,updated_at,professional_title_envelope,avatar_key)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(...Object.values(row), ...(avatarKey === undefined ? [] : [avatarKey])).run()
   return Object.freeze(row)
 }
 
@@ -115,6 +120,7 @@ const seedDesiredProfiles = async ({
   justynaClaim = null,
   juliaTitle = 'Specjalistka',
   juliaRate = 18000,
+  juliaAvatarKey,
 } = {}) => {
   const byName = new Map(STAGING_SPECIALIST_DESIRED_STATE.map((item) => [
     item.displayName,
@@ -135,6 +141,7 @@ const seedDesiredProfiles = async ({
       rate: desired.displayName === 'Julia Wolanin'
         ? juliaRate
         : desired.standardRateGrosze,
+      avatarKey: desired.displayName === 'Julia Wolanin' ? juliaAvatarKey : undefined,
     })
   }
   return byName
@@ -264,7 +271,7 @@ const directCommands = () => {
   return Object.freeze({ calls, materialize })
 }
 
-const useScenario = async (bindingName) => {
+const useScenario = async (bindingName, { stageF = false } = {}) => {
   const db = env[bindingName]
   if (!db?.prepare || !db?.batch) throw new Error('missing scenario database')
   await applyD1Migrations(db, env.TEST_STAGE_A_MIGRATIONS)
@@ -279,6 +286,7 @@ const useScenario = async (bindingName) => {
   await applyD1Migrations(db, env.TEST_STAGE_C_MIGRATIONS)
   await applyD1Migrations(db, env.TEST_STAGE_D_MIGRATIONS)
   await applyD1Migrations(db, env.TEST_STAGE_E_MIGRATIONS)
+  if (stageF) await applyD1Migrations(db, env.TEST_STAGE_F_MIGRATIONS)
   const dataKey = await getOrCreateDataKey(db, keyring, SCOPE, {
     id: 'key_staging_materializer', createdAt: NOW,
   })
@@ -816,7 +824,7 @@ describe('staging specialist desired-state materializer', () => {
   })
 
   it('converges a fallback owner and missing profiles through the real scheduled dependencies', async () => {
-    await useScenario('MATERIALIZER_REAL_CREATE')
+    await useScenario('MATERIALIZER_REAL_CREATE', { stageF: true })
     const owner = await seedStaff({
       id: 'stf_materializer_real_create',
       displayName: 'Właściciel',
@@ -856,13 +864,15 @@ describe('staging specialist desired-state materializer', () => {
   })
 
   it('backfills a legacy Julia title/rate through the normal edit before link', async () => {
-    await useScenario('MATERIALIZER_UPDATE')
+    await useScenario('MATERIALIZER_UPDATE', { stageF: true })
     const julia = await seedStaff({
       id: 'stf_materializer_julia_update',
       displayName: 'Julia Wolanin',
       role: 'owner',
     })
-    await seedDesiredProfiles({ juliaTitle: null, juliaRate: 19000 })
+    await seedDesiredProfiles({
+      juliaTitle: null, juliaRate: 19000, juliaAvatarKey: 'wave',
+    })
     const harness = directCommands()
     await expect(harness.materialize(input())).resolves.toEqual({
       created: 0, updated: 1, linked: 1, confirmed: 2,
@@ -876,6 +886,7 @@ describe('staging specialist desired-state materializer', () => {
         displayName: 'Julia Wolanin',
         professionalTitle: 'Specjalistka',
         standardRateGrosze: 18000,
+        avatarKey: 'wave',
       },
     })
     expect(harness.calls.link[0].body).toMatchObject({
@@ -883,11 +894,12 @@ describe('staging specialist desired-state materializer', () => {
       expectedStaffVersion: 1,
     })
     const profile = await activeDb.prepare(
-      `SELECT professional_title_envelope,standard_rate_grosze,staff_user_id,version
+      `SELECT professional_title_envelope,avatar_key,standard_rate_grosze,staff_user_id,version
        FROM specialists WHERE id='sp_staging_workbook_julia_wolanin'`,
     ).first()
     expect(profile).toMatchObject({
       standard_rate_grosze: 18000,
+      avatar_key: 'wave',
       staff_user_id: julia.id,
       version: 3,
     })

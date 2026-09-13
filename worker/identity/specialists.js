@@ -1,5 +1,9 @@
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
 import { isWellFormedUnicode } from '../../src/core-records.js'
+import {
+  DEFAULT_SPECIALIST_AVATAR_KEY,
+  isSpecialistAvatarKey,
+} from '../../src/specialist-avatars.js'
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 const STAFF_ID = /^stf_[A-Za-z0-9][A-Za-z0-9_-]{0,123}$/
@@ -16,6 +20,7 @@ const PROFILE_COLUMNS = Object.freeze([
   'created_at',
   'updated_at',
 ])
+const PROFILE_V4_COLUMNS = Object.freeze([...PROFILE_COLUMNS, 'avatar_key'])
 
 const failure = () => { throw new Error('SPECIALIST_LIFECYCLE_INVALID') }
 const exactRow = (value, keys) => value !== null && typeof value === 'object'
@@ -70,8 +75,12 @@ export function specialistSnapshot(profile) {
   }
 }
 
+const avatarKeyForProfile = (profile) => (
+  Object.hasOwn(profile, 'avatar_key') ? profile.avatar_key : DEFAULT_SPECIALIST_AVATAR_KEY
+)
+
 function validProfile(profile) {
-  return exactRow(profile, PROFILE_COLUMNS)
+  return (exactRow(profile, PROFILE_COLUMNS) || exactRow(profile, PROFILE_V4_COLUMNS))
     && SPECIALIST_ID.test(profile.id ?? '')
     && (profile.staff_user_id === null || STAFF_ID.test(profile.staff_user_id ?? ''))
     && Number.isSafeInteger(profile.standard_rate_grosze)
@@ -85,6 +94,7 @@ function validProfile(profile) {
     && validInstant(profile.created_at)
     && validInstant(profile.updated_at)
     && profile.created_at <= profile.updated_at
+    && (!Object.hasOwn(profile, 'avatar_key') || isSpecialistAvatarKey(profile.avatar_key))
 }
 
 async function snapshotEnvelope(context, profile, presentation = null) {
@@ -99,9 +109,12 @@ async function snapshotEnvelope(context, profile, presentation = null) {
         })
       : JSON.stringify({
           ...snapshot,
+          ...(Object.hasOwn(profile, 'avatar_key') ? {
+            avatarKey: avatarKeyForProfile(profile),
+          } : {}),
           displayName: presentation.displayName,
           professionalTitle: presentation.professionalTitle,
-          schema: 'specialist.v3',
+          schema: Object.hasOwn(profile, 'avatar_key') ? 'specialist.v4' : 'specialist.v3',
         })
   return JSON.stringify(await encryptForScope(
     context.keyring,
@@ -127,6 +140,13 @@ async function hasProfessionalTitleColumn(db) {
     "SELECT name FROM pragma_table_info('specialists') WHERE name='professional_title_envelope'",
   ).first()
   return row?.name === 'professional_title_envelope'
+}
+
+async function hasAvatarColumn(db) {
+  const row = await db.prepare(
+    "SELECT name FROM pragma_table_info('specialists') WHERE name='avatar_key'",
+  ).first()
+  return row?.name === 'avatar_key'
 }
 
 const validDisplayName = (value) => {
@@ -199,15 +219,19 @@ export async function specialistSnapshotMatches(context, record, profile) {
       },
     )
     const parsed = JSON.parse(plaintext)
-    if (sameRow(parsed, specialistSnapshot(profile))) return true
-    if (parsed?.schema === 'specialist.v2' && validDisplayName(parsed.displayName)) {
+    const avatarKey = avatarKeyForProfile(profile)
+    if (avatarKey === DEFAULT_SPECIALIST_AVATAR_KEY
+      && sameRow(parsed, specialistSnapshot(profile))) return true
+    if (avatarKey === DEFAULT_SPECIALIST_AVATAR_KEY
+      && parsed?.schema === 'specialist.v2' && validDisplayName(parsed.displayName)) {
       const { displayName: _displayName, ...withoutDisplayName } = parsed
       return sameRow(withoutDisplayName, {
         ...specialistSnapshot(profile),
         schema: 'specialist.v2',
       })
     }
-    if (parsed?.schema === 'specialist.v3'
+    if (avatarKey === DEFAULT_SPECIALIST_AVATAR_KEY
+      && parsed?.schema === 'specialist.v3'
       && validDisplayName(parsed.displayName)
       && validProfessionalTitle(parsed.professionalTitle)) {
       const {
@@ -220,16 +244,32 @@ export async function specialistSnapshotMatches(context, record, profile) {
         schema: 'specialist.v3',
       })
     }
+    if (parsed?.schema === 'specialist.v4'
+      && validDisplayName(parsed.displayName)
+      && validProfessionalTitle(parsed.professionalTitle)
+      && isSpecialistAvatarKey(parsed.avatarKey)
+      && parsed.avatarKey === avatarKey) {
+      const {
+        avatarKey: _avatarKey,
+        displayName: _displayName,
+        professionalTitle: _professionalTitle,
+        ...withoutPresentation
+      } = parsed
+      return sameRow(withoutPresentation, {
+        ...specialistSnapshot(profile),
+        schema: 'specialist.v4',
+      })
+    }
     return false
   } catch {
     return false
   }
 }
 
-async function currentProfile(db, context, specialistId, staffId) {
+async function currentProfile(db, context, specialistId, staffId, profileV4) {
   const rows = (await db.prepare(
     `SELECT id,staff_user_id,standard_rate_grosze,status,version,archived_at,
-            created_at,updated_at
+            created_at,updated_at${profileV4 ? ',avatar_key' : ''}
      FROM specialists
      WHERE id=? OR staff_user_id=?
      ORDER BY id`
@@ -288,14 +328,16 @@ export async function prepareSpecialistTransition({
     })
   }
 
+  const profileV2 = await hasDisplayNameColumn(db)
+  const profileV3 = await hasProfessionalTitleColumn(db)
+  const profileV4 = await hasAvatarColumn(db)
   const current = await currentProfile(
     db,
     cryptoContext,
     specialistId,
     nextStaff.id,
+    profileV4,
   )
-  const profileV2 = await hasDisplayNameColumn(db)
-  const profileV3 = await hasProfessionalTitleColumn(db)
   const presentation = profileV2
     ? await profilePresentation(db, cryptoContext, current, profileV3, displayName)
     : null
@@ -318,6 +360,7 @@ export async function prepareSpecialistTransition({
       id: specialistId,
       staff_user_id: nextStaff.id,
       standard_rate_grosze: 18000,
+      ...(profileV4 ? { avatar_key: DEFAULT_SPECIALIST_AVATAR_KEY } : {}),
       status,
       version: 1,
       archived_at: status === 'archived' ? now : null,

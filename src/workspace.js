@@ -1,9 +1,34 @@
 import { DEMO_ROLES } from './data.js'
-import { collectedOf, isBillable, METHOD_LABELS, monthKey, outstandingOf, timeToMin, toISODate } from './format.js'
+import { collectedOf, fmtDayMonth, isBillable, METHOD_LABELS, monthKey, outstandingOf, timeToMin, toISODate, warsawDateTimeFromUtc } from './format.js'
+import { DEFAULT_SPECIALIST_AVATAR_KEY } from './specialist-avatars.js'
+
+const assignmentStartCivilTime = (startsAt) => {
+  try {
+    return warsawDateTimeFromUtc(startsAt)
+  } catch {
+    return null
+  }
+}
+
+export const sessionHasStarted = (session, now = new Date()) => {
+  const current = warsawDateTimeFromUtc(now.toISOString())
+  return `${session.date}T${session.time}:00` <= `${current.date}T${current.time}:${current.second}`
+}
+
+export const isBeforeAssignmentStart = (date, time, startsAt) => {
+  const assignment = assignmentStartCivilTime(startsAt)
+  return !!assignment && `${date}T${time}:00` < `${assignment.date}T${assignment.time}:${assignment.second}`
+}
+
+export const assignmentStartLabel = (startsAt) => {
+  const assignment = assignmentStartCivilTime(startsAt)
+  return assignment ? `${fmtDayMonth(assignment.date)} o ${assignment.time}` : ''
+}
 
 export const withPsychologistDefaults = (psychologist) => ({
   ...psychologist,
   weeklyCapacity: psychologist.weeklyCapacity ?? 20,
+  avatarKey: psychologist.avatarKey ?? DEFAULT_SPECIALIST_AVATAR_KEY,
 })
 
 export const specialistWeekLoad = (sessions, psychologist, date = new Date()) => {
@@ -181,6 +206,30 @@ export const sessionsForRole = (state, role) =>
 export const clientsForRole = (state, role) =>
   role.scope === 'own' ? state.clients.filter((client) => client.psychId === role.psychId) : state.clients
 
+// Appointment mutations in the Worker accept only the current, writable
+// directory records. Historical and archived records can still appear next to
+// old sessions, but must never become a new appointment target.
+export const isBookableClient = (client) => !!client
+  && ['active', 'paused'].includes(client.status)
+  && client.archivedAt == null
+  && client.readOnly !== true
+
+export const bookableClientsForRole = (state, role) => clientsForRole(state, role)
+  .filter(isBookableClient)
+
+const polishClientNameOrder = new Intl.Collator('pl', { sensitivity: 'base' })
+
+// Session forms show a scoped, searchable directory instead of a browser
+// select. Keep its order deterministic even when a workspace response arrives
+// in a different order.
+export const sessionClientOptions = (clients) => [...clients].sort((left, right) => (
+  polishClientNameOrder.compare(left.name, right.name) || left.id.localeCompare(right.id)
+))
+
+export const filterSessionClientOptions = (clients, query) => clients.filter(
+  (client) => clientMatchesQuery(client, query),
+)
+
 // A family needs at least two members — after an unlink, delete, or move,
 // clear the link fields on anyone left alone so no dangling familyId survives.
 export const dissolveLoneFamilies = (clients) => {
@@ -196,7 +245,58 @@ export const dissolveLoneFamilies = (clients) => {
 export const sessionMatchesFilters = (session, filters) => {
   const paymentMatches = filters.payment === 'all' || session.payment === filters.payment
   const attendanceMatches = filters.attendance === 'all' || session.status === filters.attendance
-  return paymentMatches && attendanceMatches
+  const specialistMatches = !filters.specialist || session.psychId === filters.specialist
+  return paymentMatches && attendanceMatches && specialistMatches
+}
+
+export const latestSessionForClient = (sessions, clientId) => sessions
+  .filter((session) => session.clientId === clientId && session.status !== 'cancelled')
+  .toSorted((left, right) => (
+    right.date.localeCompare(left.date)
+    || right.time.localeCompare(left.time)
+    || right.id.localeCompare(left.id)
+  ))[0] || null
+
+export const sessionSpecialistId = ({
+  availablePsychologists,
+  ownPsychId = null,
+  preferredPsychId = null,
+  latestPsychId = null,
+  clientPsychId = null,
+  currentPsychId = null,
+}) => {
+  const availableIds = new Set(availablePsychologists.map((psychologist) => psychologist.id))
+  if (ownPsychId && availableIds.has(ownPsychId)) return ownPsychId
+  return [preferredPsychId, latestPsychId, clientPsychId, currentPsychId]
+    .find((id) => availableIds.has(id)) || ''
+}
+
+export const occupiedSessionsForSpecialistDay = (sessions, {
+  psychId, date, excludeId = null,
+} = {}) => sessions
+  .filter((session) => (
+    session.psychId === psychId
+    && session.date === date
+    && session.id !== excludeId
+    && session.status !== 'cancelled'
+  ))
+  .toSorted(compareCalendarSessionOrder)
+
+const timeFromMinutes = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
+
+export const occupiedTimeLabels = (sessions) => {
+  const labels = new Set()
+  for (const session of sessions) {
+    labels.add(`${session.time}-${timeFromMinutes(timeToMin(session.time) + (session.duration ?? 50))}`)
+  }
+  return [...labels]
+}
+
+export const suggestedSessionTime = (sessions, options = {}) => {
+  const occupied = occupiedSessionsForSpecialistDay(sessions, options)
+  if (occupied.length === 0) return null
+  const end = Math.max(...occupied.map((session) => timeToMin(session.time) + (session.duration ?? 50)))
+  return end < 24 * 60 ? timeFromMinutes(end) : null
 }
 
 export const dayAttention = (state, role, date) => {
@@ -207,7 +307,7 @@ export const dayAttention = (state, role, date) => {
     .sort((a, b) => b.amount - a.amount)
 }
 
-export const todayWorkspace = (state, role, now) => {
+export const todayWorkspace = (state, role, now, outstandingRange = null) => {
   const today = toISODate(now)
   const nowMin = now.getHours() * 60 + now.getMinutes()
   const scoped = sessionsForRole(state, role)
@@ -245,7 +345,11 @@ export const todayWorkspace = (state, role, now) => {
     schedule,
     daySummary: dayStatusSummary(schedule, today, nowMin),
     attention: dayAttention(state, role, today).slice(0, 3),
-    outstanding: scoped.reduce((sum, session) => sum + outstandingOf(session), 0),
+    outstanding: scoped
+      .filter((session) => !outstandingRange || (
+        session.date >= outstandingRange.from && session.date <= outstandingRange.to
+      ))
+      .reduce((sum, session) => sum + outstandingOf(session), 0),
     summary,
   }
 }

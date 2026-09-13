@@ -19,15 +19,22 @@ const PROTECTED_ROUTE_RULES = Object.freeze({
   calendar: WORKSPACE_READ,
   clients: WORKSPACE_READ,
   client: WORKSPACE_READ,
-  tus: allOf('tus.manage'),
-  tusGroup: allOf('tus.manage'),
-  english: allOf('tus.manage'),
-  team: allOf('staff.manage'),
+  // The view itself waits for a proved group assignment before loading any
+  // activity data. Keeping the shell route behind ordinary workspace read
+  // access lets a direct link resolve to that safe empty state.
+  tus: WORKSPACE_READ,
+  tusGroup: WORKSPACE_READ,
+  english: WORKSPACE_READ,
+  team: anyOf('staff.manage', 'permissions.manage'),
   psych: allOf('staff.manage'),
   payments: anyOf('appointment.charge.read', 'finance.centre.read'),
   ledger: allOf('finance.centre.read'),
   reports: allOf('finance.centre.read'),
-  settings: allOf(),
+  // Settings is a shell route only when at least one protected settings
+  // section is available. The profile remains the safe fallback for a
+  // specialist without centre-management capabilities.
+  settings: allOf('operations.health.read'),
+  profile: allOf(),
 })
 
 const PROTECTED_ACTION_RULES = Object.freeze({

@@ -82,6 +82,7 @@ const coreApp = (overrides = {}) => {
     postAppointment: unavailable('appointments.create'),
     postAppointmentEdit: unavailable('appointments.edit'),
     postAppointmentCancellation: unavailable('appointments.cancel'),
+    postAppointmentRestoration: unavailable('appointments.restore'),
     postAppointmentPayment: unavailable('appointments.payment'),
     postPaymentCorrection: unavailable('payments.correct'),
     safeLog: vi.fn(),

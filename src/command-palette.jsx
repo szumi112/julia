@@ -8,23 +8,48 @@ import { Icon } from './icons.jsx'
 import { Avatar, EmptyState } from './ui.jsx'
 import { searchNorm as norm, plural } from './format.js'
 import { clientsForRole } from './workspace.js'
+import { canPerformAction } from './capability-access.js'
 
 const VIEW_ITEMS = [
   { view: 'dashboard', label: 'Dziś', icon: 'dashboard' },
-  { view: 'calendar', label: 'Kalendarz', icon: 'calendar' },
+  { view: 'calendar', label: 'Grafik', icon: 'calendar', keywords: 'kalendarz terminarz wizyty plan' },
   { view: 'clients', label: 'Klienci', icon: 'clients' },
   { view: 'tus', label: 'Zajęcia TUS', icon: 'group' },
   { view: 'english', label: 'Angielski', icon: 'clients' },
-  { view: 'team', label: 'Zespół', icon: 'team' },
-  { view: 'payments', label: 'Finanse', icon: 'payments' },
-  { view: 'ledger', label: 'Rejestr', icon: 'reports' },
+  { view: 'team', label: 'Zespół', icon: 'team', keywords: 'osoby personel pracownicy specjalistki' },
+  { view: 'payments', label: 'Finanse', icon: 'payments', keywords: 'płatności płatność wpłaty rozliczenia rachunki' },
   { view: 'reports', label: 'Raporty', icon: 'reports' },
+  { view: 'profile', label: 'Mój profil', icon: 'settings', keywords: 'konto hasło logowanie wyloguj' },
   { view: 'settings', label: 'Ustawienia', icon: 'settings' },
 ]
 
+const TEAM_SECTION_ITEMS = [
+  { section: 'access', label: 'Zaproś do panelu', keywords: 'zaproszenie zaproszenia personel', action: 'staff.invite' },
+  { section: 'permissions', label: 'Uprawnienia', keywords: 'uprawnienia dostęp personelu', action: 'permissions.read' },
+]
+
+const SETTINGS_SECTION_ITEMS = [
+  { section: 'security', label: 'Bezpieczeństwo danych', keywords: 'stan systemu kopia zapasowa backup bezpieczeństwo dane', action: 'operations.health.read' },
+]
+
+const professionalTitleFor = (person) => (
+  typeof person?.professionalTitle === 'string' && person.professionalTitle
+    ? person.professionalTitle
+    : typeof person?.spec === 'string' && person.spec
+      ? person.spec
+      : typeof person?.title === 'string' ? person.title : ''
+)
+
+const personSearchText = (person) => [
+  person?.name,
+  person?.professionalTitle,
+  person?.spec,
+  person?.title,
+].filter((value) => typeof value === 'string').join(' ')
+
 export function CommandPalette({ onClose }) {
   const { state } = useApp()
-  const { role, canAccess, navigate } = useShell()
+  const { appMode, capabilities, role, canAccess, canShowInNavigation, navigate } = useShell()
   const [query, setQuery] = useState('')
   const [sel, setSel] = useState(0)
   const panelRef = useRef(null)
@@ -54,31 +79,56 @@ export function CommandPalette({ onClose }) {
         )
     }
     state.psychologists
-      .filter((p) => canAccess('psych') && (!q || norm(p.name + ' ' + p.spec).includes(q)))
+      .filter((p) => canAccess('psych') && (!q || norm(personSearchText(p)).includes(q)))
       .slice(0, q ? 5 : 3)
       .forEach((p) =>
         out.push({
           key: `p-${p.id}`,
           group: 'Zespół',
-          title: `${p.title} ${p.name}`,
-          sub: p.spec,
-          avatar: { name: p.name, color: p.color },
+          title: p.name,
+          sub: professionalTitleFor(p),
+          avatar: { name: p.name, color: p.color, avatarKey: p.avatarKey },
           run: () => navigate('psych', { id: p.id }),
         })
       )
     if (q) {
-      VIEW_ITEMS.filter((v) => canAccess(v.view) && norm(v.label).includes(q)).forEach((v) =>
+      VIEW_ITEMS.filter((v) => (
+        (canShowInNavigation || canAccess)(v.view)
+        && norm(`${v.label} ${v.keywords || ''}`).includes(q)
+      )).forEach((v) =>
         out.push({
           key: `v-${v.view}`,
-          group: 'Przejdź do',
+          group: 'Strony',
           title: v.label,
           icon: v.icon,
           run: () => navigate(v.view),
         })
       )
+      if (appMode === 'app' && canAccess('team')) {
+        TEAM_SECTION_ITEMS
+          .filter((item) => canPerformAction(capabilities, item.action) && norm(`${item.label} ${item.keywords}`).includes(q))
+          .forEach((item) => out.push({
+            key: `v-team-${item.section}`,
+            group: 'Strony',
+            title: item.label,
+            icon: 'team',
+            run: () => navigate('team', { section: item.section }),
+          }))
+      }
+      if (appMode === 'app' && canAccess('settings')) {
+        SETTINGS_SECTION_ITEMS
+          .filter((item) => canPerformAction(capabilities, item.action) && norm(`${item.label} ${item.keywords}`).includes(q))
+          .forEach((item) => out.push({
+            key: `v-settings-${item.section}`,
+            group: 'Strony',
+            title: item.label,
+            icon: 'settings',
+            run: () => navigate('settings', { section: item.section }),
+          }))
+      }
     }
     return out
-  }, [q, role, state.clients, state.psychologists, canAccess, navigate])
+  }, [appMode, capabilities, q, role, state.clients, state.psychologists, canAccess, canShowInNavigation, navigate])
 
   useEffect(() => { setSel(0) }, [q])
 
@@ -186,7 +236,7 @@ export function CommandPalette({ onClose }) {
             autoComplete="off"
             spellCheck={false}
             value={query}
-            placeholder="Szukaj klienta, specjalistki, widoku…"
+            placeholder="Szukaj klienta, osoby lub strony…"
             aria-label="Szukaj w panelu"
             role="combobox"
             aria-expanded="true"
@@ -208,7 +258,7 @@ export function CommandPalette({ onClose }) {
               compact
               icon="search"
               title="Nic nie znaleziono"
-              hint="Spróbuj wpisać imię klienta albo nazwisko specjalistki."
+              hint="Spróbuj wpisać imię klienta, osoby lub strony."
             />
           )}
           {results.map((item, i) => {
@@ -228,7 +278,7 @@ export function CommandPalette({ onClose }) {
                   onMouseMove={() => setSel(i)}
                 >
                   {item.avatar ? (
-                    <Avatar name={item.avatar.name} color={item.avatar.color} size={34} />
+                    <Avatar name={item.avatar.name} color={item.avatar.color} avatarKey={item.avatar.avatarKey} size={34} />
                   ) : (
                     <span className="cmd__icon"><Icon name={item.icon} size={17} /></span>
                   )}

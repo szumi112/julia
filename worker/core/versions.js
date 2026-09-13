@@ -132,8 +132,8 @@ function paymentAggregate(value) {
 function appointmentSnapshot(entity) {
   const row = captureExact(entity, [
     'id', 'clientId', 'specialistId', 'serviceId', 'startsAt', 'endsAt', 'timeZone',
-    'location', 'status', 'source', 'version', 'cancelledAt', 'createdAt', 'updatedAt',
-    'paymentAggregate',
+    'location', 'status', 'source', 'version', 'cancelledAt', 'cancellationReason',
+    'createdAt', 'updatedAt', 'paymentAggregate',
   ])
   if (!isAppointmentId(row.id) || !isClientId(row.clientId)
     || !isSpecialistId(row.specialistId) || !service(row.serviceId)
@@ -143,16 +143,20 @@ function appointmentSnapshot(entity) {
     || !instant(row.createdAt) || !instant(row.updatedAt) || row.createdAt > row.updatedAt
     || !((row.status === 'cancelled' && instant(row.cancelledAt))
       || (row.status !== 'cancelled' && row.cancelledAt === null))) fail()
+  if (row.status !== 'cancelled' && row.cancellationReason !== null) fail()
+  if (row.cancellationReason !== null
+    && !['client', 'centre', 'late_paid'].includes(row.cancellationReason)) fail()
   try { assertLocation(row.location) } catch { fail() }
   return {
     cancelledAt: row.cancelledAt,
+    cancellationReason: row.cancellationReason,
     clientId: row.clientId,
     createdAt: row.createdAt,
     endsAt: row.endsAt,
     id: row.id,
     location: row.location,
     paymentAggregate: paymentAggregate(row.paymentAggregate),
-    schema: 'appointment.v1',
+    schema: 'appointment.v2',
     serviceId: row.serviceId,
     source: row.source,
     specialistId: row.specialistId,

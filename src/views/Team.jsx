@@ -1,21 +1,23 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useApp, useWorkspaceRefresh, useWorkspaceRetry, useWorkspaceWindow, monthStats, clientOutstanding, lastSessionOf, upcomingSessions, revenueSeries } from '../store.jsx'
+import { useApp, useWorkspaceRefresh, useWorkspaceRetry, useWorkspaceWindow, monthStats, clientOutstanding, lastSessionOf, upcomingSessions } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
 import { useMinuteNow } from '../clock.js'
-import { Avatar, Pill, Button, Chip, IconBtn, EmptyState, Stat } from '../ui.jsx'
+import { Avatar, Pill, Button, Chip, IconBtn, EmptyState, Stat, Tabs } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
-import { AreaChart } from '../charts.jsx'
 import {
-  fmtMoney, fmtNumber, fmtShortDate, monthKey, addMonths, fmtMonthName,
-  sessionsWord, fmtDayMonth, clientsWord, plural, toISODate,
+  fmtMoney, fmtNumber, fmtShortDate, monthKey, fmtMonthName,
+  sessionsWord, fmtDayMonth, clientsWord, plural, warsawDateTimeFromUtc,
 } from '../format.js'
 import { sessionConflicts, specialistWeekLoad } from '../workspace.js'
-import { EntityLink, FilterBar, FilterGroup } from '../ux-patterns.jsx'
-import { rollingWorkspaceRange } from '../workspace-view.js'
+import { EntityLink, FilterBar, FilterGroup, ViewState, useRouteParamsSync } from '../ux-patterns.jsx'
+import { futureWorkspaceRange, isWorkspaceRangeCovered, monthWorkspaceRange, rollingWorkspaceRange } from '../workspace-view.js'
+import { isWorkspaceRangePending } from '../workspace-load-request.js'
 import { useAuth } from '../auth.jsx'
 import { SpecialistAccessForm, SpecialistProfileForm } from './SpecialistProfileForms.jsx'
+import { PermissionsAccess, StaffAccess } from './StaffAccess.jsx'
 import { canPerformAction } from '../capability-access.js'
+import { accessPresentationFor, rolePresentationFor } from '../auth-role.js'
 import { sortProfessionalDirectory } from '../historical-workspace-view.js'
 
 const TEAM_FILTERS = [
@@ -24,14 +26,68 @@ const TEAM_FILTERS = [
   { value: 'full', label: 'Pełne obłożenie' },
 ]
 
-const ACCESS_LABELS = Object.freeze({
-  enabled: 'Dostęp aktywny',
-  invited: 'Zaproszenie oczekuje',
-  unclaimed: 'Brak dostępu do panelu',
-})
-const ACCESS_TONES = Object.freeze({ enabled: 'sage', invited: 'amber', unclaimed: 'ink' })
+function ProtectedTeam({ params = {} }) {
+  const { capabilities, canAccess, navigate, patchViewState } = useShell()
+  const canReadDirectory = canAccess('dashboard')
+  const canManageStaff = canPerformAction(capabilities, 'staff.invite')
+  const canManagePermissions = canPerformAction(capabilities, 'permissions.read')
+  const sections = useMemo(() => [
+    ...(canReadDirectory ? [{ value: 'team', label: 'Zespół' }] : []),
+    ...(canManageStaff ? [{ value: 'access', label: 'Dostęp' }] : []),
+    ...(canManagePermissions ? [{ value: 'permissions', label: 'Uprawnienia' }] : []),
+  ], [canManagePermissions, canManageStaff, canReadDirectory])
+  const defaultSection = sections[0]?.value || 'team'
+  const [activeSection, setActiveSection] = useState(() => (
+    sections.some((section) => section.value === params.section) ? params.section : defaultSection
+  ))
+  const [permissionStaffId, setPermissionStaffId] = useState(() => (
+    typeof params.staffId === 'string' ? params.staffId : undefined
+  ))
 
-function AppTeamDirectory({ onRefresh, psychologists }) {
+  useEffect(() => {
+    if (!sections.some((section) => section.value === activeSection)) setActiveSection(defaultSection)
+  }, [activeSection, defaultSection, sections])
+
+  useEffect(() => {
+    patchViewState('team', { section: activeSection })
+  }, [activeSection, patchViewState])
+
+  useRouteParamsSync('team', {
+    section: activeSection === defaultSection ? undefined : activeSection,
+    staffId: activeSection === 'permissions' ? permissionStaffId : undefined,
+  })
+
+  const selectSection = (section) => {
+    if (section === activeSection) return
+    navigate('team', section === defaultSection ? undefined : {
+      section,
+      staffId: section === 'permissions' ? permissionStaffId : undefined,
+    }, () => {
+      requestAnimationFrame(() => {
+        document.querySelector('.view .tabs__panel h2')?.focus({ preventScroll: true })
+      })
+    })
+  }
+
+  if (!sections.length) return null
+
+  return (
+    <Tabs options={sections} value={activeSection} onChange={selectSection} ariaLabel="Obszary zespołu">
+      {activeSection === 'team' ? <ProtectedTeamDirectory /> : null}
+      {activeSection === 'access' && canManageStaff ? <StaffAccess /> : null}
+      {activeSection === 'permissions' && canManagePermissions ? <PermissionsAccess
+        selectedStaffId={permissionStaffId}
+        onSelectedStaffIdChange={setPermissionStaffId}
+      /> : null}
+    </Tabs>
+  )
+}
+
+const sessionsInRange = (sessions, range) => sessions.filter(
+  (session) => session.date >= range.from && session.date <= range.to,
+)
+
+function AppTeamDirectory({ blocked, notice, onRefresh, psychologists, stale }) {
   const { refresh: refreshSession, session } = useAuth()
   const { capabilities } = useShell()
   const canCreate = canPerformAction(capabilities, 'specialist.create')
@@ -47,49 +103,57 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
     <div>
       <div className="view-head">
         <div>
-          <div className="eyebrow">Katalog specjalistek</div>
           <h1 className="display view-head__title">Zespół <em>centrum</em></h1>
           <p className="view-head__sub">{canManageStaff
-            ? 'Twórz i edytuj profile oraz aktywuj dostęp do panelu.'
+            ? 'Profil specjalistki i dostęp do panelu tworzysz osobno.'
             : 'Lista aktywnych specjalistek jest dostępna tylko do odczytu.'}</p>
         </div>
         {canCreate ? <div className="view-head__actions">
           <Button icon="plus" onClick={() => setSurface({ kind: 'create' })}>Dodaj specjalistkę</Button>
         </div> : null}
       </div>
-      <div className="grid-2 team-grid">
-        {psychologists.map((psychologist, index) => (
-          <article className="card team-card" key={psychologist.id} data-psych-id={psychologist.id}>
-            <div className="team-card__profile">
-              <Avatar
-                name={psychologist.name}
-                color={psychologist.color}
-                size={52}
-                variant={index % 2 === 0 ? 'sky' : 'pink'}
-              />
-              <div className="team-card__identity">
-                <h2 className="team-card__name">{psychologist.name}</h2>
-                <span className="team-card__spec">{psychologist.professionalTitle} · {fmtMoney(psychologist.rate)} / sesja</span>
-                <Pill tone={ACCESS_TONES[psychologist.accessStatus ?? 'enabled']}>
-                  {ACCESS_LABELS[psychologist.accessStatus ?? 'enabled']}
-                </Pill>
+      {blocked || <>
+        {notice}
+        <div className={`grid-2 team-grid ${stale ? 'is-refreshing' : ''}`} aria-busy={stale || undefined}>
+          {psychologists.map((psychologist, index) => {
+            const access = accessPresentationFor({ accessStatus: psychologist.accessStatus ?? 'enabled' })
+            return (
+              <article className="card team-card" key={psychologist.id} data-psych-id={psychologist.id}>
+              <div className="team-card__profile">
+                <Avatar
+                  name={psychologist.name}
+                  color={psychologist.color}
+                  avatarKey={psychologist.avatarKey}
+                  size={52}
+                  variant={index % 2 === 0 ? 'sky' : 'pink'}
+                />
+                <div className="team-card__identity">
+                  <h2 className="team-card__name">{psychologist.name}</h2>
+                  <span className="team-card__spec">{rolePresentationFor({
+                    role: 'specialist', professionalTitle: psychologist.professionalTitle,
+                  })} · {fmtMoney(psychologist.rate)} / sesja</span>
+                  <Pill tone={access.tone}>
+                    {access.label}
+                  </Pill>
+                </div>
               </div>
-            </div>
-            {canEdit || canLink ? (
-              <div className="team-card__footer">
-                {canEdit ? <Button size="sm" variant="ghost" onClick={() => setSurface({
-                  kind: 'edit', profile: psychologist,
-                })}>Edytuj profil</Button> : null}
-                {canLink && psychologist.accessStatus === 'unclaimed' ? (
-                  <Button size="sm" variant="soft" onClick={() => setSurface({
-                    kind: 'access', profile: psychologist,
-                  })}>Aktywuj dostęp</Button>
-                ) : null}
-              </div>
-            ) : null}
-          </article>
-        ))}
-      </div>
+              {canEdit || canLink ? (
+                <div className="team-card__footer">
+                  {canEdit ? <Button size="sm" variant="ghost" onClick={() => setSurface({
+                    kind: 'edit', profile: psychologist,
+                  })}>Edytuj profil</Button> : null}
+                  {canLink && psychologist.accessStatus === 'unclaimed' ? (
+                    <Button size="sm" variant="soft" onClick={() => setSurface({
+                      kind: 'access', profile: psychologist,
+                    })}>Zaproś do panelu</Button>
+                  ) : null}
+                </div>
+              ) : null}
+              </article>
+            )
+          })}
+        </div>
+      </>}
       {surface?.kind === 'create' ? (
         <SpecialistProfileForm onClose={() => setSurface(null)} onSaved={onRefresh} />
       ) : null}
@@ -109,6 +173,59 @@ function AppTeamDirectory({ onRefresh, psychologists }) {
       ) : null}
     </div>
   )
+}
+
+function ProtectedTeamDirectory() {
+  const { state, workspace, workspaceFailures, workspacePendingRanges } = useApp()
+  const now = useMinuteNow()
+  const today = warsawDateTimeFromUtc(now.toISOString()).date
+  const workspaceRange = useMemo(() => rollingWorkspaceRange(today), [today])
+  const workspaceState = useWorkspaceWindow(workspaceRange, true)
+  const retryWorkspace = useWorkspaceRetry()
+  const refreshWorkspace = useWorkspaceRefresh()
+  const workspaceCovered = isWorkspaceRangeCovered(workspace.loadedRanges, workspaceRange)
+  const workspaceFailed = workspaceFailures.has(`${workspaceRange.from}|${workspaceRange.to}`)
+  const workspaceRefreshing = workspaceCovered
+    && isWorkspaceRangePending(workspacePendingRanges, workspaceRange)
+  const psychologists = useMemo(
+    () => sortProfessionalDirectory(state.psychologists),
+    [state.psychologists],
+  )
+
+  return <AppTeamDirectory
+    blocked={!workspaceCovered ? <ViewState
+      ariaLabel="Stan zespołu"
+      tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
+      icon="team"
+      title={workspaceState === 'unavailable' ? 'Zespół jest teraz niedostępny' : 'Wczytuję zespół…'}
+      hint={workspaceState === 'unavailable'
+        ? 'Nie pokazujemy niepełnego katalogu specjalistek.'
+        : 'Pobieramy uprawniony zakres aktywnych specjalistek.'}
+      action={workspaceState === 'unavailable'
+        ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
+        : undefined}
+    /> : null}
+    notice={<>
+      {workspaceRefreshing && <ViewState
+        compact
+        tone="loading"
+        icon="team"
+        title="Odświeżamy zespół…"
+        hint="Wyświetlamy ostatnio potwierdzony katalog specjalistek."
+      />}
+      {workspaceCovered && workspaceFailed && <ViewState
+        compact
+        tone="error"
+        icon="team"
+        title="Nie udało się odświeżyć zespołu"
+        hint="Wyświetlamy ostatnio potwierdzony katalog specjalistek."
+        action={<Button size="sm" onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>}
+      />}
+    </>}
+    psychologists={psychologists}
+    onRefresh={() => refreshWorkspace(workspaceRange)}
+    stale={workspaceRefreshing}
+  />
 }
 
 function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
@@ -139,7 +256,7 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
         label={`Otwórz profil — ${psychologist.name}`}
         className="team-card__profile"
       >
-        <Avatar name={psychologist.name} color={psychologist.color} size={52} />
+        <Avatar name={psychologist.name} color={psychologist.color} avatarKey={psychologist.avatarKey} size={52} />
         <div className="team-card__identity">
           <h2 className="team-card__name" id={titleId}>{psychologist.title} {psychologist.name}</h2>
           <span className="team-card__spec">{psychologist.spec}</span>
@@ -176,7 +293,7 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
               <div className="team-conflict" role="alert" key={`${conflict.date}:${conflict.sessionIds.join(':')}`}>
                 <Icon name="alert" size={16} />
                 <span>
-                  <b>Konflikt w kalendarzu</b>
+                  <b>Konflikt w Grafiku</b>
                   <span>{fmtDayMonth(conflict.date)} · {conflictSessions.length > 1 && conflictSessions.every((session) => session.time === conflictSessions[0].time)
                     ? `${conflictSessions.length}× ${conflictSessions[0].time}`
                     : conflictSessions.map((session) => session.time).join(' i ')}</span>
@@ -210,9 +327,9 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
               date: calendarSession?.date || today,
               highlightSessionIds: calendarSession ? [calendarSession.id] : undefined,
             }}
-            label={`Kalendarz — ${psychologist.name}`}
+            label={`Grafik — ${psychologist.name}`}
           >
-            <Icon name="calendar" size={15} /> Kalendarz
+            <Icon name="calendar" size={15} /> Grafik
           </EntityLink>
         </nav>
       </div>
@@ -220,17 +337,22 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
   )
 }
 
-export function Team() {
-  const { state } = useApp()
-  const { appMode, getViewState, openPsychForm, patchViewState } = useShell()
-  const isApp = appMode === 'app'
+function DemoTeam() {
+  const { state, workspace, workspaceFailures, workspacePendingRanges } = useApp()
+  const { getViewState, openPsychForm, patchViewState } = useShell()
+  const isApp = false
   const ref = useReveal()
   const now = useMinuteNow()
-  const today = toISODate(now)
+  const today = warsawDateTimeFromUtc(now.toISOString()).date
   const workspaceRange = useMemo(() => rollingWorkspaceRange(today), [today])
   const workspaceState = useWorkspaceWindow(workspaceRange, isApp)
   const retryWorkspace = useWorkspaceRetry()
   const refreshWorkspace = useWorkspaceRefresh()
+  const workspaceCovered = !isApp || isWorkspaceRangeCovered(workspace.loadedRanges, workspaceRange)
+  const workspaceFailed = isApp && workspaceFailures.has(`${workspaceRange.from}|${workspaceRange.to}`)
+  const workspaceRefreshing = isApp && workspaceCovered
+    && isWorkspaceRangePending(workspacePendingRanges, workspaceRange)
+  const workspaceRefreshFailed = isApp && workspaceCovered && workspaceFailed
   const [filter, setFilter] = useState(() => {
     const saved = getViewState('team', { filter: 'all' })
     return TEAM_FILTERS.some((option) => option.value === saved.filter) ? saved.filter : 'all'
@@ -273,35 +395,10 @@ export function Team() {
     patchViewState('team', { filter })
   }, [filter, patchViewState])
 
-  if (isApp && workspaceState !== 'ready') {
-    return (
-      <section role="status" aria-label="Stan zespołu">
-        <EmptyState
-          icon="team"
-          title={workspaceState === 'loading' ? 'Wczytywanie zespołu…' : 'Zespół jest teraz niedostępny'}
-          hint={workspaceState === 'loading'
-            ? 'Pobieramy uprawniony zakres aktywnych specjalistek.'
-            : 'Dane pozostają tylko do odczytu.'}
-          action={workspaceState === 'unavailable'
-            ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
-            : undefined}
-        />
-      </section>
-    )
-  }
-
-  if (isApp) return (
-    <AppTeamDirectory
-      psychologists={psychologists}
-      onRefresh={() => refreshWorkspace(workspaceRange)}
-    />
-  )
-
   return (
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">Specjalistki</div>
           <h1 className="display view-head__title">Zespół <em>centrum</em></h1>
           <p className="view-head__sub">
             Obłożenie od poniedziałku do niedzieli{firstLoad ? ` · ${fmtDayMonth(firstLoad.start)} – ${fmtDayMonth(firstLoad.end)}` : ''}. Konflikty prowadzą prosto do właściwych sesji.
@@ -369,13 +466,53 @@ export function Team() {
   )
 }
 
+export function Team({ params }) {
+  const { appMode } = useShell()
+  return appMode === 'app' ? <ProtectedTeam params={params} /> : <DemoTeam />
+}
+
 export function PsychDetail({ params }) {
-  const { state } = useApp()
+  const { state, workspace } = useApp()
   const { appMode, openSessionForm, openPsychForm } = useShell()
   const isApp = appMode === 'app'
   const ref = useReveal([params.id])
   const [debtOnly, setDebtOnly] = useState(false)
+  const now = useMinuteNow()
+  const today = warsawDateTimeFromUtc(now.toISOString()).date
+  const ym = monthKey(today)
+  const monthRange = useMemo(() => monthWorkspaceRange(ym), [ym])
+  const futureRange = useMemo(() => futureWorkspaceRange(today), [today])
+  const monthWorkspaceState = useWorkspaceWindow(monthRange, isApp)
+  const futureWorkspaceState = useWorkspaceWindow(futureRange, isApp)
+  const workspaceState = monthWorkspaceState
+  const retryWorkspace = useWorkspaceRetry()
+  const workspaceCovered = !isApp || isWorkspaceRangeCovered(workspace.loadedRanges, monthRange)
   const psych = state.psychologists.find((p) => p.id === params.id)
+  if (isApp && !workspaceCovered) {
+    return (
+      <div ref={ref}>
+        <EntityLink route="team" className="link row" style={{ gap: 7, marginBottom: 20, width: 'fit-content' }}>
+          <Icon name="arrowL" size={16} /> Wróć do zespołu
+        </EntityLink>
+        <div className="view-head">
+          <div>
+            <div className="eyebrow">Zespół centrum</div>
+            <h1 className="display view-head__title">Profil specjalistki</h1>
+          </div>
+        </div>
+        <ViewState
+          ariaLabel="Stan profilu specjalistki"
+          icon="team"
+          title={workspaceState === 'loading' ? 'Wczytuję profil specjalistki…' : 'Profil specjalistki jest teraz niedostępny'}
+          hint="Pobieramy bieżący miesiąc oraz najbliższe 3 miesiące sesji."
+          tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
+          action={workspaceState === 'unavailable'
+            ? <Button onClick={() => retryWorkspace(monthRange)}>Spróbuj ponownie</Button>
+            : undefined}
+        />
+      </div>
+    )
+  }
   if (!psych) {
     return (
       <EmptyState
@@ -387,14 +524,16 @@ export function PsychDetail({ params }) {
     )
   }
 
-  const ym = monthKey(new Date())
-  const months = Array.from({ length: 6 }, (_, i) => addMonths(ym, i - 5))
-  const own = state.sessions.filter((s) => s.psychId === psych.id)
-  const series = revenueSeries(own, months)
-  const stats = monthStats(own, ym)
+  const own = state.sessions.filter((session) => (
+    session.psychId === psych.id
+    && session.date >= monthRange.from
+    && session.date <= futureRange.to
+  ))
+  const monthSessions = sessionsInRange(own, monthRange)
+  const stats = monthStats(monthSessions, ym)
   const clients = state.clients.filter((c) => c.psychId === psych.id)
   const visibleClients = debtOnly
-    ? clients.filter((c) => clientOutstanding(state.sessions, c.id) > 0)
+    ? clients.filter((c) => clientOutstanding(monthSessions, c.id) > 0)
     : clients
   const upcoming = upcomingSessions(own, 5)
   const clientOf = (id) => state.clients.find((c) => c.id === id)
@@ -406,7 +545,7 @@ export function PsychDetail({ params }) {
       </EntityLink>
 
       <div className="id-band" data-reveal style={{ '--band-color': psych.color }}>
-        <Avatar name={psych.name} color={psych.color} size={64} />
+        <Avatar name={psych.name} color={psych.color} avatarKey={psych.avatarKey} size={64} />
         <div className="id-band__main">
           <h1 className="display id-band__name">{psych.title} {psych.name}</h1>
           <div className="id-band__sub">{psych.spec}</div>
@@ -427,9 +566,9 @@ export function PsychDetail({ params }) {
 
       <div className="stats-row stats-row--4">
         <Stat label="Klienci" value={clients.length} fmt={fmtNumber} />
-        <Stat label={`Sesje · ${fmtMonthName(ym)}`} value={stats.count} fmt={(v) => fmtNumber(Math.round(v))} />
-        <Stat label={`Godziny · ${fmtMonthName(ym)}`} value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
-        <Stat label={`Przychód · ${fmtMonthName(ym)}`} value={stats.revenue} fmt={fmtMoney} />
+        <Stat label={`Sesje odbyte · ${fmtMonthName(ym)}`} value={stats.completed} fmt={(v) => fmtNumber(Math.round(v))} />
+        <Stat label={`Godziny odbytych sesji · ${fmtMonthName(ym)}`} value={stats.hours} fmt={(v) => `${fmtNumber(Math.round(v))} h`} />
+        <Stat label={`Wartość sesji · ${fmtMonthName(ym)}`} value={stats.revenue} fmt={fmtMoney} />
       </div>
 
       <div className="grid-31" style={{ marginTop: 4 }}>
@@ -450,7 +589,7 @@ export function PsychDetail({ params }) {
                   <th>Klient</th>
                   <th>Ostatnia sesja</th>
                   <th className="right">Sesje</th>
-                  <th className="right">Zaległość</th>
+                  <th className="right">Do zapłaty w tym miesiącu</th>
                 </tr>
               </thead>
               <tbody>
@@ -464,14 +603,14 @@ export function PsychDetail({ params }) {
                 {clients.length > 0 && visibleClients.length === 0 && (
                   <tr>
                     <td colSpan={4}>
-                      <EmptyState compact icon="check" title="Brak zaległości" hint="Wszyscy klienci tej specjalistki są rozliczeni." />
+                      <EmptyState compact icon="check" title="Brak zaległości w tym miesiącu" hint="W tym miesiącu nie ma nieopłaconych sesji." />
                     </td>
                   </tr>
                 )}
                 {visibleClients.map((c) => {
-                  const last = lastSessionOf(state.sessions, c.id)
-                  const count = state.sessions.filter((s) => s.clientId === c.id && s.status === 'completed').length
-                  const debt = clientOutstanding(state.sessions, c.id)
+                  const last = lastSessionOf(monthSessions, c.id)
+                  const count = monthSessions.filter((s) => s.clientId === c.id && s.status === 'completed').length
+                  const debt = clientOutstanding(monthSessions, c.id)
                   return (
                     <tr key={c.id}>
                       <td>
@@ -489,7 +628,7 @@ export function PsychDetail({ params }) {
                       </td>
                       <td className="muted" data-th="Ostatnia sesja">{last ? fmtShortDate(last.date) : '—'}</td>
                       <td className="right num-cell" data-th="Sesje">{count}</td>
-                      <td className="right" data-th="Zaległość">
+                      <td className="right" data-th="Do zapłaty w tym miesiącu">
                         {debt > 0 ? <Pill tone="amber">{fmtMoney(debt)}</Pill> : <span className="faint">—</span>}
                       </td>
                     </tr>
@@ -499,26 +638,32 @@ export function PsychDetail({ params }) {
             </table>
           </div>
 
-          <div className="card card--pad" data-reveal>
-            <h2 className="card-title">Przychód · ostatnie 6 miesięcy</h2>
-            <div style={{ marginTop: 12 }}>
-              <AreaChart data={series} height={200} />
-            </div>
-          </div>
         </div>
 
         <div className="card card--pad" data-reveal style={{ alignSelf: 'start' }}>
           <h2 className="card-title">Najbliższe sesje</h2>
           <div className="agenda" style={{ marginTop: 6 }}>
-            {upcoming.length === 0 && (
+            {futureWorkspaceState !== 'ready' && (
+              <div className="row" role="status" style={{ gap: 10 }}>
+                <p className="faint">{futureWorkspaceState === 'loading'
+                  ? 'Wczytuję najbliższe sesje…'
+                  : 'Nie udało się wczytać najbliższych sesji.'}</p>
+                {futureWorkspaceState === 'unavailable' && (
+                  <Button size="sm" variant="soft" onClick={() => retryWorkspace(futureRange)}>
+                    Spróbuj ponownie
+                  </Button>
+                )}
+              </div>
+            )}
+            {futureWorkspaceState === 'ready' && upcoming.length === 0 && (
               <EmptyState
                 compact
                 icon="calendar"
-                title="Brak zaplanowanych sesji"
+                title="Brak sesji w najbliższych 3 miesiącach"
                 action={!isApp && <Button size="sm" variant="soft" icon="plus" onClick={() => openSessionForm({ psychId: psych.id })}>Nowa sesja</Button>}
               />
             )}
-            {upcoming.map((s) => {
+            {futureWorkspaceState === 'ready' && upcoming.map((s) => {
               const Row = isApp ? 'div' : 'button'
               return (
                 <Row key={s.id} className={`agenda__row ${isApp ? '' : 'hover-row'}`} style={{ width: '100%', textAlign: 'left' }}

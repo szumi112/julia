@@ -376,17 +376,17 @@ function healthReadDb({
 let publisherSerial = 0
 let invalidDenialSerial = 0
 
-async function publisherFixture({ id = 'run_publish', scheduledFor } = {}) {
+async function publisherFixture({ id = 'run_publish', scheduledFor, leaseExpiresAt } = {}) {
   const exactScheduledFor = scheduledFor ?? nowIso(NOW_MS - 10_000 - (++publisherSerial))
   const leaseOwner = `lease_${id}`
-  const leaseExpiresAt = nowIso(NOW_MS + LEASE_MS)
+  const exactLeaseExpiresAt = leaseExpiresAt ?? nowIso(NOW_MS + LEASE_MS)
   await seedScheduler({
     id,
     scheduledFor: exactScheduledFor,
     status: 'running',
     completedAt: null,
     leaseOwner,
-    leaseExpiresAt,
+    leaseExpiresAt: exactLeaseExpiresAt,
   })
   return {
     context: await cryptoContext(),
@@ -395,7 +395,7 @@ async function publisherFixture({ id = 'run_publish', scheduledFor } = {}) {
       scheduledFor: exactScheduledFor,
       attemptCount: 1,
       leaseOwner,
-      leaseExpiresAt,
+      leaseExpiresAt: exactLeaseExpiresAt,
       claimedJobs: 3,
       succeededJobs: 2,
       failedJobs: 1,
@@ -1924,7 +1924,7 @@ describe('atomic scheduled operational publication', () => {
       createdActions: 10,
       publicationAttempts: 1,
     })
-    expect(executions).toBe(26)
+    expect(executions).toBe(27)
     expect(maxBindings).toBeLessThanOrEqual(39)
   })
 
@@ -2301,4 +2301,244 @@ it('does not create incidents for obsolete dead Access jobs after native-auth cu
   await seedOutbox({ id: 'obsolete_access_job', status: 'dead', updatedAt: nowIso(NOW_MS + 1000) })
   const result = await evaluate(NOW_MS + 1000, { appEnv: 'staging' })
   expect(result.actionCandidates.some(candidate => candidate.entityId === 'obsolete_access_job')).toBe(false)
+})
+
+describe('automatic operational action recovery', () => {
+  it('resolves only backup and scheduler alarms with strictly later successful evidence', async () => {
+    const successMs = NOW_MS + 172_800_000
+    const publishMs = successMs + 60_000
+    const successAt = nowIso(successMs)
+    const publishAt = nowIso(publishMs)
+    const context = await cryptoContext()
+
+    await setState('access.desired_generation', '{"generation":0}', publishAt)
+    await env.DB.prepare(
+      `UPDATE operational_actions
+       SET status='resolved',version=version+1,updated_at=?,resolved_at=?
+       WHERE status='open'
+         AND kind IN ('backup_failed','backup_stale','scheduler_stale','access_reconciliation_lag')`
+    ).bind(nowIso(successMs - 300_000), nowIso(successMs - 300_000)).run()
+
+    await seedScheduler({
+      id: 'run_auto_recovery_baseline',
+      scheduledFor: nowIso(successMs - 172_800_000),
+    })
+    await seedBackup({
+      id: 'bkp_auto_recovery_success',
+      status: 'stored',
+      createdAt: successAt,
+      completedAt: successAt,
+      updatedAt: successAt,
+    })
+    await seedAction(context, {
+      id: 'opa_auto_backup_failed_old',
+      fingerprint: 'backup.failed:bkp_auto_failed_old',
+      kind: 'backup_failed',
+      severity: 'critical',
+      entityType: 'backup_run',
+      entityId: 'bkp_auto_failed_old',
+      details: { backupId: 'bkp_auto_failed_old', errorCode: 'BACKUP_FAILED' },
+      createdAt: nowIso(successMs - 120_000),
+    })
+    await seedAction(context, {
+      id: 'opa_auto_backup_stale_old',
+      fingerprint: 'backup.stale',
+      kind: 'backup_stale',
+      severity: 'critical',
+      entityType: 'centre',
+      entityId: 'centre_1',
+      details: { errorCode: 'BACKUP_STALE', thresholdHours: 36 },
+      createdAt: nowIso(successMs - 120_000),
+    })
+    await seedAction(context, {
+      id: 'opa_auto_backup_failed_fresh',
+      fingerprint: 'backup.failed:bkp_auto_failed_fresh',
+      kind: 'backup_failed',
+      severity: 'critical',
+      entityType: 'backup_run',
+      entityId: 'bkp_auto_failed_fresh',
+      details: { backupId: 'bkp_auto_failed_fresh', errorCode: 'BACKUP_FAILED' },
+      createdAt: successAt,
+    })
+    await seedAction(context, {
+      id: 'opa_auto_scheduler_old',
+      fingerprint: 'scheduler.stale',
+      kind: 'scheduler_stale',
+      severity: 'critical',
+      entityType: 'scheduler_run',
+      entityId: 'run_auto_scheduler_old',
+      details: {
+        errorCode: 'SCHEDULER_STALE',
+        schedulerRunId: 'run_auto_scheduler_old',
+        thresholdMinutes: 15,
+      },
+      createdAt: nowIso(successMs - 120_000),
+    })
+    await seedAction(context, {
+      id: 'opa_auto_access_manual',
+      fingerprint: 'access.reconciliation_lag',
+      kind: 'access_reconciliation_lag',
+      severity: 'critical',
+      entityType: 'access_group',
+      entityId: 'centre_1',
+      details: {
+        appliedGeneration: 0,
+        desiredGeneration: 1,
+        errorCode: 'ACCESS_RECONCILIATION_LAG',
+      },
+      createdAt: nowIso(successMs - 120_000),
+    })
+    await seedAction(context, {
+      id: 'opa_auto_denial_manual',
+      fingerprint: 'security.authorization_denials:stf_auto_manual:staff.manage',
+      kind: 'authorization_denial_spike',
+      severity: 'warning',
+      entityType: 'staff_user',
+      entityId: 'stf_auto_manual',
+      details: {
+        actorId: 'stf_auto_manual',
+        capability: 'staff.manage',
+        count: 10,
+        errorCode: 'AUTHORIZATION_DENIAL_SPIKE',
+        threshold: 10,
+      },
+      createdAt: nowIso(successMs - 120_000),
+    })
+
+    const beforeOutbox = (await env.DB.prepare(
+      'SELECT count(*) AS count FROM outbox_jobs'
+    ).first()).count
+    const first = await publisherFixture({
+      id: 'run_auto_recovery_first',
+      scheduledFor: nowIso(publishMs - 10_000),
+      leaseExpiresAt: nowIso(publishMs + LEASE_MS),
+    })
+    const publication = await publishScheduledOperationalState({
+      db: env.DB,
+      cryptoContext: first.context,
+      run: first.run,
+      idFactory: idSequence('opa_auto_recovery_first'),
+      now: () => publishMs,
+    })
+    expect(checkFor(publication, 'backup.freshness')).toMatchObject({
+      status: 'ok', detailCode: 'BACKUP_FRESH', lastSuccessAt: successAt,
+    })
+
+    const recovered = (await env.DB.prepare(
+      `SELECT id,status,version,updated_at,resolved_at
+       FROM operational_actions
+       WHERE id IN ('opa_auto_backup_failed_old','opa_auto_backup_stale_old',
+                    'opa_auto_scheduler_old') ORDER BY id`
+    ).all()).results
+    expect(recovered).toEqual([
+      {
+        id: 'opa_auto_backup_failed_old', status: 'resolved', version: 2,
+        updated_at: publishAt, resolved_at: publishAt,
+      },
+      {
+        id: 'opa_auto_backup_stale_old', status: 'resolved', version: 2,
+        updated_at: publishAt, resolved_at: publishAt,
+      },
+      {
+        id: 'opa_auto_scheduler_old', status: 'resolved', version: 2,
+        updated_at: publishAt, resolved_at: publishAt,
+      },
+    ])
+    expect((await env.DB.prepare(
+      `SELECT id,status,version,resolved_at FROM operational_actions
+       WHERE id IN ('opa_auto_backup_failed_fresh','opa_auto_access_manual',
+                    'opa_auto_denial_manual') ORDER BY id`
+    ).all()).results).toEqual([
+      { id: 'opa_auto_access_manual', status: 'open', version: 1, resolved_at: null },
+      { id: 'opa_auto_backup_failed_fresh', status: 'open', version: 1, resolved_at: null },
+      { id: 'opa_auto_denial_manual', status: 'open', version: 1, resolved_at: null },
+    ])
+    expect((await env.DB.prepare(
+      `SELECT occurred_at,actor_staff_id,action,entity_id,result,reason_envelope,
+              correlation_id,metadata_json
+       FROM audit_events
+       WHERE entity_id IN ('opa_auto_backup_failed_old','opa_auto_backup_stale_old',
+                           'opa_auto_scheduler_old') ORDER BY entity_id`
+    ).all()).results).toEqual([
+      {
+        occurred_at: publishAt, actor_staff_id: null,
+        action: 'operational_action.resolved', entity_id: 'opa_auto_backup_failed_old',
+        result: 'success', reason_envelope: null,
+        correlation_id: first.run.id, metadata_json: '{"actionVersion":2}',
+      },
+      {
+        occurred_at: publishAt, actor_staff_id: null,
+        action: 'operational_action.resolved', entity_id: 'opa_auto_backup_stale_old',
+        result: 'success', reason_envelope: null,
+        correlation_id: first.run.id, metadata_json: '{"actionVersion":2}',
+      },
+      {
+        occurred_at: publishAt, actor_staff_id: null,
+        action: 'operational_action.resolved', entity_id: 'opa_auto_scheduler_old',
+        result: 'success', reason_envelope: null,
+        correlation_id: first.run.id, metadata_json: '{"actionVersion":2}',
+      },
+    ])
+    expect((await env.DB.prepare(
+      'SELECT count(*) AS count FROM outbox_jobs'
+    ).first()).count).toBe(beforeOutbox)
+
+    const secondPublishMs = publishMs + 60_000
+    const secondPublishAt = nowIso(secondPublishMs)
+    await seedAction(context, {
+      id: 'opa_auto_backup_stale_fresh',
+      fingerprint: 'backup.stale',
+      kind: 'backup_stale',
+      severity: 'critical',
+      entityType: 'centre',
+      entityId: 'centre_1',
+      details: { errorCode: 'BACKUP_STALE', thresholdHours: 36 },
+      createdAt: successAt,
+    })
+    await seedAction(context, {
+      id: 'opa_auto_scheduler_fresh',
+      fingerprint: 'scheduler.stale',
+      kind: 'scheduler_stale',
+      severity: 'critical',
+      entityType: 'scheduler_run',
+      entityId: 'run_auto_scheduler_fresh',
+      details: {
+        errorCode: 'SCHEDULER_STALE',
+        schedulerRunId: 'run_auto_scheduler_fresh',
+        thresholdMinutes: 15,
+      },
+      createdAt: secondPublishAt,
+    })
+    const second = await publisherFixture({
+      id: 'run_auto_recovery_second',
+      scheduledFor: nowIso(secondPublishMs - 10_000),
+      leaseExpiresAt: nowIso(secondPublishMs + LEASE_MS),
+    })
+    await publishScheduledOperationalState({
+      db: env.DB,
+      cryptoContext: second.context,
+      run: second.run,
+      idFactory: idSequence('opa_auto_recovery_second'),
+      now: () => secondPublishMs,
+    })
+
+    expect((await env.DB.prepare(
+      `SELECT id,status,version,resolved_at FROM operational_actions
+       WHERE id IN ('opa_auto_backup_failed_fresh','opa_auto_backup_stale_fresh',
+                    'opa_auto_scheduler_fresh') ORDER BY id`
+    ).all()).results).toEqual([
+      { id: 'opa_auto_backup_failed_fresh', status: 'open', version: 1, resolved_at: null },
+      { id: 'opa_auto_backup_stale_fresh', status: 'open', version: 1, resolved_at: null },
+      { id: 'opa_auto_scheduler_fresh', status: 'open', version: 1, resolved_at: null },
+    ])
+    expect((await env.DB.prepare(
+      `SELECT count(*) AS count FROM audit_events
+       WHERE action='operational_action.resolved'
+         AND entity_id IN ('opa_auto_backup_failed_old','opa_auto_backup_stale_old',
+                           'opa_auto_scheduler_old')`
+    ).first()).count).toBe(3)
+    expect((await env.DB.prepare(
+      'SELECT count(*) AS count FROM outbox_jobs'
+    ).first()).count).toBe(beforeOutbox)
+  })
 })

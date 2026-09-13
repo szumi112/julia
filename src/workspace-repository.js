@@ -21,12 +21,21 @@ import {
 import { isBillable } from './format.js'
 import { SERVICE_BY_ID } from './services.js'
 import { createApiActivityRepository } from './activity-repository.js'
+import {
+  captureSpecialistAbsence,
+  captureSpecialistAbsenceCancelInput,
+  captureSpecialistAbsenceInput,
+  captureSpecialistAbsencesPayload,
+  isSpecialistAbsenceId,
+} from './specialist-absences.js'
 
 const API_METHODS = Object.freeze([
   'loadWorkspaceWindow', 'createClient', 'editClient', 'archiveClient',
   'activateHistoricalClient',
-  'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
+  'createAppointment', 'editAppointment', 'cancelAppointment', 'restoreAppointment',
+  'recordPayment',
   'correctPayment',
+  'loadSpecialistAbsences', 'createSpecialistAbsence', 'cancelSpecialistAbsence',
   'loadActivityWorkspace',
   'createActivityGroup', 'editActivityGroup',
   'createActivityParticipant', 'editActivityParticipant',
@@ -44,8 +53,9 @@ const ACTIVITY_API_METHODS = Object.freeze([
 ])
 const REPOSITORY_METHODS = Object.freeze([
   'loadWindow', 'createClient', 'editClient', 'archiveClient', 'activateHistoricalClient',
-  'createAppointment', 'editAppointment', 'cancelAppointment', 'recordPayment',
-  'correctPayment',
+  'createAppointment', 'editAppointment', 'cancelAppointment', 'restoreAppointment',
+  'recordPayment',
+  'correctPayment', 'loadAbsences', 'createSpecialistAbsence', 'cancelSpecialistAbsence',
 ])
 const CLIENT_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'])
 const APPOINTMENT_KEYS = Object.freeze([
@@ -148,7 +158,16 @@ const captureCollection = (value, maximum) => {
   }
 }
 
-const captureClient = (input) => validateClientInput(captureRecord(input, CLIENT_KEYS, 'body'))
+const captureClient = (input) => {
+  let keys = CLIENT_KEYS
+  try {
+    const descriptors = Object.getOwnPropertyDescriptors(input)
+    if (Object.hasOwn(descriptors, 'assignmentStartsAt')) {
+      keys = [...CLIENT_KEYS, 'assignmentStartsAt']
+    }
+  } catch { fail('body') }
+  return validateClientInput(captureRecord(input, keys, 'body'))
+}
 
 const captureAppointment = (input) => {
   const captured = captureRecord(input, APPOINTMENT_KEYS, 'body')
@@ -221,6 +240,22 @@ export function createApiWorkspaceRepository(options) {
       const requested = captureWindow(input)
       return api.loadWorkspaceWindow(requested)
     },
+    async loadAbsences(input) {
+      const requested = captureWindow(input)
+      const payload = await api.loadSpecialistAbsences(requested)
+      const accepted = captureSpecialistAbsencesPayload(payload)
+      if (accepted.from !== requested.from || accepted.to !== requested.to) fail('window')
+      return accepted
+    },
+    async createSpecialistAbsence(input) {
+      const requested = captureSpecialistAbsenceInput(input)
+      return action((options) => api.createSpecialistAbsence(requested, options))
+    },
+    async cancelSpecialistAbsence(id, expectedVersion) {
+      if (!isSpecialistAbsenceId(id)) fail('absenceId')
+      const requested = captureSpecialistAbsenceCancelInput({ expectedVersion })
+      return action((options) => api.cancelSpecialistAbsence(id, requested.expectedVersion, options))
+    },
     async createClient(input) {
       const requested = captureClient(input)
       return action((options) => api.createClient(requested, options))
@@ -255,10 +290,16 @@ export function createApiWorkspaceRepository(options) {
       const requested = captureAppointmentEdit(input)
       return action((options) => api.editAppointment(id, expectedVersion, requested, options))
     },
-    async cancelAppointment(id, expectedVersion) {
+    async cancelAppointment(id, expectedVersion, reason) {
       capturedId(id, 'appointment')
       appointmentVersion(expectedVersion)
-      return action((options) => api.cancelAppointment(id, expectedVersion, options))
+      if (!['client', 'centre', 'late_paid'].includes(reason)) fail('cancellationReason')
+      return action((options) => api.cancelAppointment(id, expectedVersion, reason, options))
+    },
+    async restoreAppointment(id, expectedVersion) {
+      capturedId(id, 'appointment')
+      appointmentVersion(expectedVersion)
+      return action((options) => api.restoreAppointment(id, expectedVersion, options))
     },
     async recordPayment(id, expectedVersion, input) {
       capturedId(id, 'appointment')
@@ -351,6 +392,9 @@ const captureLegacyAppointment = (raw) => {
   assertLegacyId(item.clientId, 'appointment')
   assertLegacyId(item.psychId, 'appointment')
   if (!demoStatuses.has(item.status) || !demoPaymentStatuses.has(item.payment)) fail('appointment')
+  if (item.cancellationReason !== undefined && item.cancellationReason !== null
+    && !['client', 'centre', 'late_paid'].includes(item.cancellationReason)) fail('appointment')
+  if (item.status !== 'cancelled' && item.cancellationReason != null) fail('appointment')
   const expectedAmountGrosze = groszeFromLegacy(item.amount, 'appointment')
   const location = item.location === undefined ? null : assertLocation(item.location)
   assertCivilDate(item.date, 'appointment')
@@ -388,6 +432,7 @@ export function createDemoWorkspaceRepository(options) {
   const clients = new Map()
   const appointments = new Map()
   const payments = new Map()
+  const absences = new Map()
   const paymentReservations = new Set()
   const correctionReservations = new Set()
   const clientMutationReservations = new Set()
@@ -396,6 +441,7 @@ export function createDemoWorkspaceRepository(options) {
   let appointmentSequence = 0
   let paymentSequence = 0
   let correctionSequence = 0
+  let absenceSequence = 0
   let logicalTime = Date.now()
 
   const commandInstant = (after = null) => {
@@ -457,6 +503,8 @@ export function createDemoWorkspaceRepository(options) {
         const meta = {
           legacyId: item.id, version: 1, chargeVersion: 1, createdAt,
           updatedAt: createdAt, cancelledAt: item.status === 'cancelled' ? createdAt : null,
+          cancellationReason: item.status === 'cancelled'
+            ? item.cancellationReason ?? null : null,
           entries: [], corrections: [], pending: null, origin: 'legacy',
         }
         const paidAmount = item.paidAmount
@@ -581,7 +629,7 @@ export function createDemoWorkspaceRepository(options) {
     return JSON.stringify([
       item.id, item.clientId, item.psychId, item.service, item.date, item.time,
       item.duration, item.expectedAmountGrosze, item.location, item.status, item.payment,
-      item.paidAmount, item.method, item.paidDate ?? null,
+      item.cancellationReason ?? null, item.paidAmount, item.method, item.paidDate ?? null,
     ])
   }
 
@@ -631,7 +679,9 @@ export function createDemoWorkspaceRepository(options) {
     return specialistDto({
       id: demoId('sp', item.id), displayName: item.name,
       professionalTitle: item.professionalTitle ?? 'Specjalistka',
-      standardRateGrosze: groszeFromLegacy(item.rate, 'specialist'), status: 'active',
+      standardRateGrosze: groszeFromLegacy(item.rate, 'specialist'),
+      avatarKey: item.avatarKey,
+      status: 'active',
       version: 1, staffVersion: 1,
     })
   }
@@ -657,7 +707,8 @@ export function createDemoWorkspaceRepository(options) {
     const status = meta.cancelledAt === null ? item.status : 'cancelled'
     const expectedAmountGrosze = item.expectedAmountGrosze
     const payment = paymentAggregate({
-      appointmentId: coreId, status, expectedAmountGrosze,
+      appointmentId: coreId, status, cancellationReason: meta.cancellationReason,
+      expectedAmountGrosze,
       paymentEntries: meta.entries, corrections: meta.corrections,
     })
     const corrections = new Map(meta.corrections.map((value) => [value.reversedEntryId, value]))
@@ -675,7 +726,8 @@ export function createDemoWorkspaceRepository(options) {
       id: coreId, clientId: demoId('cl', item.clientId), specialistId: demoId('sp', item.psychId),
       serviceId: item.service, startsAt, endsAt: addElapsedMinutes(startsAt, item.duration),
       timeZone: 'Europe/Warsaw', location: item.location, status, source: 'panel',
-      version: meta.version, cancelledAt: meta.cancelledAt, createdAt: meta.createdAt,
+      version: meta.version, cancelledAt: meta.cancelledAt,
+      cancellationReason: meta.cancellationReason, createdAt: meta.createdAt,
       updatedAt: meta.updatedAt,
       charge: { id: `chg_${coreId.slice(4)}`, serviceId: item.service, expectedAmountGrosze, currency: 'PLN', version: meta.chargeVersion },
       payment, paymentEntries: entries,
@@ -719,7 +771,8 @@ export function createDemoWorkspaceRepository(options) {
     const item = captureLegacyAppointment(raw)
     const amount = item.expectedAmountGrosze
     const aggregate = paymentAggregate({
-      appointmentId: coreId, status: item.status, expectedAmountGrosze: amount,
+      appointmentId: coreId, status: item.status,
+      cancellationReason: item.cancellationReason ?? null, expectedAmountGrosze: amount,
       paymentEntries: meta.entries, corrections: meta.corrections,
     })
     return {
@@ -761,6 +814,47 @@ export function createDemoWorkspaceRepository(options) {
         historicalClients: [], historicalOccurrences: [], latestPopulatedMonth: null,
       })
     },
+    async loadAbsences(input) {
+      const requested = captureWindow(input)
+      currentState()
+      const values = [...absences.values()]
+        .filter((item) => item.cancelledAt === null
+          && specialists.has(item.specialistId)
+          && item.dateFrom <= requested.to && item.dateTo >= requested.from)
+        .sort((left, right) => left.dateFrom.localeCompare(right.dateFrom)
+          || left.specialistId.localeCompare(right.specialistId)
+          || left.id.localeCompare(right.id))
+      return deepFreeze({ from: requested.from, to: requested.to, absences: values })
+    },
+    async createSpecialistAbsence(input) {
+      const requested = captureSpecialistAbsenceInput(input)
+      currentState()
+      if (!specialists.has(requested.specialistId)) fail('specialistId', 'NOT_FOUND')
+      const allocated = allocateDemoId({
+        kind: 'abs', after: absenceSequence, maximum: 500,
+        occupied: (id) => absences.has(id),
+      })
+      const createdAt = commandInstant()
+      const absence = captureSpecialistAbsence({
+        id: allocated.id, ...requested, version: 1, createdAt, cancelledAt: null,
+      })
+      absences.set(absence.id, absence)
+      absenceSequence = Math.max(absenceSequence, allocated.sequence)
+      return absence
+    },
+    async cancelSpecialistAbsence(id, expectedVersion) {
+      if (!isSpecialistAbsenceId(id)) fail('absenceId')
+      const requested = captureSpecialistAbsenceCancelInput({ expectedVersion })
+      const current = absences.get(id)
+      if (!current) fail('absenceId', 'NOT_FOUND')
+      if (current.cancelledAt !== null) fail('absenceId', 'NOT_FOUND')
+      if (current.version !== requested.expectedVersion) fail('expectedVersion', 'VERSION_CONFLICT')
+      const cancelled = captureSpecialistAbsence({
+        ...current, version: current.version + 1, cancelledAt: commandInstant(),
+      })
+      absences.set(id, cancelled)
+      return cancelled
+    },
     async activateHistoricalClient() {
       const error = new Error('WORKSPACE_READ_ONLY')
       error.code = 'WORKSPACE_READ_ONLY'
@@ -772,6 +866,8 @@ export function createDemoWorkspaceRepository(options) {
       const psychId = legacySpecialist(requested.specialistId)
       if (clients.size >= 200) fail('clients')
       const createdAt = commandInstant()
+      if (requested.assignmentStartsAt !== null
+        && requested.assignmentStartsAt > createdAt) fail('assignmentStartsAt')
       const allocated = allocateDemoId({
         kind: 'cl', after: clientSequence, maximum: 200,
         occupied: (id) => clients.has(id),
@@ -780,7 +876,7 @@ export function createDemoWorkspaceRepository(options) {
       const meta = {
         legacyId: null, version: 1, createdAt, updatedAt: createdAt,
         archivedAt: null, assignmentId: `asg_${coreId.slice(3)}`,
-        assignmentStartsAt: createdAt, assignmentVersion: 1,
+        assignmentStartsAt: requested.assignmentStartsAt ?? createdAt, assignmentVersion: 1,
         origin: 'command',
         pending: {
           ...requested, psychId,
@@ -793,7 +889,7 @@ export function createDemoWorkspaceRepository(options) {
           type: 'ADD_CLIENT',
           client: {
             name: requested.name, age: requested.age, status: requested.status, psychId,
-            since: legacyDate(createdAt), email: '', phone: '', notes: [], familyId: null,
+            since: legacyDate(meta.assignmentStartsAt), email: '', phone: '', notes: [], familyId: null,
             familyRole: null,
           },
         })
@@ -818,8 +914,18 @@ export function createDemoWorkspaceRepository(options) {
         const psychId = legacySpecialist(requested.specialistId)
         const raw = findClient(state, meta)
         const reassigned = raw.psychId !== psychId
+        if (reassigned && requested.assignmentStartsAt !== null) {
+          fail('assignmentStartsAt', 'CLIENT_ASSIGNMENT_CONFLICT')
+        }
+        if (!reassigned && requested.assignmentStartsAt !== null
+          && requested.assignmentStartsAt > meta.assignmentStartsAt) {
+          fail('assignmentStartsAt', 'CLIENT_ASSIGNMENT_CONFLICT')
+        }
+        const assignmentStartsAt = requested.assignmentStartsAt ?? meta.assignmentStartsAt
+        const assignmentStartChanged = !reassigned
+          && assignmentStartsAt !== meta.assignmentStartsAt
         if (raw.name === requested.name && raw.age === requested.age
-          && raw.status === requested.status && !reassigned) fail('body')
+          && raw.status === requested.status && !reassigned && !assignmentStartChanged) fail('body')
         const updatedAt = commandInstant(meta.updatedAt)
         const before = clientRowSignature(raw)
         dispatch({ type: 'UPDATE_CLIENT', id: meta.legacyId, patch: { name: requested.name, age: requested.age, status: requested.status, psychId } })
@@ -836,6 +942,9 @@ export function createDemoWorkspaceRepository(options) {
           meta.assignmentId = `asg_${id.slice(3)}_${meta.version}`
           meta.assignmentStartsAt = updatedAt
           meta.assignmentVersion = 1
+        } else if (assignmentStartChanged) {
+          meta.assignmentStartsAt = assignmentStartsAt
+          meta.assignmentVersion += 1
         }
         return deepFreeze(clientProjection(id, applied, meta))
       })
@@ -865,6 +974,11 @@ export function createDemoWorkspaceRepository(options) {
       const state = currentState()
       const client = clientMeta(requested.clientId, state)
       const psychId = legacySpecialist(requested.specialistId)
+      const rawClient = findClient(state, client)
+      if (!rawClient || rawClient.psychId !== psychId
+        || warsawDateTimeToUtc(requested.date, requested.time) < client.assignmentStartsAt) {
+        fail('clientId', 'NOT_FOUND')
+      }
       if (appointments.size >= 500) fail('appointments')
       const createdAt = commandInstant()
       const allocated = allocateDemoId({
@@ -874,7 +988,8 @@ export function createDemoWorkspaceRepository(options) {
       const coreId = allocated.id
       const meta = {
         legacyId: null, version: 1, chargeVersion: 1, createdAt,
-        updatedAt: createdAt, cancelledAt: null, entries: [], corrections: [],
+        updatedAt: createdAt, cancelledAt: null, cancellationReason: null,
+        entries: [], corrections: [],
         origin: 'command',
         pending: {
           clientId: client.legacyId, psychId, service: requested.serviceId,
@@ -893,7 +1008,7 @@ export function createDemoWorkspaceRepository(options) {
             date: requested.date, time: requested.time, duration: requested.durationMinutes,
             amount: requested.expectedAmountGrosze / 100, location: requested.location,
             status: requested.status, payment: 'unpaid', paidAmount: 0, method: null,
-            paidDate: null, note: '',
+            paidDate: null, cancellationReason: null, note: '',
           },
         })
         const added = await observeState({
@@ -916,6 +1031,15 @@ export function createDemoWorkspaceRepository(options) {
       return serializeMutation(appointmentMutationReservations, id, async () => {
         const psychId = legacySpecialist(requested.specialistId)
         const raw = findAppointment(state, meta)
+        const client = [...clients.values()].find((candidate) => (
+          candidate.legacyId === raw.clientId
+        ))
+        const rawClient = client ? findClient(state, client) : undefined
+        if (!client || client.archivedAt !== null || !rawClient
+          || rawClient.psychId !== psychId
+          || warsawDateTimeToUtc(requested.date, requested.time) < client.assignmentStartsAt) {
+          fail('clientId', 'NOT_FOUND')
+        }
         const chargeChanged = raw.service !== requested.serviceId
           || raw.expectedAmountGrosze !== requested.expectedAmountGrosze
         const changed = raw.psychId !== psychId || chargeChanged
@@ -925,6 +1049,7 @@ export function createDemoWorkspaceRepository(options) {
         if (!changed) fail('body')
         const aggregate = paymentAggregate({
           appointmentId: id, status: raw.status,
+          cancellationReason: raw.cancellationReason ?? null,
           expectedAmountGrosze: raw.expectedAmountGrosze, paymentEntries: meta.entries,
           corrections: meta.corrections,
         })
@@ -960,7 +1085,8 @@ export function createDemoWorkspaceRepository(options) {
         return appointmentProjection(id, applied, meta)
       })
     },
-    async cancelAppointment(id, expectedVersion) {
+    async cancelAppointment(id, expectedVersion, reason) {
+      if (!['client', 'centre', 'late_paid'].includes(reason)) fail('cancellationReason')
       assertMutationAvailable(appointmentMutationReservations, id)
       const state = currentState()
       const meta = appointmentMeta(id, state)
@@ -968,21 +1094,94 @@ export function createDemoWorkspaceRepository(options) {
       return serializeMutation(appointmentMutationReservations, id, async () => {
         const raw = findAppointment(state, meta)
         const aggregate = paymentAggregate({
-          appointmentId: id, status: raw.status, expectedAmountGrosze: raw.expectedAmountGrosze,
+          appointmentId: id, status: raw.status,
+          cancellationReason: raw.cancellationReason ?? null,
+          expectedAmountGrosze: raw.expectedAmountGrosze,
           paymentEntries: meta.entries, corrections: meta.corrections,
         })
         if (aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
         const cancelledAt = commandInstant(meta.updatedAt)
         const before = appointmentRowSignature(raw)
-        dispatch({ type: 'DELETE_SESSION', id: meta.legacyId })
-        await observeState({
+        dispatch({
+          type: 'UPDATE_SESSION', id: meta.legacyId,
+          patch: {
+            status: 'cancelled', cancellationReason: reason,
+            workspaceId: id, version: meta.version + 1,
+          },
+        })
+        const applied = await observeState({
           before, snapshot: (next) => appointmentTargetSnapshot(next, meta),
-          inspect: (next) => findAppointment(next, meta) === undefined ? true : null,
+          inspect: (next) => {
+            const item = findAppointment(next, meta)
+            return item?.status === 'cancelled' && item.cancellationReason === reason
+              ? item : null
+          },
         })
         meta.version += 1
         meta.updatedAt = cancelledAt
         meta.cancelledAt = cancelledAt
-        return appointmentProjection(id, { ...raw, status: 'cancelled' }, meta)
+        meta.cancellationReason = reason
+        return appointmentProjection(id, applied, meta)
+      })
+    },
+    async restoreAppointment(id, expectedVersion) {
+      assertMutationAvailable(appointmentMutationReservations, id)
+      const state = currentState()
+      capturedId(id, 'appointment')
+      const meta = appointments.get(id)
+      if (!meta || meta.cancelledAt === null) fail('appointmentId', 'NOT_FOUND')
+      assertVersion(meta.version, expectedVersion)
+      return serializeMutation(appointmentMutationReservations, id, async () => {
+        const raw = findAppointment(state, meta)
+        if (!raw || raw.status !== 'cancelled') fail('appointmentId', 'NOT_FOUND')
+        const specialist = state.psychologists.map(captureLegacySpecialist)
+          .find((item) => item.id === raw.psychId && item.status !== 'inactive')
+        const client = [...clients.values()].find((candidate) => candidate.legacyId === raw.clientId)
+        const rawClient = client ? findClient(state, client) : undefined
+        if (!specialist || !client || client.archivedAt !== null || !rawClient
+          || rawClient.psychId !== raw.psychId
+          || warsawDateTimeToUtc(raw.date, raw.time) < client.assignmentStartsAt) {
+          fail('appointmentId', 'NOT_FOUND')
+        }
+        const aggregate = paymentAggregate({
+          appointmentId: id, status: raw.status,
+          cancellationReason: meta.cancellationReason,
+          expectedAmountGrosze: raw.expectedAmountGrosze,
+          paymentEntries: meta.entries, corrections: meta.corrections,
+        })
+        if (aggregate.collectedGrosze !== 0) fail('payment', 'APPOINTMENT_PAYMENT_CONFLICT')
+        const startsAt = warsawDateTimeToUtc(raw.date, raw.time)
+        const endsAt = addElapsedMinutes(startsAt, raw.duration)
+        const blocked = state.sessions.map(captureLegacyAppointment).some((other) => {
+          if (other.id === raw.id || other.psychId !== raw.psychId
+            || other.status === 'cancelled') return false
+          const otherStarts = warsawDateTimeToUtc(other.date, other.time)
+          const otherEnds = addElapsedMinutes(otherStarts, other.duration)
+          return otherStarts < endsAt && startsAt < otherEnds
+        })
+        if (blocked) fail('appointment', 'APPOINTMENT_OVERLAP')
+        const restoredAt = commandInstant(meta.updatedAt)
+        const before = appointmentRowSignature(raw)
+        dispatch({
+          type: 'UPDATE_SESSION', id: meta.legacyId,
+          patch: {
+            status: 'scheduled', cancellationReason: null,
+            workspaceId: id, version: meta.version + 1,
+          },
+        })
+        const applied = await observeState({
+          before, snapshot: (next) => appointmentTargetSnapshot(next, meta),
+          inspect: (next) => {
+            const item = findAppointment(next, meta)
+            return item?.status === 'scheduled' && item.cancellationReason === null
+              ? item : null
+          },
+        })
+        meta.version += 1
+        meta.updatedAt = restoredAt
+        meta.cancelledAt = null
+        meta.cancellationReason = null
+        return appointmentProjection(id, applied, meta)
       })
     },
     async recordPayment(id, expectedVersion, input) {
@@ -1006,7 +1205,9 @@ export function createDemoWorkspaceRepository(options) {
           const entry = { id: entryId, appointmentId: id, ...canonical }
           const proposed = [...meta.entries, entry]
           paymentAggregate({
-            appointmentId: id, status: raw.status, expectedAmountGrosze: raw.expectedAmountGrosze,
+            appointmentId: id, status: raw.status,
+            cancellationReason: raw.cancellationReason ?? null,
+            expectedAmountGrosze: raw.expectedAmountGrosze,
             paymentEntries: proposed, corrections: meta.corrections,
           })
           const updatedAt = commandInstant(meta.updatedAt)
@@ -1078,6 +1279,7 @@ export function createDemoWorkspaceRepository(options) {
           const corrections = [...meta.corrections, correction]
           paymentAggregate({
             appointmentId: link.appointmentId, status: raw.status,
+            cancellationReason: raw.cancellationReason ?? null,
             expectedAmountGrosze: raw.expectedAmountGrosze, paymentEntries: entries,
             corrections,
           })

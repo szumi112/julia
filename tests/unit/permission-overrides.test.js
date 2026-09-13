@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import * as permissionOverrides from '../../src/permission-overrides.js'
 import {
+  BASE_ACCESS_CAPABILITIES,
+  HIDDEN_PERMISSION_CAPABILITIES,
   permissionChoicesFor,
   setPermissionEnabled,
 } from '../../src/permission-overrides.js'
@@ -30,44 +33,108 @@ test('builds Polish editor choices only from the target role ceiling', () => {
     locked: false,
   })
   assert.equal(byCapability.has('staff.manage'), false)
+  assert.equal(byCapability.has('client.operational.read'), false)
   assert.equal(Object.isFrozen(choices), true)
   assert.equal(choices.every(Object.isFrozen), true)
 })
 
-test('publishes one exact Polish label for every owner-manageable capability', () => {
+test('groups visible permissions in the fixed workflow order', () => {
+  assert.equal(typeof permissionOverrides.permissionGroupsFor, 'function')
+  const groups = permissionOverrides.permissionGroupsFor({
+    role: 'coordinator',
+    allow: ['finance.import'],
+    deny: [],
+  })
+
+  assert.deepEqual(groups.map(({ title, choices }) => [
+    title,
+    choices.map(({ capability }) => capability),
+  ]), [
+    ['Grafik i sesje', ['appointment.manage']],
+    ['Klienci', ['client.manage']],
+    ['Finanse', [
+      'finance.centre.read',
+      'finance.import',
+      'payment.manage',
+      'workbook.centre.export',
+    ]],
+    ['Zespół', []],
+    ['Administracja', ['operations.health.read']],
+  ])
+})
+
+test('restores a permission draft to the clean defaults of its role', () => {
+  assert.equal(typeof permissionOverrides.permissionDefaultsFor, 'function')
+  const restored = permissionOverrides.permissionDefaultsFor({
+    role: 'coordinator',
+    allow: ['finance.import'],
+    deny: ['client.manage', 'finance.centre.read'],
+  })
+
+  assert.deepEqual(restored.allow, [])
+  assert.deepEqual(restored.deny, [])
+  assert.equal(restored.effectiveCapabilities.includes('finance.centre.read'), true)
+  assert.equal(restored.effectiveCapabilities.includes('finance.import'), false)
+})
+
+test('publishes every visible owner choice after hiding base and unused overrides', () => {
+  assert.deepEqual(BASE_ACCESS_CAPABILITIES, [
+    'appointment.charge.read',
+    'client.operational.read',
+    'specialist.directory.read',
+  ])
+  assert.deepEqual(HIDDEN_PERMISSION_CAPABILITIES, [
+    'chat.direct',
+    'chat.general',
+    'backup.manage',
+    'restore.manage',
+    'centre.manage',
+    'clinical.read',
+    'security.keys.manage',
+  ])
+
   assert.deepEqual(
     permissionChoicesFor({ role: 'owner', allow: [], deny: [] })
       .map(({ capability, label }) => [capability, label]),
     [
-      ['chat.general', 'Czat ogólny'],
       ['workbook.centre.export', 'Eksport skoroszytu centrum'],
       ['finance.import', 'Import danych finansowych'],
-      ['clinical.read', 'Podgląd danych klinicznych'],
       ['security.audit.read', 'Podgląd dziennika bezpieczeństwa'],
       ['finance.centre.read', 'Podgląd finansów centrum'],
-      ['specialist.directory.read', 'Podgląd katalogu specjalistek'],
-      ['client.operational.read', 'Podgląd klientów i kalendarza'],
-      ['appointment.charge.read', 'Podgląd rozliczeń wizyt'],
       ['operations.health.read', 'Podgląd stanu systemu'],
-      ['restore.manage', 'Przywracanie kopii zapasowych'],
       ['payment.manage', 'Rejestrowanie płatności'],
-      ['chat.direct', 'Wiadomości bezpośrednie'],
-      ['centre.manage', 'Zarządzanie centrum'],
       ['finance.centre.manage', 'Zarządzanie finansami centrum'],
       ['client.manage', 'Zarządzanie klientami'],
-      ['security.keys.manage', 'Zarządzanie kluczami bezpieczeństwa'],
-      ['backup.manage', 'Zarządzanie kopiami zapasowymi'],
       ['staff.manage', 'Zarządzanie personelem'],
+      ['appointment.manage', 'Zarządzanie sesjami'],
       ['tus.manage', 'Zarządzanie TUS i zajęciami grupowymi'],
       ['permissions.manage', 'Zarządzanie uprawnieniami'],
-      ['appointment.manage', 'Zarządzanie wizytami'],
     ],
   )
-  assert.equal(
-    permissionChoicesFor({ role: 'specialist', allow: [], deny: [] })
-      .find(({ capability }) => capability === 'workbook.own.export')?.label,
-    'Eksport własnego skoroszytu',
+
+  for (const role of ['owner', 'coordinator', 'specialist']) {
+    const visible = permissionChoicesFor({ role, allow: [], deny: [] })
+      .map(({ capability }) => capability)
+    for (const capability of [...BASE_ACCESS_CAPABILITIES, ...HIDDEN_PERMISSION_CAPABILITIES]) {
+      assert.equal(visible.includes(capability), false, `${role}/${capability}`)
+    }
+  }
+  assert.equal(permissionChoicesFor({ role: 'specialist', allow: [], deny: [] })
+    .find(({ capability }) => capability === 'workbook.own.export')?.label, 'Eksport własnego skoroszytu')
+})
+
+test('restores every base capability by removing its denial without changing other exceptions', () => {
+  const denied = {
+    role: 'coordinator',
+    allow: ['finance.import'],
+    deny: [...BASE_ACCESS_CAPABILITIES, 'client.manage'],
+  }
+  const restored = BASE_ACCESS_CAPABILITIES.reduce(
+    (draft, capability) => setPermissionEnabled(draft, capability, true),
+    denied,
   )
+  assert.deepEqual(restored.deny, ['client.manage'])
+  assert.deepEqual(restored.allow, ['finance.import'])
 })
 
 test('turning role defaults off and on writes only normalized deny decisions', () => {

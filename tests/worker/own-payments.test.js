@@ -6,6 +6,7 @@ import * as paymentCore from '../../worker/core/payments.js'
 import * as paymentRoutes from '../../worker/routes/payments.js'
 import { authorityActor } from './fixtures.js'
 import {
+  applyAppointmentCancellationReasonMigration,
   applyCoreDirectoryStageB,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
@@ -37,6 +38,7 @@ const statement = () => ({
 beforeAll(async () => {
   await completeCoreDirectoryStageA()
   await applyCoreDirectoryStageB()
+  await applyAppointmentCancellationReasonMigration()
   const staff = (id, specialistId, subject) => env.DB.prepare(`INSERT INTO staff_users
     (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
      specialist_id,version,activated_at,disabled_at,created_at,updated_at)
@@ -49,14 +51,17 @@ beforeAll(async () => {
   const client = (id) => env.DB.prepare(`INSERT INTO clients
     (id,identity_envelope,status,version,archived_at,created_at,updated_at)
     VALUES (?,'{}','active',1,NULL,?,?)`).bind(id, NOW, NOW)
-  const appointment = (id, clientId, specialistId, startsAt) => {
+  const appointment = (id, clientId, specialistId, startsAt, {
+    status = 'completed', version = 1, cancelledAt = null, cancellationReason = null,
+  } = {}) => {
     const endsAt = new Date(Date.parse(startsAt) + 50 * 60_000).toISOString()
     return env.DB.prepare(`INSERT INTO appointments
       (id,client_id,specialist_id,service_id,starts_at,ends_at,time_zone,location,
-       status,source,version,cancelled_at,created_at,updated_at)
+       status,source,version,cancelled_at,created_at,updated_at,cancellation_reason)
       VALUES (?,?,?,'zajecia',?,?,'Europe/Warsaw',NULL,
-        'completed','panel',1,NULL,?,?)`).bind(
-      id, clientId, specialistId, startsAt, endsAt, NOW, NOW,
+        ?,'panel',?,?,?,?,?)`).bind(
+      id, clientId, specialistId, startsAt, endsAt, status, version, cancelledAt,
+      NOW, NOW, cancellationReason,
     )
   }
   const charge = (id, appointmentId) => env.DB.prepare(`INSERT INTO session_charges
@@ -75,6 +80,7 @@ beforeAll(async () => {
     staff('stf_own_payments_two', 'sp_own_payments_two', 'access-own-payments-two'),
     specialist('sp_own_payments_two', 'stf_own_payments_two'),
     client('cl_own_payments_visible'),
+    client('cl_own_payments_late_paid'),
     client('cl_own_payments_hidden'),
     appointment(
       'apt_own_payments_visible', 'cl_own_payments_visible',
@@ -84,8 +90,16 @@ beforeAll(async () => {
       'apt_own_payments_hidden', 'cl_own_payments_hidden',
       'sp_own_payments_two', '2027-03-01T09:00:00.000Z',
     ),
+    appointment(
+      'apt_own_payments_late_paid', 'cl_own_payments_late_paid',
+      'sp_own_payments_one', '2027-03-01T10:00:00.000Z', {
+        status: 'cancelled', version: 2, cancelledAt: NOW,
+        cancellationReason: 'late_paid',
+      },
+    ),
     charge('chg_own_payments_visible', 'apt_own_payments_visible'),
     charge('chg_own_payments_hidden', 'apt_own_payments_hidden'),
+    charge('chg_own_payments_late_paid', 'apt_own_payments_late_paid'),
     payment(
       'pay_own_payments_visible', 'apt_own_payments_visible',
       'stf_own_payments_one', 5_000, '2027-03-01T08:30:00.000Z',
@@ -118,6 +132,7 @@ describe('own payments projection', () => {
         serviceId: 'zajecia',
         startsAt: '2027-03-01T08:00:00.000Z',
         status: 'completed',
+        cancellationReason: null,
         version: 1,
         charge: {
           id: 'chg_own_payments_visible', serviceId: 'zajecia',
@@ -127,9 +142,24 @@ describe('own payments projection', () => {
           status: 'partial', collectedGrosze: 5_000, outstandingGrosze: 13_000,
           latestMethod: 'card', latestReceivedAt: '2027-03-01T08:30:00.000Z',
         },
+      }, {
+        id: 'apt_own_payments_late_paid',
+        serviceId: 'zajecia',
+        startsAt: '2027-03-01T10:00:00.000Z',
+        status: 'cancelled',
+        cancellationReason: 'late_paid',
+        version: 2,
+        charge: {
+          id: 'chg_own_payments_late_paid', serviceId: 'zajecia',
+          expectedAmountGrosze: 18_000, currency: 'PLN', version: 1,
+        },
+        payment: {
+          status: 'unpaid', collectedGrosze: 0, outstandingGrosze: 18_000,
+          latestMethod: null, latestReceivedAt: null,
+        },
       }],
     } })
-    expect(JSON.stringify(result)).not.toMatch(/client|specialists|displayName|hidden/i)
+    expect(JSON.stringify(result)).not.toMatch(/clientId|clients|specialists|displayName|hidden/i)
 
     await expect(paymentCore.loadOwnPaymentsWindow({
       db: env.DB,

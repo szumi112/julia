@@ -39,6 +39,7 @@ async function fixture(suffix = 'owner', {
 } = {}) {
   const actorId = `stf_session_${suffix}`
   const subject = `access-session-${suffix}`
+  const email = `session-${suffix}@example.test`
   const keyring = await createKeyring(env, {
     activeDataKekVersion: 1,
     activeLookupKeyVersion: 1,
@@ -61,7 +62,7 @@ async function fixture(suffix = 'owner', {
      VALUES (?,?,?,?,?,'active',?,?,3,?,?,?)`
   ).bind(
     actorId,
-    await blindEmailIndex(`session-${suffix}@example.test`, keyring),
+    await blindEmailIndex(email, keyring),
     '{}',
     displayNameEnvelope,
     role,
@@ -95,7 +96,7 @@ async function fixture(suffix = 'owner', {
       specialistId, actorId, profileNameEnvelope, titleEnvelope, now, now,
     ).run()
   }
-  return { keyring, dataKey, scope, actorId, subject, role, specialistId }
+  return { keyring, dataKey, scope, actorId, subject, email, role, specialistId }
 }
 
 const authorityActor = (context, overrides = {}) => {
@@ -130,7 +131,7 @@ describe('/api/v1/session route', () => {
     await expect(getSession({
       db,
       config,
-      principal: { kind: 'human', subject: 'access-session-version' },
+      principal: { kind: 'human', subject: 'access-session-version', normalizedEmail: 'session-version@example.test' },
       actor: authorityActor({
         actorId: 'stf_session_version', role: 'owner', specialistId: null,
       }, { version }),
@@ -142,7 +143,7 @@ describe('/api/v1/session route', () => {
     await expect(getSession({
       db: env.DB,
       config,
-      principal: { kind: 'human', subject: 'access-session-version' },
+      principal: { kind: 'human', subject: 'access-session-version', normalizedEmail: 'session-version@example.test' },
       actor: authorityActor({
         actorId: 'stf_session_version', role: 'owner', specialistId: null,
       }, { version }),
@@ -156,7 +157,7 @@ describe('/api/v1/session route', () => {
     const result = await getSession({
       db: env.DB,
       config,
-      principal: { kind: 'human', subject: cryptoContext.subject },
+      principal: { kind: 'human', subject: cryptoContext.subject, normalizedEmail: cryptoContext.email },
       actor: authorityActor(cryptoContext),
       cryptoContext,
       nowMs: NOW_MS + 999,
@@ -164,6 +165,7 @@ describe('/api/v1/session route', () => {
     expect(result.data.actor).toEqual({
       id: 'stf_session_owner',
       displayName: 'Julia owner',
+      email: 'session-owner@example.test',
       professionalTitle: null,
       role: 'owner',
       specialistId: null,
@@ -188,7 +190,6 @@ describe('/api/v1/session route', () => {
       keyring: cryptoContext.keyring,
       nowMs: NOW_MS + 1_000,
     })).rejects.toThrow(/^CSRF_INVALID$/)
-    expect(JSON.stringify(result)).not.toContain('email')
     expect(JSON.stringify(result)).not.toContain(cryptoContext.subject)
     expect(JSON.stringify(result)).not.toContain('ciphertext')
   })
@@ -201,11 +202,12 @@ describe('/api/v1/session route', () => {
     const actor = authorityActor(context)
     const result = await getSession({
       db: env.DB, config,
-      principal: { kind: 'human', subject: context.subject },
+      principal: { kind: 'human', subject: context.subject, normalizedEmail: context.email },
       actor, cryptoContext: context, nowMs: NOW_MS,
     })
     expect(result.data.actor).toEqual({
       id: context.actorId, displayName: 'Julia linked_owner',
+      email: context.email,
       professionalTitle: 'Psycholożka', role: 'owner',
       specialistId: context.specialistId, version: 3,
     })
@@ -219,7 +221,7 @@ describe('/api/v1/session route', () => {
     const legacy = await fixture('legacy_title', { role: 'specialist', legacyTitle: true })
     await expect(getSession({
       db: env.DB, config,
-      principal: { kind: 'human', subject: legacy.subject },
+      principal: { kind: 'human', subject: legacy.subject, normalizedEmail: legacy.email },
       actor: authorityActor(legacy),
       cryptoContext: legacy, nowMs: NOW_MS,
     })).resolves.toMatchObject({
@@ -231,7 +233,7 @@ describe('/api/v1/session route', () => {
     })
     await expect(getSession({
       db: env.DB, config,
-      principal: { kind: 'human', subject: tampered.subject },
+      principal: { kind: 'human', subject: tampered.subject, normalizedEmail: tampered.email },
       actor: authorityActor(tampered),
       cryptoContext: tampered, nowMs: NOW_MS,
     })).rejects.toThrow(/^CRYPTO_FAILURE$/)
@@ -241,7 +243,7 @@ describe('/api/v1/session route', () => {
     const context = await fixture('malformed_title', { role: 'specialist' })
     await expect(getSession({
       db: env.DB, config,
-      principal: { kind: 'human', subject: context.subject },
+      principal: { kind: 'human', subject: context.subject, normalizedEmail: context.email },
       actor: authorityActor(context),
       cryptoContext: context, nowMs: NOW_MS,
       decryptForScope: async (_keyring, _dataKey, input) => (
@@ -256,7 +258,7 @@ describe('/api/v1/session route', () => {
     await expect(getSession({
       db: env.DB,
       config,
-      principal: { kind: 'human', subject: cryptoContext.subject },
+      principal: { kind: 'human', subject: cryptoContext.subject, normalizedEmail: cryptoContext.email },
       actor: authorityActor(cryptoContext, { specialistId: 'sp_owner', version: 2 }),
       cryptoContext,
       nowMs: NOW_MS,
@@ -271,7 +273,7 @@ describe('/api/v1/session route', () => {
     await expect(getSession({
       db: env.DB,
       config,
-      principal: { kind: 'human', subject: context.subject },
+      principal: { kind: 'human', subject: context.subject, normalizedEmail: context.email },
       actor: authorityActor(context, { authorityRevision: 2 }),
       cryptoContext: context,
       nowMs: NOW_MS,
@@ -290,7 +292,7 @@ describe('/api/v1/session route', () => {
     const result = await getSession({
       db: env.DB,
       config,
-      principal: { kind: 'human', subject: context.subject },
+      principal: { kind: 'human', subject: context.subject, normalizedEmail: context.email },
       actor,
       cryptoContext: context,
       nowMs: NOW_MS,
@@ -330,7 +332,7 @@ describe('/api/v1/session route', () => {
       await expect(getSession({
         db: env.DB,
         config,
-        principal: { kind: 'human', subject },
+        principal: { kind: 'human', subject, normalizedEmail: context.email },
         actor: authorityActor(context, { version }),
         cryptoContext: context,
         nowMs: NOW_MS,
@@ -348,7 +350,7 @@ describe('/api/v1/session route', () => {
     const result = await getSession({
       db: env.DB,
       config,
-      principal: { kind: 'human', subject: context.subject },
+      principal: { kind: 'human', subject: context.subject, normalizedEmail: context.email },
       actor,
       cryptoContext: context,
       nowMs: NOW_MS,
@@ -376,7 +378,7 @@ describe('/api/v1/session route', () => {
     await expect(getSession({
       db: env.DB,
       config,
-      principal: { kind: 'human', subject: wrongScope.subject },
+      principal: { kind: 'human', subject: wrongScope.subject, normalizedEmail: wrongScope.email },
       actor: authorityActor(wrongScope),
       cryptoContext: { ...wrongScope, scope: { ...scope, id: 'centre_wrong' } },
       nowMs: NOW_MS,
@@ -386,7 +388,7 @@ describe('/api/v1/session route', () => {
     await expect(getSession({
       db: env.DB,
       config,
-      principal: { kind: 'human', subject: tampered.subject },
+      principal: { kind: 'human', subject: tampered.subject, normalizedEmail: tampered.email },
       actor: authorityActor(tampered),
       cryptoContext: tampered,
       nowMs: NOW_MS,
