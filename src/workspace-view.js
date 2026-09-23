@@ -5,7 +5,9 @@ import {
   compareHistoricalOccurrences,
 } from './historical-records.js'
 import { captureLoadedActivitiesState } from './loaded-activities.js'
-import { assertClientContactFields, assertProfessionalTitle } from './core-records.js'
+import {
+  CLIENT_PROFILE_KEYS, assertClientContactFields, assertProfessionalTitle, assertSpecialization,
+} from './core-records.js'
 import { specialistAvatarKeyOrDefault } from './specialist-avatars.js'
 
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
@@ -213,6 +215,10 @@ const professionalTitle = (value) => {
   try { return assertProfessionalTitle(value) } catch { fail('workspace specialist') }
 }
 
+const specialization = (value) => {
+  try { return assertSpecialization(value) } catch { fail('workspace specialist') }
+}
+
 const specialistAvatarKey = (value) => {
   try { return specialistAvatarKeyOrDefault(value) } catch { fail('workspace specialist') }
 }
@@ -236,6 +242,8 @@ const projectSpecialist = (item) => frozenRecord({
   professionalTitle: professionalTitle(item.professionalTitle),
   avatarKey: specialistAvatarKey(item.avatarKey),
   rate: safeInteger(item.standardRateGrosze, 1, 1_000_000, 'workspace specialist') / 100,
+  longRate: safeInteger(item.longRateGrosze, 1, 1_000_000, 'workspace specialist') / 100,
+  spec: specialization(item.specialization),
   color: presentationColor(item.id),
   status: ['active', 'archived'].includes(item.status)
     ? item.status : fail('workspace specialist'),
@@ -277,7 +285,7 @@ const projectClient = (item) => {
     readOnly,
     since,
     ...assertClientContactFields(Object.fromEntries(
-      ['guardianPhone', 'guardianEmail', 'receptionNotes']
+      CLIENT_PROFILE_KEYS
         .filter((field) => Object.hasOwn(item, field)).map((field) => [field, item[field]]),
     )),
   })

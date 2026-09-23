@@ -28,6 +28,7 @@ const selectSessionClient = async (drawer, name) => {
 
 const specialist = (id, displayName, standardRateGrosze = 18_000) => ({
   id, displayName, professionalTitle: 'Specjalistka', standardRateGrosze,
+  longRateGrosze: 25_000, specialization: '',
   status: 'active', version: 1, staffVersion: 1,
 })
 
@@ -44,7 +45,7 @@ const client = ({
 
 const appointment = ({
   id = 'apt_iga', clientId = 'cl_iga', specialistId = 'sp_anna', status = 'scheduled',
-  version = 1, startsAt = '2026-08-04T10:00:00.000Z', endsAt = '2026-08-04T10:50:00.000Z',
+  version = 1, startsAt = '2026-08-04T10:00:00.000Z', endsAt = '2026-08-04T11:00:00.000Z',
   paymentEntries = [], collectedGrosze = 0, expectedAmountGrosze = 18_000,
   createdAt = '2026-08-01T08:00:00.000Z',
   updatedAt = version === 1 ? createdAt : '2026-08-04T12:00:00.000Z',
@@ -215,7 +216,7 @@ test('@owner reconciles POST payment and correction mutations in the fictional r
   await page.route('**/api/v1/appointments', (route) => {
     expectCommand(route, { method: 'POST', path: '/api/v1/appointments', body: {
       clientId: 'cl_iga', specialistId: 'sp_anna', serviceId: 'zajecia', date: '2026-08-04',
-      time: '12:00', durationMinutes: 50, expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
+      time: '12:00', durationMinutes: 60, expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
     } })
     visit = scheduledVisit
     return route.fulfill(json(201, { data: { appointment: scheduledVisit } }))
@@ -224,10 +225,10 @@ test('@owner reconciles POST payment and correction mutations in the fictional r
     appointmentEdits += 1
     const expected = appointmentEdits === 1 ? {
       expectedVersion: 1, specialistId: 'sp_anna', serviceId: 'zajecia', date: '2026-08-04',
-      time: '12:00', durationMinutes: 50, expectedAmountGrosze: 18_000, location: null, status: 'completed',
+      time: '12:00', durationMinutes: 60, expectedAmountGrosze: 18_000, location: null, status: 'completed',
     } : {
       expectedVersion: 4, specialistId: 'sp_anna', serviceId: 'zajecia', date: '2026-08-04',
-      time: '12:00', durationMinutes: 50, expectedAmountGrosze: 18_000, location: null, status: 'noshow',
+      time: '12:00', durationMinutes: 60, expectedAmountGrosze: 18_000, location: null, status: 'noshow',
     }
     expectCommand(route, { method: 'POST', path: '/api/v1/appointments/apt_iga/edits', body: expected })
     visit = appointmentEdits === 1 ? completedVisit : noshowVisit

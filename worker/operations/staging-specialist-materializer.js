@@ -7,7 +7,8 @@ import { auditEventStatement } from '../audit/events.js'
 import { createSystemUnitOfWork } from '../db/unit-of-work.js'
 import { resolveCurrentAuthorityActor } from '../identity/staff.js'
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
-import { isWellFormedUnicode } from '../../src/core-records.js'
+import { assertSpecialization, isWellFormedUnicode } from '../../src/core-records.js'
+import { LONG_SESSION_PRICE } from '../../src/services.js'
 import {
   DEFAULT_SPECIALIST_AVATAR_KEY,
   isSpecialistAvatarKey,
@@ -23,6 +24,7 @@ const SPECIALIST_ID = /^sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const STAFF_CAP = 128
 const PROFILE_CAP = 128
+const DEFAULT_LONG_RATE_GROSZE = LONG_SESSION_PRICE * 100
 const PROFESSIONAL_TITLE = 'Specjalistka'
 const FALLBACK_OWNER_NAME = 'Właściciel'
 const failure = () => { throw new Error('STAGING_SEED_INVALID') }
@@ -112,6 +114,10 @@ const validInstant = (value) => {
   }
 }
 
+const exactSpecialization = (value) => {
+  try { return assertSpecialization(value) } catch { return failure() }
+}
+
 const exactTitle = (value) => {
   if (typeof value !== 'string' || value !== value.trim()
     || value !== value.normalize('NFC') || !isWellFormedUnicode(value)
@@ -148,15 +154,16 @@ const decrypt = async (context, recordId, field, serialized) => {
   }
 }
 
-const hasAvatarColumn = async (db) => {
+const hasSpecialistColumn = async (db, name) => {
   const row = await db.prepare(
-    "SELECT name FROM pragma_table_info('specialists') WHERE name='avatar_key'",
-  ).first()
-  return row?.name === 'avatar_key'
+    "SELECT name FROM pragma_table_info('specialists') WHERE name=?",
+  ).bind(name).first()
+  return row?.name === name
 }
 
 const loadDirectory = async (db, context) => {
-  const profileV4 = await hasAvatarColumn(db)
+  const profileV4 = await hasSpecialistColumn(db, 'avatar_key')
+  const profileV5 = await hasSpecialistColumn(db, 'long_rate_grosze')
   const [staffResult, profileResult] = await Promise.all([
     db.prepare(
       `SELECT id,email_lookup,email_envelope,display_name_envelope,role,status,
@@ -166,7 +173,7 @@ const loadDirectory = async (db, context) => {
     ).bind(STAFF_CAP + 1).all(),
     db.prepare(
       `SELECT id,staff_user_id,display_name_envelope,professional_title_envelope,
-              standard_rate_grosze,status,version,archived_at,created_at,updated_at${profileV4 ? ',avatar_key' : ''}
+              standard_rate_grosze,status,version,archived_at,created_at,updated_at${profileV4 ? ',avatar_key' : ''}${profileV5 ? ',long_rate_grosze,specialization_envelope' : ''}
        FROM specialists ORDER BY id LIMIT ?`,
     ).bind(PROFILE_CAP + 1).all(),
   ])
@@ -229,6 +236,8 @@ const loadDirectory = async (db, context) => {
       || !['pending', 'active', 'archived'].includes(row.status)
       || !Number.isSafeInteger(row.version) || row.version < 1
       || (profileV4 && !isSpecialistAvatarKey(row.avatar_key))
+      || (profileV5 && (!Number.isSafeInteger(row.long_rate_grosze)
+        || row.long_rate_grosze < 1 || row.long_rate_grosze > 1_000_000))
       || (row.status === 'archived') !== (row.archived_at !== null)) failure()
     const displayName = await decrypt(
       context,
@@ -245,6 +254,13 @@ const loadDirectory = async (db, context) => {
           'professional_title',
           row.professional_title_envelope,
         ))
+    // The materializer never manages these two, it only carries them through
+    // an update so the owner's values survive.
+    const specialization = profileV5 && row.specialization_envelope !== null
+      ? exactSpecialization(await decrypt(
+          context, row.id, 'specialization', row.specialization_envelope,
+        ))
+      : ''
     profiles.push(Object.freeze({
       id: row.id,
       staffUserId: row.staff_user_id,
@@ -254,6 +270,8 @@ const loadDirectory = async (db, context) => {
       avatarKey: profileV4 ? row.avatar_key : DEFAULT_SPECIALIST_AVATAR_KEY,
       legacyTitle,
       standardRateGrosze: row.standard_rate_grosze,
+      longRateGrosze: profileV5 ? row.long_rate_grosze : DEFAULT_LONG_RATE_GROSZE,
+      specialization,
       status: row.status,
       version: row.version,
       archivedAt: row.archived_at,
@@ -520,8 +538,7 @@ const finalVerification = async (db, context) => {
   for (const desired of STAGING_SPECIALIST_DESIRED_STATE) {
     const profile = resolveProfile(directory, desired)
     if (!profile || profile.displayName !== desired.displayName
-      || profile.legacyTitle || profile.professionalTitle !== desired.professionalTitle
-      || profile.standardRateGrosze !== desired.standardRateGrosze
+      || profile.legacyTitle
       || !isSpecialistAvatarKey(profile.avatarKey)) failure()
     const claim = currentClaim(directory, profile)
     if (desired.linkSelector) {
@@ -589,6 +606,8 @@ export function createStagingSpecialistMaterializer(value) {
             displayName: desired.displayName,
             professionalTitle: desired.professionalTitle,
             standardRateGrosze: desired.standardRateGrosze,
+            longRateGrosze: DEFAULT_LONG_RATE_GROSZE,
+            specialization: '',
             avatarKey: DEFAULT_SPECIALIST_AVATAR_KEY,
           },
           idempotencyKey: `staging-specialist-create-${index + 1}-v1`,
@@ -608,10 +627,11 @@ export function createStagingSpecialistMaterializer(value) {
           archivedAt: null,
         })
       } else {
-        const needsUpdate = profile.displayName !== desired.displayName
-          || profile.legacyTitle
-          || profile.professionalTitle !== desired.professionalTitle
-          || profile.standardRateGrosze !== desired.standardRateGrosze
+        // The owner edits titles and rates in the panel; only a legacy profile
+        // without a stored title, or a drifted name, is corrected here.
+        const needsUpdate = profile.displayName !== desired.displayName || profile.legacyTitle
+        const professionalTitle = profile.legacyTitle
+          ? desired.professionalTitle : profile.professionalTitle
         if (needsUpdate) {
           await dependencies.updateProfile({
             db: input.db,
@@ -625,8 +645,10 @@ export function createStagingSpecialistMaterializer(value) {
             body: {
               expectedVersion: profile.version,
               displayName: desired.displayName,
-              professionalTitle: desired.professionalTitle,
-              standardRateGrosze: desired.standardRateGrosze,
+              professionalTitle,
+              standardRateGrosze: profile.standardRateGrosze,
+              longRateGrosze: profile.longRateGrosze,
+              specialization: profile.specialization,
               avatarKey: profile.avatarKey,
             },
             idempotencyKey: `staging-specialist-update-${index + 1}-v${profile.version}`,
@@ -636,9 +658,8 @@ export function createStagingSpecialistMaterializer(value) {
             ...profile,
             displayName: desired.displayName,
             canonicalName: desired.displayName,
-            professionalTitle: desired.professionalTitle,
+            professionalTitle,
             legacyTitle: false,
-            standardRateGrosze: desired.standardRateGrosze,
             version: profile.version + 1,
           })
         } else {

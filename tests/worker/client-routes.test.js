@@ -35,6 +35,7 @@ import {
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
 import { authorityActor } from './fixtures.js'
+import { CLIENT_PROFILE_KEYS } from '../../src/core-records.js'
 
 const NOW_MS = 1_800_000_000_000
 const BODY = Object.freeze({
@@ -1092,9 +1093,9 @@ const countedDb = () => {
 describe('persistent client creation', () => {
   it('strictly captures the exact create body without invoking accessors', () => {
     expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'clients.create')
-      .optionalBodyKeys).toEqual(['assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes'])
+      .optionalBodyKeys).toEqual(['assignmentStartsAt', ...CLIENT_PROFILE_KEYS])
     expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'clients.edit')
-      .optionalBodyKeys).toEqual(['assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes'])
+      .optionalBodyKeys).toEqual(['assignmentStartsAt', ...CLIENT_PROFILE_KEYS])
     expect(validateCreateClientBody(BODY)).toEqual({ ...BODY, assignmentStartsAt: null })
     expect(validateCreateClientBody({
       ...BODY, assignmentStartsAt: '2026-01-02T03:04:05.000Z',
@@ -1921,6 +1922,43 @@ describe('persistent client edit and reassignment', () => {
     expect(replayFactory).not.toHaveBeenCalled()
   })
 
+  it('stores client card fields and rejects a client as their own guardian', async () => {
+    const original = await seedEditable()
+    const parent = await seedEditable()
+    const edit = async (marker, version, body) => {
+      const values = [`${marker}_version`, `${marker}_audit`]
+      return editClient({
+        db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+        keyring: await ring(), nowMs: NOW_MS + version * 1_000,
+        correlationId: CORRELATION_ID, idFactory: () => values.shift(),
+        clientId: original.id,
+        body: {
+          expectedVersion: version, name: original.name, age: original.age,
+          status: original.status, specialistId: original.assignment.specialistId, ...body,
+        },
+        idempotencyKey: `card-${marker}-key`,
+      })
+    }
+    const card = {
+      intakeReason: 'Trudności w szkole.\nLęk przed rozstaniem.',
+      guardianClientId: parent.id, parentalRights: 'not_both', therapyConsent: 'signed',
+    }
+    const first = await edit('card_first', 1, card)
+    expect(first.body.data.client).toMatchObject({
+      ...card, secondGuardianClientId: '', guardianPhone: '', version: 2,
+    })
+    const row = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(original.id).first()
+    expect(row.identity_envelope).not.toContain('Trudności')
+    await expect(edit('card_self', 2, { guardianClientId: original.id }))
+      .rejects.toThrow('VALIDATION_FAILED/guardianClientId')
+    const cleared = await edit('card_clear', 2, {
+      intakeReason: '', guardianClientId: '', parentalRights: '', therapyConsent: '',
+    })
+    expect(cleared.body.data.client).not.toHaveProperty('intakeReason')
+    expect(cleared.body.data.client.version).toBe(3)
+  })
+
   it('preserves guardian contacts on legacy edits and clears only explicitly supplied fields', async () => {
     const original = await seedEditable()
     const base = {
@@ -1981,7 +2019,7 @@ describe('persistent client edit and reassignment', () => {
     expect(JSON.parse(await decryptForScope(await ring(), dataKey, {
       expectedScope: scope, recordId: original.id, field: 'record_version',
       envelope: JSON.parse(versionRow.snapshot_envelope),
-    }))).toMatchObject({ schema: 'client.v2', guardianEmail: 'opiekun@example.test' })
+    }))).toMatchObject({ schema: 'client.v3', guardianEmail: 'opiekun@example.test', intakeReason: '' })
     const archiveIds = ['guardian_archive_version', 'guardian_archive_assignment', 'guardian_archive_audit']
     const archived = await archiveClient({
       db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,

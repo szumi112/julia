@@ -10,6 +10,7 @@ import {
   sessionsWord, fmtDayMonth, clientsWord, plural, warsawDateTimeFromUtc,
 } from '../format.js'
 import { sessionConflictGroups, specialistWeekLoad } from '../workspace.js'
+import { LONG_SESSION_PRICE } from '../services.js'
 import { loadFailureCopy } from '../save-failure-copy.js'
 import { EntityLink, FilterBar, FilterGroup, ViewState, useRouteParamsSync } from '../ux-patterns.jsx'
 import { futureWorkspaceRange, isWorkspaceRangeCovered, monthWorkspaceRange, rollingWorkspaceRange } from '../workspace-view.js'
@@ -135,7 +136,8 @@ function AppTeamDirectory({ blocked, notice, onRefresh, psychologists, stale }) 
                   ) : psychologist.name}</h2>
                   <span className="team-card__spec">{rolePresentationFor({
                     role: 'specialist', professionalTitle: psychologist.professionalTitle,
-                  })} · {fmtMoney(psychologist.rate)} / sesja</span>
+                  })} · {fmtMoney(psychologist.rate)} / 60 min · {fmtMoney(psychologist.longRate)} / 90 min</span>
+                  {psychologist.spec && <span className="team-card__spec">{psychologist.spec}</span>}
                   <Pill tone={access.tone}>
                     {access.label}
                   </Pill>
@@ -554,7 +556,8 @@ export function PsychDetail({ params }) {
             {psych.room && <span><Icon name="room" size={14} /> {psych.room}</span>}
           </div>
           <div className="id-band__pills">
-            <Pill tone="amber">{fmtMoney(psych.rate)} / sesja</Pill>
+            <Pill tone="amber">{fmtMoney(psych.rate)} / 60 min</Pill>
+            <Pill tone="amber">{fmtMoney(psych.longRate ?? LONG_SESSION_PRICE)} / 90 min</Pill>
           </div>
         </div>
         {!isApp && <div className="id-band__actions">

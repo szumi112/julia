@@ -1198,6 +1198,7 @@ test('client detail presents care sections in record order, h1 first', async ({ 
   expect(headings).toEqual([
     'Najbliższe sesje',
     'Historia sesji',
+    'Zgody i prawa rodzicielskie',
     'Notatki kliniczne',
   ])
   const h1Precedes = await page.evaluate(() => {
@@ -2551,7 +2552,7 @@ test.describe('Task 4 administrative redesign', () => {
 
     await team.getByRole('button', { name: 'Edytuj profil — Anna Maria Janowska' }).click()
     const drawer = page.getByRole('dialog', { name: 'Edycja profilu specjalistki' })
-    await drawer.getByLabel('Stawka (zł / sesja)').fill('230')
+    await drawer.getByLabel('Stawka za 60 min (zł)').fill('230')
     await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()
     await expect(drawer).toHaveCount(0)
 
@@ -2575,7 +2576,7 @@ test.describe('Task 4 administrative redesign', () => {
 
     expect(labels.indexOf('Imię i nazwisko')).toBeLessThan(labels.indexOf('Tytuł'))
     expect(labels.indexOf('Tytuł')).toBeLessThan(labels.indexOf('Specjalizacja'))
-    expect(labels.indexOf('Specjalizacja')).toBeLessThan(labels.indexOf('Stawka (zł / sesja)'))
+    expect(labels.indexOf('Specjalizacja')).toBeLessThan(labels.indexOf('Stawka za 60 min (zł)'))
   })
 
   test('animation preference remains a full-size switch with Undo', async ({ page }) => {

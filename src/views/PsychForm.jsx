@@ -8,6 +8,7 @@ import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, plural } from '../format.js'
 import { DEFAULT_SPECIALIST_AVATAR_KEY } from '../specialist-avatars.js'
+import { LONG_SESSION_PRICE } from '../services.js'
 
 // palette for newly added specialists — brand hues at text strength,
 // each paired with its ghost tint (same pairs as the seeded team)
@@ -33,6 +34,7 @@ export function PsychDrawer({ opts, onClose }) {
     phone: editing?.phone || '',
     room: editing?.room || '',
     rate: editing ? editing.rate : '',
+    longRate: editing?.longRate ?? LONG_SESSION_PRICE,
     avatarKey: editing?.avatarKey ?? DEFAULT_SPECIALIST_AVATAR_KEY,
   })
   const [errors, setErrors] = useState({})
@@ -53,6 +55,8 @@ export function PsychDrawer({ opts, onClose }) {
     if (!form.name.trim()) errs.name = 'Podaj imię i nazwisko'
     const rate = Number(form.rate)
     if (!rate || rate <= 0) errs.rate = 'Podaj stawkę większą od zera'
+    const longRate = Number(form.longRate)
+    if (!longRate || longRate <= 0) errs.longRate = 'Podaj stawkę większą od zera'
     setErrors(errs)
     if (Object.keys(errs).length) {
       shake()
@@ -69,6 +73,7 @@ export function PsychDrawer({ opts, onClose }) {
       phone: form.phone.trim(),
       room: form.room.trim(),
       rate,
+      longRate,
       avatarKey: form.avatarKey,
     }
     if (editing) {
@@ -137,11 +142,18 @@ export function PsychDrawer({ opts, onClose }) {
             </Field>
           </div>
 
-          <Field label="Stawka (zł / sesja)" error={errors.rate}>
-            <input type="number" min="0" step="10" inputMode="decimal" name="psych-rate"
-              autoComplete="off" className="input" value={form.rate} placeholder="np. 220…"
-              onChange={(e) => set('rate', e.target.value)} />
-          </Field>
+          <div className="form-grid">
+            <Field label="Stawka za 60 min (zł)" error={errors.rate}>
+              <input type="number" min="0" step="10" inputMode="decimal" name="psych-rate"
+                autoComplete="off" className="input" value={form.rate} placeholder="np. 180…"
+                onChange={(e) => set('rate', e.target.value)} />
+            </Field>
+            <Field label="Stawka za 90 min (zł)" error={errors.longRate}>
+              <input type="number" min="0" step="10" inputMode="decimal" name="psych-long-rate"
+                autoComplete="off" className="input" value={form.longRate} placeholder="np. 250…"
+                onChange={(e) => set('longRate', e.target.value)} />
+            </Field>
+          </div>
 
           <div className="form-grid">
             <Field label="E-mail">

@@ -63,7 +63,7 @@ const clientRecord = (overrides = {}) => ({
 const installClientWorkspace = async (
   page, appointments = [], onRequest = () => {}, clients = [clientRecord()], specialists = [{
     id: 'sp_anna', displayName: 'Anna Nowak', professionalTitle: 'Specjalistka',
-    standardRateGrosze: 18_000, status: 'active', version: 1, staffVersion: 1,
+    standardRateGrosze: 18_000, longRateGrosze: 25_000, specialization: '', status: 'active', version: 1, staffVersion: 1,
   }],
 ) => {
   await page.route('**/api/v1/workspace?*', (route) => {
@@ -94,7 +94,7 @@ const installClientWorkspace = async (
 const createdAppointment = {
   id: 'apt_client_create', clientId: 'cl_ola', specialistId: 'sp_anna',
   serviceId: 'zajecia', startsAt: '2026-08-04T11:00:00.000Z',
-  endsAt: '2026-08-04T11:50:00.000Z', timeZone: 'Europe/Warsaw', location: null,
+  endsAt: '2026-08-04T12:00:00.000Z', timeZone: 'Europe/Warsaw', location: null,
   status: 'scheduled', source: 'panel', version: 1, cancelledAt: null,
   cancellationReason: null,
   createdAt: '2026-08-04T08:00:00.000Z', updatedAt: '2026-08-04T08:00:00.000Z',

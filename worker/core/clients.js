@@ -18,11 +18,16 @@ import {
   loadClientCryptoContext,
 } from './crypto.js'
 import { createRecordVersionBuilder } from './versions.js'
-import { assertClientContactFields, isWellFormedUnicode } from '../../src/core-records.js'
+import {
+  CLIENT_PROFILE_KEYS,
+  LEGACY_CLIENT_CONTACT_KEYS,
+  assertClientContactFields,
+  isWellFormedUnicode,
+} from '../../src/core-records.js'
 import { captureAuthorityActor } from '../identity/authority-actor.js'
 
 const BODY_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'])
-const CONTACT_KEYS = Object.freeze(['guardianPhone', 'guardianEmail', 'receptionNotes'])
+const CONTACT_KEYS = CLIENT_PROFILE_KEYS
 const EDIT_BODY_KEYS = Object.freeze(['expectedVersion', ...BODY_KEYS])
 const ARCHIVE_BODY_KEYS = Object.freeze(['expectedVersion'])
 const INPUT_KEYS = Object.freeze([
@@ -264,6 +269,25 @@ const generated = (factory, prefix, grammar, used) => {
 const contactFields = (values) => {
   const fields = Object.fromEntries(CONTACT_KEYS.map((key) => [key, values[key] ?? '']))
   return CONTACT_KEYS.some((key) => fields[key] !== '') ? fields : {}
+}
+
+// Snapshots written before the client card fields existed are client.v2 and
+// stay valid while none of the newer fields is set.
+const expectedClientSnapshots = (base, identity) => {
+  const contacts = contactFields(identity)
+  const snapshot = (schema, fields) => JSON.stringify({
+    age: identity.age, archivedAt: base.archivedAt, createdAt: base.createdAt, id: base.id,
+    name: identity.name, ...fields, schema, status: base.status, updatedAt: base.updatedAt,
+    version: base.version,
+  })
+  if (!Object.keys(contacts).length) return [snapshot('client.v1', {})]
+  const cardUnset = CONTACT_KEYS.every((key) => LEGACY_CLIENT_CONTACT_KEYS.includes(key)
+    || contacts[key] === '')
+  return [
+    snapshot('client.v3', contacts),
+    ...(cardUnset ? [snapshot('client.v2', Object.fromEntries(LEGACY_CLIENT_CONTACT_KEYS
+      .map((key) => [key, contacts[key]])))] : []),
+  ]
 }
 
 const suppliedContactFields = (values) => Object.fromEntries(
@@ -748,19 +772,7 @@ const validateRetainedCurrentSnapshots = async (context, current, identity) => {
         envelope: JSON.parse(current.currentClientVersionEnvelope),
       },
     )
-    const expectedClient = JSON.stringify({
-      age: identity.age,
-      archivedAt: current.archivedAt,
-      createdAt: current.createdAt,
-      id: current.id,
-      name: identity.name,
-      ...contactFields(identity),
-      schema: Object.keys(contactFields(identity)).length ? 'client.v2' : 'client.v1',
-      status: current.status,
-      updatedAt: current.updatedAt,
-      version: current.version,
-    })
-    if (clientPlaintext !== expectedClient) notFound()
+    if (!expectedClientSnapshots(current, identity).includes(clientPlaintext)) notFound()
     const assignmentPlaintext = await decryptForScope(
       context.keyring, context.dataKey, {
         expectedScope: context.scope,
@@ -1429,6 +1441,10 @@ export async function editClient(input) {
     throw new Error('CLIENT_ASSIGNMENT_CONFLICT')
   }
   const contacts = contactFields({ ...identity, ...suppliedContactFields(command.body) })
+  assertClientContactFields(contacts)
+  if (contacts.guardianClientId === current.id || contacts.secondGuardianClientId === current.id) {
+    validation('guardianClientId')
+  }
   if (!reassigned && identity.name === command.body.name && identity.age === command.body.age
     && CONTACT_KEYS.every((key) => (identity[key] ?? '') === (contacts[key] ?? ''))
     && current.status === command.body.status && !assignmentStartChanged) validation('body')

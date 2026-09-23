@@ -304,6 +304,67 @@ describe('persistent appointment creation', () => {
     }
   })
 
+  it('books for clients whose history mixes legacy v2 contacts and v3 card fields', async () => {
+    const client = await seedClient()
+    const keyring = await ring()
+    const scope = clientKeyScope(client.id)
+    const row = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(client.id).first()
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(row.identity_envelope), expectedScope: scope,
+    })
+    const legacyAt = new Date(NOW_MS + 100).toISOString()
+    const contacts = { guardianPhone: '+48 600 100 200', guardianEmail: '', receptionNotes: '' }
+    const envelope = async (recordId, field, plaintext) => JSON.stringify(await encryptForScope(
+      keyring, dataKey, { expectedScope: scope, recordId, field, plaintext: JSON.stringify(plaintext) },
+    ))
+    await env.DB.batch([
+      env.DB.prepare('UPDATE clients SET identity_envelope=?,version=2,updated_at=? WHERE id=?').bind(
+        await envelope(client.id, 'identity', {
+          schema: 'client.identity.v2', name: client.name, age: client.age, ...contacts,
+        }),
+        legacyAt, client.id,
+      ),
+      env.DB.prepare(`INSERT INTO record_versions
+        (id,entity_type,entity_id,version,snapshot_envelope,changed_by_staff_id,
+         changed_at,correlation_id) VALUES (?,?,?,?,?,?,?,?)`).bind(
+        `ver_legacy_contacts_${sequence}`, 'client', client.id, 2,
+        await envelope(client.id, 'record_version', {
+          age: client.age, archivedAt: null, createdAt: client.createdAt, id: client.id,
+          name: client.name, ...contacts, schema: 'client.v2', status: 'active',
+          updatedAt: legacyAt, version: 2,
+        }),
+        OWNER.id, legacyAt, CORRELATION_ID,
+      ),
+    ])
+    expect((await create(client, {
+      body: { ...BODY, clientId: client.id, date: '2027-01-20' },
+      idempotencyKey: `appointment-legacy-v2-${sequence}-key`,
+    })).status).toBe(201)
+    const marker = `appointment_card_${++sequence}`
+    const edited = (await editClient({
+      db: env.DB, recoveryDb: env.DB, actor: OWNER, keyring, nowMs: NOW_MS + 200,
+      correlationId: CORRELATION_ID, idFactory: suffixes(marker), clientId: client.id,
+      body: {
+        expectedVersion: 2, name: client.name, age: client.age, status: 'active',
+        specialistId: client.assignment.specialistId, intakeReason: 'Trudności w szkole.',
+        parentalRights: 'both', therapyConsent: 'signed',
+      },
+      idempotencyKey: `${marker}-key`,
+    })).body.data.client
+    expect(edited).toMatchObject({
+      guardianPhone: contacts.guardianPhone, intakeReason: 'Trudności w szkole.',
+      guardianClientId: '', parentalRights: 'both', therapyConsent: 'signed', version: 3,
+    })
+    expect((await create(edited, {
+      body: {
+        ...BODY, clientId: client.id, date: '2027-01-21', durationMinutes: 90,
+        expectedAmountGrosze: 25_000,
+      },
+      idempotencyKey: `appointment-card-v3-${sequence}-key`,
+    })).status).toBe(201)
+  })
+
   it('uses half-open overlap, ignores cancelled visits, and replays before facts or IDs', async () => {
     const client = await seedClient()
     const visit = { ...BODY, clientId: client.id, date: '2027-01-17' }
@@ -713,7 +774,7 @@ describe('persistent appointment creation', () => {
       correlationId: CORRELATION_ID, idFactory: vi.fn(), body: BODY,
       idempotencyKey: 'appointment-adapter-key-0001', create: service }
     expect((await postAppointment(input)).status).toBe(201)
-    await expect(postAppointment({ ...input, body: { ...BODY, durationMinutes: 60 } }))
+    await expect(postAppointment({ ...input, body: { ...BODY, durationMinutes: 120 } }))
       .rejects.toMatchObject({ code: 'VALIDATION_FAILED', details: { field: 'durationMinutes' } })
   })
 

@@ -1,5 +1,5 @@
 import { decryptForScope, encryptForScope } from '../security/envelope.js'
-import { isWellFormedUnicode } from '../../src/core-records.js'
+import { assertSpecialization, isWellFormedUnicode } from '../../src/core-records.js'
 import {
   DEFAULT_SPECIALIST_AVATAR_KEY,
   isSpecialistAvatarKey,
@@ -260,10 +260,37 @@ export async function specialistSnapshotMatches(context, record, profile) {
         schema: 'specialist.v4',
       })
     }
+    // v5 adds the 90-minute rate and specialization, which this lifecycle
+    // neither reads nor rewrites; only their shape is checked here.
+    if (parsed?.schema === 'specialist.v5'
+      && validDisplayName(parsed.displayName)
+      && validProfessionalTitle(parsed.professionalTitle)
+      && isSpecialistAvatarKey(parsed.avatarKey)
+      && parsed.avatarKey === avatarKey
+      && Number.isSafeInteger(parsed.longRateGrosze)
+      && parsed.longRateGrosze >= 1 && parsed.longRateGrosze <= 1_000_000
+      && validSpecialization(parsed.specialization)) {
+      const {
+        avatarKey: _avatarKey,
+        displayName: _displayName,
+        longRateGrosze: _longRateGrosze,
+        professionalTitle: _professionalTitle,
+        specialization: _specialization,
+        ...withoutPresentation
+      } = parsed
+      return sameRow(withoutPresentation, {
+        ...specialistSnapshot(profile),
+        schema: 'specialist.v5',
+      })
+    }
     return false
   } catch {
     return false
   }
+}
+
+const validSpecialization = (value) => {
+  try { return typeof value === 'string' && assertSpecialization(value) === value } catch { return false }
 }
 
 async function currentProfile(db, context, specialistId, staffId, profileV4) {

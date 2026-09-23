@@ -5,6 +5,8 @@ import {
   loadDataKey,
 } from '../security/envelope.js'
 import {
+  CLIENT_PROFILE_KEYS,
+  LEGACY_CLIENT_CONTACT_KEYS,
   assertClientIdentity,
   assertCorrectionReason,
   isCorrectionId,
@@ -227,8 +229,7 @@ export async function loadClientCryptoContext(db, keyring, input) {
 export async function encryptClientIdentity(context, input) {
   try {
     const current = cryptoContext(context)
-    const fields = ['guardianPhone', 'guardianEmail', 'receptionNotes']
-      .filter((key) => Object.hasOwn(input ?? {}, key))
+    const fields = CLIENT_PROFILE_KEYS.filter((key) => Object.hasOwn(input ?? {}, key))
     const captured = captureExact(input, ['clientId', 'name', 'age', ...fields])
     if (captured.clientId !== current.scope.id) fail()
     const identity = assertClientIdentity({
@@ -237,9 +238,8 @@ export async function encryptClientIdentity(context, input) {
     })
     const hasContacts = fields.some((key) => identity[key] !== '')
     const plaintext = JSON.stringify(hasContacts ? {
-      schema: 'client.identity.v2', name: identity.name, age: identity.age,
-      guardianPhone: identity.guardianPhone ?? '', guardianEmail: identity.guardianEmail ?? '',
-      receptionNotes: identity.receptionNotes ?? '',
+      schema: 'client.identity.v3', name: identity.name, age: identity.age,
+      ...Object.fromEntries(CLIENT_PROFILE_KEYS.map((key) => [key, identity[key] ?? ''])),
     } : { schema: 'client.identity.v1', name: identity.name, age: identity.age })
     return await serializedEnvelope(encryptForScope(
       current.keyring,
@@ -271,12 +271,16 @@ export async function decryptClientIdentity(context, input) {
     )
     const parsed = JSON.parse(plaintext)
     const schema = parsed?.schema
-    const identity = captureExact(parsed, schema === 'client.identity.v2'
-      ? ['schema', 'name', 'age', 'guardianPhone', 'guardianEmail', 'receptionNotes']
-      : ['schema', 'name', 'age'])
-    if (!['client.identity.v1', 'client.identity.v2'].includes(schema)) fail()
+    const profileKeys = schema === 'client.identity.v3' ? CLIENT_PROFILE_KEYS
+      : schema === 'client.identity.v2' ? LEGACY_CLIENT_CONTACT_KEYS : []
+    const identity = captureExact(parsed, ['schema', 'name', 'age', ...profileKeys])
+    if (!['client.identity.v1', 'client.identity.v2', 'client.identity.v3'].includes(schema)) fail()
     const { schema: ignored, ...fields } = identity
-    return Object.freeze(assertClientIdentity(fields))
+    // v2 predates the client card fields; surface them as unset.
+    return Object.freeze(assertClientIdentity(schema === 'client.identity.v2'
+      ? { ...fields, ...Object.fromEntries(CLIENT_PROFILE_KEYS
+        .filter((key) => !Object.hasOwn(fields, key)).map((key) => [key, ''])) }
+      : fields))
   } catch { fail() }
 }
 

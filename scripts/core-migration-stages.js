@@ -43,6 +43,7 @@ export const CORE_MIGRATION_STAGE_F_NAMES = Object.freeze([
   '0027_appointment_cancellation_reason.sql',
   '0028_activity_history.sql',
   '0029_client_session_notes.sql',
+  '0030_specialist_rates_and_specialization.sql',
 ])
 
 export const CORE_MIGRATION_REMOTE_ENV_NAMES = Object.freeze(['production', 'staging'])

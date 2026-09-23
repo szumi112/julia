@@ -18,7 +18,10 @@ export const SERVICES = [
   {
     id: STANDARD_SERVICE,
     label: 'Zajęcia psychologiczne',
-    duration: 50,
+    duration: 60,
+    // 90 minutes bills at the specialist's second rate; 50 is the length the
+    // centre booked before 60/90 — kept so those visits stay valid.
+    durations: [60, 90, 50],
     price: 180,
     note: 'Stała praca indywidualna z dzieckiem lub nastolatkiem',
   },
@@ -95,7 +98,7 @@ export const serviceLabel = (id) => SERVICE_BY_ID[id]?.label || 'Zajęcia psycho
 export const serviceShort = (id) => serviceLabel(id).split(' — ')[0]
 
 /**
- * What to badge in a dense list. The standard 50-minute session is the norm
+ * What to badge in a dense list. The standard session is the norm
  * and stays unlabelled, so only the exceptional bookings — consultations,
  * diagnostics, observations — catch the eye.
  */
@@ -103,14 +106,25 @@ export const serviceBadge = (id) => (id && id !== STANDARD_SERVICE ? serviceShor
 
 export const durationFor = (id) => SERVICE_BY_ID[id]?.duration ?? SERVICE_BY_ID[STANDARD_SERVICE].duration
 
+export const serviceDurations = (id) => {
+  const service = SERVICE_BY_ID[id]
+  return service ? service.durations ?? [service.duration] : []
+}
+
+export const isServiceDuration = (id, minutes) => serviceDurations(id).includes(minutes)
+
+export const LONG_SESSION_MINUTES = 90
+export const LONG_SESSION_PRICE = 250
+
 /**
- * The standard 50-minute session bills at the specialist's own rate (that is
- * what the "Stawki zespołu" screen edits); every other position is a fixed
- * catalogue price.
+ * The standard session bills at the specialist's own rates — one for 60 minutes
+ * (also used by legacy 50-minute visits), one for 90 minutes; every other
+ * position is a fixed catalogue price.
  */
-export const amountFor = (id, psych) => {
+export const amountFor = (id, psych, duration) => {
   const service = SERVICE_BY_ID[id]
   if (!service) return psych?.rate ?? SERVICE_BY_ID[STANDARD_SERVICE].price
-  if (service.id === STANDARD_SERVICE && psych?.rate > 0) return psych.rate
-  return service.price
+  if (service.id !== STANDARD_SERVICE) return service.price
+  if (duration === LONG_SESSION_MINUTES) return psych?.longRate > 0 ? psych.longRate : LONG_SESSION_PRICE
+  return psych?.rate > 0 ? psych.rate : service.price
 }

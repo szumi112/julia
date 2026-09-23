@@ -1,4 +1,5 @@
 import {
+  CLIENT_PROFILE_KEYS,
   assertCanonicalUtc,
   assertClientIdentity,
   assertLocation,
@@ -64,8 +65,7 @@ function requireContext(context, clientId) {
 }
 
 function clientSnapshot(entity) {
-  const fields = ['guardianPhone', 'guardianEmail', 'receptionNotes']
-    .filter((key) => Object.hasOwn(entity ?? {}, key))
+  const fields = CLIENT_PROFILE_KEYS.filter((key) => Object.hasOwn(entity ?? {}, key))
   const row = captureExact(entity, [
     'id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt',
     ...fields,
@@ -89,11 +89,9 @@ function clientSnapshot(entity) {
     createdAt: row.createdAt,
     id: row.id,
     name: identity.name,
-    ...(hasContacts ? {
-      guardianPhone: identity.guardianPhone ?? '', guardianEmail: identity.guardianEmail ?? '',
-      receptionNotes: identity.receptionNotes ?? '',
-    } : {}),
-    schema: hasContacts ? 'client.v2' : 'client.v1',
+    ...(hasContacts ? Object.fromEntries(CLIENT_PROFILE_KEYS
+      .map((key) => [key, identity[key] ?? ''])) : {}),
+    schema: hasContacts ? 'client.v3' : 'client.v1',
     status: row.status,
     updatedAt: row.updatedAt,
     version: row.version,

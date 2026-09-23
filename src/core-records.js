@@ -1,6 +1,6 @@
 // Pure Phase 2 core-record rules. This module deliberately has no UI, storage,
 // or environment dependencies so route and repository code share one contract.
-import { SERVICE_BY_ID } from './services.js'
+import { SERVICE_BY_ID, isServiceDuration } from './services.js'
 import { isBillable } from './format.js'
 import { specialistAvatarKeyOrDefault } from './specialist-avatars.js'
 
@@ -98,27 +98,54 @@ export const assertProfessionalTitle = (value) => {
   return value
 }
 
+// Optional client card fields carried inside the encrypted identity envelope.
+// All are strings with '' meaning "not set", so stored snapshots compare by
+// plain equality. The first three are the original contact fields.
+export const LEGACY_CLIENT_CONTACT_KEYS = Object.freeze([
+  'guardianPhone', 'guardianEmail', 'receptionNotes',
+])
+export const CLIENT_PROFILE_KEYS = Object.freeze([
+  ...LEGACY_CLIENT_CONTACT_KEYS, 'intakeReason', 'guardianClientId',
+  'secondGuardianClientId', 'parentalRights', 'therapyConsent',
+])
+const clientProfileChoices = {
+  parentalRights: new Set(['', 'both', 'not_both']),
+  therapyConsent: new Set(['', 'signed']),
+}
+const multilineClientFields = new Set(['receptionNotes', 'intakeReason'])
+
+export const assertSpecialization = (value) => {
+  assertNfcTrimmed(value, { field: 'specialization', minBytes: 0, maxBytes: 200 })
+  if (invalidPresentationText.test(value)) fail('specialization')
+  return value
+}
+
 export const assertClientContactFields = (value) => {
-  const optional = ['guardianPhone', 'guardianEmail', 'receptionNotes']
-  const fields = optional.filter((key) => Object.hasOwn(value ?? {}, key))
+  const fields = CLIENT_PROFILE_KEYS.filter((key) => Object.hasOwn(value ?? {}, key))
   assertExactObject(value, fields)
   const contacts = {}
   for (const field of fields) {
     const maxBytes = field === 'guardianEmail' ? 254 : field === 'guardianPhone' ? 40 : 1000
     const text = assertNfcTrimmed(value[field], { field, minBytes: 0, maxBytes })
-    if (invalidPresentationText.test(field === 'receptionNotes'
+    if (invalidPresentationText.test(multilineClientFields.has(field)
       ? text.replace(/[\n\t]/g, '') : text)) fail(field)
     if (field === 'guardianEmail' && text && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) fail(field)
     if (field === 'guardianPhone' && text
       && (!/^[+0-9 ()-]+$/.test(text) || (text.match(/\d/g) ?? []).length < 5)) fail(field)
+    if ((field === 'guardianClientId' || field === 'secondGuardianClientId')
+      && text && !ids.client.test(text)) fail(field)
+    if (clientProfileChoices[field] && !clientProfileChoices[field].has(text)) fail(field)
     contacts[field] = text
+  }
+  if (contacts.secondGuardianClientId
+    && (!contacts.guardianClientId || contacts.secondGuardianClientId === contacts.guardianClientId)) {
+    fail('secondGuardianClientId')
   }
   return contacts
 }
 
 export const assertClientIdentity = (value) => {
-  const optional = ['guardianPhone', 'guardianEmail', 'receptionNotes']
-  const fields = optional.filter((key) => Object.hasOwn(value ?? {}, key))
+  const fields = CLIENT_PROFILE_KEYS.filter((key) => Object.hasOwn(value ?? {}, key))
   assertExactObject(value, ['name', 'age', ...fields])
   const name = assertNfcTrimmed(value.name, { field: 'name', minBytes: 1, maxBytes: 120 })
   const age = value.age === null ? null : assertInteger(value.age, 'age', 1, 26)
@@ -135,13 +162,13 @@ export const assertCorrectionReason = (value) =>
 export const assertServiceSnapshot = (value) => {
   assertExactObject(value, ['serviceId', 'durationMinutes', 'expectedAmountGrosze'])
   if (typeof value.serviceId !== 'string' || !SERVICE_BY_ID[value.serviceId]) fail('serviceId')
-  if (!durations.has(value.durationMinutes) || value.durationMinutes !== SERVICE_BY_ID[value.serviceId].duration) fail('durationMinutes')
+  if (!durations.has(value.durationMinutes) || !isServiceDuration(value.serviceId, value.durationMinutes)) fail('durationMinutes')
   assertInteger(value.expectedAmountGrosze, 'expectedAmountGrosze', 1, MAX_GROSZE)
   return { ...value }
 }
 
 export const validateClientInput = (value) => {
-  const optional = ['assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes']
+  const optional = ['assignmentStartsAt', ...CLIENT_PROFILE_KEYS]
   const fields = optional.filter((key) => Object.hasOwn(value ?? {}, key))
   if (!isExactObject(value, ['name', 'age', 'status', 'specialistId', ...fields])) fail('object')
   const identity = assertClientIdentity({
@@ -509,7 +536,7 @@ const assertDtoAssignment = (assignment) => {
 }
 
 export const clientDto = (client) => {
-  const optional = ['guardianPhone', 'guardianEmail', 'receptionNotes']
+  const optional = CLIENT_PROFILE_KEYS
   const fields = optional.filter((key) => Object.hasOwn(client ?? {}, key))
   assertExactObject(client, ['id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt', 'assignment', ...fields], 'client')
   assertId(client.id, 'client')
@@ -530,8 +557,8 @@ export const clientDto = (client) => {
 
 export const specialistDto = (specialist) => {
   const keys = [
-    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
-    'version', 'staffVersion',
+    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'longRateGrosze',
+    'specialization', 'status', 'version', 'staffVersion',
   ]
   if (![keys, [...keys, 'avatarKey'], [...keys, 'accessStatus'],
     [...keys, 'avatarKey', 'accessStatus']]
@@ -540,6 +567,8 @@ export const specialistDto = (specialist) => {
   assertNfcTrimmed(specialist.displayName, { field: 'displayName', minBytes: 1, maxBytes: 120 })
   assertProfessionalTitle(specialist.professionalTitle)
   assertInteger(specialist.standardRateGrosze, 'standardRateGrosze', 1, MAX_GROSZE)
+  assertInteger(specialist.longRateGrosze, 'longRateGrosze', 1, MAX_GROSZE)
+  assertSpecialization(specialist.specialization)
   if (specialist.status !== 'active') fail('specialist')
   assertInteger(specialist.version, 'version', 1, Number.MAX_SAFE_INTEGER)
   if (specialist.staffVersion !== null) {

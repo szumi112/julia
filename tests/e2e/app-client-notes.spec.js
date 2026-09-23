@@ -29,10 +29,10 @@ const workspace = (from, to) => json(200, {
   window: { from, to, timeZone: 'Europe/Warsaw', complete: true },
   specialists: [{
     id: 'sp_note_e2e', displayName: 'Anna Nowak', professionalTitle: 'Psycholożka',
-    standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 1,
+    standardRateGrosze: 18000, longRateGrosze: 25_000, specialization: '', status: 'active', version: 1, staffVersion: 1,
   }, {
     id: 'sp_note_other', displayName: 'Ewa Druga', professionalTitle: 'Psycholożka',
-    standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 1,
+    standardRateGrosze: 18000, longRateGrosze: 25_000, specialization: '', status: 'active', version: 1, staffVersion: 1,
   }],
   clients: [{
     id: 'cl_notes', name: 'Fikcyjna Klientka', age: 12, status: 'active',

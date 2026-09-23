@@ -20,6 +20,8 @@ import {
 import { createRecordVersionBuilder } from './versions.js'
 import { captureAuthorityActor } from '../identity/authority-actor.js'
 import {
+  CLIENT_PROFILE_KEYS,
+  LEGACY_CLIENT_CONTACT_KEYS,
   assertClientIdentity,
   assertAppointmentCancellationReason,
   assertLocation,
@@ -451,8 +453,8 @@ const authenticateClientVersions = async (context, current, identity, value) => 
       })
       snapshot = JSON.parse(plaintext)
     } catch { notFound() }
-    const contactKeys = snapshot?.schema === 'client.v2'
-      ? ['guardianPhone', 'guardianEmail', 'receptionNotes'] : []
+    const contactKeys = snapshot?.schema === 'client.v3' ? CLIENT_PROFILE_KEYS
+      : snapshot?.schema === 'client.v2' ? LEGACY_CLIENT_CONTACT_KEYS : []
     const fact = captureExact(snapshot, [
       'age', 'archivedAt', 'createdAt', 'id', 'name', 'schema', 'status',
       'updatedAt', 'version', ...contactKeys,
@@ -463,9 +465,9 @@ const authenticateClientVersions = async (context, current, identity, value) => 
         ...Object.fromEntries(contactKeys.map((key) => [key, fact[key]])),
       })
       if (contactKeys.some((key) => canonical[key] !== fact[key])
-        || (fact.schema === 'client.v2' && contactKeys.every((key) => fact[key] === ''))) notFound()
+        || (fact.schema !== 'client.v1' && contactKeys.every((key) => fact[key] === ''))) notFound()
     } catch { notFound() }
-    if (fact.id !== current.id || !['client.v1', 'client.v2'].includes(fact.schema)
+    if (fact.id !== current.id || !['client.v1', 'client.v2', 'client.v3'].includes(fact.schema)
       || fact.version !== row.version
       || !['active', 'paused'].includes(fact.status) || fact.archivedAt !== null
       || fact.createdAt !== current.createdAt || !canonicalInstant(fact.updatedAt)
@@ -474,8 +476,8 @@ const authenticateClientVersions = async (context, current, identity, value) => 
     previousUpdatedAt = fact.updatedAt
     if (index === rows.length - 1 && (fact.name !== identity.name || fact.age !== identity.age
       || contactKeys.some((key) => fact[key] !== (identity[key] ?? ''))
-      || (fact.schema === 'client.v1' && ['guardianPhone', 'guardianEmail', 'receptionNotes']
-        .some((key) => (identity[key] ?? '') !== ''))
+      || CLIENT_PROFILE_KEYS.some((key) => !contactKeys.includes(key)
+        && (identity[key] ?? '') !== '')
       || fact.status !== current.status || fact.archivedAt !== null
       || fact.createdAt !== current.createdAt || fact.updatedAt !== current.updatedAt)) notFound()
   }

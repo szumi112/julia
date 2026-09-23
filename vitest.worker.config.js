@@ -24,6 +24,7 @@ export default defineConfig({
             MATERIALIZER_FALLBACK_STALE_TIME: 'materializer-fallback-stale-time',
             MATERIALIZER_REAL_CREATE: 'materializer-real-create',
             MATERIALIZER_UPDATE: 'materializer-update',
+            MATERIALIZER_OWNER_EDITS: 'materializer-owner-edits',
             MATERIALIZER_STAFF_CAP: 'materializer-staff-cap',
             MATERIALIZER_PROFILE_CAP: 'materializer-profile-cap',
           },

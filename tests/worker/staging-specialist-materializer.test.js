@@ -75,6 +75,8 @@ const seedProfile = async ({
   rate = 18000,
   professionalTitle = 'Specjalistka',
   avatarKey,
+  longRate,
+  specialization,
 } = {}) => {
   const row = {
     id,
@@ -90,16 +92,17 @@ const seedProfile = async ({
       ? null
       : await envelope(id, 'professional_title', professionalTitle),
   }
-  await activeDb.prepare(avatarKey === undefined
-    ? `INSERT INTO specialists
-       (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
-        archived_at,created_at,updated_at,professional_title_envelope)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`
-    : `INSERT INTO specialists
-       (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
-        archived_at,created_at,updated_at,professional_title_envelope,avatar_key)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-    .bind(...Object.values(row), ...(avatarKey === undefined ? [] : [avatarKey])).run()
+  const extra = {
+    ...(avatarKey === undefined ? {} : { avatar_key: avatarKey }),
+    ...(longRate === undefined ? {} : { long_rate_grosze: longRate }),
+    ...(specialization === undefined ? {} : {
+      specialization_envelope: await envelope(id, 'specialization', specialization),
+    }),
+  }
+  const columns = [...Object.keys(row), ...Object.keys(extra)]
+  await activeDb.prepare(
+    `INSERT INTO specialists (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`,
+  ).bind(...Object.values(row), ...Object.values(extra)).run()
   return Object.freeze(row)
 }
 
@@ -121,6 +124,8 @@ const seedDesiredProfiles = async ({
   juliaTitle = 'Specjalistka',
   juliaRate = 18000,
   juliaAvatarKey,
+  juliaLongRate,
+  juliaSpecialization,
 } = {}) => {
   const byName = new Map(STAGING_SPECIALIST_DESIRED_STATE.map((item) => [
     item.displayName,
@@ -142,6 +147,8 @@ const seedDesiredProfiles = async ({
         ? juliaRate
         : desired.standardRateGrosze,
       avatarKey: desired.displayName === 'Julia Wolanin' ? juliaAvatarKey : undefined,
+      ...(desired.displayName === 'Julia Wolanin'
+        ? { longRate: juliaLongRate, specialization: juliaSpecialization } : {}),
     })
   }
   return byName
@@ -863,7 +870,7 @@ describe('staging specialist desired-state materializer', () => {
     ).first()).count).toBe(3)
   })
 
-  it('backfills a legacy Julia title/rate through the normal edit before link', async () => {
+  it('backfills a legacy Julia title through the normal edit and keeps her rates before link', async () => {
     await useScenario('MATERIALIZER_UPDATE', { stageF: true })
     const julia = await seedStaff({
       id: 'stf_materializer_julia_update',
@@ -872,6 +879,7 @@ describe('staging specialist desired-state materializer', () => {
     })
     await seedDesiredProfiles({
       juliaTitle: null, juliaRate: 19000, juliaAvatarKey: 'wave',
+      juliaLongRate: 27000, juliaSpecialization: 'Terapia nastolatków',
     })
     const harness = directCommands()
     await expect(harness.materialize(input())).resolves.toEqual({
@@ -885,7 +893,9 @@ describe('staging specialist desired-state materializer', () => {
         expectedVersion: 1,
         displayName: 'Julia Wolanin',
         professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18000,
+        standardRateGrosze: 19000,
+        longRateGrosze: 27000,
+        specialization: 'Terapia nastolatków',
         avatarKey: 'wave',
       },
     })
@@ -898,7 +908,7 @@ describe('staging specialist desired-state materializer', () => {
        FROM specialists WHERE id='sp_staging_workbook_julia_wolanin'`,
     ).first()
     expect(profile).toMatchObject({
-      standard_rate_grosze: 18000,
+      standard_rate_grosze: 19000,
       avatar_key: 'wave',
       staff_user_id: julia.id,
       version: 3,
@@ -909,5 +919,23 @@ describe('staging specialist desired-state materializer', () => {
       field: 'professional_title',
       envelope: JSON.parse(profile.professional_title_envelope),
     })).toBe('Specjalistka')
+  })
+
+  it('leaves an owner-edited title and rate alone', async () => {
+    await useScenario('MATERIALIZER_OWNER_EDITS', { stageF: true })
+    await seedStaff({
+      id: 'stf_materializer_julia_edits',
+      displayName: 'Julia Wolanin',
+      role: 'owner',
+    })
+    await seedDesiredProfiles({ juliaTitle: 'Psycholożka', juliaRate: 20000 })
+    const harness = directCommands()
+    await expect(harness.materialize(input())).resolves.toEqual({
+      created: 0, updated: 0, linked: 1, confirmed: 3,
+    })
+    expect(harness.calls.update).toHaveLength(0)
+    expect((await activeDb.prepare(
+      "SELECT standard_rate_grosze FROM specialists WHERE id='sp_staging_workbook_julia_wolanin'",
+    ).first()).standard_rate_grosze).toBe(20000)
   })
 })

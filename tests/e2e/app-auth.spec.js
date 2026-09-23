@@ -183,7 +183,7 @@ test('@owner presents a linked owner with separate role and professional title w
         id: 'sp_julia',
         displayName: 'Julia Wolanin',
         professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18_000,
+        standardRateGrosze: 18_000, longRateGrosze: 25_000, specialization: '',
         status: 'active',
         version: 1,
         staffVersion: 1,

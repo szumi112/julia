@@ -10,6 +10,14 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u
 const INVALID_TITLE = /[\p{Cc}\p{Cf}]/u
 const TEXT_ENCODER = new TextEncoder()
 
+// A typed złoty amount (Polish comma allowed) or null when it is not a valid rate.
+const parseRate = (value) => {
+  const canonical = value.trim().replace(',', '.')
+  const amount = Number(canonical)
+  return /^\d{1,5}(?:\.\d{1,2})?$/.test(canonical) && amount > 0 && amount <= 10000
+    ? amount : null
+}
+
 function ModalShell({ children, dirty, label, onClose }) {
   const dialogRef = useRef(null)
   const discard = useDiscardGuard(dirty)
@@ -52,31 +60,38 @@ export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
   const initialName = profile?.name ?? ''
   const initialProfessionalTitle = profile?.professionalTitle ?? 'Specjalistka'
   const initialRate = profile ? String(profile.rate).replace('.', ',') : '180'
+  const initialLongRate = profile ? String(profile.longRate).replace('.', ',') : '250'
+  const initialSpecialization = profile?.spec ?? ''
   const initialAvatarKey = profile?.avatarKey ?? DEFAULT_SPECIALIST_AVATAR_KEY
   const [displayName, setDisplayName] = useState(initialName)
   const [professionalTitle, setProfessionalTitle] = useState(initialProfessionalTitle)
   const [rate, setRate] = useState(initialRate)
+  const [longRate, setLongRate] = useState(initialLongRate)
+  const [specialization, setSpecialization] = useState(initialSpecialization)
   const [avatarKey, setAvatarKey] = useState(initialAvatarKey)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
   const [errors, setErrors] = useState({})
   const dirty = displayName !== initialName
     || professionalTitle !== initialProfessionalTitle || rate !== initialRate
+    || longRate !== initialLongRate || specialization !== initialSpecialization
     || avatarKey !== initialAvatarKey
   const submit = async (event) => {
     event.preventDefault()
     const name = displayName.trim().normalize('NFC')
     const title = professionalTitle.trim().normalize('NFC')
-    const canonicalRate = rate.trim().replace(',', '.')
-    const amount = Number(canonicalRate)
+    const focus = specialization.trim().normalize('NFC')
+    const parsedRate = parseRate(rate)
+    const parsedLongRate = parseRate(longRate)
     const nextErrors = {
       displayName: name ? null : 'Wpisz imię i nazwisko.',
       professionalTitle: title && !INVALID_TITLE.test(title)
         && TEXT_ENCODER.encode(title).byteLength <= 120
         ? null : 'Wpisz tytuł, np. psycholożka.',
-      rate: /^\d{1,5}(?:\.\d{1,2})?$/.test(canonicalRate)
-        && Number.isFinite(amount) && amount > 0 && amount <= 10000
-        ? null : 'Wpisz stawkę, np. 180.',
+      rate: parsedRate === null ? 'Wpisz stawkę, np. 180.' : null,
+      longRate: parsedLongRate === null ? 'Wpisz stawkę, np. 250.' : null,
+      specialization: !INVALID_TITLE.test(focus) && TEXT_ENCODER.encode(focus).byteLength <= 200
+        ? null : 'Skróć opis specjalizacji.',
     }
     setErrors(nextErrors)
     if (Object.values(nextErrors).some(Boolean)) {
@@ -89,7 +104,9 @@ export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
       const input = {
         displayName: name,
         professionalTitle: title,
-        standardRateGrosze: Math.round(amount * 100),
+        standardRateGrosze: Math.round(parsedRate * 100),
+        longRateGrosze: Math.round(parsedLongRate * 100),
+        specialization: focus,
         avatarKey,
       }
       const options = { idempotencyKey: apiClient.createIdempotencyKey() }
@@ -138,12 +155,27 @@ export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
                 setErrors((current) => ({ ...current, professionalTitle: null }))
               }} />
             </Field>
-            <Field label="Stawka za sesję (zł)" error={errors.rate}>
-              <input className="input" inputMode="decimal" value={rate} onChange={(event) => {
-                setRate(event.target.value)
-                setErrors((current) => ({ ...current, rate: null }))
+            <Field label="Specjalizacja (opcjonalnie)" error={errors.specialization}
+              hint="Np. terapia nastolatków, diagnoza ASRS.">
+              <input className="input" value={specialization} onChange={(event) => {
+                setSpecialization(event.target.value)
+                setErrors((current) => ({ ...current, specialization: null }))
               }} />
             </Field>
+            <div className="form-grid">
+              <Field label="Stawka za 60 min (zł)" error={errors.rate}>
+                <input className="input" inputMode="decimal" value={rate} onChange={(event) => {
+                  setRate(event.target.value)
+                  setErrors((current) => ({ ...current, rate: null }))
+                }} />
+              </Field>
+              <Field label="Stawka za 90 min (zł)" error={errors.longRate}>
+                <input className="input" inputMode="decimal" value={longRate} onChange={(event) => {
+                  setLongRate(event.target.value)
+                  setErrors((current) => ({ ...current, longRate: null }))
+                }} />
+              </Field>
+            </div>
             <SpecialistAvatarPicker value={avatarKey} onChange={setAvatarKey} />
             {error ? <div className="form-warn form-warn--error" role="alert"><span>{error}</span></div> : null}
           </form>

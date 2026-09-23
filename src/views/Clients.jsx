@@ -30,6 +30,8 @@ import { HistoricalOccurrenceRow } from './historical-bits.jsx'
 import { HistoricalClientActivation } from './HistoricalClientActivation.jsx'
 import { ClientSessionNotes } from './ClientSessionNotes.jsx'
 
+const PARENTAL_RIGHTS_LABELS = { '': 'Nie ustalono', both: 'Tak', not_both: 'Nie' }
+
 const HISTORICAL_SUBTITLE = 'Klienci z dawnego arkusza. Tylko do wglądu.'
 
 // the client's next scheduled visit — sessions stay sorted by date+time
@@ -815,6 +817,15 @@ export function ClientDetail({ params }) {
   const family = client.familyId
     ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
     : []
+  // App-mode family links live on the child's card; a parent sees the children
+  // that point at them. Only clients this user can see are listed.
+  const guardianIds = [client.guardianClientId, client.secondGuardianClientId].filter(Boolean)
+  const linkedFamily = isApp ? [
+    ...guardianIds.map((id) => state.clients.find((c) => c.id === id)).filter(Boolean)
+      .map((member) => ({ member, label: 'rodzic' })),
+    ...state.clients.filter((c) => c.guardianClientId === client.id
+      || c.secondGuardianClientId === client.id).map((member) => ({ member, label: 'dziecko' })),
+  ] : []
   const canReadClinicalNotes = !isApp && role.scope === 'own' && client.psychId === role.psychId
   const canReadAppSessionNotes = isApp && actor?.specialistId
     && actor.specialistId === client.psychId && capabilities.includes('clinical.read')
@@ -932,6 +943,23 @@ export function ClientDetail({ params }) {
                 ? fmtMoney(debt)
                 : 'Brak zaległości w tym zakresie'}</b>
             </div>
+            {isApp && (linkedFamily.length > 0 || guardianIds.length > 0) && <div className="care-overview__item">
+              <span>Rodzina</span>
+              {linkedFamily.length > 0 ? (
+                <span className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+                  {linkedFamily.map(({ member, label }) => (
+                    <EntityLink
+                      key={member.id}
+                      route="client"
+                      params={{ id: member.id }}
+                      className="link care-overview__value"
+                    >
+                      {`${member.name} (${label})`}
+                    </EntityLink>
+                  ))}
+                </span>
+              ) : <b>{guardianIds.length ? 'Rodzic spoza Twojej listy klientów' : '—'}</b>}
+            </div>}
             {!isApp && <div className="care-overview__item">
               <span>Rodzina</span>
               {family.length > 0 ? (
@@ -1168,6 +1196,31 @@ export function ClientDetail({ params }) {
             workspaceRange={sourceHistoryRange ?? workspaceRange}
           />
         ) : null}
+
+        {client.intakeReason && <section className="client-record__section" aria-labelledby="intake-reason-title" data-reveal>
+          <div className="card card--pad">
+            <h2 className="card-title" id="intake-reason-title">Z czym przychodzi</h2>
+            <p className="client-record__reception-notes">{client.intakeReason}</p>
+          </div>
+        </section>}
+
+        {typeof client.age === 'number' && !isHistoricalRecord && <section className="client-record__section" aria-labelledby="consent-title" data-reveal>
+          <div className="card card--pad">
+            <h2 className="card-title" id="consent-title">Zgody i prawa rodzicielskie</h2>
+            <dl className="client-record__facts">
+              <div>
+                <dt>Oboje rodzice mają pełnię praw rodzicielskich</dt>
+                <dd>{PARENTAL_RIGHTS_LABELS[client.parentalRights || '']}</dd>
+              </div>
+              <div>
+                <dt>Zgoda na terapię małoletniego</dt>
+                <dd>{client.therapyConsent === 'signed'
+                  ? <Pill tone="sage" dot>Podpisana</Pill>
+                  : <Pill tone="amber" dot>Brak podpisanej zgody</Pill>}</dd>
+              </div>
+            </dl>
+          </div>
+        </section>}
 
         {client.receptionNotes && <section className="client-record__section" aria-labelledby="reception-notes-title" data-reveal>
           <div className="card card--pad">
