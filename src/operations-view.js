@@ -42,22 +42,6 @@ export function backupFreshnessState(health) {
   })
 }
 
-// The Dashboard only surfaces a backup problem once it needs a decision. It
-// deliberately reads the server timestamp from the health snapshot instead of
-// the browser clock, so a stale tab cannot manufacture an alarm.
-export function dashboardBackupAlert(health) {
-  const backup = backupFreshnessState(health)
-  // `BACKUP_STALE` is useful in the detailed health card, but the Dashboard
-  // promise is deliberately stricter: exactly 36 hours remains quiet.
-  const serverConfirmsStaleWithoutSuccess = backup.lastSuccessAt === null
-    && backup.detailCode === 'BACKUP_STALE'
-  if (!(backup.ageHours > BACKUP_STALE_HOURS) && !serverConfirmsStaleWithoutSuccess) return null
-  return Object.freeze({
-    title: 'Kopia zapasowa wymaga sprawdzenia',
-    description: 'Od ponad 36 godzin nie powstała nowa kopia zapasowa.',
-  })
-}
-
 function effectiveCheckStatus(health, check) {
   return check.id === 'backup.freshness'
     ? backupFreshnessState(health).status

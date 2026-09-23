@@ -1,5 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { apiClient } from '../api.js'
+import { Fragment, useMemo, useRef, useState } from 'react'
 import { useApp, useAppointmentMutationLock, useWorkspaceRetry, useWorkspaceWindow } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { canPerformAction } from '../capability-access.js'
@@ -10,7 +9,6 @@ import { EntityLink, ViewState } from '../ux-patterns.jsx'
 import { todayWorkspace } from '../workspace.js'
 import { isWorkspaceRangeCovered, rollingWorkspaceRange, weekWorkspaceRange } from '../workspace-view.js'
 import { isWorkspaceRangePending } from '../workspace-load-request.js'
-import { dashboardBackupAlert } from '../operations-view.js'
 import { loadFailureCopy } from '../save-failure-copy.js'
 import {
   fmtMoney, fmtWeekday, fmtFullDate, toISODate, pad2,
@@ -180,28 +178,6 @@ export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }
   } = useShell()
   const isApp = appMode === 'app'
   const ref = useReveal()
-  const canReadBackupHealth = isApp && role.id === 'owner'
-    && canPerformAction(capabilities, 'operations.health.read')
-  const [backupHealth, setBackupHealth] = useState(null)
-
-  useEffect(() => {
-    if (!canReadBackupHealth) return undefined
-    let active = true
-    const timer = window.setTimeout(() => {
-      void apiClient.getOperationsHealth()
-        .then((health) => {
-          if (active) setBackupHealth(health)
-        })
-        .catch(() => {
-          if (active) setBackupHealth(null)
-        })
-    }, 0)
-    return () => {
-      active = false
-      window.clearTimeout(timer)
-    }
-  }, [canReadBackupHealth])
-
   // minute-aligned shared clock — "Trwa teraz" / "Następna sesja" never go stale
   const now = useMinuteNow()
   const today = toISODate(now)
@@ -274,7 +250,6 @@ export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }
   })
   const canOpenHero = workspaceCovered && heroSession && canEditSession(heroSession)
   const showClientsLink = isApp && canAccess('clients') === true
-  const backupAlert = canReadBackupHealth ? dashboardBackupAlert(backupHealth) : null
   const hasDashboardRangeFailure = todayWorkspaceState === 'unavailable'
     || todayWorkspaceFailed
     || (role.scope !== 'own' && (
@@ -329,18 +304,6 @@ export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }
           {showClientsLink && <EntityLink route="clients" className="link">Przejdź do klientów</EntityLink>}
         </div>}
       </header>
-
-      {backupAlert ? (
-        <aside className="today-backup-alert" role="alert" aria-label={backupAlert.title}>
-          <div>
-            <strong>{backupAlert.title}</strong>
-            <span>{backupAlert.description}</span>
-          </div>
-          <EntityLink route="settings" params={{ section: 'security' }} className="today-backup-alert__link">
-            Zobacz, co zrobić <span aria-hidden="true">›</span>
-          </EntityLink>
-        </aside>
-      ) : null}
 
       {!workspaceCovered && <ViewState
         tone={workspaceUnavailable ? 'error' : 'loading'}
