@@ -2829,11 +2829,35 @@ describe('D1 export REST request and response contract', () => {
 
   it('maps a rejecting fetch to start failed without exposing native detail', async () => {
     const marker = 'native-fetch-provider-detail'
-    const error = await exportError(exportInput({
-      fetch: vi.fn(async () => { throw new Error(marker) }),
-    }).input)
-    expect(error).toEqual(new Error('BACKUP_EXPORT_START_FAILED'))
-    expect(error.message).not.toContain(marker)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const error = await exportError(exportInput({
+        fetch: vi.fn(async () => { throw new Error(marker) }),
+      }).input)
+      expect(error).toEqual(new Error('BACKUP_EXPORT_START_FAILED'))
+      expect(error.message).not.toContain(marker)
+      expect(warn).toHaveBeenCalledWith(JSON.stringify({
+        event: 'backup.export.fetch_failed', errorCode: 'BACKUP_EXPORT_START_FAILED',
+      }))
+      expect(warn.mock.calls.flat().join('')).not.toContain(marker)
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('logs an unsuccessful 2xx export envelope without its errors', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const error = await exportError(exportInput({
+        fetch: vi.fn(async () => exportResponse(null, { success: false })),
+      }).input)
+      expect(error).toEqual(new Error('BACKUP_EXPORT_START_FAILED'))
+      expect(warn).toHaveBeenCalledWith(JSON.stringify({
+        event: 'backup.export.unsuccessful', errorCode: 'BACKUP_EXPORT_START_FAILED',
+      }))
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it.each([

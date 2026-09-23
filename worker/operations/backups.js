@@ -1686,6 +1686,13 @@ async function boundedDependency({
   }
 }
 
+// Each start-failure path logs its own event (never provider detail) so the
+// operations log shows where an export stopped.
+function exportFailed(event, status) {
+  safeLog('warn', { event, errorCode: 'BACKUP_EXPORT_START_FAILED', status })
+  adapterFail('BACKUP_EXPORT_START_FAILED')
+}
+
 function requestDeadlineScope(runtime, deadlineMs, beforeMs) {
   if (beforeMs >= deadlineMs) adapterFail('BACKUP_EXPORT_TIMEOUT')
   if (runtime.caller.aborted()) adapterFail('BACKUP_EXPORT_START_FAILED')
@@ -1723,9 +1730,12 @@ function requestDeadlineScope(runtime, deadlineMs, beforeMs) {
         active = false
         const observedNow = runtime.readNow()
         if (observedNow >= deadlineMs) adapterFail('BACKUP_EXPORT_TIMEOUT')
-        if (runtime.caller.aborted()) adapterFail('BACKUP_EXPORT_START_FAILED')
-        if (winner.kind === 'boundary') adapterFail('BACKUP_EXPORT_START_FAILED')
-        if (winner.kind === 'rejected') adapterFail(rejectionCode)
+        if (runtime.caller.aborted()) exportFailed('backup.export.aborted')
+        if (winner.kind === 'boundary') exportFailed('backup.export.aborted')
+        if (winner.kind === 'rejected') {
+          if (rejectionCode === 'BACKUP_EXPORT_START_FAILED') exportFailed('backup.export.fetch_failed')
+          adapterFail(rejectionCode)
+        }
         return winner.value
       } finally {
         active = false
@@ -1759,12 +1769,9 @@ function responseTransportFacts(response) {
     || typeof ok !== 'boolean'
     || !Number.isInteger(status) || status < 100 || status > 599
     || ok !== (status >= 200 && status < 300)) adapterFail('BACKUP_EXPORT_START_FAILED')
-  if (!ok) {
-    // The status alone tells an expired or under-scoped token (401/403) apart
-    // from a provider outage; the response body is never logged.
-    safeLog('warn', { event: 'backup.export.rejected', errorCode: 'BACKUP_EXPORT_START_FAILED', status })
-    adapterFail('BACKUP_EXPORT_START_FAILED')
-  }
+  // The status alone tells an expired or under-scoped token (401/403) apart
+  // from a provider outage; the response body is never logged.
+  if (!ok) exportFailed('backup.export.rejected', status)
   return response
 }
 
@@ -2035,7 +2042,7 @@ function exportEnvelope(value, firstBookmark) {
   const envelope = parsedExactObject(value, ['errors', 'messages', 'result', 'success'])
   if (!Array.isArray(envelope.errors) || !Array.isArray(envelope.messages)
     || typeof envelope.success !== 'boolean') adapterFail('BACKUP_EXPORT_RESPONSE_INVALID')
-  if (envelope.success !== true) adapterFail('BACKUP_EXPORT_START_FAILED')
+  if (envelope.success !== true) exportFailed('backup.export.unsuccessful')
   const resultKeys = Reflect.ownKeys(envelope.result ?? {})
   if (resultKeys.length === 5) {
     const current = parsedExactObject(envelope.result, [
