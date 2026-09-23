@@ -2571,7 +2571,7 @@ describe('D1 export REST request and response contract', () => {
     for (const [url, options] of fetch.mock.calls) {
       expect(url).toBe(EXPORT_ENDPOINT)
       expect(options.method).toBe('POST')
-      expect(options.redirect).toBe('error')
+      expect(options.redirect).toBe('manual')
       expect(options.headers).toEqual({
         Authorization: `Bearer ${EXPORT_TOKEN}`,
         'Content-Type': 'application/json',
@@ -3376,6 +3376,29 @@ describe('D1 export monotonic deadline and request accounting', () => {
   })
 })
 
+describe('D1 export requests in the Workers runtime', () => {
+  // workerd rejects redirect: 'error' outright, which silently failed every
+  // staging backup; building a real Request proves the options are accepted.
+  it('builds real Requests from the export and download fetch options', async () => {
+    const exportFetch = vi.fn(async () => exportResponse(completeResult()))
+    await pollD1Export(exportInput({ fetch: exportFetch }).input)
+    const downloadFetch = vi.fn(async () => responseLike({
+      body: new ReadableStream({ start(controller) { controller.close() } }),
+    }))
+    await downloadD1Export(downloadInput({ fetch: downloadFetch }))
+    for (const [url, init] of [...exportFetch.mock.calls, ...downloadFetch.mock.calls]) {
+      expect(() => new Request(url, init)).not.toThrow()
+      expect(init.redirect).toBe('manual')
+    }
+  })
+
+  it('treats a manual 3xx download as a redirect instead of following it', async () => {
+    const fetch = vi.fn(async () => responseLike({ ok: false, status: 302 }))
+    await expect(downloadD1Export(downloadInput({ fetch })))
+      .rejects.toThrow(/^BACKUP_EXPORT_REDIRECTED$/)
+  })
+})
+
 describe('signed D1 export download', () => {
   it('performs one unauthenticated GET and returns the exact unused stream', async () => {
     const stream = new ReadableStream({ start(controller) { controller.close() } })
@@ -3390,7 +3413,7 @@ describe('signed D1 export download', () => {
     expect(result.body).toBe(stream)
     expect(fetch).toHaveBeenCalledExactlyOnceWith(EXPORT_URL, {
       method: 'GET',
-      redirect: 'error',
+      redirect: 'manual',
       signal,
     })
     expect(Reflect.ownKeys(fetch.mock.calls[0][1]).sort()).toEqual([
