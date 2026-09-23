@@ -870,7 +870,7 @@ describe('staging specialist desired-state materializer', () => {
     ).first()).count).toBe(3)
   })
 
-  it('backfills a legacy Julia title/rate through the normal edit before link', async () => {
+  it('backfills a legacy Julia title through the normal edit and keeps her rates before link', async () => {
     await useScenario('MATERIALIZER_UPDATE', { stageF: true })
     const julia = await seedStaff({
       id: 'stf_materializer_julia_update',
@@ -893,7 +893,7 @@ describe('staging specialist desired-state materializer', () => {
         expectedVersion: 1,
         displayName: 'Julia Wolanin',
         professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18000,
+        standardRateGrosze: 19000,
         longRateGrosze: 27000,
         specialization: 'Terapia nastolatków',
         avatarKey: 'wave',
@@ -908,7 +908,7 @@ describe('staging specialist desired-state materializer', () => {
        FROM specialists WHERE id='sp_staging_workbook_julia_wolanin'`,
     ).first()
     expect(profile).toMatchObject({
-      standard_rate_grosze: 18000,
+      standard_rate_grosze: 19000,
       avatar_key: 'wave',
       staff_user_id: julia.id,
       version: 3,
@@ -919,5 +919,23 @@ describe('staging specialist desired-state materializer', () => {
       field: 'professional_title',
       envelope: JSON.parse(profile.professional_title_envelope),
     })).toBe('Specjalistka')
+  })
+
+  it('leaves an owner-edited title and rate alone', async () => {
+    await useScenario('MATERIALIZER_OWNER_EDITS', { stageF: true })
+    await seedStaff({
+      id: 'stf_materializer_julia_edits',
+      displayName: 'Julia Wolanin',
+      role: 'owner',
+    })
+    await seedDesiredProfiles({ juliaTitle: 'Psycholożka', juliaRate: 20000 })
+    const harness = directCommands()
+    await expect(harness.materialize(input())).resolves.toEqual({
+      created: 0, updated: 0, linked: 1, confirmed: 3,
+    })
+    expect(harness.calls.update).toHaveLength(0)
+    expect((await activeDb.prepare(
+      "SELECT standard_rate_grosze FROM specialists WHERE id='sp_staging_workbook_julia_wolanin'",
+    ).first()).standard_rate_grosze).toBe(20000)
   })
 })

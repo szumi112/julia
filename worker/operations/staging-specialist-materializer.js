@@ -538,8 +538,7 @@ const finalVerification = async (db, context) => {
   for (const desired of STAGING_SPECIALIST_DESIRED_STATE) {
     const profile = resolveProfile(directory, desired)
     if (!profile || profile.displayName !== desired.displayName
-      || profile.legacyTitle || profile.professionalTitle !== desired.professionalTitle
-      || profile.standardRateGrosze !== desired.standardRateGrosze
+      || profile.legacyTitle
       || !isSpecialistAvatarKey(profile.avatarKey)) failure()
     const claim = currentClaim(directory, profile)
     if (desired.linkSelector) {
@@ -628,10 +627,11 @@ export function createStagingSpecialistMaterializer(value) {
           archivedAt: null,
         })
       } else {
-        const needsUpdate = profile.displayName !== desired.displayName
-          || profile.legacyTitle
-          || profile.professionalTitle !== desired.professionalTitle
-          || profile.standardRateGrosze !== desired.standardRateGrosze
+        // The owner edits titles and rates in the panel; only a legacy profile
+        // without a stored title, or a drifted name, is corrected here.
+        const needsUpdate = profile.displayName !== desired.displayName || profile.legacyTitle
+        const professionalTitle = profile.legacyTitle
+          ? desired.professionalTitle : profile.professionalTitle
         if (needsUpdate) {
           await dependencies.updateProfile({
             db: input.db,
@@ -645,8 +645,8 @@ export function createStagingSpecialistMaterializer(value) {
             body: {
               expectedVersion: profile.version,
               displayName: desired.displayName,
-              professionalTitle: desired.professionalTitle,
-              standardRateGrosze: desired.standardRateGrosze,
+              professionalTitle,
+              standardRateGrosze: profile.standardRateGrosze,
               longRateGrosze: profile.longRateGrosze,
               specialization: profile.specialization,
               avatarKey: profile.avatarKey,
@@ -658,9 +658,8 @@ export function createStagingSpecialistMaterializer(value) {
             ...profile,
             displayName: desired.displayName,
             canonicalName: desired.displayName,
-            professionalTitle: desired.professionalTitle,
+            professionalTitle,
             legacyTitle: false,
-            standardRateGrosze: desired.standardRateGrosze,
             version: profile.version + 1,
           })
         } else {
