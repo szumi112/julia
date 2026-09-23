@@ -6,7 +6,12 @@ import { decryptOutboxPayload, enqueueOutboxStatement, processOutboxBatch } from
 import { decryptForScope, encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { encodeBase64Url } from '../../worker/security/encoding.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import recoveryRow from '../fixtures/backup-recovery-workbook-row.json'
+import { RECOVERY_TABLES } from '../../worker/operations/backup-recovery.js'
+
+const recoveryRow = Object.freeze({
+  applied_migrations_json: JSON.stringify([{ id: 1, name: '0001_security_primitives.sql' }]),
+  ...Object.fromEntries(RECOVERY_TABLES.map((table) => [table, 1])),
+})
 
 const VALID_ENV = Object.freeze({
   APP_ENV: 'development',
@@ -1497,11 +1502,10 @@ describe('ordinary outbox integration and privacy', () => {
       async all({ sql, execute }) {
         statements += 1
         executed.push(sql.replaceAll(/\s+/g, ' ').trim().slice(0, 100))
-        if (/WITH migration_snapshot AS/i.test(sql)
-          && /JOIN workbook_imports AS imported/i.test(sql)) {
+        if (/WITH migration_snapshot AS/i.test(sql)) {
           recoveryReads += 1
           const row = structuredClone(recoveryRow)
-          if (mode === 'recovery_drift' && recoveryReads === 2) row.activity_version += 1
+          if (mode === 'recovery_drift' && recoveryReads === 2) row.clients += 1
           return { results: [row], success: true }
         }
         return execute()

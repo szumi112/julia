@@ -7,7 +7,12 @@ import { openBackupManifest, parseCanonicalManifest } from '../../worker/operati
 import { BACKUP_SQL_MAX_BYTES } from '../../worker/operations/backup-limits.js'
 import { encryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
-import recoveryRow from '../fixtures/backup-recovery-workbook-row.json'
+import { RECOVERY_TABLES } from '../../worker/operations/backup-recovery.js'
+
+const recoveryRow = Object.freeze({
+  applied_migrations_json: JSON.stringify([{ id: 1, name: '0001_security_primitives.sql' }]),
+  ...Object.fromEntries(RECOVERY_TABLES.map((table) => [table, 1])),
+})
 
 const {
   downloadD1Export,
@@ -419,8 +424,7 @@ function workbookRecoveryDb(real, hooks = {}) {
   return trackedDb(real, {
     ...hooks,
     async all(context) {
-      if (/WITH migration_snapshot AS/i.test(context.sql)
-        && /JOIN workbook_imports AS imported/i.test(context.sql)) {
+      if (/WITH migration_snapshot AS/i.test(context.sql)) {
         const replacement = hooks.recovery?.(context)
         return replacement ?? { results: [structuredClone(recoveryRow)], success: true }
       }
@@ -861,7 +865,7 @@ describe('operational backup create runner', () => {
     expect(manifest.appliedMigrations.every(({ id, name }) => (
       Number.isSafeInteger(id) && /^\d{4}_[a-z0-9_-]+\.sql$/.test(name)
     ))).toBe(true)
-    expect(manifest.recoveryFacts).toMatchObject({ kind: 'workbook_roundtrip_v1' })
+    expect(manifest.recoveryFacts).toMatchObject({ kind: 'table_counts_v1' })
     expect(manifest.plaintextSqlSha256).toBe(
       '40b30d75e5fc82d2efb638990b7a275540ebd39f1bbacadfec3f136594d64342',
     )
@@ -1684,7 +1688,7 @@ describe('operational backup create runner', () => {
       recovery: () => {
         recoveryReads += 1
         const row = structuredClone(recoveryRow)
-        if (recoveryReads === 2) row.activity_version += 1
+        if (recoveryReads === 2) row.clients += 1
         return { results: [row], success: true }
       },
     })

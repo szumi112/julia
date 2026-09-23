@@ -5,10 +5,65 @@ import {
   CORE_PRE_WORKBOOK_MIGRATIONS,
   CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS,
   WORKBOOK_ROUNDTRIP_MIGRATIONS,
-  readBackupRecoverySnapshotWithQuery,
+  RECOVERY_TABLES,
   readBackupRecoverySnapshot,
+  readBackupRecoverySnapshotWithQuery,
+  readWorkbookRecoverySnapshot,
+  readWorkbookRecoverySnapshotWithQuery,
+  recoveryFactsMatchMigrations,
   validateBackupRecoveryFacts,
 } from '../../worker/operations/backup-recovery.js'
+
+const tableCountsRow = (migrations, overrides = {}) => ({
+  applied_migrations_json: JSON.stringify(migrations),
+  ...Object.fromEntries(RECOVERY_TABLES.map((table, index) => [table, index * 3])),
+  ...overrides,
+})
+
+test('backup snapshot fingerprints any migration set with business-table row counts', async () => {
+  const migrations = Array.from({ length: 30 }, (_, index) => ({
+    id: index + 1, name: `${String(index + 1).padStart(4, '0')}_migration_${index + 1}.sql`,
+  }))
+  const calls = []
+  const result = await readBackupRecoverySnapshotWithQuery(async (sql) => {
+    calls.push(sql)
+    return [tableCountsRow(migrations)]
+  })
+  assert.equal(calls.length, 1)
+  for (const table of RECOVERY_TABLES) assert.match(calls[0], new RegExp(`FROM ${table}\\)`))
+  assert.doesNotMatch(calls[0], /audit_events|outbox_jobs|backup_runs|scheduler_runs/)
+  assert.deepEqual(result, {
+    appliedMigrations: migrations,
+    recoveryFacts: {
+      kind: 'table_counts_v1',
+      tableCounts: Object.fromEntries(RECOVERY_TABLES.map((table, index) => [table, index * 3])),
+    },
+  })
+  assert.equal(recoveryFactsMatchMigrations(result.recoveryFacts, migrations), true)
+  assert.deepEqual(validateBackupRecoveryFacts(result.recoveryFacts), result.recoveryFacts)
+})
+
+test('backup snapshot fails closed on malformed rows and counts', async () => {
+  const migrations = structuredClone(CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS)
+  for (const rows of [
+    [],
+    [tableCountsRow(migrations), tableCountsRow(migrations)],
+    [tableCountsRow(migrations, { clients: -1 })],
+    [tableCountsRow(migrations, { clients: 1.5 })],
+    [tableCountsRow(migrations, { applied_migrations_json: '[]' })],
+    [tableCountsRow(migrations, { extra_table: 1 })],
+    [(({ clients, ...rest }) => rest)(tableCountsRow(migrations))],
+  ]) {
+    await assert.rejects(readBackupRecoverySnapshotWithQuery(async () => rows), /BACKUP_RECOVERY_INVALID/)
+  }
+  await assert.rejects(readBackupRecoverySnapshotWithQuery(async () => {
+    throw new Error('no such table: client_session_notes')
+  }), /BACKUP_RECOVERY_INVALID/)
+  await assert.rejects(readBackupRecoverySnapshot(null), /BACKUP_RECOVERY_INVALID/)
+  assert.throws(() => validateBackupRecoveryFacts({
+    kind: 'table_counts_v1', tableCounts: { clients: 1 },
+  }), /BACKUP_RECOVERY_INVALID/)
+})
 
 const approvedFingerprint = 'f4bd7138e84971325b5453dd7c8e7c817fc1ff7ded56c3c4a98419d2df3fe99a'
 
@@ -142,7 +197,7 @@ const workbookFacts = () => ({
 
 test('classifies only the literal 0001-0015 vector as core pre-workbook recovery', async () => {
   const calls = []
-  const result = await readBackupRecoverySnapshotWithQuery(async (sql) => {
+  const result = await readWorkbookRecoverySnapshotWithQuery(async (sql) => {
     calls.push(sql)
     if (calls.length === 1) throw new Error('no such table: workbook_imports')
     return structuredClone(CORE_PRE_WORKBOOK_MIGRATIONS)
@@ -159,7 +214,7 @@ test('classifies only the literal 0001-0015 vector as core pre-workbook recovery
     CORE_PRE_WORKBOOK_MIGRATIONS.map((row, index) => index === 4 ? { ...row, name: '0005_wrong.sql' } : row),
   ]) {
     await assert.rejects(
-      readBackupRecoverySnapshotWithQuery(async (_sql) => {
+      readWorkbookRecoverySnapshotWithQuery(async (_sql) => {
         if (_sql.includes('workbook_imports')) throw new Error('no such table')
         return structuredClone(migrations)
       }),
@@ -170,7 +225,7 @@ test('classifies only the literal 0001-0015 vector as core pre-workbook recovery
 
 test('reads the exact terminal workbook snapshot and preserves only count-only facts', async () => {
   let calls = 0
-  const result = await readBackupRecoverySnapshotWithQuery(async (sql) => {
+  const result = await readWorkbookRecoverySnapshotWithQuery(async (sql) => {
     calls += 1
     assert.match(sql, /workbook_imports/)
     assert.match(sql, /artifact\.centre_id='centre_1'/)
@@ -191,7 +246,7 @@ test('accepts both the proven 0001-0021 rollback snapshot and current 0001-0022 
     WORKBOOK_ROUNDTRIP_MIGRATIONS,
     CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS,
   ]) {
-    const result = await readBackupRecoverySnapshotWithQuery(async () => [workbookRow({
+    const result = await readWorkbookRecoverySnapshotWithQuery(async () => [workbookRow({
       applied_migrations_json: JSON.stringify(migrations),
     })])
     assert.deepEqual(result, {
@@ -229,7 +284,7 @@ test('workbook recovery fails closed for absent, ambiguous, incomplete and incon
   ]
   for (const rows of variants) {
     let calls = 0
-    await assert.rejects(readBackupRecoverySnapshotWithQuery(async (sql) => {
+    await assert.rejects(readWorkbookRecoverySnapshotWithQuery(async (sql) => {
       calls += 1
       assert.match(sql, /workbook_imports/)
       return rows
@@ -246,7 +301,7 @@ test('compound snapshot failure never disguises a partial workbook schema as cor
     CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS,
   ]) {
     let calls = 0
-    await assert.rejects(readBackupRecoverySnapshotWithQuery(async () => {
+    await assert.rejects(readWorkbookRecoverySnapshotWithQuery(async () => {
       calls += 1
       if (calls === 1) throw new Error('compound failed')
       return structuredClone(migrations)
@@ -272,7 +327,7 @@ test('a successful malformed D1 compound response never falls back to migrations
       },
     }
     await assert.rejects(
-      readBackupRecoverySnapshot(db),
+      readWorkbookRecoverySnapshot(db),
       (error) => error?.message === 'BACKUP_RECOVERY_INVALID',
     )
     assert.equal(calls, 1)
@@ -361,7 +416,7 @@ test('recovery boundaries reject hostile descriptors without invoking getters or
     get() { invoked = true; throw new Error('ROW_GETTER_MARKER') },
   })
   await assert.rejects(
-    readBackupRecoverySnapshotWithQuery(async () => [hostileRow]),
+    readWorkbookRecoverySnapshotWithQuery(async () => [hostileRow]),
     (error) => error?.message === 'BACKUP_RECOVERY_INVALID',
   )
   assert.equal(invoked, false)
@@ -388,7 +443,7 @@ test('recovery query arrays are dense descriptor-safe values', async () => {
   })
   for (const rows of [accessorRows, nonEnumerableRows, symbolicRows, trappedRows]) {
     await assert.rejects(
-      readBackupRecoverySnapshotWithQuery(async () => rows),
+      readWorkbookRecoverySnapshotWithQuery(async () => rows),
       (error) => error?.message === 'BACKUP_RECOVERY_INVALID',
     )
   }
@@ -400,7 +455,7 @@ test('recovery query arrays are dense descriptor-safe values', async () => {
     enumerable: true,
     get() { invoked = true; throw new Error('MIGRATION_ARRAY_GETTER_MARKER') },
   })
-  await assert.rejects(readBackupRecoverySnapshotWithQuery(async (sql) => {
+  await assert.rejects(readWorkbookRecoverySnapshotWithQuery(async (sql) => {
     if (sql.includes('workbook_imports')) throw new Error('no table')
     return migrationAccessor
   }), (error) => error?.message === 'BACKUP_RECOVERY_INVALID')
