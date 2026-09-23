@@ -2098,7 +2098,8 @@ async function exportRequest(runtime, endpoint, body, deadlineMs, beforeMs, firs
       endpoint,
       {
         method: 'POST',
-        redirect: 'error',
+        // workerd only accepts 'follow' or 'manual'; a 3xx then fails the 2xx check.
+        redirect: 'manual',
         headers: {
           Authorization: `Bearer ${runtime.token}`,
           'Content-Type': 'application/json',
@@ -2186,7 +2187,7 @@ async function downloadCaptured(runtime) {
     runtime.downloadUrl,
     {
       method: 'GET',
-      redirect: 'error',
+      redirect: 'manual',
       signal: runtime.signal,
     },
   ]), () => active)
@@ -2216,7 +2217,9 @@ async function downloadCaptured(runtime) {
   } catch {
     adapterFail('BACKUP_EXPORT_DOWNLOAD_FAILED')
   }
-  if (redirected === true) adapterFail('BACKUP_EXPORT_REDIRECTED')
+  if (redirected === true || (Number.isInteger(status) && status >= 300 && status < 400)) {
+    adapterFail('BACKUP_EXPORT_REDIRECTED')
+  }
   if (redirected !== false
     || typeof ok !== 'boolean'
     || !Number.isInteger(status) || status < 100 || status > 599
