@@ -71,6 +71,23 @@ test('constructors expose one exact frozen repository interface', () => {
   assert.equal(demoRepository.activities, null)
 })
 
+test('API repository preserves guardian contact fields through client commands', async () => {
+  const { api, calls } = apiDouble()
+  const repository = createApiWorkspaceRepository({ api })
+  const contact = {
+    guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
+    receptionNotes: 'Kontakt po 15:00.',
+  }
+  await repository.createClient(clientInput(contact))
+  await repository.editClient('cl_ola', 1, clientInput({
+    name: 'Ola Fikcyjna', guardianPhone: '',
+  }))
+  assert.deepEqual(Object.fromEntries(Object.entries(calls[0][1])
+    .filter(([key]) => Object.hasOwn(contact, key))), contact)
+  assert.equal(calls[1][3].guardianPhone, '')
+  assert.equal(Object.hasOwn(calls[1][3], 'guardianEmail'), false)
+})
+
 test('API repository delegates every command with exact captured arguments and fresh action keys', async () => {
   const { api, calls } = apiDouble()
   const repository = createApiWorkspaceRepository({ api })

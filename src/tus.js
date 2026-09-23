@@ -1,7 +1,7 @@
 // Pure TUS domain logic (group classes) — kept .js and side-effect free so it
 // is unit-testable like workspace.js. TUS money is intentionally separate from
 // session billing: nothing here feeds isBillable/monthStats.
-import { ageLabel, monthKey, searchNorm } from './format.js'
+import { ageLabel, fmtDayMonth, fmtFullDate, fmtMonthYear, monthKey, searchNorm } from './format.js'
 import { normalizeSearchText } from './workspace.js'
 
 const polishNameOrder = new Intl.Collator('pl', { sensitivity: 'base' })
@@ -53,6 +53,42 @@ export const activityClassDefaults = (classes, { groupId, month }) => {
     time: last?.time ?? '',
     durationMinutes: last?.durationMinutes ?? '',
   })
+}
+
+const activityMembershipInMonth = (membership, month) => {
+  if (membership.membershipKind === 'observation') {
+    return (membership.period?.month ?? membership.period?.day?.slice(0, 7)) === month
+  }
+  return activityRangeOverlapsMonth(membership, month)
+}
+
+// Participants of a program who belong to no active group in the viewed month,
+// so a freshly added participant stays findable until someone enrols them.
+export const activityParticipantsWithoutGroup = (state, { programId, month }) => {
+  validActivityMonth(month)
+  const groupIds = new Set(Object.values(state?.groupsById ?? {})
+    .filter((group) => group.programId === programId && group.status !== 'inactive')
+    .map(({ id }) => id))
+  const grouped = new Set(Object.values(state?.membershipsById ?? {})
+    .filter((membership) => membership.status === 'active'
+      && groupIds.has(membership.groupId)
+      && activityMembershipInMonth(membership, month))
+    .map(({ participantId }) => participantId))
+  return sortTusByName(Object.values(state?.participantsById ?? {})
+    .filter((participant) => participant.programId === programId
+      && participant.status !== 'inactive' && !grouped.has(participant.id)))
+}
+
+// "od 1 września", "od 1 września do 31 grudnia"; the year only when the date
+// falls outside the viewed month's year.
+export const activityEnrolmentLabel = (membership, month) => {
+  const year = validActivityMonth(month).slice(0, 4)
+  const day = (iso) => (iso.slice(0, 4) === year ? fmtDayMonth(iso) : fmtFullDate(iso))
+  if (membership.membershipKind === 'observation') {
+    const { day: observedDay, month: observedMonth } = membership.period ?? {}
+    return `Obserwacja: ${observedDay ? day(observedDay) : fmtMonthYear(observedMonth ?? month)}`
+  }
+  return `od ${day(membership.startsOn)}${membership.endsOn ? ` do ${day(membership.endsOn)}` : ''}`
 }
 
 export const isActivityDurationValid = (durationMinutes) => durationMinutes === null

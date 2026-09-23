@@ -13,6 +13,13 @@ import { useShell } from '../shell-ctx.js'
 import { useApp } from '../store.jsx'
 import { Button, DiscardConfirm, Field, IconBtn, Pill, Toggle, useDiscardGuard } from '../ui.jsx'
 import { EntityLink } from '../ux-patterns.jsx'
+import {
+  CHANGED_RETRY_COPY,
+  RATE_LIMIT_COPY,
+  UNCERTAIN_SAVE_COPY,
+  conflictCopy,
+  loadFailureCopy,
+} from '../save-failure-copy.js'
 
 const ROLE_OPTIONS = Object.freeze([
   Object.freeze({
@@ -31,50 +38,49 @@ const ROLE_OPTIONS = Object.freeze([
     effect: 'Zarządza całą poradnią, zespołem i dostępem.',
   }),
 ])
+const LAST_OWNER_COPY = `Ta osoba jako jedyna zarządza centrum. Najpierw nadaj rolę „${roleLabelFor('owner')}” innej osobie.`
+const STAFF_CONFLICT_COPY = conflictCopy('dane tej osoby')
+const STAFF_REFRESH_FAILED_COPY = 'Nie udało się odświeżyć listy personelu. Użyj przycisku „Spróbuj ponownie”.'
 const INVITATION_ERROR_LABELS = Object.freeze({
   CLIENT_INPUT_INVALID: 'Sprawdź dane zaproszenia i spróbuj ponownie.',
   FORBIDDEN: 'Nie masz już uprawnień do zarządzania personelem.',
-  IDEMPOTENCY_CONFLICT: 'Nie można ponowić zmienionego zaproszenia.',
-  LAST_ACTIVE_OWNER: 'Nie można zmienić dostępu ostatniego aktywnego właściciela.',
-  NOT_FOUND: 'Nie można utworzyć tego zaproszenia.',
+  IDEMPOTENCY_CONFLICT: CHANGED_RETRY_COPY,
+  LAST_ACTIVE_OWNER: LAST_OWNER_COPY,
+  NOT_FOUND: 'Nie udało się utworzyć zaproszenia.',
   RATE_LIMITED: 'Możesz wysłać maksymalnie 5 zaproszeń w ciągu godziny. Spróbuj ponownie później.',
-  STAFF_INVITATION_CONFLICT: 'Nie można utworzyć tego zaproszenia.',
+  STAFF_INVITATION_CONFLICT: 'Ta osoba jest już na liście. Sprawdź jej status w zakładce Dostęp.',
   VALIDATION_FAILED: 'Sprawdź dane zaproszenia i spróbuj ponownie.',
 })
 const INVITATION_UNKNOWN_ERROR = 'Nie udało się utworzyć zaproszenia.'
-const INVITATION_UNCERTAIN_ERROR = 'Nie wiadomo, czy zaproszenie zostało utworzone. Spróbuj ponownie bez zmiany danych.'
 const DEACTIVATION_ERROR_LABELS = Object.freeze({
   CLIENT_INPUT_INVALID: 'Nie udało się przygotować zmiany dostępu.',
   FORBIDDEN: 'Nie masz już uprawnień do zarządzania personelem.',
-  IDEMPOTENCY_CONFLICT: 'Nie można ponowić zmienionej operacji.',
-  LAST_ACTIVE_OWNER: 'Nie można wyłączyć ostatniego aktywnego właściciela.',
+  IDEMPOTENCY_CONFLICT: CHANGED_RETRY_COPY,
+  LAST_ACTIVE_OWNER: LAST_OWNER_COPY,
   NOT_FOUND: 'Nie można odnaleźć tej osoby.',
-  RATE_LIMITED: 'Limit operacji został wykorzystany. Spróbuj ponownie później.',
+  RATE_LIMITED: RATE_LIMIT_COPY,
   VALIDATION_FAILED: 'Nie udało się przygotować zmiany dostępu.',
 })
 const DEACTIVATION_UNKNOWN_ERROR = 'Nie udało się wyłączyć dostępu.'
-const DEACTIVATION_UNCERTAIN_ERROR = 'Nie wiadomo, czy dostęp został wyłączony. Spróbuj ponownie bez zmiany danych.'
 const ROLE_CHANGE_ERROR_LABELS = Object.freeze({
   CLIENT_INPUT_INVALID: 'Nie udało się przygotować zmiany roli.',
   FORBIDDEN: 'Nie masz już uprawnień do zarządzania personelem.',
-  IDEMPOTENCY_CONFLICT: 'Nie można ponowić zmienionej operacji.',
-  LAST_ACTIVE_OWNER: 'Nie można zmienić roli ostatniego aktywnego właściciela.',
+  IDEMPOTENCY_CONFLICT: CHANGED_RETRY_COPY,
+  LAST_ACTIVE_OWNER: LAST_OWNER_COPY,
   NOT_FOUND: 'Nie można odnaleźć tej osoby.',
-  RATE_LIMITED: 'Limit operacji został wykorzystany. Spróbuj ponownie później.',
+  RATE_LIMITED: RATE_LIMIT_COPY,
   VALIDATION_FAILED: 'Nie udało się przygotować zmiany roli.',
 })
 const ROLE_CHANGE_UNKNOWN_ERROR = 'Nie udało się zmienić roli.'
-const ROLE_CHANGE_UNCERTAIN_ERROR = 'Nie wiadomo, czy rola została zmieniona. Spróbuj ponownie bez zmiany wyboru.'
 const PERMISSION_SAVE_ERROR_LABELS = Object.freeze({
   CLIENT_INPUT_INVALID: 'Nie udało się przygotować zmiany uprawnień.',
   FORBIDDEN: 'Nie masz już uprawnień do zarządzania uprawnieniami.',
-  IDEMPOTENCY_CONFLICT: 'Nie można ponowić zmienionej operacji.',
+  IDEMPOTENCY_CONFLICT: CHANGED_RETRY_COPY,
   NOT_FOUND: 'Nie można odnaleźć tej osoby.',
-  RATE_LIMITED: 'Limit operacji został wykorzystany. Spróbuj ponownie później.',
+  RATE_LIMITED: RATE_LIMIT_COPY,
   VALIDATION_FAILED: 'Nie udało się przygotować zmiany uprawnień.',
 })
 const PERMISSION_UNKNOWN_ERROR = 'Nie udało się zapisać uprawnień.'
-const PERMISSION_UNCERTAIN_ERROR = 'Nie wiadomo, czy uprawnienia zostały zapisane. Spróbuj ponownie bez zmiany ustawień.'
 const PERMISSION_COPY = Object.freeze({
   'appointment.manage': Object.freeze({ label: 'Może zarządzać sesjami', effect: 'Umawia, zmienia i odwołuje sesje.' }),
   'client.manage': Object.freeze({ label: 'Może zarządzać klientami', effect: 'Dodaje i aktualizuje dane klientów.' }),
@@ -86,8 +92,8 @@ const PERMISSION_COPY = Object.freeze({
   'permissions.manage': Object.freeze({ label: 'Może zarządzać uprawnieniami', effect: 'Zmienia zakres dostępu innych osób.' }),
   'security.audit.read': Object.freeze({ label: 'Może przeglądać dziennik bezpieczeństwa', effect: 'Widoczna jest historia zdarzeń bezpieczeństwa.' }),
   'staff.manage': Object.freeze({ label: 'Może zarządzać personelem', effect: 'Zaprasza osoby i zmienia ich dostęp.' }),
-  'workbook.centre.export': Object.freeze({ label: 'Może pobierać skoroszyt centrum', effect: 'Pobiera dane całej poradni do arkusza.' }),
-  'workbook.own.export': Object.freeze({ label: 'Może pobierać własny skoroszyt', effect: 'Pobiera dane własnych sesji do arkusza.' }),
+  'workbook.centre.export': Object.freeze({ label: 'Może pobierać arkusz centrum', effect: 'Pobiera dane całej poradni do arkusza.' }),
+  'workbook.own.export': Object.freeze({ label: 'Może pobierać własny arkusz', effect: 'Pobiera dane własnych sesji do arkusza.' }),
 })
 const EMAIL = /^[\p{L}\p{N}.!#$%&'*+/=?^_`{|}~-]+@[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?(?:\.[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?)+$/u
 const INVALID_TEXT = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
@@ -284,7 +290,7 @@ function InvitationDrawer({ environment, initialPerson = null, onChanged, onClos
       }
       const uncertain = error instanceof ApiError && error.idempotencyKey === action.key
       if (uncertain) {
-        setSaveError(INVITATION_UNCERTAIN_ERROR)
+        setSaveError(UNCERTAIN_SAVE_COPY)
         setSaveStatus('uncertain')
         return
       }
@@ -317,7 +323,7 @@ function InvitationDrawer({ environment, initialPerson = null, onChanged, onClos
             <h2 className="drawer__title">{reinvite ? 'Zaproś ponownie' : 'Zaproś do panelu'}</h2>
             <p className="drawer__sub">{reinvite
               ? 'Wyślemy nowe zaproszenie do panelu tej osobie.'
-              : 'Dodaj dostęp do panelu personelu.'}</p>
+              : 'Wyślemy e-mail z linkiem do panelu.'}</p>
           </div>
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
@@ -359,7 +365,7 @@ function InvitationDrawer({ environment, initialPerson = null, onChanged, onClos
             value={form.role}
             onChange={(role) => set('role', role)}
           />
-          {!reinvite && <p className="field__hint">Profil zawodowy i powiązanie terapeutki pozostają osobnym krokiem w Zespole.</p>}
+          {!reinvite && <p className="field__hint">Specjalistkę, która ma już profil, zaproś z jej karty w zakładce Zespół.</p>}
           <p className="field__hint">Możesz wysłać maksymalnie 5 zaproszeń w ciągu godziny. Każde zaproszenie jest ważne przez 7 dni.</p>
           {saveError && (
             <div className="form-warn form-warn--error" role="alert">
@@ -451,12 +457,12 @@ function RoleChangeDrawer({
         { idempotencyKey: action.key },
       )
       await onChanged()
-      toast('Rola została zmieniona.')
+      toast(`Rola została zmieniona · ${person.displayName}`)
       forceClose()
     } catch (error) {
       const uncertain = error instanceof ApiError && error.idempotencyKey === action.key
       if (uncertain) {
-        setSaveError(ROLE_CHANGE_UNCERTAIN_ERROR)
+        setSaveError(UNCERTAIN_SAVE_COPY)
         setSaveStatus('uncertain')
         return
       }
@@ -464,12 +470,7 @@ function RoleChangeDrawer({
       if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
         forceClose()
         const refreshed = await onChanged()
-        toast(
-          refreshed
-            ? 'Lista personelu została odświeżona.'
-            : 'Nie udało się odświeżyć listy personelu. Użyj przycisku „Odśwież”.',
-          'alert',
-        )
+        toast(refreshed ? STAFF_CONFLICT_COPY : STAFF_REFRESH_FAILED_COPY, 'alert')
         return
       }
       if (error instanceof ApiError && error.code === 'FORBIDDEN') {
@@ -608,12 +609,12 @@ function DeactivationConfirm({
         idempotencyKey: action.key,
       })
       await onChanged()
-      toast(cancellingInvitation ? 'Zaproszenie zostało anulowane.' : 'Dostęp został wyłączony.')
+      toast(`${cancellingInvitation ? 'Zaproszenie zostało anulowane' : 'Dostęp został wyłączony'} · ${person.displayName}`)
       onClose()
     } catch (error) {
       const uncertain = error instanceof ApiError && error.idempotencyKey === action.key
       if (uncertain) {
-        setSaveError(DEACTIVATION_UNCERTAIN_ERROR)
+        setSaveError(UNCERTAIN_SAVE_COPY)
         setSaveStatus('uncertain')
         return
       }
@@ -621,12 +622,7 @@ function DeactivationConfirm({
       if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
         onClose()
         const refreshed = await onChanged()
-        toast(
-          refreshed
-            ? 'Lista personelu została odświeżona.'
-            : 'Nie udało się odświeżyć listy personelu. Użyj przycisku „Odśwież”.',
-          'alert',
-        )
+        toast(refreshed ? STAFF_CONFLICT_COPY : STAFF_REFRESH_FAILED_COPY, 'alert')
         return
       }
       if (error instanceof ApiError && error.code === 'FORBIDDEN') {
@@ -746,8 +742,8 @@ export function PermissionsAccess({ sectionRef, selectedStaffId, onSelectedStaff
     if (!canRead) return false
     const requestId = ++detailRequestRef.current
     actionRef.current = null
-    setAuthority(null)
-    setDraft(null)
+    // The previous person's panel stays on screen, dimmed and inert, until
+    // the new authority arrives.
     setDetailStatus('loading')
     setSaveStatus('idle')
     setSaveError(null)
@@ -835,7 +831,7 @@ export function PermissionsAccess({ sectionRef, selectedStaffId, onSelectedStaff
   const submit = async (event) => {
     event?.preventDefault()
     if (!authority || !draft || !dirty || !canEdit || saveStatus === 'saving'
-      || authority.status === 'disabled') return
+      || detailStatus !== 'ready' || authority.status === 'disabled') return
     let action = actionRef.current
     if (!action) {
       try {
@@ -881,7 +877,7 @@ export function PermissionsAccess({ sectionRef, selectedStaffId, onSelectedStaff
       if (saveRequestRef.current !== requestId) return
       const uncertain = error instanceof ApiError && error.idempotencyKey === action.key
       if (uncertain) {
-        setSaveError(PERMISSION_UNCERTAIN_ERROR)
+        setSaveError(UNCERTAIN_SAVE_COPY)
         setSaveStatus('uncertain')
         return
       }
@@ -889,7 +885,7 @@ export function PermissionsAccess({ sectionRef, selectedStaffId, onSelectedStaff
       if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
         const refreshed = await loadAuthority(action.staffId)
         if (refreshed) {
-          setSaveNotice('Uprawnienia zmieniły się w międzyczasie. Pobraliśmy aktualną wersję.')
+          setSaveNotice(`${conflictCopy('uprawnienia tej osoby')} Widzisz teraz aktualne ustawienia.`)
         }
         return
       }
@@ -901,7 +897,8 @@ export function PermissionsAccess({ sectionRef, selectedStaffId, onSelectedStaff
   }
 
   const targetDisabled = authority?.status === 'disabled'
-  const controlsDisabled = !canEdit || targetDisabled || saveStatus === 'saving'
+  const detailLoading = detailStatus === 'loading'
+  const controlsDisabled = !canEdit || targetDisabled || saveStatus === 'saving' || detailLoading
 
   return (
     <section
@@ -918,17 +915,17 @@ export function PermissionsAccess({ sectionRef, selectedStaffId, onSelectedStaff
           >
             Uprawnienia personelu
           </h2>
-          <p>Zarządzaj zakresem dostępu bez ujawniania danych logowania i zaproszeń.</p>
+          <p>Wybierz, co ta osoba może robić w panelu.</p>
         </div>
       </div>
 
       {targetsStatus === 'loading' && (
-        <p className="staff-access__state" role="status">Pobieranie listy osób…</p>
+        <p className="staff-access__state" role="status">Wczytuję listę osób…</p>
       )}
       {targetsStatus === 'error' && (
         <div className="staff-access__state" role="alert">
-          <span>Nie udało się pobrać listy osób.</span>
-          <Button size="sm" variant="ghost" onClick={loadTargets}>Odśwież listę osób</Button>
+          <span>{loadFailureCopy('listy osób')}</span>
+          <Button size="sm" variant="ghost" onClick={() => loadTargets()}>Spróbuj ponownie</Button>
         </div>
       )}
       {targetsStatus === 'ready' && targets.length === 0 && (
@@ -956,8 +953,10 @@ export function PermissionsAccess({ sectionRef, selectedStaffId, onSelectedStaff
             </select>
           </Field>
 
-          {detailStatus === 'loading' && (
-            <p className="permissions-access__state" role="status">Pobieranie uprawnień…</p>
+          {detailLoading && (
+            <p className="permissions-access__state" role="status">
+              {selected ? `Wczytuję uprawnienia: ${selected.displayName}…` : 'Wczytuję uprawnienia…'}
+            </p>
           )}
           {detailStatus === 'error' && selected && (
             <div className="permissions-access__state" role="alert">
@@ -971,8 +970,13 @@ export function PermissionsAccess({ sectionRef, selectedStaffId, onSelectedStaff
               </Button>
             </div>
           )}
-          {detailStatus === 'ready' && authority && draft && (
-            <form className="permissions-access__editor" onSubmit={submit}>
+          {(detailStatus === 'ready' || detailLoading) && authority && draft && (
+            <form
+              className={`permissions-access__editor ${detailLoading ? 'is-refreshing' : ''}`}
+              aria-busy={detailLoading || undefined}
+              inert={detailLoading ? '' : undefined}
+              onSubmit={submit}
+            >
               <div className="permissions-access__identity">
                 <strong>{authority.displayName}</strong>
                 <span>{rolePresentationFor(authority)}</span>
@@ -1113,8 +1117,10 @@ export function StaffAccess({ sectionRef }) {
     roleDirtyRef.current = dirty
   }, [])
 
-  const loadStaff = useCallback(async ({ background = false } = {}) => {
-    if (background && requestInFlightRef.current !== null) return false
+  // `poll` skips a tick while a request is in flight; `background` keeps the
+  // current list on screen instead of blanking it to the loading line.
+  const loadStaff = useCallback(async ({ background = false, poll = false } = {}) => {
+    if (poll && requestInFlightRef.current !== null) return false
     const requestId = ++requestRef.current
     requestInFlightRef.current = requestId
     if (!background) setLoadStatus('loading')
@@ -1148,7 +1154,7 @@ export function StaffAccess({ sectionRef }) {
 
   useEffect(() => {
     const refresh = () => {
-      if (document.visibilityState === 'visible') void loadStaff({ background: true })
+      if (document.visibilityState === 'visible') void loadStaff({ background: true, poll: true })
     }
     window.addEventListener('focus', refresh)
     document.addEventListener('visibilitychange', refresh)
@@ -1164,6 +1170,8 @@ export function StaffAccess({ sectionRef }) {
     () => registerLeaveGuard(() => inviteDirtyRef.current || roleDirtyRef.current),
     [registerLeaveGuard],
   )
+
+  const refreshAfterInvite = useCallback(() => loadStaff({ background: true }), [loadStaff])
 
   const clearForbidden = () => {
     requestRef.current += 1
@@ -1198,12 +1206,12 @@ export function StaffAccess({ sectionRef }) {
         </div>
 
         {loadStatus === 'loading' && (
-          <p className="staff-access__state" role="status">Pobieranie listy personelu…</p>
+          <p className="staff-access__state" role="status">Wczytuję listę personelu…</p>
         )}
         {loadStatus === 'error' && (
           <div className="staff-access__state" role="alert">
-            <span>Nie udało się pobrać listy personelu.</span>
-            <Button size="sm" variant="ghost" onClick={loadStaff}>Odśwież</Button>
+            <span>{loadFailureCopy('listy personelu')}</span>
+            <Button size="sm" variant="ghost" onClick={() => loadStaff()}>Spróbuj ponownie</Button>
           </div>
         )}
         {loadStatus === 'ready' && (
@@ -1278,7 +1286,7 @@ export function StaffAccess({ sectionRef }) {
         <InvitationDrawer
           environment={session.environment}
           initialPerson={inviteOpen === true ? null : inviteOpen}
-          onChanged={loadStaff}
+          onChanged={refreshAfterInvite}
           onClose={() => setInviteOpen(false)}
           onDirtyChange={setInviteDirty}
           onForbidden={clearForbidden}

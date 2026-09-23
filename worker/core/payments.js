@@ -8,6 +8,8 @@ import {
 } from '../db/unit-of-work.js'
 import { isD1CoreDirectoryInvariantFailure, isD1IdentityCollision } from '../db/errors.js'
 import { auditEventStatement } from '../audit/events.js'
+import { activityDetailStatement } from '../audit/activity-history.js'
+import { amountActivityChanges } from '../../src/activity-history.js'
 import { createOwnershipCapabilityBoundary } from './crypto.js'
 import { createRecordVersionBuilder } from './versions.js'
 import { captureAuthorityActor } from '../identity/authority-actor.js'
@@ -913,6 +915,11 @@ export async function recordAppointmentPayment(input) {
     metadata: { appointmentVersion: appointment.version, paymentEntryId: paymentId },
     reasonEnvelope: null,
   }))
+  uow.domain(await activityDetailStatement(command.db, {
+    auditId, action: 'payment.recorded', keyring: current.context.keyring,
+    dataKey: current.context.dataKey, scope: current.context.scope,
+    changes: amountActivityChanges(null, command.body.amountGrosze),
+  }))
   uow.idempotency(idempotency)
   uow.guard(paymentGuard(command.db, values))
   try {
@@ -1387,6 +1394,11 @@ export async function correctAppointmentPayment(input) {
     action: 'payment.corrected', entityType: 'payment_entry', entityId: command.paymentId,
     result: 'success', correlationId: command.correlationId,
     metadata, reasonEnvelope: null,
+  }))
+  if (target.amountGrosze !== replacementAmount) uow.domain(await activityDetailStatement(command.db, {
+    auditId, action: 'payment.corrected', keyring: current.context.keyring,
+    dataKey: current.context.dataKey, scope: current.context.scope,
+    changes: amountActivityChanges(target.amountGrosze, replacementAmount),
   }))
   uow.idempotency(idempotency)
   uow.guard(correctionGuard(command.db, values))

@@ -42,7 +42,7 @@ function AssignmentDialog({ fallbackRef, groups, kid, kids, onClose }) {
     const group = options.find((option) => option.id === groupId && !option.isFull)
     if (!group) return
     dispatch({ type: 'UPDATE_TUS_KID', id: kid.id, patch: { groupId: group.id } })
-    toast(`${kid.name} przypisany do grupy ${group.name}`)
+    toast(`Dziecko zostało zapisane do grupy · ${kid.name}, ${group.name}`)
     close()
   }
 
@@ -180,7 +180,7 @@ function DemoTusGroups() {
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">Zajęcia grupowe</div>
+          <div className="eyebrow">Trening Umiejętności Społecznych</div>
           <h1 className="display view-head__title">Grupy <em>TUS</em></h1>
           <p className="view-head__sub">
             {groups.length} {plural(groups.length, 'grupa', 'grupy', 'grup')} ·{' '}

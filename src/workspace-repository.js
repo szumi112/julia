@@ -162,9 +162,9 @@ const captureClient = (input) => {
   let keys = CLIENT_KEYS
   try {
     const descriptors = Object.getOwnPropertyDescriptors(input)
-    if (Object.hasOwn(descriptors, 'assignmentStartsAt')) {
-      keys = [...CLIENT_KEYS, 'assignmentStartsAt']
-    }
+    keys = [...CLIENT_KEYS, ...[
+      'assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes',
+    ].filter((key) => Object.hasOwn(descriptors, key))]
   } catch { fail('body') }
   return validateClientInput(captureRecord(input, keys, 'body'))
 }

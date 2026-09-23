@@ -3,6 +3,7 @@ import { ApiError, apiClient } from './api.js'
 import { APP_MODE } from './app-mode.js'
 import { AppLogin } from './views/Login.jsx'
 import { authClient, authStrategyFor } from './auth-client.js'
+import { BearMark } from './icons.jsx'
 
 const AuthCtx = createContext(null)
 const DENIED_CODES = new Set(['ACCESS_DENIED', 'FORBIDDEN'])
@@ -22,10 +23,20 @@ const authStateFor = (error) => {
   return DENIED_CODES.has(error.code) ? 'denied' : 'unavailable'
 }
 
+// Mirrors the static loader in index.html, so the hand-off from HTML to React
+// does not flash a second, different screen.
+function AuthLoading() {
+  return (
+    <div className="startup-loader">
+      <span className="startup-loader__mark"><BearMark size={56} /></span>
+      <p className="startup-loader__label" role="status">Otwieramy panel…</p>
+    </div>
+  )
+}
+
 function AuthScreen({ state, onLogout, onRetry }) {
-  const title = state === 'loading'
-    ? 'Sprawdzanie dostępu'
-    : state === 'denied'
+  if (state === 'loading') return <AuthLoading />
+  const title = state === 'denied'
       ? 'Brak dostępu do panelu'
       : state === 'reauth'
         ? 'Sesja wygasła'
@@ -35,13 +46,10 @@ function AuthScreen({ state, onLogout, onRetry }) {
     <main className={`auth-screen auth-screen--${state}`} aria-labelledby="auth-screen-title">
       <p className="auth-screen__brand" translate="no">Bear with me</p>
       <h1 id="auth-screen-title">{title}</h1>
-      {state === 'loading' && (
-        <p className="auth-screen__message" role="status">Trwa bezpieczne łączenie z panelem.</p>
-      )}
       {state === 'denied' && (
         <>
-          <p className="auth-screen__message">To konto nie ma aktywnego dostępu do panelu personelu.</p>
-          <button type="button" className="btn btn--ghost" onClick={onLogout}>Wyloguj się</button>
+          <p className="auth-screen__message">Poproś właścicielkę centrum o dostęp albo zaloguj się innym kontem.</p>
+          <button type="button" className="btn btn--ghost" onClick={onLogout}>Zaloguj się innym kontem</button>
         </>
       )}
       {state === 'reauth' && (
@@ -52,7 +60,7 @@ function AuthScreen({ state, onLogout, onRetry }) {
       )}
       {state === 'unavailable' && (
         <>
-          <p className="auth-screen__message">Sprawdź połączenie i spróbuj ponownie.</p>
+          <p className="auth-screen__message">Sprawdź internet i spróbuj ponownie. Jeśli internet działa, problem jest po naszej stronie - spróbuj za kilka minut.</p>
           <button type="button" className="btn btn--primary" onClick={onRetry}>Spróbuj ponownie</button>
         </>
       )}

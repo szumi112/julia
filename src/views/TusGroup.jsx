@@ -120,7 +120,7 @@ function DemoTusGroupDetail({ params }) {
   const patchPayment = (kidId, patch) => dispatch({ type: 'UPSERT_TUS_PAYMENT', kidId, ym, patch })
   const bookPayment = (kid) => {
     patchPayment(kid.id, { status: 'paid', paidDate: toISODate(new Date()) })
-    toast(`Płatność zaksięgowana — ${kid.parentName}`)
+    toast(`Płatność została zapisana · ${kid.parentName}`)
   }
 
   return (

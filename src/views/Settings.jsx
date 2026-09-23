@@ -10,6 +10,7 @@ import { canPerformAction } from '../capability-access.js'
 import { OperationsPanel } from './Operations.jsx'
 import { useAuth } from '../auth.jsx'
 import { authClient, authStrategyFor, passwordValidationError } from '../auth-client.js'
+import { loadFailureCopy } from '../save-failure-copy.js'
 
 const SECTIONS = [
   { id: 'center', label: 'Centrum' },
@@ -21,6 +22,7 @@ const OPERATIONS_SECTION = Object.freeze({ id: 'security', label: 'Bezpieczeńst
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const USES_BETTER_AUTH = authStrategyFor(import.meta.env?.MODE) === 'better-auth'
+const PASSWORD_HINT = 'Co najmniej 12 znaków.'
 
 const teamDraftOf = (psychologists, current = {}) => Object.fromEntries(
   psychologists.map((psychologist) => [
@@ -78,9 +80,12 @@ function AccountAuthentication({ client = authClient }) {
   const [reauthRequired, setReauthRequired] = useState(false)
   const [status, setStatus] = useState('loading')
   const [message, setMessage] = useState('')
+  const [loadAttempt, setLoadAttempt] = useState(0)
 
   useEffect(() => {
     let active = true
+    setStatus('loading')
+    setMessage('')
     Promise.all([client.getConfig(), client.listAccounts()])
       .then(([config, nextAccounts]) => {
         if (!active) return
@@ -91,10 +96,10 @@ function AccountAuthentication({ client = authClient }) {
       .catch(() => {
         if (!active) return
         setStatus('error')
-        setMessage('Nie udało się pobrać metod logowania.')
+        setMessage(loadFailureCopy('ustawień logowania'))
       })
     return () => { active = false }
-  }, [client])
+  }, [client, loadAttempt])
 
   const providers = new Set(accounts.map((account) => account.providerId))
   const hasPassword = providers.has('credential')
@@ -105,6 +110,7 @@ function AccountAuthentication({ client = authClient }) {
     if (password !== confirmPassword) return setMessage('Hasła nie są takie same')
     setStatus('saving')
     setMessage('')
+    setReauthRequired(false)
     try {
       await client.setFirstPassword(password, session.csrfToken)
       setAccounts((current) => [...current, { providerId: 'credential' }])
@@ -114,7 +120,12 @@ function AccountAuthentication({ client = authClient }) {
       setMessage('Hasło zostało ustawione.')
     } catch (error) {
       setStatus('idle')
-      setMessage(error?.status === 401 ? 'Zaloguj się ponownie, aby ustawić hasło.' : 'Nie udało się ustawić hasła.')
+      if (error?.status === 401) {
+        setReauthRequired(true)
+        setMessage('Dla bezpieczeństwa zaloguj się jeszcze raz, a potem ustaw hasło.')
+      } else {
+        setMessage('Nie udało się ustawić hasła.')
+      }
     }
   }
 
@@ -154,10 +165,10 @@ function AccountAuthentication({ client = authClient }) {
     <div className="card card--pad settings-authentication" aria-label="Metody logowania">
       <h3 className="card-title">Logowanie do panelu</h3>
       <p className="pref-row__desc">Kod e-mail jest zawsze dostępny. Możesz też ustawić hasło.</p>
-      {status === 'loading' ? <p role="status">Pobieranie metod logowania…</p> : null}
-      {!hasPassword && methods.includes('password') && status !== 'loading' ? (
+      {status === 'loading' ? <p role="status">Wczytuję ustawienia logowania…</p> : null}
+      {!hasPassword && methods.includes('password') && status !== 'loading' && status !== 'error' ? (
         <form className="settings-authentication__password" onSubmit={setFirstPassword}>
-          <Field label="Nowe hasło">
+          <Field label="Nowe hasło" hint={PASSWORD_HINT}>
             <input className="input" type="password" autoComplete="new-password" minLength={12} maxLength={128}
               value={password} onChange={(event) => { setPassword(event.target.value); setMessage('') }} />
           </Field>
@@ -185,7 +196,7 @@ function AccountAuthentication({ client = authClient }) {
             <input className="input" type="password" autoComplete="current-password" required maxLength={128}
               value={currentPassword} onChange={(event) => { setCurrentPassword(event.target.value); setMessage(''); setReauthRequired(false) }} />
           </Field>
-          <Field label="Nowe hasło">
+          <Field label="Nowe hasło" hint={PASSWORD_HINT}>
             <input className="input" type="password" autoComplete="new-password" required minLength={12} maxLength={128}
               value={password} onChange={(event) => { setPassword(event.target.value); setMessage(''); setReauthRequired(false) }} />
           </Field>
@@ -199,6 +210,8 @@ function AccountAuthentication({ client = authClient }) {
         </form>
       ) : null}
       {!hasPassword && message ? <p className={status === 'error' ? 'field__error' : 'settings-authentication__message'} role="status">{message}</p> : null}
+      {status === 'error' ? <Button type="button" size="sm" variant="soft" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>Spróbuj ponownie</Button> : null}
+      {!hasPassword && reauthRequired ? <Button type="button" size="sm" variant="soft" onClick={() => { void logout() }}>Zaloguj się ponownie</Button> : null}
     </div>
   )
 }
@@ -218,7 +231,6 @@ export function Profile() {
     <div ref={ref}>
       <div className="view-head" data-reveal>
         <div>
-          <div className="eyebrow">Konto</div>
           <h1 className="display view-head__title">Mój profil</h1>
           <p className="view-head__sub">Twoje dane i sposób logowania do panelu.</p>
         </div>
@@ -248,7 +260,7 @@ export function Profile() {
           )}
           <p>Imienia i adresu e-mail nie da się zmienić w panelu.</p>
           {canManageStaff && (
-            <p>Aby wyłączyć dostęp danej osoby, wyłącz go w Dostępie personelu i wyślij nowe zaproszenie.</p>
+            <p>Błędne imię lub adres e-mail innej osoby poprawisz, wyłączając jej dostęp w <EntityLink route="team" params={{ section: 'access' }}>Zespół › Dostęp</EntityLink> i wysyłając nowe zaproszenie z poprawnymi danymi.</p>
           )}
         </div>
         {isApp && USES_BETTER_AUTH ? <AccountAuthentication /> : null}
@@ -645,7 +657,7 @@ export function Settings({ params = {} }) {
                             }}
                           />
                         </Field>
-                        <Field label="Wizyt w tygodniu (maks.)" error={errors?.weeklyCapacity}>
+                        <Field label="Sesji w tygodniu (maks.)" error={errors?.weeklyCapacity}>
                           <input
                             className="input input--capacity"
                             type="number"
@@ -655,7 +667,7 @@ export function Settings({ params = {} }) {
                             inputMode="numeric"
                             name={`capacity-${psychologist.id}`}
                             autoComplete="off"
-                            aria-label={`Wizyt w tygodniu (maks.) — ${psychologist.name}`}
+                            aria-label={`Sesji w tygodniu (maks.) — ${psychologist.name}`}
                             value={draft.weeklyCapacity}
                             onChange={(event) => {
                               setTeam((current) => ({

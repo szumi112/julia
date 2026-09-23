@@ -6,7 +6,7 @@ import { FINANCE_SCOPE } from '../../worker/core/finance.js'
 import { ACTIVITY_SCOPE, encryptActivityIdentity } from '../../worker/core/activity-crypto.js'
 import { authorityActor } from './fixtures.js'
 import { completeCoreDirectoryStageA, applyCoreDirectoryStageB, applyFinanceStageC,
-  applySpecialistProfilesStageD, applyWorkbookRegistryStageE } from './apply-migrations.js'
+  applySpecialistProfilesStageD, applyWorkbookRegistryStageE, applyActivityHistoryMigration } from './apply-migrations.js'
 import { createD1QueryBudget } from '../../worker/db/query-budget.js'
 import { voidFinanceEntry } from '../../worker/core/finance-reporting.js'
 import { createActivityCharge } from '../../worker/core/activity-billing.js'
@@ -28,6 +28,7 @@ beforeAll(async () => {
   await applyFinanceStageC()
   await applySpecialistProfilesStageD()
   await applyWorkbookRegistryStageE()
+  await applyActivityHistoryMigration()
   keyring = await createKeyring(env, {
     activeDataKekVersion: 1, activeLookupKeyVersion: 1, activeBackupKekVersion: 1,
   })

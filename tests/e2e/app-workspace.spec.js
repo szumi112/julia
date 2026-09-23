@@ -356,7 +356,7 @@ test('@owner exposes protected activities and waits for a complete monthly repor
   await financeStarted
   await expect(page.getByRole('status').filter({ hasText: 'Wczytuję raport…' })).toBeVisible()
   releaseFinance()
-  await expect(page.getByRole('heading', { level: 1, name: 'Raport — lipiec 2026' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1, name: 'Raporty', exact: true })).toBeVisible()
   await expect(page.locator('.month-nav__label')).toHaveText('Lipiec 2026')
   await expect(page.getByRole('heading', { name: 'Zajęcia grupowe TUS' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Eksport (demo)' })).toHaveCount(0)
@@ -381,7 +381,7 @@ test('@owner falls back from invalid civil report months without rendering error
 
   for (const ym of ['2025-00', '2025-13']) {
     await page.goto(`./#/reports?ym=${ym}`)
-    await expect(page.getByRole('heading', { level: 1, name: 'Raport — lipiec 2026' })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 1, name: 'Raporty', exact: true })).toBeVisible()
     await expect(page.locator('.month-nav__label')).toHaveText('Lipiec 2026')
   }
 
@@ -488,7 +488,7 @@ test('@owner keeps full Calendar day titles with counts below them', async ({ pa
   await page.goto('./#/calendar?date=2026-07-16')
   await expect(plan.locator('.agenda-day__title-text')).toContainText('Czwartek, 16 lipca')
   await expect(plan.locator('.agenda-day__count')).toHaveCount(0)
-  await expect(plan.getByText('Brak sesji tego dnia', { exact: true })).toBeVisible()
+  await expect(plan.getByText('Tego dnia nie ma sesji', { exact: true })).toBeVisible()
 })
 
 test('@owner lands on a populated dashboard before visiting any other view', async ({ page }) => {
@@ -548,7 +548,7 @@ test('@owner reuses the in-flight current week request when navigating to Dziś'
   await page.getByRole('navigation', { name: 'Nawigacja główna' })
     .getByRole('link', { name: 'Dziś' }).click()
   const dashboard = page.getByRole('region', { name: 'Pulpit dnia' })
-  await expect(dashboard.getByText('Wczytuję grafik dnia…', { exact: true })).toBeVisible()
+  await expect(dashboard.getByText('Wczytuję plan dnia…', { exact: true })).toBeVisible()
   await page.waitForTimeout(100)
 
   try {
@@ -734,8 +734,7 @@ test('@owner keeps dashboard figures neutral and retries every required window a
   await page.goto('./#/dashboard')
   const dashboard = page.getByRole('region', { name: 'Pulpit dnia' })
   const figures = dashboard.getByRole('group', { name: 'Podsumowanie dnia' })
-  await expect(dashboard.getByText('Nie udało się wczytać całego podsumowania dnia', { exact: true })).toBeVisible()
-  await expect(dashboard.getByText('Nie pokazujemy niepełnych danych. Spróbuj ponownie.', { exact: true })).toBeVisible()
+  await expect(dashboard.getByText('Nie udało się wczytać planu dnia. Spróbuj ponownie za chwilę.', { exact: true })).toBeVisible()
   await expect(dashboard.getByText('Nie udało się wczytać grafiku dnia', { exact: true })).toHaveCount(0)
   await expect(dashboard.getByRole('button', { name: 'Nowa sesja' })).toHaveCount(0)
   await expect(dashboard.getByRole('button')).toHaveCount(1)
@@ -802,7 +801,7 @@ test('@owner recovers Dashboard after an unrelated range failure and keeps the p
   await expect.poll(() => windows).toContainEqual(['2026-04-14', '2026-07-15'])
 
   await page.goto('./#/calendar?date=2026-08-15&ym=2026-08&mode=cal')
-  await expect(page.getByRole('alert', { name: 'Stan Grafiku' })).toContainText('Grafik jest teraz niedostępny')
+  await expect(page.getByRole('alert', { name: 'Stan Grafiku' })).toContainText('Nie udało się wczytać Grafiku')
 
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('./#/dashboard')
@@ -909,7 +908,7 @@ for (const [label, status, code] of [
 
     await page.goto('./#/clients')
     const directoryState = page.getByLabel('Stan kartoteki')
-    await expect(directoryState).toContainText('Kartoteka jest teraz niedostępna')
+    await expect(directoryState).toContainText('Nie udało się wczytać klientów')
     await directoryState.getByRole('button', { name: 'Spróbuj ponownie' }).click()
 
     await expect(page.getByText('Ola Aktywna', { exact: true })).toBeVisible()
@@ -935,10 +934,10 @@ test('@owner keeps a repeated workspace retry failure handled by the UI', async 
 
   await page.goto('./#/clients')
   const directoryState = page.getByRole('alert', { name: 'Stan kartoteki' })
-  await expect(directoryState).toContainText('Kartoteka jest teraz niedostępna')
+  await expect(directoryState).toContainText('Nie udało się wczytać klientów')
   await directoryState.getByRole('button', { name: 'Spróbuj ponownie' }).click()
   await expect.poll(() => directoryReads).toBe(2)
-  await expect(directoryState).toContainText('Kartoteka jest teraz niedostępna')
+  await expect(directoryState).toContainText('Nie udało się wczytać klientów')
   expect(pageErrors).toEqual([])
 })
 
@@ -970,7 +969,7 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await page.goto('./#/clients')
   await expect.poll(() => pageErrors).toEqual([])
   await expect(page.getByText('Alicja Testowa', { exact: true }).first()).toBeVisible()
-  await expect(page.getByRole('status', { name: 'Stan kartoteki' })).toContainText('Wczytuję kartotekę')
+  await expect(page.getByRole('status', { name: 'Stan kartoteki' })).toContainText('Wczytuję klientów')
   await expect(page.getByText('Ola Aktywna', { exact: true })).toBeVisible()
   await expect(page.getByText('Zofia Historyczna', { exact: true })).toHaveCount(0)
   await expect(page.getByText('Nie powinna się pojawić', { exact: true })).toHaveCount(0)
@@ -979,10 +978,11 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   await page.goto('./#/dashboard')
   const dashboard = page.getByRole('region', { name: 'Pulpit dnia' })
   await expect(dashboard.getByText('Ola Aktywna', { exact: true }).first()).toBeVisible()
-  await expect(dashboard.getByRole('button', { name: 'Otwórz sesję' })).toHaveCount(0)
+  await expect(dashboard.getByRole('button', { name: 'Otwórz sesję' })).toHaveCount(1)
   await expect(dashboard.getByRole('button', { name: 'Nowa sesja' })).toHaveCount(1)
   await expect(dashboard.getByRole('button', { name: 'Nowy klient' })).toHaveCount(0)
-  await expect(dashboard.locator('button.today-session')).toHaveCount(0)
+  await expect(dashboard.getByRole('link', { name: 'Przejdź do klientów' })).toHaveCount(1)
+  await expect(dashboard.locator('button.today-session')).toHaveCount(1)
 
   await page.goto('./#/settings')
   await page.getByRole('button', { name: /Panel dnia/ }).click()
@@ -1029,12 +1029,11 @@ test('@owner renders only complete canonical workspace windows as read-only hist
   const historicalPaymentRow = ledger.locator('tbody tr', { hasText: 'Zofia Historyczna' })
   await expect(page.getByRole('button', { name: 'Wszystkie okresy' })).toHaveCount(0)
   await expect(historicalPaymentRow.getByRole('button', { name: /Dodaj wpłatę/ })).toHaveCount(0)
-  await expect(historicalPaymentRow.getByRole('button', { name: /Skoryguj wpłatę/ })).toHaveCount(0)
+  await expect(historicalPaymentRow.getByRole('button', { name: /Popraw wpłatę/ })).toHaveCount(0)
 
   await page.goto('./#/calendar?date=2026-04-15&ym=2026-04&mode=cal')
   await expect(page.getByRole('status', { name: 'Stan Grafiku' })).toContainText('Wczytuję Grafik')
-  await expect(page.getByText('Brak sesji tego dnia', { exact: true })).toBeVisible()
-  await expect(page.getByText('W tym kompletnym zakresie nie ma zaplanowanych sesji.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Tego dnia nie ma sesji', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Poprzedni miesiąc' })).toBeEnabled()
   expect(pageErrors).toEqual([])
 })
@@ -1500,11 +1499,11 @@ test('@owner reconciles POST /appointments/:appointmentId/payments in the financ
   await entry.getByRole('button', { name: 'Zapisz wpłatę' }).click()
 
   await expect(entry).toHaveCount(0)
-  await expect(page.getByText('Wpłata zapisana: 120 zł, Karta', { exact: true })).toBeVisible()
+  await expect(page.getByText('Wpłata została zapisana · 120 zł, karta', { exact: true })).toBeVisible()
   await expect(row.locator('td').nth(5)).toHaveText('120 zł')
   await expect(row.locator('td').nth(6)).toHaveText('60 zł')
-  await expect(page.getByRole('heading', { name: 'Finanse — lipiec 2026' })).toBeVisible()
-  await expect(page.getByText('Finanse są teraz niedostępne', { exact: true })).toHaveCount(0)
+  await expect(page.locator('.month-nav__label')).toHaveText('Lipiec 2026')
+  await expect(page.getByText('Nie udało się wczytać finansów', { exact: true })).toHaveCount(0)
   expect(payments).toEqual([{
     method: 'POST',
     body: JSON.stringify({
@@ -1559,7 +1558,7 @@ test('@owner keeps protected payment input after a command failure', async ({ pa
   await expect(entry.getByLabel('Kwota wpłaty')).toHaveValue('120')
   await expect(entry.getByLabel('Forma płatności')).toHaveValue('card')
   await expect(entry.getByLabel('Data wpłaty')).toHaveValue('2026-01-04')
-  await expect(entry.getByText('Nie udało się zapisać wpłaty. Spróbuj ponownie.', { exact: true })).toBeVisible()
+  await expect(entry.getByText('Nie udało się zapisać wpłaty. Spróbuj ponownie za chwilę.', { exact: true })).toBeVisible()
   expect(financeWorkspaceReads).toBe(1)
 })
 
@@ -1592,21 +1591,21 @@ test('@owner reconciles POST /payments/:paymentId/corrections in the finance win
 
   await page.goto('./#/payments?ym=2026-07')
   const ledger = page.getByRole('table', { name: 'Lista wpływów' })
-  await ledger.getByRole('button', { name: /Skoryguj wpłatę/ }).click()
-  const correction = page.getByRole('dialog', { name: 'Skoryguj wpłatę' })
+  await ledger.getByRole('button', { name: /Popraw wpłatę/ }).click()
+  const correction = page.getByRole('dialog', { name: 'Popraw wpłatę' })
   await correction.getByLabel('Powód korekty').fill('  Błędna forma płatności  ')
-  await correction.getByLabel('Dodaj wpłatę zastępczą').check()
-  await correction.getByLabel('Kwota zastępcza').fill('100')
-  await correction.getByLabel('Forma zastępcza').selectOption('transfer')
-  await correction.getByLabel('Data zastępcza').fill('2026-01-05')
+  await correction.getByLabel('Nowa wpłata w miejsce tej').check()
+  await correction.getByLabel('Kwota', { exact: true }).fill('100')
+  await correction.getByLabel('Forma płatności').selectOption('transfer')
+  await correction.getByLabel('Data wpłaty').fill('2026-01-05')
   await correction.getByRole('button', { name: 'Zapisz korektę' }).click()
 
   await expect(ledger).toContainText('Skorygowana')
   const row = ledger.locator('tbody tr', { hasText: 'Ola Aktywna' })
   await expect(row.locator('td').nth(5)).toHaveText('100 zł')
   await expect(row.locator('td').nth(6)).toHaveText('80 zł')
-  await expect(page.getByRole('heading', { name: 'Finanse — lipiec 2026' })).toBeVisible()
-  await expect(page.getByText('Finanse są teraz niedostępne', { exact: true })).toHaveCount(0)
+  await expect(page.locator('.month-nav__label')).toHaveText('Lipiec 2026')
+  await expect(page.getByText('Nie udało się wczytać finansów', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Cofnij' })).toHaveCount(0)
   expect(corrections).toEqual([{
     method: 'POST',
@@ -1642,22 +1641,22 @@ test('@owner keeps protected correction input after a command failure', async ({
 
   await page.goto('./#/payments?ym=2026-07')
   await page.getByRole('table', { name: 'Lista wpływów' })
-    .getByRole('button', { name: /Skoryguj wpłatę/ }).click()
-  const correction = page.getByRole('dialog', { name: 'Skoryguj wpłatę' })
+    .getByRole('button', { name: /Popraw wpłatę/ }).click()
+  const correction = page.getByRole('dialog', { name: 'Popraw wpłatę' })
   await correction.getByLabel('Powód korekty').fill('Błędna forma płatności')
-  await correction.getByLabel('Dodaj wpłatę zastępczą').check()
-  await correction.getByLabel('Kwota zastępcza').fill('100')
-  await correction.getByLabel('Forma zastępcza').selectOption('transfer')
-  await correction.getByLabel('Data zastępcza').fill('2026-01-05')
+  await correction.getByLabel('Nowa wpłata w miejsce tej').check()
+  await correction.getByLabel('Kwota', { exact: true }).fill('100')
+  await correction.getByLabel('Forma płatności').selectOption('transfer')
+  await correction.getByLabel('Data wpłaty').fill('2026-01-05')
   await correction.getByRole('button', { name: 'Zapisz korektę' }).click()
 
   await expect(correction).toBeVisible()
   await expect(correction.getByLabel('Powód korekty')).toHaveValue('Błędna forma płatności')
-  await expect(correction.getByLabel('Dodaj wpłatę zastępczą')).toBeChecked()
-  await expect(correction.getByLabel('Kwota zastępcza')).toHaveValue('100')
-  await expect(correction.getByLabel('Forma zastępcza')).toHaveValue('transfer')
-  await expect(correction.getByLabel('Data zastępcza')).toHaveValue('2026-01-05')
-  await expect(correction.getByText('Nie udało się zapisać korekty.', { exact: true })).toBeVisible()
+  await expect(correction.getByLabel('Nowa wpłata w miejsce tej')).toBeChecked()
+  await expect(correction.getByLabel('Kwota', { exact: true })).toHaveValue('100')
+  await expect(correction.getByLabel('Forma płatności')).toHaveValue('transfer')
+  await expect(correction.getByLabel('Data wpłaty')).toHaveValue('2026-01-05')
+  await expect(correction.getByText('Nie udało się zapisać poprawki wpłaty. Spróbuj ponownie za chwilę.', { exact: true })).toBeVisible()
 })
 
 test('@owner cannot replay an accepted correction after an unrelated canonical load', async ({ page }) => {
@@ -1700,8 +1699,8 @@ test('@owner cannot replay an accepted correction after an unrelated canonical l
 
   await page.goto('./#/payments?ym=2026-07')
   const ledger = page.getByRole('table', { name: 'Lista wpływów' })
-  await ledger.getByRole('button', { name: /Skoryguj wpłatę/ }).click()
-  const correction = page.getByRole('dialog', { name: 'Skoryguj wpłatę' })
+  await ledger.getByRole('button', { name: /Popraw wpłatę/ }).click()
+  const correction = page.getByRole('dialog', { name: 'Popraw wpłatę' })
   await correction.getByLabel('Powód korekty').fill('Błędna forma płatności')
   await correction.getByRole('button', { name: 'Zapisz korektę' }).click()
   await expect.poll(() => financeWorkspaceReads).toBe(2)
@@ -1709,7 +1708,7 @@ test('@owner cannot replay an accepted correction after an unrelated canonical l
   await page.goto('./#/calendar?date=2026-06-15&ym=2026-06&mode=cal')
   await expect.poll(() => unrelatedWorkspaceReads).toBe(1)
   await page.goto('./#/payments?ym=2026-07')
-  await expect(ledger.getByRole('button', { name: /Skoryguj wpłatę/ })).toBeDisabled()
+  await expect(ledger.getByRole('button', { name: /Popraw wpłatę/ })).toBeDisabled()
   expect(corrections).toHaveLength(1)
 })
 

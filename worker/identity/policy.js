@@ -151,7 +151,7 @@ export function authorize(value, capability, resource, options = {}) {
       return actor.role === 'specialist' && fact?.kind === 'workbook_own'
         && ownSpecialist(actor, fact.specialistId)
     }
-    if (capability === 'finance.centre.read' || capability === 'operations.health.read') {
+    if (['activity.read', 'finance.centre.read', 'operations.health.read'].includes(capability)) {
       return ['owner', 'coordinator'].includes(actor.role) && exactCentre(resource)
     }
     if (capability === 'specialist.directory.read') return exactDirectory(resource)

@@ -118,7 +118,7 @@ test('calendar rows expose exact Polish precision labels without appointment-onl
   ]
 
   assert.deepEqual(rows.map(({ periodLabel }) => periodLabel), [
-    'Godzina nieustalona', 'Dzień nieustalony', 'Okres nieustalony',
+    'bez godziny', 'bez dnia', 'bez daty',
   ])
   for (const row of rows) {
     for (const key of ['time', 'duration', 'status', 'payment', 'amount']) {
@@ -205,7 +205,7 @@ test('calendar rows distinguish client, counterparty and missing identities safe
   const dayRows = model.exactByDay['2026-07-12']
 
   assert.deepEqual(dayRows.map(({ subjectKind, subjectName }) => [subjectKind, subjectName]), [
-    ['client', 'Klient niedostępny'],
+    ['client', 'Bez nazwy w arkuszu'],
     ['client', 'Żaneta Testowa'],
   ])
   assert.deepEqual(

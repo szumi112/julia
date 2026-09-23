@@ -23,7 +23,8 @@ const ids = {
 const utcIso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const dateIso = /^(\d{4})-(\d{2})-(\d{2})$/
 const timeIso = /^(\d{2}):(\d{2})$/
-const paymentAmount = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/
+// Typed in the UI, so the Polish decimal comma is accepted next to the dot.
+const paymentAmount = /^(0|[1-9]\d*)(?:[.,](\d{1,2}))?$/
 const clientStatuses = new Set(['active', 'paused', 'archived'])
 const appointmentStatuses = new Set(['scheduled', 'completed', 'cancelled', 'noshow'])
 const appointmentCancellationReasons = new Set(['client', 'centre', 'late_paid'])
@@ -97,11 +98,31 @@ export const assertProfessionalTitle = (value) => {
   return value
 }
 
+export const assertClientContactFields = (value) => {
+  const optional = ['guardianPhone', 'guardianEmail', 'receptionNotes']
+  const fields = optional.filter((key) => Object.hasOwn(value ?? {}, key))
+  assertExactObject(value, fields)
+  const contacts = {}
+  for (const field of fields) {
+    const maxBytes = field === 'guardianEmail' ? 254 : field === 'guardianPhone' ? 40 : 1000
+    const text = assertNfcTrimmed(value[field], { field, minBytes: 0, maxBytes })
+    if (invalidPresentationText.test(field === 'receptionNotes'
+      ? text.replace(/[\n\t]/g, '') : text)) fail(field)
+    if (field === 'guardianEmail' && text && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) fail(field)
+    if (field === 'guardianPhone' && text
+      && (!/^[+0-9 ()-]+$/.test(text) || (text.match(/\d/g) ?? []).length < 5)) fail(field)
+    contacts[field] = text
+  }
+  return contacts
+}
+
 export const assertClientIdentity = (value) => {
-  assertExactObject(value, ['name', 'age'])
+  const optional = ['guardianPhone', 'guardianEmail', 'receptionNotes']
+  const fields = optional.filter((key) => Object.hasOwn(value ?? {}, key))
+  assertExactObject(value, ['name', 'age', ...fields])
   const name = assertNfcTrimmed(value.name, { field: 'name', minBytes: 1, maxBytes: 120 })
   const age = value.age === null ? null : assertInteger(value.age, 'age', 1, 26)
-  return { name, age }
+  return { name, age, ...assertClientContactFields(Object.fromEntries(fields.map((key) => [key, value[key]]))) }
 }
 
 export const assertLocation = (value) => value === null
@@ -120,11 +141,14 @@ export const assertServiceSnapshot = (value) => {
 }
 
 export const validateClientInput = (value) => {
-  if (!isExactObject(value, ['name', 'age', 'status', 'specialistId'])
-    && !isExactObject(value, [
-      'name', 'age', 'status', 'specialistId', 'assignmentStartsAt',
-    ])) fail('object')
-  const identity = assertClientIdentity({ name: value.name, age: value.age })
+  const optional = ['assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes']
+  const fields = optional.filter((key) => Object.hasOwn(value ?? {}, key))
+  if (!isExactObject(value, ['name', 'age', 'status', 'specialistId', ...fields])) fail('object')
+  const identity = assertClientIdentity({
+    name: value.name, age: value.age,
+    ...Object.fromEntries(fields.filter((key) => key !== 'assignmentStartsAt')
+      .map((key) => [key, value[key]])),
+  })
   assertClientStatus(value.status)
   assertId(value.specialistId, 'specialist')
   const assignmentStartsAt = value.assignmentStartsAt === undefined
@@ -399,7 +423,7 @@ export const validatePaymentDateInput = (value) => {
 }
 
 export const parsePaymentAmountGrosze = (value) => {
-  const match = typeof value === 'string' ? paymentAmount.exec(value) : null
+  const match = typeof value === 'string' ? paymentAmount.exec(value.trim()) : null
   if (!match) fail('amountGrosze')
   const minor = (match[2] || '').padEnd(2, '0')
   const amountGrosze = BigInt(match[1]) * 100n + BigInt(minor || '0')
@@ -485,9 +509,14 @@ const assertDtoAssignment = (assignment) => {
 }
 
 export const clientDto = (client) => {
-  assertExactObject(client, ['id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt', 'assignment'], 'client')
+  const optional = ['guardianPhone', 'guardianEmail', 'receptionNotes']
+  const fields = optional.filter((key) => Object.hasOwn(client ?? {}, key))
+  assertExactObject(client, ['id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt', 'assignment', ...fields], 'client')
   assertId(client.id, 'client')
-  assertClientIdentity({ name: client.name, age: client.age })
+  assertClientIdentity({
+    name: client.name, age: client.age,
+    ...Object.fromEntries(fields.map((key) => [key, client[key]])),
+  })
   assertClientStatus(client.status, { archivable: true })
   assertInteger(client.version, 'version', 1, Number.MAX_SAFE_INTEGER)
   assertCanonicalUtc(client.createdAt, 'createdAt')
@@ -557,7 +586,7 @@ export const appointmentDto = (appointment) => {
   return { id: appointment.id, clientId: appointment.clientId, specialistId: appointment.specialistId, serviceId: appointment.serviceId, startsAt: appointment.startsAt, endsAt: appointment.endsAt, timeZone: appointment.timeZone, location: appointment.location, status: appointment.status, source: appointment.source, version: appointment.version, cancelledAt: appointment.cancelledAt, cancellationReason: appointment.cancellationReason, createdAt: appointment.createdAt, updatedAt: appointment.updatedAt, charge: { ...appointment.charge }, payment, paymentEntries }
 }
 
-export const legacyClientProjection = (client) => ({ ...clientDto(client), email: '', phone: '', notes: [], familyId: null, familyRole: null, psychId: client.assignment?.specialistId ?? null })
+export const legacyClientProjection = (client) => ({ ...clientDto(client), email: client.guardianEmail ?? '', phone: client.guardianPhone ?? '', notes: [], familyId: null, familyRole: null, psychId: client.assignment?.specialistId ?? null })
 export const legacyAppointmentProjection = (appointment) => ({ ...appointment, psychId: appointment.specialistId, date: warsawDateFromUtc(appointment.startsAt), time: warsawDateTimeFromUtc(appointment.startsAt).time, duration: Math.round((new Date(appointment.endsAt) - new Date(appointment.startsAt)) / 60_000), amount: appointment.charge.expectedAmountGrosze / 100, payment: appointment.payment.status, paidAmount: appointment.payment.collectedGrosze / 100, method: appointment.payment.latestMethod, paidDate: appointment.payment.latestReceivedAt === null ? null : warsawDateFromUtc(appointment.payment.latestReceivedAt) })
 
 export const clientCompatibilityDto = legacyClientProjection

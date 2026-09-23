@@ -1,5 +1,9 @@
 import { isBackupFailureCode } from './operations-diagnostics.js'
 import { APP_MODE } from './app-mode.js'
+import { captureActivityHistoryPayload, captureActivityHistoryQuery } from './activity-history.js'
+import {
+  captureClientNote, captureClientNoteInput, captureClientNotesPayload, captureClientNotesQuery,
+} from './client-notes.js'
 import {
   captureCreateFinanceEntry, captureFinanceAdjustment, captureFinanceCommandResult,
   captureFinanceEntryDetail, isFinanceEntryId,
@@ -17,7 +21,7 @@ import {
   isCapability,
   normalizeCapabilityOverrides,
 } from './capabilities.js'
-import { isWellFormedUnicode, validateAppointmentInput } from './core-records.js'
+import { assertClientContactFields, isWellFormedUnicode, validateAppointmentInput } from './core-records.js'
 import { SERVICE_BY_ID } from './services.js'
 import {
   isSpecialistAvatarKey,
@@ -206,6 +210,7 @@ const CLIENT_CODES = new Set([
 const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'AUTH_REQUIRED', 'REAUTH_REQUIRED'])
 const authDenialReason = (code) => (code === 'ACCESS_DENIED' ? 'denied' : 'reauth')
 const VALIDATION_FIELDS = new Set([
+  'guardianPhone', 'guardianEmail', 'receptionNotes',
   'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
   'specialistId', 'clientId', 'assignmentStartsAt', 'serviceId', 'dateTime', 'durationMinutes',
   'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt',
@@ -219,7 +224,7 @@ const VALIDATION_FIELDS = new Set([
   'programId', 'label', 'details', 'leaderSpecialistIds', 'historicalClientId',
   'participantId', 'groupId', 'membershipId', 'classId', 'startsOn', 'endsOn',
   'date', 'time', 'topic', 'importId', 'month', 'registry', 'registryDetail',
-  'resolutions',
+  'resolutions', 'text',
 ])
 const WORKSPACE_FIELDS = new Set([
   'specialists', 'clients', 'appointments', 'paymentEntries', 'historicalClients',
@@ -360,16 +365,16 @@ const captureArray = (value, maximum) => {
   return captured
 }
 
-const captureDataObject = (value, keys) => {
+const captureDataObject = (value, keys, optionalKeys = []) => {
   try {
     if (value === null || typeof value !== 'object' || Array.isArray(value)
       || Object.getPrototypeOf(value) !== Object.prototype) return null
     const descriptors = Object.getOwnPropertyDescriptors(value)
     const actual = Reflect.ownKeys(descriptors)
-    if (actual.length !== keys.length
-      || actual.some((key) => typeof key !== 'string' || !keys.includes(key))) return null
+    if (actual.length < keys.length || actual.length > keys.length + optionalKeys.length
+      || actual.some((key) => typeof key !== 'string' || (!keys.includes(key) && !optionalKeys.includes(key)))) return null
     const captured = Object.create(null)
-    for (const key of keys) {
+    for (const key of [...keys, ...optionalKeys.filter((key) => actual.includes(key))]) {
       const descriptor = descriptors[key]
       if (!descriptor || !Object.hasOwn(descriptor, 'value') || !descriptor.enumerable) return null
       captured[key] = descriptor.value
@@ -546,8 +551,10 @@ const captureWorkspaceClient = (raw) => {
   const value = captureDataObject(raw, [
     'id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt',
     'readOnly', 'assignment',
-  ])
+  ], CLIENT_CONTACT_KEYS)
+  const contact = captureClientContact(value)
   if (!value || typeof value.id !== 'string' || !CLIENT_ID.test(value.id)
+    || !contact
     || !workspaceIdentity(value.name, value.age)
     || !['active', 'paused', 'archived'].includes(value.status)
     || !workspacePositive(value.version) || !workspaceNullableInstant(value.archivedAt)
@@ -565,6 +572,7 @@ const captureWorkspaceClient = (raw) => {
     id: value.id,
     name: value.name,
     age: value.age,
+    ...contact,
     status: value.status,
     version: value.version,
     archivedAt: value.archivedAt,
@@ -576,12 +584,25 @@ const captureWorkspaceClient = (raw) => {
 }
 
 const CLIENT_INPUT_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'])
+const CLIENT_CONTACT_KEYS = Object.freeze(['guardianPhone', 'guardianEmail', 'receptionNotes'])
 const CLIENT_STATUSES = new Set(['active', 'paused'])
 
+const captureClientContact = (value) => {
+  if (!value) return null
+  try {
+    return assertClientContactFields(Object.fromEntries(CLIENT_CONTACT_KEYS
+      .filter((key) => Object.hasOwn(value, key)).map((key) => [key, value[key]])))
+  } catch { return null }
+}
+
+const clientContactMatches = (client, requested) => CLIENT_CONTACT_KEYS.every((key) => (
+  !Object.hasOwn(requested, key) || (client[key] ?? '') === requested[key]
+))
+
 const captureClientInput = (raw) => {
-  const value = captureDataObject(raw, [...CLIENT_INPUT_KEYS, 'assignmentStartsAt'])
-    ?? captureDataObject(raw, CLIENT_INPUT_KEYS)
-  if (!value || !workspaceIdentity(value.name, value.age)
+  const value = captureDataObject(raw, CLIENT_INPUT_KEYS, ['assignmentStartsAt', ...CLIENT_CONTACT_KEYS])
+  const contact = captureClientContact(value)
+  if (!value || !contact || !workspaceIdentity(value.name, value.age)
     || !CLIENT_STATUSES.has(value.status)
     || typeof value.specialistId !== 'string' || !SPECIALIST_ID.test(value.specialistId)
     || !(value.assignmentStartsAt === undefined || value.assignmentStartsAt === null
@@ -594,6 +615,7 @@ const captureClientInput = (raw) => {
     status: value.status,
     specialistId: value.specialistId,
     assignmentStartsAt: value.assignmentStartsAt ?? null,
+    ...contact,
   })
 }
 
@@ -614,7 +636,7 @@ const captureClientEnvelope = (payload) => {
 const acceptedCreatedClient = (payload, status, requested) => {
   const client = status === 201 ? captureClientEnvelope(payload) : null
   if (!client || client.name !== requested.name || client.age !== requested.age
-    || client.status !== requested.status || client.version !== 1
+    || client.status !== requested.status || client.version !== 1 || !clientContactMatches(client, requested)
     || client.archivedAt !== null || client.readOnly !== false
     || client.updatedAt !== client.createdAt || client.assignment === null
     || client.assignment.specialistId !== requested.specialistId
@@ -709,7 +731,7 @@ const acceptedSpecialistAccountLink = (
 const acceptedEditedClient = (payload, status, clientId, expectedVersion, requested) => {
   const client = status === 200 ? captureClientEnvelope(payload) : null
   if (!client || client.id !== clientId || client.name !== requested.name
-    || client.age !== requested.age || client.status !== requested.status
+    || client.age !== requested.age || client.status !== requested.status || !clientContactMatches(client, requested)
     || client.version !== expectedVersion + 1 || client.archivedAt !== null
     || client.readOnly !== false || client.assignment === null
     || client.assignment.specialistId !== requested.specialistId
@@ -3658,6 +3680,64 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       validate: (payload) => acceptedAudit(payload, requestedLimit),
     })
   }
+  const listActivityHistory = (options = {}, requestOptions = {}) => {
+    let requested
+    try { requested = captureActivityHistoryQuery(options) } catch {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    const acceptedOptions = captureSignalOptions(requestOptions)
+    if (!acceptedOptions) return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    const query = new URLSearchParams()
+    for (const [key, value] of Object.entries(requested)) {
+      if (value !== null) query.set(key, String(value))
+    }
+    return requestJson(`${API_ROOT}/activity?${query}`, {
+      method: 'GET', credentials: 'same-origin', headers: baseHeaders(), signal: acceptedOptions.signal,
+    }, {
+      validate: (payload, status) => {
+        const outer = status === 200 ? captureDataObject(payload, ['data']) : null
+        if (!outer) return null
+        try {
+          const result = captureActivityHistoryPayload(outer.data)
+          return result.items.length <= requested.limit ? result : null
+        } catch { return null }
+      },
+    })
+  }
+  const clientNotes = (clientId, options = {}, requestOptions = {}) => {
+    const requested = captureClientNotesQuery(options)
+    const acceptedOptions = captureSignalOptions(requestOptions)
+    if (typeof clientId !== 'string' || !CLIENT_ID.test(clientId) || !requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    const query = new URLSearchParams({ limit: String(requested.limit) })
+    if (requested.cursor) query.set('cursor', requested.cursor)
+    return requestJson(`${API_ROOT}/clients/${clientId}/notes?${query}`, {
+      method: 'GET', credentials: 'same-origin', headers: baseHeaders(), signal: acceptedOptions.signal,
+    }, {
+      validate: (payload, status) => {
+        const outer = status === 200 ? captureDataObject(payload, ['data']) : null
+        const result = outer && captureClientNotesPayload(outer.data)
+        return result && result.items.length <= requested.limit
+          && result.items.every((note) => note.clientId === clientId) ? result : null
+      },
+    })
+  }
+  const createClientNote = (clientId, input, options) => {
+    const requested = captureClientNoteInput(input)
+    const acceptedOptions = captureSignalOptions(options, { idempotency: true })
+    if (typeof clientId !== 'string' || !CLIENT_ID.test(clientId) || !requested || !acceptedOptions) {
+      return Promise.reject(clientError('CLIENT_INPUT_INVALID'))
+    }
+    if (!csrfToken) return Promise.reject(clientError('SESSION_REQUIRED'))
+    return mutation(`${API_ROOT}/clients/${clientId}/notes`, JSON.stringify(requested), (payload, status) => {
+      const outer = status === 201 ? captureDataObject(payload, ['data']) : null
+      const data = outer && captureDataObject(outer.data, ['note'])
+      const note = data && captureClientNote(data.note)
+      return note && note.clientId === clientId && note.text === requested.text
+        ? Object.freeze({ note }) : null
+    }, acceptedOptions.idempotencyKey, acceptedOptions.signal)
+  }
   const listFinance = (options) => {
     const accepted = captureDataObject(options, ['month', 'kind'])
     if (!accepted || !(accepted.month === null
@@ -4090,6 +4170,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       status: requested.status,
       specialistId: requested.specialistId,
       assignmentStartsAt: requested.assignmentStartsAt,
+      ...captureClientContact(requested),
     })
     return mutation(
       `${API_ROOT}/clients`,
@@ -4599,6 +4680,7 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
       status: requested.status,
       specialistId: requested.specialistId,
       assignmentStartsAt: requested.assignmentStartsAt,
+      ...captureClientContact(requested),
     })
     return mutation(
       `${API_ROOT}/clients/${clientId}/edits`,
@@ -4919,6 +5001,9 @@ const makeApiClient = ({ fetchImpl, idempotencyKeyFactory, localIdentity }) => {
     getOperationsHealth,
     getOperationalActions,
     getSecurityAudit,
+    listActivityHistory,
+    clientNotes,
+    createClientNote,
     listFinance,
     loadFinanceWindow,
     loadWorkbookRegistry,

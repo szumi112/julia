@@ -40,7 +40,7 @@ const DETAIL_SECTIONS = Object.freeze([
 ])
 const statusLabel = Object.freeze({
   uploading: 'Przesyłanie', ready: 'Gotowy', materializing: 'Przetwarzanie',
-  conflicts: 'Wymaga rozstrzygnięcia', complete: 'Finanse zapisane', failed: 'Niepowodzenie',
+  conflicts: 'Czeka na przypisanie specjalistek', complete: 'Finanse zapisane', failed: 'Niepowodzenie',
 })
 const statusClass = (status) => (
   Object.hasOwn(statusLabel, status) ? status : 'unknown'
@@ -148,15 +148,18 @@ function ImportResume({
   const mayOperate = canContinue && latest.createdByStaffId === currentActorId
   return <section className="finance-workbook-tools__resume" aria-label="Bieżący import arkusza">
     <div>
-      <h3>{active ? 'Import wymaga dokończenia' : 'Ostatnio wgrany arkusz'}</h3>
+      <h3>{active ? 'Wczytywanie arkusza nie jest dokończone' : 'Ostatnio wgrany arkusz'}</h3>
       <p className="muted">{statusLabel[latest.status] ?? 'Stan nieustalony'}</p>
-      {progress ? <p className="muted" role="status">Przetworzono {progress.processed} z {progress.total} pozycji.</p> : null}
+      {progress ? <p className="muted" role="status">Przeniesiono {progress.processed} z {progress.total} pozycji.</p> : null}
+      {active && latest.createdByStaffId !== currentActorId ? <p className="muted">
+        Dokończyć może tylko osoba, która rozpoczęła wczytywanie.
+      </p> : null}
     </div>
     {mayOperate && active ? <Button
       disabled={operationBusy}
       onClick={() => onContinue(latest)}
     >{continuing === latest.id ? 'Wczytywanie…'
-        : latest.status === 'conflicts' ? 'Rozstrzygnij przypisania' : 'Kontynuuj import'}</Button> : null}
+        : latest.status === 'conflicts' ? 'Przypisz specjalistki' : 'Kontynuuj import'}</Button> : null}
     {mayOperate && latest.status === 'complete' ? <Button
       disabled={operationBusy}
       onClick={() => onProject(latest)}
@@ -268,17 +271,17 @@ function ResolutionPanel({ concise = false, flow, values, specialists, onChange,
   const specialistSelectOptions = concise
     ? conciseSpecialistOptions(specialists) : specialistOptionsForSelect(specialists)
   return <section className="card card--pad registry-resolutions" aria-labelledby="registry-resolutions-title">
-    <h2 className="card-title" id="registry-resolutions-title" ref={headingRef} tabIndex={-1}>Rozstrzygnij przypisania</h2>
-    <p className="muted">Każdy konflikt wymaga jawnego przypisania aktywnej specjalistki.</p>
+    <h2 className="card-title" id="registry-resolutions-title" ref={headingRef} tabIndex={-1}>Kto jest kim?</h2>
+    <p className="muted">Wskaż, która specjalistka kryje się pod nazwą z arkusza.</p>
     {conflicts.map((conflict, index) => <div
       className="registry-resolutions__conflict"
       key={conflict.id}
     >
-      <p className="registry-resolutions__source">
-        Wartość źródłowa: <strong>{conflict.sourceValue || 'brak nazwy'}</strong>
-      </p>
       {!concise ? <p>Identyfikator konfliktu: {conflict.id}</p> : null}
-      <Field label={`Konflikt przypisania ${index + 1}`}>
+      <p className="registry-resolutions__source">
+        „<strong>{conflict.sourceValue || 'brak nazwy'}</strong>” w arkuszu to:
+      </p>
+      <Field label={`Specjalistka nr ${index + 1}`}>
         <select
           className="select"
           disabled={saving || locked}
@@ -293,7 +296,7 @@ function ResolutionPanel({ concise = false, flow, values, specialists, onChange,
       </Field>
     </div>)}
     <Button disabled={!complete || saving} onClick={onSubmit}>
-      {saving ? 'Zapisywanie rozstrzygnięć…' : 'Zapisz rozstrzygnięcia i kontynuuj'}
+      {saving ? 'Zapisywanie…' : 'Zapisz i wczytuj dalej'}
     </Button>
   </section>
 }
@@ -764,7 +767,7 @@ export function Registry({ embedded = false, params = {} }) {
         const key = resolutionKeysRef.current.get(resolutionKeyId)
         if (error instanceof ApiError && error.idempotencyKey === key) {
           setResolutionLocked(true)
-          setWorkflowError('Nie potwierdzono zapisu. Ponów dokładnie ten sam zestaw rozstrzygnięć.')
+          setWorkflowError('Nie mamy pewności, czy przypisania się zapisały. Kliknij „Zapisz i wczytuj dalej” jeszcze raz, niczego nie zmieniając.')
         } else {
           resolutionKeysRef.current.delete(resolutionKeyId)
           resolutionRequestsRef.current.delete(resolutionKeyId)
@@ -775,7 +778,7 @@ export function Registry({ embedded = false, params = {} }) {
             generation,
             errorCode: 'WORKBOOK_RESOLUTION_FAILED',
           })
-          setWorkflowError('Rozstrzygnięcia odrzucono. Rejestr został odświeżony.')
+          setWorkflowError('Nie udało się zapisać przypisań. Lista została odświeżona - spróbuj ponownie.')
           refresh()
         }
       }
@@ -838,7 +841,7 @@ export function Registry({ embedded = false, params = {} }) {
       <summary>
         <span>
           <strong>Wgraj arkusz</strong>
-          <small>Wczytaj nowy lub poprawiony skoroszyt XLSX / Panel-v2.</small>
+          <small>Wczytaj nowy albo poprawiony arkusz Excel.</small>
         </span>
       </summary>
       <div className="finance-workbook-tools__body">
@@ -870,7 +873,7 @@ export function Registry({ embedded = false, params = {} }) {
           locked={resolutionLocked}
           headingRef={resolutionRef}
         /> : null}
-        {page.status === 'loading' ? <p role="status">Sprawdzanie niedokończonych importów…</p> : null}
+        {page.status === 'loading' ? <p role="status">Sprawdzam wcześniej wgrane arkusze…</p> : null}
         {page.status === 'ready' ? <ImportResume
           values={page.data?.imports ?? []}
           onContinue={continueImport}
@@ -882,7 +885,7 @@ export function Registry({ embedded = false, params = {} }) {
           operationBusy={operationBusy}
         /> : null}
         {page.status === 'unavailable' ? <p className="muted" role="status">Import arkusza jest teraz niedostępny.</p> : null}
-        {page.status === 'error' ? <p className="form-error" role="alert">Nie udało się sprawdzić niedokończonych importów. <Button size="sm" variant="ghost" onClick={refresh}>Spróbuj ponownie</Button></p> : null}
+        {page.status === 'error' ? <p className="form-error" role="alert">Nie udało się sprawdzić wcześniej wgranych arkuszy. <Button size="sm" variant="ghost" onClick={refresh}>Spróbuj ponownie</Button></p> : null}
         {workflowError ? <p className="form-error" role="alert">{workflowError}</p> : null}
       </div>
     </details>

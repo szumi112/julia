@@ -161,7 +161,7 @@ test('@owner uses a client’s latest specialist and the selected day’s occupi
   })
 
   await page.goto('./#/client?id=cl_ola')
-  await page.getByRole('button', { name: 'Umów sesję' }).click()
+  await page.locator('.id-band__actions').getByRole('button', { name: 'Umów sesję' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowa sesja' })
   await expect(drawer.getByLabel('Specjalistka')).toHaveValue('sp_anna')
   await expect(drawer.getByLabel('Godzina')).toHaveValue('11:50')
@@ -300,8 +300,9 @@ test('@owner persists client create, edit, reassignment, and archive through the
 
   let drawer = page.getByRole('dialog', { name: 'Nowy klient' })
   await expect(drawer).toBeVisible()
-  await expect(drawer.getByLabel('E-mail')).toHaveCount(0)
-  await expect(drawer.getByLabel('Telefon')).toHaveCount(0)
+  await expect(drawer.getByLabel('E-mail opiekuna')).toBeVisible()
+  await expect(drawer.getByLabel('Telefon opiekuna')).toBeVisible()
+  await expect(drawer.getByLabel('Uwagi recepcji')).toBeVisible()
   await expect(drawer.getByLabel('Powiąż z klientem')).toHaveCount(0)
   await expect(drawer.getByLabel('Pierwsza notatka (opcjonalnie)')).toHaveCount(0)
   await drawer.getByLabel('Imię i nazwisko').fill('Iga Nowa')
@@ -311,7 +312,7 @@ test('@owner persists client create, edit, reassignment, and archive through the
   await expect(drawer).toHaveCount(0)
   await expect(page).toHaveURL(/#\/client\?id=cl_iga$/)
   await expect(page.getByRole('heading', { name: 'Iga Nowa' })).toBeVisible()
-  await expect(page.getByText('Nowy klient dodany. Otworzono kartę.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Klient został dodany · Iga Nowa', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: 'Edytuj' }).click()
   drawer = page.getByRole('dialog', { name: 'Edycja klienta' })
@@ -350,6 +351,69 @@ test('@owner persists client create, edit, reassignment, and archive through the
       body: { expectedVersion: 2 },
     },
   ])
+})
+
+test('@owner saves guardian contacts and multiline reception notes on the client card', async ({ page }) => {
+  await freezeTime(page, '2026-08-04T08:00:00.000Z')
+  const records = []
+  const writes = []
+  await page.route('**/api/v1/workspace?*', (route) => {
+    const url = new URL(route.request().url())
+    return route.fulfill(workspace(url.searchParams.get('from'), url.searchParams.get('to'), records))
+  })
+  await page.route('**/api/v1/clients', async (route) => {
+    const body = route.request().postDataJSON()
+    writes.push(body)
+    records.push({
+      ...client({ id: 'cl_guardian', name: body.name, age: body.age,
+        createdAt: '2026-08-04T08:00:00.000Z' }),
+      guardianPhone: body.guardianPhone, guardianEmail: body.guardianEmail,
+      receptionNotes: body.receptionNotes,
+    })
+    records[0].assignment.startsAt = body.assignmentStartsAt
+    await route.fulfill(json(201, { data: { client: records[0] } }))
+  })
+  await page.route('**/api/v1/clients/cl_guardian/edits', async (route) => {
+    const body = route.request().postDataJSON()
+    writes.push(body)
+    records[0] = {
+      ...records[0], version: 2, updatedAt: '2026-08-04T08:05:00.000Z',
+      guardianPhone: body.guardianPhone, guardianEmail: body.guardianEmail,
+      receptionNotes: body.receptionNotes,
+    }
+    await route.fulfill(json(200, { data: { client: records[0] } }))
+  })
+
+  await page.goto('./#/clients')
+  await page.getByRole('button', { name: 'Dodaj klienta' }).first().click()
+  let drawer = page.getByRole('dialog', { name: 'Nowy klient' })
+  await drawer.getByLabel('Imię i nazwisko').fill('Iga Fikcyjna')
+  await drawer.getByLabel('Wiek').fill('9')
+  await drawer.getByLabel('Specjalistka prowadząca').selectOption('sp_anna')
+  await drawer.getByLabel('Telefon opiekuna').fill('+48 600 100 200')
+  await drawer.getByLabel('E-mail opiekuna').fill('opiekun@example.test')
+  await drawer.getByLabel('Uwagi recepcji').fill('Kontakt po 15:00.\nDzwonić do opiekuna.')
+  await drawer.getByRole('button', { name: 'Dodaj klienta' }).click()
+  await expect(page.getByRole('link', { name: '+48 600 100 200' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'opiekun@example.test' })).toBeVisible()
+  await expect(page.getByText('Kontakt po 15:00. Dzwonić do opiekuna.')).toBeVisible()
+  await expect(page.getByText('Kontakt po 15:00. Dzwonić do opiekuna.')).toHaveCSS('white-space', 'pre-wrap')
+
+  await page.getByRole('button', { name: 'Edytuj', exact: true }).click()
+  drawer = page.getByRole('dialog', { name: 'Edycja klienta' })
+  await expect(drawer.getByLabel('Uwagi recepcji')).toHaveValue('Kontakt po 15:00.\nDzwonić do opiekuna.')
+  await drawer.getByLabel('Telefon opiekuna').fill('')
+  await drawer.getByLabel('Uwagi recepcji').fill('')
+  await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()
+  await expect(page.getByRole('link', { name: '+48 600 100 200' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Uwagi recepcji' })).toHaveCount(0)
+  expect(writes[0]).toMatchObject({
+    guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
+    receptionNotes: 'Kontakt po 15:00.\nDzwonić do opiekuna.',
+  })
+  expect(writes[1]).toMatchObject({
+    guardianPhone: '', guardianEmail: 'opiekun@example.test', receptionNotes: '',
+  })
 })
 
 test('@owner sends Warsaw assignment dates and preserves the saved instant while editing a client', async ({ page }) => {
@@ -591,7 +655,7 @@ test('@owner puts a cancelled future session in the client attendance history', 
   })
 
   await page.goto('./#/client?id=cl_ola')
-  await expect(page.getByRole('heading', { name: 'Historia frekwencji' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Historia sesji' })).toBeVisible()
   await expect(page.getByText('Odwołana', { exact: true })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Najbliższe sesje' })).toBeVisible()
   await expect(page.locator('[aria-labelledby="upcoming-appointments-title"]')
@@ -647,7 +711,7 @@ test('@owner shows older-history loading without a false empty state', async ({ 
   await page.getByRole('button', { name: 'Pokaż wcześniejsze sesje' }).click()
   try {
     await expect(page.getByRole('status').filter({ hasText: 'Wczytuję wcześniejsze sesje…' })).toBeVisible()
-    await expect(page.getByText('Brak historii frekwencji', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('Brak historii sesji', { exact: true })).toHaveCount(0)
   } finally {
     releaseOlder()
   }
@@ -672,7 +736,7 @@ test('@owner shows older-history error without a false empty state', async ({ pa
   await page.goto('./#/client?id=cl_ola')
   await page.getByRole('button', { name: 'Pokaż wcześniejsze sesje' }).click()
   await expect(page.getByRole('status').filter({ hasText: 'Nie udało się wczytać wcześniejszych sesji.' })).toBeVisible()
-  await expect(page.getByText('Brak historii frekwencji', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Brak historii sesji', { exact: true })).toHaveCount(0)
 })
 
 test('@owner loads a specialist current month and future window with a monthly balance', async ({ page }) => {
@@ -877,9 +941,10 @@ test('@owner closes and disables a successful client archive when canonical relo
   expect(writes).toHaveLength(1)
 })
 
-test('@owner reloads the canonical client after a stale version conflict', async ({ page }) => {
+test('@owner keeps the client draft after a version conflict and reloads the canonical client on request', async ({ page }) => {
   await freezeTime(page, '2026-08-04T08:00:00.000Z')
   const records = [client({ id: 'cl_ola', name: 'Ola Aktywna', age: 12, version: 2 })]
+  const writes = []
   let workspaceReads = 0
   await page.route('**/api/v1/workspace?*', (route) => {
     workspaceReads += 1
@@ -887,6 +952,7 @@ test('@owner reloads the canonical client after a stale version conflict', async
     return route.fulfill(workspace(url.searchParams.get('from'), url.searchParams.get('to'), records))
   })
   await page.route('**/api/v1/clients/cl_ola/edits', (route) => {
+    writes.push(route.request().postDataJSON())
     records.splice(0, 1, client({
       id: 'cl_ola', name: 'Ola Na serwerze', age: 12, version: 3,
       updatedAt: '2026-08-04T08:06:00.000Z',
@@ -900,9 +966,19 @@ test('@owner reloads the canonical client after a stale version conflict', async
   await drawer.getByLabel('Imię i nazwisko').fill('Ola Lokalna')
   await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()
 
-  await expect(drawer).toHaveCount(0)
-  await expect(page.getByRole('heading', { name: 'Ola Na serwerze' })).toBeVisible()
-  expect(workspaceReads).toBeGreaterThanOrEqual(2)
+  await expect(drawer.getByRole('alert')).toContainText(
+    'Ktoś w międzyczasie zmienił dane klienta. Twoja zmiana nie została zapisana.',
+  )
+  await expect(drawer.getByLabel('Imię i nazwisko')).toHaveValue('Ola Lokalna')
+  const readsBeforeReload = workspaceReads
+  await drawer.getByRole('button', { name: 'Wczytaj aktualne dane' }).click()
+  await expect(drawer.getByLabel('Imię i nazwisko')).toHaveValue('Ola Na serwerze')
+  expect(workspaceReads).toBeGreaterThan(readsBeforeReload)
+
+  await drawer.getByLabel('Imię i nazwisko').fill('Ola Ponownie')
+  await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()
+  await expect.poll(() => writes).toHaveLength(2)
+  expect(writes.map(({ expectedVersion }) => expectedVersion)).toEqual([2, 3])
 })
 
 test('@owner keeps archived canonical history read-only and outside the client form', async ({ page }) => {
@@ -1047,7 +1123,7 @@ test('@owner retains a protected appointment draft after overlap, stale, and ord
   await drawer.getByLabel('Godzina').fill('13:00')
   await drawer.getByRole('button', { name: 'Dodaj sesję' }).click()
   await expect(drawer).toBeVisible()
-  await expect(drawer.getByRole('alert')).toContainText('Zmiana nie została zapisana. Zamknij formularz i otwórz sesję ponownie.')
+  await expect(drawer.getByRole('alert')).toContainText('Ktoś w międzyczasie zmienił tę sesję. Twoja zmiana nie została zapisana. Zamknij formularz, otwórz go ponownie i wprowadź zmianę jeszcze raz.')
   await expect(drawer.getByLabel('Godzina')).toHaveValue('13:00')
 
   await drawer.getByLabel('Godzina').fill('14:00')
@@ -1081,7 +1157,7 @@ test('@owner keeps a stale session edit version and draft until the session is r
   await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()
 
   await expect(drawer.getByRole('alert')).toHaveText(
-    'Zmiana nie została zapisana. Zamknij formularz i otwórz sesję ponownie.',
+    'Ktoś w międzyczasie zmienił tę sesję. Twoja zmiana nie została zapisana. Zamknij formularz, otwórz go ponownie i wprowadź zmianę jeszcze raz.',
   )
   await expect(drawer.getByLabel('Godzina')).toHaveValue('10:00')
   await drawer.getByRole('button', { name: 'Zapisz zmiany' }).click()

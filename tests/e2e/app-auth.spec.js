@@ -49,7 +49,7 @@ async function expectAuthenticated(page, projectName) {
   const actor = ACTORS[projectName]
   await expect(page.getByText(actor.name, { exact: true }).first()).toBeVisible()
   await expect(page.getByText(actor.role, { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Środowisko testowe', { exact: true })).toBeVisible()
+  await expect(page.getByText('Wersja testowa - nie wpisuj prawdziwych danych klientów', { exact: true })).toBeVisible()
 }
 
 async function expectNoDemoAuth(page) {
@@ -154,7 +154,7 @@ test('@owner delays the fictional shell behind the loading boundary', async ({ p
 
   await page.goto('.')
   await requestSeen
-  await expect(page.getByRole('heading', { name: 'Sprawdzanie dostępu' })).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Otwieramy panel…' })).toBeVisible()
   await expect(page.getByRole('navigation', { name: 'Nawigacja główna' })).toHaveCount(0)
   await expectNoDemoAuth(page)
 
@@ -347,7 +347,7 @@ test('@owner retries only after the explicit command', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Spróbuj ponownie' }).click()
   await retrySeen
-  await expect(page.getByRole('heading', { name: 'Sprawdzanie dostępu' })).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: 'Otwieramy panel…' })).toBeVisible()
   releaseRetry()
   await expectAuthenticated(page, 'owner')
   expect(attempts).toBe(2)
@@ -643,7 +643,7 @@ test('@owner renders immutable identity and keeps browser application storage em
   await expect(account).toContainText('Zarządzanie / Właścicielka')
   await expect(account).not.toContainText('Konto centrum')
   await expect(account).toContainText('Imienia i adresu e-mail nie da się zmienić w panelu.')
-  await expect(account).toContainText('Aby wyłączyć dostęp danej osoby, wyłącz go w Dostępie personelu i wyślij nowe zaproszenie.')
+  await expect(account).toContainText('Błędne imię lub adres e-mail innej osoby poprawisz, wyłączając jej dostęp w Zespół › Dostęp i wysyłając nowe zaproszenie z poprawnymi danymi.')
   await expect(account.getByRole('textbox')).toHaveCount(0)
   await expect(account).toContainText('owner@example.test')
   await expect(page.getByRole('button', { name: 'Zapisz konto' })).toHaveCount(0)
@@ -905,7 +905,7 @@ test('@owner handles role conflict, last-owner, and forbidden responses without 
   await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
   await expect(drawer).toHaveCount(0)
   await expect.poll(() => listRequests).toBeGreaterThan(beforeConflict)
-  await expect(page.getByText('Lista personelu została odświeżona.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Ktoś w międzyczasie zmienił dane tej osoby. Twoja zmiana nie została zapisana.', { exact: true })).toBeVisible()
 
   responseCode = 'LAST_ACTIVE_OWNER'
   await openRole()
@@ -913,7 +913,7 @@ test('@owner handles role conflict, last-owner, and forbidden responses without 
   await drawer.locator('input[name="staff-role"][value="owner"]').check()
   await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
   await expect(drawer.getByText(
-    'Nie można zmienić roli ostatniego aktywnego właściciela.',
+    'Ta osoba jako jedyna zarządza centrum. Najpierw nadaj rolę „Zarządzanie / Właścicielka” innej osobie.',
     { exact: true },
   )).toBeVisible()
   await expect(drawer).not.toContainText('LAST_ACTIVE_OWNER')
@@ -927,7 +927,7 @@ test('@owner handles role conflict, last-owner, and forbidden responses without 
   await drawer.getByRole('button', { name: 'Zapisz rolę' }).click()
   await expect(drawer).toHaveCount(0)
   await expect(page.locator('.staff-access-row')).toHaveCount(0)
-  await expect(page.getByText('Nie udało się pobrać listy personelu.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Nie udało się wczytać listy personelu. Spróbuj ponownie za chwilę.', { exact: true })).toBeVisible()
 })
 
 test('@owner rejects an invalid staff email inline without a request', async ({ page }) => {
@@ -1087,7 +1087,7 @@ test('@owner refreshes asynchronous invitation state on focus without overlappin
     })
     await expect.poll(() => listRequests, { timeout: 1_500 }).toBe(2)
     await expect(row).toContainText('Zaproszenie wysłane')
-    await expect(page.getByText('Pobieranie listy personelu…', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('Wczytuję listę personelu…', { exact: true })).toHaveCount(0)
 
     releaseRefresh()
     await expect(row).toContainText('Zaproszenie wysłane')
@@ -1138,7 +1138,7 @@ test('@owner keeps the current staff list when a background refresh fails', asyn
   await failed
 
   await expect(row).toContainText('Zaproszenie wysłane')
-  await expect(page.getByText('Nie udało się pobrać listy personelu.', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Nie udało się wczytać listy personelu. Spróbuj ponownie za chwilę.', { exact: true })).toHaveCount(0)
   expect(listRequests).toBe(2)
 })
 
@@ -1294,7 +1294,7 @@ test('@owner clears staff rows when the server forbids an invitation', async ({ 
   await drawer.getByRole('button', { name: 'Wyślij zaproszenie' }).click()
 
   await expect(page.locator('.staff-access-row')).toHaveCount(0)
-  await expect(page.getByText('Nie udało się pobrać listy personelu.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Nie udało się wczytać listy personelu. Spróbuj ponownie za chwilę.', { exact: true })).toBeVisible()
   await expect(drawer.getByText(
     'Nie masz już uprawnień do zarządzania personelem.',
     { exact: true },
@@ -1447,7 +1447,7 @@ test('@owner cancels a pending invitation and safely pre-fills a disabled-person
   await expect(confirmation).toContainText('Późniejszy dostęp będzie wymagał nowego zaproszenia.')
   await confirmation.getByRole('button', { name: 'Anuluj zaproszenie' }).click()
   await expect(confirmation).toHaveCount(0)
-  await expect(page.getByText('Zaproszenie zostało anulowane.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Zaproszenie zostało anulowane · Róża Ponawiana', { exact: true })).toBeVisible()
   await expect(row).toContainText('Dostęp wyłączony')
 
   await row.getByRole('button', { name: 'Zaproś ponownie' }).click()
@@ -1548,13 +1548,13 @@ test('@owner starts a new invitation action after deterministic error or field c
   const submit = drawer.getByRole('button', { name: 'Wyślij zaproszenie' })
 
   await submit.click()
-  await expect(drawer.getByText('Nie można utworzyć tego zaproszenia.', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('Ta osoba jest już na liście. Sprawdź jej status w zakładce Dostęp.', { exact: true })).toBeVisible()
   await submit.click()
   await expect(drawer.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
   await drawer.getByLabel('Imię i nazwisko').fill('Maja Zmieniona')
   await expect(submit).toBeVisible()
   await submit.click()
-  await expect(drawer.getByText('Nie można utworzyć tego zaproszenia.', { exact: true })).toBeVisible()
+  await expect(drawer.getByText('Ta osoba jest już na liście. Sprawdź jej status w zakładce Dostęp.', { exact: true })).toBeVisible()
 
   expect(keys).toHaveLength(3)
   expect(new Set(keys).size).toBe(3)
@@ -1649,7 +1649,7 @@ test('@owner closes and refreshes after a deactivation version conflict', async 
   await confirm.getByRole('button', { name: 'Wyłącz dostęp' }).click()
 
   await expect(confirm).toHaveCount(0)
-  await expect(page.getByText('Lista personelu została odświeżona.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Ktoś w międzyczasie zmienił dane tej osoby. Twoja zmiana nie została zapisana.', { exact: true })).toBeVisible()
   await expect.poll(() => listRequests).toBeGreaterThan(requestsBeforeConflict)
   await expect(row).toContainText('Ma dostęp')
 })
@@ -1676,15 +1676,15 @@ test('@owner reports a failed version-conflict refresh without claiming success'
 
   await expect(confirm).toHaveCount(0)
   await expect(page.getByText(
-    'Nie udało się odświeżyć listy personelu. Użyj przycisku „Odśwież”.',
+    'Nie udało się odświeżyć listy personelu. Użyj przycisku „Spróbuj ponownie”.',
     { exact: true },
   )).toBeVisible()
   await expect(page.getByText(
-    'Lista personelu została odświeżona.',
+    'Ktoś w międzyczasie zmienił dane tej osoby. Twoja zmiana nie została zapisana.',
     { exact: true },
   )).toHaveCount(0)
   await expect(page.getByText(
-    'Nie udało się pobrać listy personelu.',
+    'Nie udało się wczytać listy personelu. Spróbuj ponownie za chwilę.',
     { exact: true },
   )).toBeVisible()
 })
@@ -1788,7 +1788,7 @@ test('@owner sees a fixed last-active-owner deactivation error', async ({ page }
   await confirm.getByRole('button', { name: 'Wyłącz dostęp' }).click()
 
   await expect(confirm.getByText(
-    'Nie można wyłączyć ostatniego aktywnego właściciela.',
+    'Ta osoba jako jedyna zarządza centrum. Najpierw nadaj rolę „Zarządzanie / Właścicielka” innej osobie.',
     { exact: true },
   )).toBeVisible()
   await expect(confirm).not.toContainText('LAST_ACTIVE_OWNER')
@@ -1865,7 +1865,7 @@ test('@coordinator never requests or renders staff access data', async ({ page }
 test('@specialist keeps authenticated identity, gains Finances, and stays fictionally empty on phone', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('.')
-  await expect(page.getByText('Środowisko testowe', { exact: true })).toBeVisible()
+  await expect(page.getByText('Wersja testowa - nie wpisuj prawdziwych danych klientów', { exact: true })).toBeVisible()
   await expectNoDemoAuth(page)
 
   const bottomNavigation = page.getByRole('navigation', { name: 'Nawigacja dolna' })

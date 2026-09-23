@@ -2276,6 +2276,7 @@ test('lists, reads, and replaces capability overrides with an immediate authorit
     allow: ['finance.import'],
     deny: ['client.manage'],
     effectiveCapabilities: [
+      'activity.read',
       'appointment.charge.read',
       'appointment.manage',
       'chat.direct',
@@ -2926,11 +2927,7 @@ test('accepts canonical effective capabilities within each role ceiling', async 
 
   const coordinatorWithImport = sessionBody({
     actor: actors[1],
-    capabilities: [
-      ...ROLE_DEFAULT_CAPABILITIES.coordinator.slice(0, 7),
-      'finance.import',
-      ...ROLE_DEFAULT_CAPABILITIES.coordinator.slice(7),
-    ],
+    capabilities: [...ROLE_DEFAULT_CAPABILITIES.coordinator, 'finance.import'].sort(),
   })
   const elevated = queuedFetch(jsonResponse(coordinatorWithImport))
   assert.equal(
@@ -5166,6 +5163,55 @@ test('exposes client commands and sends canonical create, edit, and archive requ
     ])
   }
   assert.equal(generated.length, 0)
+})
+
+test('client commands round-trip encrypted guardian contact and reception fields', async () => {
+  const contact = { guardianPhone: '+48 500 600 700', guardianEmail: 'opiekun@example.test', receptionNotes: 'Kontakt po 16:00.' }
+  const created = clientDto(contact)
+  const edited = clientDto({ ...contact, guardianPhone: '', version: 2, updatedAt: '2026-08-04T09:00:00.000Z' })
+  const queue = queuedFetch(jsonResponse(sessionBody()), jsonResponse(clientEnvelope(created), 201), jsonResponse(clientEnvelope(edited)))
+  const client = createApiClient({ fetchImpl: queue.fetchImpl })
+  await client.getSession()
+  assert.deepEqual(await client.createClient(clientInput(contact)), created)
+  assert.deepEqual(await client.editClient('cl_ola', 1, clientInput({ guardianPhone: '' })), edited)
+  assert.equal(JSON.parse(queue.calls[1].init.body).guardianEmail, contact.guardianEmail)
+  const editBody = JSON.parse(queue.calls[2].init.body)
+  assert.equal(editBody.guardianPhone, '')
+  assert.equal(Object.hasOwn(editBody, 'guardianEmail'), false)
+  assert.equal(Object.hasOwn(editBody, 'receptionNotes'), false)
+})
+
+test('client commands reject a contact mismatch in an accepted response', async () => {
+  const contact = { guardianPhone: '+48 500 600 700', guardianEmail: '', receptionNotes: '' }
+  for (const operation of ['create', 'edit']) {
+    const queue = queuedFetch(jsonResponse(sessionBody()), jsonResponse(clientEnvelope(clientDto({
+      ...contact, guardianPhone: '', version: operation === 'create' ? 1 : 2,
+    })), operation === 'create' ? 201 : 200))
+    const client = createApiClient({ fetchImpl: queue.fetchImpl })
+    await client.getSession()
+    await assert.rejects(operation === 'create'
+      ? client.createClient(clientInput(contact))
+      : client.editClient('cl_ola', 1, clientInput(contact)), assertInvalidResponse)
+  }
+})
+
+test('client commands validate contact fields before sending and retain safe field errors', async () => {
+  const queue = queuedFetch()
+  const client = createApiClient({ fetchImpl: queue.fetchImpl })
+  for (const contact of [{ guardianEmail: 'invalid' }, { guardianPhone: '<script>' }, { receptionNotes: 'a\u0000b' }]) {
+    await assert.rejects(client.createClient(clientInput(contact)), assertClientInput)
+  }
+  assert.equal(queue.calls.length, 0)
+  const failed = queuedFetch(jsonResponse(sessionBody()), jsonResponse({ error: {
+    code: 'VALIDATION_FAILED', correlationId: CORRELATION_ID, details: { field: 'guardianEmail' },
+  } }, 400))
+  const active = createApiClient({ fetchImpl: failed.fetchImpl })
+  await active.getSession()
+  await assert.rejects(active.createClient(clientInput({ guardianEmail: 'opiekun@example.test' })), (error) => {
+    assert.equal(error.code, 'VALIDATION_FAILED')
+    assert.deepEqual(error.details, { field: 'guardianEmail' })
+    return true
+  })
 })
 
 test('client commands reject malformed and hostile inputs before fetch or key generation', async () => {

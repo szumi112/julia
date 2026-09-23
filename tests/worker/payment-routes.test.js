@@ -23,6 +23,7 @@ import {
 } from '../../worker/db/query-budget.js'
 import { createApp } from '../../worker/app.js'
 import {
+  applyActivityHistoryMigration,
   applyAppointmentCancellationReasonMigration,
   applyCoreDirectoryStageB,
   completeCoreDirectoryStageA,
@@ -70,6 +71,7 @@ const suffixes = (label) => {
 beforeAll(async () => {
   await completeCoreDirectoryStageA()
   await applyCoreDirectoryStageB()
+  await applyActivityHistoryMigration()
   await applyAppointmentCancellationReasonMigration()
   const now = new Date(NOW_MS).toISOString()
   await env.DB.batch([
@@ -157,6 +159,7 @@ const correctionInput = async (appointment, paymentId, overrides = {}) => {
 const ledgerSnapshot = async () => Object.fromEntries(await Promise.all(Object.entries({
   appointments: 'SELECT * FROM appointments ORDER BY id',
   audit: 'SELECT * FROM audit_events ORDER BY id',
+  activityDetails: 'SELECT * FROM activity_history_details ORDER BY audit_id',
   assignments: 'SELECT * FROM client_assignments ORDER BY id',
   charges: 'SELECT * FROM session_charges ORDER BY id',
   clients: 'SELECT * FROM clients ORDER BY id',
@@ -788,7 +791,7 @@ describe('appointment payment capture', () => {
       .bind(correction.id).run()).rejects.toThrow()
 
     for (const replacement of [null, CORRECTION_BODY.replacement]) {
-      const positions = replacement === null ? 6 : 7
+      const positions = 7
       for (let failedAt = 0; failedAt < positions; failedAt += 1) {
         const created = await seedAppointment()
         const recorded = await recordAppointmentPayment(await paymentInput(created))
@@ -888,7 +891,7 @@ describe('appointment payment capture', () => {
     expect(loser).toEqual(winner)
     expect(recoveryReads).toBe(2)
     expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
-      used: 18, remaining: 32, workRemaining: 24,
+      used: 19, remaining: 31, workRemaining: 23,
       totalLimit: 50, recoveryReserve: 8,
     })
   })
@@ -1112,7 +1115,7 @@ describe('appointment payment capture', () => {
           reason: 'Pomiar budżetu', replacement: null } },
     ))
     expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
-      used: 15, remaining: 35, workRemaining: 27,
+      used: 16, remaining: 34, workRemaining: 26,
       totalLimit: 50, recoveryReserve: 8,
     })
 
@@ -1148,7 +1151,7 @@ describe('appointment payment capture', () => {
     expect(response.status).toBe(200)
     expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
     expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
-      used: 15, remaining: 35, workRemaining: 27,
+      used: 16, remaining: 34, workRemaining: 26,
       totalLimit: 50, recoveryReserve: 8,
     })
   })
@@ -1596,7 +1599,7 @@ describe('appointment payment capture', () => {
     expect(loser).toEqual(winner)
     expect(recoveryReads).toBe(2)
     expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
-      used: 17, remaining: 33, workRemaining: 25,
+      used: 18, remaining: 32, workRemaining: 24,
       totalLimit: 50, recoveryReserve: 8,
     })
   })
@@ -1711,8 +1714,8 @@ describe('appointment payment capture', () => {
     }))).rejects.toThrow('NOT_FOUND')
   })
 
-  it('rolls back every one of the exact six batch statements byte-for-byte', async () => {
-    for (let failedAt = 0; failedAt < 6; failedAt += 1) {
+  it('rolls back every one of the exact seven batch statements byte-for-byte', async () => {
+    for (let failedAt = 0; failedAt < 7; failedAt += 1) {
       const appointment = await seedAppointment()
       const before = await ledgerSnapshot()
       const db = {
@@ -1736,7 +1739,7 @@ describe('appointment payment capture', () => {
       db: budget.work, recoveryDb: budget.recovery,
     }))
     const usage = usageForD1QueryBudgetViews(budget.work, budget.recovery)
-    expect(usage).toEqual({ used: 14, remaining: 36, workRemaining: 28,
+    expect(usage).toEqual({ used: 15, remaining: 35, workRemaining: 27,
       totalLimit: 50, recoveryReserve: 8 })
 
     const httpAppointment = await seedAppointment()
@@ -1768,7 +1771,7 @@ describe('appointment payment capture', () => {
     expect(response.status).toBe(200)
     expect(areSiblingD1QueryBudgetViews(views.work, views.recovery)).toBe(true)
     expect(usageForD1QueryBudgetViews(views.work, views.recovery)).toEqual({
-      used: 14, remaining: 36, workRemaining: 28,
+      used: 15, remaining: 35, workRemaining: 27,
       totalLimit: 50, recoveryReserve: 8,
     })
   })

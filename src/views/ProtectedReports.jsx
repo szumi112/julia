@@ -13,6 +13,8 @@ import { useReveal } from '../anim.js'
 import { Button, TableScroll } from '../ui.jsx'
 import { PeriodNav, useRouteParamsSync, ViewState } from '../ux-patterns.jsx'
 import { useFinanceWindow } from './use-finance-window.js'
+import { loadFailureCopy } from '../save-failure-copy.js'
+import { routeHref } from '../routing.js'
 
 const money = (value) => fmtMoney(value / 100)
 const PAYMENT_LABELS = Object.freeze({
@@ -90,62 +92,50 @@ export function ProtectedReports({ params = {} }) {
     setSelectedMonth(month)
   }
 
-  if (!finance.isCurrent) return (
-    <div className="report-window">
-      <div className="view-head">
-        <div>
-          <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>Raport — <em>{fmtMonthYear(selectedMonth)}</em></h1>
-          <p className="view-head__sub">Sześć kolejnych miesięcy zakończonych wybranym miesiącem.</p>
-        </div>
-        <div className="view-head__actions"><PeriodNav month={selectedMonth} min={FINANCE_WINDOW_MIN_MONTH} max={serverCurrentMonth} current={serverCurrentMonth} onChange={selectMonth} /></div>
-      </div>
-      <ViewState
-        tone={finance.phase === 'error' || finance.phase === 'refresh-error' ? 'error' : 'loading'}
-        icon="reports"
-        title={finance.phase === 'error' || finance.phase === 'refresh-error' ? 'Raport jest teraz niedostępny' : 'Wczytuję raport…'}
-        hint="Nie pokazujemy niezweryfikowanych zestawień dla wybranego miesiąca."
-        action={finance.phase === 'error' || finance.phase === 'refresh-error' ? <Button onClick={finance.reload}>Spróbuj ponownie</Button> : null}
-      />
-    </div>
-  )
-
-  const monthView = financeMonthView({
+  const failed = finance.phase === 'error' || finance.phase === 'refresh-error'
+  const monthView = finance.isCurrent ? financeMonthView({
     requestedMonth: null,
     savedMonth: selectedMonth,
     currentMonth: financeWindow.currentMonth,
     selectedMonth,
     selectedRowCount: financeWindow.rows.length,
     latestPopulatedMonth: financeWindow.latestPopulatedMonth,
-  })
+  }) : null
   const moneyRows = (values, labelFor) => Object.entries(values).map(([id, value]) => ({
     id, label: labelFor(id), value,
   })).sort((left, right) => right.value - left.value || left.label.localeCompare(right.label, 'pl'))
 
   return (
     <div className="report-window" ref={revealRef}>
-      <div className="view-head" data-reveal>
+      <div className="view-head">
         <div>
-          <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>Raport — <em>{fmtMonthYear(selectedMonth)}</em></h1>
+          <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>Raporty</h1>
           <p className="view-head__sub">Porównuje sześć miesięcy i podsumowuje wybrany miesiąc. Finanse służą do bieżących rozliczeń.</p>
         </div>
         <div className="view-head__actions no-print">
-          {!monthView.emptyCopy && <Button variant="ghost" icon="print" onClick={() => window.print()}>Drukuj</Button>}
+          {monthView && !monthView.emptyCopy && <Button variant="ghost" icon="print" onClick={() => window.print()}>Drukuj</Button>}
           <PeriodNav month={selectedMonth} min={FINANCE_WINDOW_MIN_MONTH} max={serverCurrentMonth} current={serverCurrentMonth} onChange={selectMonth} />
         </div>
       </div>
+      {!finance.isCurrent ? <ViewState
+        className={failed ? '' : 'finance-window__loading'}
+        tone={failed ? 'error' : 'loading'}
+        icon="reports"
+        title={failed ? loadFailureCopy('raportu') : 'Wczytuję raport…'}
+        action={failed ? <Button onClick={finance.reload}>Spróbuj ponownie</Button> : null}
+      /> : <>
       {finance.phase === 'refreshing' && <ViewState
         tone="loading"
         compact
         icon="reports"
-        title="Odświeżamy raport…"
-        hint="Wyświetlone zestawienie dotyczy nadal wybranego miesiąca."
+        title="Odświeżam raport…"
       />}
       {finance.phase === 'refresh-error' && <ViewState
         tone="error"
         compact
         icon="reports"
         title="Nie udało się odświeżyć raportu"
-        hint="Pokazujemy ostatnio potwierdzone zestawienie wybranego miesiąca."
+        hint="Widzisz ostatnio wczytane dane tego miesiąca."
         action={<Button size="sm" onClick={finance.reload}>Spróbuj ponownie</Button>}
       />}
       <div className={finance.isStale ? 'is-refreshing' : ''} aria-busy={finance.phase === 'refreshing' || undefined}>
@@ -154,7 +144,7 @@ export function ProtectedReports({ params = {} }) {
         title={monthView.emptyCopy}
         hint="Wybierz inny miesiąc, aby zobaczyć podsumowanie."
         action={monthView.latestPopulatedMonth ? <Button variant="ghost" onClick={() => selectMonth(monthView.latestPopulatedMonth)}>
-          Pokaż ostatni miesiąc z danymi — {fmtMonthYear(monthView.latestPopulatedMonth)}
+          Pokaż ostatni miesiąc z danymi ({fmtMonthYear(monthView.latestPopulatedMonth)})
         </Button> : null}
       /> : null}
       <section className="report-print-sheet print-only" aria-label="Arkusz wydruku raportu">
@@ -241,13 +231,16 @@ export function ProtectedReports({ params = {} }) {
         </dl>
       </section>
       {financeWindow.unknownPeriodCount > 0 ? <section className="card card--pad report-window__unknown" data-reveal>
-        <h2 className="card-title">Nieustalony miesiąc księgowy</h2>
+        <h2 className="card-title">Pozycje bez miesiąca</h2>
         <p>{financeWindow.unknownPeriodCount} {plural(
           financeWindow.unknownPeriodCount,
-          'pozycja wymaga', 'pozycje wymagają', 'pozycji wymaga',
-        )} przeglądu poza wybranym miesiącem.</p>
+          'pozycja z arkusza nie ma', 'pozycje z arkusza nie mają', 'pozycji z arkusza nie ma',
+        )} przypisanego miesiąca, więc nie {plural(financeWindow.unknownPeriodCount, 'liczy', 'liczą', 'liczy')} się
+          do żadnego miesiąca. Znajdziesz {financeWindow.unknownPeriodCount === 1 ? 'ją' : 'je'} w arkuszu Excel
+          pobranym w <a href={routeHref('payments')}>Finansach</a>.</p>
       </section> : null}
       </div>
+      </>}
     </div>
   )
 }

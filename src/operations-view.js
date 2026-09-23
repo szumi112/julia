@@ -1,3 +1,5 @@
+import { relDayLabel, warsawDateTimeFromUtc } from './format.js'
+
 export const BACKUP_STALE_HOURS = 36
 
 const STATUS_RANK = Object.freeze({ ok: 0, pending: 0, warning: 1, critical: 2 })
@@ -7,6 +9,15 @@ const SOURCE_PRIORITY = Object.freeze({
   'outbox.processing': 2,
   'scheduler.runs': 3,
 })
+
+// "dziś, 03:15" / "wczoraj, 22:14" / "8 wrz, 22:14" in Warsaw time; null when
+// the instant cannot be read.
+export function relInstantLabel(instant) {
+  const ms = Date.parse(instant ?? '')
+  if (!Number.isFinite(ms)) return null
+  const { date, time } = warsawDateTimeFromUtc(new Date(ms).toISOString())
+  return `${relDayLabel(date)}, ${time}`
+}
 
 const checkFor = (health, id) => health?.checks?.find((check) => check.id === id) ?? null
 

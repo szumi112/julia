@@ -17,7 +17,10 @@ import {
   cap, fmtFullDate, fmtMoney, monthKey, addMonths, fmtMonthYear, fmtShortDate,
   isBillable, collectedOf, outstandingOf, sessionsWord, METHOD_LABELS, toISODate,
 } from '../format.js'
-import { paymentEntryFor, paymentSnapshotOf, scopedBillingSummary } from '../workspace.js'
+import {
+  PAYMENT_AMOUNT_COPY, paymentEntryFor, paymentOverRemainderCopy, paymentSnapshotOf, scopedBillingSummary,
+} from '../workspace.js'
+import { saveFailureCopy } from '../save-failure-copy.js'
 import {
   assertCorrectionReason, parsePaymentAmountGrosze, validatePaymentDateInput, warsawDateFromUtc,
 } from '../core-records.js'
@@ -29,6 +32,8 @@ import {
 } from '../workspace-view.js'
 
 const validMonth = (value) => /^\d{4}-\d{2}$/.test(value || '')
+const paymentDetail = (amountGrosze, method) =>
+  `${fmtMoney(amountGrosze / 100)}, ${(METHOD_LABELS[method] ?? 'Nie ustalono').toLowerCase()}`
 
 function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
   const [open, setOpen] = useState(false)
@@ -112,10 +117,6 @@ function PaymentEntry({ session, client, onBook, fallbackFocusRef }) {
             <input
               ref={amountRef}
               className="input"
-              type="number"
-              min="0.01"
-              max={remainder}
-              step="0.01"
               inputMode="decimal"
               name="payment-amount"
               autoComplete="off"
@@ -213,10 +214,10 @@ export function AppPaymentEntry({
     try {
       amountGrosze = parsePaymentAmountGrosze(form.amount)
     } catch {
-      return { errors: { amount: 'Podaj kwotę w pełnych groszach' }, input: null }
+      return { errors: { amount: PAYMENT_AMOUNT_COPY }, input: null }
     }
     if (amountGrosze > outstandingGrosze) {
-      return { errors: { amount: 'Kwota nie może przekraczać pozostałej kwoty' }, input: null }
+      return { errors: { amount: paymentOverRemainderCopy(outstandingGrosze) }, input: null }
     }
     try {
       validatePaymentDateInput({ amountGrosze, method: form.method, paidDate: form.paidDate })
@@ -226,7 +227,7 @@ export function AppPaymentEntry({
         errors: {
           method: field === 'method' ? 'Wybierz formę płatności' : null,
           paidDate: field === 'paidDate' ? 'Podaj poprawną datę wpłaty' : null,
-          form: field === 'amountGrosze' ? 'Podaj kwotę w pełnych groszach' : 'Sprawdź dane wpłaty',
+          form: field === 'amountGrosze' ? PAYMENT_AMOUNT_COPY : 'Sprawdź dane wpłaty',
         },
         input: null,
       }
@@ -262,12 +263,12 @@ export function AppPaymentEntry({
         method: next.input.method,
         paidDate: next.input.paidDate,
       })
-    } catch {
+    } catch (error) {
       setSaveStatus('error')
-      setSaveError('Nie udało się zapisać wpłaty. Spróbuj ponownie.')
+      setSaveError(saveFailureCopy(error, { subject: 'wpłaty' }))
       return
     }
-    toast(`Wpłata zapisana: ${fmtMoney(next.input.amountGrosze / 100)}, ${METHOD_LABELS[next.input.method]}`)
+    toast(`Wpłata została zapisana · ${paymentDetail(next.input.amountGrosze, next.input.method)}`)
     setOpen(false)
     setSaveStatus('reconciling')
     try {
@@ -321,10 +322,6 @@ export function AppPaymentEntry({
             <input
               ref={amountRef}
               className="input"
-              type="number"
-              min="0.01"
-              max={remainder}
-              step="0.01"
               inputMode="decimal"
               name="payment-amount"
               autoComplete="off"
@@ -377,6 +374,7 @@ export function AppPaymentCorrection({
   entry, session, client, fallbackFocusRef, paymentMutationLocked, refreshWorkspace, workspace,
   workspaceRange, onReconciled,
 }) {
+  const { toast } = useApp()
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ reason: '', replace: false, amount: '', method: '', paidDate: '' })
   const [errors, setErrors] = useState({})
@@ -425,17 +423,22 @@ export function AppPaymentCorrection({
 
   const correctionInput = () => {
     let reason
+    const typedReason = form.reason.trim().normalize('NFC')
     try {
-      reason = assertCorrectionReason(form.reason.trim())
+      reason = assertCorrectionReason(typedReason)
     } catch {
-      return { errors: { reason: 'Podaj powód korekty (maksymalnie 500 bajtów)' }, input: null }
+      // The limit counts UTF-8 bytes, so a character count would be a false promise.
+      return {
+        errors: { reason: typedReason ? 'Skróć powód korekty.' : 'Napisz krótko, dlaczego poprawiasz wpłatę.' },
+        input: null,
+      }
     }
     if (!form.replace) return { errors: {}, input: { reason, replacement: null } }
     let amountGrosze
     try {
       amountGrosze = parsePaymentAmountGrosze(form.amount)
     } catch {
-      return { errors: { amount: 'Podaj kwotę w pełnych groszach' }, input: null }
+      return { errors: { amount: PAYMENT_AMOUNT_COPY }, input: null }
     }
     try {
       validatePaymentDateInput({ amountGrosze, method: form.method, paidDate: form.paidDate })
@@ -445,7 +448,7 @@ export function AppPaymentCorrection({
         errors: {
           method: field === 'method' ? 'Wybierz formę płatności' : null,
           paidDate: field === 'paidDate' ? 'Podaj poprawną datę wpłaty' : null,
-          form: field === 'amountGrosze' ? 'Podaj kwotę w pełnych groszach' : 'Sprawdź dane wpłaty',
+          form: field === 'amountGrosze' ? PAYMENT_AMOUNT_COPY : 'Sprawdź dane wpłaty',
         },
         input: null,
       }
@@ -477,21 +480,28 @@ export function AppPaymentCorrection({
     setSaveError(null)
     try {
       await workspace.correctPayment(entry.id, session.version, next.input)
-    } catch {
+    } catch (error) {
       setSaveStatus('error')
-      setSaveError('Nie udało się zapisać korekty.')
+      setSaveError(saveFailureCopy(error, { subject: 'poprawki wpłaty' }))
       return
     }
+    const { replacement } = next.input
+    toast(replacement
+      ? `Wpłata została poprawiona · ${paymentDetail(replacement.amountGrosze, replacement.method)}`
+      : `Wpłata została wycofana · ${paymentDetail(entry.amountGrosze, entry.method)}`)
+    setOpen(false)
+    setSaveStatus('reconciling')
     try {
       await refreshWorkspace(workspaceRange)
     } catch {
-      setSaveStatus('reconciling')
-      setSaveError('Korekta została zapisana, ale nie udało się odświeżyć rozliczeń.')
+      setSaveStatus('idle')
+      focusAfterClose()
+      toast('Nie udało się odświeżyć rozliczeń. Odśwież stronę, żeby zobaczyć nowe kwoty.', 'alert')
       return
     }
-    onReconciled?.()
-    setOpen(false)
+    setSaveStatus('idle')
     focusAfterClose()
+    onReconciled?.()
   }
 
   const close = () => {
@@ -506,18 +516,18 @@ export function AppPaymentCorrection({
         open={open}
         setOpen={(next) => { if (!saving && !reconciled) setOpen(next) }}
         contentRole="dialog"
-        ariaLabel="Skoryguj wpłatę"
+        ariaLabel="Popraw wpłatę"
         align="right"
         trigger={(
           <Button
             variant="ghost"
             size="sm"
             aria-haspopup="dialog"
-            aria-label={`Skoryguj wpłatę — ${fmtMoney(entry.amountGrosze / 100)}, ${client?.name || 'klient'}`}
+            aria-label={`Popraw wpłatę — ${fmtMoney(entry.amountGrosze / 100)}, ${client?.name || 'klient'}`}
             disabled={paymentMutationLocked || workspace.status !== 'ready'}
             onClick={begin}
           >
-            Skoryguj
+            Popraw wpłatę
           </Button>
         )}
       >
@@ -547,16 +557,13 @@ export function AppPaymentCorrection({
               disabled={saving || reconciled}
               onChange={(event) => set('replace', event.target.checked)}
             />
-            <span>Dodaj wpłatę zastępczą</span>
+            <span>Nowa wpłata w miejsce tej</span>
           </label>
           {form.replace && <>
-            <Field label="Kwota zastępcza" error={errors.amount}>
+            <Field label="Kwota" error={errors.amount}>
               <input
                 ref={amountRef}
                 className="input"
-                type="number"
-                min="0.01"
-                step="0.01"
                 inputMode="decimal"
                 name="replacement-amount"
                 autoComplete="off"
@@ -565,7 +572,7 @@ export function AppPaymentCorrection({
                 onChange={(event) => set('amount', event.target.value)}
               />
             </Field>
-            <Field label="Forma zastępcza" error={errors.method}>
+            <Field label="Forma płatności" error={errors.method}>
               <select
                 ref={methodRef}
                 className="select"
@@ -581,7 +588,7 @@ export function AppPaymentCorrection({
                 ))}
               </select>
             </Field>
-            <Field label="Data zastępcza" error={errors.paidDate || errors.form}>
+            <Field label="Data wpłaty" error={errors.paidDate || errors.form}>
               <input
                 ref={dateRef}
                 className="input"
@@ -738,7 +745,7 @@ export function Payments({ ownSpecialistId = null }) {
     const amount = patch.paidAmount - paymentSnapshotOf(session).paidAmount
     const client = clientOf(session.clientId)
     dispatch({ type: 'UPDATE_SESSION', id: session.id, patch })
-    toast(`Wpłata zapisana: ${fmtMoney(amount)}, ${METHOD_LABELS[patch.method] ?? 'Nie ustalono'}`, 'payments')
+    toast(`Wpłata została zapisana · ${paymentDetail(Math.round(amount * 100), patch.method)}`, 'payments')
   }
 
   if (isApp && workspaceState !== 'ready') {
@@ -746,10 +753,8 @@ export function Payments({ ownSpecialistId = null }) {
       <section role="status" aria-label="Stan rozliczeń">
         <EmptyState
           icon="payments"
-          title={workspaceState === 'loading' ? 'Wczytywanie rozliczeń…' : 'Rozliczenia są teraz niedostępne'}
-          hint={workspaceState === 'loading'
-            ? 'Pobieramy kompletny wybrany miesiąc.'
-            : 'Nie pokazujemy sum ani pustych wyników dla niepełnego okresu.'}
+          title={workspaceState === 'loading' ? 'Wczytuję rozliczenia…' : 'Nie udało się wczytać rozliczeń'}
+          hint={workspaceState === 'loading' ? undefined : 'Spróbuj ponownie za chwilę.'}
         />
       </section>
     )

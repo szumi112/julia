@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { apiClient } from '../api.js'
 import { canPerformAction } from '../capability-access.js'
-import { fmtFullDate, fmtMoney, fmtMonthYear, isBillable, monthKey, METHOD_LABELS } from '../format.js'
+import { fmtFullDate, fmtMoney, isBillable, monthKey, METHOD_LABELS } from '../format.js'
 import { ownPaymentSession } from '../own-payments.js'
 import { routeHref } from '../routing.js'
 import { SERVICE_BY_ID } from '../services.js'
@@ -13,10 +13,12 @@ import { Button, EmptyState, MoneyKpi, Pager, Pill, usePagination } from '../ui.
 import { PeriodNav, useRouteParamsSync, ViewState } from '../ux-patterns.jsx'
 import { monthWorkspaceRange } from '../workspace-view.js'
 import { AppPaymentEntry } from './Payments.jsx'
+import { WorkbookExport } from './WorkbookExport.jsx'
+import { loadFailureCopy } from '../save-failure-copy.js'
 
 const validMonth = (value) => /^\d{4}-\d{2}$/.test(value || '')
 const paymentLabel = Object.freeze({
-  paid: 'Opłacona', partial: 'Częściowo opłacona', unpaid: 'Nieopłacona',
+  paid: 'Opłacona', partial: 'Częściowo opłacona', unpaid: 'Do zapłaty',
 })
 
 export function OwnPayments() {
@@ -107,21 +109,20 @@ export function OwnPayments() {
       <div className="view-head" data-reveal>
         <div>
           <h1 className="display view-head__title">Finanse <em>i płatności</em></h1>
-          <p className="view-head__sub">
-            Wyłącznie należności i wpłaty za Twoje sesje — bez danych klientów i zespołu.
-          </p>
+          <p className="view-head__sub">Twoje sesje, należności i wpłaty.</p>
         </div>
         <div className="view-head__actions">
+          <WorkbookExport own />
           <PeriodNav month={selectedMonth} max={currentMonth} current={currentMonth} onChange={setSelectedMonth} />
         </div>
       </div>
 
       {!isCurrent ? (
         <ViewState
+          className={phase === 'error' || phase === 'refresh-error' ? '' : 'finance-window__loading'}
           tone={phase === 'error' || phase === 'refresh-error' ? 'error' : 'loading'}
           icon="payments"
-          title={phase === 'error' || phase === 'refresh-error' ? 'Własne rozliczenia są teraz niedostępne' : 'Wczytuję własne rozliczenia…'}
-          hint="Nie pokazujemy niezweryfikowanych kwot dla wybranego miesiąca."
+          title={phase === 'error' || phase === 'refresh-error' ? loadFailureCopy('Twoich rozliczeń') : 'Wczytuję Twoje rozliczenia…'}
           action={phase === 'error' || phase === 'refresh-error' ? <Button onClick={reload}>Spróbuj ponownie</Button> : null}
         />
       ) : (
@@ -130,15 +131,14 @@ export function OwnPayments() {
             tone="loading"
             compact
             icon="payments"
-            title="Odświeżamy własne rozliczenia…"
-            hint="Wyświetlone kwoty dotyczą nadal wybranego miesiąca."
+            title="Odświeżam Twoje rozliczenia…"
           />}
           {phase === 'refresh-error' && <ViewState
             tone="error"
             compact
             icon="payments"
-            title="Nie udało się odświeżyć własnych rozliczeń"
-            hint="Pokazujemy ostatnio potwierdzone dane wybranego miesiąca."
+            title="Nie udało się odświeżyć Twoich rozliczeń"
+            hint="Widzisz ostatnio wczytane dane tego miesiąca."
             action={<Button size="sm" onClick={reload}>Spróbuj ponownie</Button>}
           />}
           <div className={phase === 'refreshing' || phase === 'refresh-error' ? 'is-refreshing' : ''} aria-busy={phase === 'refreshing' || undefined}>
@@ -153,7 +153,7 @@ export function OwnPayments() {
           </section>
           <section className="card finance-window__table" data-reveal aria-labelledby="own-payments-title">
             <h2 className="card-title" id="own-payments-title" ref={ownPaymentsHeadingRef} tabIndex={-1}>
-              Własne sesje · {fmtMonthYear(selectedMonth)}
+              Twoje sesje
             </h2>
             <div className="table-scroll">
               <table className="table table--cards" aria-label="Własne rozliczenia sesji">

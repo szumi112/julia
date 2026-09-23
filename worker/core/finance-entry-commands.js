@@ -2,6 +2,8 @@ import { validateFinanceEntryInput } from '../../src/finance-records.js'
 import { FINANCE_SCOPE, createFinanceContext, loadFinanceContext } from './finance.js'
 import { createIdempotencyStatement, createUnitOfWork, inspectIdempotency } from '../db/unit-of-work.js'
 import { auditEventStatement } from '../audit/events.js'
+import { activityDetailStatement } from '../audit/activity-history.js'
+import { amountActivityChanges } from '../../src/activity-history.js'
 import { authorize } from '../identity/policy.js'
 import { captureAuthorityActor } from '../identity/authority-actor.js'
 import { resolveCurrentAuthorityActor } from '../identity/staff.js'
@@ -55,7 +57,7 @@ const idemFor = async (command, operation, body) => ({ actorId: command.actor.id
     new TextEncoder().encode(JSON.stringify([command.entryId ?? null, body]))))) })
 const responseFor = (status, entryId, version) => ({ status, body: { data: { entryId, version } } })
 
-async function commit(command, context, idem, entryId, version, statements, action, adjustmentId = null, specialist = null) {
+async function commit(command, context, idem, entryId, version, statements, action, adjustmentId = null, specialist = null, activityChanges = []) {
   const { db, actor, now } = command
   const response = responseFor(version === 1 ? 201 : 200, entryId, version)
   const auditId = identifier(command, 'aud')
@@ -67,6 +69,10 @@ async function commit(command, context, idem, entryId, version, statements, acti
     actorStaffId: actor.id, action, entityType: 'finance_entry', entityId: entryId,
     result: 'success', correlationId: command.correlationId,
     metadata: { entryVersion: version }, reasonEnvelope: null }))
+  if (activityChanges.length > 0) unit.domain(await activityDetailStatement(db, {
+    auditId, action, keyring: context.keyring, dataKey: context.dataKey,
+    scope: FINANCE_SCOPE, changes: activityChanges,
+  }))
   unit.idempotency(await createIdempotencyStatement(db, context, {
     ...idem, resourceType: 'finance_entry', resourceId: entryId, response,
     createdAt: now, expiresAt: new Date(command.nowMs + 7 * 86400000).toISOString(),
@@ -131,7 +137,8 @@ export async function createFinanceEntry(input) {
     entryId, body.kind, body.recordType, body.accountingMonth, body.occurredOn,
     body.amountGrosze, body.paidAmountGrosze, body.paymentMethod, body.settlementStatus,
     body.invoiceStatus, body.specialistId, details, actor.id, now, now)
-  return commit(command, context, idem, entryId, 1, [statement], 'finance.entry.created', null, specialist)
+  return commit(command, context, idem, entryId, 1, [statement],
+    'finance.entry.created', null, specialist, amountActivityChanges(null, body.amountGrosze))
 }
 
 export async function adjustFinanceEntry(input) {
@@ -188,7 +195,8 @@ export async function adjustFinanceEntry(input) {
       (id,finance_entry_id,reason_envelope,before_envelope,after_envelope,recorded_by_staff_id,created_at)
       SELECT ?,?,?,?,?,?,? WHERE changes()=1`).bind(adjustmentId, entryId, reason, beforeEnvelope,
       afterEnvelope, command.actor.id, now),
-  ], 'finance.entry.adjusted', adjustmentId)
+  ], 'finance.entry.adjusted', adjustmentId, null,
+  amountActivityChanges(row.paid_amount_grosze, body.paidAmountGrosze))
 }
 
 export async function loadFinanceEntry(input) {

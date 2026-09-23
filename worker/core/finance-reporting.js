@@ -1,5 +1,7 @@
 import { createFinanceReadModel } from '../../src/finance-reporting.js'
 import { auditEventStatement } from '../audit/events.js'
+import { activityDetailStatement } from '../audit/activity-history.js'
+import { amountActivityChanges } from '../../src/activity-history.js'
 import { FINANCE_SCOPE } from './finance.js'
 import { createUnitOfWork } from '../db/unit-of-work.js'
 import { authorize } from '../identity/policy.js'
@@ -636,7 +638,8 @@ export async function voidFinanceEntry(input) {
     return voidResponse(existing.entity_id, existing.response_version)
   }
   const entry = await input.db.prepare(
-    `SELECT entry.id,entry.version,workbook_void.id AS workbook_void_id,
+    `SELECT entry.id,entry.version,entry.amount_grosze,
+            workbook_void.id AS workbook_void_id,
             manual_void.id AS manual_void_id,entry.batch_id,batch.status AS batch_status
      FROM finance_entries AS entry
      LEFT JOIN finance_entry_voids AS workbook_void ON workbook_void.finance_entry_id=entry.id
@@ -714,6 +717,11 @@ export async function voidFinanceEntry(input) {
     id: auditId, occurredAt: createdAt, actorStaffId: input.actor.id,
     action: 'finance.entry.voided', entityType: 'finance_entry', entityId: input.entryId,
     result: 'success', correlationId: input.correlationId, metadata, reasonEnvelope: null,
+  }))
+  const activityChanges = amountActivityChanges(entry.amount_grosze, 0)
+  if (activityChanges.length > 0) unit.domain(await activityDetailStatement(input.db, {
+    auditId, action: 'finance.entry.voided', keyring: input.keyring,
+    dataKey, scope: FINANCE_SCOPE, changes: activityChanges,
   }))
   unit.guard(input.db.prepare(
     `INSERT INTO core_directory_invariant_failures (failure_kind)

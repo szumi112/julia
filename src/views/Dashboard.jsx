@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { apiClient } from '../api.js'
-import { useApp, useWorkspaceRetry, useWorkspaceWindow } from '../store.jsx'
+import { useApp, useAppointmentMutationLock, useWorkspaceRetry, useWorkspaceWindow } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { canPerformAction } from '../capability-access.js'
 import { useReveal, useDrawerFX } from '../anim.js'
@@ -11,6 +11,7 @@ import { todayWorkspace } from '../workspace.js'
 import { isWorkspaceRangeCovered, rollingWorkspaceRange, weekWorkspaceRange } from '../workspace-view.js'
 import { isWorkspaceRangePending } from '../workspace-load-request.js'
 import { dashboardBackupAlert } from '../operations-view.js'
+import { loadFailureCopy } from '../save-failure-copy.js'
 import {
   fmtMoney, fmtWeekday, fmtFullDate, toISODate, pad2,
   cap, plural, timeToMin, relDayLabel,
@@ -21,7 +22,7 @@ const ROW_STATUS = { completed: 'odbyta', noshow: 'nieobecność' }
 
 // today's sessions in plain time order — the "teraz" marker carries the ordering
 // so no row has to explain its own position
-function TodayThread({ sessions, nowMin, currentId, onOpen }) {
+function TodayThread({ sessions, nowMin, currentId, canOpen, onOpen }) {
   return (
     <div className="dash-hero__day" data-reveal>
       <div className="spine">
@@ -36,8 +37,8 @@ function TodayThread({ sessions, nowMin, currentId, onOpen }) {
           const overdue = session.status === 'scheduled'
             && !live
             && timeToMin(session.time) + (session.duration || 50) <= nowMin
-          const status = live ? 'trwa' : overdue ? 'wymaga statusu' : ROW_STATUS[session.status] || ''
-          const Row = onOpen ? 'button' : 'div'
+          const status = live ? 'trwa' : overdue ? 'do oznaczenia' : ROW_STATUS[session.status] || ''
+          const Row = canOpen(session) ? 'button' : 'div'
           return (
             <Fragment key={session.id}>
               {markerHere && <div className="spine__now" aria-hidden="true">teraz</div>}
@@ -45,7 +46,7 @@ function TodayThread({ sessions, nowMin, currentId, onOpen }) {
                 className={`spine__row today-session ${live ? 'is-live' : ''} ${session.status === 'completed' ? 'is-done' : ''}`}
                 data-status={session.status}
                 style={{ '--node-color': session.psych?.color }}
-                onClick={onOpen ? () => onOpen(session) : undefined}
+                onClick={Row === 'button' ? () => onOpen(session) : undefined}
               >
                 <span className="spine__time">{session.time}</span>
                 <span className="spine__name">{session.client?.name}</span>
@@ -173,6 +174,7 @@ export function BoardDrawer({ onClose }) {
 
 export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }) {
   const { state, workspace, workspaceFailures, workspacePendingRanges } = useApp()
+  const { locked: appointmentMutationLocked } = useAppointmentMutationLock()
   const {
     appMode, canAccess, capabilities, openSessionForm, openClientForm, navigate, role,
   } = useShell()
@@ -244,20 +246,13 @@ export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }
   const heroPsych = heroSession ? psychOf(heroSession.psychId) : null
   const heroClient = heroSession ? clientOf(heroSession.clientId) : null
   const heroState = workspaceModel.current ? 'Trwa teraz' : workspaceModel.next ? 'Następna sesja' : null
-  const terminalHeading = !workspaceCovered
-    ? (workspaceUnavailable ? 'Nie udało się wczytać całego podsumowania dnia' : 'Wczytuję grafik dnia…')
-    : daySummary.unresolvedPast > 0
-      ? `${daySummary.unresolvedPast} sesji wymaga statusu`
-      : daySummary.total > 0 ? 'Dzień zakończony' : 'Wolny dzień'
-  const terminalSupport = !workspaceCovered
-    ? (workspaceUnavailable
-      ? 'Nie pokazujemy częściowych danych. Spróbuj ponownie.'
-      : 'Pobieramy dzisiejszy grafik.')
-    : daySummary.unresolvedPast > 0
-      ? 'Zaktualizuj status zakończonych sesji, aby domknąć plan dnia.'
-      : daySummary.total > 0
-        ? 'Wszystkie dzisiejsze sesje mają uzupełniony status.'
-        : 'Grafik jest dziś pusty — czas na oddech.'
+  const unresolved = daySummary.unresolvedPast
+  const terminalHeading = unresolved > 0
+    ? `${unresolved} ${plural(unresolved, 'sesja czeka', 'sesje czekają', 'sesji czeka')} na oznaczenie`
+    : daySummary.total > 0 ? 'Dzień zakończony' : 'Dziś nie ma sesji.'
+  const terminalSupport = unresolved > 0
+    ? 'Zaznacz, jak poszły dzisiejsze sesje.'
+    : daySummary.total > 0 ? 'Wszystkie dzisiejsze sesje są oznaczone.' : null
 
   const outstandingLabel = isApp
     ? (role.scope === 'own' ? 'Do zapłaty za dzisiejsze sesje' : 'Do zapłaty (ostatnie 3 miesiące)')
@@ -267,6 +262,18 @@ export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }
   const canCreateDashboardSession = canCreateSession && (!isApp || (
     workspaceCovered && !workspaceRefreshFailed && !workspaceReadOnlyError
   ))
+  const canEditSession = (session) => !isApp || (
+    canPerformAction(capabilities, 'appointment.edit')
+    && workspaceCovered && !workspaceRefreshFailed && !workspaceReadOnlyError
+    && !appointmentMutationLocked
+    && !session.readOnly && !clientOf(session.clientId)?.readOnly
+  )
+  const openSession = (session) => openSessionForm({
+    session: state.sessions.find((candidate) => candidate.id === session.id) ?? session,
+    workspaceRange,
+  })
+  const canOpenHero = workspaceCovered && heroSession && canEditSession(heroSession)
+  const showClientsLink = isApp && canAccess('clients') === true
   const backupAlert = canReadBackupHealth ? dashboardBackupAlert(backupHealth) : null
   const hasDashboardRangeFailure = todayWorkspaceState === 'unavailable'
     || todayWorkspaceFailed
@@ -297,28 +304,29 @@ export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }
             <p className="display today-hero__time">{heroSession.time}</p>
             <p className="display today-hero__name">{heroClient?.name}</p>
             <p className="today-hero__meta">
-              {heroPsych?.room || 'Gabinet do potwierdzenia'} · {heroPsych?.name}
+              {heroPsych?.room ? `${heroPsych.room} · ` : ''}{heroPsych?.name}
             </p>
           </>
         ) : workspaceCovered ? (
           <>
             <h2 className="display today-hero__title">{terminalHeading}</h2>
-            <p className="today-hero__meta">{terminalSupport}</p>
+            {terminalSupport && <p className="today-hero__meta">{terminalSupport}</p>}
           </>
         ) : null}
-        {canCreateDashboardSession && <div className="today-hero__actions">
-          {!isApp && heroSession && (
-            <Button magnetic onClick={() => openSessionForm({ session: heroSession })}>Otwórz sesję</Button>
+        {(canCreateDashboardSession || canOpenHero || showClientsLink) && <div className="today-hero__actions">
+          {canOpenHero && (
+            <Button magnetic onClick={() => openSession(heroSession)}>Otwórz sesję</Button>
           )}
-          <Button
-            variant={heroSession ? 'ghost' : 'primary'}
+          {canCreateDashboardSession && <Button
+            variant={canOpenHero ? 'ghost' : 'primary'}
             icon="plus"
-            magnetic={!heroSession}
+            magnetic={!canOpenHero}
             onClick={() => openSessionForm()}
           >
             Nowa sesja
-          </Button>
+          </Button>}
           {!isApp && <button className="link" onClick={() => openClientForm()}>Nowy klient</button>}
+          {showClientsLink && <EntityLink route="clients" className="link">Przejdź do klientów</EntityLink>}
         </div>}
       </header>
 
@@ -336,26 +344,22 @@ export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }
 
       {!workspaceCovered && <ViewState
         tone={workspaceUnavailable ? 'error' : 'loading'}
-        icon="calendar"
-        title={workspaceUnavailable ? 'Nie udało się wczytać całego podsumowania dnia' : 'Wczytuję grafik dnia…'}
-        hint={workspaceUnavailable
-          ? 'Nie pokazujemy niepełnych danych. Spróbuj ponownie.'
-          : 'Pobieramy dzisiejszy grafik.'}
+        icon={workspaceUnavailable ? 'alert' : 'calendar'}
+        title={workspaceUnavailable ? loadFailureCopy('planu dnia') : 'Wczytuję plan dnia…'}
         action={workspaceUnavailable ? <Button onClick={retryDashboard}>Spróbuj ponownie</Button> : undefined}
       />}
       {workspaceRefreshing && <ViewState
         compact
         tone="loading"
         icon="calendar"
-        title="Odświeżamy pulpit dnia…"
-        hint="Wyświetlamy ostatnio potwierdzone podsumowanie dnia."
+        title="Wczytuję plan dnia…"
       />}
       {workspaceRefreshFailed && <ViewState
         compact
         tone="error"
-        icon="calendar"
-        title="Nie udało się odświeżyć pulpitu dnia"
-        hint="Wyświetlamy ostatnio potwierdzone podsumowanie dnia."
+        icon="alert"
+        title="Nie udało się odświeżyć planu dnia"
+        hint="Widzisz ostatnio wczytane dane."
         action={<Button size="sm" onClick={retryDashboard}>Spróbuj ponownie</Button>}
       />}
       <div
@@ -363,12 +367,7 @@ export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }
         aria-busy={workspaceRefreshing || undefined}
       >
       <div className="figures today-figures" role="group" aria-label="Podsumowanie dnia">
-        <Figure
-          label="Odbyte"
-          value={!workspaceCovered ? 0 : daySummary.completed}
-          fmt={figureFmt}
-          suffix={!workspaceCovered ? undefined : `/${daySummary.total}`}
-        />
+        <Figure label="Odbyte" value={!workspaceCovered ? 0 : daySummary.completed} fmt={figureFmt} />
         <Figure label="Nieobecności" value={!workspaceCovered ? 0 : daySummary.noshow} fmt={figureFmt} />
         <Figure label="Pozostałe" value={!workspaceCovered ? 0 : daySummary.scheduled} fmt={figureFmt} />
         <Figure
@@ -387,7 +386,8 @@ export function Dashboard({ todayWorkspaceRange, todayWorkspaceState = 'ready' }
             sessions={todays}
             nowMin={nowMin}
             currentId={workspaceModel.current?.id}
-            onOpen={isApp ? undefined : (s) => openSessionForm({ session: state.sessions.find((x) => x.id === s.id) })}
+            canOpen={canEditSession}
+            onOpen={openSession}
           />
         </section>
       )}

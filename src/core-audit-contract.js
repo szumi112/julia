@@ -44,6 +44,7 @@ export const CORE_AUDIT_SCHEMAS = Object.freeze({
   'client.archived': schema('client', 'clientId', { assignmentId: 'assignmentId', assignmentVersion: 'version', clientVersion: 'version' }),
   'client.assignment.changed': schema('client', 'clientId', { clientVersion: 'version', closedAssignmentId: 'assignmentId', closedAssignmentVersion: 'version', newAssignmentId: 'assignmentId', newAssignmentVersion: 'version' }),
   'client.created': schema('client', 'clientId', { assignmentId: 'assignmentId', assignmentVersion: 'version', clientVersion: 'version' }),
+  'client.note.created': schema('client', 'clientId', {}),
   'client.updated': schema('client', 'clientId', { clientVersion: 'version' }),
   'finance.import.chunk.accepted': schema('finance_import', 'financeBatchId', { batchVersion: 'version', rowCount: 'count' }),
   'finance.import.committed': schema('finance_import', 'financeBatchId', { batchVersion: 'version', rowCount: 'count' }),

@@ -702,13 +702,17 @@ const clientDto = async (row, actor, context, decrypt, appointmentByClient) => {
     }
   if (!fact || !authorize(actor, 'client.operational.read', fact, { nowMs: 0 })) invalid()
   const dataKey = validatedClientKey(row)
-  const decrypted = captureExact(await decrypt({
+  const decryptedValue = await decrypt({
     clientId: row.id, envelope: row.identity_envelope, dataKey,
     keyring: context.keyring,
-  }), ['name', 'age'], cryptoFailure)
+  })
+  const contactKeys = ['guardianPhone', 'guardianEmail', 'receptionNotes']
+    .filter((key) => Object.hasOwn(decryptedValue ?? {}, key))
+  const decrypted = captureExact(decryptedValue, ['name', 'age', ...contactKeys], cryptoFailure)
   const identity = assertClientIdentity(decrypted)
   return freeze({
     id: row.id, name: identity.name, age: identity.age, status: row.status,
+    ...Object.fromEntries(contactKeys.map((key) => [key, identity[key]])),
     version: row.version, archivedAt: row.archived_at, createdAt: row.created_at,
     updatedAt: row.updated_at, readOnly: row.status === 'archived', assignment,
   })

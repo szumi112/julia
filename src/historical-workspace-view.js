@@ -14,13 +14,13 @@ const subjectFor = (occurrence, clientsById) => {
   if (occurrence.historicalClientId !== null) {
     return {
       historicalClientId: occurrence.historicalClientId,
-      subjectName: clientsById.get(occurrence.historicalClientId)?.name ?? 'Klient niedostępny',
+      subjectName: clientsById.get(occurrence.historicalClientId)?.name ?? 'Bez nazwy w arkuszu',
       subjectKind: 'client',
     }
   }
   return {
     historicalClientId: null,
-    subjectName: occurrence.counterparty?.name ?? 'Podmiot niedostępny',
+    subjectName: occurrence.counterparty?.name ?? 'Bez nazwy w arkuszu',
     subjectKind: 'counterparty',
   }
 }
@@ -29,18 +29,18 @@ const periodFacts = (period) => {
   if (period.precision === 'day') {
     return {
       kind: 'historical-day', day: period.day, month: period.month,
-      periodLabel: 'Godzina nieustalona',
+      periodLabel: 'bez godziny',
     }
   }
   if (period.precision === 'month') {
     return {
       kind: 'historical-month', day: undefined, month: period.month,
-      periodLabel: 'Dzień nieustalony',
+      periodLabel: 'bez dnia',
     }
   }
   return {
     kind: 'historical-unknown', day: undefined, month: null,
-    periodLabel: 'Okres nieustalony',
+    periodLabel: 'bez daty',
   }
 }
 
@@ -52,7 +52,7 @@ const rowFor = (occurrence, clientsById, specialistsById) => {
     ...subjectFor(occurrence, clientsById),
     specialistId: occurrence.specialistId,
     specialistName: specialistsById.get(occurrence.specialistId)?.name
-      ?? 'Specjalistka niedostępna',
+      ?? 'Specjalistka spoza listy',
     serviceLabel: occurrence.serviceLabel,
   }
   if (period.day !== undefined) row.day = period.day
@@ -194,7 +194,7 @@ export function historicalClientDirectoryModel({
       activeClientId: client.activeClientId,
       visitCount: visits.length,
       periodSummary: periodMode === 'unknown'
-        ? 'Okres nieustalony'
+        ? 'Bez daty'
         : knownMonths.length > 0 ? fmtMonthYear(knownMonths.at(-1)) : fmtMonthYear(ym),
     }))
   }

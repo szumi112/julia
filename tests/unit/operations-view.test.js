@@ -7,6 +7,7 @@ import {
   operationalActionCommand,
   operationsOverview,
   operationsSummary,
+  relInstantLabel,
 } from '../../src/operations-view.js'
 
 const check = (id, status, detailCode, lastSuccessAt = null) => ({
@@ -249,4 +250,14 @@ test('pending health stays neutral until an open action needs attention', () => 
     status: 'critical',
     source: 'outbox_job_failed',
   })
+})
+
+test('relInstantLabel shows a relative Warsaw day with the time', () => {
+  assert.equal(relInstantLabel('2031-04-12T01:15:00.000Z'), '12 kwi, 03:15')
+  assert.equal(relInstantLabel('2031-01-12T22:14:00Z'), '12 sty, 23:14')
+  const noon = new Date()
+  noon.setHours(12, 0, 0, 0)
+  assert.match(relInstantLabel(noon.toISOString()), /^dziś, \d{2}:\d{2}$/)
+  assert.equal(relInstantLabel(null), null)
+  assert.equal(relInstantLabel('not a date'), null)
 })

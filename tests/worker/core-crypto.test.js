@@ -210,6 +210,37 @@ describe('client crypto boundary', () => {
     }, { clientId: 'cl_crypto_owner', name: 'Fikcyjna Osoba', age: null }))
   })
 
+  it('encrypts guardian contacts in the client identity and reads old identity envelopes', async () => {
+    const { keyring, built, context } = await contextFor('cl_guardian_crypto', 'guardian_crypto')
+    const input = {
+      clientId: 'cl_guardian_crypto', name: 'Fikcyjna', age: 9,
+      guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
+      receptionNotes: 'Kontakt po 15:00.\nDzwonić do opiekuna.',
+    }
+    const envelope = await encryptClientIdentity(context, input)
+    expect(envelope).not.toContain(input.guardianPhone)
+    expect(envelope).not.toContain(input.guardianEmail)
+    expect(envelope).not.toContain(input.receptionNotes)
+    expect(JSON.parse(await decryptForScope(keyring, built.row, {
+      expectedScope: built.scope, recordId: input.clientId, field: 'identity',
+      envelope: JSON.parse(envelope),
+    }))).toMatchObject({
+      schema: 'client.identity.v2', guardianPhone: input.guardianPhone,
+      guardianEmail: input.guardianEmail, receptionNotes: input.receptionNotes,
+    })
+    await expect(decryptClientIdentity(context, { clientId: input.clientId, envelope }))
+      .resolves.toEqual({
+        name: input.name, age: input.age, guardianPhone: input.guardianPhone,
+        guardianEmail: input.guardianEmail, receptionNotes: input.receptionNotes,
+      })
+    const oldEnvelope = JSON.stringify(await encryptForScope(keyring, built.row, {
+      expectedScope: built.scope, recordId: input.clientId, field: 'identity',
+      plaintext: '{"schema":"client.identity.v1","name":"Fikcyjna","age":9}',
+    }))
+    await expect(decryptClientIdentity(context, { clientId: input.clientId, envelope: oldEnvelope }))
+      .resolves.toEqual({ name: 'Fikcyjna', age: 9 })
+  })
+
   it('loads retained retired keys for historical reads but refuses new encryption', async () => {
     const { keyring, built, context } = await contextFor('cl_crypto_retired', 'crypto_retired')
     const envelope = await encryptClientIdentity(context, {

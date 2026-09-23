@@ -81,7 +81,7 @@ test('@owner creates, edits, and invites one stable specialist profile', async (
   await createDialog.getByRole('button', { name: 'Dodaj specjalistkę' }).click()
 
   let profile = page.locator('article').filter({ hasText: 'Anna Janowska' })
-  await expect(page.getByText('Anna Janowska dodana do zespołu', { exact: true })).toBeVisible()
+  await expect(page.getByText('Specjalistka została dodana do zespołu · Anna Janowska', { exact: true })).toBeVisible()
   await expect(profile).toContainText('Brak dostępu do panelu')
   await expect(profile).toContainText('Psycholożka')
   await expect(profile).toContainText('185,50 zł')
@@ -98,7 +98,7 @@ test('@owner creates, edits, and invites one stable specialist profile', async (
   await editDialog.getByRole('button', { name: 'Zapisz zmiany' }).click()
 
   profile = page.locator('article').filter({ hasText: 'Anna Janowska-Kowalska' })
-  await expect(page.getByText('Dane specjalistki zostały zapisane: Anna Janowska-Kowalska', { exact: true })).toBeVisible()
+  await expect(page.getByText('Dane specjalistki zostały zapisane · Anna Janowska-Kowalska', { exact: true })).toBeVisible()
   await expect(profile).toContainText('Brak dostępu do panelu')
   await expect(profile).toContainText('Psychoterapeutka')
   await expect(profile).not.toContainText('Właściciel')
@@ -171,13 +171,13 @@ test('@owner creates, edits, and invites one stable specialist profile', async (
   await accessDialog.getByRole('button', { name: 'Zaproś do panelu' }).click()
   await expect(accessDialog.getByRole('button', { name: 'Spróbuj ponownie' })).toBeVisible()
   await expect(accessDialog).toContainText(
-    'Nie wiadomo, czy zaproszenie zostało utworzone. Spróbuj ponownie bez zmiany adresu e-mail.',
+    'Nie mamy pewności, czy zmiany się zapisały. Kliknij „Spróbuj ponownie”, niczego nie zmieniając.',
   )
   await accessDialog.getByRole('button', { name: 'Spróbuj ponownie' }).click()
 
   await expect(profile).toContainText('Zaproszenie wysłane')
   await expect(profile.getByRole('button', { name: 'Zaproś do panelu' })).toHaveCount(0)
-  await expect(page.getByText('Zaproszenie wysłane na anna-j@example.test', { exact: true })).toBeVisible()
+  await expect(page.getByText('Wysyłamy zaproszenie do anna-j@example.test', { exact: true })).toBeVisible()
   expect(invitationAttempts).toHaveLength(2)
   expect(invitationAttempts[1]).toEqual(invitationAttempts[0])
   expect(JSON.parse(invitationAttempts[0].body)).toEqual({

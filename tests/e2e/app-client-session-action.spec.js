@@ -114,7 +114,7 @@ test('@owner client card opens the session drawer with the client preselected wh
   await installClientWorkspace(page)
   await page.goto('./#/client?id=cl_ola')
 
-  await page.getByRole('button', { name: 'Umów sesję' }).click()
+  await page.locator('.id-band__actions').getByRole('button', { name: 'Umów sesję' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowa sesja' })
   await expect(drawer.getByRole('combobox', { name: 'Klient' })).toHaveValue('Ola Aktywna')
 })
@@ -169,7 +169,7 @@ test('@owner creates a client-card session and opens its highlighted day without
   })
   await page.goto('./#/client?id=cl_ola')
 
-  await page.getByRole('button', { name: 'Umów sesję' }).click()
+  await page.locator('.id-band__actions').getByRole('button', { name: 'Umów sesję' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowa sesja' })
   await drawer.getByLabel('Data').fill('2026-08-04')
   await drawer.getByLabel('Godzina').fill('13:00')

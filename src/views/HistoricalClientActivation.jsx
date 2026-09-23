@@ -18,12 +18,14 @@ import { ApiError } from '../api.js'
 import { canPerformAction } from '../capability-access.js'
 import { EntityLink } from '../ux-patterns.jsx'
 import { sortProfessionalDirectory } from '../historical-workspace-view.js'
+import { conflictCopy, loadFailureCopy, saveFailureCopy } from '../save-failure-copy.js'
+import { isAssignableSpecialist } from '../specialist-eligibility.js'
 
 export function HistoricalClientActivation({ historicalClient, workspaceRange, onClose }) {
   const { state, toast, workspace } = useApp()
   const { locked: clientMutationLocked } = useClientMutationLock()
   const refreshWorkspace = useWorkspaceRefresh()
-  const { capabilities, registerLeaveGuard, role } = useShell()
+  const { capabilities, navigate, registerLeaveGuard, role } = useShell()
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const [specialistId, setSpecialistId] = useState('')
@@ -33,7 +35,7 @@ export function HistoricalClientActivation({ historicalClient, workspaceRange, o
   const current = state.historicalClients.find(({ id }) => id === historicalClient.id)
     ?? historicalClient
   const specialists = useMemo(
-    () => sortProfessionalDirectory(state.psychologists.filter(({ status }) => status === 'active')),
+    () => sortProfessionalDirectory(state.psychologists.filter(isAssignableSpecialist)),
     [state.psychologists],
   )
   const dirty = specialistId !== ''
@@ -68,35 +70,43 @@ export function HistoricalClientActivation({ historicalClient, workspaceRange, o
     setSaving(true)
     setSaveError(null)
     let commandAccepted = false
+    let activeClientId = null
     try {
-      await workspace.activateHistoricalClient(current.id, {
+      const result = await workspace.activateHistoricalClient(current.id, {
         expectedVersion: current.version,
         specialistId,
       })
       commandAccepted = true
+      activeClientId = result?.client?.id ?? null
       await refreshWorkspace(workspaceRange)
     } catch (error) {
       if (error?.code === 'WORKSPACE_AUTHORITY_STALE'
         || error?.code === 'SESSION_AUTHORITY_STALE') return
       if (commandAccepted) {
         forceClose()
-        toast('Aktywację przyjęto, ale nie udało się odświeżyć kartoteki.', 'alert')
+        toast('Klient został dodany do kartoteki, ale nie udało się odświeżyć listy.', 'alert')
         return
       }
       if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
         try {
           await refreshWorkspace(workspaceRange)
-          setSaveError('Profil zmienił się w innym oknie. Sprawdź odświeżone dane przed ponowieniem.')
+          setSaveError(`${conflictCopy('dane tego klienta')} Sprawdź aktualne dane i spróbuj ponownie.`)
         } catch {
-          setSaveError('Wykryto konflikt wersji i nie udało się odświeżyć profilu.')
+          setSaveError(`${conflictCopy('dane tego klienta')} ${loadFailureCopy('aktualnych danych')}`)
         }
       } else {
-        setSaveError('Nie udało się aktywować klienta. Spróbuj ponownie.')
+        const copy = saveFailureCopy(error)
+        setSaveError(copy.startsWith('Nie udało się zapisać')
+          ? 'Nie udało się dodać klienta do kartoteki. Spróbuj ponownie za chwilę.'
+          : copy)
       }
       setSaving(false)
       return
     }
-    toast('Klient historyczny został aktywowany')
+    toast(`Klient został dodany do kartoteki · ${current.name}`, 'check', activeClientId ? {
+      label: 'Otwórz kartę',
+      onClick: () => navigate('client', { id: activeClientId }),
+    } : undefined)
     forceClose()
   }
 
@@ -114,17 +124,17 @@ export function HistoricalClientActivation({ historicalClient, workspaceRange, o
           <div>
             <h2 className="drawer__title">Dodaj do bieżącej kartoteki</h2>
             <p className="drawer__sub">
-              {current.name} · dane z dawnego arkusza pozostają niezmienione<br />
-              Wersja źródła: {current.version}
+              {current.name} · Utworzymy nową kartę klienta. Historia z arkusza zostanie bez zmian.
             </p>
           </div>
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
         <form className="drawer__body" onSubmit={submit} noValidate>
-          <p className="faint">
-            Utworzymy odrębną bieżącą kartę. Wybierz osobę prowadzącą bez domyślnego przypisania z historii.
-          </p>
-          <Field label="Specjalistka prowadząca" error={fieldError}>
+          <Field
+            label="Specjalistka prowadząca"
+            error={fieldError}
+            hint="Wybierz, kto będzie teraz prowadzić tę osobę."
+          >
             <select
               className="select"
               value={specialistId}

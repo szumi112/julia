@@ -5,6 +5,8 @@ import { useDrawerFX } from '../anim.js'
 import { Button, Check, DiscardConfirm, Field, IconBtn, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { activityClassDefaults, activityMonthStart, isActivityDurationValid } from '../tus.js'
+import { fmtDayMonth } from '../format.js'
+import { conflictCopy, saveFailureCopy } from '../save-failure-copy.js'
 
 const staleAuthority = (error) => ['SESSION_AUTHORITY_STALE', 'WORKSPACE_AUTHORITY_STALE']
   .includes(error?.code)
@@ -82,12 +84,12 @@ export function ActivityGroupDrawer({ opts, onClose }) {
         try { await workspace.activities.loadWindow(reconciliation) } catch { /* Keep draft open. */ }
       }
       setError(submitError?.code === 'VERSION_CONFLICT'
-        ? 'Grupa zmieniła się w innym oknie. Sprawdź odświeżone dane przed ponowieniem.'
-        : 'Nie udało się zapisać grupy. Spróbuj ponownie.')
+        ? conflictCopy('tę grupę')
+        : saveFailureCopy(submitError, { subject: 'grupy' }))
       setSaving(false)
       return
     }
-    toast(editing ? 'Grupa została zapisana' : 'Nowa grupa została utworzona')
+    toast(`${editing ? 'Grupa została zapisana' : 'Grupa została dodana'} · ${cleanLabel}`)
     forceClose()
   }
 
@@ -117,7 +119,7 @@ export function ActivityGroupDrawer({ opts, onClose }) {
               setError(null)
             }} />
           </Field>
-          <Field label="Opis" hint="Opcjonalny; bez harmonogramu, wieku i opłat domyślnych.">
+          <Field label="Opis (opcjonalnie)">
             <textarea className="textarea" value={details} maxLength={2000} onChange={(event) => setDetails(event.target.value)} />
           </Field>
           {role.scope === 'centre' && (
@@ -135,7 +137,7 @@ export function ActivityGroupDrawer({ opts, onClose }) {
               </div>
               {directoryState !== 'ready' && <p role="status" className="muted">{directoryState === 'loading'
                 ? 'Wczytywanie specjalistów…' : 'Lista specjalistów jest teraz niedostępna.'}</p>}
-              {directoryState === 'ready' && specialistOptions.length === 0 && <p className="muted">Brak specjalistów do przypisania.</p>}
+              {directoryState === 'ready' && specialistOptions.length === 0 && <p className="muted">Nie ma specjalistów do wyboru.</p>}
             </section>
           )}
           {error && label.trim() && (
@@ -144,12 +146,12 @@ export function ActivityGroupDrawer({ opts, onClose }) {
             </div>
           )}
           {error && canonical && canonical.version !== editing.version && (
-            <p className="muted activity-wrap">Aktualna wersja w panelu: {canonical.label}</p>
+            <p className="muted activity-wrap">Aktualna nazwa grupy: {canonical.label}</p>
           )}
         </form>
         {discard.confirming && <DiscardConfirm onStay={discard.hide} onDiscard={forceClose} />}
         <div className="drawer__foot">
-          <Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz grupę' : 'Utwórz grupę'}</Button>
+          <Button onClick={submit} disabled={saving || readOnly}>{saving ? 'Zapisywanie…' : editing ? 'Zapisz grupę' : 'Utwórz grupę'}</Button>
           <Button variant="ghost" onClick={close}>Anuluj</Button>
         </div>
       </aside>
@@ -212,12 +214,12 @@ export function ActivityParticipantDrawer({ opts, onClose }) {
         try { await workspace.activities.loadWindow(reconciliation) } catch { /* Keep draft open. */ }
       }
       setError(submitError?.code === 'VERSION_CONFLICT'
-        ? 'Uczestnik zmienił się w innym oknie. Sprawdź odświeżone dane przed ponowieniem.'
-        : 'Nie udało się zapisać uczestnika. Spróbuj ponownie.')
+        ? conflictCopy('dane uczestnika')
+        : saveFailureCopy(submitError, { subject: 'uczestnika' }))
       setSaving(false)
       return
     }
-    toast(editing ? 'Uczestnik został zapisany' : 'Uczestnik został utworzony')
+    toast(`${editing ? 'Dane uczestnika zostały zmienione' : 'Uczestnik został dodany'} · ${cleanName}`)
     forceClose()
   }
 
@@ -235,7 +237,6 @@ export function ActivityParticipantDrawer({ opts, onClose }) {
         <div className="drawer__head">
           <div>
             <h2 className="drawer__title">{editing ? 'Edytuj uczestnika' : 'Nowy uczestnik'}</h2>
-            <p className="drawer__sub">Bez domyślnych danych kontaktowych, wieku i opłat.</p>
           </div>
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
@@ -249,7 +250,7 @@ export function ActivityParticipantDrawer({ opts, onClose }) {
         </form>
         {discard.confirming && <DiscardConfirm onStay={discard.hide} onDiscard={forceClose} />}
         <div className="drawer__foot">
-          <Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz uczestnika' : 'Utwórz uczestnika'}</Button>
+          <Button onClick={submit} disabled={saving || readOnly}>{saving ? 'Zapisywanie…' : editing ? 'Zapisz uczestnika' : 'Dodaj uczestnika'}</Button>
           <Button variant="ghost" onClick={close}>Anuluj</Button>
         </div>
       </aside>
@@ -266,7 +267,11 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
   const canonical = editing
     ? workspace.activities.state.membershipsById[editing.id] ?? editing
     : null
-  const [participantId, setParticipantId] = useState(editing?.participantId ?? '')
+  const [participantId, setParticipantId] = useState(editing?.participantId ?? opts.participantId ?? '')
+  // Opened from the "Bez grupy" list the group is chosen here; from a group page it is fixed.
+  const pickGroup = !editing && !opts.groupId
+  const [groupId, setGroupId] = useState(opts.groupId ?? (opts.groups?.length === 1 ? opts.groups[0].id : ''))
+  const groupRef = useRef(null)
   const [startsOn, setStartsOn] = useState(editing?.startsOn ?? activityMonthStart(opts.month))
   const [endsOn, setEndsOn] = useState(editing?.endsOn ?? '')
   const [error, setError] = useState(null)
@@ -275,8 +280,8 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
   const participantRef = useRef(null)
   const startsOnRef = useRef(null)
   const endsOnRef = useRef(null)
-  const initial = JSON.stringify({ participantId, startsOn, endsOn })
-  const dirty = JSON.stringify({ participantId, startsOn, endsOn }) !== initial
+  const [initial] = useState(() => JSON.stringify({ participantId, startsOn, endsOn, groupId }))
+  const dirty = JSON.stringify({ participantId, startsOn, endsOn, groupId }) !== initial
   const discard = useDiscardGuard(dirty)
   const { close, forceClose, shake } = useDrawerFX(
     drawerRef, backRef, onClose, discard.guard,
@@ -289,6 +294,7 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
     event?.preventDefault()
     const nextFieldErrors = {
       ...(!participantId ? { participantId: 'Wybierz uczestnika.' } : {}),
+      ...(!groupId ? { groupId: 'Wybierz grupę.' } : {}),
       ...(!/^\d{4}-\d{2}-\d{2}$/.test(startsOn) ? { startsOn: 'Wybierz datę rozpoczęcia.' } : {}),
       ...(endsOn && endsOn < startsOn ? { endsOn: 'Data zakończenia nie może być wcześniejsza.' } : {}),
     }
@@ -298,6 +304,7 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
       shake()
       requestAnimationFrame(() => {
         if (nextFieldErrors.participantId) participantRef.current?.focus()
+        else if (nextFieldErrors.groupId) groupRef.current?.focus()
         else if (nextFieldErrors.startsOn) startsOnRef.current?.focus()
         else endsOnRef.current?.focus()
       })
@@ -318,7 +325,7 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
         }, reconciliation)
       } else {
         await workspace.activities.createMembership({
-          participantId, groupId: opts.groupId, startsOn, endsOn: endsOn || null,
+          participantId, groupId, startsOn, endsOn: endsOn || null,
         }, reconciliation)
       }
     } catch (submitError) {
@@ -327,12 +334,13 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
         try { await workspace.activities.loadWindow(reconciliation) } catch { /* Keep draft open. */ }
       }
       setError(submitError?.code === 'VERSION_CONFLICT'
-        ? 'Przypisanie zmieniło się w innym oknie. Sprawdź odświeżone dane przed ponowieniem.'
-        : 'Nie udało się zapisać przypisania. Spróbuj ponownie.')
+        ? conflictCopy('ten zapis do grupy')
+        : saveFailureCopy(submitError, { subject: 'zapisu do grupy' }))
       setSaving(false)
       return
     }
-    toast(editing ? 'Przypisanie zostało zapisane' : 'Uczestnik został przypisany do grupy')
+    const participantName = opts.participants.find(({ id }) => id === participantId)?.name
+    toast(`${editing ? 'Daty zapisu zostały zmienione' : 'Uczestnik został zapisany do grupy'}${participantName ? ` · ${participantName}` : ''}`)
     forceClose()
   }
 
@@ -344,12 +352,12 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
         ref={drawerRef}
         role="dialog"
         aria-modal="true"
-        aria-label={editing ? 'Edytuj przypisanie do grupy' : 'Zapisz uczestnika do grupy'}
+        aria-label={editing ? 'Zmień daty zapisu' : 'Zapisz uczestnika do grupy'}
       >
         <div className="drawer__head">
           <div>
-            <h2 className="drawer__title">{editing ? 'Edytuj przypisanie' : 'Zapisz do grupy'}</h2>
-            <p className="drawer__sub">Określ, od kiedy uczestnik jest w grupie. Data zakończenia jest opcjonalna.</p>
+            <h2 className="drawer__title">{editing ? 'Zmień daty zapisu' : 'Zapisz do grupy'}</h2>
+            <p className="drawer__sub">Od kiedy uczestnik chodzi do tej grupy? Datę końca wpisz, gdy zrezygnuje.</p>
           </div>
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
@@ -365,13 +373,26 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
               ))}
             </select>
           </Field>
+          {pickGroup && (
+            <Field label="Grupa" error={fieldErrors.groupId}>
+              <select className="select" ref={groupRef} value={groupId} onChange={(event) => {
+                setGroupId(event.target.value)
+                setFieldErrors((current) => ({ ...current, groupId: null }))
+              }}>
+                <option value="">— wybierz grupę —</option>
+                {(opts.groups ?? []).map((group) => (
+                  <option key={group.id} value={group.id}>{group.label}</option>
+                ))}
+              </select>
+            </Field>
+          )}
           <Field label="Data rozpoczęcia" error={fieldErrors.startsOn}>
             <input className="input" ref={startsOnRef} type="date" value={startsOn} onChange={(event) => {
               setStartsOn(event.target.value)
               setFieldErrors((current) => ({ ...current, startsOn: null, endsOn: null }))
             }} />
           </Field>
-          <Field label="Data zakończenia" hint="Opcjonalnie." error={fieldErrors.endsOn}>
+          <Field label="Data zakończenia (opcjonalnie)" error={fieldErrors.endsOn}>
             <input className="input" ref={endsOnRef} type="date" value={endsOn} min={startsOn} onChange={(event) => {
               setEndsOn(event.target.value)
               setFieldErrors((current) => ({ ...current, endsOn: null }))
@@ -381,7 +402,7 @@ export function ActivityMembershipDrawer({ opts, onClose }) {
         </form>
         {discard.confirming && <DiscardConfirm onStay={discard.hide} onDiscard={forceClose} />}
         <div className="drawer__foot">
-          <Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz przypisanie' : 'Zapisz do grupy'}</Button>
+          <Button onClick={submit} disabled={saving || readOnly}>{saving ? 'Zapisywanie…' : editing ? 'Zapisz daty' : 'Zapisz do grupy'}</Button>
           <Button variant="ghost" onClick={close}>Anuluj</Button>
         </div>
       </aside>
@@ -468,12 +489,12 @@ export function ActivityClassDrawer({ opts, onClose }) {
         try { await workspace.activities.loadWindow(reconciliation) } catch { /* Keep draft open. */ }
       }
       setError(submitError?.code === 'VERSION_CONFLICT'
-        ? 'Zajęcia zmieniły się w innym oknie. Sprawdź odświeżone dane przed ponowieniem.'
-        : 'Nie udało się zapisać zajęć. Spróbuj ponownie.')
+        ? conflictCopy('te zajęcia')
+        : saveFailureCopy(submitError, { subject: 'zajęć' }))
       setSaving(false)
       return
     }
-    toast(editing ? 'Zajęcia zostały zapisane' : 'Zajęcia zostały dodane')
+    toast(`${editing ? 'Zajęcia zostały zapisane' : 'Zajęcia zostały dodane'} · ${fmtDayMonth(date)}${time ? `, ${time}` : ''}`)
     opts.onSavedMonth?.(savedMonth)
     forceClose()
   }
@@ -485,20 +506,20 @@ export function ActivityClassDrawer({ opts, onClose }) {
         <div className="drawer__head">
           <div>
             <h2 className="drawer__title">{editing ? 'Edytuj zajęcia' : 'Nowe zajęcia'}</h2>
-            <p className="drawer__sub">Pojedynczy termin; bez tworzenia cyklu.</p>
+            <p className="drawer__sub">Jedne zajęcia w wybranym dniu.</p>
           </div>
           <IconBtn name="close" label="Zamknij" onClick={close} />
         </div>
         <form className="drawer__body" onSubmit={submit} noValidate>
           <Field label="Data zajęć" error={fieldErrors.date}><input className="input" ref={dateRef} type="date" value={date} onChange={(event) => { setDate(event.target.value); setFieldErrors((current) => ({ ...current, date: null })) }} /></Field>
-          <Field label="Godzina" hint="Opcjonalnie." error={fieldErrors.time}><input className="input" ref={timeRef} type="time" value={time} onChange={(event) => { setTime(event.target.value); setFieldErrors((current) => ({ ...current, time: null })) }} /></Field>
-          <Field label="Czas trwania w minutach" hint="Opcjonalnie." error={fieldErrors.duration}><input className="input" ref={durationRef} type="number" min="1" max="1440" value={duration} onChange={(event) => { setDuration(event.target.value); setFieldErrors((current) => ({ ...current, duration: null })) }} /></Field>
-          <Field label="Temat" hint="Opcjonalnie."><textarea className="textarea" maxLength={1000} value={topic} onChange={(event) => setTopic(event.target.value)} /></Field>
+          <Field label="Godzina (opcjonalnie)" error={fieldErrors.time}><input className="input" ref={timeRef} type="time" value={time} onChange={(event) => { setTime(event.target.value); setFieldErrors((current) => ({ ...current, time: null })) }} /></Field>
+          <Field label="Czas trwania w minutach (opcjonalnie)" error={fieldErrors.duration}><input className="input" ref={durationRef} type="number" min="1" max="1440" value={duration} onChange={(event) => { setDuration(event.target.value); setFieldErrors((current) => ({ ...current, duration: null })) }} /></Field>
+          <Field label="Temat (opcjonalnie)"><textarea className="textarea" maxLength={1000} value={topic} onChange={(event) => setTopic(event.target.value)} /></Field>
           <Field label="Status"><select className="select" value={status} onChange={(event) => setStatus(event.target.value)}><option value="scheduled">Zaplanowane</option><option value="completed">Odbyte</option><option value="cancelled">Odwołane</option></select></Field>
           {error && <div className="form-warn form-warn--error" role="alert"><Icon name="alert" size={15} /> <span>{error}</span></div>}
         </form>
         {discard.confirming && <DiscardConfirm onStay={discard.hide} onDiscard={forceClose} />}
-        <div className="drawer__foot"><Button onClick={submit} disabled={saving || readOnly}>{editing ? 'Zapisz zajęcia' : 'Dodaj zajęcia'}</Button><Button variant="ghost" onClick={close}>Anuluj</Button></div>
+        <div className="drawer__foot"><Button onClick={submit} disabled={saving || readOnly}>{saving ? 'Zapisywanie…' : editing ? 'Zapisz zajęcia' : 'Dodaj zajęcia'}</Button><Button variant="ghost" onClick={close}>Anuluj</Button></div>
       </aside>
     </>
   )

@@ -227,12 +227,20 @@ export async function loadClientCryptoContext(db, keyring, input) {
 export async function encryptClientIdentity(context, input) {
   try {
     const current = cryptoContext(context)
-    const captured = captureExact(input, ['clientId', 'name', 'age'])
+    const fields = ['guardianPhone', 'guardianEmail', 'receptionNotes']
+      .filter((key) => Object.hasOwn(input ?? {}, key))
+    const captured = captureExact(input, ['clientId', 'name', 'age', ...fields])
     if (captured.clientId !== current.scope.id) fail()
-    const identity = assertClientIdentity({ name: captured.name, age: captured.age })
-    const plaintext = JSON.stringify({
-      schema: 'client.identity.v1', name: identity.name, age: identity.age,
+    const identity = assertClientIdentity({
+      name: captured.name, age: captured.age,
+      ...Object.fromEntries(fields.map((key) => [key, captured[key]])),
     })
+    const hasContacts = fields.some((key) => identity[key] !== '')
+    const plaintext = JSON.stringify(hasContacts ? {
+      schema: 'client.identity.v2', name: identity.name, age: identity.age,
+      guardianPhone: identity.guardianPhone ?? '', guardianEmail: identity.guardianEmail ?? '',
+      receptionNotes: identity.receptionNotes ?? '',
+    } : { schema: 'client.identity.v1', name: identity.name, age: identity.age })
     return await serializedEnvelope(encryptForScope(
       current.keyring,
       current.dataKey,
@@ -262,9 +270,13 @@ export async function decryptClientIdentity(context, input) {
       },
     )
     const parsed = JSON.parse(plaintext)
-    const identity = captureExact(parsed, ['schema', 'name', 'age'])
-    if (identity.schema !== 'client.identity.v1') fail()
-    return Object.freeze(assertClientIdentity({ name: identity.name, age: identity.age }))
+    const schema = parsed?.schema
+    const identity = captureExact(parsed, schema === 'client.identity.v2'
+      ? ['schema', 'name', 'age', 'guardianPhone', 'guardianEmail', 'receptionNotes']
+      : ['schema', 'name', 'age'])
+    if (!['client.identity.v1', 'client.identity.v2'].includes(schema)) fail()
+    const { schema: ignored, ...fields } = identity
+    return Object.freeze(assertClientIdentity(fields))
   } catch { fail() }
 }
 

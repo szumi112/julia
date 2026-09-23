@@ -93,7 +93,7 @@ describe('authorization matrix', () => {
       authorityRevision: 1,
       capabilities: ROLE_DEFAULT_CAPABILITIES.specialist,
     })).toEqual(capabilitiesForActor(ACTORS.specialist))
-    expect(CAPABILITIES).toHaveLength(23)
+    expect(CAPABILITIES).toHaveLength(24)
   })
 
   it('requires one complete authority snapshot and honors effective removals before facts', () => {

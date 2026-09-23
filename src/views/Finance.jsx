@@ -293,14 +293,14 @@ export function Finance() {
       </section>
 
       {finance.status === 'loading' ? (
-        <section role="status"><EmptyState icon="payments" title="Wczytywanie finansów…" /></section>
+        <section role="status"><EmptyState icon="payments" title="Wczytuję finanse…" /></section>
       ) : finance.status === 'error' ? (
         <section>
           <EmptyState
             icon="alert"
-            title="Finanse są teraz niedostępne"
-            hint="Nie pokazujemy niepełnych sum. Spróbuj ponownie."
-            action={<Button variant="ghost" onClick={() => setReloadToken((value) => value + 1)}>Ponów</Button>}
+            title="Nie udało się wczytać finansów"
+            hint="Spróbuj ponownie za chwilę."
+            action={<Button variant="ghost" onClick={() => setReloadToken((value) => value + 1)}>Spróbuj ponownie</Button>}
           />
         </section>
       ) : (

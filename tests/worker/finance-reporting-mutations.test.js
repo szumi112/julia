@@ -6,6 +6,7 @@ import { voidFinanceEntry } from '../../worker/core/finance-reporting.js'
 import { decryptForScope, getOrCreateDataKey } from '../../worker/security/envelope.js'
 import { createKeyring } from '../../worker/security/keyring.js'
 import {
+  applyActivityHistoryMigration,
   applyCoreDirectoryStageB,
   applyFinanceStageC,
   applySpecialistProfilesStageD,
@@ -27,6 +28,7 @@ beforeAll(async () => {
   await applyFinanceStageC()
   await applySpecialistProfilesStageD()
   await applyWorkbookRegistryStageE()
+  await applyActivityHistoryMigration()
   await env.DB.prepare(`INSERT INTO staff_users
     (id,email_lookup,email_envelope,display_name_envelope,role,status,access_subject,
      specialist_id,version,activated_at,disabled_at,created_at,updated_at)

@@ -148,6 +148,23 @@ export function draftWithOccurredOn(draft, occurredOn, accountingMonthManuallySe
   }
 }
 
+// A new income follows its paid amount (0 → unpaid, full → paid, between →
+// partial) until the status is chosen by hand; unreadable amounts leave it.
+export function draftWithSettlementFromPaid(draft, statusManuallySelected = false) {
+  if (statusManuallySelected) return draft
+  let amount
+  let paid
+  try {
+    amount = cents(String(draft.amount ?? ''))
+    paid = cents(String(draft.paidAmount ?? ''))
+  } catch {
+    return draft
+  }
+  const settlementStatus = paid === 0 ? 'unpaid'
+    : amount > 0 && paid >= amount ? 'paid' : 'partial'
+  return draft.settlementStatus === settlementStatus ? draft : { ...draft, settlementStatus }
+}
+
 export function financeEntryCommand(draft, entry, currentMonth) {
   const accountingMonth = draft.accountingMonth || null
   const unchangedUnknown = entry && entry.accountingMonth === null && accountingMonth === null

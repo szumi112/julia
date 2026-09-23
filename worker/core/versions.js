@@ -64,8 +64,11 @@ function requireContext(context, clientId) {
 }
 
 function clientSnapshot(entity) {
+  const fields = ['guardianPhone', 'guardianEmail', 'receptionNotes']
+    .filter((key) => Object.hasOwn(entity ?? {}, key))
   const row = captureExact(entity, [
     'id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt',
+    ...fields,
   ])
   if (!isClientId(row.id) || !CLIENT_STATUSES.has(row.status)
     || !positive(row.version) || !instant(row.createdAt) || !instant(row.updatedAt)
@@ -73,14 +76,24 @@ function clientSnapshot(entity) {
     || !((row.status === 'archived' && instant(row.archivedAt))
       || (row.status !== 'archived' && row.archivedAt === null))) fail()
   let identity
-  try { identity = assertClientIdentity({ name: row.name, age: row.age }) } catch { fail() }
+  try {
+    identity = assertClientIdentity({
+      name: row.name, age: row.age,
+      ...Object.fromEntries(fields.map((key) => [key, row[key]])),
+    })
+  } catch { fail() }
+  const hasContacts = fields.some((key) => identity[key] !== '')
   return {
     age: identity.age,
     archivedAt: row.archivedAt,
     createdAt: row.createdAt,
     id: row.id,
     name: identity.name,
-    schema: 'client.v1',
+    ...(hasContacts ? {
+      guardianPhone: identity.guardianPhone ?? '', guardianEmail: identity.guardianEmail ?? '',
+      receptionNotes: identity.receptionNotes ?? '',
+    } : {}),
+    schema: hasContacts ? 'client.v2' : 'client.v1',
     status: row.status,
     updatedAt: row.updatedAt,
     version: row.version,

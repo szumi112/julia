@@ -73,11 +73,11 @@ export function PsychDrawer({ opts, onClose }) {
     }
     if (editing) {
       dispatch({ type: 'UPDATE_PSYCH', id: editing.id, patch: payload })
-      toast('Profil specjalistki zapisany')
+      toast(`Profil specjalistki został zapisany · ${payload.name}`)
     } else {
       const [color, soft] = NEW_PAIRS[state.psychologists.length % NEW_PAIRS.length]
       dispatch({ type: 'ADD_PSYCH', psych: { ...payload, color, soft } })
-      toast('Nowa specjalistka dodana do zespołu')
+      toast(`Specjalistka została dodana do zespołu · ${payload.name}`)
     }
     forceClose()
   }
@@ -93,7 +93,7 @@ export function PsychDrawer({ opts, onClose }) {
 
   const remove = () => {
     dispatch({ type: 'DELETE_PSYCH', id: editing.id })
-    toast('Specjalistka usunięta z zespołu', 'close')
+    toast(`Specjalistka została usunięta z zespołu · ${editing.name}`)
     if (route.name === 'psych' && route.params?.id === editing.id) navigate('team')
     forceClose()
   }

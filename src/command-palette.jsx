@@ -10,15 +10,18 @@ import { searchNorm as norm, plural } from './format.js'
 import { clientsForRole } from './workspace.js'
 import { canPerformAction } from './capability-access.js'
 
+// Views from the main menu take their icon from the menu definition (the
+// `nav` prop), so search and sidebar never disagree.
 const VIEW_ITEMS = [
-  { view: 'dashboard', label: 'Dziś', icon: 'dashboard' },
-  { view: 'calendar', label: 'Grafik', icon: 'calendar', keywords: 'kalendarz terminarz wizyty plan' },
-  { view: 'clients', label: 'Klienci', icon: 'clients' },
-  { view: 'tus', label: 'Zajęcia TUS', icon: 'group' },
-  { view: 'english', label: 'Angielski', icon: 'clients' },
-  { view: 'team', label: 'Zespół', icon: 'team', keywords: 'osoby personel pracownicy specjalistki' },
-  { view: 'payments', label: 'Finanse', icon: 'payments', keywords: 'płatności płatność wpłaty rozliczenia rachunki' },
-  { view: 'reports', label: 'Raporty', icon: 'reports' },
+  { view: 'dashboard', label: 'Dziś' },
+  { view: 'calendar', label: 'Grafik', keywords: 'kalendarz terminarz wizyty plan' },
+  { view: 'clients', label: 'Klienci' },
+  { view: 'tus', label: 'Zajęcia TUS' },
+  { view: 'english', label: 'Angielski' },
+  { view: 'team', label: 'Zespół', keywords: 'osoby personel pracownicy specjalistki' },
+  { view: 'payments', label: 'Finanse', keywords: 'płatności płatność wpłaty rozliczenia rachunki' },
+  { view: 'reports', label: 'Raporty' },
+  { view: 'history', label: 'Historia aktywności', keywords: 'zmiany aktywność dziennik' },
   { view: 'profile', label: 'Mój profil', icon: 'settings', keywords: 'konto hasło logowanie wyloguj' },
   { view: 'settings', label: 'Ustawienia', icon: 'settings' },
 ]
@@ -47,7 +50,7 @@ const personSearchText = (person) => [
   person?.title,
 ].filter((value) => typeof value === 'string').join(' ')
 
-export function CommandPalette({ onClose }) {
+export function CommandPalette({ nav = [], onClose }) {
   const { state } = useApp()
   const { appMode, capabilities, role, canAccess, canShowInNavigation, navigate } = useShell()
   const [query, setQuery] = useState('')
@@ -100,7 +103,7 @@ export function CommandPalette({ onClose }) {
           key: `v-${v.view}`,
           group: 'Strony',
           title: v.label,
-          icon: v.icon,
+          icon: v.icon ?? nav.find((item) => item.id === v.view)?.icon,
           run: () => navigate(v.view),
         })
       )
@@ -128,7 +131,7 @@ export function CommandPalette({ onClose }) {
       }
     }
     return out
-  }, [appMode, capabilities, q, role, state.clients, state.psychologists, canAccess, canShowInNavigation, navigate])
+  }, [appMode, capabilities, nav, q, role, state.clients, state.psychologists, canAccess, canShowInNavigation, navigate])
 
   useEffect(() => { setSel(0) }, [q])
 

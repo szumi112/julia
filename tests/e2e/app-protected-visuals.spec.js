@@ -115,38 +115,23 @@ test('@owner keeps workbook tools compact inside protected Finanse', async ({ pa
   await expect(page.getByText('wba_visual_artifact', { exact: true })).toHaveCount(0)
   await expect(page.getByText('Odcisk SHA-256', { exact: true })).toHaveCount(0)
 
-  const picker = page.getByLabel('Wybierz plik XLSX')
-  await expect(picker).toBeVisible()
-  const style = await picker.evaluate((element) => {
+  const picker = page.getByLabel('Wybierz plik Excel (.xlsx)')
+  await expect(picker).toBeAttached()
+  const chooser = page.locator('.workbook-import__file')
+  await expect(chooser).toBeVisible()
+  await expect(chooser).toHaveText('Wybierz plik Excel (.xlsx)')
+  const style = await chooser.evaluate((element) => {
     const computed = getComputedStyle(element)
-    return {
-      backgroundColor: computed.backgroundColor,
-      borderColor: computed.borderColor,
-      borderRadius: computed.borderRadius,
-      fontSize: Number.parseFloat(computed.fontSize),
-      lineStrong: getComputedStyle(document.documentElement).getPropertyValue('--line-strong').trim(),
-      surface: getComputedStyle(document.documentElement).getPropertyValue('--surface').trim(),
-    }
-  })
-  const pickerButtonStyle = await picker.evaluate((element) => {
-    const computed = getComputedStyle(element, '::file-selector-button')
     const root = getComputedStyle(document.documentElement)
     return {
       backgroundColor: computed.backgroundColor,
       borderColor: computed.borderColor,
-      color: computed.color,
-      blush: root.getPropertyValue('--blush').trim(),
-      coralDeep: root.getPropertyValue('--coral-deep').trim(),
-      coralGhost: root.getPropertyValue('--coral-ghost').trim(),
+      line: root.getPropertyValue('--line').trim(),
+      surface: root.getPropertyValue('--surface').trim(),
     }
   })
   expect(rgb(style.backgroundColor)).toEqual(rgb(style.surface))
-  expect(rgb(style.borderColor)).toEqual(rgb(style.lineStrong))
-  expect(style.borderRadius).toBe('14px')
-  expect(style.fontSize).toBeGreaterThanOrEqual(16)
-  expect(rgb(pickerButtonStyle.backgroundColor)).toEqual(rgb(pickerButtonStyle.coralGhost))
-  expect(rgb(pickerButtonStyle.borderColor)).toEqual(rgb(pickerButtonStyle.blush))
-  expect(rgb(pickerButtonStyle.color)).toEqual(rgb(pickerButtonStyle.coralDeep))
+  expect(rgb(style.borderColor)).toEqual(rgb(style.line))
 })
 
 test('@owner gives protected Team avatars a visible surface and readable initials', async ({ page }) => {

@@ -18,10 +18,11 @@ import {
   loadClientCryptoContext,
 } from './crypto.js'
 import { createRecordVersionBuilder } from './versions.js'
-import { isWellFormedUnicode } from '../../src/core-records.js'
+import { assertClientContactFields, isWellFormedUnicode } from '../../src/core-records.js'
 import { captureAuthorityActor } from '../identity/authority-actor.js'
 
 const BODY_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'])
+const CONTACT_KEYS = Object.freeze(['guardianPhone', 'guardianEmail', 'receptionNotes'])
 const EDIT_BODY_KEYS = Object.freeze(['expectedVersion', ...BODY_KEYS])
 const ARCHIVE_BODY_KEYS = Object.freeze(['expectedVersion'])
 const INPUT_KEYS = Object.freeze([
@@ -85,7 +86,7 @@ const validName = (value) => {
 }
 
 export function validateCreateClientBody(value) {
-  const body = captureExact(value, BODY_KEYS, 'body', ['assignmentStartsAt'])
+  const body = captureExact(value, BODY_KEYS, 'body', ['assignmentStartsAt', ...CONTACT_KEYS])
   if (!validName(body.name)) validation('name')
   if (body.age !== null && (!Number.isSafeInteger(body.age) || body.age < 1 || body.age > 26)) validation('age')
   if (!['active', 'paused'].includes(body.status)) validation('status')
@@ -95,11 +96,17 @@ export function validateCreateClientBody(value) {
   if (assignmentStartsAt !== null && !canonicalInstant(assignmentStartsAt)) {
     validation('assignmentStartsAt')
   }
+  const fields = Object.fromEntries(CONTACT_KEYS.filter((key) => Object.hasOwn(body, key))
+    .map((key) => [key, body[key]]))
+  try { assertClientContactFields(fields) } catch (error) {
+    if (error instanceof TypeError) throw error
+    validation('body')
+  }
   return Object.freeze({ ...body, assignmentStartsAt })
 }
 
 export function validateEditClientBody(value) {
-  const body = captureExact(value, EDIT_BODY_KEYS, 'body', ['assignmentStartsAt'])
+  const body = captureExact(value, EDIT_BODY_KEYS, 'body', ['assignmentStartsAt', ...CONTACT_KEYS])
   if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 1) {
     validation('expectedVersion')
   }
@@ -109,6 +116,8 @@ export function validateEditClientBody(value) {
     status: body.status,
     specialistId: body.specialistId,
     assignmentStartsAt: body.assignmentStartsAt ?? null,
+    ...Object.fromEntries(CONTACT_KEYS.filter((key) => Object.hasOwn(body, key))
+      .map((key) => [key, body[key]])),
   })) })
 }
 
@@ -130,6 +139,8 @@ export async function digestCreateClientRequest(value) {
       specialistId: body.specialistId,
       status: body.status,
       assignmentStartsAt: body.assignmentStartsAt,
+      ...Object.fromEntries(CONTACT_KEYS.filter((key) => Object.hasOwn(body, key))
+        .map((key) => [key, body[key]])),
     },
   })
   const encoded = new TextEncoder().encode(plaintext)
@@ -155,6 +166,8 @@ export async function digestEditClientRequest(clientId, value) {
       specialistId: body.specialistId,
       status: body.status,
       assignmentStartsAt: body.assignmentStartsAt,
+      ...Object.fromEntries(CONTACT_KEYS.filter((key) => Object.hasOwn(body, key))
+        .map((key) => [key, body[key]])),
     },
   })
   const encoded = new TextEncoder().encode(plaintext)
@@ -248,6 +261,29 @@ const generated = (factory, prefix, grammar, used) => {
   return value
 }
 
+const contactFields = (values) => {
+  const fields = Object.fromEntries(CONTACT_KEYS.map((key) => [key, values[key] ?? '']))
+  return CONTACT_KEYS.some((key) => fields[key] !== '') ? fields : {}
+}
+
+const suppliedContactFields = (values) => Object.fromEntries(
+  CONTACT_KEYS.filter((key) => Object.hasOwn(values, key)).map((key) => [key, values[key]]),
+)
+
+const replayClient = (value) => replayObject(value, [
+  'id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt',
+  'readOnly', 'assignment',
+  ...CONTACT_KEYS.filter((key) => Object.hasOwn(value ?? {}, key)),
+])
+
+const replayContactsValid = (client, request) => {
+  const present = CONTACT_KEYS.filter((key) => Object.hasOwn(client, key))
+  if (present.length !== 0 && present.length !== CONTACT_KEYS.length) return false
+  try { assertClientContactFields(suppliedContactFields(client)) } catch { return false }
+  return CONTACT_KEYS.every((key) => !Object.hasOwn(request, key)
+    || (client[key] ?? '') === request[key])
+}
+
 const clientDto = (client, assignment) => Object.freeze({
   id: client.id,
   name: client.name,
@@ -257,6 +293,7 @@ const clientDto = (client, assignment) => Object.freeze({
   archivedAt: client.archivedAt,
   createdAt: client.createdAt,
   updatedAt: client.updatedAt,
+  ...contactFields(client),
   readOnly: false,
   assignment: Object.freeze({
     id: assignment.id,
@@ -269,7 +306,7 @@ const clientDto = (client, assignment) => Object.freeze({
 const archivedClientDto = (client) => Object.freeze({
   id: client.id, name: client.name, age: client.age, status: 'archived',
   version: client.version, archivedAt: client.archivedAt, createdAt: client.createdAt,
-  updatedAt: client.updatedAt, readOnly: true, assignment: null,
+  updatedAt: client.updatedAt, ...contactFields(client), readOnly: true, assignment: null,
 })
 
 const replayFailure = () => { throw new Error('CRYPTO_FAILURE') }
@@ -301,16 +338,14 @@ const validateCreateReplay = (value, request) => {
   const replay = replayObject(value, ['status', 'body'])
   const body = replayObject(replay.body, ['data'])
   const data = replayObject(body.data, ['client'])
-  const client = replayObject(data.client, [
-    'id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt',
-    'readOnly', 'assignment',
-  ])
+  const client = replayClient(data.client)
   const assignment = replayObject(client.assignment, [
     'id', 'specialistId', 'startsAt', 'version',
   ])
   if (replay.status !== 201 || !CLIENT_ID.test(client.id)
     || client.name !== request.name || client.age !== request.age
     || client.status !== request.status || client.version !== 1
+    || !replayContactsValid(client, request)
     || client.archivedAt !== null || client.readOnly !== false
     || !canonicalInstant(client.createdAt) || client.updatedAt !== client.createdAt
     || !ASSIGNMENT_ID.test(assignment.id)
@@ -654,15 +689,13 @@ const validateEditReplay = (value, clientId, request) => {
   const replay = replayObject(value, ['status', 'body'])
   const body = replayObject(replay.body, ['data'])
   const data = replayObject(body.data, ['client'])
-  const client = replayObject(data.client, [
-    'id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt',
-    'readOnly', 'assignment',
-  ])
+  const client = replayClient(data.client)
   const assignment = replayObject(client.assignment, [
     'id', 'specialistId', 'startsAt', 'version',
   ])
   if (replay.status !== 200 || client.id !== clientId
     || client.name !== request.name || client.age !== request.age
+    || !replayContactsValid(client, request)
     || client.status !== request.status || client.version !== request.expectedVersion + 1
     || client.archivedAt !== null || client.readOnly !== false
     || !canonicalInstant(client.createdAt) || !canonicalInstant(client.updatedAt)
@@ -683,11 +716,9 @@ const validateArchiveReplay = (value, clientId, request) => {
   const replay = replayObject(value, ['status', 'body'])
   const body = replayObject(replay.body, ['data'])
   const data = replayObject(body.data, ['client'])
-  const client = replayObject(data.client, [
-    'id', 'name', 'age', 'status', 'version', 'archivedAt', 'createdAt', 'updatedAt',
-    'readOnly', 'assignment',
-  ])
+  const client = replayClient(data.client)
   if (replay.status !== 200 || client.id !== clientId || !validName(client.name)
+    || !replayContactsValid(client, {})
     || (client.age !== null && (!Number.isSafeInteger(client.age) || client.age < 1 || client.age > 26))
     || client.status !== 'archived' || client.version !== request.expectedVersion + 1
     || !canonicalInstant(client.archivedAt) || client.updatedAt !== client.archivedAt
@@ -723,7 +754,8 @@ const validateRetainedCurrentSnapshots = async (context, current, identity) => {
       createdAt: current.createdAt,
       id: current.id,
       name: identity.name,
-      schema: 'client.v1',
+      ...contactFields(identity),
+      schema: Object.keys(contactFields(identity)).length ? 'client.v2' : 'client.v1',
       status: current.status,
       updatedAt: current.updatedAt,
       version: current.version,
@@ -1396,7 +1428,9 @@ export async function editClient(input) {
     && command.body.assignmentStartsAt > current.assignment.startsAt) {
     throw new Error('CLIENT_ASSIGNMENT_CONFLICT')
   }
+  const contacts = contactFields({ ...identity, ...suppliedContactFields(command.body) })
   if (!reassigned && identity.name === command.body.name && identity.age === command.body.age
+    && CONTACT_KEYS.every((key) => (identity[key] ?? '') === (contacts[key] ?? ''))
     && current.status === command.body.status && !assignmentStartChanged) validation('body')
 
   let targetPractitioner = null
@@ -1445,6 +1479,7 @@ export async function editClient(input) {
   const auditId = generated(command.idFactory, 'aud', AUDIT_ID, used)
   const client = Object.freeze({
     id: current.id, name: command.body.name, age: command.body.age,
+    ...contacts,
     status: command.body.status, version: current.version + 1, archivedAt: null,
     createdAt: current.createdAt, updatedAt: now,
   })
@@ -1465,7 +1500,7 @@ export async function editClient(input) {
         })
       : current.assignment
   const identityEnvelope = await encryptClientIdentity(context, {
-    clientId: current.id, name: client.name, age: client.age,
+    clientId: current.id, name: client.name, age: client.age, ...contacts,
   })
   const clientVersion = await versionBuilder.build(command.db, context, {
     clientId: current.id, versionId: clientVersionId, entityType: 'client',
@@ -1659,7 +1694,7 @@ export async function archiveClient(input) {
   const assignmentVersionId = generated(command.idFactory, 'ver', VERSION_ID, used)
   const auditId = generated(command.idFactory, 'aud', AUDIT_ID, used)
   const client = Object.freeze({
-    id: current.id, name: identity.name, age: identity.age, status: 'archived',
+    id: current.id, name: identity.name, age: identity.age, ...contactFields(identity), status: 'archived',
     version: current.version + 1, archivedAt: now, createdAt: current.createdAt,
     updatedAt: now,
   })
@@ -1820,6 +1855,7 @@ export async function createClient(input) {
   const context = Object.freeze({ keyring: command.keyring, dataKey: built.row, scope: built.scope })
   const client = Object.freeze({
     id: clientId, name: command.body.name, age: command.body.age,
+    ...contactFields(command.body),
     status: command.body.status, version: 1, archivedAt: null,
     createdAt: now, updatedAt: now,
   })
@@ -1830,7 +1866,7 @@ export async function createClient(input) {
     createdAt: now, updatedAt: now,
   })
   const identityEnvelope = await encryptClientIdentity(context, {
-    clientId, name: client.name, age: client.age,
+    clientId, name: client.name, age: client.age, ...contactFields(client),
   })
   const clientVersion = await versionBuilder.build(command.db, context, {
     clientId, versionId: clientVersionId, entityType: 'client', entity: client,

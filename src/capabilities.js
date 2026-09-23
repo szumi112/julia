@@ -1,4 +1,5 @@
 export const CAPABILITIES = Object.freeze([
+  'activity.read',
   'appointment.charge.read',
   'appointment.manage',
   'backup.manage',
@@ -26,6 +27,7 @@ export const CAPABILITIES = Object.freeze([
 
 export const ROLE_DEFAULT_CAPABILITIES = Object.freeze({
   owner: Object.freeze([
+    'activity.read',
     'appointment.charge.read',
     'appointment.manage',
     'backup.manage',
@@ -50,6 +52,7 @@ export const ROLE_DEFAULT_CAPABILITIES = Object.freeze({
     'workbook.centre.export',
   ]),
   coordinator: Object.freeze([
+    'activity.read',
     'appointment.charge.read',
     'appointment.manage',
     'chat.direct',
@@ -81,6 +84,7 @@ export const ROLE_DEFAULT_CAPABILITIES = Object.freeze({
 export const ROLE_CAPABILITY_CEILINGS = Object.freeze({
   owner: Object.freeze([...ROLE_DEFAULT_CAPABILITIES.owner]),
   coordinator: Object.freeze([
+    'activity.read',
     'appointment.charge.read',
     'appointment.manage',
     'chat.direct',

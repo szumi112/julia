@@ -50,7 +50,7 @@ export async function postClient(input) {
       }
     } catch { throw new Error('INTERNAL_ERROR') }
     const match = typeof message === 'string'
-      ? /^VALIDATION_FAILED\/(body|name|age|status|specialistId|assignmentStartsAt)$/.exec(message)
+      ? /^VALIDATION_FAILED\/(body|name|age|status|specialistId|assignmentStartsAt|guardianPhone|guardianEmail|receptionNotes)$/.exec(message)
       : null
     if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
     throw error
@@ -76,7 +76,7 @@ export async function postClientEdit(input) {
       }
     } catch { throw new Error('INTERNAL_ERROR') }
     const match = typeof message === 'string'
-      ? /^VALIDATION_FAILED\/(body|name|age|status|specialistId|assignmentStartsAt|clientId|expectedVersion)$/.exec(message)
+      ? /^VALIDATION_FAILED\/(body|name|age|status|specialistId|assignmentStartsAt|guardianPhone|guardianEmail|receptionNotes|clientId|expectedVersion)$/.exec(message)
       : null
     if (match) throw new AppError('VALIDATION_FAILED', { field: match[1] })
     throw error

@@ -130,24 +130,24 @@ test('@owner keeps an empty current month until the explicit latest-source actio
   await page.goto('./#/calendar?date=2026-08-28&ym=2026-08&mode=cal')
 
   await expect(page.locator('.month-nav__label')).toHaveText('Sierpień 2026')
-  await expect(page.getByText('W sierpniu 2026 nie ma sesji ani wpisów ze skoroszytu.')).toBeVisible()
+  await expect(page.getByText('W sierpniu 2026 nie ma sesji ani wpisów z arkusza.')).toBeVisible()
   await page.getByRole('button', { name: 'Pokaż lipiec 2026' }).click()
 
   await expect(page.locator('.month-nav__label')).toHaveText('Lipiec 2026')
-  await expect(page).toHaveURL(/date=2026-07-01/)
-  await page.getByRole('button', { name: /15 lipca - 1 sesja · 2 wpisy ze skoroszytu/ }).click()
+  await expect(page).toHaveURL(/date=2026-07-15/)
+  await page.getByRole('button', { name: /15 lipca - 1 sesja · 2 wpisy z arkusza/ }).click()
   await expect(page.getByText('Zoja Historyczna', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Godzina nieustalona', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('bez godziny', { exact: true }).first()).toBeVisible()
   await expect(page.getByRole('heading', { name: /Wpisy z nieustalonym dniem/ })).toBeVisible()
-  await expect(page.getByText('Dzień nieustalony', { exact: true })).toBeVisible()
+  await expect(page.getByText('bez dnia', { exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: /Przejrzyj.*okres/ })).toBeVisible()
 
   await page.getByRole('group', { name: 'Płatność' })
     .getByRole('button', { name: 'Do zapłaty' }).click()
   await expect(page.locator('.historical-filter-note')).toContainText(
-    'Wpisy ze skoroszytu bez statusu i płatności są ukryte przez aktywny filtr.',
+    'Wpisy z arkusza bez statusu i płatności są ukryte przez aktywny filtr.',
   )
-  await expect(page.getByText('Godzina nieustalona', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('bez godziny', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('heading', { name: /Wpisy z nieustalonym dniem/ })).toHaveCount(0)
   await page.getByRole('button', { name: 'Wyczyść filtry' }).click()
   await expect(page.getByRole('link', { name: /Przejrzyj.*okres/ })).toBeVisible()
@@ -192,9 +192,9 @@ test('@owner keeps historical client profiles separate from active clients and s
   await expect(page.getByRole('heading', { name: 'Zoja Historyczna' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Dokładne daty' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Miesiące bez dnia' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Okres nieustalony' })).toBeVisible()
-  await expect(page.getByText('Godzina nieustalona', { exact: true })).toBeVisible()
-  await expect(page.getByText('Dzień nieustalony', { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Bez daty' })).toBeVisible()
+  await expect(page.getByText('bez godziny', { exact: true })).toBeVisible()
+  await expect(page.getByText('bez dnia', { exact: true })).toBeVisible()
   await expect(page.getByText('Rozmowa historyczna')).toHaveCount(0)
   await expect(page.getByText(/telefon|e-mail|wiek/i)).toHaveCount(0)
 
@@ -202,7 +202,7 @@ test('@owner keeps historical client profiles separate from active clients and s
   await expect(page.getByRole('heading', { name: 'Ola Aktywna' })).toBeVisible()
   const sourceHistory = page.getByRole('region', { name: 'Historia z dawnego arkusza' })
   await expect(sourceHistory).toContainText('Spotkanie ze skoroszytu')
-  await expect(sourceHistory).toContainText('Widoczny zakres')
+  await expect(sourceHistory).toContainText('Sesje z dawnego arkusza, osobno od historii sesji.')
 
   await page.goto('./#/clients?catalog=historical&historyPeriod=unknown&ym=2026-07')
   const unknownDirectory = page.getByRole('table', { name: 'Klienci historyczni' })
@@ -274,8 +274,8 @@ test('@owner keeps a source-linked client history unavailable until its exact mo
 
   await page.goto('./#/client?id=cl_active&ym=2026-01')
   const sourceState = page.getByRole('alert', { name: 'Stan historii z dawnego arkusza' })
-  await expect(sourceState).toContainText('Historia z dawnego arkusza jest teraz niedostępna')
-  await expect(page.getByText('Brak wpisów z dokładną datą w widocznym zakresie.')).toHaveCount(0)
+  await expect(sourceState).toContainText('Nie udało się wczytać historii z dawnego arkusza')
+  await expect(page.getByText('Brak sesji z dokładną datą.')).toHaveCount(0)
 
   await sourceState.getByRole('button', { name: 'Spróbuj ponownie' }).click()
   await expect(page.getByRole('region', { name: 'Historia z dawnego arkusza' }))
@@ -354,7 +354,7 @@ test('@owner keeps the activation draft through ordinary failure and guarded clo
   await specialist.selectOption('sp_anna')
   await drawer.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
 
-  await expect(drawer.getByRole('alert')).toContainText('Nie udało się aktywować klienta')
+  await expect(drawer.getByRole('alert')).toContainText('Nie udało się dodać klienta do kartoteki')
   await expect(specialist).toHaveValue('sp_anna')
   await drawer.getByRole('button', { name: 'Zamknij' }).click()
   await expect(drawer.getByText('Zamknąć bez zapisywania?')).toBeVisible()
@@ -405,9 +405,9 @@ test('@owner refreshes a version conflict without erasing the activation draft',
   await drawer.getByLabel('Specjalistka prowadząca').selectOption('sp_anna')
   await drawer.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
 
-  await expect(drawer.locator('.form-warn--error')).toContainText('Profil zmienił się w innym oknie')
+  await expect(drawer.locator('.form-warn--error')).toContainText('Ktoś w międzyczasie zmienił dane tego klienta')
   await expect(drawer.getByLabel('Specjalistka prowadząca')).toHaveValue('sp_anna')
-  await expect(drawer).toContainText('Wersja źródła: 2')
+  await expect(drawer).not.toContainText('Wersja źródła')
   await expect(drawer.getByRole('link', { name: 'Otwórz aktywną kartę' })).toBeVisible()
   await expect(drawer.getByRole('button', { name: 'Dodaj do kartoteki' })).toBeDisabled()
 })
@@ -454,7 +454,7 @@ test('@owner closes an accepted activation whose canonical reload fails and prev
   await drawer.getByRole('button', { name: 'Dodaj do kartoteki' }).click()
 
   await expect(drawer).toHaveCount(0)
-  await expect(page.getByText('Aktywację przyjęto, ale nie udało się odświeżyć kartoteki.')).toBeVisible()
+  await expect(page.getByText('Klient został dodany do kartoteki, ale nie udało się odświeżyć listy.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Dodaj do kartoteki' })).toBeDisabled()
   expect(activationRequests).toBe(1)
 })
@@ -557,7 +557,7 @@ test('@owner operates historical calendar links and the activation guard by keyb
   })
 
   await page.goto('./#/calendar?date=2026-07-15&ym=2026-07&mode=cal')
-  const selectedDay = page.getByRole('button', { name: /15 lipca - 1 sesja · 2 wpisy ze skoroszytu/ })
+  const selectedDay = page.getByRole('button', { name: /15 lipca - 1 sesja · 2 wpisy z arkusza/ })
   await selectedDay.focus()
   await page.keyboard.press('ArrowRight')
   await expect(page.getByRole('button', { name: /16 lipca - 0 sesji/ })).toBeFocused()
@@ -566,7 +566,7 @@ test('@owner operates historical calendar links and the activation guard by keyb
 
   const count = page.locator('.cal-day-panel__count')
   await expect(count).toHaveAttribute('aria-live', 'polite')
-  await expect(count).toHaveText('1 sesja · 2 wpisy ze skoroszytu')
+  await expect(count).toHaveText('1 sesja · 2 wpisy z arkusza')
   const clientLink = page.getByRole('link', {
     name: 'Otwórz klienta historycznego — Zoja Historyczna',
   }).first()
