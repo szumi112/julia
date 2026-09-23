@@ -1,5 +1,5 @@
 import { DEMO_ROLES } from './data.js'
-import { collectedOf, fmtDayMonth, isBillable, METHOD_LABELS, monthKey, outstandingOf, timeToMin, toISODate, warsawDateTimeFromUtc } from './format.js'
+import { collectedOf, fmtDayMonth, fmtMoney, isBillable, METHOD_LABELS, monthKey, outstandingOf, timeToMin, toISODate, warsawDateTimeFromUtc } from './format.js'
 import { DEFAULT_SPECIALIST_AVATAR_KEY } from './specialist-avatars.js'
 
 const assignmentStartCivilTime = (startsAt) => {
@@ -154,6 +154,27 @@ export const sessionConflicts = (sessions, { date } = {}) => {
     .map(({ date: conflictDate, psychId, sessionIds }) => ({ date: conflictDate, psychId, sessionIds }))
 }
 
+// One entry per overlapping block (e.g. three sessions at 14:00) instead of one
+// per overlapping pair; sessionIds keep sessionConflicts' order of appearance.
+export const sessionConflictGroups = (sessions, options) => {
+  const groups = []
+  const groupOf = new Map()
+  for (const conflict of sessionConflicts(sessions, options)) {
+    const [target, ...others] = [...new Set(conflict.sessionIds.map((id) => groupOf.get(id)).filter(Boolean))]
+    const group = target || { date: conflict.date, psychId: conflict.psychId, sessionIds: [] }
+    if (!target) groups.push(group)
+    for (const other of others) {
+      groups.splice(groups.indexOf(other), 1)
+      group.sessionIds.push(...other.sessionIds)
+    }
+    for (const id of conflict.sessionIds) {
+      if (!group.sessionIds.includes(id)) group.sessionIds.push(id)
+    }
+    for (const id of group.sessionIds) groupOf.set(id, group)
+  }
+  return groups
+}
+
 export const scopedBillingSummary = (sessions, { psychId = null } = {}) => {
   const summary = { due: 0, collected: 0, outstanding: 0 }
   for (const session of sessions) {
@@ -172,15 +193,20 @@ export const paymentSnapshotOf = (session) => ({
   paidDate: session.paidDate ?? null,
 })
 
+export const PAYMENT_AMOUNT_COPY = 'Wpisz kwotę, np. 180 albo 180,50.'
+export const paymentOverRemainderCopy = (remainderCents) =>
+  `Do zapłaty zostało ${fmtMoney(remainderCents / 100)} - wpisz tyle albo mniej.`
+
 export const paymentEntryFor = (session, { amount, method, paidDate }) => {
-  const entryAmount = Number(amount)
+  const typed = String(amount ?? '').trim()
+  const entryAmount = /^\d+(?:[.,]\d{1,2})?$/.test(typed) ? Number(typed.replace(',', '.')) : NaN
   const entryCents = Math.round(entryAmount * 100)
   const remainderCents = Math.round(outstandingOf(session) * 100)
   const errors = {}
   if (!Number.isFinite(entryAmount) || entryAmount <= 0 || entryCents <= 0) {
-    errors.amount = 'Podaj kwotę większą od zera'
+    errors.amount = PAYMENT_AMOUNT_COPY
   } else if (entryCents > remainderCents) {
-    errors.amount = 'Kwota nie może przekraczać pozostałej kwoty'
+    errors.amount = paymentOverRemainderCopy(remainderCents)
   }
   if (!Object.hasOwn(METHOD_LABELS, method)) errors.method = 'Wybierz formę płatności'
   if (Object.keys(errors).length > 0) return { errors, patch: null }

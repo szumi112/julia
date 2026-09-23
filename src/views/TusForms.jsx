@@ -126,10 +126,10 @@ export function TusGroupDrawer({ opts, onClose }) {
     }
     if (editing) {
       dispatch({ type: 'UPDATE_TUS_GROUP', id: editing.id, patch: payload, memberKeys, newChildren })
-      toast('Grupa zapisana')
+      toast(`Grupa została zapisana · ${payload.name}`)
     } else {
       dispatch({ type: 'ADD_TUS_GROUP', group: payload, memberKeys, newChildren })
-      toast('Nowa grupa utworzona')
+      toast(`Grupa została dodana · ${payload.name}`)
     }
     forceClose()
   }
@@ -330,17 +330,17 @@ export function TusKidDrawer({ opts, onClose }) {
     }
     if (editing) {
       dispatch({ type: 'UPDATE_TUS_KID', id: editing.id, patch: payload })
-      toast('Profil dziecka zapisany')
+      toast(`Dane dziecka zostały zmienione · ${payload.name}`)
     } else {
       dispatch({ type: 'ADD_TUS_KID', kid: { ...payload, note: '' } })
-      toast('Dziecko dodane do zajęć TUS')
+      toast(`Dziecko zostało dodane · ${payload.name}`)
     }
     forceClose()
   }
 
   const remove = () => {
     dispatch({ type: 'DELETE_TUS_KID', id: editing.id })
-    toast('Profil dziecka usunięty', 'close')
+    toast(`Dziecko zostało usunięte · ${editing.name}`)
     forceClose()
   }
 
@@ -473,17 +473,17 @@ export function TusClassDrawer({ opts, onClose }) {
     const payload = { date: form.date, time: form.time, topic: form.topic.trim() }
     if (editing) {
       dispatch({ type: 'UPDATE_TUS_CLASS', id: editing.id, patch: payload })
-      toast(form.date !== editing.date ? 'Zajęcia przeniesione' : 'Zajęcia zapisane')
+      toast(`${form.date !== editing.date ? 'Zajęcia zostały przeniesione' : 'Zajęcia zostały zapisane'} · ${fmtDayMonth(form.date)}`)
     } else {
       dispatch({ type: 'ADD_TUS_CLASS', cls: { ...payload, groupId: group.id, attendance: {} } })
-      toast('Zajęcia dodane')
+      toast(`Zajęcia zostały dodane · ${fmtDayMonth(form.date)}`)
     }
     forceClose()
   }
 
   const remove = () => {
     dispatch({ type: 'DELETE_TUS_CLASS', id: editing.id })
-    toast('Zajęcia usunięte', 'close')
+    toast(`Zajęcia zostały usunięte · ${fmtDayMonth(editing.date)}`)
     forceClose()
   }
 

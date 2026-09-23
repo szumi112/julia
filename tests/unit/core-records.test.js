@@ -5,6 +5,7 @@ import {
   appointmentDto,
   addElapsedMinutes,
   assertClientArchivable,
+  assertClientIdentity,
   assertAppointmentPaymentTransition,
   assertId,
   assertReassignment,
@@ -37,6 +38,27 @@ import {
   warsawDateTimeFromUtc,
   warsawNoonToUtc,
 } from '../../src/core-records.js'
+
+test('guardian contact fields validate as canonical optional identity fields', () => {
+  assert.deepEqual(assertClientIdentity({
+    name: 'Fikcyjna', age: 8, guardianPhone: '+48 600 100 200',
+    guardianEmail: 'opiekun@example.test', receptionNotes: 'Kontakt po 15:00.',
+  }), {
+    name: 'Fikcyjna', age: 8, guardianPhone: '+48 600 100 200',
+    guardianEmail: 'opiekun@example.test', receptionNotes: 'Kontakt po 15:00.',
+  })
+  assert.equal(validateClientInput({
+    name: 'Fikcyjna', age: 8, status: 'active', specialistId: 'sp_one',
+    guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
+    receptionNotes: 'Kontakt po 15:00.',
+  }).guardianPhone, '+48 600 100 200')
+  assert.throws(() => assertClientIdentity({ name: 'Fikcyjna', age: 8, guardianEmail: 'bad' }),
+    /VALIDATION_FAILED\/guardianEmail/)
+  assert.equal(assertClientIdentity({ name: 'Fikcyjna', age: 8, receptionNotes: 'Kontakt po 15:00.\nDzwonić do opiekuna.' }).receptionNotes,
+    'Kontakt po 15:00.\nDzwonić do opiekuna.')
+  assert.throws(() => assertClientIdentity({ name: 'Fikcyjna', age: 8, receptionNotes: 'Uwagi\u0000kliniczne' }),
+    /VALIDATION_FAILED\/receptionNotes/)
+})
 
 test('core records reject unknown object keys and entity-mismatched identifiers', () => {
   assert.doesNotThrow(() => assertExactObject({ name: 'Ada' }, ['name']))
@@ -243,7 +265,9 @@ test('payment date input becomes Warsaw noon UTC and rejects invalid civil dates
 test('payment amount parsing preserves integer grosze', () => {
   assert.equal(parsePaymentAmountGrosze('120'), 12_000)
   assert.equal(parsePaymentAmountGrosze('120.05'), 12_005)
-  for (const amount of ['', '0', '12.345', '12,50', '-1']) {
+  assert.equal(parsePaymentAmountGrosze('180,50'), 18_050)
+  assert.equal(parsePaymentAmountGrosze(' 180,5 '), 18_050)
+  for (const amount of ['', '0', '12.345', '12,345', '1,000.50', '12,', '-1']) {
     assert.throws(() => parsePaymentAmountGrosze(amount), /VALIDATION_FAILED\/amountGrosze/)
   }
 })

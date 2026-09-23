@@ -13,8 +13,7 @@ const importKey = () => `workbook-import-${crypto.randomUUID()}`
 const warningText = ({ code, count }) => {
   if (code === 'DUPLICATE_SOURCE_RECORD') {
     return `${count} ${plural(
-      count, 'powtórzona pozycja źródłowa', 'powtórzone pozycje źródłowe',
-      'powtórzonych pozycji źródłowych',
+      count, 'powtórzony wiersz', 'powtórzone wiersze', 'powtórzonych wierszy',
     )}`
   }
   if (code === 'AMOUNT_STORED_AS_TEXT') {
@@ -24,8 +23,8 @@ const warningText = ({ code, count }) => {
     )}`
   }
   return `${count} ${plural(
-    count, 'ostrzeżenie wymaga', 'ostrzeżenia wymagają', 'ostrzeżeń wymaga',
-  )} przeglądu`
+    count, 'wiersz', 'wiersze', 'wierszy',
+  )} do sprawdzenia`
 }
 
 const quarantineReason = Object.freeze({
@@ -34,16 +33,16 @@ const quarantineReason = Object.freeze({
   ORPHAN_AMOUNT: 'Kwota bez przypisanej pozycji',
 })
 const panelFieldLabel = Object.freeze({
-  accountingMonth: 'miesiąc księgowy', occurredOn: 'data', amountGrosze: 'kwota',
-  paidAmountGrosze: 'zapłacono', paymentMethod: 'sposób płatności',
-  settlementStatus: 'rozliczenie', invoiceStatus: 'faktura', specialistId: 'specjalistka',
+  accountingMonth: 'miesiąc rozliczenia', occurredOn: 'data', amountGrosze: 'kwota',
+  paidAmountGrosze: 'wpłacono', paymentMethod: 'forma płatności',
+  settlementStatus: 'status płatności', invoiceStatus: 'faktura', specialistId: 'specjalistka',
 })
 const panelConflictLabel = Object.freeze({
-  PANEL_CONCURRENT_EDIT: 'Równoległa zmiana pola',
-  PANEL_CONCURRENT_VOID: 'Pozycja została równolegle unieważniona',
-  PANEL_ROW_MISSING: 'Pozycja nie istnieje już w rejestrze',
+  PANEL_CONCURRENT_EDIT: 'Ktoś w międzyczasie zmienił to pole w panelu',
+  PANEL_CONCURRENT_VOID: 'Ktoś w międzyczasie usunął tę pozycję z rozliczeń',
+  PANEL_ROW_MISSING: 'Tej pozycji nie ma już w panelu',
   PANEL_VALUE_INVALID: 'Niepoprawna wartość pola',
-  PANEL_DEPENDENCY_CONFLICT: 'Pozycja ma aktywne powiązanie i nie może być zmieniona w pliku',
+  PANEL_DEPENDENCY_CONFLICT: 'Tę pozycję można zmienić tylko w panelu, nie w pliku',
 })
 const panelEnumLabel = Object.freeze({
   paymentMethod: Object.freeze({
@@ -52,7 +51,7 @@ const panelEnumLabel = Object.freeze({
   }),
   settlementStatus: Object.freeze({
     paid: 'Opłacona', partial: 'Częściowo opłacona',
-    unknown: 'Nie ustalono', unpaid: 'Nieopłacona',
+    unknown: 'Nie ustalono', unpaid: 'Do zapłaty',
   }),
   invoiceStatus: Object.freeze({
     action_required: 'Wymaga wystawienia', issued: 'Wystawiona',
@@ -229,26 +228,27 @@ export function WorkbookImport({
   if (!allowed) return null
   return (
     <section className="card card--pad workbook-import" data-reveal aria-labelledby="workbook-import-title">
-      <h2 className="card-title" id="workbook-import-title">Import skoroszytu</h2>
-      <Field label="Wybierz plik XLSX" hint="Plik trafia bezpośrednio do bezpiecznego podglądu na serwerze.">
+      <h2 className="card-title" id="workbook-import-title">Przeniesienie danych z arkusza</h2>
+      <label className={`btn btn--ghost workbook-import__file${busy || commitLocked ? ' is-disabled' : ''}`}>
         <input
           key={inputGeneration}
-          className="input"
+          className="workbook-import__file-input"
           type="file"
           accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
           onChange={chooseFile}
           disabled={busy || commitLocked}
         />
-      </Field>
-      {flow.phase === 'previewing' ? <p role="status">Przygotowywanie podglądu…</p> : null}
+        <span>Wybierz plik Excel (.xlsx)</span>
+      </label>
+      {flow.phase === 'previewing' ? <p role="status">Sprawdzam plik…</p> : null}
       {flow.preview ? <section className="workbook-import__review" aria-labelledby="workbook-preview-title">
         <h3 id="workbook-preview-title" ref={headingRef} tabIndex={-1}>
-          Podgląd — nic nie zostało zapisane
+          Sprawdziliśmy plik. Nic jeszcze nie zostało zapisane.
         </h3>
         <dl className="workbook-import__counts">
-          <div><dt>Przyjęte wiersze</dt><dd>{flow.preview.reconciliation.acceptedRows}</dd></div>
-          <div><dt>Kwarantanna</dt><dd>{flow.preview.reconciliation.quarantinedRows}</dd></div>
-          <div><dt>Wykluczone formuły</dt><dd>{flow.preview.reconciliation.excludedFormulaRows}</dd></div>
+          <div><dt>Gotowe do przeniesienia</dt><dd>{flow.preview.reconciliation.acceptedRows}</dd></div>
+          <div><dt>Do poprawy w arkuszu</dt><dd>{flow.preview.reconciliation.quarantinedRows}</dd></div>
+          <div><dt>Pominięte (sumy i formuły)</dt><dd>{flow.preview.reconciliation.excludedFormulaRows}</dd></div>
         </dl>
         {flow.preview.proposedMappings.length > 0 ? <section
           className="workbook-import__evidence"
@@ -265,7 +265,7 @@ export function WorkbookImport({
           className="workbook-import__evidence"
           aria-labelledby="workbook-preview-warnings"
         >
-          <h4 id="workbook-preview-warnings">Duplikaty i ostrzeżenia</h4>
+          <h4 id="workbook-preview-warnings">Powtórzenia i uwagi</h4>
           <ul>{flow.preview.warnings.map((warning, index) => <li
             key={`${warning.code}:${index}`}
           >{warningText(warning)}</li>)}</ul>
@@ -274,7 +274,7 @@ export function WorkbookImport({
           className="workbook-import__evidence"
           aria-labelledby="workbook-preview-quarantine"
         >
-          <h4 id="workbook-preview-quarantine">Pozycje w kwarantannie</h4>
+          <h4 id="workbook-preview-quarantine">Do poprawy w arkuszu</h4>
           <ul>{flow.preview.quarantine.map((item, index) => <li
             key={`quarantine:${index}`}
           >
@@ -288,7 +288,7 @@ export function WorkbookImport({
           className="workbook-import__evidence"
           aria-labelledby="workbook-preview-panel-changes"
         >
-          <h4 id="workbook-preview-panel-changes">Zmiany Panel-v2</h4>
+          <h4 id="workbook-preview-panel-changes">Zmiany w pozycjach</h4>
           {flow.preview.panelChanges.updates.length > 0 ? <>
             <p>Pozycje do zmiany</p>
             <ul>{flow.preview.panelChanges.updates.map((update, index) => <li
@@ -302,24 +302,24 @@ export function WorkbookImport({
             </li>)}</ul>
           </> : <p>Brak zmian pól.</p>}
           {flow.preview.panelChanges.voidIds.length > 0 ? <>
-            <p>Pozycje do unieważnienia</p>
+            <p>Pozycje do usunięcia z rozliczeń</p>
             {concise ? <p>{flow.preview.panelChanges.voidIds.length} {plural(
-              flow.preview.panelChanges.voidIds.length, 'pozycja do unieważnienia',
-              'pozycje do unieważnienia', 'pozycji do unieważnienia',
+              flow.preview.panelChanges.voidIds.length, 'pozycja do usunięcia',
+              'pozycje do usunięcia', 'pozycji do usunięcia',
             )}.</p> : <ul>{flow.preview.panelChanges.voidIds.map((id, index) => <li
               key={`panel-void:${index}`}
             >{id}</li>)}</ul>}
-          </> : <p>Brak unieważnień.</p>}
+          </> : <p>Żadna pozycja nie zostanie usunięta.</p>}
         </section> : null}
         {conflicts.length > 0 ? <section
           className="workbook-import__evidence"
           aria-labelledby="workbook-preview-conflicts"
         >
-          <h4 id="workbook-preview-conflicts">Konflikty przypisań</h4>
+          <h4 id="workbook-preview-conflicts">Kto jest kim?</h4>
           {conflicts.map((conflict, index) => (
             <div className="workbook-import__conflict" key={conflict.id}>
-              <p>Wartość źródłowa: <strong>{conflict.sourceValue || 'brak nazwy'}</strong></p>
-              <Field label={`Wybierz specjalistkę — konflikt ${index + 1}`}>
+              <p>„<strong>{conflict.sourceValue || 'brak nazwy'}</strong>” w arkuszu to:</p>
+              <Field label={`Specjalistka nr ${index + 1}`}>
                 <select
                   className="select"
                   disabled={commitLocked || flow.phase === 'committing'}
@@ -338,8 +338,8 @@ export function WorkbookImport({
         {blocked ? <section className="workbook-import__evidence">
           <EmptyState
             icon="ledger"
-            title="Zmiany Panel-v2 wymagają osobnego przeglądu"
-            hint="Ten podgląd jest blokujący i nie może zostać zapisany automatycznie."
+            title="Tego pliku nie można teraz przenieść"
+            hint="Niektóre pozycje zmieniły się w panelu po pobraniu arkusza. Pobierz arkusz ponownie i nanieś zmiany jeszcze raz."
           />
           <ul>{panelConflicts.map((conflict, index) => <li key={`panel-conflict:${index}`}>
             {concise ? 'Pozycja w pliku' : <strong>{conflict.recordId}</strong>}{' — '}{panelConflictLabel[conflict.code]}
@@ -351,30 +351,27 @@ export function WorkbookImport({
           </li>)}</ul>
         </section> : null}
         <Button disabled={!complete || blocked || flow.phase !== 'review'} onClick={commit}>
-          {flow.phase === 'committing' ? 'Zapisywanie…' : 'Zapisz i rozpocznij import'}
+          {flow.phase === 'committing' ? 'Zapisywanie…' : 'Przenieś dane'}
         </Button>
-        {commitLocked ? <p className="muted">
-          Wybory są zablokowane do czasu ponowienia dokładnie tej samej operacji.
-        </p> : null}
       </section> : null}
-      {flow.phase === 'materializing' ? <p role="status">Import zapisany. Możesz kontynuować przetwarzanie poniżej.</p> : null}
-      {flow.phase === 'complete' ? <p role="status">Finanse zostały zapisane. Poniżej możesz dokończyć import klientów i zajęć.</p> : null}
+      {flow.phase === 'materializing' ? <p role="status">Dane z arkusza są przenoszone. Dokończ to poniżej.</p> : null}
+      {flow.phase === 'complete' ? <p role="status">Finanse zostały przeniesione. Poniżej możesz dokończyć import klientów i zajęć.</p> : null}
       {flow.phase === 'review' && flow.errorCode === 'WORKBOOK_COMMIT_FAILED'
         ? <p className="form-error" role="alert">
-          Nie udało się potwierdzić zapisu. Ten sam plik i klucz operacji zostały zachowane do bezpiecznej ponownej próby.
+          Nie mamy pewności, czy dane się zapisały. Kliknij „Przenieś dane” jeszcze raz, niczego nie zmieniając - nic się nie zdubluje.
         </p> : null}
       {flow.phase === 'failed' && flow.errorCode === 'WORKBOOK_IMPORT_CONFLICT'
         ? <p className="form-error" role="alert">
-          Nie można zapisać tego podglądu. Plik mógł zostać już zaimportowany albo lista specjalistek się zmieniła. Wybierz plik ponownie.
+          Nie można przenieść danych z tego pliku. Mógł zostać już wczytany albo lista specjalistek się zmieniła. Wybierz plik ponownie.
         </p> : null}
       {flow.phase === 'failed' && flow.errorCode === 'WORKBOOK_FINGERPRINT_REJECTED'
         ? <p className="form-error" role="alert">
-          To nie jest zatwierdzony skoroszyt historyczny. Historia została zaimportowana jednorazowo, a bieżące dane wpisuje się w panelu. Plik został usunięty z pamięci przeglądarki.
+          Tego arkusza nie można wczytać. Dawny arkusz poradni został już przeniesiony, a bieżące dane wpisuje się w panelu.
         </p> : null}
-      {flow.phase === 'failed' && ['WORKBOOK_COMMIT_REJECTED', 'WORKBOOK_PREVIEW_FAILED']
-        .includes(flow.errorCode) ? <p className="form-error" role="alert">
-        Nie udało się zakończyć operacji. Plik został usunięty z pamięci przeglądarki.
-      </p> : null}
+      {flow.phase === 'failed' && flow.errorCode === 'WORKBOOK_PREVIEW_FAILED'
+        ? <p className="form-error" role="alert">Nie udało się sprawdzić pliku. Wybierz go ponownie.</p> : null}
+      {flow.phase === 'failed' && flow.errorCode === 'WORKBOOK_COMMIT_REJECTED'
+        ? <p className="form-error" role="alert">Nie udało się przenieść danych. Wybierz plik ponownie.</p> : null}
     </section>
   )
 }

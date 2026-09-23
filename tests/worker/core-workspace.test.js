@@ -282,6 +282,32 @@ describe('workspace read model', () => {
     expect(Object.isFrozen(result.data)).toBe(true)
   })
 
+  it('projects authorized guardian contacts from the decrypted client identity', async () => {
+    const window = parseWorkspaceQuery(
+      'https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-31'
+    )
+    const { db } = scriptedDb({
+      specialists: [specialistRow('sp_guardian', 'stf_guardian')],
+      clients: [clientRow('cl_guardian', 'active', {
+        id: 'asg_guardian', specialistId: 'sp_guardian', startsAt: instant('01'), version: 1,
+      })],
+    })
+    const result = await readWorkspace({
+      db, actor: authorityActor({ id: 'stf_owner', role: 'owner' }),
+      cryptoContext: { keyring: {}, dataKey: {}, scope: {} }, window,
+      decryptSpecialist: async () => 'Specjalistka Fikcyjna',
+      decryptClient: async () => ({
+        name: 'Klient Fikcyjny', age: 9,
+        guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
+        receptionNotes: 'Kontakt po 15:00.',
+      }),
+    })
+    expect(result.data.clients[0]).toMatchObject({
+      guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
+      receptionNotes: 'Kontakt po 15:00.',
+    })
+  })
+
   it('pushes specialist assignment and history scope into every record query', async () => {
     const window = parseWorkspaceQuery(
       'https://panel.example/api/v1/workspace?from=2026-08-01&to=2026-08-02'

@@ -59,7 +59,7 @@ test('groups visible permissions in the fixed workflow order', () => {
       'workbook.centre.export',
     ]],
     ['Zespół', []],
-    ['Administracja', ['operations.health.read']],
+    ['Administracja', ['activity.read', 'operations.health.read']],
   ])
 })
 
@@ -97,7 +97,8 @@ test('publishes every visible owner choice after hiding base and unused override
     permissionChoicesFor({ role: 'owner', allow: [], deny: [] })
       .map(({ capability, label }) => [capability, label]),
     [
-      ['workbook.centre.export', 'Eksport skoroszytu centrum'],
+      ['workbook.centre.export', 'Eksport arkusza centrum'],
+      ['activity.read', 'Historia aktywności'],
       ['finance.import', 'Import danych finansowych'],
       ['security.audit.read', 'Podgląd dziennika bezpieczeństwa'],
       ['finance.centre.read', 'Podgląd finansów centrum'],
@@ -120,7 +121,7 @@ test('publishes every visible owner choice after hiding base and unused override
     }
   }
   assert.equal(permissionChoicesFor({ role: 'specialist', allow: [], deny: [] })
-    .find(({ capability }) => capability === 'workbook.own.export')?.label, 'Eksport własnego skoroszytu')
+    .find(({ capability }) => capability === 'workbook.own.export')?.label, 'Eksport własnego arkusza')
 })
 
 test('restores every base capability by removing its denial without changing other exceptions', () => {
@@ -144,6 +145,7 @@ test('turning role defaults off and on writes only normalized deny decisions', (
     allow: ['finance.import'],
     deny: ['chat.general', 'client.manage'],
     effectiveCapabilities: [
+      'activity.read',
       'appointment.charge.read',
       'appointment.manage',
       'chat.direct',
@@ -163,6 +165,7 @@ test('turning role defaults off and on writes only normalized deny decisions', (
     allow: ['finance.import'],
     deny: ['client.manage'],
     effectiveCapabilities: [
+      'activity.read',
       'appointment.charge.read',
       'appointment.manage',
       'chat.direct',

@@ -30,6 +30,7 @@ const PROTECTED_ROUTE_RULES = Object.freeze({
   payments: anyOf('appointment.charge.read', 'finance.centre.read'),
   ledger: allOf('finance.centre.read'),
   reports: allOf('finance.centre.read'),
+  history: allOf('activity.read'),
   // Settings is a shell route only when at least one protected settings
   // section is available. The profile remains the safe fallback for a
   // specialist without centre-management capabilities.

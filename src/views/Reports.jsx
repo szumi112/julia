@@ -138,10 +138,8 @@ export function Reports({ params = {} }) {
       <section role="status" aria-label="Stan raportu">
         <EmptyState
           icon="reports"
-          title={workspaceState === 'loading' ? 'Wczytywanie raportu…' : 'Raport jest teraz niedostępny'}
-          hint={workspaceState === 'loading'
-            ? 'Pobieramy kompletny wybrany miesiąc.'
-            : 'Nie pokazujemy podsumowania dla niepełnego okresu.'}
+          title={workspaceState === 'loading' ? 'Wczytuję raport…' : 'Nie udało się wczytać raportu'}
+          hint={workspaceState === 'loading' ? undefined : 'Spróbuj ponownie za chwilę.'}
         />
       </section>
     )

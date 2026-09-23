@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers'
+import { applyD1Migrations } from 'cloudflare:test'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
   ROLE_DEFAULT_CAPABILITIES,
@@ -17,6 +18,7 @@ import {
   getOrCreateDataKey,
 } from '../../worker/security/envelope.js'
 import { publicError } from '../../worker/http/errors.js'
+import { selectCoreMigrationStage } from '../../scripts/core-migration-stages.js'
 import {
   applyCoreDirectoryStageB,
   applyFinanceStageC,
@@ -174,6 +176,9 @@ beforeAll(async () => {
   await applyFinanceStageC()
   await applySpecialistProfilesStageD()
   await applyWorkbookRegistryStageE()
+  await applyD1Migrations(env.DB, [selectCoreMigrationStage(
+    env.TEST_STAGE_F_MIGRATIONS, 'stage-f',
+  ).find(({ name }) => name === '0028_activity_history.sql')])
   const keyring = await createKeyring(env, {
     activeDataKekVersion: 1,
     activeLookupKeyVersion: 1,
@@ -289,6 +294,7 @@ describe('capability override read', () => {
           allow: ['finance.import'],
           deny: ['client.manage'],
           effectiveCapabilities: [
+            'activity.read',
             'appointment.charge.read',
             'appointment.manage',
             'chat.direct',
@@ -403,6 +409,31 @@ describe('capability override read', () => {
 })
 
 describe('capability override replacement', () => {
+  it('can deny and restore activity history access for a coordinator', async () => {
+    const owner = await seedStaff({ role: 'owner', suffix: 'activity_owner' })
+    const target = await seedStaff({ role: 'coordinator', suffix: 'activity_target' })
+    const denied = await replace(ownerWithOverrides(owner), target.id, {
+      expectedAuthorityRevision: 1, allow: [], deny: ['activity.read'],
+    }, {
+      idempotencyKey: 'capability-activity-deny', idFactory: ids('activity_deny'),
+    })
+    expect(denied.data.authority.effectiveCapabilities).not.toContain('activity.read')
+    expect(denied.data.authority.deny).toEqual(['activity.read'])
+    const restored = await replace(ownerWithOverrides({ ...owner, authorityRevision: 2 }), target.id, {
+      expectedAuthorityRevision: 2, allow: [], deny: [],
+    }, {
+      idempotencyKey: 'capability-activity-restore', idFactory: ids('activity_restore'),
+    })
+    expect(restored.data.authority.effectiveCapabilities).toContain('activity.read')
+    expect(restored.data.authority.deny).toEqual([])
+    expect((await env.DB.prepare(
+      `SELECT decision,override_version FROM staff_capability_override_history
+       WHERE staff_id=? AND capability='activity.read' ORDER BY override_version`,
+    ).bind(target.id).all()).results).toEqual([
+      { decision: 'deny', override_version: 1 },
+      { decision: 'cleared', override_version: 2 },
+    ])
+  })
   it('normalizes one complete replacement and commits current, history, revisions, audit, and replay atomically', async () => {
     const owner = await seedStaff({ role: 'owner', suffix: 'replace_owner' })
     const target = await seedStaff({
@@ -431,6 +462,7 @@ describe('capability override replacement', () => {
           allow: ['finance.import'],
           deny: ['client.manage'],
           effectiveCapabilities: [
+            'activity.read',
             'appointment.charge.read',
             'appointment.manage',
             'chat.direct',

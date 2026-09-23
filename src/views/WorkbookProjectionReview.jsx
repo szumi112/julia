@@ -87,7 +87,7 @@ export function WorkbookProjectionReview({ importId, creatorId, quarantineCount 
       await advance(controller.signal)
     } catch {
       if (!controller.signal.aborted) {
-        setError('Operacja nie została potwierdzona. Ponów operację; zapisane partie nie zostaną powielone.')
+        setError('Nie mamy pewności, czy wszystko się zapisało. Kliknij „Kontynuuj import klientów i zajęć” jeszcze raz - nic się nie zdubluje.')
       }
     } finally {
       if (!controller.signal.aborted) setBusy(false)
@@ -96,7 +96,7 @@ export function WorkbookProjectionReview({ importId, creatorId, quarantineCount 
   const complete = loaded && projectionsComplete(historical, activity)
   return <section className="card card--pad" aria-label="Import klientów i zajęć">
     <h2 className="card-title">Import klientów i zajęć</h2>
-    <p>Finanse zostały zapisane. Import klientów oraz zajęć TUS i angielskiego wymaga osobnego potwierdzenia.</p>
+    <p>Finanse zostały przeniesione. Klientów oraz zajęcia TUS i angielskiego przeniesiesz osobnym przyciskiem.</p>
     <p>Historia klientów: <Pill tone={historical?.status === 'complete' ? 'sage' : 'amber'}>
       {loaded ? labels[historical?.status] ?? 'Oczekuje' : 'Sprawdzanie…'}</Pill>
       {historical ? ` ${historical.processedRecords} / ${historical.totalRecords}` : ''}</p>
@@ -104,7 +104,7 @@ export function WorkbookProjectionReview({ importId, creatorId, quarantineCount 
       {loaded ? labels[activity?.status] ?? 'Oczekuje' : 'Sprawdzanie…'}</Pill>
       {activity ? ` ${activity.processedRecords} / ${activity.totalRecords}` : ''}</p>
     {complete ? <p role="status">Finanse, historia klientów i zajęcia zostały zaimportowane.</p> : null}
-    {quarantineCount > 0 ? <p role="status">Pozycje w kwarantannie: {quarantineCount}. Pozostają wyłączone z importu i wymagają osobnej korekty źródła.</p> : null}
+    {quarantineCount > 0 ? <p role="status">Do poprawy w arkuszu: {quarantineCount}. Te wiersze nie zostały przeniesione - popraw je w arkuszu, jeśli są potrzebne.</p> : null}
     {!complete ? <Button disabled={busy || disabled} onClick={() => run()}>
       {busy ? 'Importowanie klientów i zajęć…' : 'Kontynuuj import klientów i zajęć'}</Button> : null}
     {error ? <p className="form-error" role="alert">{error}</p> : null}

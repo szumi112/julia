@@ -4,6 +4,7 @@ import { useApp } from '../store.jsx'
 import { Button, DiscardConfirm, Field, IconBtn, SpecialistAvatarPicker, useDiscardGuard } from '../ui.jsx'
 import { DEFAULT_SPECIALIST_AVATAR_KEY } from '../specialist-avatars.js'
 import { rolePresentationFor } from '../auth-role.js'
+import { CHANGED_RETRY_COPY, UNCERTAIN_SAVE_COPY, saveFailureCopy } from '../save-failure-copy.js'
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u
 const INVALID_TITLE = /[\p{Cc}\p{Cf}]/u
@@ -40,12 +41,11 @@ function ModalShell({ children, dirty, label, onClose }) {
   )
 }
 
-const errorText = (error) => error instanceof ApiError && error.code === 'FORBIDDEN'
-  ? 'Nie masz uprawnień do tej operacji.'
-  : error instanceof ApiError && error.code === 'STAFF_INVITATION_CONFLICT'
-    ? 'Ten profil ma już przypisane zaproszenie lub konto.'
-    : 'Nie udało się zapisać zmian. Spróbuj ponownie.'
-const SPECIALIST_INVITATION_UNCERTAIN = 'Nie wiadomo, czy zaproszenie zostało utworzone. Spróbuj ponownie bez zmiany adresu e-mail.'
+const errorText = (error) => error instanceof ApiError && error.code === 'STAFF_INVITATION_CONFLICT'
+  ? 'Ten profil ma już przypisane zaproszenie lub konto.'
+  : error instanceof ApiError && error.code === 'IDEMPOTENCY_CONFLICT'
+    ? CHANGED_RETRY_COPY
+    : saveFailureCopy(error)
 
 export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
   const { toast } = useApp()
@@ -99,11 +99,11 @@ export function SpecialistProfileForm({ onClose, onSaved, profile = null }) {
       else await apiClient.createSpecialistProfile(input, options)
       accepted = true
       await onSaved()
-      toast(profile ? `Dane specjalistki zostały zapisane: ${name}` : `${name} dodana do zespołu`)
+      toast(profile ? `Dane specjalistki zostały zapisane · ${name}` : `Specjalistka została dodana do zespołu · ${name}`)
       onClose()
     } catch (caught) {
       if (accepted) {
-        toast(profile ? `Dane specjalistki zostały zapisane: ${name}` : `${name} dodana do zespołu`)
+        toast(profile ? `Dane specjalistki zostały zapisane · ${name}` : `Specjalistka została dodana do zespołu · ${name}`)
         toast('Nie udało się odświeżyć listy zespołu. Odśwież stronę.', 'alert')
         onClose()
         return
@@ -212,18 +212,18 @@ export function SpecialistAccessForm({ profile, onClose, onSaved }) {
       )
       accepted = true
       await onSaved()
-      toast(`Zaproszenie wysłane na ${canonical}`)
+      toast(`Wysyłamy zaproszenie do ${canonical}`)
       onClose()
     } catch (caught) {
       if (accepted) {
-        toast(`Zaproszenie wysłane na ${canonical}`)
+        toast(`Wysyłamy zaproszenie do ${canonical}`)
         toast('Nie udało się odświeżyć listy zespołu. Odśwież stronę.', 'alert')
         onClose()
         return
       }
       if (caught instanceof ApiError
         && caught.idempotencyKey === action.idempotencyKey) {
-        setError(SPECIALIST_INVITATION_UNCERTAIN)
+        setError(UNCERTAIN_SAVE_COPY)
         setUncertain(true)
         setSaving(false)
         return

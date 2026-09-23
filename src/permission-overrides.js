@@ -9,6 +9,7 @@ import {
 const CAPABILITY_LABELS = Object.freeze({
   'appointment.charge.read': 'Podgląd rozliczeń sesji',
   'appointment.manage': 'Zarządzanie sesjami',
+  'activity.read': 'Historia aktywności',
   'backup.manage': 'Zarządzanie kopiami zapasowymi',
   'centre.manage': 'Zarządzanie centrum',
   'chat.direct': 'Wiadomości bezpośrednie',
@@ -28,8 +29,8 @@ const CAPABILITY_LABELS = Object.freeze({
   'specialist.directory.read': 'Podgląd katalogu specjalistek',
   'staff.manage': 'Zarządzanie personelem',
   'tus.manage': 'Zarządzanie TUS i zajęciami grupowymi',
-  'workbook.centre.export': 'Eksport skoroszytu centrum',
-  'workbook.own.export': 'Eksport własnego skoroszytu',
+  'workbook.centre.export': 'Eksport arkusza centrum',
+  'workbook.own.export': 'Eksport własnego arkusza',
 })
 const LABEL_COLLATOR = new Intl.Collator('pl-PL', {
   numeric: true,
@@ -84,6 +85,7 @@ const PERMISSION_GROUPS = Object.freeze([
   Object.freeze({
     title: 'Administracja',
     capabilities: Object.freeze([
+      'activity.read',
       'operations.health.read',
       'permissions.manage',
       'security.audit.read',

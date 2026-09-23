@@ -8,10 +8,13 @@ import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, plural, fmtMoney, warsawDateTimeFromUtc } from '../format.js'
 import { ApiError } from '../api.js'
-import { validateClientInput, warsawDateTimeToUtc } from '../core-records.js'
+import { assertClientContactFields, validateClientInput, warsawDateTimeToUtc } from '../core-records.js'
 import { canPerformAction } from '../capability-access.js'
+import { conflictCopy, loadFailureCopy, saveFailureCopy } from '../save-failure-copy.js'
+import { hasActivePanelAccess, isAssignableSpecialist, NO_PANEL_ACCESS_COPY } from '../specialist-eligibility.js'
 
-const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const AGE_ERROR = 'Wiek wpisujemy dzieciom i młodzieży (1-26 lat). Dorosłej osobie zostaw to pole puste.'
+const ARCHIVE_BLOCKED_COPY = 'Ten klient ma zaplanowane sesje. Odwołaj je, zanim zarchiwizujesz klienta.'
 
 export function ClientDrawer({ opts, onClose }) {
   const { state, dispatch, toast, workspace } = useApp()
@@ -19,37 +22,44 @@ export function ClientDrawer({ opts, onClose }) {
   const { appMode, capabilities, route, navigate, role, registerLeaveGuard } = useShell()
   const refreshWorkspace = useWorkspaceRefresh()
   const isApp = appMode === 'app'
-  const editing = opts.client || null
+  // The record whose version the next save sends. It changes only when the
+  // user explicitly reloads the latest data after a version conflict.
+  const [editing, setEditing] = useState(opts.client || null)
   const today = warsawDateTimeFromUtc(new Date().toISOString()).date
-  const initialAssignmentDate = isApp && editing?.assignmentStartsAt
-    ? warsawDateTimeFromUtc(editing.assignmentStartsAt).date
-    : editing?.since || today
+  const assignmentDateOf = (record) => isApp && record?.assignmentStartsAt
+    ? warsawDateTimeFromUtc(record.assignmentStartsAt).date
+    : record?.since || today
+  const initialAssignmentDate = assignmentDateOf(editing)
   const drawerRef = useRef(null)
   const backRef = useRef(null)
   const availablePsychologists = state.psychologists.filter((psych) => (
-    (!isApp || psych.status === 'active')
+    (!isApp || isAssignableSpecialist(psych))
     && (role.scope !== 'own' || psych.id === role.psychId)
   ))
   const defaultPsych = editing?.psychId || opts.psychId || (role.scope === 'own' ? role.psychId : '')
     || (availablePsychologists.length === 1 ? availablePsychologists[0].id : '')
 
-  const [form, setForm] = useState({
-    name: editing?.name || '',
-    age: editing?.age ?? '',
-    psychId: defaultPsych,
-    email: editing?.email || '',
-    phone: editing?.phone || '',
-    status: editing?.status || 'active',
-    assignmentDate: initialAssignmentDate,
+  const formFrom = (record, psychId) => ({
+    name: record?.name || '',
+    age: record?.age ?? '',
+    psychId,
+    email: record?.guardianEmail ?? record?.email ?? '',
+    phone: record?.guardianPhone ?? record?.phone ?? '',
+    receptionNotes: record?.receptionNotes || '',
+    status: record?.status || 'active',
+    assignmentDate: assignmentDateOf(record),
     familyOtherId: '',
-    familyRole: editing?.familyRole || '',
+    familyRole: record?.familyRole || '',
     note: '',
   })
+  const [form, setForm] = useState(() => formFrom(editing, defaultPsych))
   const [errors, setErrors] = useState({})
   const [confirmDel, setConfirmDel] = useState(false)
   const [saveStatus, setSaveStatus] = useState('idle')
   const [saveError, setSaveError] = useState(null)
-  const [initialForm] = useState(form)
+  const [conflict, setConflict] = useState(false)
+  const [reloadStatus, setReloadStatus] = useState('idle')
+  const [initialForm, setInitialForm] = useState(form)
   const discardGuard = useDiscardGuard(JSON.stringify(form) !== JSON.stringify(initialForm))
   const allowCreatedClientNavigation = useRef(false)
   const { close, forceClose, shake } = useDrawerFX(drawerRef, backRef, onClose, discardGuard.guard)
@@ -98,10 +108,13 @@ export function ClientDrawer({ opts, onClose }) {
     } catch (error) {
       const field = error instanceof TypeError ? error.message.split('/').at(-1) : 'body'
       if (field === 'name') errors.name ||= 'Podaj imię i nazwisko'
-      else if (field === 'age') errors.age = 'Podaj wiek od 1 do 26 lat'
+      else if (field === 'age') errors.age = AGE_ERROR
       else if (field === 'specialistId') errors.psychId ||= 'Wybierz specjalistkę'
       else if (field === 'status') errors.status ||= 'Wybierz status klienta'
       else if (field === 'assignmentStartsAt') errors.assignmentDate ||= 'Podaj prawidłową datę rozpoczęcia opieki'
+      else if (field === 'guardianEmail') errors.email = 'Podaj poprawny adres e-mail opiekuna'
+      else if (field === 'guardianPhone') errors.phone = 'Podaj poprawny telefon opiekuna'
+      else if (field === 'receptionNotes') errors.receptionNotes = 'Skróć uwagi lub usuń niedozwolone znaki'
       else errors.body = 'Sprawdź dane klienta'
       return errors
     }
@@ -119,6 +132,12 @@ export function ClientDrawer({ opts, onClose }) {
       status: form.status,
       specialistId: form.psychId,
       assignmentStartsAt,
+      ...(form.phone.trim() || (editing?.guardianPhone ?? editing?.phone)
+        ? { guardianPhone: form.phone.trim().normalize('NFC') } : {}),
+      ...(form.email.trim() || (editing?.guardianEmail ?? editing?.email)
+        ? { guardianEmail: form.email.trim().normalize('NFC') } : {}),
+      ...(form.receptionNotes.trim() || editing?.receptionNotes
+        ? { receptionNotes: form.receptionNotes.trim().normalize('NFC') } : {}),
     }
   }
 
@@ -143,7 +162,54 @@ export function ClientDrawer({ opts, onClose }) {
     return true
   }
 
+  const selectedPsych = state.psychologists.find((psych) => psych.id === form.psychId)
+  const selectedLacksAccess = isApp && Boolean(selectedPsych) && !hasActivePanelAccess(selectedPsych)
+
+  const showConflict = () => {
+    setSaveStatus('error')
+    setConflict(true)
+    setSaveError(null)
+  }
+
+  // After a conflict the draft stays on screen; only this explicit reload
+  // swaps in the latest record (and its version) for the next save.
+  const [adoptLatest, setAdoptLatest] = useState(false)
+  const reloadLatest = async () => {
+    if (reloadStatus === 'loading') return
+    setReloadStatus('loading')
+    try {
+      await refreshWorkspace(opts.workspaceRange)
+    } catch {
+      setReloadStatus('error')
+      return
+    }
+    setAdoptLatest(true)
+  }
+  useEffect(() => {
+    if (!adoptLatest) return
+    setAdoptLatest(false)
+    const latest = state.clients.find((client) => client.id === editing?.id)
+    if (!latest) {
+      setReloadStatus('error')
+      return
+    }
+    const next = formFrom(latest, latest.psychId)
+    setEditing(latest)
+    setForm(next)
+    setInitialForm(next)
+    setErrors({})
+    setConfirmDel(false)
+    setConflict(false)
+    setReloadStatus('idle')
+    setSaveStatus('idle')
+    setSaveError(null)
+  }, [adoptLatest, state.clients, editing?.id])
+
   const submitApp = async () => {
+    if (conflict) {
+      shake()
+      return
+    }
     if (saveStatus === 'saving' || clientMutationLocked
       || !canPerformAction(capabilities, editing ? 'client.edit' : 'client.create')
       || editing?.readOnly || editing?.status === 'archived') return
@@ -162,9 +228,11 @@ export function ClientDrawer({ opts, onClose }) {
     }
     nextErrors.assignmentDate = assignmentDateError() || nextErrors.assignmentDate
     if (form.psychId && !availablePsychologists.some((psychologist) => psychologist.id === form.psychId)) {
-      nextErrors.psychId = role.scope === 'own'
-        ? 'Klient musi pozostać pod opieką aktywnej specjalistki'
-        : 'Wybierz aktywną specjalistkę'
+      nextErrors.psychId = selectedLacksAccess
+        ? NO_PANEL_ACCESS_COPY
+        : role.scope === 'own'
+          ? 'Klient musi pozostać pod opieką aktywnej specjalistki'
+          : 'Wybierz aktywną specjalistkę'
     }
     setErrors(nextErrors)
     if (Object.values(nextErrors).some(Boolean)) {
@@ -180,13 +248,15 @@ export function ClientDrawer({ opts, onClose }) {
         : await workspace.createClient(payload)
     } catch (error) {
       if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
-        forceClose()
-        try {
-          await refreshWorkspace(opts.workspaceRange)
-          toast('Dane klienta zostały odświeżone', 'alert')
-        } catch {
-          toast('Nie udało się odświeżyć danych klienta', 'alert')
-        }
+        showConflict()
+        return
+      }
+      if (selectedLacksAccess) {
+        // the server answers a generic NOT_FOUND here; the loaded team data
+        // tells us the real reason
+        setSaveStatus('error')
+        setErrors({ psychId: NO_PANEL_ACCESS_COPY })
+        focusFirstError()
         return
       }
       if (error instanceof ApiError && (error.code === 'CLIENT_ASSIGNMENT_CONFLICT'
@@ -197,19 +267,19 @@ export function ClientDrawer({ opts, onClose }) {
         return
       }
       setSaveStatus('error')
-      setSaveError('Nie udało się zapisać danych klienta.')
+      setSaveError(saveFailureCopy(error, { subject: 'danych klienta' }))
       return
     }
     if (!await refreshAfterAppMutation('Dane zapisano, ale nie udało się odświeżyć kartoteki.')) return
     if (editing) {
       forceClose()
-      toast('Dane klienta zapisane')
+      toast(`Dane klienta zostały zapisane · ${payload.name}`)
       return
     }
     allowCreatedClientNavigation.current = true
     forceClose()
     navigate('client', { id: createdClient.id })
-    setTimeout(() => toast('Nowy klient dodany. Otworzono kartę.'), 0)
+    setTimeout(() => toast(`Klient został dodany · ${payload.name}`), 0)
   }
 
   const submit = (e) => {
@@ -221,12 +291,19 @@ export function ClientDrawer({ opts, onClose }) {
     if (role.scope === 'own' && form.psychId !== role.psychId) {
       errs.psychId = 'Klient musi pozostać pod opieką aktywnej specjalistki'
     }
-    if (form.email.trim() && !EMAIL_SHAPE.test(form.email.trim())) errs.email = 'Podaj poprawny adres e-mail'
+    for (const [field, value, error] of [
+      ['guardianEmail', form.email, 'Podaj poprawny adres e-mail opiekuna'],
+      ['guardianPhone', form.phone, 'Podaj poprawny telefon opiekuna'],
+      ['receptionNotes', form.receptionNotes, 'Skróć uwagi lub usuń niedozwolone znaki'],
+    ]) {
+      try { assertClientContactFields({ [field]: value.trim().normalize('NFC') }) }
+      catch { errs[field === 'guardianEmail' ? 'email' : field === 'guardianPhone' ? 'phone' : field] = error }
+    }
     const dateError = assignmentDateError()
     if (dateError) errs.assignmentDate = dateError
     if (String(form.age).trim()) {
       const age = Number(form.age)
-      if (!Number.isInteger(age) || age < 1 || age > 26) errs.age = 'Podaj wiek od 1 do 26 lat'
+      if (!Number.isInteger(age) || age < 1 || age > 26) errs.age = AGE_ERROR
     }
     setErrors(errs)
     if (Object.keys(errs).length) {
@@ -240,6 +317,9 @@ export function ClientDrawer({ opts, onClose }) {
       psychId: form.psychId,
       email: form.email.trim(),
       phone: form.phone.trim(),
+      guardianPhone: form.phone.trim(),
+      guardianEmail: form.email.trim(),
+      receptionNotes: form.receptionNotes.trim(),
       status: form.status,
       since: form.assignmentDate,
     }
@@ -250,7 +330,7 @@ export function ClientDrawer({ opts, onClose }) {
       if (form.familyOtherId) {
         dispatch({ type: 'LINK_FAMILY', clientId: editing.id, otherId: form.familyOtherId, role: form.familyRole || null })
       }
-      toast('Dane klienta zapisane')
+      toast(`Dane klienta zostały zapisane · ${payload.name}`)
     } else {
       const note = form.note.trim()
       const createdClientId = allocateDemoClientId()
@@ -269,7 +349,7 @@ export function ClientDrawer({ opts, onClose }) {
       allowCreatedClientNavigation.current = true
       forceClose()
       navigate('client', { id: createdClientId })
-      setTimeout(() => toast('Nowy klient dodany. Otworzono kartę.'), 0)
+      setTimeout(() => toast(`Klient został dodany · ${payload.name}`), 0)
       return
     }
     forceClose()
@@ -281,12 +361,18 @@ export function ClientDrawer({ opts, onClose }) {
   const remove = () => {
     if (isApp) return
     dispatch({ type: 'DELETE_CLIENT', id: editing.id })
-    toast('Klient usunięty z kartoteki', 'close')
+    toast(`Klient został usunięty · ${editing.name}`)
     if (route.name === 'client' && route.params?.id === editing.id) navigate('clients')
     forceClose()
   }
 
+  const canArchive = isApp && Boolean(editing) && !editing.readOnly && editing.status !== 'archived'
+    && canPerformAction(capabilities, 'client.archive')
   const archive = async () => {
+    if (conflict) {
+      shake()
+      return
+    }
     if (!isApp || saveStatus === 'saving' || clientMutationLocked
       || !canPerformAction(capabilities, 'client.archive')
       || !editing || editing.readOnly || editing.status === 'archived') return
@@ -296,21 +382,22 @@ export function ClientDrawer({ opts, onClose }) {
       await workspace.archiveClient(editing.id, editing.version)
     } catch (error) {
       if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
-        forceClose()
-        try {
-          await refreshWorkspace(opts.workspaceRange)
-          toast('Dane klienta zostały odświeżone', 'alert')
-        } catch {
-          toast('Nie udało się odświeżyć danych klienta', 'alert')
-        }
+        showConflict()
         return
       }
       setSaveStatus('error')
-      setSaveError('Nie udało się zarchiwizować klienta.')
+      if (error instanceof ApiError && error.code === 'CLIENT_ARCHIVE_CONFLICT') {
+        setSaveError(ARCHIVE_BLOCKED_COPY)
+      } else {
+        const copy = saveFailureCopy(error)
+        setSaveError(copy.startsWith('Nie udało się zapisać')
+          ? 'Nie udało się zarchiwizować klienta. Spróbuj ponownie za chwilę.'
+          : copy)
+      }
       return
     }
     if (!await refreshAfterAppMutation('Klienta zarchiwizowano, ale nie udało się odświeżyć kartoteki.')) return
-    toast('Klient zarchiwizowany', 'close')
+    toast(`Klient został zarchiwizowany · ${editing.name}`)
     if (route.name === 'client' && route.params?.id === editing.id) navigate('clients')
     forceClose()
   }
@@ -369,7 +456,7 @@ export function ClientDrawer({ opts, onClose }) {
             </Field>
           </div>
 
-          <Field label="Wiek" error={errors.age} hint="Zostaw puste dla osoby dorosłej.">
+          <Field label="Wiek (opcjonalnie)" error={errors.age} hint="Tylko dla dzieci i młodzieży do 26 lat. Dorosłym zostaw puste.">
             <input
               type="number"
               min="1"
@@ -385,8 +472,8 @@ export function ClientDrawer({ opts, onClose }) {
             />
           </Field>
 
-          {!isApp && <div className="form-grid">
-            <Field label="E-mail" error={errors.email} hint="Kontakt do rodzica lub opiekuna.">
+          <div className="form-grid">
+            <Field label="E-mail opiekuna" error={errors.email}>
               <input
                 type="email"
                 name="client-email"
@@ -398,7 +485,7 @@ export function ClientDrawer({ opts, onClose }) {
                 onChange={(e) => set('email', e.target.value)}
               />
             </Field>
-            <Field label="Telefon">
+            <Field label="Telefon opiekuna" error={errors.phone}>
               <input
                 type="tel"
                 name="client-phone"
@@ -409,7 +496,19 @@ export function ClientDrawer({ opts, onClose }) {
                 onChange={(e) => set('phone', e.target.value)}
               />
             </Field>
-          </div>}
+          </div>
+
+          <Field label="Uwagi recepcji" error={errors.receptionNotes}
+            hint="Tylko informacje organizacyjne, bez notatek klinicznych.">
+            <textarea
+              name="client-reception-notes"
+              autoComplete="off"
+              className="textarea"
+              value={form.receptionNotes}
+              placeholder="np. Preferowany kontakt po 15:00"
+              onChange={(e) => set('receptionNotes', e.target.value)}
+            />
+          </Field>
 
           <Field
             label="Status"
@@ -447,7 +546,7 @@ export function ClientDrawer({ opts, onClose }) {
                     onClick={() => {
                       dispatch({ type: 'UNLINK_FAMILY', clientId: editing.id })
                       set('familyRole', '')
-                      toast('Powiązanie rodzinne usunięte', 'close')
+                      toast('Powiązanie rodzinne zostało usunięte')
                     }}
                   >
                     Usuń powiązanie z rodziną
@@ -498,6 +597,25 @@ export function ClientDrawer({ opts, onClose }) {
             </Field>
           )}
 
+          {editing && !confirmDel && (!isApp || canArchive) && (
+            <button
+              type="button"
+              className="link client-form__archive"
+              onClick={() => setConfirmDel(true)}
+              disabled={saveStatus === 'saving'}
+            >
+              {isApp ? 'Archiwizuj klienta' : 'Usuń klienta'}
+            </button>
+          )}
+
+          {isApp && editing && confirmDel && (
+            <div className="form-warn">
+              <Icon name="alert" size={15} />
+              <span>
+                <b>{editing.name}</b> zniknie z listy klientów. Karta, historia sesji i płatności zostaną zachowane.
+              </span>
+            </div>
+          )}
           {!isApp && editing && confirmDel && (
             <div className="form-warn form-warn--error" role="alert">
               <Icon name="alert" size={15} />
@@ -509,6 +627,18 @@ export function ClientDrawer({ opts, onClose }) {
                 )}
                 .
               </span>
+            </div>
+          )}
+          {conflict && (
+            <div className="form-warn form-warn--error client-form__conflict" role="alert">
+              <Icon name="alert" size={15} />
+              <span>
+                {conflictCopy('dane klienta')} Wczytaj aktualne dane i wprowadź zmianę jeszcze raz.
+                {reloadStatus === 'error' && <> {loadFailureCopy('danych klienta')}</>}
+              </span>
+              <Button size="sm" variant="soft" onClick={reloadLatest} disabled={reloadStatus === 'loading'}>
+                {reloadStatus === 'loading' ? 'Wczytuję dane klienta…' : reloadStatus === 'error' ? 'Spróbuj ponownie' : 'Wczytaj aktualne dane'}
+              </Button>
             </div>
           )}
           {saveError && (
@@ -523,36 +653,23 @@ export function ClientDrawer({ opts, onClose }) {
           <DiscardConfirm onStay={discardGuard.hide} onDiscard={forceClose} />
         )}
 
-        <div className="drawer__foot">
-          {isApp && confirmDel ? (
+        <div className={`drawer__foot${confirmDel ? ' client-form__confirm-foot' : ''}`}>
+          {confirmDel ? (
             <>
-              <Button variant="danger" onClick={archive} disabled={saveStatus === 'saving'}>
-                Tak, archiwizuj klienta
-              </Button>
               <Button variant="ghost" onClick={() => setConfirmDel(false)} disabled={saveStatus === 'saving'}>Wróć</Button>
-            </>
-          ) : !isApp && confirmDel ? (
-            <>
-              <Button variant="danger" onClick={remove}>
-                Tak, usuń klienta
-              </Button>
-              <Button variant="ghost" onClick={() => setConfirmDel(false)}>Wróć</Button>
+              {isApp ? (
+                <Button variant="danger" onClick={archive} disabled={saveStatus === 'saving'}>
+                  {saveStatus === 'saving' ? 'Archiwizowanie…' : 'Tak, archiwizuj klienta'}
+                </Button>
+              ) : (
+                <Button variant="danger" onClick={remove}>Tak, usuń klienta</Button>
+              )}
             </>
           ) : (
             <>
               <Button variant="primary" onClick={submit} disabled={isApp && saveStatus === 'saving'}>
-                {editing ? 'Zapisz zmiany' : 'Dodaj klienta'}
+                {isApp && saveStatus === 'saving' ? 'Zapisywanie…' : editing ? 'Zapisz zmiany' : 'Dodaj klienta'}
               </Button>
-              {editing && isApp && (
-                <Button variant="danger" onClick={() => setConfirmDel(true)} disabled={saveStatus === 'saving'}>
-                  Archiwizuj klienta
-                </Button>
-              )}
-              {editing && !isApp && (
-                <Button variant="danger" onClick={() => setConfirmDel(true)}>
-                  Usuń
-                </Button>
-              )}
               <Button variant="ghost" onClick={close} disabled={isApp && saveStatus === 'saving'}>Anuluj</Button>
             </>
           )}

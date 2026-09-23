@@ -12,7 +12,7 @@ test('client card opens the existing session drawer with its client selected', a
   await page.getByRole('navigation').getByRole('link', { name: 'Klienci' }).click()
   await page.getByRole('link', { name: 'Otwórz kartę — Zofia Mazur' }).click()
 
-  await page.getByRole('button', { name: 'Umów sesję' }).click()
+  await page.locator('.id-band__actions').getByRole('button', { name: 'Umów sesję' }).click()
   const drawer = page.getByRole('dialog', { name: 'Nowa sesja' })
   await expect(drawer.getByRole('combobox', { name: 'Klient' })).toHaveValue('Zofia Mazur')
 })

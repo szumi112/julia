@@ -14,6 +14,7 @@ import {
 } from '../../src/capabilities.js'
 
 const CATALOG = [
+  'activity.read',
   'appointment.charge.read',
   'appointment.manage',
   'backup.manage',
@@ -41,6 +42,7 @@ const CATALOG = [
 
 const DEFAULTS = {
   owner: [
+    'activity.read',
     'appointment.charge.read',
     'appointment.manage',
     'backup.manage',
@@ -65,6 +67,7 @@ const DEFAULTS = {
     'workbook.centre.export',
   ],
   coordinator: [
+    'activity.read',
     'appointment.charge.read',
     'appointment.manage',
     'chat.direct',
@@ -96,6 +99,7 @@ const DEFAULTS = {
 const CEILINGS = {
   owner: [...DEFAULTS.owner],
   coordinator: [
+    'activity.read',
     'appointment.charge.read',
     'appointment.manage',
     'chat.direct',
@@ -138,7 +142,7 @@ const invalid = (field) => ({
 
 test('publishes the exact frozen, unique, alphabetically ordered capability vocabulary', () => {
   assert.deepEqual(CAPABILITIES, CATALOG)
-  assert.equal(new Set(CAPABILITIES).size, 23)
+  assert.equal(new Set(CAPABILITIES).size, 24)
   assert.deepEqual(CAPABILITIES, [...CAPABILITIES].sort())
   assert.equal(Object.isFrozen(CAPABILITIES), true)
   for (const capability of CATALOG) assert.equal(isCapability(capability), true)
@@ -190,6 +194,7 @@ test('normalizes duplicate and contradictory overrides in catalog order without 
   assert.equal(Object.isFrozen(normalized.allow), true)
   assert.equal(Object.isFrozen(normalized.deny), true)
   assert.deepEqual(effectiveCapabilitiesFor(input), [
+    'activity.read',
     'appointment.charge.read',
     'chat.direct',
     'chat.general',

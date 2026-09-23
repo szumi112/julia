@@ -20,6 +20,8 @@ import { SERVICES, SERVICE_BY_ID, STANDARD_SERVICE, amountFor, durationFor } fro
 import { ApiError } from '../api.js'
 import { validateAppointmentInput } from '../core-records.js'
 import { canPerformAction } from '../capability-access.js'
+import { conflictCopy, saveFailureCopy } from '../save-failure-copy.js'
+import { hasActivePanelAccess, isAssignableSpecialist, NO_PANEL_ACCESS_COPY } from '../specialist-eligibility.js'
 import { isWorkspaceRangeCovered, monthWorkspaceRange } from '../workspace-view.js'
 import {
   appointmentCancellationTarget,
@@ -48,8 +50,9 @@ export function SessionDrawer({ opts, onClose }) {
   const dateRef = useRef(null)
 
   const availableClients = bookableClientsForRole(state, role)
+  // only specialists with active panel access can take a session in the app
   const availablePsychologists = state.psychologists.filter((psych) => (
-    (!isApp || psych.status === 'active')
+    (!isApp || isAssignableSpecialist(psych))
     && (role.scope !== 'own' || psych.id === role.psychId)
   ))
   const solePsychologist = availablePsychologists.length === 1 ? availablePsychologists[0] : null
@@ -401,6 +404,11 @@ export function SessionDrawer({ opts, onClose }) {
     return true
   }
 
+  const selectedPsychLacksAccess = () => {
+    const psych = state.psychologists.find((item) => item.id === form.psychId)
+    return Boolean(psych) && !hasActivePanelAccess(psych)
+  }
+
   const submitApp = async () => {
     if (saveStatus === 'saving' || appointmentMutationLocked
       || !canPerformAction(capabilities, editing
@@ -414,7 +422,7 @@ export function SessionDrawer({ opts, onClose }) {
       nextErrors.date = `Ten klient jest pod opieką tej specjalistki od ${assignmentStartLabel(selectedClient.assignmentStartsAt)}. Wcześniejszej sesji nie można zapisać.`
     }
     if (form.psychId && !availablePsychologists.some((psychologist) => psychologist.id === form.psychId)) {
-      nextErrors.psychId = 'Wybierz aktywną specjalistkę'
+      nextErrors.psychId = selectedPsychLacksAccess() ? NO_PANEL_ACCESS_COPY : 'Wybierz aktywną specjalistkę'
     }
     setErrors(nextErrors)
     if (Object.values(nextErrors).some(Boolean)) {
@@ -436,6 +444,11 @@ export function SessionDrawer({ opts, onClose }) {
         setErrors({ time: 'Ta sesja koliduje z inną sesją tej specjalistki. Wybierz inną godzinę.' })
         shake()
         focusFirstInvalid()
+      } else if (error instanceof ApiError && error.code === 'NOT_FOUND' && selectedPsychLacksAccess()) {
+        // the server refuses such a specialist with a generic NOT_FOUND
+        setErrors({ psychId: NO_PANEL_ACCESS_COPY })
+        shake()
+        focusFirstInvalid()
       } else if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
         try {
           const source = appRefreshSourceRange()
@@ -443,9 +456,9 @@ export function SessionDrawer({ opts, onClose }) {
         } catch {
           // The form intentionally stays open with its draft after stale failures.
         }
-        setSaveError('Zmiana nie została zapisana. Zamknij formularz i otwórz sesję ponownie.')
+        setSaveError(`${conflictCopy('tę sesję')} Zamknij formularz, otwórz go ponownie i wprowadź zmianę jeszcze raz.`)
       } else {
-        setSaveError('Nie udało się zapisać sesji.')
+        setSaveError(saveFailureCopy(error, { subject: 'sesji' }))
       }
       return
     }
@@ -513,10 +526,10 @@ export function SessionDrawer({ opts, onClose }) {
     }
     if (editing) {
       dispatch({ type: 'UPDATE_SESSION', id: editing.id, patch: payload })
-      toast('Zmiany w sesji zapisane')
+      toast(`Sesja została zapisana · ${selectedClient?.name || 'Klient'}, ${fmtDayMonth(payload.date)}, ${payload.time}`)
     } else {
       dispatch({ type: 'ADD_SESSION', session: payload })
-      toast('Nowa sesja dodana do Grafiku')
+      toast(`Sesja została dodana · ${selectedClient?.name || 'Klient'}, ${fmtDayMonth(payload.date)}, ${payload.time}`)
     }
     forceClose()
   }
@@ -543,7 +556,7 @@ export function SessionDrawer({ opts, onClose }) {
     const toastKey = appointmentCancellationToastKey(cancelled.id)
     toast(
       refreshed
-        ? `Sesja odwołana · ${clientName}, ${fmtDayMonth(editing.date)}, ${editing.time}`
+        ? `Sesja została odwołana · ${clientName}, ${fmtDayMonth(editing.date)}, ${editing.time}`
         : `Sesję odwołano, ale nie udało się odświeżyć Grafiku · ${clientName}, ${fmtDayMonth(editing.date)}, ${editing.time}`,
       refreshed ? 'check' : 'alert',
       {
@@ -554,7 +567,7 @@ export function SessionDrawer({ opts, onClose }) {
           try {
             restored = await workspace.restoreAppointment(cancelled.id, cancelled.version)
             if (range) await refreshWorkspace(range)
-            toast(`Sesję przywrócono · ${clientName}, ${fmtDayMonth(editing.date)}, ${editing.time}`, 'check', { key: toastKey })
+            toast(`Sesja została przywrócona · ${clientName}, ${fmtDayMonth(editing.date)}, ${editing.time}`, 'check', { key: toastKey })
           } catch (error) {
             if (!restored && error instanceof ApiError && error.code === 'VERSION_CONFLICT' && range) {
               try { await refreshWorkspace(range) } catch { /* keep the command error */ }
@@ -690,7 +703,7 @@ export function SessionDrawer({ opts, onClose }) {
           <Field
             label="Status sesji"
             hint={sessionHasStarted(form)
-              ? 'Rozliczane są sesje odbyte i nieobecności. Sesja odwołana nie jest fakturowana.'
+              ? 'Rozliczane są sesje odbyte i nieobecności. Sesja odwołana nie wlicza się do rozliczeń.'
               : 'Odbytą sesję oznaczysz po jej rozpoczęciu.'}
           >
             {form.status === 'cancelled'
@@ -777,7 +790,7 @@ export function SessionDrawer({ opts, onClose }) {
 
         <div className="drawer__foot">
           <Button variant="primary" onClick={submit} disabled={availablePsychologists.length === 0 || (isApp && (saveStatus === 'saving' || appointmentMutationLocked))}>
-            {editing ? 'Zapisz zmiany' : 'Dodaj sesję'}
+            {isApp && saveStatus === 'saving' ? 'Zapisywanie…' : editing ? 'Zapisz zmiany' : 'Dodaj sesję'}
           </Button>
           {editing && form.status !== 'cancelled'
             && (!isApp || canPerformAction(capabilities, 'appointment.cancel')) && (

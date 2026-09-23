@@ -13,8 +13,8 @@ test('calendar counters decline sessions and keep workbook entries and absences 
   assert.equal(sessionsWord(1), 'sesja')
   assert.equal(sessionsWord(2), 'sesje')
   assert.equal(sessionsWord(5), 'sesji')
-  assert.equal(calendarCountLabel(3, 2, 1), '3 sesje · 2 wpisy ze skoroszytu · 1 nieobecność')
-  assert.equal(calendarCountLabel(0, 1), '0 sesji · 1 wpis ze skoroszytu')
+  assert.equal(calendarCountLabel(3, 2, 1), '3 sesje · 2 wpisy z arkusza · 1 nieobecność')
+  assert.equal(calendarCountLabel(0, 1), '0 sesji · 1 wpis z arkusza')
 })
 
 test('calendar month picker omits the current year', () => {
@@ -58,7 +58,7 @@ test('session pill colors distinguish neutral states from completed and missed s
   assert.equal(STATUS_PILL.scheduled, 'pill--ink')
   assert.equal(STATUS_PILL.cancelled, 'pill--ink')
   assert.equal(STATUS_PILL.completed, 'pill--sage')
-  assert.equal(STATUS_PILL.noshow, 'pill--error')
+  assert.equal(STATUS_PILL.noshow, 'pill--pink')
 })
 
 test('money formatting preserves cents only for fractional złoty values', () => {
@@ -104,4 +104,10 @@ test('untilLabel formats compact countdowns', () => {
   assert.equal(untilLabel(45), 'za 45 min')
   assert.equal(untilLabel(60), 'za 1 h')
   assert.equal(untilLabel(125), 'za 2 h 5 min')
+})
+
+test('month prose uses the locative with the right preposition', async () => {
+  const { inMonthYear } = await import('../../src/format.js')
+  assert.equal(inMonthYear('2026-09'), 'we wrześniu 2026')
+  assert.equal(inMonthYear('2026-07'), 'w lipcu 2026')
 })

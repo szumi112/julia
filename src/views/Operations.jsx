@@ -2,21 +2,17 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { ApiError, apiClient } from '../api.js'
 import { canPerformAction } from '../capability-access.js'
 import {
+  backupFreshnessState,
   currentOperationalActions,
   operationalActionCommand,
   operationsSummary,
+  relInstantLabel,
 } from '../operations-view.js'
 import { useShell } from '../shell-ctx.js'
 import { useApp } from '../store.jsx'
 import { Button } from '../ui.jsx'
 import { EntityLink } from '../ux-patterns.jsx'
 import { BACKUP_FAILURE_COPY } from '../operations-diagnostics.js'
-
-const timeFormat = new Intl.DateTimeFormat('pl-PL', {
-  dateStyle: 'medium',
-  timeStyle: 'short',
-  timeZone: 'Europe/Warsaw',
-})
 
 const STATUS_COPY = Object.freeze({
   critical: 'wymaga działania',
@@ -39,7 +35,7 @@ const STALE_ERROR = 'Nie udało się odświeżyć listy problemów. Pokazujemy o
 const UNCERTAIN_ERROR = 'Nie udało się potwierdzić wyniku. Sprawdź listę przed ponowieniem.'
 const SUCCESS_STALE_ERROR = 'Działanie przyjęto, ale nie udało się odświeżyć listy problemów.'
 
-const formatTime = (instant) => timeFormat.format(new Date(instant))
+const formatTime = (instant) => relInstantLabel(instant) ?? ''
 const failureCopy = (error) => error instanceof ApiError && error.code === 'FORBIDDEN'
   ? FORBIDDEN_ERROR
   : GENERIC_ERROR
@@ -65,8 +61,9 @@ function problemCopy(action) {
     if (action.details.outboxType === 'staff.invitation.email') return {
       title: 'Nie udało się wysłać zaproszenia',
       description: action.recovery?.status === 'unsafe'
-        ? 'Zaproszenie mogło mimo wszystko dotrzeć. Sprawdź jego status przed kolejną próbą.'
+        ? 'Zaproszenie mogło już zostać wysłane. Sprawdź w Zespół › Dostęp, czy zaproszona osoba ma już dostęp. Jeśli nie, zapytaj ją, czy dostała e-mail.'
         : 'Zaproszenie nie zostało wysłane automatycznie.',
+      staffAccessLink: action.recovery?.status === 'unsafe',
     }
     if (action.details.outboxType === 'staff.access.reconcile') return {
       title: 'Nie udało się zaktualizować dostępu',
@@ -391,6 +388,7 @@ export function OperationsPanel({ sectionRef }) {
   const actions = snapshot.actions?.actions ?? []
   const currentActions = health ? currentOperationalActions(health, actions) : []
   const summary = health ? operationsSummary(health, actions) : null
+  const lastBackupAt = health ? backupFreshnessState(health).lastSuccessAt : null
 
   return (
     <>
@@ -422,9 +420,9 @@ export function OperationsPanel({ sectionRef }) {
             <div className="card card--pad operations-summary" data-status={summary.status}>
               <strong className="operations-summary__title">{summary.title}</strong>
               <p>{summary.description}</p>
-              {health.generatedAt ? (
+              {lastBackupAt ? (
                 <p className="operations-summary__time">
-                  Ostatnie sprawdzenie: <time dateTime={health.generatedAt}>{formatTime(health.generatedAt)}</time>
+                  Ostatnia kopia zapasowa: <time dateTime={lastBackupAt}>{formatTime(lastBackupAt)}</time>
                 </p>
               ) : null}
             </div>
@@ -440,6 +438,9 @@ export function OperationsPanel({ sectionRef }) {
                         <div>
                           <strong>{copy.title}</strong>
                           <p>{copy.description}</p>
+                          {copy.staffAccessLink ? (
+                            <EntityLink route="team" params={{ section: 'access' }}>Otwórz Zespół › Dostęp</EntityLink>
+                          ) : null}
                           <p className="operations-problem__time">
                             Zgłoszono <time dateTime={action.createdAt}>{formatTime(action.createdAt)}</time>
                           </p>

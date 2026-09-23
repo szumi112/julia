@@ -31,6 +31,7 @@ import { createD1QueryBudget, usageForD1QueryBudgetViews } from '../../worker/db
 import { createApp } from '../../worker/app.js'
 import { selectCoreMigrationStage } from '../../scripts/core-migration-stages.js'
 import {
+  applyActivityHistoryMigration,
   applyCoreDirectoryStageB,
   completeCoreDirectoryStageA,
 } from './apply-migrations.js'
@@ -57,6 +58,7 @@ const suffixes = (label) => {
 beforeAll(async () => {
   expect(await completeCoreDirectoryStageA()).toMatchObject({ status: 'complete' })
   await applyCoreDirectoryStageB()
+  await applyActivityHistoryMigration()
   const stageF = selectCoreMigrationStage(env.TEST_STAGE_F_MIGRATIONS, 'stage-f')
   await applyD1Migrations(env.DB, [
     stageF.find((migration) => migration.name === '0026_assignment_starts_at.sql'),
@@ -154,6 +156,7 @@ const ledgerSnapshot = async () => {
   const queries = {
     appointments: 'SELECT * FROM appointments ORDER BY id',
     audit: 'SELECT * FROM audit_events ORDER BY id',
+    activityDetails: 'SELECT * FROM activity_history_details ORDER BY audit_id',
     assignments: 'SELECT * FROM client_assignments ORDER BY id',
     charges: 'SELECT * FROM session_charges ORDER BY id',
     clients: 'SELECT * FROM clients ORDER BY id',
@@ -679,8 +682,8 @@ describe('persistent appointment creation', () => {
     expect(result.status).toBe(201)
   })
 
-  it('rolls back every one of the exact seven batch statements and stays within budget', async () => {
-    for (let failedAt = 0; failedAt < 7; failedAt += 1) {
+  it('rolls back every one of the exact eight batch statements and stays within budget', async () => {
+    for (let failedAt = 0; failedAt < 8; failedAt += 1) {
       const client = await seedClient()
       const before = await ledgerSnapshot()
       const db = {
@@ -700,7 +703,7 @@ describe('persistent appointment creation', () => {
     await create(client, { db: budget.work, recoveryDb: budget.recovery,
       body: { ...BODY, clientId: client.id, date: '2027-01-26' } })
     const usage = usageForD1QueryBudgetViews(budget.work, budget.recovery)
-    expect(usage).toEqual({ used: 13, remaining: 37, workRemaining: 29,
+    expect(usage).toEqual({ used: 14, remaining: 36, workRemaining: 28,
       totalLimit: 50, recoveryReserve: 8 })
   })
 
@@ -1066,7 +1069,7 @@ describe('persistent appointment editing', () => {
   })
 
   it('rolls back every statement in both edit UOW shapes and stays within exact budgets', async () => {
-    for (const [shape, statementCount] of [['unchanged', 5], ['changed', 7]]) {
+    for (const [shape, statementCount] of [['unchanged', 6], ['changed', 8]]) {
       for (let failedAt = 0; failedAt < statementCount; failedAt += 1) {
         const client = await seedClient()
         const current = (await create(client, { body: { ...BODY, clientId: client.id,
@@ -1091,7 +1094,7 @@ describe('persistent appointment editing', () => {
       }
     }
 
-    for (const [shape, expectedUsed] of [['unchanged', 14], ['changed', 16]]) {
+    for (const [shape, expectedUsed] of [['unchanged', 15], ['changed', 17]]) {
       const client = await seedClient()
       const date = shape === 'changed' ? '2027-06-02' : '2027-06-01'
       const current = (await create(client, { body: { ...BODY, clientId: client.id, date } }))
@@ -1376,7 +1379,7 @@ describe('persistent appointment editing', () => {
     expect(loser).toEqual(winner)
     expect(recoveryReads).toBe(2)
     expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
-      used: 17, remaining: 33, workRemaining: 25,
+      used: 18, remaining: 32, workRemaining: 24,
       totalLimit: 50, recoveryReserve: 8,
     })
   })
@@ -2033,8 +2036,8 @@ describe('persistent appointment cancellation', () => {
     } })).resolves.toMatchObject({ status: 201 })
   })
 
-  it('rolls back all five statements byte-for-byte and stays inside exact budgets', async () => {
-    for (let failedAt = 0; failedAt < 5; failedAt += 1) {
+  it('rolls back all six statements byte-for-byte and stays inside exact budgets', async () => {
+    for (let failedAt = 0; failedAt < 6; failedAt += 1) {
       const client = await seedClient()
       const current = (await create(client, { body: {
         ...BODY, clientId: client.id, date: `2027-10-0${failedAt + 1}`,
@@ -2055,13 +2058,13 @@ describe('persistent appointment cancellation', () => {
 
     const client = await seedClient()
     const current = (await create(client, { body: {
-      ...BODY, clientId: client.id, date: '2027-10-06',
+      ...BODY, clientId: client.id, date: '2027-10-07',
     } })).body.data.appointment
     const budget = createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 })
     await cancel(current, { db: budget.work, recoveryDb: budget.recovery })
     const usage = usageForD1QueryBudgetViews(budget.work, budget.recovery)
     expect(usage).toEqual({
-      used: 13, remaining: 37, workRemaining: 29,
+      used: 14, remaining: 36, workRemaining: 28,
       totalLimit: 50, recoveryReserve: 8,
     })
   })
@@ -2132,7 +2135,7 @@ describe('persistent appointment cancellation', () => {
       WHERE entity_id=? AND action='appointment.cancelled'`).bind(unrelated.id).first()).count)
       .toBe(1)
     expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
-      used: 22, remaining: 28, workRemaining: 20,
+      used: 23, remaining: 27, workRemaining: 19,
       totalLimit: 50, recoveryReserve: 8,
     })
   })
@@ -2176,7 +2179,7 @@ describe('persistent appointment cancellation', () => {
     expect(loser).toEqual(winner)
     expect(recoveryReads).toBe(2)
     expect(usageForD1QueryBudgetViews(budget.work, budget.recovery)).toEqual({
-      used: 16, remaining: 34, workRemaining: 26,
+      used: 17, remaining: 33, workRemaining: 25,
       totalLimit: 50, recoveryReserve: 8,
     })
   })

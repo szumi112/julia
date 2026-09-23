@@ -15,8 +15,7 @@ import { useIsCompact, useIsPhone } from './responsive.js'
 import { useMinuteNow } from './clock.js'
 import { TodayCockpit } from './cockpit.jsx'
 import { motionOK, brandBurst } from './anim.js'
-import { fmtMonthYear, monthKey, toISODate, fmtWeekday, cap, sessionsWord, outstandingOf } from './format.js'
-import { todayWorkspace } from './workspace.js'
+import { fmtMonthYear, monthKey, toISODate, cap, outstandingOf } from './format.js'
 import { weekWorkspaceRange } from './workspace-view.js'
 import { activityCurrentMonth } from './activity-workspace.js'
 import { activityModuleVisible } from './tus.js'
@@ -33,8 +32,8 @@ import { Reports } from './views/Reports.jsx'
 import { ProtectedFinance } from './views/ProtectedFinance.jsx'
 import { OwnPayments } from './views/OwnPayments.jsx'
 import { ProtectedReports } from './views/ProtectedReports.jsx'
-import { WorkbookExport } from './views/WorkbookExport.jsx'
 import { Profile, Settings } from './views/Settings.jsx'
+import { ActivityHistory } from './views/ActivityHistory.jsx'
 import { SessionDrawer } from './views/SessionForm.jsx'
 import { SpecialistAbsenceDrawer } from './views/SpecialistAbsenceForm.jsx'
 import { ClientDrawer } from './views/ClientForm.jsx'
@@ -61,8 +60,9 @@ const NAV = [
   { id: 'team', label: 'Zespół', icon: 'team' },
   { id: 'payments', label: 'Finanse', icon: 'payments' },
   { id: 'reports', label: 'Raporty', icon: 'reports' },
+  { id: 'history', label: 'Historia aktywności', icon: 'clock' },
 ]
-const CENTRE_NAV_IDS = new Set(['team', 'payments', 'reports'])
+const CENTRE_NAV_IDS = new Set(['team', 'payments', 'reports', 'history'])
 
 const EMPTY_CAPABILITIES = Object.freeze([])
 
@@ -84,6 +84,7 @@ const TITLES = {
   payments: 'Finanse',
   ledger: 'Rejestr',
   reports: 'Raporty',
+  history: 'Historia aktywności',
   settings: 'Ustawienia',
   profile: 'Mój profil',
 }
@@ -101,6 +102,7 @@ const VIEWS = {
   payments: Payments,
   ledger: Finance,
   reports: Reports,
+  history: ActivityHistory,
   settings: Settings,
   profile: Profile,
 }
@@ -111,12 +113,7 @@ const ACTIVE_OF = { client: 'clients', psych: 'team', tusGroup: 'tus' }
 const META_K = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent) ? '⌘ K' : 'Ctrl K'
 
 function AppSpecialistPayments() {
-  return (
-    <div>
-      <OwnPayments />
-      <WorkbookExport own />
-    </div>
-  )
+  return <OwnPayments />
 }
 
 function AppUnavailablePayments() {
@@ -131,7 +128,7 @@ function RetiredLedger() {
   return <div className="view-head"><div>
     <div className="eyebrow">Narzędzia arkusza</div>
     <h1 className="display view-head__title">Rejestr został <em>przeniesiony</em></h1>
-    <p className="view-head__sub">Wgrywanie arkusza i eksport pełnego skoroszytu znajdziesz w Finansach.</p>
+    <p className="view-head__sub">Wgrywanie arkusza i eksport całej bazy znajdziesz w Finansach.</p>
   </div></div>
 }
 
@@ -175,9 +172,7 @@ function Sidebar({
   inert,
   navIds,
   canAccessRoute,
-  showTodayCard = true,
 }) {
-  const { state } = useApp()
   const navRef = useRef(null)
   const pillRef = useRef(null)
   const activeId = ACTIVE_OF[route.name] || route.name
@@ -205,9 +200,6 @@ function Sidebar({
     }
   }, [activeId, itemIds, role.id, showSettings])
 
-  const now = new Date()
-  const today = toISODate(now)
-  const todayCount = todayWorkspace(state, role, now).daySummary.total
   const navItem = (item) => (
     <a
       key={item.id}
@@ -253,15 +245,6 @@ function Sidebar({
       </nav>
       <div className="sidebar__foot" data-shell-reveal>
         {accountControls}
-        {showTodayCard && (
-          <div className="today-card">
-            <div className="today-card__label">Dziś · {fmtWeekday(today)}</div>
-            <div className="today-card__line">
-              {todayCount > 0 ? `${todayCount} ${sessionsWord(todayCount)} w grafiku` : 'Spokojny dzień'}
-            </div>
-            <div className="today-card__sub">Weź głęboki oddech 🌿</div>
-          </div>
-        )}
       </div>
     </aside>
   )
@@ -407,7 +390,6 @@ function MobileNavDrawer({
         className={`sidebar--drawer ${phone ? 'sidebar--phone' : ''}`}
         innerRef={asideRef}
         navIds={phone ? PHONE_MENU_IDS : undefined}
-        showTodayCard={appMode !== 'app' && !phone}
       />
     </div>
   )
@@ -665,7 +647,7 @@ function useMonthSettled() {
             document.querySelector('.stat--amber') ||
             document.querySelector('.today-chip')
           )
-          toast(`${cap(fmtMonthYear(ym))} rozliczony w całości ✨`)
+          toast(`${cap(fmtMonthYear(ym))} został rozliczony w całości`)
           break
         }
       }
@@ -1256,7 +1238,6 @@ export function Shell({
             role={role}
             canAccessRoute={canShowNavigationRoute}
             inert={hasOverlay ? '' : undefined}
-            showTodayCard={!isApp}
           />
         )}
         <div className="main">
@@ -1280,7 +1261,7 @@ export function Shell({
             todayWorkspaceState={todayWorkspaceState}
           />
           {isApp && dataMode === 'fictional' && (
-            <div className="environment-strip" role="status">Środowisko testowe</div>
+            <div className="environment-strip" role="status">Wersja testowa - nie wpisuj prawdziwych danych klientów</div>
           )}
           <main
             id="main-content"
@@ -1337,7 +1318,7 @@ export function Shell({
       {isApp && overlay === 'drawer' && drawer?.kind === 'activityMembership' && <ActivityMembershipDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {isApp && overlay === 'drawer' && drawer?.kind === 'activityClass' && <ActivityClassDrawer opts={drawer.opts} onClose={closeDrawer} />}
       {!isApp && overlay === 'drawer' && drawer?.kind === 'board' && <BoardDrawer onClose={closeDrawer} />}
-      {overlay === 'palette' && <CommandPalette onClose={() => closeOverlay('palette')} />}
+      {overlay === 'palette' && <CommandPalette nav={NAV} onClose={() => closeOverlay('palette')} />}
       {pendingLeave && (
         <LeaveConfirmDialog
           onCancel={cancelLeave}

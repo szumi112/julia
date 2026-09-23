@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import { selectCoreMigrationStage } from '../../scripts/core-migration-stages.js'
 import { CAPABILITIES } from '../../src/capabilities.js'
 import {
+  applyActivityHistoryMigration,
   applyCoreDirectoryStageB,
   applyFinanceStageC,
   applySpecialistProfilesStageD,
@@ -43,7 +44,7 @@ const indexColumns = async (name) => (await all(`PRAGMA index_info(${name})`))
   .sort((left, right) => left.seqno - right.seqno)
   .map(({ name: column }) => column)
 
-describe('capability override migration', () => {
+describe('capability override migrations', () => {
   beforeAll(async () => {
     await completeCoreDirectoryStageA()
     await applyCoreDirectoryStageB()
@@ -62,6 +63,7 @@ describe('capability override migration', () => {
     await insertStaff('stf_authority_backfill')
     await insertStaff('stf_authority_changer')
     await applyD1Migrations(env.DB, [authorityMigration])
+    await applyActivityHistoryMigration()
 
     await insertStaff('stf_authority_catalog')
     await insertStaff('stf_authority_override')

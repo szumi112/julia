@@ -10,6 +10,8 @@ import { isD1CoreDirectoryInvariantFailure, isD1IdentityCollision } from '../db/
 import { authorize } from '../identity/policy.js'
 import { specialistPostcondition } from '../identity/specialists.js'
 import { auditEventStatement } from '../audit/events.js'
+import { activityDetailStatement } from '../audit/activity-history.js'
+import { appointmentActivityChanges } from '../../src/activity-history.js'
 import {
   createOwnershipCapabilityBoundary,
   decryptClientIdentity,
@@ -449,18 +451,31 @@ const authenticateClientVersions = async (context, current, identity, value) => 
       })
       snapshot = JSON.parse(plaintext)
     } catch { notFound() }
+    const contactKeys = snapshot?.schema === 'client.v2'
+      ? ['guardianPhone', 'guardianEmail', 'receptionNotes'] : []
     const fact = captureExact(snapshot, [
       'age', 'archivedAt', 'createdAt', 'id', 'name', 'schema', 'status',
-      'updatedAt', 'version',
+      'updatedAt', 'version', ...contactKeys,
     ], notFound)
-    try { assertClientIdentity({ name: fact.name, age: fact.age }) } catch { notFound() }
-    if (fact.id !== current.id || fact.schema !== 'client.v1' || fact.version !== row.version
+    try {
+      const canonical = assertClientIdentity({
+        name: fact.name, age: fact.age,
+        ...Object.fromEntries(contactKeys.map((key) => [key, fact[key]])),
+      })
+      if (contactKeys.some((key) => canonical[key] !== fact[key])
+        || (fact.schema === 'client.v2' && contactKeys.every((key) => fact[key] === ''))) notFound()
+    } catch { notFound() }
+    if (fact.id !== current.id || !['client.v1', 'client.v2'].includes(fact.schema)
+      || fact.version !== row.version
       || !['active', 'paused'].includes(fact.status) || fact.archivedAt !== null
       || fact.createdAt !== current.createdAt || !canonicalInstant(fact.updatedAt)
       || fact.updatedAt !== row.changed_at
       || (previousUpdatedAt !== null && fact.updatedAt <= previousUpdatedAt)) notFound()
     previousUpdatedAt = fact.updatedAt
     if (index === rows.length - 1 && (fact.name !== identity.name || fact.age !== identity.age
+      || contactKeys.some((key) => fact[key] !== (identity[key] ?? ''))
+      || (fact.schema === 'client.v1' && ['guardianPhone', 'guardianEmail', 'receptionNotes']
+        .some((key) => (identity[key] ?? '') !== ''))
       || fact.status !== current.status || fact.archivedAt !== null
       || fact.createdAt !== current.createdAt || fact.updatedAt !== current.updatedAt)) notFound()
   }
@@ -1097,6 +1112,13 @@ export async function createAppointment(input) {
     entityType: 'appointment', entityId: appointment.id, result: 'success',
     correlationId: command.correlationId,
     metadata: { appointmentVersion: 1, chargeVersion: 1 }, reasonEnvelope: null,
+  }))
+  uow.domain(await activityDetailStatement(command.db, {
+    auditId, action: 'appointment.created', keyring: context.keyring,
+    dataKey: context.dataKey, scope: context.scope,
+    changes: appointmentActivityChanges(null, {
+      ...appointment, expectedAmountGrosze: charge.expectedAmountGrosze,
+    }),
   }))
   uow.idempotency(idempotency)
   uow.guard(guardStatement(command.db, guardValues))
@@ -2259,6 +2281,15 @@ export async function editAppointment(input) {
     metadata: { appointmentVersion: appointment.version, chargeVersion: charge.version },
     reasonEnvelope: null,
   }))
+  const activityChanges = appointmentActivityChanges(
+    { ...current.appointment, expectedAmountGrosze: current.charge.expectedAmountGrosze },
+    { ...appointment, expectedAmountGrosze: charge.expectedAmountGrosze },
+  )
+  if (activityChanges.length) uow.domain(await activityDetailStatement(command.db, {
+    auditId, action: 'appointment.updated', keyring: current.context.keyring,
+    dataKey: current.context.dataKey, scope: current.context.scope,
+    changes: activityChanges,
+  }))
   uow.idempotency(idempotency)
   uow.guard(editGuardStatement(command.db, values))
   try {
@@ -3030,6 +3061,11 @@ export async function cancelAppointment(input) {
     },
     reasonEnvelope: null,
   }))
+  uow.domain(await activityDetailStatement(command.db, {
+    auditId, action: 'appointment.cancelled', keyring: current.context.keyring,
+    dataKey: current.context.dataKey, scope: current.context.scope,
+    changes: appointmentActivityChanges(current.appointment, appointment),
+  }))
   uow.idempotency(idempotency)
   uow.guard(cancellationGuardStatement(command.db, values))
   try {
@@ -3355,6 +3391,11 @@ export async function restoreAppointment(input) {
       chargeVersion: current.charge.version,
     },
     reasonEnvelope: null,
+  }))
+  uow.domain(await activityDetailStatement(command.db, {
+    auditId, action: 'appointment.restored', keyring: current.context.keyring,
+    dataKey: current.context.dataKey, scope: current.context.scope,
+    changes: appointmentActivityChanges(current.appointment, appointment),
   }))
   uow.idempotency(idempotency)
   uow.guard(restorationGuardStatement(command.db, values))

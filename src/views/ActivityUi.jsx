@@ -1,9 +1,10 @@
-import { Button, EmptyState, Figure, IconBtn, Pill } from '../ui.jsx'
+import { Button, EmptyState, Figure, Pill } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
-import { addMonths, fmtMonthYear, fmtMoney, METHOD_LABELS } from '../format.js'
+import { fmtMonthYear, fmtMoney, METHOD_LABELS } from '../format.js'
 import { routeHref } from '../routing.js'
 import { useApp } from '../store.jsx'
-import { ViewState } from '../ux-patterns.jsx'
+import { PeriodNav, ViewState } from '../ux-patterns.jsx'
+import { loadFailureCopy } from '../save-failure-copy.js'
 import { FinanceEntryActions } from './FinanceEntryActions.jsx'
 
 const SETTLEMENT_LABELS = Object.freeze({
@@ -21,11 +22,9 @@ export function ActivityLoadState({ state, title, onRetry }) {
   return (
     <ViewState
       tone={state === 'loading' ? 'loading' : 'error'}
-      icon="group"
+      icon={state === 'loading' ? 'group' : 'alert'}
       title={state === 'loading' ? 'Wczytuję zajęcia…' : activityUnavailableTitle(title)}
-      hint={state === 'loading'
-        ? 'Pobieramy dane za wybrany miesiąc.'
-        : 'Nie udało się pobrać danych. Spróbuj ponownie.'}
+      hint={state === 'loading' ? null : loadFailureCopy('zajęć')}
       action={state === 'unavailable' && onRetry ? <Button onClick={onRetry}>Spróbuj ponownie</Button> : null}
     />
   )
@@ -38,30 +37,18 @@ export function ActivityModuleEmpty({ program }) {
       icon="group"
       title={english ? 'Angielski nie jest teraz w Twoim zakresie' : 'Zajęcia TUS nie są teraz w Twoim zakresie'}
       hint={english
-        ? 'Nie prowadzisz obecnie grupy angielskiego. Gdy dostaniesz przypisanie, zajęcia pojawią się tutaj.'
-        : 'Nie prowadzisz obecnie grupy TUS. Gdy dostaniesz przypisanie, zajęcia pojawią się tutaj.'}
+        ? 'Nie prowadzisz obecnie grupy angielskiego. Gdy ktoś z centrum doda Cię jako prowadzącą, zobaczysz ją tutaj.'
+        : 'Nie prowadzisz obecnie grupy TUS. Gdy ktoś z centrum doda Cię jako prowadzącą, zobaczysz ją tutaj.'}
     />
   )
 }
 
+// Sits in its own row under the page header, left-aligned, like the other
+// month pickers.
 export function ActivityMonthNav({ currentMonth, month, onChange }) {
   return (
     <div className="activity-month-controls">
-      {month !== currentMonth && (
-        <Button variant="ghost" size="sm" onClick={() => onChange(currentMonth)}>Bieżący miesiąc</Button>
-      )}
-      <div className="month-nav">
-        <IconBtn name="chevL" label="Poprzedni miesiąc" onClick={() => onChange(addMonths(month, -1))} />
-        <time className="month-nav__label" dateTime={month}>{fmtMonthYear(month)}</time>
-        <IconBtn
-          name="chevR"
-          label="Następny miesiąc"
-          onClick={() => onChange(addMonths(month, 1))}
-        />
-      </div>
-      <span className="sr-only" aria-live="polite" aria-atomic="true">
-        Wybrano miesiąc: {fmtMonthYear(month)}
-      </span>
+      <PeriodNav month={month} current={currentMonth} onChange={onChange} />
     </div>
   )
 }
@@ -70,7 +57,7 @@ export function ActivityLatestLink({ latestMonth, month, route, params = {} }) {
   if (!latestMonth || latestMonth === month) return null
   return (
     <a className="link activity-latest" href={routeHref(route, { ...params, ym: latestMonth })}>
-      Przejdź do ostatniego miesiąca z danymi — {fmtMonthYear(latestMonth)}
+      Pokaż ostatni miesiąc z danymi ({fmtMonthYear(latestMonth)})
     </a>
   )
 }

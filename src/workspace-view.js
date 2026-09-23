@@ -5,7 +5,7 @@ import {
   compareHistoricalOccurrences,
 } from './historical-records.js'
 import { captureLoadedActivitiesState } from './loaded-activities.js'
-import { assertProfessionalTitle } from './core-records.js'
+import { assertClientContactFields, assertProfessionalTitle } from './core-records.js'
 import { specialistAvatarKeyOrDefault } from './specialist-avatars.js'
 
 const CIVIL_DATE = /^(\d{4})-(\d{2})-(\d{2})$/
@@ -276,6 +276,10 @@ const projectClient = (item) => {
     version: safeInteger(item.version, 1, Number.MAX_SAFE_INTEGER, 'workspace client'),
     readOnly,
     since,
+    ...assertClientContactFields(Object.fromEntries(
+      ['guardianPhone', 'guardianEmail', 'receptionNotes']
+        .filter((field) => Object.hasOwn(item, field)).map((field) => [field, item[field]]),
+    )),
   })
 }
 

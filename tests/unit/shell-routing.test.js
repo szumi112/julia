@@ -27,7 +27,7 @@ test('preserves the exact demo role navigation including detail routes', () => {
   }
   const routes = [
     'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'team',
-    'psych', 'payments', 'ledger', 'reports', 'settings', 'profile', 'unknown',
+    'psych', 'payments', 'ledger', 'reports', 'history', 'settings', 'profile', 'unknown',
   ]
 
   for (const [roleId, accessible] of Object.entries(expectations)) {
@@ -76,13 +76,17 @@ test('maps every rendered protected route to capabilities instead of role labels
       accessible: ['payments', 'ledger', 'reports', 'profile'],
     },
     {
+      capabilities: ['activity.read'],
+      accessible: ['history', 'profile'],
+    },
+    {
       capabilities: [],
     accessible: ['profile'],
     },
   ]
   const routes = [
     'dashboard', 'calendar', 'clients', 'client', 'tus', 'tusGroup', 'team',
-    'psych', 'payments', 'ledger', 'reports', 'settings', 'profile', 'english', 'unknown',
+    'psych', 'payments', 'ledger', 'reports', 'history', 'settings', 'profile', 'english', 'unknown',
   ]
 
   for (const { capabilities, accessible } of cases) {

@@ -94,3 +94,12 @@ export const applyCapabilityOverridesMigration = () => {
   if (!migration) throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')
   return applyD1Migrations(env.DB, [migration])
 }
+
+export const applyActivityHistoryMigration = async () => {
+  await applyCapabilityOverridesMigration()
+  const migration = env.TEST_STAGE_F_MIGRATIONS.find(({ name }) => (
+    name === '0028_activity_history.sql'
+  ))
+  if (!migration) throw new Error('CORE_DIRECTORY_TEST_SETUP_INVALID')
+  return applyD1Migrations(env.DB, [migration])
+}

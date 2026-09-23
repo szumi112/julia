@@ -22,6 +22,7 @@ import {
   useProtectedPaymentContext,
 } from './PaymentActions.jsx'
 import { useFinanceWindow } from './use-finance-window.js'
+import { loadFailureCopy } from '../save-failure-copy.js'
 import { FinanceEntryActions, FinanceEntryToolbar } from './FinanceEntryActions.jsx'
 import { Registry } from './Registry.jsx'
 import { WorkbookExport } from './WorkbookExport.jsx'
@@ -61,6 +62,11 @@ function MonthlySettlement({ values }) {
   const due = collected + outstanding + verification
   const collectedShare = due > 0 ? Math.round((collected / due) * 100) : 0
   const settlementSummary = due > 0 ? `${collectedShare}% wpłacone` : 'Brak należności'
+  const parts = [
+    { value: collected, color: 'var(--sage)', label: 'Wpłacono' },
+    { value: outstanding, color: 'var(--amber-mid)', label: 'Do zapłaty' },
+    { value: verification, color: 'var(--ink-faint)', label: 'Do sprawdzenia' },
+  ]
 
   return (
     <section className="finance-window__balance" data-reveal aria-label="Rozliczenie miesiąca">
@@ -69,15 +75,14 @@ function MonthlySettlement({ values }) {
         <span className="hbar__val">{settlementSummary}</span>
       </div>
       <div className="hbar__track finance-window__balance-track" aria-hidden="true">
-        <BarFill
-          segments={[
-            { value: collected, color: 'var(--sage)', label: 'wpłacono' },
-            { value: outstanding, color: 'var(--amber-mid)', label: 'pozostało do zapłaty' },
-            { value: verification, color: 'var(--ink-faint)', label: 'do sprawdzenia' },
-          ]}
-          totalMax={Math.max(due, 1)}
-        />
+        <BarFill segments={parts} totalMax={Math.max(due, 1)} />
       </div>
+      {due > 0 ? <ul className="legend finance-window__balance-legend">
+        {parts.filter(({ value }) => value > 0).map(({ color, label, value }) => <li key={label} className="row" style={{ gap: 8 }}>
+          <span className="legend__swatch" style={{ background: color }} aria-hidden="true" />
+          {label}: {money(value)}
+        </li>)}
+      </ul> : null}
     </section>
   )
 }
@@ -100,7 +105,7 @@ function LedgerTable({
     ? 'Angielski' : SERVICE_BY_ID[row.serviceId]?.label ?? 'Pozostała pozycja'
   const settlementLabel = (row) => row.settlementStatus === 'unknown' ? 'Do sprawdzenia'
     : row.settlementStatus === 'paid' ? 'Opłacona'
-      : row.settlementStatus === 'partial' ? 'Częściowo opłacona' : 'Nieopłacona'
+      : row.settlementStatus === 'partial' ? 'Częściowo opłacona' : 'Do zapłaty'
 
   if (income) return (
     <section className="card finance-window__table" data-reveal aria-labelledby="finance-income-title">
@@ -129,7 +134,7 @@ function LedgerTable({
         </td></tr> : rowsForKind.map((row) => {
           const settlement = financeIncomeSettlement(row)
           return <tr key={row.id}>
-            <td data-th="Data">{row.occurredOn ? fmtShortDate(row.occurredOn) : 'Dzień nieustalony'}</td>
+            <td data-th="Data">{row.occurredOn ? fmtShortDate(row.occurredOn) : <span className="muted">bez dnia</span>}</td>
             <td data-th="Osoba lub opis"><strong>{sourceLabel(row)}</strong>
               {!row.appointmentId && row.counterparty && row.counterparty !== row.sourceLabel
                 ? <div className="muted">{row.counterparty}</div> : null}</td>
@@ -162,7 +167,7 @@ function LedgerTable({
             <EmptyState icon="payments" title="Brak faktur w tym miesiącu" />
           </td></tr> : rowsForKind.map((row) => (
             <tr key={row.id}>
-              <td data-th="Data">{row.occurredOn ? fmtShortDate(row.occurredOn) : 'Dzień nieustalony'}</td>
+              <td data-th="Data">{row.occurredOn ? fmtShortDate(row.occurredOn) : <span className="muted">bez dnia</span>}</td>
               <td data-th="Osoba lub opis"><strong>{sourceLabel(row)}</strong>
                 {!row.appointmentId && row.counterparty && row.counterparty !== row.sourceLabel
                   ? <div className="muted">{row.counterparty}</div> : null}</td>
@@ -191,7 +196,7 @@ function LedgerTable({
               <EmptyState icon="payments" title="Brak wydatków w tym miesiącu" />
             </td></tr> : rowsForKind.map((row) => (
               <tr key={row.id}>
-                <td data-th="Data">{row.occurredOn ? fmtShortDate(row.occurredOn) : 'Dzień nieustalony'}</td>
+                <td data-th="Data">{row.occurredOn ? fmtShortDate(row.occurredOn) : <span className="muted">bez dnia</span>}</td>
                 <td data-th="Opis"><strong>{row.sourceLabel || row.counterparty || 'Wydatek'}</strong>
                   {row.counterparty && row.counterparty !== row.sourceLabel
                     ? <div className="muted">{row.counterparty}</div> : null}</td>
@@ -292,30 +297,6 @@ export function ProtectedFinance({ params = {} }) {
     requestAnimationFrame(() => headingRef.current?.focus({ preventScroll: true }))
   }, [finance.status, selectedMonth])
 
-  if (!finance.isCurrent) return (
-    <div className="finance-window">
-      <div className="view-head">
-        <div>
-          <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>
-            Finanse — <em>{fmtMonthYear(selectedMonth)}</em>
-          </h1>
-          <p className="view-head__sub">Jedno autorytatywne podsumowanie rejestru centrum.</p>
-        </div>
-        <div className="view-head__actions">
-          <FinanceEntryToolbar selectedMonth={selectedMonth} onChanged={finance.reload} />
-          <PeriodNav month={selectedMonth} min={FINANCE_WINDOW_MIN_MONTH} max={serverCurrentMonth} current={serverCurrentMonth} onChange={selectMonth} />
-        </div>
-      </div>
-      <ViewState
-        tone={finance.phase === 'error' || finance.phase === 'refresh-error' ? 'error' : 'loading'}
-        icon="payments"
-        title={finance.phase === 'error' || finance.phase === 'refresh-error' ? 'Finanse są teraz niedostępne' : 'Wczytuję finanse…'}
-        hint="Nie pokazujemy niezweryfikowanych kwot dla wybranego miesiąca."
-        action={finance.phase === 'error' || finance.phase === 'refresh-error' ? <Button onClick={finance.reload}>Spróbuj ponownie</Button> : null}
-      />
-    </div>
-  )
-
   const paymentMixTotal = paymentMix.reduce((total, part) => total + part.value, 0)
   const emptyMonth = selectedRows.length === 0
   const afterFinanceEntryChanged = (kind) => {
@@ -326,15 +307,14 @@ export function ProtectedFinance({ params = {} }) {
   const canUseWorkbookTools = appMode === 'app' && environment === 'staging'
     && canPerformAction(capabilities, 'finance.import.preview')
     && canPerformAction(capabilities, 'finance.import.create')
+  const failed = finance.phase === 'error' || finance.phase === 'refresh-error'
 
   return (
     <div className="finance-window" ref={revealRef}>
-      <div className="view-head" data-reveal>
+      <div className="view-head">
         <div>
-          <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>
-            Finanse — <em>{fmtMonthYear(selectedMonth)}</em>
-          </h1>
-          <p className="view-head__sub">Jedno autorytatywne podsumowanie rejestru centrum.</p>
+          <h1 className="display view-head__title" ref={headingRef} tabIndex={-1}>Finanse</h1>
+          <p className="view-head__sub">Wpłaty, kwoty do zapłaty i wydatki poradni w wybranym miesiącu.</p>
         </div>
         <div className="view-head__actions">
           <WorkbookExport placement="finance-header" onComplete={finance.reload} />
@@ -342,19 +322,25 @@ export function ProtectedFinance({ params = {} }) {
           <PeriodNav month={selectedMonth} min={FINANCE_WINDOW_MIN_MONTH} max={serverCurrentMonth} current={serverCurrentMonth} onChange={selectMonth} />
         </div>
       </div>
+      {!finance.isCurrent ? <ViewState
+        className={failed ? '' : 'finance-window__loading'}
+        tone={failed ? 'error' : 'loading'}
+        icon="payments"
+        title={failed ? loadFailureCopy('finansów') : 'Wczytuję finanse…'}
+        action={failed ? <Button onClick={finance.reload}>Spróbuj ponownie</Button> : null}
+      /> : <>
       {finance.phase === 'refreshing' && <ViewState
         tone="loading"
         compact
         icon="payments"
-        title="Odświeżamy finanse…"
-        hint="Wyświetlone kwoty dotyczą nadal wybranego miesiąca."
+        title="Odświeżam finanse…"
       />}
       {finance.phase === 'refresh-error' && <ViewState
         tone="error"
         compact
         icon="payments"
         title="Nie udało się odświeżyć finansów"
-        hint="Pokazujemy ostatnio potwierdzone dane wybranego miesiąca."
+        hint="Widzisz ostatnio wczytane dane tego miesiąca."
         action={<Button size="sm" onClick={finance.reload}>Spróbuj ponownie</Button>}
       />}
       <div className={finance.isStale ? 'is-refreshing' : ''} aria-busy={finance.phase === 'refreshing' || undefined}>
@@ -365,7 +351,7 @@ export function ProtectedFinance({ params = {} }) {
           hint="Pozycje pojawią się tu po odbytych sesjach albo po dodaniu wydatku."
         />
         {monthView.latestPopulatedMonth ? <Button variant="ghost" onClick={() => selectMonth(monthView.latestPopulatedMonth)}>
-          Pokaż ostatni miesiąc z danymi — {fmtMonthYear(monthView.latestPopulatedMonth)}
+          Pokaż ostatni miesiąc z danymi ({fmtMonthYear(monthView.latestPopulatedMonth)})
         </Button> : null}
       </section> : <>
       <Kpis values={window.kpis} />
@@ -373,6 +359,18 @@ export function ProtectedFinance({ params = {} }) {
         Do sprawdzenia: {money(window.kpis.verificationGrosze)}. Te wpływy wymagają potwierdzenia rozliczenia.
       </p> : null}
       <MonthlySettlement values={window.kpis} />
+      <Tabs options={TABS} value={tab} onChange={setTab} ariaLabel="Obszary finansów">
+        <LedgerTable
+          rows={selectedRows}
+          kind={tab}
+          specialistNames={specialistNames}
+          appointmentLabels={appointmentLabels}
+          onReconciled={afterFinanceEntryChanged}
+          paymentContext={paymentContext}
+          unpaidOnly={unpaidOnly}
+          onUnpaidOnlyChange={setUnpaidOnly}
+        />
+      </Tabs>
       <section className="card card--pad finance-window__trend" data-reveal aria-labelledby="finance-trend-title">
         <h2 className="card-title" id="finance-trend-title">Przychody · sześć miesięcy</h2>
         <div className="chart-frame">
@@ -451,21 +449,10 @@ export function ProtectedFinance({ params = {} }) {
           )}
         </section>
       </div>
-      <Tabs options={TABS} value={tab} onChange={setTab} ariaLabel="Obszary finansów">
-        <LedgerTable
-          rows={selectedRows}
-          kind={tab}
-          specialistNames={specialistNames}
-          appointmentLabels={appointmentLabels}
-          onReconciled={afterFinanceEntryChanged}
-          paymentContext={paymentContext}
-          unpaidOnly={unpaidOnly}
-          onUnpaidOnlyChange={setUnpaidOnly}
-        />
-      </Tabs>
+      </>}
+      </div>
       </>}
       {canUseWorkbookTools ? <Registry embedded /> : null}
-      </div>
     </div>
   )
 }

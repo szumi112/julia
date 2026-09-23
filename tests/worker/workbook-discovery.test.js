@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import { ROLE_DEFAULT_CAPABILITIES } from '../../src/capabilities.js'
 import * as workbookCore from '../../worker/core/workbooks.js'
 import {
+  applyActivityHistoryMigration,
   applyCoreDirectoryStageB,
   applyFinanceStageC,
   applySpecialistProfilesStageD,
@@ -118,6 +119,7 @@ beforeAll(async () => {
   await applyFinanceStageC()
   await applySpecialistProfilesStageD()
   await applyWorkbookRegistryStageE()
+  await applyActivityHistoryMigration()
   await seedFinanceImportOperator(OPERATOR, 'operator')
   await seedFinanceImportOperator(OTHER_OPERATOR, 'other')
   await env.DB.batch([

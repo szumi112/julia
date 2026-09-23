@@ -7,7 +7,7 @@ import { Button, IconBtn, Segmented, Avatar, Chip, Pill, EmptyState, Popover } f
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
 import { ProtectedPaymentAction, useProtectedPaymentContext } from './PaymentActions.jsx'
-import { FilterBar, FilterGroup, useRouteParamsSync, ViewState } from '../ux-patterns.jsx'
+import { EntityLink, FilterBar, FilterGroup, PeriodNav, useRouteParamsSync, ViewState } from '../ux-patterns.jsx'
 import {
   compareCalendarSessionOrder,
   sessionMatchesFilters,
@@ -15,10 +15,14 @@ import {
 } from '../workspace.js'
 import { serviceBadge } from '../services.js'
 import {
-  monthKey, addMonths, fmtMonthNameWithYearOutsideCurrent, fmtMonthYear, toISODate, parseISO, pad2, cap,
-  fmtWeekday, fmtDayMonth, fmtWeekRange, fmtMoney, sessionsWord, calendarCountLabel, timeToMin,
-  STATUS_LABELS, PAY_LABELS, fmtMonthLocative, warsawDateTimeFromUtc, isBillable,
+  monthKey, addMonths, fmtMonthNameWithYearOutsideCurrent, toISODate, parseISO, pad2, cap,
+  fmtWeekday, fmtDayMonth, fmtMoney, calendarCountLabel, timeToMin,
+  STATUS_LABELS, PAY_LABELS, inMonthYear, warsawDateTimeFromUtc, isBillable,
 } from '../format.js'
+import {
+  dayHeadingLabel, firstSessionDayInMonth, monthSelectionDay, weekRangeLabel,
+} from '../calendar-dates.js'
+import { conflictCopy, loadFailureCopy } from '../save-failure-copy.js'
 import {
   clientIdentityFor,
   isWorkspaceRangeCovered,
@@ -56,10 +60,10 @@ const PAYMENT_FILTERS = [
 ]
 const ATTENDANCE_FILTERS = [
   { value: 'all', label: 'Wszystkie' },
-  { value: 'noshow', label: 'Nieobecność' },
-  { value: 'completed', label: 'Odbyta' },
-  { value: 'cancelled', label: 'Odwołana' },
   { value: 'scheduled', label: 'Zaplanowana' },
+  { value: 'completed', label: 'Odbyta' },
+  { value: 'noshow', label: 'Nieobecność' },
+  { value: 'cancelled', label: 'Odwołana' },
 ]
 
 const defaultCalendarFilters = () => ({ payment: 'all', attendance: 'all', specialist: null })
@@ -192,13 +196,6 @@ function monthGrid(ym) {
   return cells
 }
 
-function firstSessionDayInMonth(ym, sessions) {
-  return sessions
-    .filter((session) => session.date?.startsWith(`${ym}-`))
-    .map((session) => session.date)
-    .sort()[0] || `${ym}-01`
-}
-
 function WeekNav({ selected, today, sessions, firstMonth, lastMonth, isApp, onSelect }) {
   const [open, setOpen] = useState(false)
   const [pickerMonth, setPickerMonth] = useState(() => monthKey(selected))
@@ -225,6 +222,7 @@ function WeekNav({ selected, today, sessions, firstMonth, lastMonth, isApp, onSe
   }
 
   const week = weekDaysFor(selected)
+  const weekLabel = weekRangeLabel(week[0], week[6], currentYear)
   return (
     <Popover
       open={open}
@@ -237,10 +235,10 @@ function WeekNav({ selected, today, sessions, firstMonth, lastMonth, isApp, onSe
           size="sm"
           className="week-nav__trigger"
           aria-haspopup="dialog"
-          aria-label={`Wybierz tydzień: ${fmtWeekRange(week[0], week[6])}`}
+          aria-label={`Wybierz tydzień: ${weekLabel}`}
           onClick={() => setOpen((current) => !current)}
         >
-          <span className="month-nav__label month-nav__label--sentence">{fmtWeekRange(week[0], week[6])}</span>
+          <span className="month-nav__label month-nav__label--sentence">{weekLabel}</span>
         </Button>
       )}
     >
@@ -381,10 +379,11 @@ export function CalendarView({ params = {} }) {
   const { locked: appointmentMutationLocked } = useAppointmentMutationLock()
   const refreshWorkspace = useWorkspaceRefresh()
   const {
-    appMode, capabilities, getViewState, navigate, openSessionForm,
+    appMode, canAccess, capabilities, getViewState, navigate, openSessionForm,
     openSpecialistAbsenceForm, patchViewState, role,
   } = useShell()
   const isApp = appMode === 'app'
+  const canOpenClient = canAccess('client') === true
   const today = toISODate(new Date())
   const curYm = monthKey(new Date())
   const [initialViewState] = useState(() => {
@@ -643,10 +642,10 @@ export function CalendarView({ params = {} }) {
               try {
                 await refreshWorkspace(workspaceRange)
                 if (d.cancelled || !calendarMounted.current) return
-                toast('Sesja została zmieniona. Odświeżono Grafik.', 'alert')
+                toast(conflictCopy('tę sesję'), 'alert')
               } catch {
                 if (d.cancelled || !calendarMounted.current) return
-                toast('Sesja została zmieniona, ale nie udało się odświeżyć Grafiku.', 'alert')
+                toast(`${conflictCopy('tę sesję')} Nie udało się odświeżyć Grafiku.`, 'alert')
               }
             } else if (commandAccepted) {
               toast('Sesję przeniesiono, ale nie udało się odświeżyć Grafiku.', 'alert')
@@ -693,7 +692,7 @@ export function CalendarView({ params = {} }) {
                     date: restoredAt.date,
                     highlightSessionIds: [restoredAppointment.id],
                   })
-                  toast('Zmianę sesji cofnięto.', 'check', { key: toastKey })
+                  toast('Zmiana sesji została cofnięta', 'check', { key: toastKey })
                 } catch (error) {
                   if (!undoAccepted && error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
                     try {
@@ -714,9 +713,9 @@ export function CalendarView({ params = {} }) {
           selectDay(movedAt.date)
           navigate('calendar', { date: movedAt.date, highlightSessionIds: [updatedAppointment.id] })
         } else if (clash) {
-          toast(`Sesja przeniesiona na ${fmtDayMonth(d.dropIso)} — uwaga, nakłada się z sesją o ${clash.time}`, 'alert')
+          toast(`Sesja została przełożona · ${fmtDayMonth(d.dropIso)} · Uwaga: nakłada się z sesją o ${clash.time}`, 'alert')
         } else {
-          toast(`Sesja przeniesiona na ${fmtDayMonth(d.dropIso)}`)
+          toast(`Sesja została przełożona · ${fmtDayMonth(d.dropIso)}`)
         }
         if (!isApp) selectDay(d.dropIso)
       }
@@ -756,11 +755,13 @@ export function CalendarView({ params = {} }) {
   const agendaFlipRef = useFlip(`agenda|${filterKey}`)
   const gridFlipRef = useFlip(`cal|${filterKey}`)
 
-  const changeMonth = (d) => {
-    const next = addMonths(ym, d)
+  // A month switch selects today in the current month, else the first day with
+  // sessions. An unloaded month settles that choice once its data arrives.
+  const autoSelectMonth = useRef(null)
+  const goToMonth = (next) => {
+    autoSelectMonth.current = next === curYm ? null : next
     setYm(next)
-    // keep a day selected so the panel never collapses to an empty prompt
-    setSelected(next === curYm ? today : `${next}-01`)
+    setSelected(monthSelectionDay(next, filteredSessions, today))
   }
 
   const toggleFilter = (key, value) => {
@@ -778,6 +779,7 @@ export function CalendarView({ params = {} }) {
   // Selecting a day brings its session list into view only when it is off
   // screen — a panel the user can already see must not move under them.
   const selectDay = (iso, scroll = true) => {
+    autoSelectMonth.current = null
     const shouldScroll = scroll && iso !== selected
     setYm(monthKey(iso))
     setSelected(iso)
@@ -856,6 +858,11 @@ export function CalendarView({ params = {} }) {
   const workspaceRefreshing = isApp && workspaceCovered
     && isWorkspaceRangePending(workspacePendingRanges, workspaceRange)
   const workspaceRefreshFailed = isApp && workspaceCovered && workspaceFailed
+  useEffect(() => {
+    if (autoSelectMonth.current !== ym || !workspaceCovered) return
+    autoSelectMonth.current = null
+    setSelected(firstSessionDayInMonth(ym, filteredSessions))
+  }, [filteredSessions, workspaceCovered, ym])
   const absenceLoadKeyRef = useRef(null)
   const [absenceLoadError, setAbsenceLoadError] = useState(false)
   const absenceProviderState = workspace.absences?.state
@@ -913,7 +920,7 @@ export function CalendarView({ params = {} }) {
         ...current,
         absences: current.absences.filter(({ id }) => id !== cancelled.id),
       }))
-      toast('Wolne anulowane')
+      toast('Wolne zostało anulowane')
     } catch {
       toast('Nie udało się anulować wolnego.', 'alert')
     }
@@ -944,9 +951,9 @@ export function CalendarView({ params = {} }) {
       if (!commandAccepted && error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
         try {
           await refreshWorkspace(workspaceRange)
-          toast('Sesja została zmieniona. Odświeżono Grafik.', 'alert')
+          toast(conflictCopy('tę sesję'), 'alert')
         } catch {
-          toast('Sesja została zmieniona, ale nie udało się odświeżyć Grafiku.', 'alert')
+          toast(`${conflictCopy('tę sesję')} Nie udało się odświeżyć Grafiku.`, 'alert')
         }
       } else if (commandAccepted) {
         toast('Status sesji zapisano, ale nie udało się odświeżyć Grafiku.', 'alert')
@@ -956,7 +963,7 @@ export function CalendarView({ params = {} }) {
       return
     }
     const toastKey = `appointment-undo-${updatedAppointment.id}`
-    toast(`Status zmieniony: ${STATUS_LABELS[status].toLowerCase()}`, 'check', {
+    toast(`Status sesji został zmieniony · ${STATUS_LABELS[status]}`, 'check', {
       key: toastKey,
       label: 'Cofnij',
       onClick: async () => {
@@ -965,7 +972,7 @@ export function CalendarView({ params = {} }) {
           await workspace.editAppointment(updatedAppointment.id, updatedAppointment.version, previousEdit)
           undoAccepted = true
           await refreshWorkspace(workspaceRange)
-          toast('Zmianę sesji cofnięto.', 'check', { key: toastKey })
+          toast('Zmiana sesji została cofnięta', 'check', { key: toastKey })
         } catch (error) {
           if (!undoAccepted && error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
             try {
@@ -1001,7 +1008,7 @@ export function CalendarView({ params = {} }) {
     const toastKey = appointmentCancellationToastKey(cancelled.id)
     toast(
       refreshed
-        ? `Sesja odwołana · ${clientName}, ${fmtDayMonth(session.date)}, ${session.time}`
+        ? `Sesja została odwołana · ${clientName}, ${fmtDayMonth(session.date)}, ${session.time}`
         : `Sesję odwołano, ale nie udało się odświeżyć Grafiku · ${clientName}, ${fmtDayMonth(session.date)}, ${session.time}`,
       refreshed ? 'check' : 'alert',
       {
@@ -1012,7 +1019,7 @@ export function CalendarView({ params = {} }) {
           try {
             restored = await workspace.restoreAppointment(cancelled.id, cancelled.version)
             await refreshWorkspace(workspaceRange)
-            toast(`Sesję przywrócono · ${clientName}, ${fmtDayMonth(session.date)}, ${session.time}`, 'check', { key: toastKey })
+            toast(`Sesja została przywrócona · ${clientName}, ${fmtDayMonth(session.date)}, ${session.time}`, 'check', { key: toastKey })
           } catch (error) {
             if (!restored && error instanceof ApiError && error.code === 'VERSION_CONFLICT') {
               try { await refreshWorkspace(workspaceRange) } catch { /* keep the command error */ }
@@ -1034,27 +1041,10 @@ export function CalendarView({ params = {} }) {
   // One navigator per view: Plan dnia moves by week and Miesiąc by month.
   const firstMonth = monthsRange[0]
   const lastMonth = monthsRange[monthsRange.length - 1]
-  const nav = mode === 'agenda'
-    ? {
-      label: fmtWeekRange(weekDays[0], weekDays[6]),
-      prevLabel: 'Poprzedni tydzień',
-      nextLabel: 'Następny tydzień',
-      prev: () => selectDay(addDays(agendaSel, -7)),
-      next: () => selectDay(addDays(agendaSel, 7)),
-      prevOff: !isApp && monthKey(addDays(weekDays[0], -7)) < firstMonth,
-      nextOff: !isApp && monthKey(addDays(weekDays[6], 7)) > lastMonth,
-      atToday: agendaSel === today,
-    }
-    : {
-      label: fmtMonthYear(ym),
-      prevLabel: 'Poprzedni miesiąc',
-      nextLabel: 'Następny miesiąc',
-      prev: () => changeMonth(-1),
-      next: () => changeMonth(1),
-      prevOff: !isApp && ym <= firstMonth,
-      nextOff: !isApp && ym >= lastMonth,
-      atToday: ym === curYm,
-    }
+  const weekNav = {
+    prevOff: !isApp && monthKey(addDays(weekDays[0], -7)) < firstMonth,
+    nextOff: !isApp && monthKey(addDays(weekDays[6], 7)) > lastMonth,
+  }
   const focusedHighlightKey = useRef(null)
   useEffect(() => {
     if (highlightedSessionIds.size === 0) return
@@ -1117,7 +1107,16 @@ export function CalendarView({ params = {} }) {
       >
         <span className="agenda__time">{s.time}</span>
         <span className="agenda__main">
-          <span className="agenda__client">{clientName}</span>
+          {clientIdentity.available && canOpenClient ? (
+            <EntityLink
+              route="client"
+              params={{ id: s.clientId }}
+              label={`Otwórz kartę klienta — ${clientName}`}
+              className="agenda__client agenda__client-link"
+            >
+              {clientName}
+            </EntityLink>
+          ) : <span className="agenda__client">{clientName}</span>}
           <span className="agenda__meta">
             <Avatar name={specialistIdentity.name} color={specialistIdentity.color} avatarKey={specialistIdentity.avatarKey} size={16} />
             {specialistIdentity.name} · {fmtMoney(s.amount)}
@@ -1244,45 +1243,12 @@ export function CalendarView({ params = {} }) {
         </div>
       </div>
 
-      {!workspaceCovered ? <ViewState
-        ariaLabel="Stan Grafiku"
-        tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
-        icon="calendar"
-        title={workspaceState === 'unavailable' ? 'Grafik jest teraz niedostępny' : 'Wczytuję Grafik…'}
-        hint={workspaceState === 'unavailable'
-          ? 'Nie pokazujemy niepełnego ani demonstracyjnego Grafiku.'
-          : 'Pobieramy kompletny widoczny zakres Grafiku.'}
-        action={workspaceState === 'unavailable'
-          ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
-          : undefined}
-      /> : <>
-      {workspaceRefreshing && <ViewState
-        compact
-        tone="loading"
-        icon="calendar"
-        title="Odświeżamy Grafik…"
-        hint="Wyświetlamy ostatnio potwierdzony widoczny zakres."
-      />}
-      {workspaceRefreshFailed && <ViewState
-        compact
-        tone="error"
-        icon="calendar"
-        title="Nie udało się odświeżyć Grafiku"
-        hint="Wyświetlamy ostatnio potwierdzony widoczny zakres."
-        action={<Button size="sm" onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>}
-      />}
-      {absenceUnavailable && (
-        <div className="cal__absence-error" role="status">
-          <span>Nie udało się sprawdzić wolnego w tym zakresie.</span>
-          <Button variant="ghost" size="sm" onClick={retryAbsences}>Spróbuj ponownie</Button>
-        </div>
-      )}
-
+      {/* the period navigator stays put while a new period loads or fails */}
       <div className="row row--between cal-toolbar" data-reveal>
-        <div className="row" style={{ gap: 14 }}>
-          <div className="month-nav">
-            <IconBtn name="chevL" label={nav.prevLabel} disabled={nav.prevOff} onClick={nav.prev} />
-            {mode === 'agenda' ? (
+        {mode === 'agenda' ? (
+          <div className="row" style={{ gap: 14 }}>
+            <div className="month-nav">
+              <IconBtn name="chevL" label="Poprzedni tydzień" disabled={weekNav.prevOff} onClick={() => selectDay(addDays(agendaSel, -7))} />
               <WeekNav
                 selected={agendaSel}
                 today={today}
@@ -1292,16 +1258,54 @@ export function CalendarView({ params = {} }) {
                 isApp={isApp}
                 onSelect={selectDay}
               />
-            ) : <span className="month-nav__label month-nav__label--sentence">{cap(nav.label)}</span>}
-            <IconBtn name="chevR" label={nav.nextLabel} disabled={nav.nextOff} onClick={nav.next} />
+              <IconBtn name="chevR" label="Następny tydzień" disabled={weekNav.nextOff} onClick={() => selectDay(addDays(agendaSel, 7))} />
+            </div>
+            {agendaSel !== today && (
+              <Button variant="ghost" size="sm" onClick={() => selectDay(today)}>
+                Dziś
+              </Button>
+            )}
           </div>
-          {!nav.atToday && (
-            <Button variant="ghost" size="sm" onClick={() => selectDay(today)}>
-              Dziś
-            </Button>
-          )}
-        </div>
+        ) : (
+          <PeriodNav
+            month={ym}
+            min={isApp ? undefined : firstMonth}
+            max={isApp ? undefined : lastMonth}
+            current={curYm}
+            onChange={goToMonth}
+          />
+        )}
       </div>
+
+      {!workspaceCovered ? <ViewState
+        ariaLabel="Stan Grafiku"
+        tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
+        icon="calendar"
+        title={workspaceState === 'unavailable' ? loadFailureCopy('Grafiku') : 'Wczytuję Grafik…'}
+        action={workspaceState === 'unavailable'
+          ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
+          : undefined}
+      /> : <>
+      {workspaceRefreshing && <ViewState
+        compact
+        tone="loading"
+        icon="calendar"
+        title="Odświeżam Grafik…"
+      />}
+      {workspaceRefreshFailed && <ViewState
+        compact
+        tone="error"
+        icon="calendar"
+        title="Nie udało się odświeżyć Grafiku"
+        hint="Widzisz ostatnio wczytane sesje."
+        action={<Button size="sm" onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>}
+      />}
+      {absenceUnavailable && (
+        <div className="cal__absence-error" role="status">
+          <span>Nie udało się sprawdzić wolnego w tym okresie.</span>
+          <Button variant="ghost" size="sm" onClick={retryAbsences}>Spróbuj ponownie</Button>
+        </div>
+      )}
 
       {role.scope !== 'own' && (
         <section className="filter-bar" aria-label="Filtr specjalistki">
@@ -1339,7 +1343,7 @@ export function CalendarView({ params = {} }) {
               </Chip>
             ))}
         </FilterGroup>
-        <FilterGroup label="Obecność klienta">
+        <FilterGroup label="Status sesji">
             {ATTENDANCE_FILTERS.map((attendance) => (
               <Chip key={attendance.value} on={filters.attendance === attendance.value} onClick={() => toggleFilter('attendance', attendance.value)}>
                 {attendance.label}
@@ -1365,7 +1369,7 @@ export function CalendarView({ params = {} }) {
             <div className="agenda-day__head">
               <h2 className="card-title agenda-day__title">
                 <span className="agenda-day__title-text">
-                  {cap(fmtWeekday(agendaSel))}, {fmtDayMonth(agendaSel)}
+                  {dayHeadingLabel(agendaSel, Number(today.slice(0, 4)))}
                   {agendaSel === today && <span className="pill pill--amber">dziś</span>}
                 </span>
               </h2>
@@ -1393,12 +1397,7 @@ export function CalendarView({ params = {} }) {
             {agendaSessions.length === 0
               && (historicalModel.exactByDay[agendaSel]?.length ?? 0) === 0
               && agendaAbsences.length === 0 ? (
-              <EmptyState
-                compact
-                icon="calendar"
-                title="Brak sesji tego dnia"
-                hint={isApp ? 'W tym kompletnym zakresie nie ma zaplanowanych sesji.' : 'Dodaj pierwszą sesję przyciskiem poniżej.'}
-              />
+              <EmptyState compact icon="calendar" title="Tego dnia nie ma sesji" />
             ) : (
               dayThread(
                 agendaSessions,
@@ -1411,7 +1410,7 @@ export function CalendarView({ params = {} }) {
             )}
             {canManageAppointments && <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
               onClick={() => openSessionForm({ date: agendaSel, psychId: rolePsychId, workspaceRange })}>
-              Dodaj sesję tego dnia
+              Umów sesję na ten dzień
             </Button>}
           </section>
         </>
@@ -1471,7 +1470,7 @@ export function CalendarView({ params = {} }) {
                         {items.slice(0, 3).map((s) => (
                           <span
                             key={s.id}
-                            className={`cal__item ${s.status === 'scheduled' && canDragSession(s) ? 'is-draggable' : ''}`}
+                            className={`cal__item cal__item--${s.status} ${s.status === 'scheduled' && canDragSession(s) ? 'is-draggable' : ''}`}
                             data-flip-id={s.id}
                             style={{ background: psychOf(s.psychId)?.soft, '--node-color': psychOf(s.psychId)?.color }}
                             onPointerDown={(e) => { if (canDragSession(s)) onChipDown(e, s) }}
@@ -1539,12 +1538,7 @@ export function CalendarView({ params = {} }) {
                   />
                 ))}
                 {selected && daySessions.length === 0 && dayHistoricalRows.length === 0 && selectedAbsences.length === 0 && (
-                  <EmptyState
-                    compact
-                    icon="calendar"
-                    title="Brak sesji tego dnia"
-                    hint={isApp ? 'W tym kompletnym zakresie nie ma zaplanowanych sesji.' : 'Dodaj pierwszą sesję przyciskiem poniżej.'}
-                  />
+                  <EmptyState compact icon="calendar" title="Tego dnia nie ma sesji" />
                 )}
                 {(daySessions.length > 0 || dayHistoricalRows.length > 0) &&
                   dayThread(
@@ -1557,7 +1551,7 @@ export function CalendarView({ params = {} }) {
               {selected && canManageAppointments && (
                 <Button variant="soft" size="sm" icon="plus" className="btn--full" style={{ marginTop: 14 }}
                   onClick={() => openSessionForm({ date: selected, psychId: rolePsychId, workspaceRange })}>
-                  Dodaj sesję tego dnia
+                  Umów sesję na ten dzień
                 </Button>
               )}
             </div>
@@ -1566,20 +1560,19 @@ export function CalendarView({ params = {} }) {
       )}
       {isApp && historicalModel.suppressedCount > 0 && (
         <p className="historical-filter-note" role="status">
-          Wpisy ze skoroszytu bez statusu i płatności są ukryte przez aktywny filtr.
+          Wpisy z arkusza bez statusu i płatności są ukryte przez aktywny filtr.
         </p>
       )}
       {isApp && mode === 'cal' && workspaceState === 'ready' && showHistorical
         && canonicalMonthAppointmentCount + historicalModel.historicalCount === 0 && (
         <section className="card card--pad historical-zero" aria-live="polite">
-          <h2 className="card-title">Brak sesji i wpisów ze skoroszytu w tym miesiącu</h2>
-          <p>W {fmtMonthLocative(ym)} {ym.slice(0, 4)} nie ma sesji ani wpisów ze skoroszytu.</p>
+          <h2 className="card-title">Brak sesji i wpisów z arkusza w tym miesiącu</h2>
+          <p>{cap(inMonthYear(ym))} nie ma sesji ani wpisów z arkusza.</p>
           {latestMonthAction && (
             <Button
               variant="soft"
               onClick={() => {
-                setYm(latestMonthAction.month)
-                setSelected(`${latestMonthAction.month}-01`)
+                goToMonth(latestMonthAction.month)
                 setMode('cal')
                 setReview(null)
               }}

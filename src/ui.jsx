@@ -607,7 +607,7 @@ export function EmptyState({ icon = 'sparkle', title, hint, action, compact, ton
   return (
     <div className={`empty empty--${tone} ${compact ? 'empty--sm' : ''}`}>
       <span className="empty__icon">
-        <Icon name={icon} size={compact ? 18 : 22} />
+        <Icon name={tone === 'error' ? 'alert' : icon} size={compact ? 18 : 22} />
       </span>
       <div className="empty__title">{title}</div>
       {hint && <div className="empty__hint">{hint}</div>}

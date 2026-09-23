@@ -52,10 +52,10 @@ test('@owner staging export is retried after a quiet failure and removed after e
   })
 
   await page.goto('./#/payments')
-  const exportButton = page.getByRole('button', { name: 'Pobierz pełny skoroszyt' })
+  const exportButton = page.getByRole('button', { name: 'Pobierz arkusz Excel' })
   await expect(exportButton).toBeVisible()
   await exportButton.click()
-  await expect(page.getByRole('alert')).toContainText('Nie udało się przygotować bezpiecznego eksportu')
+  await expect(page.getByRole('alert')).toContainText('Nie udało się przygotować arkusza')
   const download = page.waitForEvent('download')
   await page.getByRole('button', { name: 'Spróbuj ponownie' }).click()
   expect((await download).suggestedFilename()).toBe('panel-v2-test.xlsx')
@@ -67,6 +67,6 @@ test('@owner staging export is retried after a quiet failure and removed after e
 test('@owner does not see workbook tools outside staging or without import capability', async ({ page }) => {
   await installSession(page, { environment: 'development' })
   await page.goto('./#/payments')
-  await expect(page.getByRole('button', { name: 'Pobierz pełny skoroszyt' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Pobierz arkusz Excel' })).toHaveCount(0)
   await expect(page.getByText('Wgraj arkusz', { exact: true })).toHaveCount(0)
 })

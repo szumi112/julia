@@ -31,6 +31,7 @@ const expectedActor = ({
   capabilities = ROLE_DEFAULT_CAPABILITIES[role],
 }) => ({ id, role, specialistId, version, authorityRevision, capabilities })
 const COORDINATOR_OVERRIDE_CAPABILITIES = Object.freeze([
+  'activity.read',
   'appointment.charge.read',
   'appointment.manage',
   'chat.direct',

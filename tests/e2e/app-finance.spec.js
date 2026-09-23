@@ -389,7 +389,7 @@ test('@owner keeps the six-month report context beside the selected month empty 
   await page.goto('./#/reports?ym=2026-08')
 
   await expect(page.getByText('Brak danych w bieżącym miesiącu', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Pokaż ostatni miesiąc z danymi — lipiec 2026' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Pokaż ostatni miesiąc z danymi (lipiec 2026)' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Drukuj' })).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'Trend sześciu miesięcy' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Pokrycie czasu i dat' })).toBeVisible()
@@ -439,14 +439,14 @@ test('@owner uses one authoritative finance window, latest month and unknown-per
   await expect(page.locator('.finance-window__trend')).toHaveCount(0)
   await page.getByRole('button', { name: /Pokaż ostatni miesiąc z danymi/ }).click()
   await julyStarted
-  await expect(page.getByRole('heading', { level: 1, name: 'Finanse — lipiec 2026' }))
+  await expect(page.getByRole('heading', { level: 1, name: 'Finanse', exact: true }))
     .toBeVisible()
   await expect(page.getByRole('button', { name: 'Dodaj pozycję' })).toBeVisible()
   await expect(page.getByText('Wczytuję finanse…', { exact: true })).toBeVisible()
   await expect(page.getByText('Brak pozycji w tym miesiącu', { exact: true }))
     .toHaveCount(0)
   releaseJuly()
-  const heading = page.getByRole('heading', { level: 1, name: /Finanse — lipiec 2026/ })
+  const heading = page.getByRole('heading', { level: 1, name: 'Finanse', exact: true })
   await expect(heading).toBeFocused()
   await expect(page.getByRole('table', { name: 'Lista wpływów' }).getByRole('row'))
     .toHaveCount(21)
@@ -466,7 +466,7 @@ test('@owner uses one authoritative finance window, latest month and unknown-per
   await expect(page.getByRole('button', { name: 'Poprzedni miesiąc' })).toBeDisabled()
   await page.goto('./#/reports?ym=2000-06')
   await expect(page.getByRole('button', { name: 'Poprzedni miesiąc' })).toBeDisabled()
-  await expect(page.getByText('Nieustalony miesiąc księgowy', { exact: true })).toBeVisible()
+  await expect(page.getByText('Pozycje bez miesiąca', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', {
     name: 'Przejdź do pozycji z nieustalonym okresem',
   })).toHaveCount(0)
@@ -507,20 +507,20 @@ test('@owner preserves the exact file and idempotency key across an ambiguous cr
 
   await page.goto('./#/payments')
   await page.getByText('Wgraj arkusz', { exact: true }).click()
-  const picker = page.getByLabel('Wybierz plik XLSX')
+  const picker = page.getByLabel('Wybierz plik Excel (.xlsx)')
   await picker.setInputFiles({
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
   await expect(page.getByRole('heading', {
-    name: 'Podgląd — nic nie zostało zapisane',
+    name: 'Sprawdziliśmy plik. Nic jeszcze nie zostało zapisane.',
   })).toBeFocused()
   await expect(page.getByRole('heading', { name: 'Proponowane przypisania' })).toBeVisible()
   await expect(page.getByText('Anna N. → Anna Nowak', { exact: true })).toBeVisible()
-  await expect(page.getByText('2 powtórzone pozycje źródłowe', { exact: true })).toBeVisible()
+  await expect(page.getByText('2 powtórzone wiersze', { exact: true })).toBeVisible()
   await expect(page.getByText('1 kwota zapisana jako tekst', { exact: true })).toBeVisible()
-  await expect(page.getByText('5 ostrzeżeń wymaga przeglądu', { exact: true })).toBeVisible()
+  await expect(page.getByText('5 wierszy do sprawdzenia', { exact: true })).toBeVisible()
   await expect(page.getByText('Fikcyjny arkusz · wiersz 4', { exact: true })).toBeVisible()
-  const mappingSelect = page.getByLabel('Wybierz specjalistkę — konflikt 1')
+  const mappingSelect = page.getByLabel('Specjalistka nr 1')
   await expect(mappingSelect.getByRole('option', {
     name: 'Anna Nowak (1)', exact: true,
   })).toHaveCount(1)
@@ -528,15 +528,15 @@ test('@owner preserves the exact file and idempotency key across an ambiguous cr
     name: 'Anna Nowak (2)', exact: true,
   })).toHaveCount(1)
   await mappingSelect.selectOption(duplicateSpecialistId)
-  await page.getByRole('button', { name: 'Zapisz i rozpocznij import' }).click()
+  await page.getByRole('button', { name: 'Przenieś dane' }).click()
   await expect(page.getByRole('alert')).toContainText(
-    'Ten sam plik i klucz operacji zostały zachowane',
+    'Kliknij „Przenieś dane” jeszcze raz',
   )
   await expect(picker).toBeDisabled()
   await expect(mappingSelect).toBeDisabled()
   expect(await picker.evaluate((input) => input.files.length)).toBe(0)
-  await page.getByRole('button', { name: 'Zapisz i rozpocznij import' }).click()
-  await expect(page.getByRole('status').filter({ hasText: 'Import zapisany' }))
+  await page.getByRole('button', { name: 'Przenieś dane' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Dane z arkusza są przenoszone' }))
     .toBeVisible()
   expect(keys).toHaveLength(2)
   expect(keys[0]).toBe(keys[1])
@@ -546,7 +546,7 @@ test('@owner preserves the exact file and idempotency key across an ambiguous cr
   ], [
     { conflictId: `wmc_${'Q'.repeat(43)}`, specialistId: duplicateSpecialistId },
   ]])
-  expect(await page.getByLabel('Wybierz plik XLSX')
+  expect(await page.getByLabel('Wybierz plik Excel (.xlsx)')
     .evaluate((input) => input.files.length)).toBe(0)
   await expect(page.getByRole('main')).not.toContainText('RAW_SOURCE_MUST_NOT_RENDER')
   await expect(page.getByRole('main')).not.toContainText(specialist.id)
@@ -571,16 +571,16 @@ test('@owner clears a definitively rejected create and requires a fresh preview'
   }, 409)))
 
   await openWorkbookTools(page)
-  await page.getByLabel('Wybierz plik XLSX').setInputFiles({
+  await page.getByLabel('Wybierz plik Excel (.xlsx)').setInputFiles({
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
-  await page.getByRole('button', { name: 'Zapisz i rozpocznij import' }).click()
+  await page.getByRole('button', { name: 'Przenieś dane' }).click()
   await expect(page.getByRole('alert')).toContainText(
-    'Plik mógł zostać już zaimportowany albo lista specjalistek się zmieniła',
+    'Mógł zostać już wczytany albo lista specjalistek się zmieniła',
   )
-  await expect(page.getByRole('button', { name: 'Zapisz i rozpocznij import' }))
+  await expect(page.getByRole('button', { name: 'Przenieś dane' }))
     .toHaveCount(0)
-  expect(await page.getByLabel('Wybierz plik XLSX')
+  expect(await page.getByLabel('Wybierz plik Excel (.xlsx)')
     .evaluate((input) => input.files.length)).toBe(0)
 })
 
@@ -596,14 +596,14 @@ test('@owner explains a rejected workbook fingerprint instead of a generic failu
   }, 400)))
 
   await openWorkbookTools(page)
-  await page.getByLabel('Wybierz plik XLSX').setInputFiles({
+  await page.getByLabel('Wybierz plik Excel (.xlsx)').setInputFiles({
     name: 'edytowany.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
   await expect(page.getByRole('alert')).toContainText(
-    'To nie jest zatwierdzony skoroszyt historyczny',
+    'Tego arkusza nie można wczytać',
   )
-  await expect(page.getByRole('alert')).not.toContainText('Nie udało się zakończyć operacji')
-  expect(await page.getByLabel('Wybierz plik XLSX')
+  await expect(page.getByRole('alert')).not.toContainText('Nie udało się sprawdzić pliku')
+  expect(await page.getByLabel('Wybierz plik Excel (.xlsx)')
     .evaluate((input) => input.files.length)).toBe(0)
 })
 
@@ -613,34 +613,34 @@ test('@owner reviews exact signed Panel-v2 updates, voids and blocking conflicts
   await routeRegistry(page)
   await page.route('**/api/v1/workbooks/preview', (route) => route.fulfill(json(panelPreview)))
   await openWorkbookTools(page)
-  await page.getByLabel('Wybierz plik XLSX').setInputFiles({
+  await page.getByLabel('Wybierz plik Excel (.xlsx)').setInputFiles({
     name: 'fikcyjny-panel.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
-  await expect(page.getByRole('heading', { name: 'Zmiany Panel-v2' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Zmiany w pozycjach' })).toBeVisible()
   const updateEvidence = page.locator('.workbook-import__evidence li')
     .filter({ hasText: 'Pozycja do zmiany:' })
   await expect(updateEvidence).toContainText('kwota — 190,00 zł')
-  await expect(updateEvidence).toContainText('miesiąc księgowy — lipiec 2026')
+  await expect(updateEvidence).toContainText('miesiąc rozliczenia — lipiec 2026')
   await expect(updateEvidence).toContainText('data — 15 lip')
-  await expect(updateEvidence).toContainText('sposób płatności — Przelew')
-  await expect(updateEvidence).toContainText('rozliczenie — Opłacona')
+  await expect(updateEvidence).toContainText('forma płatności — Przelew')
+  await expect(updateEvidence).toContainText('status płatności — Opłacona')
   await expect(updateEvidence).toContainText('faktura — Wystawiona')
   await expect(updateEvidence).toContainText('specjalistka — Anna Nowak')
   await expect(updateEvidence).not.toContainText('transfer')
   await expect(updateEvidence).not.toContainText('issued')
   await expect(updateEvidence).not.toContainText(specialist.id)
-  await expect(page.getByText('1 pozycja do unieważnienia.', { exact: true })).toBeVisible()
+  await expect(page.getByText('1 pozycja do usunięcia.', { exact: true })).toBeVisible()
   const conflictEvidence = page.locator('.workbook-import__evidence li')
-    .filter({ hasText: 'Równoległa zmiana pola' })
+    .filter({ hasText: 'Ktoś w międzyczasie zmienił to pole w panelu' })
   await expect(conflictEvidence).toContainText(
     'obecnie: 180,00 zł · w pliku: 200,00 zł',
   )
   const dependencyEvidence = page.locator('.workbook-import__evidence li')
-    .filter({ hasText: 'Pozycja ma aktywne powiązanie' })
+    .filter({ hasText: 'Tę pozycję można zmienić tylko w panelu' })
   await expect(dependencyEvidence).toContainText(
-    'Pozycja ma aktywne powiązanie i nie może być zmieniona w pliku',
+    'Tę pozycję można zmienić tylko w panelu, nie w pliku',
   )
-  await expect(page.getByRole('button', { name: 'Zapisz i rozpocznij import' }))
+  await expect(page.getByRole('button', { name: 'Przenieś dane' }))
     .toBeDisabled()
   for (const value of [
     'fin_panel_review_update', 'fin_panel_review_void', 'fin_panel_review_conflict',
@@ -694,13 +694,13 @@ test('@owner clears native workbook and in-flight export state on authority refr
   await expect(page.getByText('wba_finance_e2e', { exact: true })).toHaveCount(0)
   await expect(page.getByText('a'.repeat(64), { exact: true })).toHaveCount(0)
   await expect(page.getByText('Parser 2 · materializator 2', { exact: true })).toHaveCount(0)
-  await page.getByLabel('Wybierz plik XLSX').setInputFiles({
+  await page.getByLabel('Wybierz plik Excel (.xlsx)').setInputFiles({
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
   await expect(page.getByRole('heading', {
-    name: 'Podgląd — nic nie zostało zapisane',
+    name: 'Sprawdziliśmy plik. Nic jeszcze nie zostało zapisane.',
   })).toBeVisible()
-  await expect(page.getByLabel('Wybierz specjalistkę — konflikt 1')).toBeVisible()
+  await expect(page.getByLabel('Specjalistka nr 1')).toBeVisible()
   await expect(page.getByLabel(new RegExp(AUTHORIZED_SOURCE))).toHaveCount(0)
   await expect(page.getByText(AUTHORIZED_SOURCE, { exact: true })).toBeVisible()
   expect(await page.locator('*').evaluateAll((nodes, sentinel) => nodes.some((node) => (
@@ -709,23 +709,23 @@ test('@owner clears native workbook and in-flight export state on authority refr
   expect(requests.some(({ url, body }) => url.includes(AUTHORIZED_SOURCE)
     || body.includes(AUTHORIZED_SOURCE))).toBe(false)
   expect(messages.some((value) => value.includes(AUTHORIZED_SOURCE))).toBe(false)
-  await page.getByRole('button', { name: 'Pobierz pełny skoroszyt' }).click()
-  await expect(page.getByRole('button', { name: 'Przygotowywanie…' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Pobierz arkusz Excel' }).click()
+  await expect(page.getByRole('button', { name: 'Przygotowuję arkusz…' })).toBeDisabled()
 
   refreshed = true
   const sessionRefresh = page.waitForResponse('**/api/v1/session')
   await page.evaluate(() => window.dispatchEvent(new Event('focus')))
   await sessionRefresh
 
-  const picker = page.getByLabel('Wybierz plik XLSX')
+  const picker = page.getByLabel('Wybierz plik Excel (.xlsx)')
   await expect(picker).toBeEnabled()
   expect(await picker.evaluate((input) => input.files.length)).toBe(0)
   await expect(page.getByRole('heading', {
-    name: 'Podgląd — nic nie zostało zapisane',
+    name: 'Sprawdziliśmy plik. Nic jeszcze nie zostało zapisane.',
   })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Zapisz i rozpocznij import' }))
+  await expect(page.getByRole('button', { name: 'Przenieś dane' }))
     .toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Pobierz pełny skoroszyt' })).toBeEnabled()
+  await expect(page.getByRole('button', { name: 'Pobierz arkusz Excel' })).toBeEnabled()
   await expect(page.getByRole('main')).not.toContainText(AUTHORIZED_SOURCE)
   expect(await page.evaluate(async () => ({
     local: localStorage.length,
@@ -774,16 +774,16 @@ test('@owner downloads a whole-centre workbook with an idempotent retry', async 
     })
   })
   await openWorkbookTools(page)
-  await page.getByRole('button', { name: 'Pobierz pełny skoroszyt' }).click()
+  await page.getByRole('button', { name: 'Pobierz arkusz Excel' }).click()
   await expect(page.getByRole('alert')).toContainText(
-    'Nie udało się przygotować bezpiecznego eksportu',
+    'Nie udało się przygotować arkusza',
   )
-  await page.getByRole('button', { name: 'Pobierz pełny skoroszyt' }).click()
+  await page.getByRole('button', { name: 'Pobierz arkusz Excel' }).click()
   await expect(page.getByRole('alert')).toContainText(
-    'Dane zmieniły się — ponów jako nowy eksport',
+    'Dane zmieniły się w trakcie przygotowania arkusza',
   )
   const download = page.waitForEvent('download')
-  await page.getByRole('button', { name: 'Pobierz pełny skoroszyt' }).click()
+  await page.getByRole('button', { name: 'Pobierz arkusz Excel' }).click()
   expect((await download).suggestedFilename())
     .toBe('bear-with-me-panel-v2-2026-08-15.xlsx')
   expect(exportKeys).toHaveLength(3)
@@ -855,24 +855,24 @@ test('@owner resolves creator-bound conflicts and continues with authoritative v
   )
 
   await openWorkbookTools(page)
-  await page.getByRole('button', { name: 'Rozstrzygnij przypisania' }).click()
-  await expect(page.getByRole('heading', { name: 'Rozstrzygnij przypisania' }))
+  await page.getByRole('button', { name: 'Przypisz specjalistki' }).click()
+  await expect(page.getByRole('heading', { name: 'Kto jest kim?' }))
     .toBeFocused()
   await expect(page.getByText(
     'Fikcyjna specjalistka po ponownym wczytaniu', { exact: true },
   )).toBeVisible()
   await expect(page.getByLabel(/Fikcyjna specjalistka po ponownym wczytaniu/))
     .toHaveCount(0)
-  await page.getByLabel('Konflikt przypisania 1').selectOption(specialist.id)
+  await page.getByLabel('Specjalistka nr 1').selectOption(specialist.id)
   await page.getByRole('button', {
-    name: 'Zapisz rozstrzygnięcia i kontynuuj',
+    name: 'Zapisz i wczytuj dalej',
   }).click()
   await expect(page.getByRole('alert')).toContainText(
-    'Ponów dokładnie ten sam zestaw rozstrzygnięć',
+    'Kliknij „Zapisz i wczytuj dalej” jeszcze raz',
   )
-  await expect(page.getByLabel('Konflikt przypisania 1')).toBeDisabled()
+  await expect(page.getByLabel('Specjalistka nr 1')).toBeDisabled()
   await page.getByRole('button', {
-    name: 'Zapisz rozstrzygnięcia i kontynuuj',
+    name: 'Zapisz i wczytuj dalej',
   }).click()
   await expect(page.getByText('Wgraj arkusz', { exact: true })).toBeVisible()
   expect(resolutionBodies).toEqual([{
@@ -1106,13 +1106,13 @@ test('@coordinator @specialist keeps capability-scoped finance controls', async 
   if (testInfo.project.name === 'coordinator') {
     await page.goto('./#/payments')
     await expect(page.getByText('Wgraj arkusz', { exact: true })).toHaveCount(0)
-    await expect(page.getByLabel('Wybierz plik XLSX')).toHaveCount(0)
+    await expect(page.getByLabel('Wybierz plik Excel (.xlsx)')).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Kontynuuj import' })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Pobierz pełny skoroszyt' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Pobierz arkusz Excel' })).toHaveCount(0)
     return
   }
   await page.goto('./#/payments')
-  await expect(page.getByRole('button', { name: 'Eksportuj własne dane' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Pobierz arkusz Excel' })).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Przychody' })).toHaveCount(0)
   await expect(page.getByRole('link', { name: 'Rejestr' })).toHaveCount(0)
 })
@@ -1139,7 +1139,7 @@ test('@owner chooses the finance surface from current capabilities rather than r
   await expect(page.getByText('Dostęp do finansów nadaje osoba zarządzająca panelem.', { exact: true })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Finanse' })).toHaveCount(0)
   expect(financeRequests).toBe(0)
-  await expect(page.getByRole('button', { name: 'Eksportuj własne dane' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Pobierz arkusz Excel' })).toHaveCount(0)
 
   await page.goto('./#/reports')
   await expect(page).toHaveURL(/#\/dashboard$/)
@@ -1207,7 +1207,7 @@ test('@owner keeps own payments with charge-read alone and never loads workspace
   await page.goto('./#/payments?ym=2026-07')
   await expect(page.getByRole('heading', { name: 'Finanse i płatności' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Finanse' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Eksportuj własne dane' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Pobierz arkusz Excel' })).toHaveCount(0)
   const ownTable = page.getByRole('table', { name: 'Własne rozliczenia sesji' })
   await expect(ownTable.getByRole('button', { name: /Dodaj wpłatę.*sesja/i }).first()).toBeVisible()
   await expect(ownTable.getByRole('link', { name: 'Otwórz w Grafiku' })).toHaveCount(0)
@@ -1272,7 +1272,7 @@ test('@owner records an own-session payment through the narrow monthly window', 
   await expect(entry).toHaveCount(0)
   await expect(row).toContainText('Opłacona')
   await expect(row.getByRole('button', { name: /Dodaj wpłatę/i })).toHaveCount(0)
-  await expect(page.getByRole('heading', { name: /Własne sesje/ })).toBeFocused()
+  await expect(page.getByRole('heading', { name: 'Twoje sesje' })).toBeFocused()
   expect(calls).toEqual([{
     expectedVersion: 1, amountGrosze: 18_000, method: 'card',
     receivedAt: '2026-08-15T10:00:00.000Z',
@@ -1346,10 +1346,10 @@ test('@owner uses finance-owned specialist labels and import choices without wor
   await page.goto('./#/reports?ym=2026-07')
   await expect(page.getByText(specialist.displayName, { exact: true })).toBeVisible()
   await openWorkbookTools(page, { sessionConfigured: true })
-  await page.getByLabel('Wybierz plik XLSX').setInputFiles({
+  await page.getByLabel('Wybierz plik Excel (.xlsx)').setInputFiles({
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
-  await expect(page.getByLabel('Wybierz specjalistkę — konflikt 1')
+  await expect(page.getByLabel('Specjalistka nr 1')
     .getByRole('option', { name: specialist.displayName })).toHaveCount(1)
   expect(workspaceRequests).toBe(0)
 })
@@ -1382,7 +1382,7 @@ test('@owner reviews an archived Panel specialist from preview authority without
   ))
 
   await openWorkbookTools(page, { sessionConfigured: true })
-  await page.getByLabel('Wybierz plik XLSX').setInputFiles({
+  await page.getByLabel('Wybierz plik Excel (.xlsx)').setInputFiles({
     name: 'fikcyjny-panel.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
   const evidence = page.locator('.workbook-import__evidence li')
@@ -1443,7 +1443,7 @@ test('@owner keeps Task 11 grids bounded and the workbook registry out of naviga
   expect(navigationIcons.reports).toBeTruthy()
 
   await page.setViewportSize({ width: 390, height: 900 })
-  await page.getByLabel('Wybierz plik XLSX').setInputFiles({
+  await page.getByLabel('Wybierz plik Excel (.xlsx)').setInputFiles({
     name: 'fikcyjny.xlsx', mimeType: XLSX, buffer: Buffer.from([80, 75, 3, 4]),
   })
   await expect(page.getByText(LONG_AUTHORIZED_SOURCE, { exact: true })).toBeVisible()
@@ -1491,7 +1491,7 @@ test('@owner renders Polish report counts without exposing workbook history', as
   await page.goto('./#/reports?ym=2026-07')
   await expect(page.getByText(/2 aktywności/)).toBeVisible()
   await expect(page.getByText(/5 aktywności/)).toBeVisible()
-  await expect(page.getByText('1 pozycja wymaga przeglądu poza wybranym miesiącem.'))
+  await expect(page.getByText(/1 pozycja z arkusza nie ma przypisanego miesiąca/))
     .toBeVisible()
 })
 

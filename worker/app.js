@@ -69,6 +69,8 @@ import {
 } from './routes/activities.js'
 import { postActivityCharge } from './routes/activity-billing.js'
 import { postClient, postClientArchive, postClientEdit } from './routes/clients.js'
+import { getClientNotes, postClientNote } from './routes/client-notes.js'
+import { listActivityHistory } from './routes/activity-history.js'
 import {
   postAppointment,
   postAppointmentCancellation,
@@ -195,6 +197,7 @@ const descriptor = (value) => {
   return route
 }
 const CORE_ROUTES = Object.freeze([
+  descriptor({ id: 'activity.history', path: '/api/v1/activity', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'activity.read', auditActions: [], bodyKeys: null, queryMode: 'handler', idempotency: false }),
   descriptor({ id: 'workspace', path: '/api/v1/workspace', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capabilityAllOf: ['appointment.charge.read', 'client.operational.read', 'specialist.directory.read'], auditActions: [], bodyKeys: null }),
   descriptor({ id: 'permissions.targets', path: '/api/v1/staff/capability-targets', methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'permissions.manage', auditActions: [], bodyKeys: null, queryMode: 'none', idempotency: false }),
   descriptor({ id: 'permissions.read', pathPattern: `^/api/v1/staff/${STAFF_PATH_ID}/capability-overrides$`, methods: ['GET', 'HEAD', 'OPTIONS'], allow: CORE_READ_ALLOW, capability: 'permissions.manage', auditActions: [], bodyKeys: null, queryMode: 'none', idempotency: false }),
@@ -203,9 +206,10 @@ const CORE_ROUTES = Object.freeze([
   descriptor({ id: 'specialists.create', path: '/api/v1/specialists', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.created'], bodyKeys: ['displayName', 'professionalTitle', 'standardRateGrosze', 'avatarKey'] }),
   descriptor({ id: 'specialists.edit', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.profile.updated'], bodyKeys: ['expectedVersion', 'displayName', 'professionalTitle', 'standardRateGrosze', 'avatarKey'] }),
   descriptor({ id: 'specialists.account.link', pathPattern: `^/api/v1/specialists/sp_[A-Za-z0-9][A-Za-z0-9_-]{0,124}/account-links$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'staff.manage', auditActions: ['specialist.account.linked'], bodyKeys: ['staffId', 'expectedSpecialistVersion', 'expectedStaffVersion'] }),
-  descriptor({ id: 'clients.create', path: '/api/v1/clients', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'], optionalBodyKeys: ['assignmentStartsAt'] }),
-  descriptor({ id: 'clients.edit', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'], optionalBodyKeys: ['assignmentStartsAt'] }),
+  descriptor({ id: 'clients.create', path: '/api/v1/clients', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'], optionalBodyKeys: ['assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes'] }),
+  descriptor({ id: 'clients.edit', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'], optionalBodyKeys: ['assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes'] }),
   descriptor({ id: 'clients.archive', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/archive$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'] }),
+  descriptor({ id: 'clients.notes', pathPattern: `^/api/v1/clients/${CLIENT_PATH_ID}/notes$`, methods: ['GET', 'HEAD', 'POST', 'OPTIONS'], allow: 'GET, HEAD, POST, OPTIONS', capability: 'clinical.read', auditActions: ['client.note.created'], bodyKeys: ['text'], queryMode: 'handler' }),
   descriptor({ id: 'appointments.create', path: '/api/v1/appointments', methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.created'], bodyKeys: ['clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'] }),
   descriptor({ id: 'appointments.edit', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/edits$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.updated'], bodyKeys: ['expectedVersion', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'] }),
   descriptor({ id: 'appointments.cancel', pathPattern: `^/api/v1/appointments/${APPOINTMENT_PATH_ID}/cancellation$`, methods: ['POST', 'OPTIONS'], allow: CORE_COMMAND_ALLOW, capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion', 'reason'] }),
@@ -790,6 +794,13 @@ export function createApp(deps = {}) {
     })
     return c.json(result)
   })
+  app.get('/api/v1/activity', async (c) => {
+    if (c.get('routeId') !== 'activity.history') throw new AppError('NOT_FOUND')
+    return readResponse(c, await (deps.listActivityHistory ?? listActivityHistory)({
+      db: c.get('coreWorkDb'), cryptoContext: c.get('cryptoContext'), actor: c.get('actor'),
+      nowMs: c.get('nowMs'), query: new URL(c.req.url).searchParams,
+    }))
+  })
   app.post('/api/v1/clients', async (c) => {
     if (c.get('routeId') !== 'clients.create') throw new AppError('NOT_FOUND')
     const input = {
@@ -805,6 +816,29 @@ export function createApp(deps = {}) {
       ...(deps.createClient ? { create: deps.createClient } : {}),
     }
     const result = await (deps.postClient ?? postClient)(input)
+    return c.json(result.body, result.status)
+  })
+  app.all('/api/v1/clients/:clientId/notes', async (c) => {
+    if (c.get('routeId') !== 'clients.notes') throw new AppError('NOT_FOUND')
+    if (c.req.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: { Allow: 'GET, HEAD, POST, OPTIONS' } })
+    }
+    const input = {
+      db: c.get('coreWorkDb'), actor: c.get('actor'),
+      keyring: c.get('cryptoContext')?.keyring, nowMs: c.get('nowMs'),
+      clientId: c.req.param('clientId'),
+    }
+    if (c.req.method === 'GET' || c.req.method === 'HEAD') {
+      return readResponse(c, await (deps.getClientNotes ?? getClientNotes)({
+        ...input, query: new URL(c.req.url).searchParams,
+      }))
+    }
+    if (new URL(c.req.url).search) throw new AppError('NOT_FOUND')
+    const result = await (deps.postClientNote ?? postClientNote)({
+      ...input, recoveryDb: c.get('coreRecoveryDb'),
+      correlationId: c.get('correlationId'), idFactory: deps.idFactory ?? idFactory,
+      body: c.get('jsonBody'), idempotencyKey: c.req.header('Idempotency-Key'),
+    })
     return c.json(result.body, result.status)
   })
   app.post('/api/v1/specialists', async (c) => {

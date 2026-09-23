@@ -213,6 +213,17 @@ test('projects canonical records into immutable legacy view records without priv
   assert.notEqual(projected.clients[0], source.clientsById.cl_paused)
 })
 
+test('preserves guardian contacts and reception notes in client card records', () => {
+  const contact = {
+    guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
+    receptionNotes: 'Kontakt po 15:00.\nDzwonić do opiekuna.',
+  }
+  const source = loadedState({ clientsById: nullMap({ cl_ola: client(contact) }), appointmentsById: nullMap({}) })
+  const projected = projectLoadedWorkspace(source).clients[0]
+  for (const [field, value] of Object.entries(contact)) assert.equal(projected[field], value)
+  assert.equal(Object.hasOwn(projected, 'notes'), false)
+})
+
 test('projects canonical historical DTOs separately from timed sessions and preserves source precision', () => {
   const sourceClient = historicalClient({
     status: 'activated', activeClientId: 'cl_ola', version: 2,

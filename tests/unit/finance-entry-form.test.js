@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { accountingMonthForOccurredOn, accountingMonthOptions, activityChargeCommand, activityChargeFieldErrors, activityMembershipForParticipant, activitySettlementDraft, draftWithOccurredOn, financeEntryDraft, financeEntryCommand, financePaidAmountError, manualFinanceEntryErrors } from '../../src/finance-entry-form.js'
+import { accountingMonthForOccurredOn, accountingMonthOptions, activityChargeCommand, activityChargeFieldErrors, activityMembershipForParticipant, activitySettlementDraft, draftWithOccurredOn, draftWithSettlementFromPaid, financeEntryDraft, financeEntryCommand, financePaidAmountError, manualFinanceEntryErrors } from '../../src/finance-entry-form.js'
 
 const entry = { id: 'fin_test', version: 2, kind: 'income', recordType: 'income',
   accountingMonth: null, occurredOn: null, amountGrosze: 12345, paidAmountGrosze: 0,
@@ -22,6 +22,17 @@ test('a new manual entry follows its date until the accounting month is chosen d
   assert.deepEqual(draftWithOccurredOn(manuallyClassified, '2026-09-13', true), {
     ...manuallyClassified, occurredOn: '2026-09-13',
   })
+})
+
+test('a new income derives its payment status from the paid amount until chosen by hand', () => {
+  const fresh = { ...financeEntryDraft(null, '2026-08'), amount: '180' }
+  assert.equal(draftWithSettlementFromPaid({ ...fresh, paidAmount: '0' }).settlementStatus, 'unpaid')
+  assert.equal(draftWithSettlementFromPaid({ ...fresh, paidAmount: '90,50' }).settlementStatus, 'partial')
+  assert.equal(draftWithSettlementFromPaid({ ...fresh, paidAmount: '180' }).settlementStatus, 'paid')
+  const unreadable = { ...fresh, paidAmount: '10,001' }
+  assert.equal(draftWithSettlementFromPaid(unreadable), unreadable)
+  const chosen = { ...fresh, paidAmount: '180', settlementStatus: 'unknown' }
+  assert.equal(draftWithSettlementFromPaid(chosen, true), chosen)
 })
 
 test('an existing entry draft preserves its recorded accounting classification', () => {

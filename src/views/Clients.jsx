@@ -6,10 +6,10 @@ import { Button, Avatar, Pill, Chip, SearchInput, IconBtn, EmptyState, Segmented
 import { Icon } from '../icons.jsx'
 import { StatusPicker, PaymentPicker } from './session-bits.jsx'
 import { ClientDrawer } from './ClientForm.jsx'
-import { ageLabel, addMonths, fmtMoney, fmtMonthYear, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, monthKey, sessionsWord, toISODate, warsawDateTimeFromUtc, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
+import { ageLabel, fmtMoney, fmtMonthYear, inMonthYear, fmtShortDate, fmtFullDate, fmtDayMonth, fmtWeekday, cap, monthKey, sessionsWord, toISODate, warsawDateTimeFromUtc, plural, STATUS_LABELS, PAY_LABELS } from '../format.js'
 import { clientMatchesQuery, clientsForRole, isBookableClient, sessionsForRole } from '../workspace.js'
 import { serviceBadge, serviceShort } from '../services.js'
-import { EntityLink, FilterBar, FilterGroup, useRouteParamsSync, ViewState } from '../ux-patterns.jsx'
+import { EntityLink, FilterBar, FilterGroup, PeriodNav, useRouteParamsSync, ViewState } from '../ux-patterns.jsx'
 import {
   monthWorkspaceRange,
   futureWorkspaceRange,
@@ -28,6 +28,9 @@ import {
 } from '../historical-workspace-view.js'
 import { HistoricalOccurrenceRow } from './historical-bits.jsx'
 import { HistoricalClientActivation } from './HistoricalClientActivation.jsx'
+import { ClientSessionNotes } from './ClientSessionNotes.jsx'
+
+const HISTORICAL_SUBTITLE = 'Klienci z dawnego arkusza. Tylko do wglądu.'
 
 // the client's next scheduled visit — sessions stay sorted by date+time
 const nextSessionOf = (sessions, clientId) => {
@@ -52,7 +55,7 @@ function HistoricalHistorySections({ history }) {
             <time dateTime={row.day}>{fmtFullDate(row.day)}</time>
             <HistoricalOccurrenceRow row={row} date={row.day} />
           </div>
-        )) : <p className="faint">Brak wpisów z dokładną datą w widocznym zakresie.</p>}
+        )) : <p className="faint">Brak sesji z dokładną datą.</p>}
       </section>
       <section className="card card--pad historical-section" aria-labelledby="historical-months-title">
         <h2 className="card-title" id="historical-months-title">Miesiące bez dnia</h2>
@@ -61,47 +64,42 @@ function HistoricalHistorySections({ history }) {
             <time dateTime={row.month}>{fmtMonthYear(row.month)}</time>
             <HistoricalOccurrenceRow row={row} />
           </div>
-        )) : <p className="faint">Brak wpisów miesięcznych w widocznym zakresie.</p>}
+        )) : <p className="faint">Brak sesji bez dnia.</p>}
       </section>
       <section className="card card--pad historical-section" aria-labelledby="historical-unknown-title">
-        <h2 className="card-title" id="historical-unknown-title">Okres nieustalony</h2>
+        <h2 className="card-title" id="historical-unknown-title">Bez daty</h2>
         {history.unknownRows.length > 0 ? history.unknownRows.map((row) => (
           <HistoricalOccurrenceRow key={row.id} row={row} />
-        )) : <p className="faint">Brak wpisów z nieustalonym okresem.</p>}
+        )) : <p className="faint">Brak sesji bez daty.</p>}
       </section>
     </div>
   )
 }
 
 function HistoricalClientsPanel({
-  directory, historyPeriod, historyYm, latestAction, onHistoryPeriod,
+  directory, currentMonth, historyPeriod, historyYm, latestAction, onHistoryPeriod,
   onHistoryYm, query, setQuery, notice, stale,
 }) {
   return (
     <div>
       <div className="view-head">
         <div>
-          <div className="eyebrow">Kartoteka źródłowa</div>
           <h1 className="display view-head__title">Klienci <em>historyczni</em></h1>
-          <p className="view-head__sub">Profile i sesje odtworzone z dawnego arkusza, bez dopisywania bieżącej opieki.</p>
+          <p className="view-head__sub">{HISTORICAL_SUBTITLE}</p>
         </div>
         <div className="view-head__actions historical-directory__actions">
           <SearchInput value={query} onChange={setQuery} placeholder="Imię, usługa lub specjalistka…" />
         </div>
       </div>
       <div className="historical-directory__toolbar">
-        <div className="month-nav">
-          <IconBtn name="chevL" label="Poprzedni miesiąc" onClick={() => onHistoryYm(addMonths(historyYm, -1))} />
-          <span className="month-nav__label month-nav__label--sentence">{cap(fmtMonthYear(historyYm))}</span>
-          <IconBtn name="chevR" label="Następny miesiąc" onClick={() => onHistoryYm(addMonths(historyYm, 1))} />
-        </div>
+        <PeriodNav month={historyYm} current={currentMonth} onChange={onHistoryYm} />
         <Segmented
           ariaLabel="Okres historii"
           value={historyPeriod}
           onChange={onHistoryPeriod}
           options={[
-            { value: 'known', label: 'Znany okres' },
-            { value: 'unknown', label: 'Okres nieustalony' },
+            { value: 'known', label: 'Z datą' },
+            { value: 'unknown', label: 'Bez daty' },
           ]}
         />
       </div>
@@ -111,8 +109,8 @@ function HistoricalClientsPanel({
         <section className="card card--pad historical-zero" aria-live="polite">
           <h2 className="card-title">{query ? 'Nie znaleziono klientów z dawnego arkusza' : 'Brak klientów z dawnego arkusza'}</h2>
           <p>{query ? `Brak wyników dla „${query}”.` : historyPeriod === 'unknown'
-            ? 'Nie ma klientów z wpisami o nieustalonym okresie.'
-            : `W ${fmtMonthYear(historyYm)} nie ma klientów z dawnego arkusza.`}</p>
+            ? 'Nie ma klientów z sesjami bez daty.'
+            : `${cap(inMonthYear(historyYm))} nie ma klientów z dawnego arkusza.`}</p>
           {query && <Button variant="soft" onClick={() => setQuery('')}>Wyczyść wyszukiwanie</Button>}
           {latestAction && <Button variant="soft" onClick={() => onHistoryYm(latestAction.month)}>{latestAction.label}</Button>}
         </section>
@@ -241,8 +239,8 @@ function HistoricalSourceHistory({ historicalClient, occurrences, specialists, w
       <div className="card card--pad">
         <h2 className="card-title">Historia z dawnego arkusza</h2>
         <p className="faint">
-          Widoczny zakres: {fmtFullDate(workspaceRange.from)} – {fmtFullDate(workspaceRange.to)}.
-          To dane z dawnego arkusza, oddzielne od historii frekwencji.
+          Od {fmtFullDate(workspaceRange.from)} do {fmtFullDate(workspaceRange.to)}.
+          Sesje z dawnego arkusza, osobno od historii sesji.
         </p>
         <HistoricalHistorySections history={history} />
       </div>
@@ -417,7 +415,7 @@ export function Clients({ params = {} }) {
     + (statusFilter !== 'all' ? 1 : 0)
   const filterSummary = [
     role.scope !== 'own' && psychFilter
-      ? `Specjalistka: ${psychOf(psychFilter)?.name.split(' ')[0]}`
+      ? `Specjalistka: ${psychOf(psychFilter)?.name}`
       : null,
     debtOnly ? 'Płatności: z zaległościami' : null,
     statusFilter === 'active' ? 'Status klienta: aktywni' : null,
@@ -435,6 +433,7 @@ export function Clients({ params = {} }) {
         {workspaceCovered ? <>
           <HistoricalClientsPanel
             directory={historicalDirectory}
+            currentMonth={monthKey(today)}
             historyPeriod={historyPeriod}
             historyYm={historyYm}
             latestAction={latestHistoryAction}
@@ -448,15 +447,14 @@ export function Clients({ params = {} }) {
                 compact
                 tone="loading"
                 icon="clients"
-                title="Odświeżamy kartotekę…"
-                hint="Wyświetlamy ostatnio potwierdzony zakres klientów."
+                title="Wczytuję klientów…"
               />}
               {workspaceRefreshFailed && <ViewState
                 compact
                 tone="error"
                 icon="clients"
-                title="Nie udało się odświeżyć kartoteki"
-                hint="Wyświetlamy ostatnio potwierdzony zakres klientów."
+                title="Nie udało się odświeżyć listy klientów"
+                hint="Spróbuj ponownie za chwilę."
                 action={<Button size="sm" onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>}
               />}
             </>}
@@ -464,9 +462,8 @@ export function Clients({ params = {} }) {
         </> : <>
           <div className="view-head">
             <div>
-              <div className="eyebrow">Kartoteka źródłowa</div>
               <h1 className="display view-head__title">Klienci <em>historyczni</em></h1>
-              <p className="view-head__sub">Profile i sesje odtworzone z dawnego arkusza, bez dopisywania bieżącej opieki.</p>
+              <p className="view-head__sub">{HISTORICAL_SUBTITLE}</p>
             </div>
             <div className="view-head__actions historical-directory__actions">
               <SearchInput value={query} onChange={setQuery} placeholder="Imię, usługa lub specjalistka…" />
@@ -476,10 +473,8 @@ export function Clients({ params = {} }) {
             ariaLabel="Stan kartoteki"
             tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
             icon="clients"
-            title={workspaceState === 'unavailable' ? 'Kartoteka jest teraz niedostępna' : 'Wczytuję kartotekę…'}
-            hint={workspaceState === 'unavailable'
-              ? 'Nie pokazujemy niepełnego zakresu klientów.'
-              : 'Pobieramy uprawniony zakres klientów i historii sesji.'}
+            title={workspaceState === 'unavailable' ? 'Nie udało się wczytać klientów' : 'Wczytuję klientów…'}
+            hint={workspaceState === 'unavailable' ? 'Spróbuj ponownie za chwilę.' : undefined}
             action={workspaceState === 'unavailable'
               ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
               : undefined}
@@ -496,14 +491,12 @@ export function Clients({ params = {} }) {
           <h1 className="display view-head__title">
             {role.scope === 'own' ? <>Moi <em>klienci</em></> : <>Klienci <em>centrum</em></>}
           </h1>
-          <p className="view-head__sub">
-            {isApp && !workspaceCovered
-              ? 'Wczytujemy uprawnioną kartotekę klientów.'
-              : <>{scopedClients.length} {plural(scopedClients.length, 'osoba', 'osoby', 'osób')}
-                {role.scope === 'own'
-                  ? ' przypisanych do Twojej opieki — wyszukuj i przechodź do kart klientów.'
-                  : ' pod opieką zespołu — wyszukuj, filtruj i przechodź do kart klientów.'}</>}
-          </p>
+          {workspaceCovered && <p className="view-head__sub">
+            {scopedClients.length} {plural(scopedClients.length, 'osoba', 'osoby', 'osób')}
+            {role.scope === 'own'
+              ? ' przypisanych do Twojej opieki — wyszukuj i przechodź do kart klientów.'
+              : ' pod opieką zespołu — wyszukuj, filtruj i przechodź do kart klientów.'}
+          </p>}
         </div>
         <div className="view-head__actions">
           <SearchInput value={query} onChange={setQuery} placeholder="Imię klienta…" />
@@ -519,10 +512,8 @@ export function Clients({ params = {} }) {
         ariaLabel="Stan kartoteki"
         tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
         icon="clients"
-        title={workspaceState === 'unavailable' ? 'Kartoteka jest teraz niedostępna' : 'Wczytuję kartotekę…'}
-        hint={workspaceState === 'unavailable'
-          ? 'Nie pokazujemy niepełnego zakresu klientów.'
-          : 'Pobieramy uprawniony zakres klientów i historii sesji.'}
+        title={workspaceState === 'unavailable' ? 'Nie udało się wczytać klientów' : 'Wczytuję klientów…'}
+        hint={workspaceState === 'unavailable' ? 'Spróbuj ponownie za chwilę.' : undefined}
         action={workspaceState === 'unavailable'
           ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
           : undefined}
@@ -531,15 +522,14 @@ export function Clients({ params = {} }) {
         compact
         tone="loading"
         icon="clients"
-        title="Odświeżamy kartotekę…"
-        hint="Wyświetlamy ostatnio potwierdzony zakres klientów."
+        title="Wczytuję klientów…"
       />}
       {workspaceRefreshFailed && <ViewState
         compact
         tone="error"
         icon="clients"
-        title="Nie udało się odświeżyć kartoteki"
-        hint="Wyświetlamy ostatnio potwierdzony zakres klientów."
+        title="Nie udało się odświeżyć listy klientów"
+        hint="Spróbuj ponownie za chwilę."
         action={<Button size="sm" onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>}
       />}
 
@@ -566,7 +556,7 @@ export function Clients({ params = {} }) {
                   swatch={p.color}
                   onClick={() => setPsychFilter(p.id)}
                 >
-                  {p.name.split(' ')[0]}
+                  {p.name}
                 </Chip>
               ))}
             </FilterGroup>
@@ -681,7 +671,7 @@ export function Clients({ params = {} }) {
                   </td>
                   <td className="right" data-th={`Do zapłaty: ${fmtFullDate(workspaceRange.from)} – ${fmtFullDate(workspaceRange.to)}`}>
                     {workspaceState !== 'ready'
-                      ? <span className="faint">Zakres rozliczeń jest niedostępny.</span>
+                      ? <span className="faint">Nie udało się wczytać płatności.</span>
                       : debt > 0 ? <Pill tone="amber">{fmtMoney(debt)}</Pill>
                         : <span className="faint">Brak zaległości w tym zakresie</span>}
                   </td>
@@ -702,7 +692,7 @@ export function Clients({ params = {} }) {
 
 export function ClientDetail({ params }) {
   const { state, dispatch, toast } = useApp()
-  const { appMode, capabilities, openSessionForm, openClientForm, role } = useShell()
+  const { actor, appMode, authorityGeneration, capabilities, openSessionForm, openClientForm, role } = useShell()
   const isApp = appMode === 'app'
   const nowParts = warsawDateTimeFromUtc(new Date().toISOString())
   const todayIso = nowParts.date
@@ -772,7 +762,6 @@ export function ClientDetail({ params }) {
         </EntityLink>
         <div className="view-head">
           <div>
-            <div className="eyebrow">Kartoteka klientów</div>
             <h1 className="display view-head__title">Karta klienta</h1>
           </div>
         </div>
@@ -780,8 +769,8 @@ export function ClientDetail({ params }) {
           ariaLabel="Stan karty klienta"
           tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
           icon="clients"
-          title={workspaceState === 'loading' ? 'Wczytuję kartę klienta…' : 'Karta klienta jest teraz niedostępna'}
-          hint="Wyświetlimy wyłącznie dane z uprawnionego, kompletnego zakresu."
+          title={workspaceState === 'loading' ? 'Wczytuję kartę klienta…' : 'Nie udało się wczytać karty klienta'}
+          hint={workspaceState === 'loading' ? undefined : 'Spróbuj ponownie za chwilę.'}
           action={workspaceState === 'unavailable'
             ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
             : undefined}
@@ -827,6 +816,8 @@ export function ClientDetail({ params }) {
     ? state.clients.filter((c) => c.familyId === client.familyId && c.id !== client.id)
     : []
   const canReadClinicalNotes = !isApp && role.scope === 'own' && client.psychId === role.psychId
+  const canReadAppSessionNotes = isApp && actor?.specialistId
+    && actor.specialistId === client.psychId && capabilities.includes('clinical.read')
   const canEditClient = !clientMutationLocked && !client.readOnly
     && (!isApp || canPerformAction(capabilities, 'client.edit'))
     && (role.scope !== 'own' || client.psychId === role.psychId)
@@ -840,6 +831,8 @@ export function ClientDetail({ params }) {
     }
     else openClientForm({ client })
   }
+  const bookSession = () => openSessionForm({ clientId: client.id })
+  const bookLabel = role.scope === 'own' ? 'Przygotuj sesję' : 'Umów sesję'
 
   const addNote = () => {
     if (!canReadClinicalNotes) return
@@ -851,7 +844,7 @@ export function ClientDetail({ params }) {
       patch: { notes: [{ date: toISODate(new Date()), text }, ...client.notes] },
     })
     setNoteText('')
-    toast('Notatka dodana')
+    toast('Notatka została dodana')
   }
 
   const removeNote = (idx) => {
@@ -862,7 +855,7 @@ export function ClientDetail({ params }) {
       id: client.id,
       patch: { notes: client.notes.filter((_, k) => k !== idx) },
     })
-    toast('Notatka usunięta', 'close', {
+    toast('Notatka została usunięta', 'check', {
       label: 'Cofnij',
       key: `note:${client.id}:${idx}`,
       timeoutMs: 5000,
@@ -877,24 +870,23 @@ export function ClientDetail({ params }) {
       </EntityLink>
 
       <div className="client-record">
-        <section className="client-record__section" aria-labelledby="care-overview-title" data-reveal>
+        <section className="client-record__section" aria-labelledby="client-name-title" data-reveal>
           <div className="id-band" style={{ '--band-color': psych?.color }}>
             <Avatar name={client.name} color={psych?.color} size={64} />
             <div className="id-band__main">
-              <p className="eyebrow id-band__eyebrow">Karta klienta</p>
-              <h1 className="display id-band__name">{client.name}</h1>
+              <h1 className="display id-band__name" id="client-name-title">{client.name}</h1>
               <div className="id-band__meta">
                 {ageLabel(client.age, client.age) && <span>{ageLabel(client.age, client.age)}</span>}
-                {!isApp && client.phone && (
+                {(client.guardianPhone || client.phone) && (
                   <span>
                     <Icon name="phone" size={14} />
-                    <a href={`tel:${client.phone.replace(/\s/g, '')}`}>{client.phone}</a>
+                    <a href={`tel:${(client.guardianPhone || client.phone).replace(/\s/g, '')}`}>{client.guardianPhone || client.phone}</a>
                   </span>
                 )}
-                {!isApp && client.email && (
+                {(client.guardianEmail || client.email) && (
                   <span>
                     <Icon name="mail" size={14} />
-                    <a href={`mailto:${client.email}`}>{client.email}</a>
+                    <a href={`mailto:${client.guardianEmail || client.email}`}>{client.guardianEmail || client.email}</a>
                   </span>
                 )}
                 <span>pod opieką od {fmtFullDate(client.since)}</span>
@@ -911,13 +903,10 @@ export function ClientDetail({ params }) {
             {(canEditClient || canManageCare) && (
               <div className="id-band__actions">
                 {canEditClient && <Button variant="ghost" icon="edit" onClick={openClient}>Edytuj</Button>}
-                {canManageCare && <Button icon="plus" onClick={() => openSessionForm({ clientId: client.id })}>
-                  {role.scope === 'own' ? 'Przygotuj sesję' : 'Umów sesję'}
-                </Button>}
+                {canManageCare && <Button icon="plus" onClick={bookSession}>{bookLabel}</Button>}
               </div>
             )}
           </div>
-          <h2 className="client-record__title" id="care-overview-title">Przegląd opieki</h2>
           <div className="care-overview" aria-label="Podsumowanie opieki">
             <div className="care-overview__item">
               <span>Specjalistka prowadząca</span>
@@ -1043,7 +1032,10 @@ export function ClientDetail({ params }) {
                 compact
                 icon="calendar"
                 title={isHistoricalRecord ? 'Brak sesji w wybranym miesiącu' : 'Brak sesji w najbliższych 3 miesiącach'}
-                hint={isHistoricalRecord ? 'W tym miesiącu nie ma zaplanowanych sesji.' : 'Umów sesję, aby pojawiła się w planie opieki.'}
+                hint={isHistoricalRecord ? 'W tym miesiącu nie ma zaplanowanych sesji.' : undefined}
+                action={!isHistoricalRecord && canManageCare
+                  ? <Button size="sm" icon="plus" onClick={bookSession}>{bookLabel}</Button>
+                  : undefined}
               />
             )}
           </div>
@@ -1052,7 +1044,7 @@ export function ClientDetail({ params }) {
         <section className="client-record__section" aria-labelledby="attendance-history-title" data-reveal>
           <div className="card card--pad">
             <h2 className="card-title" id="attendance-history-title">
-              Historia frekwencji
+              Historia sesji
               <span className="faint" style={{ fontSize: 13, fontFamily: 'var(--font-ui)' }}>
                 {history.length} {sessionsWord(history.length)}
               </span>
@@ -1132,7 +1124,7 @@ export function ClientDetail({ params }) {
             ) : isApp && historyRange && historyWorkspaceState === 'unavailable' ? (
               <p className="faint" role="status">Nie udało się wczytać wcześniejszych sesji.</p>
             ) : (
-              <EmptyState compact icon="calendar" title="Brak historii frekwencji" hint="Odbyte, odwołane i nieobecne sesje pojawią się tutaj." />
+              <EmptyState compact icon="calendar" title="Brak historii sesji" hint="Odbyte, odwołane i nieobecne sesje pojawią się tutaj." />
             )}
             {isApp && historyWorkspaceState === 'unavailable' && historyRange ? (
               <div className="row" style={{ marginTop: 14, gap: 10 }}>
@@ -1160,9 +1152,9 @@ export function ClientDetail({ params }) {
               tone={sourceHistoryState === 'unavailable' ? 'error' : 'loading'}
               icon="clients"
               title={sourceHistoryState === 'unavailable'
-                ? 'Historia z dawnego arkusza jest teraz niedostępna'
+                ? 'Nie udało się wczytać historii z dawnego arkusza'
                 : 'Wczytuję historię z dawnego arkusza…'}
-              hint="Pokażemy ją dopiero po pobraniu kompletnego miesiąca źródłowego."
+              hint={sourceHistoryState === 'unavailable' ? 'Spróbuj ponownie za chwilę.' : undefined}
               action={sourceHistoryState === 'unavailable'
                 ? <Button onClick={() => retryWorkspace(sourceHistoryRange)}>Spróbuj ponownie</Button>
                 : undefined}
@@ -1176,6 +1168,20 @@ export function ClientDetail({ params }) {
             workspaceRange={sourceHistoryRange ?? workspaceRange}
           />
         ) : null}
+
+        {client.receptionNotes && <section className="client-record__section" aria-labelledby="reception-notes-title" data-reveal>
+          <div className="card card--pad">
+            <h2 className="card-title" id="reception-notes-title">Uwagi recepcji</h2>
+            <p className="client-record__reception-notes">{client.receptionNotes}</p>
+          </div>
+        </section>}
+
+        {canReadAppSessionNotes && <ClientSessionNotes
+          key={`${client.id}:${client.psychId}:${actor.id}:${authorityGeneration}`}
+          clientId={client.id}
+          specialistId={client.psychId}
+          authorName={specialistIdentityFor(state.psychologists, client.psychId).name}
+        />}
 
         {!isApp && <section className="client-record__section" aria-labelledby="clinical-notes-title" data-reveal>
           <div className="card card--pad">

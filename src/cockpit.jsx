@@ -124,7 +124,7 @@ function CockpitBody({ m, onClose }) {
           compact
           icon="calendar"
           title={isApp ? 'Dziś bez sesji' : 'Brak zaplanowanych sesji'}
-          hint={isApp ? 'Dziś nie ma zaplanowanych sesji.' : 'Grafik jest wolny — czas na oddech.'}
+          hint="Dziś nie ma zaplanowanych sesji."
         />
       )}
 
@@ -386,7 +386,7 @@ export function TodayCockpit({
   else if (m.running) text = `Trwa · ${clientName(m.running.clientId)}`
   else if (m.next) text = `${untilLabel(timeToMin(m.next.time) - m.nowMin)} · ${m.next.time}`
   else if (m.total > 0) text = `Po sesjach · ${m.done}/${m.total}`
-  else text = 'Wolny dzień'
+  else text = 'Dziś bez sesji'
 
   return (
     <>

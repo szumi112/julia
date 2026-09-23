@@ -9,7 +9,8 @@ import {
   fmtMoney, fmtNumber, fmtShortDate, monthKey, fmtMonthName,
   sessionsWord, fmtDayMonth, clientsWord, plural, warsawDateTimeFromUtc,
 } from '../format.js'
-import { sessionConflicts, specialistWeekLoad } from '../workspace.js'
+import { sessionConflictGroups, specialistWeekLoad } from '../workspace.js'
+import { loadFailureCopy } from '../save-failure-copy.js'
 import { EntityLink, FilterBar, FilterGroup, ViewState, useRouteParamsSync } from '../ux-patterns.jsx'
 import { futureWorkspaceRange, isWorkspaceRangeCovered, monthWorkspaceRange, rollingWorkspaceRange } from '../workspace-view.js'
 import { isWorkspaceRangePending } from '../workspace-load-request.js'
@@ -89,7 +90,8 @@ const sessionsInRange = (sessions, range) => sessions.filter(
 
 function AppTeamDirectory({ blocked, notice, onRefresh, psychologists, stale }) {
   const { refresh: refreshSession, session } = useAuth()
-  const { capabilities } = useShell()
+  const { canAccess, capabilities } = useShell()
+  const canOpenProfile = canAccess('psych') === true
   const canCreate = canPerformAction(capabilities, 'specialist.create')
   const canEdit = canPerformAction(capabilities, 'specialist.edit')
   const canLink = canPerformAction(capabilities, 'specialist.link')
@@ -106,7 +108,7 @@ function AppTeamDirectory({ blocked, notice, onRefresh, psychologists, stale }) 
           <h1 className="display view-head__title">Zespół <em>centrum</em></h1>
           <p className="view-head__sub">{canManageStaff
             ? 'Profil specjalistki i dostęp do panelu tworzysz osobno.'
-            : 'Lista aktywnych specjalistek jest dostępna tylko do odczytu.'}</p>
+            : 'Specjalistki pracujące w centrum.'}</p>
         </div>
         {canCreate ? <div className="view-head__actions">
           <Button icon="plus" onClick={() => setSurface({ kind: 'create' })}>Dodaj specjalistkę</Button>
@@ -128,7 +130,9 @@ function AppTeamDirectory({ blocked, notice, onRefresh, psychologists, stale }) 
                   variant={index % 2 === 0 ? 'sky' : 'pink'}
                 />
                 <div className="team-card__identity">
-                  <h2 className="team-card__name">{psychologist.name}</h2>
+                  <h2 className="team-card__name">{canOpenProfile ? (
+                    <EntityLink route="psych" params={{ id: psychologist.id }}>{psychologist.name}</EntityLink>
+                  ) : psychologist.name}</h2>
                   <span className="team-card__spec">{rolePresentationFor({
                     role: 'specialist', professionalTitle: psychologist.professionalTitle,
                   })} · {fmtMoney(psychologist.rate)} / sesja</span>
@@ -197,10 +201,7 @@ function ProtectedTeamDirectory() {
       ariaLabel="Stan zespołu"
       tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
       icon="team"
-      title={workspaceState === 'unavailable' ? 'Zespół jest teraz niedostępny' : 'Wczytuję zespół…'}
-      hint={workspaceState === 'unavailable'
-        ? 'Nie pokazujemy niepełnego katalogu specjalistek.'
-        : 'Pobieramy uprawniony zakres aktywnych specjalistek.'}
+      title={workspaceState === 'unavailable' ? loadFailureCopy('zespołu') : 'Wczytuję zespół…'}
       action={workspaceState === 'unavailable'
         ? <Button onClick={() => retryWorkspace(workspaceRange)}>Spróbuj ponownie</Button>
         : undefined}
@@ -296,7 +297,7 @@ function TeamCard({ clients, conflicts, load, psychologist, sessions, today }) {
                   <b>Konflikt w Grafiku</b>
                   <span>{fmtDayMonth(conflict.date)} · {conflictSessions.length > 1 && conflictSessions.every((session) => session.time === conflictSessions[0].time)
                     ? `${conflictSessions.length}× ${conflictSessions[0].time}`
-                    : conflictSessions.map((session) => session.time).join(' i ')}</span>
+                    : conflictSessions.map((session) => session.time).join(', ').replace(/, (?=[^,]*$)/, ' i ')}</span>
                 </span>
                 <EntityLink
                   route="calendar"
@@ -377,7 +378,7 @@ function DemoTeam() {
   )
   const conflictsByPsychologist = useMemo(() => {
     const map = new Map()
-    for (const conflict of sessionConflicts(weekSessions)) {
+    for (const conflict of sessionConflictGroups(weekSessions)) {
       const current = map.get(conflict.psychId) || []
       current.push(conflict)
       map.set(conflict.psychId, current)
@@ -496,15 +497,13 @@ export function PsychDetail({ params }) {
         </EntityLink>
         <div className="view-head">
           <div>
-            <div className="eyebrow">Zespół centrum</div>
             <h1 className="display view-head__title">Profil specjalistki</h1>
           </div>
         </div>
         <ViewState
           ariaLabel="Stan profilu specjalistki"
           icon="team"
-          title={workspaceState === 'loading' ? 'Wczytuję profil specjalistki…' : 'Profil specjalistki jest teraz niedostępny'}
-          hint="Pobieramy bieżący miesiąc oraz najbliższe 3 miesiące sesji."
+          title={workspaceState === 'unavailable' ? loadFailureCopy('profilu specjalistki') : 'Wczytuję profil specjalistki…'}
           tone={workspaceState === 'unavailable' ? 'error' : 'loading'}
           action={workspaceState === 'unavailable'
             ? <Button onClick={() => retryWorkspace(monthRange)}>Spróbuj ponownie</Button>
@@ -664,17 +663,29 @@ export function PsychDetail({ params }) {
               />
             )}
             {futureWorkspaceState === 'ready' && upcoming.map((s) => {
-              const Row = isApp ? 'div' : 'button'
-              return (
-                <Row key={s.id} className={`agenda__row ${isApp ? '' : 'hover-row'}`} style={{ width: '100%', textAlign: 'left' }}
-                  onClick={isApp ? undefined : () => openSessionForm({ session: s })}>
-                  <span className="agenda__time">{s.time}</span>
-                  <span className="agenda__main">
-                    <span className="agenda__client">{clientOf(s.clientId)?.name}</span>
-                    <span className="agenda__meta">{fmtDayMonth(s.date)} · {s.duration} min</span>
-                  </span>
-                  <Icon name="chevR" size={15} className="faint" />
-                </Row>
+              const content = <>
+                <span className="agenda__time">{s.time}</span>
+                <span className="agenda__main">
+                  <span className="agenda__client">{clientOf(s.clientId)?.name}</span>
+                  <span className="agenda__meta">{fmtDayMonth(s.date)} · {s.duration} min</span>
+                </span>
+                <Icon name="chevR" size={15} className="faint" />
+              </>
+              // The app opens the session in Grafik; the demo edits it in place.
+              return isApp ? (
+                <EntityLink
+                  key={s.id}
+                  route="calendar"
+                  params={{ date: s.date, highlightSessionIds: [s.id] }}
+                  className="agenda__row hover-row psych-upcoming__row"
+                >
+                  {content}
+                </EntityLink>
+              ) : (
+                <button key={s.id} type="button" className="agenda__row hover-row" style={{ width: '100%', textAlign: 'left' }}
+                  onClick={() => openSessionForm({ session: s })}>
+                  {content}
+                </button>
               )
             })}
           </div>

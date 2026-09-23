@@ -180,6 +180,7 @@ describe('closed core route descriptors', () => {
     expect(CORE_ROUTE_DESCRIPTORS.map(({ id, capability, auditActions, bodyKeys, sharedBudget }) => ({
       id, capability, auditActions, bodyKeys, sharedBudget,
     }))).toEqual([
+      { id: 'activity.history', capability: 'activity.read', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'workspace', capability: null, auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'permissions.targets', capability: 'permissions.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'permissions.read', capability: 'permissions.manage', auditActions: [], bodyKeys: null, sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
@@ -191,6 +192,7 @@ describe('closed core route descriptors', () => {
       { id: 'clients.create', capability: 'client.manage', auditActions: ['client.created'], bodyKeys: ['name', 'age', 'status', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'clients.edit', capability: 'client.manage', auditActions: ['client.updated', 'client.assignment.changed'], bodyKeys: ['expectedVersion', 'name', 'age', 'status', 'specialistId'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'clients.archive', capability: 'client.manage', auditActions: ['client.archived'], bodyKeys: ['expectedVersion'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
+      { id: 'clients.notes', capability: 'clinical.read', auditActions: ['client.note.created'], bodyKeys: ['text'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'appointments.create', capability: 'appointment.manage', auditActions: ['appointment.created'], bodyKeys: ['clientId', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'appointments.edit', capability: 'appointment.manage', auditActions: ['appointment.updated'], bodyKeys: ['expectedVersion', 'specialistId', 'serviceId', 'date', 'time', 'durationMinutes', 'expectedAmountGrosze', 'location', 'status'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },
       { id: 'appointments.cancel', capability: 'appointment.manage', auditActions: ['appointment.cancelled'], bodyKeys: ['expectedVersion', 'reason'], sharedBudget: { totalLimit: 50, recoveryReserve: 8 } },

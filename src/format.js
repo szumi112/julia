@@ -86,6 +86,11 @@ export const fmtMonthNameWithYearOutsideCurrent = (ym, currentYear) => {
 // locative case for prose ("w lipcu") — Intl only provides the nominative
 const MONTHS_LOC = ['styczniu', 'lutym', 'marcu', 'kwietniu', 'maju', 'czerwcu', 'lipcu', 'sierpniu', 'wrześniu', 'październiku', 'listopadzie', 'grudniu']
 export const fmtMonthLocative = (ym) => MONTHS_LOC[Number(ym.slice(5, 7)) - 1]
+// "we wrześniu 2026" / "w lipcu 2026" - prose phrase with the right preposition
+export const inMonthYear = (ym) => {
+  const month = fmtMonthLocative(ym)
+  return `${month.startsWith('wrz') ? 'we' : 'w'} ${month} ${ym.slice(0, 4)}`
+}
 export const fmtDayMonth = (iso) => dayMonthFmt.format(parseISO(iso))
 export const fmtFullDate = (iso) => fullDateFmt.format(parseISO(iso))
 export const fmtWeekday = (iso) => weekdayFmt.format(parseISO(iso))
@@ -175,9 +180,9 @@ export const sessionsWord = (n) => plural(n, 'sesja', 'sesje', 'sesji')
 export const clientsWord = (n) => plural(n, 'klient', 'klientów', 'klientów')
 export const workbookEntriesWord = (n) => plural(
   n,
-  'wpis ze skoroszytu',
-  'wpisy ze skoroszytu',
-  'wpisów ze skoroszytu',
+  'wpis z arkusza',
+  'wpisy z arkusza',
+  'wpisów z arkusza',
 )
 export const absencesWord = (n) => plural(n, 'nieobecność', 'nieobecności', 'nieobecności')
 export const calendarCountLabel = (sessionCount, workbookEntryCount, absenceCount = 0) => [
@@ -207,7 +212,7 @@ export const STATUS_PILL = {
   scheduled: 'pill--ink',
   completed: 'pill--sage',
   cancelled: 'pill--ink',
-  noshow: 'pill--error',
+  noshow: 'pill--pink',
 }
 
 export const PAY_LABELS = {

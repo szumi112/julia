@@ -11,7 +11,7 @@ import {
   appointmentCancellationError,
 } from '../appointment-cancellation.js'
 
-const STATUS_TONE = { scheduled: 'ink', completed: 'sage', cancelled: 'ink', noshow: 'error' }
+const STATUS_TONE = { scheduled: 'ink', completed: 'sage', cancelled: 'ink', noshow: 'pink' }
 const PAY_TONE = { paid: 'sage', unpaid: 'amber', partial: 'amber' }
 
 export function CancellationDialog({ session, clientName, specialistName, onClose, onConfirm }) {
@@ -80,10 +80,10 @@ export function CancellationDialog({ session, clientName, specialistName, onClos
 
       {error && <div className="cancellation-dialog__error" role="alert">{error}</div>}
       <div className="quick-dialog__actions">
+        <Button variant="ghost" disabled={saving} onClick={close}>Zamknij</Button>
         <Button variant="danger" disabled={!reason || saving} onClick={() => { void confirm() }}>
           {saving ? 'Odwoływanie…' : 'Odwołaj sesję'}
         </Button>
-        <Button variant="ghost" disabled={saving} onClick={close}>Zamknij</Button>
       </div>
     </dialog>
   )
@@ -119,8 +119,8 @@ export function StatusPicker({
         dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: { status } })
         // cancelling has a billing consequence worth naming
         toast(status === 'cancelled'
-          ? 'Status zmieniony: odwołana — sesja nie jest fakturowana'
-          : `Status zmieniony: ${STATUS_LABELS[status].toLowerCase()}`)
+          ? 'Sesja została odwołana · nie wlicza się do rozliczeń'
+          : `Status sesji został zmieniony · ${STATUS_LABELS[status]}`)
       }
     } finally {
       setSaving(false)
@@ -226,7 +226,7 @@ export function PaymentPicker({ session, accessibleLabel, readOnly = false, acti
             }
             dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: { payment: p } })
             setOpen(p === 'partial')
-            toast(`Płatność zmieniona: ${PAY_LABELS[p].toLowerCase()}`)
+            toast(`Płatność została zmieniona · ${PAY_LABELS[p]}`)
           }}
         >
           <span className="dot" style={{ width: 7, height: 7, borderRadius: 99, background: `var(--${PAY_TONE[p] === 'error' ? 'error' : PAY_TONE[p]})` }} />
@@ -257,7 +257,7 @@ export function PaymentPicker({ session, accessibleLabel, readOnly = false, acti
                 setOpen(false)
                 if (session.method === value) return
                 dispatch({ type: 'UPDATE_SESSION', id: session.id, patch: { method: value } })
-                toast(`Forma płatności: ${label.toLowerCase()}`)
+                toast(`Forma płatności została zmieniona · ${label}`)
               }}
             >
               {label}

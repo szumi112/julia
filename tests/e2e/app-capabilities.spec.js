@@ -187,9 +187,9 @@ test('@owner direct spreadsheet entry is retired without mounting workbook tools
   await page.goto('./#/ledger')
 
   await expect(page.getByRole('heading', { name: 'Rejestr został przeniesiony' })).toBeVisible()
-  await expect(page.getByText(/Wgrywanie arkusza i eksport pełnego skoroszytu znajdziesz w Finansach/)).toBeVisible()
+  await expect(page.getByText(/Wgrywanie arkusza i eksport całej bazy znajdziesz w Finansach/)).toBeVisible()
   await expect(page.getByRole('tab')).toHaveCount(0)
-  await expect(page.getByLabel('Wybierz plik XLSX')).toHaveCount(0)
+  await expect(page.getByLabel('Wybierz plik Excel (.xlsx)')).toHaveCount(0)
   expect(workbookRequests).toEqual([])
 })
 
@@ -337,7 +337,7 @@ test('@owner revoking TUS authority closes a dirty activity drawer and shows the
   await expect(page).toHaveURL(/#\/tus(?:\?|$)/)
   await expect(drawer).toHaveCount(0)
   await expect(page.getByText('Fikcyjny sekret starej władzy')).toHaveCount(0)
-  await expect(page.getByRole('status').filter({ hasText: 'Nowa grupa została utworzona' })).toHaveCount(0)
+  await expect(page.getByRole('status').filter({ hasText: 'Grupa została dodana' })).toHaveCount(0)
   await expect(page.getByText('Zajęcia TUS nie są teraz w Twoim zakresie', { exact: true })).toBeVisible()
 })
 
@@ -430,11 +430,11 @@ test('@owner permissions surface uses only the minimal sorted directory and reco
 
   await page.goto('./#/team?section=permissions')
   await expect(page.getByRole('heading', { name: 'Uprawnienia personelu' })).toBeVisible()
-  await expect(page.getByText('Pobieranie listy osób…', { exact: true })).toBeVisible()
+  await expect(page.getByText('Wczytuję listę osób…', { exact: true })).toBeVisible()
   releaseFirstTargets()
-  await expect(page.getByText('Nie udało się pobrać listy osób.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Nie udało się wczytać listy osób. Spróbuj ponownie za chwilę.', { exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Odśwież listę osób' }).click()
+  await page.getByRole('button', { name: 'Spróbuj ponownie' }).click()
   const targetSelect = page.getByRole('combobox', { name: 'Osoba' })
   await expect(targetSelect.locator('option')).toHaveText([
     'Celina Koordynatorka — Koordynacja i recepcja',
@@ -775,7 +775,7 @@ test('@owner refreshes permission targets behind the saved editor', async ({ pag
   await expect(appointments).toHaveAttribute('aria-checked', 'false')
   await expect(targetSelect).toHaveValue(permissionTarget.staffId)
   await expect(page.getByText('Zofia Koordynatorka', { exact: true })).toBeVisible()
-  await expect(page.getByText('Pobieranie listy osób…', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Wczytuję listę osób…', { exact: true })).toHaveCount(0)
   await expect(page).toHaveURL(`#\/team?section=permissions&staffId=${permissionTarget.staffId}`)
   await expect(page.locator('.toast')).toHaveText('Uprawnienia zostały zapisane · Zofia Koordynatorka')
   releaseRefresh()
@@ -822,8 +822,8 @@ test('@owner keeps permission selection visible when its background refresh fail
   await expect.poll(() => targetRequests).toBe(2)
   await expect(appointments).toHaveAttribute('aria-checked', 'false')
   await expect(page.getByRole('combobox', { name: 'Osoba' })).toHaveValue(permissionTarget.staffId)
-  await expect(page.getByText('Pobieranie listy osób…', { exact: true })).toHaveCount(0)
-  await expect(page.getByText('Nie udało się pobrać listy osób.', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Wczytuję listę osób…', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Nie udało się wczytać listy osób. Spróbuj ponownie za chwilę.', { exact: true })).toHaveCount(0)
   await expect(page).toHaveURL(`#\/team?section=permissions&staffId=${permissionTarget.staffId}`)
 })
 
@@ -998,7 +998,7 @@ test('@owner permission save retries an uncertain response with one immutable ke
   await page.getByRole('switch', { name: 'Może zarządzać sesjami' }).click()
   await page.getByRole('button', { name: 'Zapisz uprawnienia' }).click()
   await expect(page.getByText(
-    'Nie wiadomo, czy uprawnienia zostały zapisane. Spróbuj ponownie bez zmiany ustawień.',
+    'Nie mamy pewności, czy zmiany się zapisały. Kliknij „Spróbuj ponownie”, niczego nie zmieniając.',
     { exact: true },
   )).toBeVisible()
   await page.getByLabel('Uprawnienia personelu')
@@ -1046,7 +1046,7 @@ test('@owner permission save reloads the current revision after an optimistic co
   await page.getByRole('button', { name: 'Zapisz uprawnienia' }).click()
 
   await expect(page.getByText(
-    'Uprawnienia zmieniły się w międzyczasie. Pobraliśmy aktualną wersję.',
+    'Ktoś w międzyczasie zmienił uprawnienia tej osoby. Twoja zmiana nie została zapisana. Widzisz teraz aktualne ustawienia.',
     { exact: true },
   )).toBeVisible()
   await expect(appointments).toHaveAttribute('aria-checked', 'false')

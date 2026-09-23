@@ -1092,9 +1092,9 @@ const countedDb = () => {
 describe('persistent client creation', () => {
   it('strictly captures the exact create body without invoking accessors', () => {
     expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'clients.create')
-      .optionalBodyKeys).toEqual(['assignmentStartsAt'])
+      .optionalBodyKeys).toEqual(['assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes'])
     expect(CORE_ROUTE_DESCRIPTORS.find(({ id }) => id === 'clients.edit')
-      .optionalBodyKeys).toEqual(['assignmentStartsAt'])
+      .optionalBodyKeys).toEqual(['assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes'])
     expect(validateCreateClientBody(BODY)).toEqual({ ...BODY, assignmentStartsAt: null })
     expect(validateCreateClientBody({
       ...BODY, assignmentStartsAt: '2026-01-02T03:04:05.000Z',
@@ -1265,6 +1265,30 @@ describe('persistent client creation', () => {
       idempotencyKey: 'client-create-future-start-0001',
     })).rejects.toThrow('VALIDATION_FAILED/assignmentStartsAt')
     expect(futureFactory).not.toHaveBeenCalled()
+  })
+
+  it('creates fictional guardian contacts in the encrypted client identity', async () => {
+    const ids = ['guardian_create_client', 'guardian_create_assignment',
+      'guardian_create_version', 'guardian_create_assignment_version',
+      'guardian_create_audit', 'guardian_create_key']
+    const body = {
+      ...BODY, guardianPhone: '+48 600 100 200',
+      guardianEmail: 'opiekun@example.test', receptionNotes: 'Kontakt po 15:00.',
+    }
+    const result = await createClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS, correlationId: CORRELATION_ID,
+      idFactory: () => ids.shift(), body, idempotencyKey: 'guardian-create-key',
+    })
+    expect(result.body.data.client).toMatchObject({
+      guardianPhone: body.guardianPhone, guardianEmail: body.guardianEmail,
+      receptionNotes: body.receptionNotes,
+    })
+    const row = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(result.body.data.client.id).first()
+    expect(row.identity_envelope).not.toContain(body.guardianPhone)
+    expect(row.identity_envelope).not.toContain(body.guardianEmail)
+    expect(row.identity_envelope).not.toContain(body.receptionNotes)
   })
 
   it('creates and replays a client with an explicit past assignment start', async () => {
@@ -1781,6 +1805,14 @@ describe('persistent client edit and reassignment', () => {
       .toThrow('VALIDATION_FAILED/clientId')
   })
 
+  it('distinguishes omitted guardian fields from explicit clearing in edit digests', async () => {
+    const omitted = await digestEditClientRequest('cl_edit_target', editBody)
+    const cleared = await digestEditClientRequest('cl_edit_target', {
+      ...editBody, guardianPhone: '', guardianEmail: '', receptionNotes: '',
+    })
+    expect(cleared).not.toBe(omitted)
+  })
+
   it('keeps the edit adapter exact and maps safe semantic fields', async () => {
     const service = vi.fn(async () => ({ status: 200, body: { data: { client: {} } } }))
     const input = {
@@ -1887,6 +1919,81 @@ describe('persistent client edit and reassignment', () => {
       clientId: original.id, body, idempotencyKey: 'client-edit-identity-success-0001',
     })).toEqual(result)
     expect(replayFactory).not.toHaveBeenCalled()
+  })
+
+  it('preserves guardian contacts on legacy edits and clears only explicitly supplied fields', async () => {
+    const original = await seedEditable()
+    const base = {
+      status: original.status, specialistId: original.assignment.specialistId,
+      age: original.age,
+    }
+    const makeOptions = (marker, version, body) => {
+      const values = [`${marker}_version`, `${marker}_audit`]
+      return {
+        db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+        keyring: ring(), nowMs: NOW_MS + version * 1_000,
+        correlationId: CORRELATION_ID, idFactory: () => values.shift(),
+        clientId: original.id, body: { ...base, expectedVersion: version, ...body },
+        idempotencyKey: `guardian-${marker}-key`,
+      }
+    }
+    const firstOptions = makeOptions('first_contacts', 1, {
+      name: original.name, guardianPhone: '+48 600 100 200',
+      guardianEmail: 'opiekun@example.test', receptionNotes: 'Kontakt po 15:00.',
+    })
+    firstOptions.keyring = await firstOptions.keyring
+    const first = await editClient(firstOptions)
+    expect(first.body.data.client).toMatchObject({
+      guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
+      receptionNotes: 'Kontakt po 15:00.', version: 2,
+    })
+    expect(await editClient({ ...firstOptions, idFactory: () => { throw new Error('replayed') } }))
+      .toEqual(first)
+    const row = await env.DB.prepare('SELECT identity_envelope FROM clients WHERE id=?')
+      .bind(original.id).first()
+    expect(row.identity_envelope).not.toContain('600 100 200')
+    expect(row.identity_envelope).not.toContain('opiekun@example.test')
+    expect(row.identity_envelope).not.toContain('Kontakt po')
+    const secondOptions = makeOptions('legacy_contacts', 2, { name: 'Fikcyjna po zmianie' })
+    secondOptions.keyring = await secondOptions.keyring
+    const second = await editClient(secondOptions)
+    expect(second.body.data.client).toMatchObject({
+      guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
+      receptionNotes: 'Kontakt po 15:00.', version: 3,
+    })
+    const thirdOptions = makeOptions('clear_contacts', 3, {
+      name: 'Fikcyjna po zmianie', guardianPhone: '',
+    })
+    thirdOptions.keyring = await thirdOptions.keyring
+    const third = await editClient(thirdOptions)
+    expect(third.body.data.client).toMatchObject({
+      guardianPhone: '', guardianEmail: 'opiekun@example.test',
+      receptionNotes: 'Kontakt po 15:00.', version: 4,
+    })
+    const versionRow = await env.DB.prepare(
+      "SELECT snapshot_envelope FROM record_versions WHERE entity_type='client' AND entity_id=? AND version=4"
+    ).bind(original.id).first()
+    expect(versionRow.snapshot_envelope).not.toContain('opiekun@example.test')
+    const scope = clientKeyScope(original.id)
+    const dataKey = await loadDataKey(env.DB, {
+      envelope: JSON.parse(versionRow.snapshot_envelope), expectedScope: scope,
+    })
+    expect(JSON.parse(await decryptForScope(await ring(), dataKey, {
+      expectedScope: scope, recordId: original.id, field: 'record_version',
+      envelope: JSON.parse(versionRow.snapshot_envelope),
+    }))).toMatchObject({ schema: 'client.v2', guardianEmail: 'opiekun@example.test' })
+    const archiveIds = ['guardian_archive_version', 'guardian_archive_assignment', 'guardian_archive_audit']
+    const archived = await archiveClient({
+      db: env.DB, recoveryDb: env.DB, actor: CLIENT_OWNER_ACTOR,
+      keyring: await ring(), nowMs: NOW_MS + 5_000,
+      correlationId: CORRELATION_ID, idFactory: () => archiveIds.shift(),
+      clientId: original.id, body: { expectedVersion: 4 },
+      idempotencyKey: 'guardian-archive-key',
+    })
+    expect(archived.body.data.client).toMatchObject({
+      guardianPhone: '', guardianEmail: 'opiekun@example.test',
+      receptionNotes: 'Kontakt po 15:00.', status: 'archived',
+    })
   })
 
   it('backdates one open assignment with its own version and preserves it on later edits', async () => {

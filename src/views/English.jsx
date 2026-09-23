@@ -5,7 +5,7 @@ import { useReveal } from '../anim.js'
 import { Button, EmptyState, Pager } from '../ui.jsx'
 import { useRouteParamsSync } from '../ux-patterns.jsx'
 import { pageCount, pageSlice } from '../pagination.js'
-import { fmtMonthYear } from '../format.js'
+import { inMonthYear } from '../format.js'
 import { ActivityBillingAction } from './FinanceEntryActions.jsx'
 import {
   activityActionAvailability,
@@ -24,6 +24,8 @@ import {
 
 const PAGE_SIZE = 30
 const validMonth = (month) => /^(?!0000)\d{4}-(0[1-9]|1[0-2])$/.test(month ?? '')
+const englishSubtitle = (month, role) => `${
+  role.scope === 'own' ? 'Twoi uczestnicy' : 'Uczestnicy'} i rozliczenia ${inMonthYear(month)}.`
 
 export function English({ params = {} }) {
   const { workspace } = useApp()
@@ -66,26 +68,28 @@ export function English({ params = {} }) {
     : null, [loadState, month, workspace.activities])
 
   const actions = activityActionAvailability({ actor, role, capabilities, group: null, loadState })
+  const newParticipant = () => openActivityParticipantForm({ month, programId: 'apg_english' })
+  const newGroup = () => openActivityGroupForm({ month, programId: 'apg_english', leaderSpecialistIds: [] })
   if (loadState !== 'ready') return (
     <div ref={ref}>
       <div className="view-head">
         <div>
           <h1 className="display view-head__title">Angielski</h1>
-          <p className="view-head__sub">
-            W miesiącu {fmtMonthYear(month)} wyświetlamy uczestników i rozliczenia {role.scope === 'own' ? 'z Twojego zakresu' : 'całego centrum'}.
-          </p>
+          <p className="view-head__sub">{englishSubtitle(month, role)}</p>
         </div>
         <div className="view-head__actions">
-          {actions.createParticipant && <Button variant="ghost" icon="plus" onClick={() => openActivityParticipantForm({ month, programId: 'apg_english' })}>Nowy uczestnik</Button>}
-          {actions.createGroup && <Button icon="plus" onClick={() => openActivityGroupForm({ month, programId: 'apg_english', leaderSpecialistIds: [] })}>Nowa grupa</Button>}
-          <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
+          {actions.createParticipant && <Button variant="ghost" icon="plus" onClick={newParticipant}>Nowy uczestnik</Button>}
+          {actions.createGroup && <Button icon="plus" onClick={newGroup}>Nowa grupa</Button>}
         </div>
       </div>
+      <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
       <ActivityLoadState state={loadState} title="Angielski" onRetry={retry} />
     </div>
   )
   if (!moduleVisible) return <ActivityModuleEmpty program="english" />
 
+  const programEmpty = overview.groups.length === 0 && overview.participants.length === 0
+    && overview.rows.length === 0
   const pages = pageCount(overview.rows.length, PAGE_SIZE)
   const visibleRows = pageSlice(overview.rows, page, PAGE_SIZE)
   return (
@@ -93,25 +97,26 @@ export function English({ params = {} }) {
       <div className="view-head" data-reveal>
         <div>
           <h1 className="display view-head__title">Angielski</h1>
-          <p className="view-head__sub">
-            W miesiącu {fmtMonthYear(month)} wyświetlamy uczestników i rozliczenia {role.scope === 'own' ? 'z Twojego zakresu' : 'całego centrum'}.
-          </p>
+          <p className="view-head__sub">{englishSubtitle(month, role)}</p>
         </div>
         <div className="view-head__actions">
-          {actions.createParticipant && (
-            <Button variant="ghost" icon="plus" onClick={() => openActivityParticipantForm({
-              month, programId: 'apg_english',
-            })}>Nowy uczestnik</Button>
+          {actions.createParticipant && !programEmpty && (
+            <Button variant="ghost" icon="plus" onClick={newParticipant}>Nowy uczestnik</Button>
           )}
-          {actions.createGroup && (
-            <Button icon="plus" onClick={() => openActivityGroupForm({
-              month, programId: 'apg_english', leaderSpecialistIds: [],
-            })}>Nowa grupa</Button>
-          )}
-          <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
+          {actions.createGroup && <Button icon="plus" onClick={newGroup}>Nowa grupa</Button>}
         </div>
       </div>
-      <ActivityFigures summary={overview.summary} english />
+      <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
+      {programEmpty ? (
+        <EmptyState
+          icon="english"
+          title="Nie ma jeszcze uczestników angielskiego"
+          hint={actions.createParticipant ? 'Dodaj pierwszego uczestnika, aby rozliczać zajęcia.' : undefined}
+          action={actions.createParticipant
+            ? <Button icon="plus" onClick={newParticipant}>Nowy uczestnik</Button>
+            : null}
+        />
+      ) : overview.rows.length > 0 && <ActivityFigures summary={overview.summary} english />}
       <ActivityLatestLink
         latestMonth={overview.summary.participantCount === 0
           && overview.summary.classCount === 0
@@ -150,8 +155,9 @@ export function English({ params = {} }) {
         </section>
       )}
 
+      {!programEmpty && <>
       <section className="card card--pad" aria-labelledby="english-participants-title">
-        <h2 className="card-title" id="english-participants-title">Uczestnicy programu</h2>
+        <h2 className="card-title" id="english-participants-title">Uczestnicy</h2>
         {overview.participants.length > 0 ? (
           <ul className="activity-participant-list">
             {overview.participants.map((participant) => (
@@ -169,7 +175,7 @@ export function English({ params = {} }) {
               </li>
             ))}
           </ul>
-        ) : <p className="muted">Brak uczestników programu.</p>}
+        ) : <EmptyState compact icon="group" title="Nie ma jeszcze uczestników." />}
       </section>
 
       <section className="card card--pad activity-monthly-table" aria-labelledby="english-month-title">
@@ -181,19 +187,10 @@ export function English({ params = {} }) {
             <Pager page={page} pages={pages} onPage={setPage} />
           </>
         ) : (
-          <EmptyState compact icon="group" title="Brak danych z angielskiego w tym miesiącu" />
+          <EmptyState compact icon="payments" title="W tym miesiącu nie ma jeszcze rozliczeń." />
         )}
       </section>
-
-      {overview.ungroupedRows.length > 0 && (
-        <section className="card card--pad" aria-labelledby="english-ungrouped-title">
-          <h2 className="card-title" id="english-ungrouped-title">Bez przypisanej grupy</h2>
-          <p className="muted">
-            {overview.ungroupedRows.length} {overview.ungroupedRows.length === 1 ? 'rozliczenie' : 'rozliczenia'} w tabeli powyżej
-            ma oznaczenie „Bez przypisanej grupy” - bez potwierdzonego przypisania do grupy ani członkostwa.
-          </p>
-        </section>
-      )}
+      </>}
     </div>
   )
 }

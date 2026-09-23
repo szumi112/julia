@@ -73,47 +73,41 @@ export function WorkbookExport({ own = false, onComplete, placement = 'card' }) 
         }
         setStatus('error')
         setError(caught instanceof ApiError && caught.code === 'IDEMPOTENCY_CONFLICT'
-          ? 'Dane zmieniły się — ponów jako nowy eksport.'
-          : 'Nie udało się przygotować bezpiecznego eksportu.')
+          ? 'Dane zmieniły się w trakcie przygotowania arkusza. Spróbuj ponownie.'
+          : 'Nie udało się przygotować arkusza. Spróbuj ponownie za chwilę.')
       }
     }
   }
 
   if (!allowed || unavailable) return null
-  if (own) return (
-    <div className="workbook-export">
-      <Button disabled={status === 'loading'} onClick={() => download('panel-v2')}>
-        {status === 'loading' ? 'Przygotowywanie…' : 'Eksportuj własne dane'}
-      </Button>
-      {error ? <p className="form-error" role="alert">{error}</p> : null}
-    </div>
-  )
-  if (placement === 'finance-header') return (
+  const done = status === 'complete' ? <p className="muted" role="status">Eksport został pobrany.</p> : null
+  if (own || placement === 'finance-header') return (
     <div className="workbook-export workbook-export--finance">
       <Button
         variant="ghost"
         disabled={status === 'loading'}
         onClick={() => download('panel-v2')}
       >
-        {status === 'loading' ? 'Przygotowywanie…' : 'Pobierz pełny skoroszyt'}
+        {status === 'loading' ? 'Przygotowuję arkusz…' : 'Pobierz arkusz Excel'}
       </Button>
-      <p className="muted">Pobiera całą bazę poradni w formacie Panel-v2, nie tylko wybrany miesiąc.</p>
+      {own ? null : <p className="muted">Plik zawiera wszystkie dane poradni, nie tylko wybrany miesiąc.</p>}
+      {done}
       {error ? <p className="form-error" role="alert">{error} <Button size="sm" variant="ghost" onClick={() => download('panel-v2')}>Spróbuj ponownie</Button></p> : null}
     </div>
   )
   return (
     <section className="card card--pad workbook-export" data-reveal aria-labelledby="workbook-export-title">
-      <h2 className="card-title" id="workbook-export-title">Eksport skoroszytu</h2>
-      <p className="muted">Zakres wybiera serwer na podstawie bieżących uprawnień.</p>
+      <h2 className="card-title" id="workbook-export-title">Pobierz arkusz</h2>
+      <p className="muted">Plik zawiera dane, które widzisz w panelu.</p>
       <div className="row workbook-export__actions">
         <Button disabled={status === 'loading'} onClick={() => download('panel-v2')}>
-          Eksportuj Panel-v2
+          Pobierz arkusz Excel
         </Button>
         <Button variant="ghost" disabled={status === 'loading'} onClick={() => download('legacy')}>
-          Eksportuj format zgodny
+          Pobierz w układzie dawnego arkusza
         </Button>
       </div>
-      {status === 'complete' ? <p role="status">Eksport został pobrany.</p> : null}
+      {done}
       {error ? <p className="form-error" role="alert">{error}</p> : null}
     </section>
   )

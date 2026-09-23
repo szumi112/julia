@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { useApp, useActivityMonthRetry } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { useReveal } from '../anim.js'
-import { EmptyState } from '../ui.jsx'
-import { Button } from '../ui.jsx'
+import { Button, EmptyState } from '../ui.jsx'
 import { EntityLink, useRouteParamsSync } from '../ux-patterns.jsx'
-import { fmtDayMonth, fmtMonthYear, plural } from '../format.js'
+import { fmtDayMonth, inMonthYear, plural } from '../format.js'
+import { conflictCopy, saveFailureCopy } from '../save-failure-copy.js'
 import { Icon } from '../icons.jsx'
 import { ActivityBillingAction } from './FinanceEntryActions.jsx'
 import {
@@ -14,7 +14,9 @@ import {
   activityGroupView,
   activityProgramOverview,
 } from '../activity-workspace.js'
-import { activityModuleVisible } from '../tus.js'
+import {
+  activityEnrolmentLabel, activityModuleVisible, activityParticipantsWithoutGroup,
+} from '../tus.js'
 import {
   ActivityBackLink,
   ActivityChargeTable,
@@ -43,13 +45,16 @@ const useSelectedActivityMonth = (routeName, params) => {
   return { currentMonth, month, setMonth }
 }
 
+const tusSubtitle = (month, role) => `Trening Umiejętności Społecznych - ${
+  role.scope === 'own' ? 'Twoje grupy' : 'grupy'} i rozliczenia ${inMonthYear(month)}.`
+
 const ATTENDANCE_LABEL = Object.freeze({
   absent: 'Nieobecność', excused: 'Nieobecność usprawiedliwiona',
   present: 'Obecność', unknown: 'Nieoznaczona obecność',
 })
 
 function ProtectedAttendance({ actions, activityClass, month, participantRows, rows }) {
-  const { toast, workspace } = useApp()
+  const { workspace } = useApp()
   const [pendingId, setPendingId] = useState(null)
   const [error, setError] = useState(null)
   const byParticipant = new Map(rows.map((row) => [row.participant.id, row.attendance]))
@@ -70,13 +75,13 @@ function ProtectedAttendance({ actions, activityClass, month, participantRows, r
           try { await workspace.activities.loadWindow({ from: month, to: month }) } catch { /* Keep control available. */ }
         }
         setError(submitError?.code === 'VERSION_CONFLICT'
-          ? 'Obecność zmieniła się w innym oknie. Sprawdź odświeżone dane.'
-          : 'Nie udało się zapisać obecności.')
+          ? conflictCopy('obecność')
+          : saveFailureCopy(submitError, { subject: 'obecności' }))
         setPendingId(null)
       }
       return
     }
-    toast('Obecność została zapisana')
+    // The button itself shows the new state, so no toast per click.
     setPendingId(null)
   }
   return (
@@ -104,9 +109,10 @@ function ProtectedAttendance({ actions, activityClass, month, participantRows, r
 }
 
 export function ProtectedTusOverview({ params }) {
-  const { workspace } = useApp()
+  const { state, workspace } = useApp()
   const {
-    actor, activityDiscovery, capabilities, openActivityGroupForm, openActivityParticipantForm, role,
+    actor, activityDiscovery, capabilities, openActivityGroupForm, openActivityMembershipForm,
+    openActivityParticipantForm, role,
   } = useShell()
   const ref = useReveal()
   const { currentMonth, month, setMonth } = useSelectedActivityMonth('tus', params)
@@ -129,22 +135,25 @@ export function ProtectedTusOverview({ params }) {
   const overview = useMemo(() => loadState === 'ready'
     ? activityProgramOverview(workspace.activities.state, { program: 'tus', month })
     : null, [loadState, month, workspace.activities])
+  const withoutGroup = useMemo(() => loadState === 'ready'
+    ? activityParticipantsWithoutGroup(workspace.activities.state, { programId: 'apg_tus', month })
+    : [], [loadState, month, workspace.activities])
+  const specialistName = new Map(state.psychologists.map(({ id, name }) => [id, name]))
+  const newGroup = () => openActivityGroupForm({ month, programId: 'apg_tus', leaderSpecialistIds: [] })
 
   if (loadState !== 'ready') return (
     <div ref={ref}>
       <div className="view-head">
         <div>
           <h1 className="display view-head__title">Grupy TUS</h1>
-          <p className="view-head__sub">
-            W miesiącu {fmtMonthYear(month)} wyświetlamy grupy i rozliczenia {role.scope === 'own' ? 'z Twojego zakresu' : 'całego centrum'}.
-          </p>
+          <p className="view-head__sub">{tusSubtitle(month, role)}</p>
         </div>
         <div className="view-head__actions">
           {actions.createParticipant && <Button variant="ghost" icon="plus" onClick={() => openActivityParticipantForm({ month, programId: 'apg_tus' })}>Nowy uczestnik TUS</Button>}
-          {actions.createGroup && <Button icon="plus" onClick={() => openActivityGroupForm({ month, programId: 'apg_tus', leaderSpecialistIds: [] })}>Nowa grupa</Button>}
-          <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
+          {actions.createGroup && <Button icon="plus" onClick={newGroup}>Nowa grupa</Button>}
         </div>
       </div>
+      <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
       <ActivityLoadState state={loadState} title="Grupy TUS" onRetry={retry} />
     </div>
   )
@@ -154,9 +163,7 @@ export function ProtectedTusOverview({ params }) {
       <div className="view-head" data-reveal>
         <div>
           <h1 className="display view-head__title">Grupy TUS</h1>
-          <p className="view-head__sub">
-            W miesiącu {fmtMonthYear(month)} wyświetlamy grupy i rozliczenia {role.scope === 'own' ? 'z Twojego zakresu' : 'całego centrum'}.
-          </p>
+          <p className="view-head__sub">{tusSubtitle(month, role)}</p>
         </div>
         <div className="view-head__actions">
           {actions.createParticipant && (
@@ -164,15 +171,20 @@ export function ProtectedTusOverview({ params }) {
               month, programId: 'apg_tus',
             })}>Nowy uczestnik TUS</Button>
           )}
-          {actions.createGroup && (
-            <Button icon="plus" onClick={() => openActivityGroupForm({
-              month, programId: 'apg_tus', leaderSpecialistIds: [],
-            })}>Nowa grupa</Button>
+          {actions.createGroup && overview.groups.length > 0 && (
+            <Button icon="plus" onClick={newGroup}>Nowa grupa</Button>
           )}
-          <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
         </div>
       </div>
-      <ActivityFigures summary={overview.summary} />
+      <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
+      {overview.groups.length === 0 ? (
+        <EmptyState
+          icon="group"
+          title="Nie ma jeszcze żadnej grupy TUS"
+          hint={actions.createGroup ? 'Utwórz pierwszą grupę, aby zapisywać uczestników i planować zajęcia.' : undefined}
+          action={actions.createGroup ? <Button icon="plus" onClick={newGroup}>Nowa grupa</Button> : null}
+        />
+      ) : <ActivityFigures summary={overview.summary} />}
       <ActivityLatestLink
         latestMonth={overview.summary.participantCount === 0
           && overview.summary.classCount === 0
@@ -184,6 +196,7 @@ export function ProtectedTusOverview({ params }) {
       <div className="grid-2 activity-group-grid">
         {overview.groups.map(({ group, leaders, latestClass, summary }) => {
           const titleId = `protected-tus-group-${group.id}`
+          const leaderNames = leaders.map(({ specialistId }) => specialistName.get(specialistId)).filter(Boolean)
           return (
             <article className="card card--pad activity-group-card" key={group.id} aria-labelledby={titleId} data-reveal>
               <EntityLink
@@ -197,6 +210,13 @@ export function ProtectedTusOverview({ params }) {
                   <Icon name="chevR" size={18} aria-hidden="true" />
                 </div>
                 {group.details && <p className="muted activity-wrap">{group.details}</p>}
+                {leaders.length > 0 && (
+                  <p className="muted activity-wrap activity-group-card__leaders">
+                    Prowadzący: {leaderNames.length > 0
+                      ? leaderNames.join(', ')
+                      : `${leaders.length} ${plural(leaders.length, 'osoba', 'osoby', 'osób')}`}
+                  </p>
+                )}
                 {latestClass && (
                   <p className="muted activity-group-card__latest">
                     Ostatnie zajęcia: <time dateTime={latestClass.date}>{fmtDayMonth(latestClass.date)}</time>
@@ -205,7 +225,6 @@ export function ProtectedTusOverview({ params }) {
                 <dl className="activity-card-facts">
                   <div><dt>Uczestnicy</dt><dd>{summary.participantCount}</dd></div>
                   <div><dt>Zajęcia</dt><dd>{summary.classCount}</dd></div>
-                  <div><dt>Prowadzący</dt><dd>{leaders.length}</dd></div>
                   <div><dt>Kwota</dt><dd>{activityMoney(summary.amountGrosze)}</dd></div>
                   <div><dt>Wpłacono</dt><dd>{activityMoney(summary.paidAmountGrosze)}</dd></div>
                   <div><dt>Pozostało</dt><dd>{activityMoney(summary.outstandingAmountGrosze)}</dd></div>
@@ -215,11 +234,25 @@ export function ProtectedTusOverview({ params }) {
           )
         })}
       </div>
-      {overview.groups.length === 0 && (
-        <EmptyState icon="group" title="Brak grup TUS w tym zakresie" />
-      )}
-      {overview.summary.classCount === 0 && (
-        <p className="muted activity-empty-note">Brak zapisanych zajęć w tym miesiącu</p>
+      {role.scope === 'centre' && withoutGroup.length > 0 && (
+        <section className="card card--pad activity-ungrouped" aria-labelledby="protected-tus-ungrouped">
+          <h2 className="card-title" id="protected-tus-ungrouped">Uczestnicy bez grupy</h2>
+          <ul className="activity-participant-list">
+            {withoutGroup.map((participant) => (
+              <li className="activity-participant-row" key={participant.id}>
+                <strong className="activity-wrap">{participant.name}</strong>
+                {actions.createMembership && overview.groups.length > 0 && (
+                <Button size="sm" variant="soft" onClick={() => openActivityMembershipForm({
+                  month,
+                  participantId: participant.id,
+                  participants: overview.participants,
+                  groups: overview.groups.map(({ group }) => group),
+                })}>Zapisz do grupy</Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
     </div>
   )
@@ -262,10 +295,8 @@ export function ProtectedTusGroup({ params }) {
         <div>
           <h1 className="display view-head__title">Grupa TUS</h1>
         </div>
-        <div className="view-head__actions">
-          <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
-        </div>
       </div>
+      <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
       <ActivityLoadState state={loadState} title="Grupa TUS" onRetry={retry} />
     </div>
   )
@@ -306,9 +337,9 @@ export function ProtectedTusGroup({ params }) {
               groupId: view.group.id, month, onSavedMonth: setMonth,
             })}>Dodaj zajęcia</Button>
           )}
-          <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
         </div>
       </div>
+      <ActivityMonthNav currentMonth={currentMonth} month={month} onChange={setMonth} />
       <ActivityFigures summary={view.summary} />
       <ActivityLatestLink
         latestMonth={view.summary.participantCount === 0
@@ -323,7 +354,7 @@ export function ProtectedTusGroup({ params }) {
         <div className="row row--between">
           <h2 className="card-title" id="protected-tus-participants">Uczestnicy grupy</h2>
           {actions.createMembership && (
-            <Button icon="plus" onClick={() => openActivityMembershipForm({
+            <Button size="sm" variant="soft" icon="plus" onClick={() => openActivityMembershipForm({
               groupId: view.group.id, month, participants,
             })}>Zapisz do grupy</Button>
           )}
@@ -334,11 +365,7 @@ export function ProtectedTusGroup({ params }) {
               <li className="activity-participant-row" key={membership.id}>
                 <span className="activity-wrap">
                   <strong>{participant.name}</strong>
-                  <small>
-                    {membership.membershipKind === 'observation'
-                      ? `Obserwacja: ${membership.period.month ?? membership.period.day}`
-                      : `${membership.startsOn}${membership.endsOn ? ` – ${membership.endsOn}` : ''}`}
-                  </small>
+                  <small>{activityEnrolmentLabel(membership, month)}</small>
                 </span>
                 <span className="row">
                   {actions.editParticipant && (
@@ -349,25 +376,25 @@ export function ProtectedTusGroup({ params }) {
                   {actions.editMembership && membership.membershipKind === 'interval' && (
                     <Button size="sm" variant="ghost" onClick={() => openActivityMembershipForm({
                       groupId: view.group.id, membership, month, participants,
-                    })}>Edytuj przypisanie</Button>
+                    })}>Zmień daty zapisu</Button>
                   )}
                 </span>
               </li>
             ))}
           </ul>
-        ) : <p className="muted">W tym miesiącu w tej grupie nie ma jeszcze uczestników.</p>}
+        ) : <EmptyState compact icon="group" title="W tym miesiącu nikt nie jest zapisany do grupy." />}
       </section>
       <section className="card card--pad" aria-labelledby="protected-tus-charges">
         <h2 className="card-title" id="protected-tus-charges">Rozliczenia uczestników</h2>
         <ActivityBillingAction month={month} programId="apg_tus" groupId={view.group.id} participants={participants} />
         {view.chargeRows.length > 0
           ? <ActivityChargeTable rows={view.chargeRows} month={month} titleId="protected-tus-charges" />
-          : <p className="muted">Brak rozliczeń w tym miesiącu.</p>}
+          : <EmptyState compact icon="payments" title="W tym miesiącu nie ma jeszcze rozliczeń." />}
       </section>
       <section className="card card--pad" aria-labelledby="protected-tus-classes">
         <h2 className="card-title" id="protected-tus-classes">Zajęcia i obecność</h2>
         {view.classes.length === 0 ? (
-          <p className="muted">Brak zapisanych zajęć w tym miesiącu</p>
+          <EmptyState compact icon="calendar" title="W tym miesiącu nie ma jeszcze zajęć." />
         ) : view.classes.map(({ activityClass, attendance }) => (
           <article className="activity-class" key={activityClass.id}>
             <div className="row row--between">

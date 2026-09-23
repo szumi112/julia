@@ -11,7 +11,7 @@ const {
   linkTusGuardian, unlinkTusGuardian, updateTusKidAndClients, searchTusOverview, tusAssignmentOptions,
   tusAgeLabel, tusAssignmentStatusLabel, withTusGroupDefaults, sortTusGroups,
   activityClassDefaults, activityModuleVisible, activityMonthStart, activityRangeOverlapsMonth,
-  isActivityDurationValid,
+  isActivityDurationValid, activityParticipantsWithoutGroup, activityEnrolmentLabel,
 } = tus
 
 const groups = [
@@ -210,6 +210,41 @@ test('a new single class uses the viewed month and the most recent group schedul
   ], { groupId: 'agr_tus', month: '2026-09' }), {
     date: '2026-09-01', time: '16:15', durationMinutes: 75,
   })
+})
+
+test('participants without an active group in the viewed month stay listed', () => {
+  const state = {
+    groupsById: {
+      g_on: { id: 'g_on', programId: 'apg_tus', status: 'active' },
+      g_off: { id: 'g_off', programId: 'apg_tus', status: 'inactive' },
+    },
+    participantsById: {
+      p_new: { id: 'p_new', programId: 'apg_tus', name: 'Zuzia Nowa', status: 'active' },
+      p_in: { id: 'p_in', programId: 'apg_tus', name: 'Ala W Grupie', status: 'active' },
+      p_left: { id: 'p_left', programId: 'apg_tus', name: 'Bartek Odszedł', status: 'active' },
+      p_old: { id: 'p_old', programId: 'apg_tus', name: 'Celina Nieaktywna', status: 'inactive' },
+      p_en: { id: 'p_en', programId: 'apg_english', name: 'Ewa Angielski', status: 'active' },
+      p_closed: { id: 'p_closed', programId: 'apg_tus', name: 'Adam Zamknięta', status: 'active' },
+    },
+    membershipsById: {
+      m_in: { id: 'm_in', participantId: 'p_in', groupId: 'g_on', membershipKind: 'interval', startsOn: '2026-09-01', endsOn: null, status: 'active' },
+      m_left: { id: 'm_left', participantId: 'p_left', groupId: 'g_on', membershipKind: 'interval', startsOn: '2026-01-01', endsOn: '2026-06-30', status: 'active' },
+      m_closed: { id: 'm_closed', participantId: 'p_closed', groupId: 'g_off', membershipKind: 'interval', startsOn: '2026-09-01', endsOn: null, status: 'active' },
+    },
+  }
+  assert.deepEqual(
+    activityParticipantsWithoutGroup(state, { programId: 'apg_tus', month: '2026-09' }).map(({ id }) => id),
+    ['p_closed', 'p_left', 'p_new'],
+  )
+})
+
+test('enrolment dates read in Polish, with the year only outside the viewed year', () => {
+  assert.equal(activityEnrolmentLabel({ membershipKind: 'interval', startsOn: '2026-09-01', endsOn: null }, '2026-09'), 'od 1 września')
+  assert.equal(
+    activityEnrolmentLabel({ membershipKind: 'interval', startsOn: '2025-09-01', endsOn: '2026-12-31' }, '2026-09'),
+    'od 1 września 2025 do 31 grudnia',
+  )
+  assert.equal(activityEnrolmentLabel({ membershipKind: 'observation', period: { month: '2026-08' } }, '2026-08'), 'Obserwacja: sierpień 2026')
 })
 
 test('activity class duration accepts optional whole-minute values from 1 through 1440', () => {

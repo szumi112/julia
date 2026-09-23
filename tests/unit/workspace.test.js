@@ -2,11 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import * as workspace from '../../src/workspace.js'
 import { PSYCHOLOGISTS } from '../../src/data.js'
-import { billableSummary, paymentPatchFor } from '../../src/format.js'
+import { billableSummary, fmtMoney, paymentPatchFor } from '../../src/format.js'
 
 const {
   roleById, sessionsForRole, clientsForRole, dayAttention, todayWorkspace, sessionMatchesFilters,
-  dissolveLoneFamilies, normalizeSearchText, clientMatchesQuery, dayStatusSummary, sessionConflicts,
+  dissolveLoneFamilies, normalizeSearchText, clientMatchesQuery, dayStatusSummary, sessionConflicts, sessionConflictGroups,
   paymentEntryFor, paymentSnapshotOf, scopedBillingSummary, specialistWeekLoad, withPsychologistDefaults,
   sessionHasStarted, isBeforeAssignmentStart, assignmentStartLabel,
   latestSessionForClient, occupiedSessionsForSpecialistDay, occupiedTimeLabels, suggestedSessionTime,
@@ -211,6 +211,23 @@ test('session conflicts report overlaps in stable date, time, and ID order', () 
   ])
   assert.deepEqual(sessionConflicts(sessions, { date: '2026-07-11' }), [
     { date: '2026-07-11', psychId: 'p2', sessionIds: ['s-a', 's-z'] },
+  ])
+})
+
+test('session conflict groups merge every overlapping pair into one block', () => {
+  const sessions = [
+    { id: 's-1', psychId: 'p1', date: '2026-07-10', time: '14:00', duration: 50, status: 'scheduled' },
+    { id: 's-2', psychId: 'p1', date: '2026-07-10', time: '14:00', duration: 50, status: 'scheduled' },
+    { id: 's-3', psychId: 'p1', date: '2026-07-10', time: '14:00', duration: 50, status: 'scheduled' },
+    { id: 's-4', psychId: 'p1', date: '2026-07-10', time: '16:00', duration: 50, status: 'scheduled' },
+    { id: 's-5', psychId: 'p1', date: '2026-07-10', time: '16:30', duration: 50, status: 'scheduled' },
+    { id: 's-6', psychId: 'p2', date: '2026-07-10', time: '14:00', duration: 50, status: 'scheduled' },
+  ]
+
+  assert.equal(sessionConflicts(sessions).length, 4)
+  assert.deepEqual(sessionConflictGroups(sessions), [
+    { date: '2026-07-10', psychId: 'p1', sessionIds: ['s-1', 's-2', 's-3'] },
+    { date: '2026-07-10', psychId: 'p1', sessionIds: ['s-4', 's-5'] },
   ])
 })
 
@@ -474,7 +491,7 @@ test('payment entry rejects a missing method and an amount above the exact remai
     paidDate: '2026-07-14',
   }), {
     errors: {
-      amount: 'Kwota nie może przekraczać pozostałej kwoty',
+      amount: `Do zapłaty zostało ${fmtMoney(130)} - wpisz tyle albo mniej.`,
       method: 'Wybierz formę płatności',
     },
     patch: null,
@@ -496,7 +513,7 @@ test('payment entry requires an amount greater than zero', () => {
     method: 'cash',
     paidDate: '2026-07-14',
   }), {
-    errors: { amount: 'Podaj kwotę większą od zera' },
+    errors: { amount: 'Wpisz kwotę, np. 180 albo 180,50.' },
     patch: null,
   })
 })
@@ -526,6 +543,28 @@ test('payment entry accepts the exact cent remainder without floating-point reje
   })
 })
 
+test('payment entry accepts a decimal comma', () => {
+  const session = {
+    amount: 180.5,
+    payment: 'unpaid',
+    paidAmount: 0,
+    method: null,
+    paidDate: null,
+    status: 'completed',
+  }
+
+  assert.deepEqual(paymentEntryFor(session, {
+    amount: '180,50',
+    method: 'cash',
+    paidDate: '2026-07-14',
+  }).patch, {
+    payment: 'paid',
+    paidAmount: 180.5,
+    method: 'cash',
+    paidDate: '2026-07-14',
+  })
+})
+
 test('payment snapshot preserves every value needed to undo a booking', () => {
   assert.deepEqual(paymentSnapshotOf({
     payment: 'partial',
@@ -538,4 +577,12 @@ test('payment snapshot preserves every value needed to undo a booking', () => {
     method: 'cash',
     paidDate: '2026-07-01',
   })
+})
+
+test('payment entry rejects thousands separators and a third decimal', () => {
+  const session = { amount: 1800, payment: 'unpaid', paidAmount: 0, method: null, paidDate: null, status: 'completed' }
+  for (const amount of ['1,000', '180,555', '1 000', '-5']) {
+    assert.equal(paymentEntryFor(session, { amount, method: 'cash', paidDate: '2026-07-14' }).errors.amount,
+      'Wpisz kwotę, np. 180 albo 180,50.')
+  }
 })
