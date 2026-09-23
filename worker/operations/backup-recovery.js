@@ -45,6 +45,20 @@ export const CURRENT_WORKBOOK_ROUNDTRIP_MIGRATIONS = Object.freeze([
   migration(22, '0022_outbox_job_recoveries.sql'),
 ])
 
+// Business tables whose row counts fingerprint a backup. Restore recounts them
+// in the restored database and must match exactly. Only tables that background
+// jobs never insert into are listed, so the count is stable while the export
+// runs; changing this list needs a new recovery-facts kind.
+export const RECOVERY_TABLES = Object.freeze([
+  'activity_attendance', 'activity_charges', 'activity_classes', 'activity_groups',
+  'activity_memberships', 'activity_participants', 'activity_programs', 'appointments',
+  'client_assignments', 'client_session_notes', 'clients', 'finance_adjustments',
+  'finance_entries', 'finance_entry_voids', 'finance_manual_voids', 'historical_clients',
+  'historical_counterparties', 'historical_service_occurrences', 'payment_corrections',
+  'payment_entries', 'session_charges', 'specialist_absences', 'specialists',
+  'workbook_imports', 'workbook_source_records',
+])
+
 const ARTIFACT_KEYS = Object.freeze([
   'id', 'fingerprint', 'byteSize', 'parserVersion', 'materializerVersion',
 ])
@@ -279,8 +293,20 @@ function validateWorkbook(value) {
   }
 }
 
+function validateTableCounts(value) {
+  const facts = capturedObject(value, ['kind', 'tableCounts'])
+  if (facts.kind !== 'table_counts_v1') fail()
+  const tableCounts = capturedObject(facts.tableCounts, RECOVERY_TABLES)
+  if (RECOVERY_TABLES.some((table) => !count(tableCounts[table]))) fail()
+  return {
+    kind: facts.kind,
+    tableCounts: Object.fromEntries(RECOVERY_TABLES.map((table) => [table, tableCounts[table]])),
+  }
+}
+
 function validateRecoveryFacts(value) {
   const kind = capturedProperty(value, 'kind')
+  if (kind === 'table_counts_v1') return validateTableCounts(value)
   if (kind === 'core_pre_workbook_v1') return validateCore(value)
   if (kind === 'workbook_roundtrip_v1') return validateWorkbook(value)
   fail()
@@ -294,6 +320,9 @@ export function recoveryFactsMatchMigrations(recoveryFacts, appliedMigrations) {
   try {
     const facts = validateRecoveryFacts(recoveryFacts)
     const migrations = migrationRows(appliedMigrations)
+    // Table counts describe any schema: restore compares the migration list
+    // and counts against the manifest instead of a fixed expected state.
+    if (facts.kind === 'table_counts_v1') return true
     if (facts.kind === 'core_pre_workbook_v1') {
       if (!sameMigrations(migrations, CORE_PRE_WORKBOOK_MIGRATIONS)) fail()
     } else if (!supportedWorkbookMigrations(migrations)) fail()
@@ -305,6 +334,15 @@ const MIGRATIONS_SQL = `SELECT id,name
 FROM d1_migrations
 ORDER BY id
 LIMIT 257`
+
+const TABLE_COUNTS_SQL = `WITH migration_snapshot AS (
+  SELECT json_group_array(json_object('id',ordered.id,'name',ordered.name))
+    AS applied_migrations_json
+  FROM (SELECT id,name FROM d1_migrations ORDER BY id LIMIT 257) AS ordered
+)
+SELECT migration_snapshot.applied_migrations_json AS applied_migrations_json,
+${RECOVERY_TABLES.map((table) => `  (SELECT count(*) FROM ${table}) AS ${table}`).join(',\n')}
+FROM migration_snapshot`
 
 const WORKBOOK_SQL = `WITH migration_snapshot AS (
   SELECT json_group_array(json_object('id',ordered.id,'name',ordered.name))
@@ -696,7 +734,27 @@ function rowsValue(rows) {
   return capturedArray(rows)
 }
 
-async function readSnapshotWithQuery(query) {
+async function readTableCountsWithQuery(query) {
+  if (typeof query !== 'function') fail()
+  let result
+  try { result = await query(TABLE_COUNTS_SQL) } catch { fail() }
+  const rows = rowsValue(result)
+  if (rows.length !== 1) fail()
+  const row = capturedObject(rows[0], ['applied_migrations_json', ...RECOVERY_TABLES])
+  let parsed
+  try { parsed = JSON.parse(row.applied_migrations_json) } catch { fail() }
+  const migrations = migrationRows(parsed)
+  if (JSON.stringify(migrations) !== row.applied_migrations_json) fail()
+  const recoveryFacts = validateBackupRecoveryFacts({
+    kind: 'table_counts_v1',
+    tableCounts: Object.fromEntries(RECOVERY_TABLES.map((table) => [table, row[table]])),
+  })
+  return { appliedMigrations: migrations, recoveryFacts }
+}
+
+// The one-off workbook rollout proof: exact expected facts for the approved
+// staging workbook. Kept for the operator reconciliation evidence only.
+async function readWorkbookSnapshotWithQuery(query) {
   if (typeof query !== 'function') fail()
   let compound
   let compoundThrew = false
@@ -723,20 +781,33 @@ async function readSnapshotWithQuery(query) {
   return { appliedMigrations: migrations, recoveryFacts }
 }
 
+export async function readWorkbookRecoverySnapshotWithQuery(query) {
+  try { return await readWorkbookSnapshotWithQuery(query) } catch { fail() }
+}
+
 export async function readBackupRecoverySnapshotWithQuery(query) {
-  try { return await readSnapshotWithQuery(query) } catch { fail() }
+  try { return await readTableCountsWithQuery(query) } catch { fail() }
+}
+
+const d1Query = (db) => async (sql) => {
+  let response
+  try { response = await db.prepare(sql).all() } catch { fail() }
+  try {
+    const results = capturedProperty(response, 'results')
+    return Array.isArray(results) ? results : null
+  } catch { return null }
 }
 
 export async function readBackupRecoverySnapshot(db) {
   try {
     if (!db || typeof db.prepare !== 'function') fail()
-    return await readSnapshotWithQuery(async (sql) => {
-      let response
-      try { response = await db.prepare(sql).all() } catch { fail() }
-      try {
-        const results = capturedProperty(response, 'results')
-        return Array.isArray(results) ? results : null
-      } catch { return null }
-    })
+    return await readTableCountsWithQuery(d1Query(db))
+  } catch { fail() }
+}
+
+export async function readWorkbookRecoverySnapshot(db) {
+  try {
+    if (!db || typeof db.prepare !== 'function') fail()
+    return await readWorkbookSnapshotWithQuery(d1Query(db))
   } catch { fail() }
 }

@@ -25,6 +25,7 @@ export default defineConfig({
             MATERIALIZER_REAL_CREATE: 'materializer-real-create',
             MATERIALIZER_UPDATE: 'materializer-update',
             MATERIALIZER_OWNER_EDITS: 'materializer-owner-edits',
+            BACKUP_RECOVERY_SCHEMA: 'backup-recovery-schema',
             MATERIALIZER_STAFF_CAP: 'materializer-staff-cap',
             MATERIALIZER_PROFILE_CAP: 'materializer-profile-cap',
           },

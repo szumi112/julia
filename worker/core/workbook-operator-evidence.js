@@ -1,5 +1,5 @@
 import { authorize } from '../identity/policy.js'
-import { readBackupRecoverySnapshot } from '../operations/backup-recovery.js'
+import { readWorkbookRecoverySnapshot } from '../operations/backup-recovery.js'
 import { readWorkbookArtifact } from '../security/workbook-artifacts.js'
 
 const CENTRE = Object.freeze({ kind: 'centre', centreId: 'centre_1' })
@@ -154,7 +154,7 @@ export async function loadWorkbookReconciliationEvidence(input) {
   ).bind(input.importId, input.actor.id).first()
   if (!imported || imported.id !== input.importId) fail('NOT_FOUND')
   let snapshot
-  try { snapshot = await readBackupRecoverySnapshot(input.db) } catch {
+  try { snapshot = await readWorkbookRecoverySnapshot(input.db) } catch {
     await authorizeOperator(input.db, input.actor, input.nowMs)
     fail('INTERNAL_ERROR')
   }

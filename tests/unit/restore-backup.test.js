@@ -17,7 +17,7 @@ import {
   validateRestoreRequest,
   writeRestoreStream,
 } from '../../scripts/restore-backup-lib.mjs'
-import recoveryRow from '../fixtures/backup-recovery-workbook-row.json' with { type: 'json' }
+import { RECOVERY_TABLES } from '../../worker/operations/backup-recovery.js'
 
 const fixtureV1 = JSON.parse(readFileSync(new URL('../fixtures/backup-format-v1.json', import.meta.url), 'utf8'))
 const fixtureV2 = JSON.parse(readFileSync(new URL('../fixtures/backup-format-v2.json', import.meta.url), 'utf8'))
@@ -124,7 +124,10 @@ test('Wrangler restore commands use one strict envelope and a temporary binding 
         meta: { opaque: true },
       }]) }
       if (args.some((value) => value.includes('WITH migration_snapshot'))) return { stdout: JSON.stringify([{
-        results: [structuredClone(recoveryRow)],
+        results: [{
+          applied_migrations_json: JSON.stringify(fixtureV2.manifest.appliedMigrations),
+          ...Object.fromEntries(RECOVERY_TABLES.map((table) => [table, 2])),
+        }],
         success: true,
         meta: { opaque: true },
       }]) }
@@ -153,7 +156,7 @@ test('Wrangler restore commands use one strict envelope and a temporary binding 
     assert.deepEqual(await runner.runCommand({ operation: 'integrity', target: target.name, targetId: target.id }), { valid: true })
     assert.deepEqual(await runner.runCommand({ operation: 'migrations', target: target.name, targetId: target.id }), { migrations: fixtureV2.manifest.appliedMigrations })
     assert.deepEqual(await runner.runCommand({ operation: 'sentinel', target: target.name, targetId: target.id, backupId: fixtureV2.manifest.backupId }), { sentinel: fixtureV2.manifest.restoreSentinel })
-    assert.equal((await runner.runCommand({ operation: 'recovery', target: target.name, targetId: target.id })).recoveryFacts.kind, 'workbook_roundtrip_v1')
+    assert.equal((await runner.runCommand({ operation: 'recovery', target: target.name, targetId: target.id })).recoveryFacts.kind, 'table_counts_v1')
   } finally {
     await runner.cleanup()
   }

@@ -226,7 +226,7 @@ export function restoreCliLine(value) {
       ? [null, true, false, true, true]
       : [value.recoveryKind, true, true, true, true]
   if ((value.format === 'bwm-d1-sql-v3'
-    && !['core_pre_workbook_v1', 'workbook_roundtrip_v1'].includes(value.recoveryKind))
+    && !['table_counts_v1', 'core_pre_workbook_v1', 'workbook_roundtrip_v1'].includes(value.recoveryKind))
     || [value.recoveryKind, value.migrationsVerified, value.recoveryFactsVerified,
       value.restoreSentinelVerified, value.sourceMarkedVerified]
       .some((entry, index) => entry !== expected[index])
