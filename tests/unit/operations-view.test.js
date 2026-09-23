@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   backupFreshnessState,
-  dashboardBackupAlert,
   currentOperationalActions,
   operationalActionCommand,
   operationsOverview,
@@ -60,49 +59,6 @@ test('backup one millisecond past 36 hours is overdue', () => {
 
   assert.equal(state.overdue, true)
   assert.equal(state.status, 'critical')
-})
-
-test('Dashboard does not alert at exactly 36 hours and alerts immediately after', () => {
-  const exactlyAtThreshold = health({
-    backup: check('backup.freshness', 'critical', 'BACKUP_STALE', '2031-04-11T00:00:00.000Z'),
-  })
-  const pastThreshold = health({
-    generatedAt: '2031-04-12T12:00:00.001Z',
-    backup: check('backup.freshness', 'critical', 'BACKUP_STALE', '2031-04-11T00:00:00.000Z'),
-  })
-
-  assert.equal(dashboardBackupAlert(exactlyAtThreshold), null)
-  assert.deepEqual(dashboardBackupAlert(pastThreshold), {
-    title: 'Kopia zapasowa wymaga sprawdzenia',
-    description: 'Od ponad 36 godzin nie powstała nowa kopia zapasowa.',
-  })
-})
-
-test('Dashboard stays quiet when a failed backup has no confirmed previous success', () => {
-  const snapshot = health({
-    backup: check('backup.freshness', 'critical', 'BACKUP_FAILED'),
-  })
-
-  assert.equal(dashboardBackupAlert(snapshot), null)
-})
-
-test('Dashboard alerts when the canonical snapshot confirms a stale backup without success', () => {
-  const snapshot = health({
-    backup: check('backup.freshness', 'critical', 'BACKUP_STALE'),
-  })
-
-  assert.deepEqual(dashboardBackupAlert(snapshot), {
-    title: 'Kopia zapasowa wymaga sprawdzenia',
-    description: 'Od ponad 36 godzin nie powstała nowa kopia zapasowa.',
-  })
-})
-
-test('Dashboard hides a fresh failed backup attempt', () => {
-  const snapshot = health({
-    backup: check('backup.freshness', 'critical', 'BACKUP_FAILED', '2031-04-12T01:00:00.000Z'),
-  })
-
-  assert.equal(dashboardBackupAlert(snapshot), null)
 })
 
 test('backup age uses generatedAt instead of the browser clock', () => {

@@ -83,7 +83,7 @@ test('@owner Dashboard hides the new-session action without appointment creation
     .getByRole('button', { name: 'Nowa sesja' })).toHaveCount(0)
 })
 
-test('@owner sees a stale-backup banner that links to Data Security', async ({ page }) => {
+test('@owner does not request or see a Dashboard backup banner even when backups are stale', async ({ page }) => {
   const healthRequests = []
   await installDashboardSession(page, 'owner', ROLE_DEFAULT_CAPABILITIES.owner)
   await page.route('**/api/v1/operations/health', (route) => {
@@ -100,34 +100,9 @@ test('@owner sees a stale-backup banner that links to Data Security', async ({ p
 
   await page.goto('./#/dashboard')
 
-  const alert = page.getByRole('alert', { name: 'Kopia zapasowa wymaga sprawdzenia' })
-  await expect(alert).toBeVisible()
-  expect(healthRequests).toHaveLength(1)
-  await alert.getByRole('link', { name: /Zobacz, co zrobić/ }).click()
-  await expect(page).toHaveURL(/#\/settings\?section=security$/)
-})
-
-test('@owner does not see a Dashboard backup banner after a fresh failed attempt', async ({ page }) => {
-  const healthRequests = []
-  await installDashboardSession(page, 'owner', ROLE_DEFAULT_CAPABILITIES.owner)
-  await page.route('**/api/v1/operations/health', (route) => {
-    healthRequests.push(route.request())
-    return route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ data: {
-        generatedAt: '2026-09-13T12:00:00.000Z',
-        checks: HEALTHY_CHECKS('2026-09-13T02:00:00.000Z').map((check) => check.id === 'backup.freshness'
-          ? { ...check, status: 'critical', detailCode: 'BACKUP_FAILED' }
-          : check),
-      } }),
-    })
-  })
-
-  await page.goto('./#/dashboard')
-
-  await expect.poll(() => healthRequests.length).toBe(1)
+  await expect(page.getByRole('region', { name: 'Pulpit dnia' })).toBeVisible()
   await expect(page.getByRole('alert', { name: 'Kopia zapasowa wymaga sprawdzenia' })).toHaveCount(0)
+  expect(healthRequests).toHaveLength(0)
 })
 
 test('@coordinator with health capability does not request or see the Dashboard backup status', async ({ page }) => {

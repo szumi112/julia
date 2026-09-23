@@ -3670,32 +3670,6 @@ span.historical-row__subject { color: var(--ink); }
   gap: 8px 12px;
   margin-top: clamp(12px, 2.4vh, 20px);
 }
-.today-backup-alert {
-  width: min(560px, 100%);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 13px 15px;
-  border-left: 4px solid var(--error);
-  background: var(--error-ghost);
-  box-shadow: var(--shadow-1);
-  color: var(--ink);
-  text-align: left;
-}
-.today-backup-alert > div { min-width: 0; }
-.today-backup-alert strong,
-.today-backup-alert span { display: block; }
-.today-backup-alert strong { font-size: 14px; }
-.today-backup-alert > div > span { margin-top: 2px; color: var(--ink-soft); font-size: 13px; line-height: 1.45; }
-.today-backup-alert__link {
-  flex: 0 0 auto;
-  color: var(--error);
-  font-size: 13px;
-  font-weight: 700;
-  text-decoration: none;
-}
-.today-backup-alert__link:hover { color: var(--coral-deep); text-decoration: underline; text-underline-offset: 3px; }
 .today-rule {
   width: min(320px, 58%);
   border: 0;
@@ -3758,7 +3732,6 @@ span.historical-row__subject { color: var(--ink); }
   .today-hero__actions { width: 100%; }
   .today-hero__actions .btn { flex: 1 1 100%; justify-content: center; min-height: 42px; }
   .today-figures .figures__item { min-width: 84px; padding-bottom: var(--s3); }
-  .today-backup-alert { align-items: flex-start; flex-direction: column; gap: 8px; }
   /* one short status word stays on the row; the client name takes the ellipsis */
   .today-session__status { font-size: 11px; }
 }
