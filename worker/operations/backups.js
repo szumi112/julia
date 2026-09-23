@@ -7,6 +7,7 @@ import {
   expectedObjectMetadata,
 } from './backup-format.js'
 import { readBackupRecoverySnapshot } from './backup-recovery.js'
+import { safeLog } from '../logging/safe-log.js'
 import { BACKUP_SQL_MAX_BYTES, nextBackupSqlByteCount } from './backup-limits.js'
 
 const BACKUP_JOB_LIMIT = 1
@@ -1757,8 +1758,13 @@ function responseTransportFacts(response) {
   if (redirected !== false
     || typeof ok !== 'boolean'
     || !Number.isInteger(status) || status < 100 || status > 599
-    || ok !== (status >= 200 && status < 300)
-    || !ok) adapterFail('BACKUP_EXPORT_START_FAILED')
+    || ok !== (status >= 200 && status < 300)) adapterFail('BACKUP_EXPORT_START_FAILED')
+  if (!ok) {
+    // The status alone tells an expired or under-scoped token (401/403) apart
+    // from a provider outage; the response body is never logged.
+    safeLog('warn', { event: 'backup.export.rejected', errorCode: 'BACKUP_EXPORT_START_FAILED', status })
+    adapterFail('BACKUP_EXPORT_START_FAILED')
+  }
   return response
 }
 
