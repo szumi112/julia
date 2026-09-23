@@ -2812,6 +2812,21 @@ describe('D1 export REST request and response contract', () => {
     expect(error).toEqual(new Error(code))
   })
 
+  it('logs only the HTTP status when the export API rejects the request', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const fetch = vi.fn(async () => rawExportResponse('{"errors":[{"message":"secret-detail"}]}', { status: 403 }))
+      const error = await exportError(exportInput({ fetch }).input)
+      expect(error).toEqual(new Error('BACKUP_EXPORT_START_FAILED'))
+      expect(warn).toHaveBeenCalledWith(JSON.stringify({
+        event: 'backup.export.rejected', errorCode: 'BACKUP_EXPORT_START_FAILED', status: 403,
+      }))
+      expect(warn.mock.calls.flat().join('')).not.toContain('secret-detail')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('maps a rejecting fetch to start failed without exposing native detail', async () => {
     const marker = 'native-fetch-provider-detail'
     const error = await exportError(exportInput({
