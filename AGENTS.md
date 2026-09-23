@@ -180,7 +180,7 @@ src/
                        (SessionForm, ClientForm, PsychForm, TusForms, TusMemberPicker)
                        + session-bits.jsx (inline status/payment pills)
 worker/                Cloudflare Worker backend (Hono) — see "Backend architecture"
-migrations/            tracked, numbered D1 SQL migrations (0001…0023, append-only)
+migrations/            tracked, numbered D1 SQL migrations (0001…0030, append-only)
 scripts/               Node scripts run outside the Worker runtime — see
                        "Backend architecture" for the migration/deploy scripts
 tests/
@@ -321,7 +321,7 @@ instead of a real Access login; it only activates when `config.appEnv ===
 address — structurally unreachable once `APP_ENV` is `staging`/`production`.
 
 **Migration model**: `migrations/` holds tracked, numbered, append-only D1 SQL files
-(currently `0001`…`0023`). They are never applied directly by hand — the local
+(currently `0001`…`0030`). They are never applied directly by hand — the local
 workflow stages a fixed subset into the gitignored `.core-migrations/active/`
 directory (the `migrations_dir` `wrangler.json` points D1 at) via
 `scripts/apply-core-migration-stage.js`, run as `npm run migrate:core:stage-a` /

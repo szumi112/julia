@@ -368,13 +368,13 @@ test('downgrades an omitted active specialist to historical-only attribution', (
   const previouslyActive = {
     id: 'sp_transitioned', displayName: 'Specjalistka Historyczna',
     professionalTitle: 'Specjalistka',
-    standardRateGrosze: 18000, status: 'active', version: 3, staffVersion: 4,
+    standardRateGrosze: 18000, longRateGrosze: 25_000, specialization: '', status: 'active', version: 3, staffVersion: 4,
     accessStatus: 'enabled',
   }
   const currentActive = {
     id: 'sp_current', displayName: 'Specjalistka Aktywna',
     professionalTitle: 'Specjalistka',
-    standardRateGrosze: 19000, status: 'active', version: 1, staffVersion: 2,
+    standardRateGrosze: 19000, longRateGrosze: 25_000, specialization: '', status: 'active', version: 1, staffVersion: 2,
     accessStatus: 'enabled',
   }
   let state = createLoadedWorkspaceState()

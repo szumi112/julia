@@ -158,24 +158,24 @@ describe('specialist profile creation', () => {
   it('strictly validates the name, professional title, standard rate and avatar key', () => {
     expect(validateSpecialistProfileBody({
       displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
-      standardRateGrosze: 18000,
+      standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '',
     })).toEqual({
       displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
-      standardRateGrosze: 18000, avatarKey: 'bloom',
+      standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '', avatarKey: 'bloom',
     })
     expect(validateSpecialistProfileBody({
       displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
-      standardRateGrosze: 18000, avatarKey: 'orbit',
+      standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '', avatarKey: 'orbit',
     }).avatarKey).toBe('orbit')
     for (const value of [
-      { displayName: '', professionalTitle: 'Specjalistka', standardRateGrosze: 18000 },
-      { displayName: ' Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000 },
-      { displayName: 'Anna Janowska', professionalTitle: '', standardRateGrosze: 18000 },
-      { displayName: 'Anna Janowska', professionalTitle: ' Specjalistka', standardRateGrosze: 18000 },
-      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka\u0000', standardRateGrosze: 18000 },
-      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 0 },
-      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, avatarKey: 'photo' },
-      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, email: 'x@example.test' },
+      { displayName: '', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '' },
+      { displayName: ' Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '' },
+      { displayName: 'Anna Janowska', professionalTitle: '', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '' },
+      { displayName: 'Anna Janowska', professionalTitle: ' Specjalistka', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '' },
+      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka\u0000', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '' },
+      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 0, longRateGrosze: 25000, specialization: '' },
+      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '', avatarKey: 'photo' },
+      { displayName: 'Anna Janowska', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '', email: 'x@example.test' },
     ]) expect(() => validateSpecialistProfileBody(value)).toThrow('VALIDATION_FAILED')
   })
 
@@ -191,14 +191,14 @@ describe('specialist profile creation', () => {
       nowMs: NOW_MS, correlationId: CORRELATION_ID, idFactory: () => generated.shift(),
       body: {
         displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18000, avatarKey: 'orbit',
+        standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '', avatarKey: 'orbit',
       },
       idempotencyKey: 'profile-create-one',
     })
 
     expect(result).toEqual({ status: 201, body: { data: { specialist: {
       id: 'sp_profile_one', displayName: 'Anna Janowska',
-      professionalTitle: 'Specjalistka', standardRateGrosze: 18000,
+      professionalTitle: 'Specjalistka', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '',
       avatarKey: 'orbit',
       status: 'active', version: 1, accessStatus: 'unclaimed',
       createdAt: NOW, updatedAt: NOW,
@@ -223,7 +223,7 @@ describe('specialist profile creation', () => {
       envelope: JSON.parse(profile.professional_title_envelope),
     })).rejects.toThrow()
     expect(await specialistSnapshotAt(profile.id, 1)).toMatchObject({
-      schema: 'specialist.v4', displayName: 'Anna Janowska',
+      schema: 'specialist.v5', displayName: 'Anna Janowska',
       professionalTitle: 'Specjalistka', avatarKey: 'orbit', version: 1,
     })
     expect({
@@ -247,7 +247,7 @@ describe('specialist profile creation', () => {
       idFactory: () => { throw new Error('id factory must not run on replay') },
       body: {
         displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18000, avatarKey: 'orbit',
+        standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '', avatarKey: 'orbit',
       },
       idempotencyKey: 'profile-create-one',
     }
@@ -266,7 +266,7 @@ describe('specialist profile creation', () => {
     const created = await createSpecialistProfile({
       db: env.DB, recoveryDb: env.DB, actor, keyring: cryptoContext.keyring,
       nowMs: NOW_MS, correlationId: CORRELATION_ID, idFactory: () => createdIds.shift(),
-      body: { displayName, professionalTitle: 'Specjalistka', standardRateGrosze: 18000 },
+      body: { displayName, professionalTitle: 'Specjalistka', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '' },
       idempotencyKey: 'profile-create-format-name',
     })
     expect(created.body.data.specialist.displayName).toBe(displayName)
@@ -287,7 +287,7 @@ describe('specialist profile creation', () => {
       idFactory: () => updatedIds.shift(), specialistId: created.body.data.specialist.id,
       body: {
         expectedVersion: 2, displayName,
-        professionalTitle: 'Psycholożka', standardRateGrosze: 19000,
+        professionalTitle: 'Psycholożka', standardRateGrosze: 19000, longRateGrosze: 25000, specialization: '',
       },
       idempotencyKey: 'profile-edit-format-name',
     })
@@ -305,7 +305,7 @@ describe('specialist profile creation', () => {
       idFactory: () => 'must_not_run',
       body: {
         displayName: 'Justyna J-J', professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18000,
+        standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '',
       },
       idempotencyKey: 'profile-denied-one',
     })).rejects.toThrow('FORBIDDEN')
@@ -325,7 +325,7 @@ describe('specialist profile creation', () => {
     })
     expect(workspace.data.specialists).toContainEqual({
       id: 'sp_profile_one', displayName: 'Anna Janowska',
-      professionalTitle: 'Specjalistka', standardRateGrosze: 18000,
+      professionalTitle: 'Specjalistka', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '',
       avatarKey: 'orbit',
       status: 'active', version: 1,
       staffVersion: null, accessStatus: 'unclaimed',
@@ -398,7 +398,7 @@ describe('specialist profile creation', () => {
       idFactory: () => profileIds.shift(),
       body: {
         displayName: 'Live Replay Specialist', professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18000,
+        standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '',
       },
       idempotencyKey: 'profile-live-replay-create',
     })
@@ -475,27 +475,47 @@ describe('specialist profile creation', () => {
         expectedVersion: 2,
         displayName: 'Anna Janowska-Kowalska',
         professionalTitle: 'Psycholożka',
-        standardRateGrosze: 19000,
+        standardRateGrosze: 19000, longRateGrosze: 27000, specialization: 'Terapia nastolatków',
         avatarKey: 'wave',
       },
       idempotencyKey: 'profile-edit-one',
     })
     expect(result.body.data.specialist).toMatchObject({
       id: 'sp_profile_one', displayName: 'Anna Janowska-Kowalska',
-      professionalTitle: 'Psycholożka', standardRateGrosze: 19000,
+      professionalTitle: 'Psycholożka', standardRateGrosze: 19000, longRateGrosze: 27000,
+      specialization: 'Terapia nastolatków',
       avatarKey: 'wave',
       version: 3, accessStatus: 'invited',
     })
     const encryptedProfile = await env.DB.prepare(
-      'SELECT professional_title_envelope,avatar_key FROM specialists WHERE id=?',
+      `SELECT professional_title_envelope,avatar_key,long_rate_grosze,specialization_envelope
+       FROM specialists WHERE id=?`,
     ).bind('sp_profile_one').first()
+    expect(encryptedProfile.long_rate_grosze).toBe(27000)
+    expect(encryptedProfile.specialization_envelope).not.toContain('nastolatków')
+    expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
+      expectedScope: SCOPE, recordId: 'sp_profile_one', field: 'specialization',
+      envelope: JSON.parse(encryptedProfile.specialization_envelope),
+    })).toBe('Terapia nastolatków')
+    const workspace = await readWorkspace({
+      db: createD1QueryBudget(env.DB, { totalLimit: 50, recoveryReserve: 8 }).work,
+      actor,
+      cryptoContext,
+      window: {
+        from: '2026-08-01', to: '2026-08-31',
+        lower: '2026-07-31T22:00:00.000Z', upper: '2026-08-31T22:00:00.000Z',
+      },
+    })
+    expect(workspace.data.specialists.find(({ id }) => id === 'sp_profile_one')).toMatchObject({
+      longRateGrosze: 27000, specialization: 'Terapia nastolatków',
+    })
     expect(await decryptForScope(cryptoContext.keyring, cryptoContext.dataKey, {
       expectedScope: SCOPE, recordId: 'sp_profile_one', field: 'professional_title',
       envelope: JSON.parse(encryptedProfile.professional_title_envelope),
     })).toBe('Psycholożka')
     expect(encryptedProfile.avatar_key).toBe('wave')
     expect(await specialistSnapshotAt('sp_profile_one', 3)).toMatchObject({
-      schema: 'specialist.v4', displayName: 'Anna Janowska-Kowalska',
+      schema: 'specialist.v5', displayName: 'Anna Janowska-Kowalska',
       professionalTitle: 'Psycholożka', avatarKey: 'wave', status: 'pending', version: 3,
     })
     expect(await env.DB.prepare(
@@ -513,7 +533,7 @@ describe('specialist profile creation', () => {
         expectedVersion: 2,
         displayName: 'Anna Janowska-Kowalska',
         professionalTitle: 'Psycholożka',
-        standardRateGrosze: 19000,
+        standardRateGrosze: 19000, longRateGrosze: 27000, specialization: 'Terapia nastolatków',
         avatarKey: 'wave',
       },
       idempotencyKey: 'profile-edit-one',
@@ -615,7 +635,7 @@ describe('specialist profile creation', () => {
       })(),
       body: {
         displayName: 'Profil do zwolnienia', professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18000,
+        standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '',
       },
       idempotencyKey: 'profile-pending-release-create',
     })

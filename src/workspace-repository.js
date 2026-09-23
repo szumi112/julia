@@ -1,5 +1,6 @@
 // Pure compatibility adapters between canonical core records and the current demo reducer.
 import {
+  CLIENT_PROFILE_KEYS,
   addElapsedMinutes,
   assertAppointmentPaymentTransition,
   assertCivilDate,
@@ -19,7 +20,7 @@ import {
   warsawNoonToUtc,
 } from './core-records.js'
 import { isBillable } from './format.js'
-import { SERVICE_BY_ID } from './services.js'
+import { LONG_SESSION_PRICE, SERVICE_BY_ID, isServiceDuration } from './services.js'
 import { createApiActivityRepository } from './activity-repository.js'
 import {
   captureSpecialistAbsence,
@@ -162,9 +163,8 @@ const captureClient = (input) => {
   let keys = CLIENT_KEYS
   try {
     const descriptors = Object.getOwnPropertyDescriptors(input)
-    keys = [...CLIENT_KEYS, ...[
-      'assignmentStartsAt', 'guardianPhone', 'guardianEmail', 'receptionNotes',
-    ].filter((key) => Object.hasOwn(descriptors, key))]
+    keys = [...CLIENT_KEYS, ...['assignmentStartsAt', ...CLIENT_PROFILE_KEYS]
+      .filter((key) => Object.hasOwn(descriptors, key))]
   } catch { fail('body') }
   return validateClientInput(captureRecord(input, keys, 'body'))
 }
@@ -401,7 +401,7 @@ const captureLegacyAppointment = (raw) => {
   assertWallTime(item.time, 'appointment')
   if (typeof item.service !== 'string' || !SERVICE_BY_ID[item.service]
     || !Number.isSafeInteger(item.duration)
-    || item.duration !== SERVICE_BY_ID[item.service].duration) fail('appointment')
+    || !isServiceDuration(item.service, item.duration)) fail('appointment')
   const paidAmount = item.paidAmount === undefined ? 0 : item.paidAmount
   if (typeof paidAmount !== 'number' || !Number.isFinite(paidAmount) || paidAmount < 0) {
     fail('appointment')
@@ -680,6 +680,8 @@ export function createDemoWorkspaceRepository(options) {
       id: demoId('sp', item.id), displayName: item.name,
       professionalTitle: item.professionalTitle ?? 'Specjalistka',
       standardRateGrosze: groszeFromLegacy(item.rate, 'specialist'),
+      longRateGrosze: groszeFromLegacy(item.longRate ?? LONG_SESSION_PRICE, 'specialist'),
+      specialization: item.spec ?? '',
       avatarKey: item.avatarKey,
       status: 'active',
       version: 1, staffVersion: 1,

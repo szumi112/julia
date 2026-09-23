@@ -6,9 +6,11 @@ import { decryptForScope } from '../security/envelope.js'
 import { decodeBase64Url } from '../security/encoding.js'
 import { decryptClientIdentity } from './crypto.js'
 import {
+  CLIENT_PROFILE_KEYS,
   assertClientIdentity,
   assertLocation,
   assertProfessionalTitle,
+  assertSpecialization,
   isAppointmentId,
   isAssignmentId,
   isCanonicalUtc,
@@ -28,7 +30,7 @@ import {
   isHistoricalCounterpartyId,
   isHistoricalOccurrenceId,
 } from '../../src/historical-records.js'
-import { SERVICE_BY_ID } from '../../src/services.js'
+import { LONG_SESSION_PRICE, SERVICE_BY_ID } from '../../src/services.js'
 import { specialistAvatarKeyOrDefault } from '../../src/specialist-avatars.js'
 import { decryptHistoricalIdentityWithDataKey } from './historical-crypto.js'
 
@@ -55,6 +57,10 @@ const STAFF_KEYS = Object.freeze([
 ])
 const STAFF_V3_KEYS = Object.freeze([...STAFF_KEYS, 'professional_title_envelope'])
 const STAFF_V4_KEYS = Object.freeze([...STAFF_V3_KEYS, 'avatar_key'])
+const STAFF_V5_KEYS = Object.freeze([
+  ...STAFF_V4_KEYS, 'long_rate_grosze', 'specialization_envelope',
+])
+const DEFAULT_LONG_RATE_GROSZE = LONG_SESSION_PRICE * 100
 const CLIENT_KEYS = Object.freeze([
   'id', 'identity_envelope', 'status', 'version', 'archived_at', 'created_at',
   'updated_at', 'assignment_id', 'assignment_specialist_id', 'assignment_starts_at',
@@ -346,6 +352,26 @@ const directoryV4Sql = (specialist) => `
   ORDER BY specialist.id
   LIMIT ?`
 
+const directoryV5Sql = (specialist) => `
+  SELECT specialist.id, specialist.staff_user_id, specialist.standard_rate_grosze,
+         specialist.status, specialist.version, staff.id AS staff_id,
+         staff.specialist_id AS staff_specialist_id, staff.status AS staff_status,
+         staff.version AS staff_version, specialist.display_name_envelope,
+         specialist.professional_title_envelope, specialist.avatar_key,
+         specialist.long_rate_grosze, specialist.specialization_envelope
+  FROM specialists AS specialist
+  LEFT JOIN staff_users AS staff
+    ON staff.id=specialist.staff_user_id AND staff.specialist_id=specialist.id
+  WHERE (specialist.status IN ('active','pending')
+      AND (specialist.staff_user_id IS NULL OR staff.status IN ('pending','active')))
+    OR (specialist.status='archived' AND EXISTS (
+      SELECT 1 FROM historical_service_occurrences AS occurrence
+      WHERE occurrence.specialist_id=specialist.id
+        AND ${historicalWindowSql(specialist)}
+    ))
+  ORDER BY specialist.id
+  LIMIT ?`
+
 const appointmentSql = (specialist) => `
   SELECT appointment.id, appointment.client_id, appointment.specialist_id,
          appointment.service_id, appointment.starts_at, appointment.ends_at,
@@ -587,6 +613,7 @@ const specialistDto = async (row, context, decrypt, profileVersion) => {
   const profileV2 = profileVersion >= 2
   const profileV3 = profileVersion >= 3
   const profileV4 = profileVersion >= 4
+  const profileV5 = profileVersion >= 5
   const archived = row.status === 'archived'
   const accessStatus = row.staff_user_id === null
     ? 'unclaimed'
@@ -596,6 +623,9 @@ const specialistDto = async (row, context, decrypt, profileVersion) => {
     || !positive(row.version) || typeof row.display_name_envelope !== 'string'
     || (profileV3 && !(row.professional_title_envelope === null
       || typeof row.professional_title_envelope === 'string'))
+    || (profileV5 && (!positive(row.long_rate_grosze, 1_000_000)
+      || !(row.specialization_envelope === null
+        || typeof row.specialization_envelope === 'string')))
     || (profileV2
       ? (!['active', 'pending', 'archived'].includes(row.status)
         || (!archived && accessStatus === null)
@@ -644,19 +674,32 @@ const specialistDto = async (row, context, decrypt, profileVersion) => {
   let avatarKey
   try { avatarKey = specialistAvatarKeyOrDefault(profileV4 ? row.avatar_key : undefined) }
   catch { cryptoFailure() }
-  if (profileV2 && archived) return freeze({
-    id: row.id, displayName, professionalTitle, avatarKey,
+  let specialization = ''
+  if (profileV5 && row.specialization_envelope !== null) {
+    try {
+      specialization = assertSpecialization(await decrypt({
+        recordId: row.id,
+        staffId: row.staff_id,
+        field: 'specialization',
+        envelope: row.specialization_envelope,
+        cryptoContext: context,
+      }))
+    } catch { cryptoFailure() }
+  }
+  const rates = {
     standardRateGrosze: row.standard_rate_grosze,
+    longRateGrosze: profileV5 ? row.long_rate_grosze : DEFAULT_LONG_RATE_GROSZE,
+  }
+  if (profileV2 && archived) return freeze({
+    id: row.id, displayName, professionalTitle, avatarKey, ...rates, specialization,
     status: 'archived', version: row.version, staffVersion: row.staff_version,
   })
   return freeze(profileV2 ? {
-    id: row.id, displayName, professionalTitle, avatarKey,
-    standardRateGrosze: row.standard_rate_grosze,
+    id: row.id, displayName, professionalTitle, avatarKey, ...rates, specialization,
     status: 'active', version: row.version, staffVersion: row.staff_version,
     accessStatus,
   } : {
-    id: row.id, displayName, professionalTitle, avatarKey,
-    standardRateGrosze: row.standard_rate_grosze,
+    id: row.id, displayName, professionalTitle, avatarKey, ...rates, specialization,
     status: 'active', version: row.version, staffVersion: row.staff_version,
   })
 }
@@ -706,7 +749,7 @@ const clientDto = async (row, actor, context, decrypt, appointmentByClient) => {
     clientId: row.id, envelope: row.identity_envelope, dataKey,
     keyring: context.keyring,
   })
-  const contactKeys = ['guardianPhone', 'guardianEmail', 'receptionNotes']
+  const contactKeys = CLIENT_PROFILE_KEYS
     .filter((key) => Object.hasOwn(decryptedValue ?? {}, key))
   const decrypted = captureExact(decryptedValue, ['name', 'age', ...contactKeys], cryptoFailure)
   const identity = assertClientIdentity(decrypted)
@@ -945,13 +988,18 @@ export async function readWorkspace(input) {
     window.from, window.to, window.from.slice(0, 7), window.to.slice(0, 7),
   ]
   let specialistRows
-  let profileVersion = 4
+  let profileVersion = 5
   try {
     specialistRows = limit(await query(
-      db, directoryV4Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_V4_KEYS,
+      db, directoryV5Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_V5_KEYS,
     ), 'specialists')
   } catch (error) {
-    if (isD1MissingColumn(error, 'specialist.avatar_key')) {
+    if (isD1MissingColumn(error, 'specialist.long_rate_grosze')) {
+      profileVersion = 4
+      specialistRows = limit(await query(
+        db, directoryV4Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_V4_KEYS,
+      ), 'specialists')
+    } else if (isD1MissingColumn(error, 'specialist.avatar_key')) {
       profileVersion = 3
       specialistRows = limit(await query(
         db, directoryV3Sql(scoped), [...historicalBindings, CAPS.specialists + 1], STAFF_V3_KEYS,

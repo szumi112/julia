@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { allocateDemoClientId, useApp, clientOutstanding, useClientMutationLock, useWorkspaceRefresh } from '../store.jsx'
 import { useShell } from '../shell-ctx.js'
 import { clientsForRole } from '../workspace.js'
-import { Button, Field, Segmented, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
+import { Button, Check, Field, Segmented, IconBtn, DiscardConfirm, useDiscardGuard } from '../ui.jsx'
 import { Icon } from '../icons.jsx'
 import { useDrawerFX } from '../anim.js'
 import { toISODate, plural, fmtMoney, warsawDateTimeFromUtc } from '../format.js'
@@ -13,6 +13,11 @@ import { canPerformAction } from '../capability-access.js'
 import { conflictCopy, loadFailureCopy, saveFailureCopy } from '../save-failure-copy.js'
 import { hasActivePanelAccess, isAssignableSpecialist, NO_PANEL_ACCESS_COPY } from '../specialist-eligibility.js'
 
+const PARENTAL_RIGHTS_OPTIONS = [
+  { value: '', label: 'Nie ustalono' },
+  { value: 'both', label: 'Tak' },
+  { value: 'not_both', label: 'Nie' },
+]
 const AGE_ERROR = 'Wiek wpisujemy dzieciom i młodzieży (1-26 lat). Dorosłej osobie zostaw to pole puste.'
 const ARCHIVE_BLOCKED_COPY = 'Ten klient ma zaplanowane sesje. Odwołaj je, zanim zarchiwizujesz klienta.'
 
@@ -46,6 +51,11 @@ export function ClientDrawer({ opts, onClose }) {
     email: record?.guardianEmail ?? record?.email ?? '',
     phone: record?.guardianPhone ?? record?.phone ?? '',
     receptionNotes: record?.receptionNotes || '',
+    intakeReason: record?.intakeReason || '',
+    guardianClientId: record?.guardianClientId || '',
+    secondGuardianClientId: record?.secondGuardianClientId || '',
+    parentalRights: record?.parentalRights || '',
+    therapyConsent: record?.therapyConsent === 'signed',
     status: record?.status || 'active',
     assignmentDate: assignmentDateOf(record),
     familyOtherId: '',
@@ -76,6 +86,17 @@ export function ClientDrawer({ opts, onClose }) {
   const linkables = clientsForRole(state, role).filter(
     (c) => c.id !== editing?.id && !familyMembers.some((m) => m.id === c.id)
   )
+  // A child's parents who are clients too: adults (no age) the user can see,
+  // listed alphabetically.
+  const isChild = String(form.age).trim() !== ''
+  const guardianCandidates = clientsForRole(state, role)
+    .filter((c) => c.id !== editing?.id && c.age === null && !c.readOnly)
+    .toSorted((a, b) => a.name.localeCompare(b.name, 'pl'))
+  const guardianOptions = (value) => {
+    const selected = state.clients.find((c) => c.id === value)
+    return selected && !guardianCandidates.includes(selected)
+      ? [selected, ...guardianCandidates] : guardianCandidates
+  }
   const reassigned = isApp && Boolean(editing && form.psychId !== editing.psychId)
   const assignmentMax = editing && !reassigned ? initialAssignmentDate : today
 
@@ -84,6 +105,18 @@ export function ClientDrawer({ opts, onClose }) {
     setErrors((e) => ({ ...e, [k]: null }))
     setSaveStatus('idle')
     setSaveError(null)
+  }
+
+  // Clearing the first guardian moves the second one up, so the form never
+  // holds a hidden second link.
+  const setGuardian = (key, value) => {
+    if (key === 'guardianClientId' && !value) {
+      setForm((f) => ({ ...f, guardianClientId: f.secondGuardianClientId, secondGuardianClientId: '' }))
+      setErrors((e) => ({ ...e, guardians: null }))
+      return
+    }
+    set(key, value)
+    setErrors((e) => ({ ...e, guardians: null }))
   }
 
   const focusFirstError = () => {
@@ -115,7 +148,10 @@ export function ClientDrawer({ opts, onClose }) {
       else if (field === 'guardianEmail') errors.email = 'Podaj poprawny adres e-mail opiekuna'
       else if (field === 'guardianPhone') errors.phone = 'Podaj poprawny telefon opiekuna'
       else if (field === 'receptionNotes') errors.receptionNotes = 'Skróć uwagi lub usuń niedozwolone znaki'
-      else errors.body = 'Sprawdź dane klienta'
+      else if (field === 'intakeReason') errors.intakeReason = 'Skróć opis lub usuń niedozwolone znaki'
+      else if (field === 'guardianClientId' || field === 'secondGuardianClientId') {
+        errors.guardians = 'Wybierz dwie różne osoby albo zostaw drugie pole puste'
+      } else errors.body = 'Sprawdź dane klienta'
       return errors
     }
   }
@@ -138,7 +174,23 @@ export function ClientDrawer({ opts, onClose }) {
         ? { guardianEmail: form.email.trim().normalize('NFC') } : {}),
       ...(form.receptionNotes.trim() || editing?.receptionNotes
         ? { receptionNotes: form.receptionNotes.trim().normalize('NFC') } : {}),
+      ...cardFields(),
     }
+  }
+
+  // Card fields travel only when set now or set before (to clear them). The
+  // guardian, rights and consent fields describe a child, so an adult record
+  // clears them.
+  const cardFields = () => {
+    const values = {
+      intakeReason: form.intakeReason.trim().normalize('NFC'),
+      guardianClientId: isChild ? form.guardianClientId : '',
+      secondGuardianClientId: isChild ? form.secondGuardianClientId : '',
+      parentalRights: isChild ? form.parentalRights : '',
+      therapyConsent: isChild && form.therapyConsent ? 'signed' : '',
+    }
+    return Object.fromEntries(Object.entries(values)
+      .filter(([key, value]) => value || editing?.[key]))
   }
 
   const assignmentDateError = () => {
@@ -295,6 +347,7 @@ export function ClientDrawer({ opts, onClose }) {
       ['guardianEmail', form.email, 'Podaj poprawny adres e-mail opiekuna'],
       ['guardianPhone', form.phone, 'Podaj poprawny telefon opiekuna'],
       ['receptionNotes', form.receptionNotes, 'Skróć uwagi lub usuń niedozwolone znaki'],
+      ['intakeReason', form.intakeReason, 'Skróć opis lub usuń niedozwolone znaki'],
     ]) {
       try { assertClientContactFields({ [field]: value.trim().normalize('NFC') }) }
       catch { errs[field === 'guardianEmail' ? 'email' : field === 'guardianPhone' ? 'phone' : field] = error }
@@ -320,6 +373,9 @@ export function ClientDrawer({ opts, onClose }) {
       guardianPhone: form.phone.trim(),
       guardianEmail: form.email.trim(),
       receptionNotes: form.receptionNotes.trim(),
+      intakeReason: form.intakeReason.trim(),
+      parentalRights: isChild ? form.parentalRights : '',
+      therapyConsent: isChild && form.therapyConsent ? 'signed' : '',
       status: form.status,
       since: form.assignmentDate,
     }
@@ -471,6 +527,60 @@ export function ClientDrawer({ opts, onClose }) {
               onChange={(e) => set('age', e.target.value)}
             />
           </Field>
+
+          <Field label="Z czym przychodzi" error={errors.intakeReason}
+            hint="Krótko, z czym osoba zgłasza się na pierwszą wizytę.">
+            <textarea
+              name="client-intake-reason"
+              autoComplete="off"
+              className="textarea"
+              value={form.intakeReason}
+              placeholder="np. Trudności w szkole, lęk przed rozstaniem"
+              onChange={(e) => set('intakeReason', e.target.value)}
+            />
+          </Field>
+
+          {isChild && isApp && (
+            <Field label="Rodzic / opiekun" error={errors.guardians}
+              hint="Powiąż kartę dziecka z kartą rodzica, jeśli rodzic też jest klientem.">
+              <div className="stack client-form__guardians">
+                {[['guardianClientId', 'Pierwszy rodzic lub opiekun'], ['secondGuardianClientId', 'Drugi rodzic lub opiekun']]
+                  .filter(([key]) => key === 'guardianClientId' || form.guardianClientId)
+                  .map(([key, label]) => (
+                    <select
+                      key={key}
+                      name={`client-${key}`}
+                      autoComplete="off"
+                      className="select"
+                      aria-label={label}
+                      value={form[key]}
+                      onChange={(e) => setGuardian(key, e.target.value)}
+                    >
+                      <option value="">— brak —</option>
+                      {guardianOptions(form[key]).map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+                  ))}
+              </div>
+            </Field>
+          )}
+
+          {isChild && (
+            <>
+              <Field label="Oboje rodzice mają pełnię praw rodzicielskich">
+                <Segmented
+                  ariaLabel="Oboje rodzice mają pełnię praw rodzicielskich"
+                  value={form.parentalRights}
+                  onChange={(v) => set('parentalRights', v)}
+                  options={PARENTAL_RIGHTS_OPTIONS}
+                />
+              </Field>
+              <Check checked={form.therapyConsent} onChange={(v) => set('therapyConsent', v)}>
+                Zgoda na terapię małoletniego podpisana
+              </Check>
+            </>
+          )}
 
           <div className="form-grid">
             <Field label="E-mail opiekuna" error={errors.email}>

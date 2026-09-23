@@ -36,12 +36,12 @@ const selectSessionClient = async (drawer, name) => {
 const specialists = [
   {
     id: 'sp_anna', displayName: 'Anna Nowak', professionalTitle: 'Specjalistka',
-    standardRateGrosze: 18_000,
+    standardRateGrosze: 18_000, longRateGrosze: 25_000, specialization: '',
     status: 'active', version: 3, staffVersion: 4,
   },
   {
     id: 'sp_basia', displayName: 'Basia Zielińska', professionalTitle: 'Specjalistka',
-    standardRateGrosze: 19_000,
+    standardRateGrosze: 19_000, longRateGrosze: 25_000, specialization: '',
     status: 'active', version: 2, staffVersion: 3,
   },
 ]
@@ -368,7 +368,8 @@ test('@owner saves guardian contacts and multiline reception notes on the client
       ...client({ id: 'cl_guardian', name: body.name, age: body.age,
         createdAt: '2026-08-04T08:00:00.000Z' }),
       guardianPhone: body.guardianPhone, guardianEmail: body.guardianEmail,
-      receptionNotes: body.receptionNotes,
+      receptionNotes: body.receptionNotes, intakeReason: body.intakeReason,
+      parentalRights: body.parentalRights, therapyConsent: body.therapyConsent,
     })
     records[0].assignment.startsAt = body.assignmentStartsAt
     await route.fulfill(json(201, { data: { client: records[0] } }))
@@ -393,11 +394,17 @@ test('@owner saves guardian contacts and multiline reception notes on the client
   await drawer.getByLabel('Telefon opiekuna').fill('+48 600 100 200')
   await drawer.getByLabel('E-mail opiekuna').fill('opiekun@example.test')
   await drawer.getByLabel('Uwagi recepcji').fill('Kontakt po 15:00.\nDzwonić do opiekuna.')
+  await drawer.getByLabel('Z czym przychodzi').fill('Trudności w szkole.')
+  await drawer.getByRole('radio', { name: 'Tak' }).click()
+  await drawer.getByText('Zgoda na terapię małoletniego podpisana').click()
   await drawer.getByRole('button', { name: 'Dodaj klienta' }).click()
   await expect(page.getByRole('link', { name: '+48 600 100 200' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'opiekun@example.test' })).toBeVisible()
   await expect(page.getByText('Kontakt po 15:00. Dzwonić do opiekuna.')).toBeVisible()
   await expect(page.getByText('Kontakt po 15:00. Dzwonić do opiekuna.')).toHaveCSS('white-space', 'pre-wrap')
+  await expect(page.getByRole('heading', { name: 'Z czym przychodzi' })).toBeVisible()
+  await expect(page.getByText('Trudności w szkole.')).toBeVisible()
+  await expect(page.getByText('Podpisana', { exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: 'Edytuj', exact: true }).click()
   drawer = page.getByRole('dialog', { name: 'Edycja klienta' })
@@ -410,6 +417,7 @@ test('@owner saves guardian contacts and multiline reception notes on the client
   expect(writes[0]).toMatchObject({
     guardianPhone: '+48 600 100 200', guardianEmail: 'opiekun@example.test',
     receptionNotes: 'Kontakt po 15:00.\nDzwonić do opiekuna.',
+    intakeReason: 'Trudności w szkole.', parentalRights: 'both', therapyConsent: 'signed',
   })
   expect(writes[1]).toMatchObject({
     guardianPhone: '', guardianEmail: 'opiekun@example.test', receptionNotes: '',
@@ -474,7 +482,7 @@ test('@owner sends Warsaw assignment dates and preserves the saved instant while
     appointmentCreated = true
     await route.fulfill(json(201, { data: { appointment: appointment({
       id: 'apt_iga', clientId: body.clientId, specialistId: body.specialistId,
-      startsAt: '2026-08-01T07:00:00.000Z', endsAt: '2026-08-01T07:50:00.000Z',
+      startsAt: '2026-08-01T07:00:00.000Z', endsAt: '2026-08-01T08:00:00.000Z',
     }) } }))
   })
 
@@ -523,7 +531,7 @@ test('@owner sends Warsaw assignment dates and preserves the saved instant while
     },
     {
       clientId: 'cl_iga', specialistId: 'sp_anna', serviceId: 'zajecia', date: '2026-08-01',
-      time: '09:00', durationMinutes: 50, expectedAmountGrosze: 18_000, location: null,
+      time: '09:00', durationMinutes: 60, expectedAmountGrosze: 18_000, location: null,
       status: 'scheduled',
     },
     {
@@ -1022,7 +1030,7 @@ test('@owner persists protected appointment create and edit with canonical reloa
     const created = appointment({
       id: 'apt_created', clientId: body.clientId, specialistId: body.specialistId,
       serviceId: body.serviceId, startsAt: '2026-08-04T11:00:00.000Z',
-      endsAt: '2026-08-04T11:50:00.000Z', status: body.status,
+      endsAt: '2026-08-04T12:00:00.000Z', status: body.status,
       expectedAmountGrosze: body.expectedAmountGrosze,
       createdAt: '2026-08-04T08:00:00.000Z', updatedAt: '2026-08-04T08:00:00.000Z',
     })
@@ -1077,7 +1085,7 @@ test('@owner persists protected appointment create and edit with canonical reloa
       path: '/api/v1/appointments',
       body: {
         clientId: 'cl_ola', specialistId: 'sp_anna', serviceId: 'zajecia',
-        date: '2026-08-04', time: '13:00', durationMinutes: 50,
+        date: '2026-08-04', time: '13:00', durationMinutes: 60,
         expectedAmountGrosze: 18_000, location: null, status: 'scheduled',
       },
     },

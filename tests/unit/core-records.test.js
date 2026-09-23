@@ -5,7 +5,10 @@ import {
   appointmentDto,
   addElapsedMinutes,
   assertClientArchivable,
+  assertClientContactFields,
   assertClientIdentity,
+  assertSpecialization,
+  CLIENT_PROFILE_KEYS,
   assertAppointmentPaymentTransition,
   assertId,
   assertReassignment,
@@ -60,6 +63,49 @@ test('guardian contact fields validate as canonical optional identity fields', (
     /VALIDATION_FAILED\/receptionNotes/)
 })
 
+test('client card fields validate intake reason, parent links, parental rights and consent', () => {
+  const card = {
+    intakeReason: 'Trudności w szkole.\nLęk przed rozstaniem.',
+    guardianClientId: 'cl_parent_one', secondGuardianClientId: 'cl_parent_two',
+    parentalRights: 'both', therapyConsent: 'signed',
+  }
+  assert.deepEqual(assertClientIdentity({ name: 'Fikcyjna', age: 8, ...card }),
+    { name: 'Fikcyjna', age: 8, ...card })
+  assert.deepEqual(CLIENT_PROFILE_KEYS, [
+    'guardianPhone', 'guardianEmail', 'receptionNotes', 'intakeReason',
+    'guardianClientId', 'secondGuardianClientId', 'parentalRights', 'therapyConsent',
+  ])
+  assert.equal(validateClientInput({
+    name: 'Fikcyjna', age: 8, status: 'active', specialistId: 'sp_one', ...card,
+  }).therapyConsent, 'signed')
+  const empty = {
+    intakeReason: '', guardianClientId: '', secondGuardianClientId: '',
+    parentalRights: '', therapyConsent: '',
+  }
+  assert.deepEqual(assertClientContactFields(empty), empty)
+  assert.equal(assertClientContactFields({ parentalRights: 'not_both' }).parentalRights, 'not_both')
+  for (const [value, field] of [
+    [{ parentalRights: 'one' }, 'parentalRights'],
+    [{ therapyConsent: 'yes' }, 'therapyConsent'],
+    [{ guardianClientId: 'sp_one' }, 'guardianClientId'],
+    [{ guardianClientId: '', secondGuardianClientId: 'cl_parent_two' }, 'secondGuardianClientId'],
+    [{ secondGuardianClientId: 'cl_parent_two' }, 'secondGuardianClientId'],
+    [{ guardianClientId: 'cl_parent_one', secondGuardianClientId: 'cl_parent_one' }, 'secondGuardianClientId'],
+    [{ intakeReason: 'x'.repeat(1001) }, 'intakeReason'],
+    [{ intakeReason: 'Powód\u0000' }, 'intakeReason'],
+  ]) {
+    assert.throws(() => assertClientContactFields(value), new RegExp(`VALIDATION_FAILED/${field}$`))
+  }
+})
+
+test('specialization is optional bounded single-line text', () => {
+  assert.equal(assertSpecialization(''), '')
+  assert.equal(assertSpecialization('Terapia nastolatków, diagnoza ASRS'), 'Terapia nastolatków, diagnoza ASRS')
+  for (const value of [' Terapia', 'Terapia\nnastolatków', 'x'.repeat(201), 7]) {
+    assert.throws(() => assertSpecialization(value), /VALIDATION_FAILED\/specialization/)
+  }
+})
+
 test('core records reject unknown object keys and entity-mismatched identifiers', () => {
   assert.doesNotThrow(() => assertExactObject({ name: 'Ada' }, ['name']))
   assert.throws(() => assertExactObject({ name: 'Ada', phone: '' }, ['name']), /VALIDATION_FAILED\/object/)
@@ -105,7 +151,11 @@ test('core records require already trimmed NFC strings and bounded snapshots', (
   assert.deepEqual(assertServiceSnapshot({ serviceId: 'zajecia', durationMinutes: 50, expectedAmountGrosze: 18000 }), {
     serviceId: 'zajecia', durationMinutes: 50, expectedAmountGrosze: 18000,
   })
-  assert.throws(() => assertServiceSnapshot({ serviceId: 'zajecia', durationMinutes: 60, expectedAmountGrosze: 18000 }), /VALIDATION_FAILED\/durationMinutes/)
+  for (const durationMinutes of [60, 90]) {
+    assert.equal(assertServiceSnapshot({ serviceId: 'zajecia', durationMinutes, expectedAmountGrosze: 18000 }).durationMinutes, durationMinutes)
+  }
+  assert.throws(() => assertServiceSnapshot({ serviceId: 'zajecia', durationMinutes: 120, expectedAmountGrosze: 18000 }), /VALIDATION_FAILED\/durationMinutes/)
+  assert.throws(() => assertServiceSnapshot({ serviceId: 'konsultacja', durationMinutes: 60, expectedAmountGrosze: 25000 }), /VALIDATION_FAILED\/durationMinutes/)
 })
 
 test('specialist DTO requires one canonical professional title and avatar key', () => {
@@ -113,7 +163,7 @@ test('specialist DTO requires one canonical professional title and avatar key', 
     id: 'sp_one',
     displayName: 'Ada',
     professionalTitle: 'Specjalistka',
-    standardRateGrosze: 18_000,
+    standardRateGrosze: 18_000, longRateGrosze: 25_000, specialization: '',
     status: 'active',
     version: 1,
     staffVersion: 2,
@@ -238,7 +288,7 @@ test('canonical DTOs fail closed and separate legacy projections derive frontend
   assert.deepEqual(Object.keys(clientDto(client)).sort(), ['age', 'archivedAt', 'assignment', 'createdAt', 'id', 'name', 'readOnly', 'status', 'updatedAt', 'version'])
   assert.throws(() => appointmentDto({ id: 'apt_one' }), /VALIDATION_FAILED\/appointment/)
   assert.throws(() => clientDto({ ...client, assignment: { id: 'asg_one' } }), /VALIDATION_FAILED\/client/)
-  assert.deepEqual(specialistDto({ id: 'sp_one', displayName: 'Ada', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 2 }).id, 'sp_one')
+  assert.deepEqual(specialistDto({ id: 'sp_one', displayName: 'Ada', professionalTitle: 'Specjalistka', standardRateGrosze: 18000, longRateGrosze: 25_000, specialization: '', status: 'active', version: 1, staffVersion: 2 }).id, 'sp_one')
   assert.equal(legacyClientProjection(client).email, '')
   const dto = appointmentDto({ id: 'apt_one', clientId: 'cl_one', specialistId: 'sp_one', serviceId: 'zajecia', startsAt: '2026-08-04T07:15:00.000Z', endsAt: '2026-08-04T08:05:00.000Z', timeZone: 'Europe/Warsaw', location: null, status: 'completed', source: 'panel', version: 1, cancelledAt: null, cancellationReason: null, createdAt: '2026-08-01T10:00:00.000Z', updatedAt: '2026-08-01T10:00:00.000Z', charge: { id: 'chg_one', serviceId: 'zajecia', expectedAmountGrosze: 18000, currency: 'PLN', version: 1 }, paymentEntries: [{ id: 'pay_one', appointmentId: 'apt_one', amountGrosze: 18000, method: 'card', receivedAt: '2026-08-04T10:00:00.000Z' }], corrections: [] })
   assert.deepEqual(legacyAppointmentProjection(dto), { ...dto, psychId: 'sp_one', date: '2026-08-04', time: '09:15', duration: 50, amount: 180, payment: 'paid', paidAmount: 180, method: 'card', paidDate: '2026-08-04' })

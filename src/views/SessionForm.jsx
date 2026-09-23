@@ -16,7 +16,9 @@ import {
   bookableClientsForRole, isBookableClient, occupiedSessionsForSpecialistDay, occupiedTimeLabels, sessionHasStarted, sessionSpecialistId,
   suggestedSessionTime,
 } from '../workspace.js'
-import { SERVICES, SERVICE_BY_ID, STANDARD_SERVICE, amountFor, durationFor } from '../services.js'
+import {
+  SERVICES, SERVICE_BY_ID, STANDARD_SERVICE, amountFor, durationFor, serviceDurations,
+} from '../services.js'
 import { ApiError } from '../api.js'
 import { validateAppointmentInput } from '../core-records.js'
 import { canPerformAction } from '../capability-access.js'
@@ -80,10 +82,11 @@ export function SessionDrawer({ opts, onClose }) {
   // a new session opens priced: the service and the specialist are both known
   // up front, so the cennik can fill the amount before anything is typed
   const defaultService = editing?.service || STANDARD_SERVICE
+  const defaultDuration = editing?.duration || durationFor(defaultService)
   const defaultAmount = editing
     ? editing.amount
     : defaultPsych
-      ? amountFor(defaultService, state.psychologists.find((p) => p.id === defaultPsych))
+      ? amountFor(defaultService, state.psychologists.find((p) => p.id === defaultPsych), defaultDuration)
       : ''
 
   const [form, setForm] = useState({
@@ -92,7 +95,7 @@ export function SessionDrawer({ opts, onClose }) {
     service: defaultService,
     date: defaultDate,
     time: defaultTime,
-    duration: editing?.duration || durationFor(defaultService),
+    duration: defaultDuration,
     amount: defaultAmount,
     status: editing?.status || 'scheduled',
     payment: editing?.payment || 'unpaid',
@@ -228,7 +231,7 @@ export function SessionDrawer({ opts, onClose }) {
             psychId, date: f.date, excludeId: editing?.id,
           }) || DEFAULT_SESSION_TIME
           : f.time,
-      amount: amountTouched.current ? f.amount : amountFor(f.service, psych),
+      amount: amountTouched.current ? f.amount : amountFor(f.service, psych, Number(f.duration)),
     }))
     setErrors((e) => ({ ...e, clientId: null, psychId: null, time: null }))
   }
@@ -246,7 +249,7 @@ export function SessionDrawer({ opts, onClose }) {
             psychId, date: f.date, excludeId: editing?.id,
           }) || DEFAULT_SESSION_TIME
           : f.time,
-      amount: amountTouched.current ? f.amount : amountFor(f.service, psych),
+      amount: amountTouched.current ? f.amount : amountFor(f.service, psych, Number(f.duration)),
     }))
     setErrors((e) => ({ ...e, psychId: null, time: null }))
   }
@@ -268,9 +271,24 @@ export function SessionDrawer({ opts, onClose }) {
   const onServiceChange = (service) => {
     const psych = state.psychologists.find((p) => p.id === form.psychId)
     amountTouched.current = false
-    setForm((f) => ({ ...f, service, duration: durationFor(service), amount: amountFor(service, psych) }))
+    const duration = durationFor(service)
+    setForm((f) => ({ ...f, service, duration, amount: amountFor(service, psych, duration) }))
     setErrors((e) => ({ ...e, amount: null, time: null }))
   }
+
+  // A 60- or 90-minute session bills at a different specialist rate, so an
+  // explicit length change re-prices like a change of service does.
+  const onDurationChange = (value) => {
+    const psych = state.psychologists.find((p) => p.id === form.psychId)
+    const duration = Number(value)
+    amountTouched.current = false
+    setForm((f) => ({ ...f, duration, amount: amountFor(f.service, psych, duration) }))
+    setErrors((e) => ({ ...e, amount: null, time: null }))
+  }
+  // Keep a stored length the catalogue no longer offers (older 50-minute
+  // visits) selectable, so editing such a session does not silently change it.
+  const durationOptions = [...new Set([...serviceDurations(form.service), Number(form.duration)])]
+    .sort((a, b) => a - b)
 
   // acceptance target: a failed submit lands focus on the first invalid field
   const focusFirstInvalid = () =>
@@ -640,6 +658,12 @@ export function SessionDrawer({ opts, onClose }) {
               }}
             >Przejdź do Klientów</EntityLink>
           </p>
+          {client?.intakeReason && (
+            <div className="session-intake">
+              <span className="field__label">Z czym przychodzi</span>
+              <p className="session-intake__text">{client.intakeReason}</p>
+            </div>
+          )}
 
           {availablePsychologists.length === 0 ? (
             <div className="field has-error" role="alert">
@@ -677,11 +701,10 @@ export function SessionDrawer({ opts, onClose }) {
               <input type="time" name="session-time" autoComplete="off" className="input" value={form.time} onChange={(e) => set('time', e.target.value)} />
             </Field>
             <Field label="Czas trwania">
-              <select name="session-duration" autoComplete="off" className="select" value={form.duration} onChange={(e) => set('duration', e.target.value)}>
-                <option value="50">50 minut</option>
-                <option value="60">60 minut</option>
-                <option value="90">90 minut</option>
-                <option value="120">120 minut</option>
+              <select name="session-duration" autoComplete="off" className="select" value={form.duration} onChange={(e) => onDurationChange(e.target.value)}>
+                {durationOptions.map((minutes) => (
+                  <option key={minutes} value={minutes}>{minutes} minut</option>
+                ))}
               </select>
             </Field>
             <Field label="Kwota (zł)" error={errors.amount}>

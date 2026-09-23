@@ -21,8 +21,11 @@ import {
   isCapability,
   normalizeCapabilityOverrides,
 } from './capabilities.js'
-import { assertClientContactFields, isWellFormedUnicode, validateAppointmentInput } from './core-records.js'
-import { SERVICE_BY_ID } from './services.js'
+import {
+  CLIENT_PROFILE_KEYS, assertClientContactFields, assertSpecialization, isWellFormedUnicode,
+  validateAppointmentInput,
+} from './core-records.js'
+import { SERVICE_BY_ID, isServiceDuration } from './services.js'
 import {
   isSpecialistAvatarKey,
   specialistAvatarKeyOrDefault,
@@ -210,7 +213,8 @@ const CLIENT_CODES = new Set([
 const AUTH_DENIAL_CODES = new Set(['ACCESS_ASSERTION_INVALID', 'ACCESS_DENIED', 'AUTH_REQUIRED', 'REAUTH_REQUIRED'])
 const authDenialReason = (code) => (code === 'ACCESS_DENIED' ? 'denied' : 'reauth')
 const VALIDATION_FIELDS = new Set([
-  'guardianPhone', 'guardianEmail', 'receptionNotes',
+  'guardianPhone', 'guardianEmail', 'receptionNotes', 'intakeReason', 'guardianClientId',
+  'secondGuardianClientId', 'parentalRights', 'therapyConsent',
   'body', 'displayName', 'email', 'role', 'version', 'name', 'age', 'status',
   'specialistId', 'clientId', 'assignmentStartsAt', 'serviceId', 'dateTime', 'durationMinutes',
   'expectedAmountGrosze', 'location', 'amountGrosze', 'method', 'receivedAt',
@@ -219,7 +223,7 @@ const VALIDATION_FIELDS = new Set([
   'historicalOccurrences',
   'filename', 'fingerprint', 'formatVersion', 'totalRows', 'batchId', 'sequence',
   'entries', 'accountingMonth', 'kind',
-  'standardRateGrosze', 'professionalTitle', 'staffId',
+  'standardRateGrosze', 'longRateGrosze', 'specialization', 'professionalTitle', 'staffId',
   'expectedSpecialistVersion', 'expectedStaffVersion',
   'programId', 'label', 'details', 'leaderSpecialistIds', 'historicalClientId',
   'participantId', 'groupId', 'membershipId', 'classId', 'startsOn', 'endsOn',
@@ -493,8 +497,8 @@ const workspaceIdentity = (name, age) => validClientIdentityText(name)
 
 const captureWorkspaceSpecialist = (raw) => {
   const legacyKeys = [
-    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
-    'version', 'staffVersion',
+    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'longRateGrosze',
+    'specialization', 'status', 'version', 'staffVersion',
   ]
   const value = captureDataObject(raw, [...legacyKeys, 'avatarKey', 'accessStatus'])
     ?? captureDataObject(raw, [...legacyKeys, 'avatarKey'])
@@ -507,6 +511,8 @@ const captureWorkspaceSpecialist = (raw) => {
     || !validWorkspaceText(value.displayName, 120)
     || !validWorkspaceText(value.professionalTitle, 120)
     || !workspacePositive(value.standardRateGrosze, 1_000_000)
+    || !workspacePositive(value.longRateGrosze, 1_000_000)
+    || !validSpecialization(value.specialization)
     || !['active', 'archived'].includes(value.status) || !workspacePositive(value.version)
     || !(value.staffVersion === null || workspacePositive(value.staffVersion))
     || (Object.hasOwn(value, 'accessStatus')
@@ -518,6 +524,8 @@ const captureWorkspaceSpecialist = (raw) => {
     professionalTitle: value.professionalTitle,
     avatarKey,
     standardRateGrosze: value.standardRateGrosze,
+    longRateGrosze: value.longRateGrosze,
+    specialization: value.specialization,
     status: value.status,
     version: value.version,
     staffVersion: value.staffVersion,
@@ -528,6 +536,8 @@ const captureWorkspaceSpecialist = (raw) => {
     professionalTitle: value.professionalTitle,
     avatarKey,
     standardRateGrosze: value.standardRateGrosze,
+    longRateGrosze: value.longRateGrosze,
+    specialization: value.specialization,
     status: value.status,
     version: value.version,
     staffVersion: value.staffVersion,
@@ -584,7 +594,7 @@ const captureWorkspaceClient = (raw) => {
 }
 
 const CLIENT_INPUT_KEYS = Object.freeze(['name', 'age', 'status', 'specialistId'])
-const CLIENT_CONTACT_KEYS = Object.freeze(['guardianPhone', 'guardianEmail', 'receptionNotes'])
+const CLIENT_CONTACT_KEYS = CLIENT_PROFILE_KEYS
 const CLIENT_STATUSES = new Set(['active', 'paused'])
 
 const captureClientContact = (value) => {
@@ -645,8 +655,14 @@ const acceptedCreatedClient = (payload, status, requested) => {
   return client
 }
 
+const validSpecialization = (value) => {
+  try { return assertSpecialization(value) === value } catch { return false }
+}
+
 const captureSpecialistProfileInput = (raw) => {
-  const keys = ['displayName', 'professionalTitle', 'standardRateGrosze']
+  const keys = [
+    'displayName', 'professionalTitle', 'standardRateGrosze', 'longRateGrosze', 'specialization',
+  ]
   const value = captureDataObject(raw, [...keys, 'avatarKey'])
     ?? captureDataObject(raw, keys)
   let avatarKey
@@ -654,7 +670,9 @@ const captureSpecialistProfileInput = (raw) => {
   catch { return null }
   if (!value || !validWorkspaceText(value.displayName, 120)
     || !validWorkspaceText(value.professionalTitle, 120)
-    || !workspacePositive(value.standardRateGrosze, 1_000_000)) return null
+    || !workspacePositive(value.standardRateGrosze, 1_000_000)
+    || !workspacePositive(value.longRateGrosze, 1_000_000)
+    || !validSpecialization(value.specialization)) return null
   return Object.freeze({ ...value, avatarKey })
 }
 
@@ -662,13 +680,15 @@ const acceptedSpecialistProfile = (payload, status, requested) => {
   const outer = captureDataObject(payload, ['data'])
   const data = outer && captureDataObject(outer.data, ['specialist'])
   const value = data && captureDataObject(data.specialist, [
-    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
-    'version', 'accessStatus', 'createdAt', 'updatedAt', 'avatarKey',
+    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'longRateGrosze',
+    'specialization', 'status', 'version', 'accessStatus', 'createdAt', 'updatedAt', 'avatarKey',
   ])
   if (status !== 201 || !value || !SPECIALIST_ID.test(value.id ?? '')
     || value.displayName !== requested.displayName
     || value.professionalTitle !== requested.professionalTitle
     || value.standardRateGrosze !== requested.standardRateGrosze
+    || value.longRateGrosze !== requested.longRateGrosze
+    || value.specialization !== requested.specialization
     || value.avatarKey !== requested.avatarKey || !isSpecialistAvatarKey(value.avatarKey)
     || value.status !== 'active' || value.version !== 1
     || value.accessStatus !== 'unclaimed' || !validInstant(value.createdAt)
@@ -682,13 +702,16 @@ const acceptedEditedSpecialistProfile = (
   const outer = captureDataObject(payload, ['data'])
   const data = outer && captureDataObject(outer.data, ['specialist'])
   const value = data && captureDataObject(data.specialist, [
-    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'status',
-    'version', 'staffVersion', 'accessStatus', 'createdAt', 'updatedAt', 'avatarKey',
+    'id', 'displayName', 'professionalTitle', 'standardRateGrosze', 'longRateGrosze',
+    'specialization', 'status', 'version', 'staffVersion', 'accessStatus', 'createdAt',
+    'updatedAt', 'avatarKey',
   ])
   if (status !== 200 || !value || value.id !== specialistId
     || value.displayName !== requested.displayName
     || value.professionalTitle !== requested.professionalTitle
     || value.standardRateGrosze !== requested.standardRateGrosze
+    || value.longRateGrosze !== requested.longRateGrosze
+    || value.specialization !== requested.specialization
     || value.avatarKey !== requested.avatarKey || !isSpecialistAvatarKey(value.avatarKey)
     || value.status !== 'active' || value.version !== expectedVersion + 1
     || !(value.staffVersion === null || positive(value.staffVersion))
@@ -794,8 +817,8 @@ const captureWorkspaceAppointment = (raw, bounds = null) => {
       && !['client', 'centre', 'late_paid'].includes(value.cancellationReason))
     || !validInstant(value.createdAt) || !validInstant(value.updatedAt)
     || value.createdAt > value.updatedAt
-    || new Date(value.endsAt).getTime() - new Date(value.startsAt).getTime()
-      !== SERVICE_BY_ID[value.serviceId].duration * 60_000
+    || !isServiceDuration(value.serviceId,
+      (new Date(value.endsAt).getTime() - new Date(value.startsAt).getTime()) / 60_000)
     || (value.cancelledAt !== null
       && (value.cancelledAt < value.createdAt || value.cancelledAt > value.updatedAt))) return null
 

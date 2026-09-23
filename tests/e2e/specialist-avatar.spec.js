@@ -15,7 +15,7 @@ test('demo keeps a selected specialist avatar in memory when creating and editin
 
   const createDialog = page.getByRole('dialog', { name: 'Nowa specjalistka' })
   await createDialog.getByLabel('Imię i nazwisko').fill('Ada Awatarowa')
-  await createDialog.getByLabel('Stawka (zł / sesja)').fill('190')
+  await createDialog.getByLabel('Stawka za 60 min (zł)').fill('190')
   await createDialog.getByRole('radio', { name: 'Orbita' }).check()
   await createDialog.getByRole('button', { name: 'Dodaj do zespołu' }).click()
 

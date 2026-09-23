@@ -21,7 +21,7 @@ import {
 } from '../../src/loaded-activities.js'
 
 const specialist = (overrides = {}) => Object.freeze({
-  id: 'sp_anna', displayName: 'Anna Nowak', standardRateGrosze: 18_000,
+  id: 'sp_anna', displayName: 'Anna Nowak', standardRateGrosze: 18_000, longRateGrosze: 25_000, specialization: '',
   professionalTitle: 'Psycholożka', avatarKey: 'orbit', status: 'active', version: 3,
   staffVersion: 4, ...overrides,
 })
@@ -173,7 +173,7 @@ test('projects canonical records into immutable legacy view records without priv
   const projected = projectLoadedWorkspace(source)
 
   assert.deepEqual(projected.psychologists, [{
-    id: 'sp_anna', name: 'Anna Nowak', rate: 180, color: 'var(--pink-deep)',
+    id: 'sp_anna', name: 'Anna Nowak', rate: 180, longRate: 250, spec: '', color: 'var(--pink-deep)',
     professionalTitle: 'Psycholożka', avatarKey: 'orbit',
     status: 'active', version: 3, staffVersion: 4,
   }])
@@ -273,7 +273,7 @@ test('keeps archived historical specialist identities out of the active team dir
   }))
   assert.deepEqual(projected.psychologists.map(({ id }) => id), ['sp_anna'])
   assert.deepEqual(projected.historicalSpecialists, [{
-    id: 'sp_archived_history', name: 'Zofia Archiwalna', rate: 180,
+    id: 'sp_archived_history', name: 'Zofia Archiwalna', rate: 180, longRate: 250, spec: '',
     color: 'var(--sky-deep)', professionalTitle: 'Psycholożka', avatarKey: 'bloom',
     status: 'archived', version: 5, staffVersion: 7,
   }])

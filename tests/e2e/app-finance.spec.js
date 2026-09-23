@@ -28,7 +28,7 @@ const freezeTime = async (page) => {
 
 const specialist = {
   id: 'sp_anna', displayName: 'Anna Nowak', professionalTitle: 'Psycholożka',
-  standardRateGrosze: 18_000, status: 'active', version: 1, staffVersion: 1,
+  standardRateGrosze: 18_000, longRateGrosze: 25_000, specialization: '', status: 'active', version: 1, staffVersion: 1,
 }
 const client = {
   id: 'cl_finance_e2e', name: 'Fikcyjna Klientka', age: 12, status: 'active',

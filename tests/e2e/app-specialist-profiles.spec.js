@@ -21,7 +21,7 @@ test('@owner orders protected Team by professional name and presents Julia witho
         id: 'sp_julia',
         displayName: 'Julia Wolanin',
         professionalTitle: 'Specjalistka',
-        standardRateGrosze: 18_000,
+        standardRateGrosze: 18_000, longRateGrosze: 25_000, specialization: '',
         status: 'active',
         version: 1,
         staffVersion: 1,
@@ -40,7 +40,7 @@ test('@owner orders protected Team by professional name and presents Julia witho
   expect(names).toEqual(names.toSorted((left, right) => left.localeCompare(right, 'pl')))
   expect(names).toContain('Julia Wolanin')
   await expect(julia).toContainText('Specjalistka')
-  await expect(julia).toContainText(/180\s*zł \/ sesja/)
+  await expect(julia).toContainText(/180\s*zł \/ 60 min/)
   await expect(julia).toContainText('Ma dostęp')
   await expect(julia).not.toContainText('Właściciel')
 })
@@ -67,16 +67,19 @@ test('@owner creates, edits, and invites one stable specialist profile', async (
   await expect(createDialog.getByRole('button', { name: 'Dodaj specjalistkę' })).toBeVisible()
   await expect(createDialog.getByRole('button', { name: 'Zamknij' })).toHaveCount(2)
   await expect(createDialog.getByLabel('Tytuł zawodowy')).toHaveValue('Specjalistka')
-  await expect(createDialog.getByLabel('Stawka za sesję (zł)')).toHaveValue('180')
+  await expect(createDialog.getByLabel('Stawka za 60 min (zł)')).toHaveValue('180')
   await createDialog.getByLabel('Tytuł zawodowy').fill('')
-  await createDialog.getByLabel('Stawka za sesję (zł)').fill('')
+  await createDialog.getByLabel('Stawka za 60 min (zł)').fill('')
   await createDialog.getByRole('button', { name: 'Dodaj specjalistkę' }).click()
   await expect(createDialog.getByText('Wpisz imię i nazwisko.', { exact: true })).toBeVisible()
   await expect(createDialog.getByText('Wpisz tytuł, np. psycholożka.', { exact: true })).toBeVisible()
   await expect(createDialog.getByText('Wpisz stawkę, np. 180.', { exact: true })).toBeVisible()
   await createDialog.getByLabel('Imię i nazwisko').fill('Anna Janowska')
   await createDialog.getByLabel('Tytuł zawodowy').fill('Psycholożka')
-  await createDialog.getByLabel('Stawka za sesję (zł)').fill('185,50')
+  await createDialog.getByLabel('Stawka za 60 min (zł)').fill('185,50')
+  await expect(createDialog.getByLabel('Stawka za 90 min (zł)')).toHaveValue('250')
+  await createDialog.getByLabel('Stawka za 90 min (zł)').fill('270')
+  await createDialog.getByLabel('Specjalizacja (opcjonalnie)').fill('Terapia nastolatków')
   await createDialog.getByRole('radio', { name: 'Orbita' }).check()
   await createDialog.getByRole('button', { name: 'Dodaj specjalistkę' }).click()
 
@@ -85,14 +88,20 @@ test('@owner creates, edits, and invites one stable specialist profile', async (
   await expect(profile).toContainText('Brak dostępu do panelu')
   await expect(profile).toContainText('Psycholożka')
   await expect(profile).toContainText('185,50 zł')
+  await expect(profile).toContainText('270 zł / 90 min')
+  await expect(profile).toContainText('Terapia nastolatków')
   await expect(profile.locator('.avatar__art--orbit')).toBeVisible()
-  expect(profilePayloads[0]).toMatchObject({ avatarKey: 'orbit' })
+  expect(profilePayloads[0]).toMatchObject({
+    avatarKey: 'orbit', longRateGrosze: 27_000, specialization: 'Terapia nastolatków',
+  })
 
   await profile.getByRole('button', { name: 'Edytuj profil' }).click()
   const editDialog = page.getByRole('dialog', { name: 'Edytuj profil specjalistki' })
   await expect(editDialog).toContainText('Klienci i dostęp do panelu pozostaną bez zmian.')
   await editDialog.getByLabel('Imię i nazwisko').fill('Anna Janowska-Kowalska')
   await expect(editDialog.getByLabel('Tytuł zawodowy')).toHaveValue('Psycholożka')
+  await expect(editDialog.getByLabel('Stawka za 90 min (zł)')).toHaveValue('270')
+  await expect(editDialog.getByLabel('Specjalizacja (opcjonalnie)')).toHaveValue('Terapia nastolatków')
   await editDialog.getByLabel('Tytuł zawodowy').fill('Psychoterapeutka')
   await editDialog.getByRole('radio', { name: 'Kropki' }).check()
   await editDialog.getByRole('button', { name: 'Zapisz zmiany' }).click()

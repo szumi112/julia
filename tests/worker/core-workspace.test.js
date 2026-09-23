@@ -69,6 +69,8 @@ const specialistRow = (id, staffId, version = 1) => ({
   staff_version: version + 2, display_name_envelope: `staff:${staffId}`,
   professional_title_envelope: null,
   avatar_key: 'bloom',
+  long_rate_grosze: 25000,
+  specialization_envelope: null,
 })
 
 const archivedSpecialistRow = (id, staffId, version = 2) => ({
@@ -247,8 +249,8 @@ describe('workspace read model', () => {
     expect(result).toEqual({ data: {
       window: { from: '2026-08-01', to: '2026-08-31', timeZone: 'Europe/Warsaw', complete: true },
       specialists: [
-        { id: 'sp_ania', displayName: 'Ągata Fikcyjna', professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
-        { id: 'sp_zofia', displayName: 'Zofia Fikcyjna', professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 18000, status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
+        { id: 'sp_ania', displayName: 'Ągata Fikcyjna', professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '', status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
+        { id: 'sp_zofia', displayName: 'Zofia Fikcyjna', professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '', status: 'active', version: 1, staffVersion: 3, accessStatus: 'enabled' },
       ],
       clients: [
         { id: 'cl_archived', name: 'Archiwalna Fikcyjna', age: null, status: 'archived', version: 2, archivedAt: instant('01'), createdAt: instant('01'), updatedAt: instant('02'), readOnly: true, assignment: null },
@@ -471,7 +473,7 @@ describe('workspace read model', () => {
     })
     expect(result.data.specialists).toEqual([{
       id: 'sp_archived_history', displayName: 'Archiwalna Fikcyjna',
-      professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 18000,
+      professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 18000, longRateGrosze: 25000, specialization: '',
       status: 'archived', version: 2, staffVersion: 4,
     }])
     expect(result.data.historicalOccurrences[0].specialistId).toBe('sp_archived_history')
@@ -1238,7 +1240,7 @@ describe('workspace read model', () => {
     })
     expect(result.data.specialists).toEqual([{
       id: specialistId, displayName: 'Żaneta Fikcyjna',
-      professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 19000,
+      professionalTitle: 'Specjalistka', avatarKey: 'bloom', standardRateGrosze: 19000, longRateGrosze: 25000, specialization: '',
       status: 'active', version: 2, staffVersion: 4, accessStatus: 'enabled',
     }])
     expect(result.data.clients[0]).toMatchObject({ id: clientId, name: 'Łucja Fikcyjna', age: 11 })

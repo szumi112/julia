@@ -75,6 +75,8 @@ const seedProfile = async ({
   rate = 18000,
   professionalTitle = 'Specjalistka',
   avatarKey,
+  longRate,
+  specialization,
 } = {}) => {
   const row = {
     id,
@@ -90,16 +92,17 @@ const seedProfile = async ({
       ? null
       : await envelope(id, 'professional_title', professionalTitle),
   }
-  await activeDb.prepare(avatarKey === undefined
-    ? `INSERT INTO specialists
-       (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
-        archived_at,created_at,updated_at,professional_title_envelope)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`
-    : `INSERT INTO specialists
-       (id,staff_user_id,display_name_envelope,standard_rate_grosze,status,version,
-        archived_at,created_at,updated_at,professional_title_envelope,avatar_key)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-    .bind(...Object.values(row), ...(avatarKey === undefined ? [] : [avatarKey])).run()
+  const extra = {
+    ...(avatarKey === undefined ? {} : { avatar_key: avatarKey }),
+    ...(longRate === undefined ? {} : { long_rate_grosze: longRate }),
+    ...(specialization === undefined ? {} : {
+      specialization_envelope: await envelope(id, 'specialization', specialization),
+    }),
+  }
+  const columns = [...Object.keys(row), ...Object.keys(extra)]
+  await activeDb.prepare(
+    `INSERT INTO specialists (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`,
+  ).bind(...Object.values(row), ...Object.values(extra)).run()
   return Object.freeze(row)
 }
 
@@ -121,6 +124,8 @@ const seedDesiredProfiles = async ({
   juliaTitle = 'Specjalistka',
   juliaRate = 18000,
   juliaAvatarKey,
+  juliaLongRate,
+  juliaSpecialization,
 } = {}) => {
   const byName = new Map(STAGING_SPECIALIST_DESIRED_STATE.map((item) => [
     item.displayName,
@@ -142,6 +147,8 @@ const seedDesiredProfiles = async ({
         ? juliaRate
         : desired.standardRateGrosze,
       avatarKey: desired.displayName === 'Julia Wolanin' ? juliaAvatarKey : undefined,
+      ...(desired.displayName === 'Julia Wolanin'
+        ? { longRate: juliaLongRate, specialization: juliaSpecialization } : {}),
     })
   }
   return byName
@@ -872,6 +879,7 @@ describe('staging specialist desired-state materializer', () => {
     })
     await seedDesiredProfiles({
       juliaTitle: null, juliaRate: 19000, juliaAvatarKey: 'wave',
+      juliaLongRate: 27000, juliaSpecialization: 'Terapia nastolatków',
     })
     const harness = directCommands()
     await expect(harness.materialize(input())).resolves.toEqual({
@@ -886,6 +894,8 @@ describe('staging specialist desired-state materializer', () => {
         displayName: 'Julia Wolanin',
         professionalTitle: 'Specjalistka',
         standardRateGrosze: 18000,
+        longRateGrosze: 27000,
+        specialization: 'Terapia nastolatków',
         avatarKey: 'wave',
       },
     })

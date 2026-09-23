@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   SERVICES, SERVICE_BY_ID, STANDARD_SERVICE,
-  amountFor, durationFor, serviceBadge, serviceLabel, serviceShort,
+  amountFor, durationFor, isServiceDuration, serviceBadge, serviceDurations, serviceLabel,
+  serviceShort,
 } from '../../src/services.js'
 
 test('every catalogue position has a unique id, a positive price and a slot length', () => {
@@ -20,7 +21,7 @@ test('the catalogue matches the published cennik', () => {
   assert.equal(SERVICE_BY_ID.konsultacja.price, 250)
   assert.equal(SERVICE_BY_ID.konsultacja.duration, 90)
   assert.equal(SERVICE_BY_ID.zajecia.price, 180)
-  assert.equal(SERVICE_BY_ID.zajecia.duration, 50)
+  assert.equal(SERVICE_BY_ID.zajecia.duration, 60)
   assert.equal(SERVICE_BY_ID['terapia-rodzinna'].price, 220)
   assert.equal(SERVICE_BY_ID['terapia-rodzinna'].duration, 60)
   assert.equal(SERVICE_BY_ID.asrs.price, 400)
@@ -39,10 +40,30 @@ test('the standard session bills at the specialist rate, everything else at cata
   assert.equal(amountFor('asrs', undefined), 400)
 })
 
+test('the standard session books for 60 or 90 minutes and keeps legacy 50-minute visits valid', () => {
+  assert.deepEqual(serviceDurations(STANDARD_SERVICE), [60, 90, 50])
+  assert.deepEqual(serviceDurations('konsultacja'), [90])
+  assert.equal(isServiceDuration(STANDARD_SERVICE, 90), true)
+  assert.equal(isServiceDuration(STANDARD_SERVICE, 50), true)
+  assert.equal(isServiceDuration(STANDARD_SERVICE, 120), false)
+  assert.equal(isServiceDuration('konsultacja', 60), false)
+  assert.equal(isServiceDuration('nie-ma-takiej', 60), false)
+})
+
+test('a 90-minute standard session bills at the specialist 90-minute rate', () => {
+  const psych = { rate: 200, longRate: 270 }
+  assert.equal(amountFor(STANDARD_SERVICE, psych, 60), 200)
+  assert.equal(amountFor(STANDARD_SERVICE, psych, 90), 270)
+  assert.equal(amountFor(STANDARD_SERVICE, psych, 50), 200, 'legacy 50-minute visits keep the hourly rate')
+  assert.equal(amountFor(STANDARD_SERVICE, { rate: 200 }, 90), 250, 'a missing 90-minute rate falls back to 250 zł')
+  assert.equal(amountFor(STANDARD_SERVICE, undefined, 90), 250)
+  assert.equal(amountFor('konsultacja', psych, 90), 250, 'fixed positions ignore specialist rates')
+})
+
 test('unknown service ids fall back instead of throwing', () => {
   assert.equal(amountFor('nie-ma-takiej', { rate: 210 }), 210)
   assert.equal(amountFor('nie-ma-takiej', undefined), 180)
-  assert.equal(durationFor('nie-ma-takiej'), 50)
+  assert.equal(durationFor('nie-ma-takiej'), 60)
   assert.equal(serviceLabel('nie-ma-takiej'), 'Zajęcia psychologiczne')
 })
 

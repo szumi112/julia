@@ -2465,6 +2465,15 @@ button.spine__row:hover { background: rgba(252, 232, 226, 0.45); }
 .agenda__actions { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; margin-top: -6px; }
 .agenda--spine .agenda__row .agenda__actions .icon-btn { margin-top: 0; }
 .session-client-picker__link { margin-top: -12px; }
+.session-intake {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  background: var(--surface-warm);
+  border: 1px solid var(--line);
+}
+.session-intake__text { margin: 0; font-size: 13px; color: var(--ink-soft); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Workbook occurrences remain a separate, read-only visual path. Their
    deliberately wider precision label never impersonates a session hour. */
@@ -2858,6 +2867,7 @@ span.historical-row__subject { color: var(--ink); }
 .care-overview__debt { color: var(--amber-deep) !important; }
 /* client form: archive is a quiet link at the end of the body, and its
    confirmation footer keeps the safe ghost action first */
+.client-form__guardians { gap: 8px; }
 .client-form__archive { align-self: flex-start; margin-top: 4px; font-size: 13px; color: var(--error); }
 .client-form__archive:hover { color: var(--error); text-decoration: underline; }
 .drawer__foot.client-form__confirm-foot .btn:first-child { flex: 0 0 auto; }
@@ -4361,6 +4371,10 @@ button.cockpit__due:hover { transform: translateY(-1px); box-shadow: var(--shado
 .registry-list__item h3 { overflow-wrap: anywhere; }
 
 .client-record__reception-notes { white-space: pre-wrap; overflow-wrap: anywhere; }
+.client-record__facts { display: grid; gap: 12px; margin: 14px 0 0; }
+.client-record__facts > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 16px; }
+.client-record__facts dt { font-size: 14px; color: var(--ink-soft); }
+.client-record__facts dd { margin: 0; font-weight: 600; }
 .activity-history { display: grid; gap: 20px; }
 .activity-history__day { display: grid; gap: 10px; }
 .activity-history__day-title { margin: 0; font: 600 13px var(--font-ui); color: var(--ink-soft); }

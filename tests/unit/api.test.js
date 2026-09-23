@@ -199,7 +199,7 @@ const fullWorkspaceBody = () => ({
       displayName: 'Anna Żuraw',
       professionalTitle: 'Psycholożka',
       avatarKey: 'wave',
-      standardRateGrosze: 18000,
+      standardRateGrosze: 18000, longRateGrosze: 25_000, specialization: '',
       status: 'active',
       version: 2,
       staffVersion: 3,
@@ -586,7 +586,7 @@ test('accepts only archived specialist profiles referenced by historical occurre
   source.data.specialists.push({
     id: 'sp_archived_history', displayName: 'Zofia Archiwalna',
     professionalTitle: 'Psycholożka',
-    standardRateGrosze: 19000, status: 'archived', version: 4, staffVersion: 6,
+    standardRateGrosze: 19000, longRateGrosze: 25_000, specialization: '', status: 'archived', version: 4, staffVersion: 6,
   })
   source.data.historicalOccurrences[1].specialistId = 'sp_archived_history'
   const { fetchImpl } = queuedFetch(parsedResponse(source))
@@ -1296,7 +1296,7 @@ test('creates, edits, and targets an invitation at one stable specialist profile
       id: 'sp_anna_profile', displayName: 'Anna Janowska',
       professionalTitle: 'Specjalistka',
       avatarKey: 'orbit',
-      standardRateGrosze: 18000, status: 'active', version: 1,
+      standardRateGrosze: 18000, longRateGrosze: 25_000, specialization: '', status: 'active', version: 1,
       accessStatus: 'unclaimed', createdAt, updatedAt: createdAt,
     } },
   }
@@ -1307,7 +1307,7 @@ test('creates, edits, and targets an invitation at one stable specialist profile
       displayName: 'Anna Janowska-Kowalska',
       professionalTitle: 'Psycholożka',
       avatarKey: 'wave',
-      standardRateGrosze: 19000,
+      standardRateGrosze: 19000, longRateGrosze: 25_000, specialization: '',
       version: 2,
       staffVersion: null,
       updatedAt,
@@ -1334,11 +1334,11 @@ test('creates, edits, and targets an invitation at one stable specialist profile
   await client.getSession()
   await client.createSpecialistProfile({
     displayName: 'Anna Janowska', professionalTitle: 'Specjalistka',
-    avatarKey: 'orbit', standardRateGrosze: 18000,
+    avatarKey: 'orbit', standardRateGrosze: 18000, longRateGrosze: 25_000, specialization: '',
   }, { idempotencyKey: 'specialist-create-api-0001' })
   await client.updateSpecialistProfile('sp_anna_profile', 1, {
     displayName: 'Anna Janowska-Kowalska', professionalTitle: 'Psycholożka',
-    avatarKey: 'wave', standardRateGrosze: 19000,
+    avatarKey: 'wave', standardRateGrosze: 19000, longRateGrosze: 25_000, specialization: '',
   }, { idempotencyKey: 'specialist-edit-api-0001' })
   await client.inviteSpecialistProfile('sp_anna_profile', {
     email: 'anna-j@gmail.com', expectedVersion: 2,
@@ -1351,11 +1351,11 @@ test('creates, edits, and targets an invitation at one stable specialist profile
     url,
   })), [
     {
-      body: '{"displayName":"Anna Janowska","professionalTitle":"Specjalistka","standardRateGrosze":18000,"avatarKey":"orbit"}',
+      body: '{"displayName":"Anna Janowska","professionalTitle":"Specjalistka","standardRateGrosze":18000,"longRateGrosze":25000,"specialization":"","avatarKey":"orbit"}',
       key: 'specialist-create-api-0001', method: 'POST', url: '/api/v1/specialists',
     },
     {
-      body: '{"expectedVersion":1,"displayName":"Anna Janowska-Kowalska","professionalTitle":"Psycholożka","standardRateGrosze":19000,"avatarKey":"wave"}',
+      body: '{"expectedVersion":1,"displayName":"Anna Janowska-Kowalska","professionalTitle":"Psycholożka","standardRateGrosze":19000,"longRateGrosze":25000,"specialization":"","avatarKey":"wave"}',
       key: 'specialist-edit-api-0001', method: 'POST',
       url: '/api/v1/specialists/sp_anna_profile/edits',
     },
@@ -5850,7 +5850,7 @@ test('ledger commands reject invalid hostile inputs and options before session, 
     appointmentInput({ serviceId: 'unknown' }),
     appointmentInput({ date: '2026-02-29' }),
     appointmentInput({ time: '24:00' }),
-    appointmentInput({ durationMinutes: 60 }),
+    appointmentInput({ durationMinutes: 120 }),
     appointmentInput({ expectedAmountGrosze: 0 }),
     appointmentInput({ expectedAmountGrosze: 1_000_001 }),
     appointmentInput({ location: ' Gabinet' }),

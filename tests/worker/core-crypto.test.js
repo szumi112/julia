@@ -225,13 +225,43 @@ describe('client crypto boundary', () => {
       expectedScope: built.scope, recordId: input.clientId, field: 'identity',
       envelope: JSON.parse(envelope),
     }))).toMatchObject({
-      schema: 'client.identity.v2', guardianPhone: input.guardianPhone,
+      schema: 'client.identity.v3', guardianPhone: input.guardianPhone,
       guardianEmail: input.guardianEmail, receptionNotes: input.receptionNotes,
     })
+    const unsetCard = {
+      intakeReason: '', guardianClientId: '', secondGuardianClientId: '',
+      parentalRights: '', therapyConsent: '',
+    }
     await expect(decryptClientIdentity(context, { clientId: input.clientId, envelope }))
       .resolves.toEqual({
         name: input.name, age: input.age, guardianPhone: input.guardianPhone,
         guardianEmail: input.guardianEmail, receptionNotes: input.receptionNotes,
+        ...unsetCard,
+      })
+    const card = {
+      intakeReason: 'Trudności w szkole.', guardianClientId: 'cl_parent_one',
+      secondGuardianClientId: '', parentalRights: 'both', therapyConsent: 'signed',
+    }
+    const cardEnvelope = await encryptClientIdentity(context, {
+      clientId: input.clientId, name: input.name, age: input.age, ...card,
+    })
+    expect(cardEnvelope).not.toContain(card.intakeReason)
+    await expect(decryptClientIdentity(context, { clientId: input.clientId, envelope: cardEnvelope }))
+      .resolves.toEqual({
+        name: input.name, age: input.age, guardianPhone: '', guardianEmail: '',
+        receptionNotes: '', ...card,
+      })
+    const v2Envelope = JSON.stringify(await encryptForScope(keyring, built.row, {
+      expectedScope: built.scope, recordId: input.clientId, field: 'identity',
+      plaintext: JSON.stringify({
+        schema: 'client.identity.v2', name: 'Fikcyjna', age: 9,
+        guardianPhone: input.guardianPhone, guardianEmail: '', receptionNotes: '',
+      }),
+    }))
+    await expect(decryptClientIdentity(context, { clientId: input.clientId, envelope: v2Envelope }))
+      .resolves.toEqual({
+        name: 'Fikcyjna', age: 9, guardianPhone: input.guardianPhone, guardianEmail: '',
+        receptionNotes: '', ...unsetCard,
       })
     const oldEnvelope = JSON.stringify(await encryptForScope(keyring, built.row, {
       expectedScope: built.scope, recordId: input.clientId, field: 'identity',

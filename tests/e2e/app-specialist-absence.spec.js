@@ -9,7 +9,7 @@ const json = (status, body) => ({
 
 const specialist = {
   id: 'sp_anna', displayName: 'Anna Nowak', professionalTitle: 'Specjalistka',
-  standardRateGrosze: 18_000, status: 'active', version: 1, staffVersion: 1,
+  standardRateGrosze: 18_000, longRateGrosze: 25_000, specialization: '', status: 'active', version: 1, staffVersion: 1,
 }
 
 const workspace = (from, to) => ({
@@ -72,7 +72,7 @@ test('@owner manages whole-day absence on a phone and keeps the session warning 
         appointment: {
           id: 'apt_absence_warning', clientId: body.clientId, specialistId: body.specialistId,
           serviceId: body.serviceId, startsAt: '2026-08-04T10:00:00.000Z',
-          endsAt: '2026-08-04T10:50:00.000Z', timeZone: 'Europe/Warsaw', location: body.location,
+          endsAt: '2026-08-04T11:00:00.000Z', timeZone: 'Europe/Warsaw', location: body.location,
           status: body.status, source: 'panel', version: 1, cancelledAt: null,
           cancellationReason: null,
           createdAt, updatedAt: createdAt,
@@ -167,7 +167,7 @@ test('@owner manages whole-day absence on a phone and keeps the session warning 
   expect(appointmentPosts).toHaveLength(1)
   expect(appointmentPosts[0]).toMatchObject({
     clientId: 'cl_ola', specialistId: 'sp_anna', serviceId: 'zajecia',
-    date: '2026-08-04', time: '12:00', durationMinutes: 50,
+    date: '2026-08-04', time: '12:00', durationMinutes: 60,
     expectedAmountGrosze: 18_000, status: 'scheduled',
   })
 
